@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
-import { readMeta } from "./registry.js";
+import { readMeta, writeMeta } from "./registry.js";
 
 type RegisteredTool = {
   name: string;
@@ -157,6 +157,27 @@ describe("extension e2e", () => {
     } finally {
       await sessionA.execute("bg_task_stop", { id });
     }
+  });
+
+  it("hides failed navigator rows after 30 seconds", async () => {
+    const harness = createHarness({ sessionId: "session-a", mode: "tui", hasUI: true });
+    const launch = await harness.execute("bg_task_spawn", {
+      name: "recent-failure",
+      shell: false,
+      argv: [process.execPath, "-e", "process.exit(1)"],
+      callback: false,
+    });
+    const id = extractTaskId(launch);
+
+    const failed = await waitForMeta(id, (meta) => meta?.status === "failed" && typeof meta.endedAt === "number");
+    await harness.fireSessionStart();
+    expect(harness.lastWidget("background-work-list")?.join("\n") ?? "").toContain("recent-failure");
+
+    writeMeta({ ...failed!, endedAt: Date.now() - 31_000 });
+    await harness.fireSessionStart();
+
+    expect(harness.lastWidget("background-work-list")?.join("\n") ?? "").not.toContain("recent-failure");
+    expect(readMeta(id)?.status).toBe("failed");
   });
 });
 
