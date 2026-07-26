@@ -3,11 +3,13 @@ import { appendLine, appendWatchResult } from "./logs.js";
 import { evaluateCondition } from "./conditions.js";
 import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, writeMeta } from "./registry.js";
-import type { BackgroundTaskMeta, CommandSpec, Condition, TerminalResult } from "./types.js";
+import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, CommandSpec, Condition, TerminalResult } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const activePolls = new Set<string>();
+
+export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
 
 export interface SpawnTaskParams extends CommandSpec {
   name?: string;
@@ -24,7 +26,13 @@ export interface WatchTaskParams extends CommandSpec {
   failure_when?: Condition;
 }
 
-export function spawnTask(pi: ExtensionAPI, params: SpawnTaskParams, defaultCwd: string): BackgroundTaskMeta {
+export function spawnTask(
+  pi: ExtensionAPI,
+  params: SpawnTaskParams,
+  defaultCwd: string,
+  callbackOrigin?: BackgroundTaskCallbackOrigin,
+  getActiveSession?: ActiveSessionProvider,
+): BackgroundTaskMeta {
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const logPath = logPathFor(id);
@@ -40,6 +48,7 @@ export function spawnTask(pi: ExtensionAPI, params: SpawnTaskParams, defaultCwd:
     deadlineAt: params.timeout_seconds ? now + params.timeout_seconds * 1000 : undefined,
     logPath,
     callback: params.callback,
+    callbackOrigin,
     command: params.command,
     argv: params.argv,
     shell: params.shell ?? true,
@@ -60,13 +69,19 @@ export function spawnTask(pi: ExtensionAPI, params: SpawnTaskParams, defaultCwd:
     latest.lastSignal = signal;
     latest.result = { exitCode, signal };
     writeMeta(latest);
-    void notifyTerminal(pi, latest);
+    void notifyTerminal(pi, latest, getActiveSession);
   });
-  if (meta.deadlineAt) scheduleProcessTimeout(pi, id, meta.deadlineAt);
+  if (meta.deadlineAt) scheduleProcessTimeout(pi, id, meta.deadlineAt, getActiveSession);
   return meta;
 }
 
-export function startWatchTask(pi: ExtensionAPI, params: WatchTaskParams, defaultCwd: string): BackgroundTaskMeta {
+export function startWatchTask(
+  pi: ExtensionAPI,
+  params: WatchTaskParams,
+  defaultCwd: string,
+  callbackOrigin?: BackgroundTaskCallbackOrigin,
+  getActiveSession?: ActiveSessionProvider,
+): BackgroundTaskMeta {
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const now = Date.now();
@@ -80,6 +95,7 @@ export function startWatchTask(pi: ExtensionAPI, params: WatchTaskParams, defaul
     intervalMs: Math.max(1, params.interval_seconds ?? 30) * 1000,
     logPath: logPathFor(id),
     callback: params.callback,
+    callbackOrigin,
     command: params.command,
     argv: params.argv,
     shell: params.shell ?? true,
@@ -93,17 +109,21 @@ export function startWatchTask(pi: ExtensionAPI, params: WatchTaskParams, defaul
   ensureTaskDir(id);
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
   writeMeta(meta);
-  scheduleWatch(pi, id, 0);
+  scheduleWatch(pi, id, 0, getActiveSession);
   return meta;
 }
 
-export function resumeRunningTask(pi: ExtensionAPI, meta: BackgroundTaskMeta): BackgroundTaskMeta {
+export function resumeRunningTask(
+  pi: ExtensionAPI,
+  meta: BackgroundTaskMeta,
+  getActiveSession?: ActiveSessionProvider,
+): BackgroundTaskMeta {
   if (meta.status !== "running") {
-    void notifyTerminal(pi, meta);
+    void notifyTerminal(pi, meta, getActiveSession);
     return meta;
   }
   if (meta.kind === "command_watch") {
-    scheduleWatch(pi, meta.id, 0);
+    scheduleWatch(pi, meta.id, 0, getActiveSession);
     return meta;
   }
   if (meta.kind === "process" && meta.pid && !processExists(meta.pid)) {
@@ -112,14 +132,14 @@ export function resumeRunningTask(pi: ExtensionAPI, meta: BackgroundTaskMeta): B
     meta.error = "process is no longer alive; exit result was not captured by this pi session";
     meta.result = { reason: meta.error };
     writeMeta(meta);
-    void notifyTerminal(pi, meta);
+    void notifyTerminal(pi, meta, getActiveSession);
     return meta;
   }
-  if (meta.kind === "process" && meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt);
+  if (meta.kind === "process" && meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt, getActiveSession);
   return meta;
 }
 
-export function stopTask(pi: ExtensionAPI, id: string): BackgroundTaskMeta | undefined {
+export function stopTask(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): BackgroundTaskMeta | undefined {
   const meta = readMeta(id);
   if (!meta) return undefined;
   if (isTerminalStatus(meta.status)) return meta;
@@ -137,13 +157,13 @@ export function stopTask(pi: ExtensionAPI, id: string): BackgroundTaskMeta | und
       writeMeta(meta);
     }
   }
-  void notifyTerminal(pi, meta);
+  void notifyTerminal(pi, meta, getActiveSession);
   return meta;
 }
 
-function scheduleWatch(pi: ExtensionAPI, id: string, delayMs: number): void {
+function scheduleWatch(pi: ExtensionAPI, id: string, delayMs: number, getActiveSession?: ActiveSessionProvider): void {
   clearWatchTimer(id);
-  const timer = setTimeout(() => void pollWatch(pi, id), delayMs);
+  const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession), delayMs);
   timer.unref();
   watcherTimers.set(id, timer);
 }
@@ -154,7 +174,7 @@ function clearWatchTimer(id: string): void {
   watcherTimers.delete(id);
 }
 
-async function pollWatch(pi: ExtensionAPI, id: string): Promise<void> {
+async function pollWatch(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): Promise<void> {
   if (activePolls.has(id)) return;
   activePolls.add(id);
   try {
@@ -162,7 +182,7 @@ async function pollWatch(pi: ExtensionAPI, id: string): Promise<void> {
     if (!meta || meta.status !== "running" || meta.kind !== "command_watch") return;
     const now = Date.now();
     if (meta.deadlineAt && now >= meta.deadlineAt) {
-      finalize(meta, { status: "timed_out", reason: "timeout" }, pi);
+      finalize(meta, { status: "timed_out", reason: "timeout" }, pi, getActiveSession);
       return;
     }
     const result = await runCommandOnce(commandSpecFromMeta(meta));
@@ -177,7 +197,7 @@ async function pollWatch(pi: ExtensionAPI, id: string): Promise<void> {
     if (latest.failureWhen) {
       const failure = evaluateCondition(latest.failureWhen, result);
       if (failure.matched) {
-        finalize(latest, { status: "failed", reason: "failure condition matched", matchedCondition: latest.failureWhen, commandResult: result }, pi);
+        finalize(latest, { status: "failed", reason: "failure condition matched", matchedCondition: latest.failureWhen, commandResult: result }, pi, getActiveSession);
         return;
       }
     }
@@ -185,24 +205,29 @@ async function pollWatch(pi: ExtensionAPI, id: string): Promise<void> {
     if (latest.successWhen) {
       const success = evaluateCondition(latest.successWhen, result);
       if (success.matched) {
-        finalize(latest, { status: "succeeded", reason: "success condition matched", matchedCondition: latest.successWhen, commandResult: result }, pi);
+        finalize(latest, { status: "succeeded", reason: "success condition matched", matchedCondition: latest.successWhen, commandResult: result }, pi, getActiveSession);
         return;
       }
     }
 
     writeMeta(latest);
-    scheduleWatch(pi, id, latest.intervalMs ?? 30_000);
+    scheduleWatch(pi, id, latest.intervalMs ?? 30_000, getActiveSession);
   } catch (error) {
     const meta = readMeta(id);
     if (meta && meta.status === "running") {
-      finalize(meta, { status: "failed", reason: error instanceof Error ? error.message : String(error) }, pi);
+      finalize(meta, { status: "failed", reason: error instanceof Error ? error.message : String(error) }, pi, getActiveSession);
     }
   } finally {
     activePolls.delete(id);
   }
 }
 
-function finalize(meta: BackgroundTaskMeta, terminal: TerminalResult, pi: ExtensionAPI): void {
+function finalize(
+  meta: BackgroundTaskMeta,
+  terminal: TerminalResult,
+  pi: ExtensionAPI,
+  getActiveSession?: ActiveSessionProvider,
+): void {
   meta.status = terminal.status;
   meta.endedAt = Date.now();
   meta.result = {
@@ -219,10 +244,15 @@ function finalize(meta: BackgroundTaskMeta, terminal: TerminalResult, pi: Extens
   }
   writeMeta(meta);
   clearWatchTimer(meta.id);
-  void notifyTerminal(pi, meta);
+  void notifyTerminal(pi, meta, getActiveSession);
 }
 
-function scheduleProcessTimeout(pi: ExtensionAPI, id: string, deadlineAt: number): void {
+function scheduleProcessTimeout(
+  pi: ExtensionAPI,
+  id: string,
+  deadlineAt: number,
+  getActiveSession?: ActiveSessionProvider,
+): void {
   const delay = Math.max(0, deadlineAt - Date.now());
   const timer = setTimeout(() => {
     const meta = readMeta(id);
@@ -234,15 +264,26 @@ function scheduleProcessTimeout(pi: ExtensionAPI, id: string, deadlineAt: number
     meta.endedAt = Date.now();
     meta.result = { reason: "timeout" };
     writeMeta(meta);
-    void notifyTerminal(pi, meta);
+    void notifyTerminal(pi, meta, getActiveSession);
   }, delay);
   timer.unref();
 }
 
-async function notifyTerminal(pi: ExtensionAPI, meta: BackgroundTaskMeta): Promise<void> {
-  if (meta.callback === false || meta.callbackSentAt) return;
+async function notifyTerminal(
+  pi: ExtensionAPI,
+  meta: BackgroundTaskMeta,
+  getActiveSession?: ActiveSessionProvider,
+): Promise<void> {
+  if (meta.callback === false || meta.callbackSentAt || meta.callbackSuppressedAt) return;
   const latest = readMeta(meta.id) ?? meta;
-  if (latest.callback === false || latest.callbackSentAt) return;
+  if (latest.callback === false || latest.callbackSentAt || latest.callbackSuppressedAt) return;
+  const suppressionReason = getCallbackSuppressionReason(latest, getActiveSession?.());
+  if (suppressionReason) {
+    latest.callbackSuppressedAt = Date.now();
+    latest.callbackSuppressedReason = suppressionReason;
+    writeMeta(latest);
+    return;
+  }
   const label = latest.name ? `${latest.name} (${latest.id})` : latest.id;
   try {
     await pi.sendUserMessage(
@@ -252,8 +293,28 @@ async function notifyTerminal(pi: ExtensionAPI, meta: BackgroundTaskMeta): Promi
     latest.callbackSentAt = Date.now();
     writeMeta(latest);
   } catch {
-    // Leave callbackSentAt unset so a later session can attempt delivery once.
+    // Leave callbackSentAt unset so the originating session can attempt delivery once.
   }
+}
+
+function getCallbackSuppressionReason(
+  meta: BackgroundTaskMeta,
+  activeSession: BackgroundTaskCallbackOrigin | undefined,
+): string | undefined {
+  const origin = meta.callbackOrigin;
+  if (origin) {
+    if (!activeSession) return "active session identity is unavailable";
+    if (origin.cwd !== activeSession.cwd) return `origin cwd ${origin.cwd} does not match active cwd ${activeSession.cwd}`;
+    if (origin.sessionId && origin.sessionId !== activeSession.sessionId) {
+      return `origin session ${origin.sessionId} does not match active session ${activeSession.sessionId ?? "unknown"}`;
+    }
+    return undefined;
+  }
+
+  if (activeSession && meta.cwd !== activeSession.cwd) {
+    return `legacy task cwd ${meta.cwd} does not match active cwd ${activeSession.cwd}`;
+  }
+  return undefined;
 }
 
 function commandSpecFromMeta(meta: BackgroundTaskMeta): CommandSpec {

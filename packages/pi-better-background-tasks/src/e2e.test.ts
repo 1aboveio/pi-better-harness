@@ -111,24 +111,59 @@ describe("extension e2e", () => {
     await harness.fireSessionStart();
     expect(harness.messages).toHaveLength(1);
   });
+
+  it("suppresses terminal callback replay in a different session", async () => {
+    const originHarness = createHarness({ sessionId: "session-a", failUserMessage: true });
+
+    const launch = await originHarness.execute("bg_task_watch", {
+      name: "e2e callback isolation",
+      command: "node -e 'console.log(\"done\")'",
+      interval_seconds: 1,
+      timeout_seconds: 5,
+      success_when: { type: "stdout_contains", value: "done" },
+    });
+    const id = extractTaskId(launch);
+
+    await waitForMeta(id, (meta) => meta?.status === "succeeded" && originHarness.messageAttempts.length === 1);
+    expect(readMeta(id)?.callbackSentAt).toBeUndefined();
+
+    const otherHarness = createHarness({ sessionId: "session-b" });
+    await otherHarness.fireSessionStart();
+
+    const terminal = await waitForMeta(id, (meta) => typeof meta?.callbackSuppressedAt === "number");
+    expect(otherHarness.messages).toHaveLength(0);
+    expect(terminal?.callbackSuppressedReason).toContain("origin session session-a does not match active session session-b");
+  });
 });
 
-function createHarness() {
+function createHarness(options: { cwd?: string; sessionId?: string; failUserMessage?: boolean } = {}) {
   const tools = new Map<string, RegisteredTool>();
-  const sessionStartHandlers: Array<() => unknown> = [];
+  const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => unknown> = [];
   const messages: string[] = [];
+  const messageAttempts: string[] = [];
   const events = new EventEmitter();
   const goalProviders: unknown[] = [];
   events.on("pi-better-goal:register-provider", (provider) => goalProviders.push(provider));
+  const cwd = options.cwd ?? process.cwd();
+  const sessionId = options.sessionId ?? "test-session";
+  const context = {
+    cwd,
+    hasUI: false,
+    sessionManager: {
+      getSessionId: () => sessionId,
+    },
+  };
   const pi = {
     events,
     registerTool(tool: RegisteredTool) {
       tools.set(tool.name, tool);
     },
-    on(eventName: string, handler: () => unknown) {
+    on(eventName: string, handler: (event: unknown, ctx: unknown) => unknown) {
       if (eventName === "session_start") sessionStartHandlers.push(handler);
     },
     async sendUserMessage(message: string) {
+      messageAttempts.push(message);
+      if (options.failUserMessage) throw new Error("simulated send failure");
       messages.push(message);
     },
   } as unknown as ExtensionAPI;
@@ -138,6 +173,7 @@ function createHarness() {
   return {
     tools,
     messages,
+    messageAttempts,
     events,
     goalProviders,
     async execute(name: string, params: Record<string, unknown>) {
@@ -148,12 +184,12 @@ function createHarness() {
         params,
         new AbortController().signal,
         undefined,
-        { cwd: process.cwd(), hasUI: false },
+        context,
       );
       return result.content.map((part) => part.text).join("\n");
     },
     async fireSessionStart() {
-      for (const handler of sessionStartHandlers) await handler();
+      for (const handler of sessionStartHandlers) await handler({ type: "session_start" }, context);
     },
   };
 }
