@@ -81,21 +81,24 @@ process.env.PATH = `${binDir}:${originalPath}`;
 const liveRuns = []; // { id, pid } — children to reap and dirs to remove
 const dirOnly = []; // ids with no child (metadata-only fixtures)
 
-function makeHarness() {
+function makeHarness(options = {}) {
     const tools = new Map();
     const handlers = new Map();
     const sent = [];
     const notes = [];
+    const cwd = options.cwd ?? tmpdir();
+    const sessionId = options.sessionId ?? "test-session";
     const pi = {
         registerTool: (def) => tools.set(def.name, def),
         on: (event, fn) => handlers.set(event, fn),
         sendMessage: (message, options) => sent.push({ message, options }),
     };
     const ctx = {
-        cwd: tmpdir(),
+        cwd,
         hasUI: false,
         ui: { notify: (msg, level) => notes.push({ msg, level }), setWidget: () => {} },
         model: undefined,
+        sessionManager: { getSessionId: () => sessionId },
     };
     betterSubagents(pi);
     const shutdown = () => handlers.get("session_shutdown")?.({}, ctx);
@@ -454,6 +457,99 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
         } finally {
             h.shutdown();
         }
+    });
+});
+
+/**
+ * Session isolation for unsolicited coordinator messages. Explicit id-based
+ * tools remain global for recovery, but callbacks must only target the
+ * foreground session that launched the run.
+ *
+ * // @covers subagent.callback-session-isolation
+ * // @level unit
+ */
+describe("callback session isolation", () => {
+    it("suppresses completion follow-up after the foreground session changes", async () => {
+        const cwd = tmpdir();
+        const h = makeHarness({ cwd, sessionId: "session-a" });
+        try {
+            const { id, pid } = await spawnRun(h);
+            const launched = readMeta(id);
+            assert.deepEqual(launched.callbackOrigin, { cwd, sessionId: "session-a" });
+
+            const switchedCtx = {
+                ...h.ctx,
+                sessionManager: { getSessionId: () => "session-b" },
+            };
+            await h.handlers.get("session_start")({}, switchedCtx);
+
+            killProcessTree(pid, "SIGKILL");
+            const suppressed = await waitFor(() => {
+                const meta = readMeta(id);
+                return meta?.completionCallbackSuppressedAt ? meta : undefined;
+            }, { timeoutMs: 3000 });
+
+            assert.ok(suppressed, "completion callback suppression marker is written");
+            assert.match(suppressed.completionCallbackSuppressedReason, /origin session session-a does not match active session session-b/);
+            assert.equal(
+                h.sent.some((s) => s.message?.customType === "subagent-complete" && s.message.content.includes(id)),
+                false,
+                "completion follow-up must not be delivered to the new session",
+            );
+            rmSync(runDir(id), { recursive: true, force: true });
+        } finally {
+            h.shutdown();
+        }
+    });
+
+    it("suppresses recovered lost health follow-up after the foreground session changes", async () => {
+        await withFakeClock(async () => {
+            const cwd = tmpdir();
+            const h = makeHarness({ cwd, sessionId: "session-b" });
+            try {
+                const id = nextRunId();
+                dirOnly.push(id);
+                writeMeta({
+                    id,
+                    status: "lost",
+                    pid: DEAD_PID,
+                    pgid: DEAD_PID,
+                    pidStartTime: "gone-token",
+                    spawnPid: process.pid,
+                    cwd,
+                    promptPreview: "p",
+                    startedAt: Date.now() - 120_000,
+                    lostAt: Date.now() - 60_000,
+                    endedAt: Date.now() - 60_000,
+                    logPath: join(runDir(id), "output.log"),
+                    sessionId: id,
+                    callbackOrigin: { cwd, sessionId: "session-a" },
+                    callback: true,
+                });
+                writeFileSync(join(runDir(id), "output.log"), "lost-other-session\n");
+
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+
+                const meta = readMeta(id);
+                assert.equal(meta.status, "lost");
+                assert.ok(meta.lostCallbackSuppressedAt > 0, "lost callback suppression marker is written");
+                assert.match(meta.lostCallbackSuppressedReason, /origin session session-a does not match active session session-b/);
+                assert.equal(
+                    h.sent.some((s) => s.message?.customType === "subagent-health" && s.message.content.includes(id)),
+                    false,
+                    "health follow-up must not be delivered to the new session",
+                );
+                assert.equal(
+                    h.notes.some((n) => n.msg.includes(id)),
+                    false,
+                    "health toast must not be delivered to the new session",
+                );
+                assert.equal(isHealthTickerActive(), false, "suppressed lost callback no longer keeps recovery armed");
+            } finally {
+                h.shutdown();
+            }
+        });
     });
 });
 

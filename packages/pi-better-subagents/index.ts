@@ -53,6 +53,7 @@ import {
     isDismissed,
     dismissRun,
     type RunMeta,
+    type RunCallbackOrigin,
 } from "./registry.ts";
 import {
     captureProcessIdentity,
@@ -131,6 +132,7 @@ const SUBAGENT_TOOLS = [
 
 /** Freshest UI-bearing context, captured from session_start / tool calls. */
 let uiCtx: ExtensionContext | undefined;
+let activeCallbackOrigin: RunCallbackOrigin | undefined;
 let ticker: ReturnType<typeof setInterval> | undefined;
 let frame = 0;
 /** Last lines successfully sent to setWidget (undefined ⇒ cleared / never set). */
@@ -167,6 +169,60 @@ function logStatOf(id: string): { size: number; mtimeMs?: number } {
 
 function logSizeOf(id: string): number {
     return logStatOf(id).size;
+}
+
+function callbackOriginFromContext(ctx: ExtensionContext): RunCallbackOrigin {
+    let sessionId: string | undefined;
+    try {
+        sessionId = ctx.sessionManager?.getSessionId();
+    } catch {
+        sessionId = undefined;
+    }
+    return { cwd: ctx.cwd, sessionId };
+}
+
+function callbackSuppressionReason(meta: RunMeta, active: RunCallbackOrigin | undefined = activeCallbackOrigin): string | undefined {
+    const origin = meta.callbackOrigin;
+    if (origin) {
+        if (!active) return "active session identity is unavailable";
+        if (origin.cwd !== active.cwd) return `origin cwd ${origin.cwd} does not match active cwd ${active.cwd}`;
+        if (origin.sessionId && origin.sessionId !== active.sessionId) {
+            return `origin session ${origin.sessionId} does not match active session ${active.sessionId ?? "unknown"}`;
+        }
+        return undefined;
+    }
+
+    if (active && meta.cwd !== active.cwd) {
+        return `legacy run cwd ${meta.cwd} does not match active cwd ${active.cwd}`;
+    }
+    return undefined;
+}
+
+function markCompletionCallbackSuppressed(id: string, reason: string, now: number = Date.now()): void {
+    const meta = readMeta(id);
+    if (!meta || meta.completionCallbackSuppressedAt !== undefined) return;
+    meta.completionCallbackSuppressedAt = now;
+    meta.completionCallbackSuppressedReason = reason;
+    writeMeta(meta);
+}
+
+function markHealthCallbackSuppressed(meta: RunMeta, status: "orphaned" | "lost", reason: string, now: number): void {
+    if (status === "orphaned") {
+        if (meta.orphanedCallbackSuppressedAt !== undefined) return;
+        meta.orphanedCallbackSuppressedAt = now;
+        meta.orphanedCallbackSuppressedReason = reason;
+    } else {
+        if (meta.lostCallbackSuppressedAt !== undefined) return;
+        meta.lostCallbackSuppressedAt = now;
+        meta.lostCallbackSuppressedReason = reason;
+    }
+    writeMeta(meta);
+}
+
+function isHealthCallbackHandled(meta: RunMeta, status: "orphaned" | "lost"): boolean {
+    return status === "orphaned"
+        ? meta.orphanedCallbackSentAt !== undefined || meta.orphanedCallbackSuppressedAt !== undefined
+        : meta.lostCallbackSentAt !== undefined || meta.lostCallbackSuppressedAt !== undefined;
 }
 
 /** Refresh spend/tool for a run only when the cache is stale or the log grew. */
@@ -369,8 +425,13 @@ let healthPi: ExtensionAPI | undefined;
  */
 function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, status: "orphaned" | "lost", now: number): void {
     if (!pi) return;
-    if (status === "orphaned" && meta.orphanedCallbackSentAt !== undefined) return;
-    if (status === "lost" && meta.lostCallbackSentAt !== undefined) return;
+    if (isHealthCallbackHandled(meta, status)) return;
+
+    const suppressionReason = callbackSuppressionReason(meta);
+    if (suppressionReason) {
+        markHealthCallbackSuppressed(meta, status, suppressionReason, now);
+        return;
+    }
 
     const callback = meta.callback !== false;
     const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
@@ -421,11 +482,13 @@ function reconcileHealth(): void {
                 writeMeta(meta);
                 if (result.transition) {
                     // Human-visible health (always) on fresh transitions.
-                    const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
-                    const note = result.status === "orphaned"
-                        ? `Subagent ${label} lost supervision — related processes may still be alive (orphaned).`
-                        : `Subagent ${label} is lost — no related process remains and no terminal result was observed.`;
-                    try { ctx?.ui.notify(note, "warning"); } catch { /* ignore */ }
+                    if (!callbackSuppressionReason(meta)) {
+                        const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+                        const note = result.status === "orphaned"
+                            ? `Subagent ${label} lost supervision — related processes may still be alive (orphaned).`
+                            : `Subagent ${label} is lost — no related process remains and no terminal result was observed.`;
+                        try { ctx?.ui.notify(note, "warning"); } catch { /* ignore */ }
+                    }
                 }
             }
         }
@@ -756,6 +819,13 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
             try { ctx.ui.notify(message, level); } catch { /* ignore */ }
         },
         sendMessage: (message, options) => {
+            const meta = readMeta(id);
+            if (!meta) return;
+            const suppressionReason = callbackSuppressionReason(meta);
+            if (suppressionReason) {
+                markCompletionCallbackSuppressed(id, suppressionReason);
+                return;
+            }
             pi.sendMessage(message, options);
         },
     });
@@ -793,6 +863,8 @@ export default function (pi: ExtensionAPI) {
         sandboxDir?: string;
     }> {
         const cfg = loadConfig();
+        const callbackOrigin = callbackOriginFromContext(ctx);
+        activeCallbackOrigin = callbackOrigin;
 
         // Sandbox is ON by default. sandbox_dir moves the confinement + working
         // dir elsewhere. git_clone_workspace prepares a disposable clone with
@@ -884,6 +956,7 @@ export default function (pi: ExtensionAPI) {
             ...identity,
             promptPreview: p.prompt.slice(0, 200),
             startedAt: Date.now(), logPath: logPathFor(id), sessionId: id,
+            callbackOrigin,
             sandbox: sandboxDir, callback: p.callback !== false,
             ...batchInfo,
         };
@@ -1153,6 +1226,7 @@ export default function (pi: ExtensionAPI) {
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
         uiCtx = ctx;
+        activeCallbackOrigin = callbackOriginFromContext(ctx);
         // Reload / session switch hardening (#48):
         // - Drop any leftover overlay timers/confirm state from a prior session
         //   (defensive if the host skipped session_shutdown before re-start).
@@ -1188,8 +1262,13 @@ export default function (pi: ExtensionAPI) {
         if (needsMonitoring(listMetas())) ensureHealthTicker();
     });
 
+    pi.on("session_before_switch", () => {
+        activeCallbackOrigin = undefined;
+    });
+
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (_event, ctx) => {
+        activeCallbackOrigin = undefined;
         stopTicker();
         stopHealthTicker();
         spendCache.clear();

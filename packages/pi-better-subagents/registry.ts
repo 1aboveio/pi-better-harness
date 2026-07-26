@@ -20,6 +20,11 @@ import type { LifecycleClassification } from "./lifecycle.ts";
  */
 export type RunStatus = "running" | "completed" | "failed" | "killed" | "orphaned" | "lost";
 
+export interface RunCallbackOrigin {
+    cwd: string;
+    sessionId?: string;
+}
+
 /**
  * True when coherent child-exit evidence may finalize a run in this status.
  * `running` is the normal path; `orphaned`/`lost` are PROVISIONAL
@@ -77,7 +82,16 @@ export interface RunMeta {
     /** Named lifecycle quality from exit/stream validation. */
     lifecycleClassification?: LifecycleClassification;
     logPath: string;
+    /** Child subagent session id. */
     sessionId: string;
+    /** Foreground session that is allowed to receive unsolicited callbacks. */
+    callbackOrigin?: RunCallbackOrigin;
+    completionCallbackSuppressedAt?: number;
+    completionCallbackSuppressedReason?: string;
+    orphanedCallbackSuppressedAt?: number;
+    orphanedCallbackSuppressedReason?: string;
+    lostCallbackSuppressedAt?: number;
+    lostCallbackSuppressedReason?: string;
     /** Writable dir the child is OS-sandboxed to, if any. */
     sandbox?: string;
     /** Whether completion posts the result back to the main session (default true). */
