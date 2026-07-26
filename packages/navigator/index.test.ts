@@ -402,16 +402,17 @@ describe("shared background work navigator", () => {
       const bottomMargin = 3 + navigatorRows;
       assert.equal(customOptions?.overlay, true);
       assert.equal(typeof visible, "function");
+      const topMargin = 5;
       assert.equal(visible(120, 40), true);
       assert.deepEqual(layoutOptions, {
         anchor: "top-left",
         width: "100%",
         maxHeight: "100%",
-        margin: { top: 1, right: 0, bottom: bottomMargin, left: 0 },
+        margin: { top: topMargin, right: 0, bottom: bottomMargin, left: 0 },
       });
 
       let renderedLines = component.render(72);
-      assert.equal(renderedLines.length, 40 - 1 - bottomMargin, "detail overlay should fill the rows between header and navigator");
+      assert.equal(renderedLines.length, 40 - topMargin - bottomMargin, "detail overlay should fill the rows between header and navigator");
       for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
       let rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 10);

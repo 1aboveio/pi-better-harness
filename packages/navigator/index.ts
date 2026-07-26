@@ -94,7 +94,7 @@ export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25, 50, 100] as const;
 const MAIN_LIST_TICK_MS = 1000;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
-const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 1;
+const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 5;
 const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
 
 function state(): NavigatorState {
