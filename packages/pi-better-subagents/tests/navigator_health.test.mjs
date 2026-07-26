@@ -288,8 +288,8 @@ describe("navigator status colorization", () => {
     it("maps running/completed/failed/killed/orphaned/lost to semantic theme colors", () => {
         assert.equal(statusThemeColor("running"), "accent");
         assert.equal(statusThemeColor("completed"), "success");
-        assert.equal(statusThemeColor("failed"), "danger");
-        assert.equal(statusThemeColor("lost"), "danger");
+        assert.equal(statusThemeColor("failed"), "error");
+        assert.equal(statusThemeColor("lost"), "error");
         assert.equal(statusThemeColor("killed"), "warning");
         assert.equal(statusThemeColor("orphaned"), "warning");
         assert.equal(statusThemeColor("exited"), "dim");
@@ -319,9 +319,9 @@ describe("navigator status colorization", () => {
         assert.ok(plain[4].includes("beta · m · 2s · failed · stale"));
         // Color markers present on status tokens only.
         assert.ok(lines[3].includes("<accent>running</>"), lines[3]);
-        assert.ok(lines[4].includes("<danger>failed</>"), lines[4]);
+        assert.ok(lines[4].includes("<error>failed</>"), lines[4]);
         assert.ok(lines[5].includes("<warning>orphaned</>"), lines[5]);
-        assert.ok(lines[6].includes("<danger>lost</>"), lines[6]);
+        assert.ok(lines[6].includes("<error>lost</>"), lines[6]);
         assert.ok(lines[7].includes("<success>completed</>"), lines[7]);
         assert.ok(lines[8].includes("<warning>killed</>"), lines[8]);
 
@@ -340,7 +340,7 @@ describe("navigator status colorization", () => {
     // @covers navigator.health
     // @level unit
     it("truncateToVisibleWidth preserves ANSI while limiting visible cells", () => {
-        const colored = `hello · <danger>failed</> · stale`;
+        const colored = `hello · <error>failed</> · stale`;
         assert.equal(visibleWidth(colored), visibleWidth(strip(colored)));
         const cut = truncateToVisibleWidth(colored, 12);
         assert.ok(visibleWidth(cut) <= 12, `${visibleWidth(cut)} ${cut}`);
@@ -368,9 +368,9 @@ describe("navigator status colorization", () => {
         );
         const lines = component.render(80);
         const row = lines[3];
-        assert.ok(row.includes("<danger>failed</>"), row);
-        // Selected marker is accent, but status keeps danger.
-        assert.ok(row.includes("›") && row.includes("<danger>failed</>"), row);
+        assert.ok(row.includes("<error>failed</>"), row);
+        // Selected marker is accent, but status keeps error.
+        assert.ok(row.includes("›") && row.includes("<error>failed</>"), row);
         assert.ok(visibleWidth(row) <= 80);
         // List-mode render does not arm timers, but dispose is still the
         // required teardown contract for any overlay component instance.

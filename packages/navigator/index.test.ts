@@ -134,4 +134,81 @@ describe("shared background work navigator", () => {
       unregister();
     }
   });
+
+  it("renders failed rows with Pi-supported theme colors", () => {
+    const seenColors: string[] = [];
+    const allowed = new Set(["accent", "success", "error", "warning", "dim"]);
+    const unregister = registerBackgroundWorkProvider({
+      id: "background-tasks",
+      label: "Background Tasks",
+      priority: 20,
+      visibleCount: () => 2,
+      listRows: () => [
+        {
+          providerId: "background-tasks",
+          id: "failed-task",
+          name: "failed task",
+          status: "failed",
+          statusTone: "failed",
+          kind: "watch",
+          elapsed: "1s",
+          primary: "gh pr checks",
+          sortStartedAt: 200,
+        },
+        {
+          providerId: "background-tasks",
+          id: "lost-task",
+          name: "lost task",
+          status: "lost",
+          statusTone: "failed",
+          kind: "subagent",
+          elapsed: "2s",
+          primary: "subagent run",
+          sortStartedAt: 100,
+        },
+      ],
+      detail: () => null,
+      armCloseLabel: () => "x again to dismiss",
+      close: (id) => ({ action: "dismissed", providerId: "background-tasks", id }),
+    });
+
+    let component: any;
+    const ui = {
+      factory: undefined as any,
+      theme: {
+        fg(color: string, value: string) {
+          seenColors.push(color);
+          if (!allowed.has(color)) throw new Error(`Unknown theme color: ${color}`);
+          return `<${color}>${value}</>`;
+        },
+      },
+      setStatus() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+
+      assert.doesNotThrow(() => component.render(100));
+      assert.ok(seenColors.includes("error"), "failed statuses use Pi's error color");
+      assert.equal(seenColors.includes("danger"), false, "danger is not a Pi theme color");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
 });

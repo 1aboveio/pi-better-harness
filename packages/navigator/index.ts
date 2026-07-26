@@ -525,7 +525,7 @@ function buildDetailLines(detail: BackgroundWorkDetail | null, width: number, tr
 
 function toneColor(tone: BackgroundWorkStatusTone | undefined, status: string): string {
   if (tone === "success") return "success";
-  if (tone === "failed") return "danger";
+  if (tone === "failed") return "error";
   if (tone === "warning") return "warning";
   if (tone === "running") return "accent";
   switch (status) {
@@ -535,7 +535,7 @@ function toneColor(tone: BackgroundWorkStatusTone | undefined, status: string): 
     case "failed":
     case "lost":
     case "timed_out":
-      return "danger";
+      return "error";
     case "cancelled":
     case "killed":
     case "orphaned":
