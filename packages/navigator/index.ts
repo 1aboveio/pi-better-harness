@@ -160,7 +160,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
 
 export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   const s = state();
-  const activeCtx = ctx ?? s.uiCtx;
+  const activeCtx = isNavigatorUiAvailable(ctx) ? ctx : s.uiCtx;
   if (!isNavigatorUiAvailable(activeCtx)) return;
   try {
     const count = visibleCount();

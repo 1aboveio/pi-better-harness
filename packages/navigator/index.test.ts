@@ -5,6 +5,7 @@ import {
   NAVIGATOR_STATUS_KEY,
   disposeBackgroundWorkNavigator,
   ensureBackgroundWorkNavigator,
+  refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
   type BackgroundWorkProvider,
 } from "./index.ts";
@@ -94,6 +95,43 @@ describe("shared background work navigator", () => {
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
       unregisterTasks();
+    }
+  });
+
+  it("refreshes the stored TUI navigator when a tool call has a non-TUI context", () => {
+    let count = 0;
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("background-tasks", "Background Tasks", 20, 100, () => undefined),
+      visibleCount: () => count,
+      listRows: () => [],
+    });
+
+    const statuses: Array<[string, string | undefined]> = [];
+    const ui = {
+      factory: undefined as any,
+      setStatus(key: string, value: string | undefined) { statuses.push([key, value]); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+    };
+    const tuiCtx = { mode: "tui", hasUI: true, ui } as any;
+    const toolCtx = { mode: "rpc", hasUI: false, ui: {} } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(tuiCtx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      assert.equal(statuses.at(-1)?.[1], undefined);
+
+      count = 1;
+      refreshBackgroundWorkNavigator(toolCtx);
+
+      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, "← background work · 1"]);
+    } finally {
+      disposeBackgroundWorkNavigator(tuiCtx);
+      unregister();
     }
   });
 });
