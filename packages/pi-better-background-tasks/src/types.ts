@@ -48,6 +48,7 @@ export interface BackgroundTaskMeta {
   logPath: string;
   callback?: boolean;
   callbackSentAt?: number;
+  dismissedAt?: number;
   command?: string;
   argv?: string[];
   shell?: boolean;

@@ -260,9 +260,6 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
             editor.handleInput("left");
         },
         async openDetailViaEnter() {
-            // Reset the ready gate so a later open (if any) can wait again.
-            overlayReady = new Promise((r) => { resolveOverlay = r; });
-            editor.handleInput("enter");
             const component = await Promise.race([
                 overlayReady,
                 new Promise((_, rej) => {
@@ -272,7 +269,8 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
                     overlayReady.then(() => clearTimeout(t), () => clearTimeout(t));
                 }),
             ]);
-            assert.ok(component, "enter on focused widget row must open navigator detail overlay");
+            component.handleInput("enter");
+            assert.ok(component, "left must open the shared navigator overlay");
             assert.equal(typeof component.handleInput, "function");
             return component;
         },
@@ -353,9 +351,9 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         await nav.start();
 
-        assert.equal(nav.lastStatus("subagents-nav"), undefined, "terminal-only runs clear the footer hint");
+        assert.equal(nav.lastStatus("background-work-nav"), undefined, "terminal-only runs clear the footer hint");
         assert.equal(
-            nav.widgetCalls.some((c) => c[0] === "subagents" && Array.isArray(c[1]) && c[1].some((line) => line.includes("← subagents"))),
+            nav.widgetCalls.some((c) => c[0] === "subagents" && Array.isArray(c[1]) && c[1].some((line) => line.includes("← background work"))),
             false,
             "terminal-only runs do not paint a fallback left-arrow widget",
         );
@@ -381,32 +379,29 @@ describe("registered extension path: session_start reload cleanup", () => {
             startedAt: 50,
             endedAt: 90,
         });
-        const runningHint = "← subagents · 1";
+        const runningHint = "← background work · 1";
 
         // 1) First session_start installs the empty-editor wrapper + running-only footer.
         await nav.start();
         assert.equal(nav.setEditorCount, 1, "first session_start installs editor once");
-        assert.equal(nav.ui.factory?.__piBetterSubagentsNavigatorFactory, true, "factory is marked");
-        const footerAfterStart = nav.lastStatus("subagents-nav");
+        assert.equal(nav.ui.factory?.__piBetterHarnessNavigatorFactory, true, "factory is marked");
+        const footerAfterStart = nav.lastStatus("background-work-nav");
         const widgetAfterStart = nav.lastWidget("subagents");
         assert.equal(footerAfterStart, runningHint, "first session_start publishes running-only count footer");
         assert.ok(Array.isArray(widgetAfterStart), "running session_start paints the live widget");
         assert.ok(widgetAfterStart[0].startsWith("Subagents · 1 running"), "live widget keeps the original running-count title");
-        assert.ok(widgetAfterStart[0].includes("<muted>← to navigate</>"), "live widget includes a muted navigate hint on the title row");
-        assert.ok(!widgetAfterStart.slice(1).some((line) => String(line).includes("← to navigate")), "live widget does not add a standalone left-arrow hint row");
+        assert.ok(widgetAfterStart[0].includes("<muted>← background work</>"), "live widget includes a muted shared navigator hint on the title row");
+        assert.ok(!widgetAfterStart.slice(1).some((line) => String(line).includes("← background work")), "live widget does not add a standalone left-arrow hint row");
 
-        // 2) Focus the main-window list via the registered empty-editor Left path.
+        // 2) Open the shared overlay via the registered empty-editor Left path.
         nav.focusViaLeftKey();
-        let widgetFocused = nav.lastWidget("subagents");
-        assert.ok(widgetFocused[0].includes("<muted>Enter to view · x to stop</>"), "focused widget shows the main-window actions");
-        assert.ok(widgetFocused.some((line) => String(line).startsWith("› ")), "focused widget marks the selected row");
 
         // 3) Enter opens detail; x arms close confirmation → widget interval + health interval + live detail interval + arm timeout.
         const component = await nav.openDetailViaEnter();
         nav.press("x");
         assert.equal(timerSpies.pendingIntervals(), 3, "widget, health, and detail tick intervals are live");
         assert.equal(timerSpies.pendingTimeouts(), 1, "close-arm timeout is live");
-        const confirmAfterArm = nav.lastStatus("subagents-close");
+        const confirmAfterArm = nav.lastStatus("background-work-close");
         assert.equal(
             typeof confirmAfterArm,
             "string",
@@ -422,13 +417,13 @@ describe("registered extension path: session_start reload cleanup", () => {
         await nav.reload();
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
-        // session_start path (disposeTrackedNavigator + CLOSE_CONFIRM clear).
+        // session_start path (disposeBackgroundWorkNavigator + CLOSE_CONFIRM clear).
         assert.equal(timerSpies.pendingIntervals(), 2, "reload must clear detail interval while keeping widget and health tickers");
         assert.equal(timerSpies.pendingTimeouts(), 0, "reload must clear close-arm timeout");
-        const confirmAfterReload = nav.lastStatus("subagents-close");
+        const confirmAfterReload = nav.lastStatus("background-work-close");
         assert.equal(confirmAfterReload, undefined, "reload clears CLOSE_CONFIRM_STATUS_KEY");
         assert.ok(
-            nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "subagents-close" && c[1] === undefined),
+            nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "background-work-close" && c[1] === undefined),
             "reload path must invoke setStatus(close-confirm, undefined)",
         );
         // Dispose clears arm/detail state; the host would drop the focused
@@ -439,22 +434,22 @@ describe("registered extension path: session_start reload cleanup", () => {
         // 5b) Editor wrapper does not stack.
         assert.equal(nav.setEditorCount, 1, "reload must not call setEditorComponent again");
         assert.equal(nav.ui.factory, editorBefore, "same marked factory remains installed");
-        assert.equal(nav.ui.factory?.__piBetterSubagentsNavigatorFactory, true);
+        assert.equal(nav.ui.factory?.__piBetterHarnessNavigatorFactory, true);
 
         // 5c) Footer count is republished after lastNavigatorHint reset.
-        const footerAfterReload = nav.lastStatus("subagents-nav");
+        const footerAfterReload = nav.lastStatus("background-work-nav");
         const widgetAfterReload = nav.lastWidget("subagents");
         assert.equal(footerAfterReload, runningHint, "reload republishes running-only navigator count footer");
         assert.ok(Array.isArray(widgetAfterReload), "reload repaints the live widget");
         assert.ok(widgetAfterReload[0].startsWith("Subagents · 1 running"), "reload keeps the original widget title");
-        assert.ok(widgetAfterReload[0].includes("<muted>← to navigate</>"), "reload republishes the muted widget navigate hint on the title row");
-        assert.ok(!widgetAfterReload.slice(1).some((line) => String(line).includes("← to navigate")), "reload does not add a standalone widget left-arrow hint row");
+        assert.ok(widgetAfterReload[0].includes("<muted>← background work</>"), "reload republishes the muted shared navigator hint on the title row");
+        assert.ok(!widgetAfterReload.slice(1).some((line) => String(line).includes("← background work")), "reload does not add a standalone widget left-arrow hint row");
         assert.ok(
-            nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "subagents-nav" && typeof c[1] === "string"),
+            nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "background-work-nav" && typeof c[1] === "string"),
             "reload path must re-invoke setStatus for the running count footer",
         );
         assert.ok(
-            nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && Array.isArray(c[1]) && String(c[1][0] ?? "").includes("<muted>← to navigate</>")),
+            nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && Array.isArray(c[1]) && String(c[1][0] ?? "").includes("<muted>← background work</>")),
             "reload path must re-invoke setWidget for the title-row navigator hint",
         );
 

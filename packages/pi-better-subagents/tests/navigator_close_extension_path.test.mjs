@@ -211,12 +211,12 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
             editor.handleInput("left");
         },
         async openDetailViaEnter() {
-            editor.handleInput("enter");
             const component = await Promise.race([
                 overlayReady,
                 new Promise((_, rej) => setTimeout(() => rej(new Error("overlay did not open")), 1000)),
             ]);
-            assert.ok(component, "enter on focused widget row must open navigator detail overlay");
+            component.handleInput("enter");
+            assert.ok(component, "left must open the shared navigator overlay");
             assert.equal(typeof component.handleInput, "function");
             return component;
         },
@@ -229,7 +229,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
             }
             return Symbol.for("missing");
         },
-        pressX() { editor.handleInput("x"); },
+        pressX() { overlayComponent?.handleInput("x"); },
         statusCalls,
         widgetCalls,
         closedOutcomes,
@@ -298,7 +298,7 @@ describe("registered extension path: main-window navigator actions", () => {
 
     // @covers navigator.close
     // @level integration
-    it("registered TUI path left focuses widget list and enter opens selected running detail", async () => {
+    it("registered TUI path left opens the shared background-work navigator and enter opens selected detail", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const affordancePid = spawnSleeper();
         const affordanceId = nav.seedRun({
@@ -306,24 +306,19 @@ describe("registered extension path: main-window navigator actions", () => {
             name: "live-affordance",
             status: "running",
             pid: affordancePid,
-            startedAt: 50,
+            startedAt: Date.now() + 1000,
         });
         const id = nav.seedRun({
             id: trackDisk(`sa_t47_ext_term_${Date.now()}`),
             name: "done-job",
             status: "completed",
             startedAt: 100,
-            endedAt: 99,
+            endedAt: 100,
         });
 
         try {
             await nav.start();
             nav.focusViaLeftKey();
-            const focused = nav.lastWidget("subagents");
-            assert.ok(Array.isArray(focused), "left focuses the main widget list, not the overlay");
-            assert.ok(focused[0].includes("<muted>Enter to view · x to stop</>"), "focused widget shows main-list actions");
-            assert.ok(focused.some((line) => String(line).startsWith("› ") && String(line).includes("live-affordance")), "running row is selected");
-
             const component = await nav.openDetailViaEnter();
             const text = component.render(80).join("\n").replace(/<\/?[a-z]*>/g, "");
             assert.ok(text.includes("live-affordance"), text);
@@ -333,16 +328,9 @@ describe("registered extension path: main-window navigator actions", () => {
             assert.equal(back.dismissedAt, undefined, "terminal row is not dismissed by main running-list navigation");
 
             component.handleInput("left");
-            const afterDetailClose = nav.lastWidget("subagents");
-            assert.ok(
-                Array.isArray(afterDetailClose) && afterDetailClose[0].includes("<muted>Enter to view · x to stop</>"),
-                "back from detail must return to the focused main-window list, not an overlay list",
-            );
-            assert.ok(
-                afterDetailClose.some((line) => String(line).startsWith("› ") && String(line).includes("live-affordance")),
-                "main-window list selection remains on the viewed running row",
-            );
-            nav.pressEditor("down");
+            const listText = component.render(80).join("\n");
+            assert.ok(listText.includes("Background work"), "back from detail returns to the shared overlay list");
+            assert.ok(listText.includes("Subagents"), "shared overlay groups the subagent provider");
         } finally {
             registry.dismissRun(affordanceId);
             try { process.kill(-affordancePid, "SIGTERM"); } catch { try { process.kill(affordancePid, "SIGTERM"); } catch { /* ignore */ } }
@@ -351,7 +339,7 @@ describe("registered extension path: main-window navigator actions", () => {
 
     // @covers navigator.close
     // @level integration
-    it("running run: registered TUI main-list x stops via shared stopRun and dismisses", async () => {
+    it("running run: registered shared navigator x stops via shared stopRun and dismisses", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const pid = spawnSleeper();
         const id = nav.seedRun({
@@ -359,11 +347,13 @@ describe("registered extension path: main-window navigator actions", () => {
             name: "live-job",
             status: "running",
             pid,
+            startedAt: Date.now() + 1000,
         });
 
         await nav.start();
         nav.focusViaLeftKey();
 
+        nav.pressX();
         nav.pressX();
         let back = registry.readMeta(id);
         assert.equal(back.status, "killed", "main-list x must mark killed via shared stopRun");

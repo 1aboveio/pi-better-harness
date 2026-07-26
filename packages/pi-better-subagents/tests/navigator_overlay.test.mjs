@@ -145,9 +145,10 @@ describe("navigator footer hint", () => {
     // @level unit
     it("extension wiring bases the left-arrow affordance on running runs", () => {
         const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
+        const sharedSrc = readFileSync(new URL("../../navigator/index.ts", import.meta.url), "utf8");
         assert.ok(src.includes("function navigatorRunningCount"), "index.ts must expose a running-only affordance seam");
-        assert.ok(src.includes("canOpen: () => navigatorRunningCount() > 0"), "empty-editor left must require a running run");
-        assert.ok(src.includes("navigatorFooterHint(navigatorRunningCount())"), "footer hint must count running runs only");
+        assert.ok(sharedSrc.includes("visibleCount() > 0"), "empty-editor left must require visible background work");
+        assert.ok(src.includes("visibleCount: () => navigatorRunningCount()"), "subagent provider footer count must count running runs only");
     });
 
     // @covers navigator.footer-hint

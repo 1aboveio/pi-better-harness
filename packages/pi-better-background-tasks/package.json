@@ -26,6 +26,9 @@
     "!src/**/*.test.ts",
     "README.md"
   ],
+  "dependencies": {
+    "navigator": "*"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"

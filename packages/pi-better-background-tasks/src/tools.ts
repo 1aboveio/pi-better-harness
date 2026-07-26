@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readLog } from "./logs.js";
+import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import { listMetas, readMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import type { BackgroundTaskMeta } from "./types.js";
@@ -82,6 +83,7 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const meta = spawnTask(pi, params, ctx.cwd);
+      refreshBackgroundTasksNavigator(ctx);
       return text(formatLaunch(meta));
     },
   });
@@ -93,6 +95,7 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: WatchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const meta = startWatchTask(pi, params, ctx.cwd);
+      refreshBackgroundTasksNavigator(ctx);
       return text(formatLaunch(meta));
     },
   });
@@ -134,7 +137,9 @@ export function registerTools(pi: ExtensionAPI): void {
     description: "Cancel a watcher or terminate a background process group. Nonblocking.",
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return text(formatStop(pi, params.id, ctx));
+      const result = formatStop(pi, params.id, ctx);
+      refreshBackgroundTasksNavigator(ctx);
+      return text(result);
     },
   });
 
@@ -166,10 +171,10 @@ export function text(textValue: string, details?: unknown) {
 function runAction(pi: ExtensionAPI, params: Record<string, unknown>, ctx: ExtensionContext): string {
   switch (params.action) {
     case "spawn":
-      return formatLaunch(spawnTask(pi, params, ctx.cwd));
+      return withNavigatorRefresh(ctx, formatLaunch(spawnTask(pi, params, ctx.cwd)));
     case "watch":
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
-      return formatLaunch(startWatchTask(pi, params as never, ctx.cwd));
+      return withNavigatorRefresh(ctx, formatLaunch(startWatchTask(pi, params as never, ctx.cwd)));
     case "list":
       return formatList(resolveList(params.status as string[] | undefined, params.limit as number | undefined));
     case "status":
@@ -180,10 +185,15 @@ function runAction(pi: ExtensionAPI, params: Record<string, unknown>, ctx: Exten
       return formatLog(String(params.id), params.tail_lines as number | undefined);
     case "stop":
       if (!params.id) return "Invalid parameters: stop requires id.";
-      return formatStop(pi, String(params.id), ctx);
+      return withNavigatorRefresh(ctx, formatStop(pi, String(params.id), ctx));
     default:
       return `Unknown action: ${String(params.action)}`;
   }
+}
+
+function withNavigatorRefresh(ctx: ExtensionContext, result: string): string {
+  refreshBackgroundTasksNavigator(ctx);
+  return result;
 }
 
 function resolveList(statuses?: string[], limit?: number): BackgroundTaskMeta[] {

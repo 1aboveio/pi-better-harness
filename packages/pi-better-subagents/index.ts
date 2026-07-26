@@ -17,6 +17,18 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
+import {
+    CLOSE_CONFIRM_STATUS_KEY,
+    NAVIGATOR_STATUS_KEY,
+    disposeBackgroundWorkNavigator,
+    ensureBackgroundWorkNavigator,
+    isNavigatorUiAvailable,
+    refreshBackgroundWorkNavigator,
+    registerBackgroundWorkProvider,
+    type BackgroundWorkDetail,
+    type BackgroundWorkProvider,
+    type BackgroundWorkRow,
+} from "navigator";
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
@@ -89,18 +101,9 @@ import {
     resolveHealthLogExtraction,
 } from "./widget.ts";
 import {
-    NAVIGATOR_STATUS_KEY,
-    CLOSE_CONFIRM_STATUS_KEY,
-    navigatorFooterHint,
-    applyNavigatorFooter,
-    applyCloseConfirmFooter,
     executeNavigatorClose,
-    isNavigatorUiAvailable,
     buildNavigatorRows,
     buildNavigatorDetail,
-    installNavigatorEditor,
-    openTrackedNavigator,
-    disposeTrackedNavigator,
 } from "./navigator.ts";
 
 /** The tools this extension registers — excluded from children by default so a
@@ -305,7 +308,7 @@ function renderWidget(): void {
         const obs = observeWidgetHealth(m, now);
         if (obs) healthById[m.id] = obs;
     }
-    const widgetHintText = widgetNavActive ? "Enter to view · x to stop" : "← to navigate";
+    const widgetHintText = widgetNavActive ? "Enter to view · x to stop" : "← background work";
     const widgetHint = ctx.ui.theme?.fg
         ? ctx.ui.theme.fg("muted", widgetHintText)
         : widgetHintText;
@@ -483,11 +486,7 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 //      Detail + close-arm timers dispose on back, Escape, overlay close,
 //      selection change, list↔detail return, and session_shutdown.
 
-/** Last footer hint published (undefined ⇒ never set); dirty-check guard. */
-let lastNavigatorHint: string | null | undefined;
-
-/** Active navigator overlay dispose hook (clears detail timers on teardown). */
-let activeNavigatorDispose: (() => void) | undefined;
+let unregisterSubagentProvider: (() => void) | undefined;
 
 /**
  * Observe health for a navigator row/detail (#69). Reuses the size/mtime-gated
@@ -553,12 +552,6 @@ function navigatorDetail(id: string) {
     });
 }
 
-/** Mutable slot holding the active overlay's dispose hook. */
-const navigatorDisposeSlot = {
-    get: () => activeNavigatorDispose,
-    set: (fn: (() => void) | undefined) => { activeNavigatorDispose = fn; },
-};
-
 /** Shared #44 stop+dismiss path used by navigator Close (#47). */
 function navigatorCloseRun(id: string) {
     return executeNavigatorClose(id, {
@@ -573,8 +566,85 @@ function navigatorCloseRun(id: string) {
 function publishCloseConfirmHint(ctx: ExtensionContext, hint: string | null): void {
     if (!isNavigatorUiAvailable(ctx)) return;
     try {
-        applyCloseConfirmFooter(ctx.ui, hint);
+        ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, hint ?? undefined);
     } catch { /* ignore */ }
+}
+
+function statusTone(status: string): BackgroundWorkRow["statusTone"] {
+    switch (status) {
+        case "running": return "running";
+        case "completed": return "success";
+        case "failed":
+        case "lost": return "failed";
+        case "killed":
+        case "orphaned": return "warning";
+        default: return "muted";
+    }
+}
+
+function subagentWorkRows(now: number): BackgroundWorkRow[] {
+    const startedById = new Map(navigatorVisibleRuns(listMetas()).map((m) => [m.id, m.startedAt]));
+    return navigatorRows().map((row) => {
+        const bits = [];
+        if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
+        if (row.tool) bits.push(row.tool);
+        if (row.spend) bits.push(row.spend);
+        return {
+            providerId: "subagents",
+            id: row.id,
+            name: row.name,
+            status: row.status,
+            statusTone: statusTone(row.status),
+            kind: "subagent",
+            elapsed: row.elapsed,
+            primary: bits.join(" · ") || "subagent run",
+            facts: row.healthFacts,
+            sortStartedAt: startedById.get(row.id) ?? now,
+        };
+    });
+}
+
+function subagentWorkDetail(id: string, now: number): BackgroundWorkDetail | null {
+    const detail = navigatorDetail(id);
+    if (!detail) return null;
+    const metadata = [
+        { label: "provider", value: "Subagents" },
+        { label: "model", value: detail.effort ? `${detail.model} · effort ${detail.effort}` : detail.model },
+        { label: "elapsed", value: detail.elapsed },
+        { label: "tools", value: detail.currentTool ? `current ${detail.currentTool}` : (detail.tools || "(none)") },
+        { label: "spend", value: detail.spend || "(none)" },
+        { label: "pid", value: detail.pid != null ? String(detail.pid) : "-" },
+        { label: "pgid", value: detail.pgid != null ? String(detail.pgid) : "-" },
+    ];
+    return {
+        providerId: "subagents",
+        id: detail.id,
+        title: detail.name || detail.id,
+        status: detail.status,
+        statusTone: statusTone(detail.status),
+        subtitle: detail.currentTool ? `current tool ${detail.currentTool}` : undefined,
+        metadata,
+        evidence: { label: "output", text: detail.output || "(no output yet)" },
+        footerActions: [detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
+    };
+}
+
+function ensureSubagentProvider(): void {
+    if (unregisterSubagentProvider) return;
+    const provider: BackgroundWorkProvider = {
+        id: "subagents",
+        label: "Subagents",
+        priority: 10,
+        visibleCount: () => navigatorRunningCount(),
+        listRows: (now) => subagentWorkRows(now),
+        detail: (id, now) => subagentWorkDetail(id, now),
+        armCloseLabel: (row) => row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
+        close: (id) => {
+            const outcome = navigatorCloseRun(id) as { action: string; id: string; status?: string };
+            return { ...outcome, providerId: "subagents" };
+        },
+    };
+    unregisterSubagentProvider = registerBackgroundWorkProvider(provider);
 }
 
 function selectedWidgetNavRun(): RunMeta | undefined {
@@ -629,71 +699,32 @@ function stopWidgetNavSelection(ctx: ExtensionContext): void {
     const selected = selectedWidgetNavRun();
     if (!selected) return;
     try { navigatorCloseRun(selected.id); } catch { /* ignore */ }
-    lastNavigatorHint = undefined;
     updateNavigatorFooter(ctx);
     try { renderWidget(); } catch { /* ignore */ }
 }
 
 /** Open the focused navigator overlay. No-op without a UI or visible runs. */
 function openNavigator(ctx: ExtensionContext, initialDetailId?: string): void {
-    if (!isNavigatorUiAvailable(ctx)) return;
-    const rows = navigatorRows();
-    if (rows.length === 0) return;
-    try {
-        // Pi's ui.custom() resolves with done()'s value (null), NOT the component.
-        // openTrackedNavigator captures dispose synchronously via onComponent
-        // and clears the slot when the overlay promise settles.
-        openTrackedNavigator(ctx.ui, rows, {
-            matchKey: matchesKey,
-            truncate: truncateToWidth,
-            getDetail: (id: string) => navigatorDetail(id),
-            getRows: () => navigatorRows(),
-            initialDetailId,
-            closeDetailToMainPage: initialDetailId !== undefined,
-            closeRun: (id: string) => navigatorCloseRun(id),
-            onCloseConfirmHint: (hint: string | null) => publishCloseConfirmHint(ctx, hint),
-            onClosed: () => {
-                // Refresh footer count after a dismiss; force dirty-check miss.
-                lastNavigatorHint = undefined;
-                updateNavigatorFooter(ctx);
-                // A kill may have changed the live widget's set of running runs.
-                try { renderWidget(); } catch { /* ignore */ }
-            },
-        }, navigatorDisposeSlot);
-    } catch { /* never let UI glue break the session */ }
+    void initialDetailId;
+    ensureNavigator(ctx);
 }
 
 /** Publish/clear the running-only `← subagents · N` footer hint (dirty-checked). */
 function updateNavigatorFooter(ctx: ExtensionContext | undefined): void {
-    if (!isNavigatorUiAvailable(ctx)) return;
-    try {
-        const hint = navigatorFooterHint(navigatorRunningCount());
-        if (hint === lastNavigatorHint) return;
-        applyNavigatorFooter(ctx!.ui, navigatorRunningCount());
-        lastNavigatorHint = hint;
-    } catch { /* ignore */ }
+    refreshBackgroundWorkNavigator(ctx);
 }
 
 /** Install the empty-editor ← wrapper once per UI (reload-safe, composable). */
-function installNavigator(ctx: ExtensionContext): void {
+function ensureNavigator(ctx: ExtensionContext): void {
     if (!isNavigatorUiAvailable(ctx)) return;
     try {
-        installNavigatorEditor(ctx.ui, {
+        ensureSubagentProvider();
+        ensureBackgroundWorkNavigator(ctx, {
             createDefaultEditor: (tui: any, theme: any, keybindings: any) =>
                 new CustomEditor(tui, theme, keybindings),
             isOpenTrigger: (data: string) => matchesKey(data, Key.left),
-            canOpen: () => navigatorRunningCount() > 0,
-            isNavigating: () => widgetNavActive,
-            isReturnTrigger: (data: string) => matchesKey(data, "down"),
-            isPreviousTrigger: (data: string) => matchesKey(data, "up"),
-            isViewTrigger: (data: string) => matchesKey(data, "enter"),
-            isStopTrigger: (data: string) => data === "x" || data === "X",
-            onOpen: () => enterWidgetNav(ctx),
-            onReturn: () => returnWidgetNavToInput(),
-            onPrevious: () => moveWidgetNavPrevious(),
-            onView: () => viewWidgetNavSelection(ctx),
-            onStop: () => stopWidgetNavSelection(ctx),
-            onCancel: () => exitWidgetNav(),
+            matchKey: (data: string, keyId: string) => matchesKey(data, keyId),
+            truncate: truncateToWidth,
         });
     } catch { /* ignore */ }
 }
@@ -734,6 +765,7 @@ export default function (pi: ExtensionAPI) {
     // Capture for the health ticker (module-level); needed for orphaned/lost
     // coordinator follow-ups that fire outside a tool-call stack (#65).
     healthPi = pi;
+    ensureSubagentProvider();
 
     type SpawnParams = {
         prompt: string; name?: string; model?: string; tools?: string;
@@ -863,7 +895,7 @@ export default function (pi: ExtensionAPI) {
         ensureTicker();
         // Start periodic supervision reconciliation (self-stops when idle).
         ensureHealthTicker();
-        // Footer hint: a visible run now exists, so `← subagents · N` shows.
+        // Footer hint: a visible run now exists, so `← background work · N` shows.
         updateNavigatorFooter(ctx);
 
         const runtime = resolution.mode === "inherit"
@@ -1129,15 +1161,15 @@ export default function (pi: ExtensionAPI) {
         //   session switch/reload; dirty-check only dedupes within a session).
         // - Repaint the widget even if its last in-memory lines match; the host
         //   may have dropped extension UI during reload/session replacement.
-        disposeTrackedNavigator(navigatorDisposeSlot);
+        ensureSubagentProvider();
+        disposeBackgroundWorkNavigator(ctx);
         widgetNavActive = false;
         widgetNavSelectedId = undefined;
         lastWidgetLines = undefined;
         if (isNavigatorUiAvailable(ctx)) {
             try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
         }
-        installNavigator(ctx);
-        lastNavigatorHint = undefined;
+        ensureNavigator(ctx);
         updateNavigatorFooter(ctx);
         // Resume passive widget for supervised running and non-terminal orphaned (#67).
         if (listMetas().some((m) => {
@@ -1163,7 +1195,7 @@ export default function (pi: ExtensionAPI) {
         spendCache.clear();
         // Always dispose navigator detail timers (no UI call — just clearInterval).
         // Safe in every mode; the dispose hook is only set when a TUI overlay opened.
-        disposeTrackedNavigator(navigatorDisposeSlot);
+        disposeBackgroundWorkNavigator(ctx);
         // Widget clear is intentional in every mode that exposes ui (incl. RPC
         // — pi docs: setWidget works in both TUI and RPC). Navigator cleanup
         // is TUI-only: the footer hint is never published outside TUI, so
@@ -1173,7 +1205,6 @@ export default function (pi: ExtensionAPI) {
             try { ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, undefined); } catch { /* ignore */ }
             try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
         }
-        lastNavigatorHint = undefined;
         lastWidgetLines = undefined;
     });
 }

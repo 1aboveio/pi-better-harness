@@ -1,0 +1,21 @@
+{
+  "name": "navigator",
+  "version": "0.1.0",
+  "description": "Internal shared TUI navigator for Pi background work extensions.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --strict --skipLibCheck index.ts index.test.ts",
+    "test": "node --import tsx --test index.test.ts"
+  },
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

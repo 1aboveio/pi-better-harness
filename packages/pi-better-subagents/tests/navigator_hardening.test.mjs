@@ -556,7 +556,7 @@ describe("navigator hardening: footer / reload / timers", () => {
         assert.ok(shut.includes("isNavigatorUiAvailable(ctx)"));
         assert.ok(shut.includes("NAVIGATOR_STATUS_KEY"));
         assert.ok(shut.includes("CLOSE_CONFIRM_STATUS_KEY"));
-        assert.ok(shut.includes("disposeTrackedNavigator(navigatorDisposeSlot)"));
+        assert.ok(shut.includes("disposeBackgroundWorkNavigator(ctx)"));
     });
 });
 
@@ -615,7 +615,7 @@ describe("navigator hardening: non-TUI + widget isolation", () => {
         const indexSrc = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts"), "utf8");
         assert.ok(indexSrc.includes('setWidget("subagents"'), "widget path still present");
         // Navigator uses custom() overlay, not setWidget.
-        assert.ok(indexSrc.includes("openTrackedNavigator") || indexSrc.includes("showNavigator"));
+        assert.ok(indexSrc.includes("ensureBackgroundWorkNavigator"));
     });
 
     // @covers navigator.hardening
