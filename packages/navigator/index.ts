@@ -354,8 +354,8 @@ function buildMainListLines(
     lines.push(section(label.toLowerCase(), width));
     const isBackgroundTasks = group.some((row) => row.providerId === "background-tasks");
     lines.push(dim(isBackgroundTasks
-      ? `   ${fit("name", 24)} ${fit("command/tool", 34)} ${fit("status", 10)} elapsed`
-      : `   ${fit("name", 22)} ${fit("model", 16)} ${fit("tool", 14)} ${fit("tokens", 18)} ${fit("status", 10)} elapsed`, fg));
+      ? `  ${fit("name", 24)} ${fit("command/tool", 34)} ${fit("status", 10)} elapsed`
+      : `  ${fit("name", 22)} ${fit("model", 16)} ${fit("tool", 14)} ${fit("tokens", 18)} ${fit("status", 10)} elapsed`, fg));
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
       lines.push(formatMainListRow(row, selected === true, isBackgroundTasks, fg));
