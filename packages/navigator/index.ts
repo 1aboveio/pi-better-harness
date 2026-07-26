@@ -77,6 +77,7 @@ type NavigatorState = {
   mainListCloseArm?: { id: string; armedAt: number };
   mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
   mainListTimer?: ReturnType<typeof setInterval>;
+  detailOverlayRows?: number;
   dispose?: () => void;
 };
 
@@ -179,6 +180,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   }
   s.lastHint = undefined;
   s.lastMainListLines = undefined;
+  s.detailOverlayRows = undefined;
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
   if (ctx && s.uiCtx === ctx) s.uiCtx = undefined;
@@ -681,7 +683,7 @@ function createOverlayComponent(
   return {
     render(width: number) {
       const lines = mode === "detail"
-        ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows })
+        ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: state().detailOverlayRows })
         : buildListLines(overlayState, width, deps.truncate, fg);
       return lines;
     },
@@ -743,6 +745,7 @@ function createOverlayComponent(
 
 function detailOverlayOptions() {
   const navigatorRows = state().lastMainListLines?.length ?? 0;
+  const marginBottom = DETAIL_OVERLAY_FOOTER_MARGIN_ROWS + navigatorRows;
   return {
     anchor: "top-left" as const,
     width: "100%" as const,
@@ -750,8 +753,12 @@ function detailOverlayOptions() {
     margin: {
       top: DETAIL_OVERLAY_HEADER_MARGIN_ROWS,
       right: 0,
-      bottom: DETAIL_OVERLAY_FOOTER_MARGIN_ROWS + navigatorRows,
+      bottom: marginBottom,
       left: 0,
+    },
+    visible: (_termWidth: number, termHeight: number) => {
+      state().detailOverlayRows = Math.max(1, termHeight - DETAIL_OVERLAY_HEADER_MARGIN_ROWS - marginBottom);
+      return true;
     },
   };
 }
@@ -805,10 +812,14 @@ function buildDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { expandedSections?: Set<string>; logTailRows?: number } = {},
+  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number } = {},
 ): string[] {
   if (!detail) {
-    return [rule("Work unavailable", width), dim("   ← back · Esc close", fg), "", dim(rule("", width), fg)].map((line) => safeTruncate(line, width, truncate));
+    const lines = [rule("Work unavailable", width), dim("   ← back · Esc close", fg), ""];
+    const footerLines = [dim(rule("", width), fg)];
+    padBeforeFooter(lines, footerLines.length, options.minRows);
+    lines.push(...footerLines);
+    return lines.map((line) => safeTruncate(line, width, truncate));
   }
   const lines: string[] = [];
   lines.push(fg("accent", rule(detail.title, width)));
@@ -844,9 +855,16 @@ function buildDetailLines(
   const body = detail.evidence.text && detail.evidence.text.trim() ? detail.evidence.text : "(no output yet)";
   for (const raw of body.split(/\r?\n/)) lines.push(raw ? `   ${raw}` : "   ");
   lines.push("");
-  lines.push(dim(`   ← back · ${actions}`, fg));
-  lines.push(dim(rule("", width), fg));
+  const footerLines = [dim(`   ← back · ${actions}`, fg), dim(rule("", width), fg)];
+  padBeforeFooter(lines, footerLines.length, options.minRows);
+  lines.push(...footerLines);
   return lines.map((line) => safeTruncate(line, width, truncate));
+}
+
+function padBeforeFooter(lines: string[], footerLineCount: number, minRows: number | undefined): void {
+  if (minRows === undefined || !Number.isFinite(minRows)) return;
+  const target = Math.max(1, Math.floor(minRows));
+  while (lines.length + footerLineCount < target) lines.push("");
 }
 
 function sectionHeader(label: string, width: number): string {
