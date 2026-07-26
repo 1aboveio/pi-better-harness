@@ -1,0 +1,1 @@
+Amended after review to make the persistent background-work list session-bound for both background task and subagent providers. Added regression coverage for rows from another session staying hidden.
