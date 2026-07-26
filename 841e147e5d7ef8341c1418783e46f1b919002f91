@@ -1,0 +1,1 @@
+Amended after screenshot review: reserve the full Pi header area for the detail overlay so title/status/action rows are visible instead of being clipped under the header.
