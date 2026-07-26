@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Package dry run
+        run: npm pack --dry-run --workspaces
+
+  macos-sandbox:
+    name: macos-sandbox
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run macOS sandbox-exec confinement checks
+        working-directory: packages/pi-better-subagents
+        run: |
+          set -euo pipefail
+          bash tests/test_sandbox_applied.sh
+          bash tests/test_sandbox_deny_outside.sh
+          bash tests/test_sandbox_wrapper_argv.sh
+          node --test tests/sandbox_profile.test.mjs

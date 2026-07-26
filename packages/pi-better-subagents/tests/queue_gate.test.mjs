@@ -9,7 +9,7 @@ import { readFile } from 'node:fs/promises';
 import { it } from 'node:test';
 
 const queueRunner = new URL('./run_queue.sh', import.meta.url);
-const ciWorkflow = new URL('../.github/workflows/ci.yml', import.meta.url);
+const ciWorkflow = new URL('../../../.github/workflows/ci.yml', import.meta.url);
 const queueSmokes = [
     'test_env_inherit.sh',
     'test_web_fetch.sh',

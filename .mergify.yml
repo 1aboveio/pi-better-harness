@@ -1,22 +1,15 @@
 # Mergify — two-step merge queue (review-gated auto-enqueue).
 #
-# Step 1 (queue entry):  check-success = ci            — every PR
-# Step 2 (merge gate):   check-success = integration   — merge-queue branches only
+# Step 1 (queue entry): check-success = ci           — every PR
+# Step 2 (merge gate):  check-success = integration  — merge-queue branches only
 #
 # Enqueue: automatic after CI + review pass, or manually with
 # `@mergifyio queue` / the queue checkbox.
 #
-# Docs: https://docs.mergify.com/merge-queue/two-step/
-# Validate:  mergify config validate
-# Simulate:  mergify config simulate https://github.com/<owner>/<repo>/pull/<n>
+# Validate: mergify config validate
 
 shared:
-  # PR gate from .github/workflows/ci.yml (job name: ci).
   gate: &gate check-success = ci
-
-  # Queue gate from .github/workflows/integration-tests.yml (job name: integration).
-  # It runs only on mergify/merge-queue/* branches, so it is absent on ordinary
-  # PRs and must not be in queue_conditions.
   queue_gate: &queue_gate check-success = integration
 
 queue_rules:
@@ -25,28 +18,23 @@ queue_rules:
     # inject GitHub requirements only at merge time so enqueue is not deadlocked.
     branch_protection_injection_mode: merge
 
-    # Step 1: enter the queue after the cheap PR gate is green.
-    # `-draft` deliberately absent; auto-enqueue handles readiness below.
     queue_conditions:
       - base = main
       - *gate
 
-    # Step 2: merge only after the batch's integration suite is green.
-    # Not redundant with step 1: Mergify re-tests against base+batch.
     merge_conditions:
       - *gate
       - *queue_gate
 
-    # Batch mode: 3 PRs -> one integration run. REQUIRED GitHub setting:
-    # "Require branches to be up to date before merging" must be DISABLED.
+    # Batch mode: 3 PRs -> one integration run. GitHub's "Require branches to
+    # be up to date before merging" must stay disabled for batched queues.
     batch_size: 3
     batch_max_wait_time: 30 seconds
     batch_max_failure_resolution_attempts: 10
 
-    # Inert under batch_size > 1 (queue branch is always fresh); kept so
-    # dropping to batch_size 1 does not silently change update behaviour.
+    # Inert while batch_size > 1; kept so dropping to single-PR checks keeps the
+    # branch fresh by rebase instead of silently changing behavior.
     update_method: rebase
-
     merge_method: merge
 
 merge_queue:
@@ -55,8 +43,6 @@ merge_queue:
 merge_protections_settings:
   reporting_method: check-runs
   post_comment: true
-  # Auto-enqueue only ready, reviewed PRs with no open change request.
-  # Manual `@mergifyio queue` remains available for write collaborators.
   auto_merge_conditions:
     - base = main
     - "-draft"
@@ -65,18 +51,13 @@ merge_protections_settings:
     - *gate
 
 merge_protections:
-  # Republish the PR gate as a stable Mergify check-run for the GitHub ruleset.
-  # Do not put the queue-only integration check here: it is absent on ordinary
-  # PRs and would strand every PR before enqueue.
   - name: CI before merge
-    description: >-
-      Preliminary CI gate. Green when the `ci` check succeeded.
+    description: Preliminary CI gate. Green when the `ci` check succeeded.
     if:
       - base = main
     success_conditions:
       - *gate
 
-# Escape hatch 1: jump the line, keep both gates.
 priority_rules:
   - name: urgent — front of the queue
     conditions:
@@ -84,7 +65,6 @@ priority_rules:
     priority: high
     allow_checks_interruption: true
 
-# Escape hatch 2: skip queue integration, but retain preliminary CI.
 pull_request_rules:
   - name: emergency merge — skips queue integration, retains preliminary CI
     conditions:
