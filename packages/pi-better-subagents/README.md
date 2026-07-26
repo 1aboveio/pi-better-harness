@@ -267,26 +267,6 @@ is unchanged in every mode.
   running run using shared `subagent_stop` semantics and dismisses it from the
   navigator.
 
-### Overlay list view
-
-- The overlay renders as a borderless command sheet: a strong title rail,
-  inset action bar, inset rows, and a bottom rail. This keeps it visually
-  distinct from transcript content without drawing a full box around the UI.
-- The overlay list is available after returning from detail with `←`. Newest
-  visible runs appear first (running and terminal). Dismissed runs are hidden
-  from this list and from the running-count affordance only.
-- Each row (scan order): name or id · model [· effort] · elapsed [· tool]
-  [· spend] · status [· up to two compact health facts]. Durable status is
-  colorized (completed success, failed/lost danger, killed/orphaned warning,
-  running accent). Healthy/quiet rows stay low-noise; degraded rows may append
-  facts such as compacting, long tool, model error, or stale.
-- `↑` / `↓` move selection. Selection stays on the same run across status
-  refreshes when that run is still visible; if it disappears, selection clamps
-  to a remaining row.
-- `enter` opens the live detail view for the selected run.
-- `x` arms Stop for a running run, or Dismiss for a terminal run.
-- `esc` closes the navigator.
-
 ### Detail view
 
 - Detail uses the same command-sheet treatment, with section rules for the
@@ -296,10 +276,10 @@ is unchanged in every mode.
   compaction, active tool, model call/error, last log write, thresholds, and
   callback notification timestamps. Compaction, active tool, and model state
   are separate sections. The view refreshes about once per second while open.
-- `←` returns to the list (selection restored on the viewed run when still
-  visible).
+- Detail opened from the main-window list closes back to the main page; the
+  main-window selection remains on the viewed run when it is still visible.
 - `x` arms Stop for a running run, or Dismiss for a terminal run.
-- `esc` closes the entire navigator.
+- `esc` closes the detail view and returns to the main page.
 
 ### Two-press `x` stop/dismiss
 

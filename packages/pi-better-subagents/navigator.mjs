@@ -792,6 +792,7 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
     function handleCloseKey() {
         const row = currentTargetRow();
         if (!row || row.id == null) return;
+        const wasDetail = mode === "detail";
         const now = nowFn();
         if (isCloseArmed(closeArm, row.id, now)) {
             // Second press within the window on the same run — act.
@@ -816,6 +817,10 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
                 detailId = null;
             }
             refreshRows();
+            if (wasDetail && deps.closeDetailToMainPage === true) {
+                close();
+                return;
+            }
             // Prefer keeping selection near the closed run's former neighbors.
             selectById(state, armedId);
             clampSelection(state);
@@ -855,6 +860,10 @@ export function createNavigatorOverlayComponent(rows, deps, tui, theme, done) {
 
     function leaveDetail() {
         if (mode !== "detail") return;
+        if (deps.closeDetailToMainPage === true) {
+            close();
+            return;
+        }
         const viewedId = detailId;
         clearCloseArm();
         stopDetailTimer();

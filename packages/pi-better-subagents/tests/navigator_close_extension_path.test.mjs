@@ -331,6 +331,18 @@ describe("registered extension path: main-window navigator actions", () => {
             const back = registry.readMeta(id);
             assert.equal(back.status, "completed", "terminal status preserved");
             assert.equal(back.dismissedAt, undefined, "terminal row is not dismissed by main running-list navigation");
+
+            component.handleInput("left");
+            const afterDetailClose = nav.lastWidget("subagents");
+            assert.ok(
+                Array.isArray(afterDetailClose) && afterDetailClose[0].includes("<muted>Enter to view · x to stop</>"),
+                "back from detail must return to the focused main-window list, not an overlay list",
+            );
+            assert.ok(
+                afterDetailClose.some((line) => String(line).startsWith("› ") && String(line).includes("live-affordance")),
+                "main-window list selection remains on the viewed running row",
+            );
+            nav.pressEditor("down");
         } finally {
             registry.dismissRun(affordanceId);
             try { process.kill(-affordancePid, "SIGTERM"); } catch { try { process.kill(affordancePid, "SIGTERM"); } catch { /* ignore */ } }

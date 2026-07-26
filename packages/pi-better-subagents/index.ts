@@ -622,7 +622,6 @@ function returnWidgetNavToInput(): void {
 function viewWidgetNavSelection(ctx: ExtensionContext): void {
     const selected = selectedWidgetNavRun();
     if (!selected) return;
-    exitWidgetNav();
     openNavigator(ctx, selected.id);
 }
 
@@ -650,6 +649,7 @@ function openNavigator(ctx: ExtensionContext, initialDetailId?: string): void {
             getDetail: (id: string) => navigatorDetail(id),
             getRows: () => navigatorRows(),
             initialDetailId,
+            closeDetailToMainPage: initialDetailId !== undefined,
             closeRun: (id: string) => navigatorCloseRun(id),
             onCloseConfirmHint: (hint: string | null) => publishCloseConfirmHint(ctx, hint),
             onClosed: () => {
@@ -1130,6 +1130,8 @@ export default function (pi: ExtensionAPI) {
         // - Repaint the widget even if its last in-memory lines match; the host
         //   may have dropped extension UI during reload/session replacement.
         disposeTrackedNavigator(navigatorDisposeSlot);
+        widgetNavActive = false;
+        widgetNavSelectedId = undefined;
         lastWidgetLines = undefined;
         if (isNavigatorUiAvailable(ctx)) {
             try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }

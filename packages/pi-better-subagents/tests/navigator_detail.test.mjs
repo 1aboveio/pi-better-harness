@@ -7,7 +7,8 @@
  *   and parsed output (finalText when terminal, lastActivity while running).
  * - Detail refreshes once per second while open (injected timer).
  * - A running detail transitions to terminal output without close/reopen.
- * - `←` returns to the list; Escape closes the navigator from detail.
+ * - `←` returns to the list for overlay-list detail, while initial-detail
+ *   overlays close back to the main page; Escape closes the navigator from detail.
  * - Returning to the list preserves selection for the viewed run when visible.
  * - Detail timers dispose on Back, Escape, overlay close, and explicit dispose.
  * - Narrow terminals truncate every detail line to width.
@@ -269,6 +270,8 @@ describe("navigator detail view", () => {
             setInterval: timers.setInterval,
             clearInterval: timers.clearInterval,
             tickMs: opts.tickMs ?? DETAIL_TICK_MS,
+            initialDetailId: opts.initialDetailId,
+            closeDetailToMainPage: opts.closeDetailToMainPage,
         };
         let component;
         // Prefer the component constructor for dispose access; showNavigator is
@@ -464,6 +467,28 @@ describe("navigator detail view", () => {
         o.press("<escape>");
         assert.deepEqual(o.doneCalls, [null]);
         assert.equal(o.timers.activeCount(), 0, "escape must clear the detail timer");
+    });
+
+    // @covers navigator.detail
+    // @level unit
+    it("initial detail opened from the main-page list closes back to the main page instead of overlay list", async () => {
+        const rows = [
+            { id: "sa_1", name: "main-row", status: "running", model: "m", elapsed: "1s", spend: "" },
+            { id: "sa_2", name: "overlay-only", status: "completed", model: "m", elapsed: "2s", spend: "" },
+        ];
+        const o = drive(rows, {
+            details: { sa_1: detailFrom({ id: "sa_1", name: "main-row", output: "detail body" }) },
+            initialDetailId: "sa_1",
+            closeDetailToMainPage: true,
+        });
+        await Promise.resolve();
+        assert.equal(o.timers.activeCount(), 1, "initial detail opens directly and starts the refresh timer");
+        assert.ok(o.lines().join("\n").includes("detail body"), "starts in detail mode");
+
+        o.press("<left>");
+
+        assert.deepEqual(o.doneCalls, [null], "back from direct detail closes the overlay");
+        assert.equal(o.timers.activeCount(), 0, "back clears the detail timer");
     });
 
     // @covers navigator.detail
