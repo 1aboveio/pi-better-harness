@@ -342,14 +342,17 @@ describe("shared background work navigator", () => {
     });
 
     let component: any;
+    let customOptions: any;
+    const widgets: Array<[string, string[] | undefined]> = [];
     const ui = {
       factory: undefined as any,
       theme: { fg: (_color: string, value: string) => value },
       setStatus() {},
-      setWidget() {},
+      setWidget(key: string, value: string[] | undefined) { widgets.push([key, value]); },
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
-      custom(factory: any) {
+      custom(factory: any, options: any) {
+        customOptions = options;
         component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
         return Promise.resolve(null);
       },
@@ -366,6 +369,15 @@ describe("shared background work navigator", () => {
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       editor.handleInput("enter");
+
+      const overlayOptions = customOptions?.overlayOptions?.();
+      assert.equal(customOptions?.overlay, true);
+      assert.deepEqual(overlayOptions, {
+        anchor: "top-left",
+        width: "100%",
+        maxHeight: "100%",
+        margin: { top: 1, right: 0, bottom: 3 + (widgets.at(-1)?.[1]?.length ?? 0), left: 0 },
+      });
 
       let rendered = component.render(120).join("\n");
       assert.equal(detailCalls.at(-1), 10);

@@ -93,6 +93,8 @@ export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25, 50, 100] as const;
 const MAIN_LIST_TICK_MS = 1000;
 const MAIN_LIST_WIDTH = 100;
+const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 1;
+const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
 
 function state(): NavigatorState {
   const g = globalThis as typeof globalThis & { [GLOBAL_KEY]?: NavigatorState };
@@ -521,7 +523,7 @@ function openNavigator(): void {
       disposeToken = () => component.dispose();
       s.dispose = disposeToken;
       return component;
-    }, { overlay: true });
+    }, { overlay: true, overlayOptions: detailOverlayOptions });
     const clear = () => {
       if (s.dispose === disposeToken) s.dispose = undefined;
     };
@@ -726,6 +728,21 @@ function createOverlayComponent(
     dispose() {
       clearCloseArm();
       stopDetailTimer();
+    },
+  };
+}
+
+function detailOverlayOptions() {
+  const navigatorRows = state().lastMainListLines?.length ?? 0;
+  return {
+    anchor: "top-left" as const,
+    width: "100%" as const,
+    maxHeight: "100%" as const,
+    margin: {
+      top: DETAIL_OVERLAY_HEADER_MARGIN_ROWS,
+      right: 0,
+      bottom: DETAIL_OVERLAY_FOOTER_MARGIN_ROWS + navigatorRows,
+      left: 0,
     },
   };
 }
