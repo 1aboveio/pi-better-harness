@@ -104,3 +104,158 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.ok(shutdown);
   await shutdown({}, ctx);
 });
+
+test("external active background providers suppress idle goal continuation", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const entries: SessionEntry[] = [];
+  const commands = new Map<string, CommandDefinition>();
+  const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+  const messages: unknown[] = [];
+
+  const ctx = {
+    hasUI: false,
+    isIdle: () => true,
+    sessionManager: { getBranch: () => entries },
+    ui: {
+      confirm: async () => true,
+      notify: () => undefined,
+      setStatus: () => undefined,
+      setWidget: () => undefined,
+    },
+  } as unknown as ExtensionContext;
+
+  const events = new EventEmitter();
+  const pi = {
+    events,
+    appendEntry(customType: string, data: unknown) {
+      entries.push({ type: "custom", customType, data });
+    },
+    sendMessage(message: unknown) {
+      messages.push(message);
+    },
+    registerCommand(name: string, command: CommandDefinition) {
+      commands.set(name, command);
+    },
+    registerTool() {
+      // Not needed for this regression.
+    },
+    on(event: string, handler: (event: unknown, context: ExtensionContext) => unknown) {
+      handlers.set(event, handler);
+    },
+  } as unknown as ExtensionAPI;
+
+  extension(pi);
+  events.emit("pi-better-goal:register-provider", {
+    id: "background-tasks",
+    label: "Background Tasks",
+    getActivity: () => ({
+      providerId: "background-tasks",
+      items: [{ id: "bg_watch", status: "running", active: true }],
+    }),
+  });
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  messages.length = 0;
+
+  await handlers.get("agent_settled")?.({}, ctx);
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+
+  assert.equal(messages.length, 0, "active background tasks must not trigger idle continuation");
+});
+
+test("idle goal continuation waits for the inactivity grace period", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  messages.length = 0;
+
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.equal(messages.length, 0);
+
+  t.mock.timers.tick(29_999);
+  await flushPromises();
+  assert.equal(messages.length, 0);
+
+  t.mock.timers.tick(1);
+  await flushPromises();
+  assert.equal(messages.length, 1);
+});
+
+test("idle goal continuation rechecks background activity before waking", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  let active = false;
+  const { commands, handlers, messages, ctx, events } = createContinuationHarness();
+  events.emit("pi-better-goal:register-provider", {
+    id: "background-tasks",
+    label: "Background Tasks",
+    getActivity: () => ({
+      providerId: "background-tasks",
+      items: active ? [{ id: "bg_watch", status: "running", active: true }] : [],
+    }),
+  });
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  messages.length = 0;
+
+  await handlers.get("agent_settled")?.({}, ctx);
+  active = true;
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+
+  assert.equal(messages.length, 0, "new background activity during the grace period cancels the wake");
+});
+
+function createContinuationHarness() {
+  const entries: SessionEntry[] = [];
+  const commands = new Map<string, CommandDefinition>();
+  const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+  const messages: unknown[] = [];
+  const events = new EventEmitter();
+
+  const ctx = {
+    hasUI: false,
+    isIdle: () => true,
+    sessionManager: { getBranch: () => entries },
+    ui: {
+      confirm: async () => true,
+      notify: () => undefined,
+      setStatus: () => undefined,
+      setWidget: () => undefined,
+    },
+  } as unknown as ExtensionContext;
+
+  const pi = {
+    events,
+    appendEntry(customType: string, data: unknown) {
+      entries.push({ type: "custom", customType, data });
+    },
+    sendMessage(message: unknown) {
+      messages.push(message);
+    },
+    registerCommand(name: string, command: CommandDefinition) {
+      commands.set(name, command);
+    },
+    registerTool() {
+      // Not needed for these continuation regressions.
+    },
+    on(event: string, handler: (event: unknown, context: ExtensionContext) => unknown) {
+      handlers.set(event, handler);
+    },
+  } as unknown as ExtensionAPI;
+
+  extension(pi);
+  return { commands, handlers, messages, ctx, events };
+}
+
+async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
