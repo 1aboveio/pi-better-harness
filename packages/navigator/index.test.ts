@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   CLOSE_CONFIRM_STATUS_KEY,
+  MAIN_LIST_WIDGET_KEY,
   NAVIGATOR_STATUS_KEY,
   disposeBackgroundWorkNavigator,
   ensureBackgroundWorkNavigator,
@@ -51,11 +52,13 @@ describe("shared background work navigator", () => {
     const unregisterTasks = registerBackgroundWorkProvider(provider("background-tasks", "Background Tasks", 20, 100, (id) => closed.push(`tasks:${id}`)));
 
     const statuses: Array<[string, string | undefined]> = [];
+    const widgets: Array<[string, string[] | undefined]> = [];
     let component: any;
     const ui = {
       factory: undefined as any,
       theme: { fg: (_color: string, value: string) => value },
       setStatus(key: string, value: string | undefined) { statuses.push([key, value]); },
+      setWidget(key: string, value: string[] | undefined) { widgets.push([key, value]); },
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
       custom(factory: any) {
@@ -79,10 +82,15 @@ describe("shared background work navigator", () => {
 
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
-      const list = component.render(100).join("\n");
-      assert.match(list, /Background work/);
-      assert.match(list, /Subagents/);
-      assert.match(list, /Background Tasks/);
+      assert.equal(widgets.at(-1)?.[0], MAIN_LIST_WIDGET_KEY);
+      const list = widgets.at(-1)?.[1]?.join("\n") ?? "";
+      assert.match(list, /background work/);
+      assert.match(list, /subagents/);
+      assert.match(list, /background tasks/);
+
+      editor.handleInput("enter");
+      const detail = component.render(100).join("\n");
+      assert.match(detail, /Subagents detail/);
 
       component.handleInput("x");
       assert.equal(statuses.at(-1)?.[0], CLOSE_CONFIRM_STATUS_KEY);
@@ -110,6 +118,7 @@ describe("shared background work navigator", () => {
     const ui = {
       factory: undefined as any,
       setStatus(key: string, value: string | undefined) { statuses.push([key, value]); },
+      setWidget() {},
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
     };
@@ -137,6 +146,7 @@ describe("shared background work navigator", () => {
 
   it("renders failed rows with Pi-supported theme colors", () => {
     const seenColors: string[] = [];
+    const widgets: Array<string[] | undefined> = [];
     const allowed = new Set(["accent", "success", "error", "warning", "dim"]);
     const unregister = registerBackgroundWorkProvider({
       id: "background-tasks",
@@ -183,6 +193,7 @@ describe("shared background work navigator", () => {
         },
       },
       setStatus() {},
+      setWidget(_key: string, value: string[] | undefined) { widgets.push(value); },
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
       custom(factory: any) {
@@ -200,12 +211,177 @@ describe("shared background work navigator", () => {
         truncate: (value, width) => value.slice(0, width),
       });
 
+      const renderedWidget = widgets.at(-1)?.join("\n") ?? "";
+      assert.match(renderedWidget, /failed/);
+      assert.match(renderedWidget, /lost/);
+
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
+      editor.handleInput("enter");
 
       assert.doesNotThrow(() => component.render(100));
       assert.ok(seenColors.includes("error"), "failed statuses use Pi's error color");
       assert.equal(seenColors.includes("danger"), false, "danger is not a Pi theme color");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("groups the main list by provider and hides model columns for background tasks", () => {
+    const unregisterSubagents = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 200, () => undefined),
+      listRows: () => [{
+        providerId: "subagents",
+        id: "sa-1",
+        name: "reviewer",
+        model: "grok-4.5",
+        effort: "high",
+        tool: "bash",
+        tokens: "18.2k tok · $0.08",
+        status: "running",
+        statusTone: "running",
+        kind: "subagent",
+        elapsed: "1m 04s",
+        primary: "18.2k tok · $0.08",
+        sortStartedAt: 100,
+      }],
+    });
+    const unregisterTasks = registerBackgroundWorkProvider({
+      ...provider("background-tasks", "Background Tasks", 20, 300, () => undefined),
+      listRows: () => [{
+        providerId: "background-tasks",
+        id: "bg-1",
+        name: "watch-pr-14-merge",
+        command: "gh pr view",
+        status: "failed",
+        statusTone: "failed",
+        kind: "watch",
+        elapsed: "2m 18s",
+        primary: "gh pr view",
+        sortStartedAt: 300,
+      }],
+    });
+
+    const widgets: Array<string[] | undefined> = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: string[] | undefined) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom() { return Promise.resolve(null); },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const lines = widgets.at(-1) ?? [];
+      const text = lines.join("\n");
+      assert.ok(text.indexOf("subagents") < text.indexOf("background tasks"), text);
+      assert.match(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/);
+      assert.match(text, /reviewer\s+grok-4\.5 high\s+bash\s+18\.2k tok/);
+
+      const bgHeaderIndex = lines.findIndex((line) => /command\/tool/.test(line));
+      assert.ok(bgHeaderIndex >= 0, text);
+      assert.doesNotMatch(lines[bgHeaderIndex]!, /model|tokens/);
+      assert.match(text, /watch-pr-14-merge\s+gh pr view\s+failed\s+2m 18s/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregisterSubagents();
+      unregisterTasks();
+    }
+  });
+
+  it("opens detail only as an overlay with a rolling tail size and folded command", () => {
+    const detailCalls: Array<number | undefined> = [];
+    const unregister = registerBackgroundWorkProvider({
+      id: "background-tasks",
+      label: "Background Tasks",
+      priority: 20,
+      visibleCount: () => 1,
+      listRows: () => [{
+        providerId: "background-tasks",
+        id: "bg-1",
+        name: "watch-pr-14-merge",
+        command: "gh pr view 14 --repo 1aboveio/pi-better-harness --json state,mergedAt,mergeCommit,statusCheckRollup",
+        status: "running",
+        statusTone: "running",
+        kind: "watch",
+        elapsed: "2m 18s",
+        primary: "gh pr view",
+        sortStartedAt: 300,
+      }],
+      detail: (_id, _now, options) => {
+        detailCalls.push(options?.logTailLines);
+        return {
+          providerId: "background-tasks",
+          id: "bg-1",
+          title: "watch-pr-14-merge",
+          status: "running",
+          statusTone: "running",
+          metadata: [{ label: "provider", value: "Background Tasks" }],
+          foldedSections: [{
+            id: "command",
+            label: "command",
+            text: "gh pr view 14 --repo 1aboveio/pi-better-harness --json state,mergedAt,mergeCommit,statusCheckRollup",
+            collapsedText: "gh pr view",
+          }],
+          evidence: { label: "log tail", text: `latest ${options?.logTailLines ?? 0}` },
+          footerActions: ["x stop"],
+        };
+      },
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "background-tasks", id }),
+    });
+
+    let component: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+
+      let rendered = component.render(120).join("\n");
+      assert.equal(detailCalls.at(-1), 10);
+      assert.match(rendered, /log tail · latest 10 rows/);
+      assert.match(rendered, /command\s+gh pr view\s+folded/);
+      assert.doesNotMatch(rendered, /statusCheckRollup/);
+
+      component.handleInput("]");
+      rendered = component.render(120).join("\n");
+      assert.equal(detailCalls.at(-1), 25);
+      assert.match(rendered, /log tail · latest 25 rows/);
+      assert.match(rendered, /latest 25/);
+
+      component.handleInput("enter");
+      rendered = component.render(120).join("\n");
+      assert.match(rendered, /statusCheckRollup/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

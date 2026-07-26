@@ -260,6 +260,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
             editor.handleInput("left");
         },
         async openDetailViaEnter() {
+            editor.handleInput("enter");
             const component = await Promise.race([
                 overlayReady,
                 new Promise((_, rej) => {
@@ -269,8 +270,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
                     overlayReady.then(() => clearTimeout(t), () => clearTimeout(t));
                 }),
             ]);
-            component.handleInput("enter");
-            assert.ok(component, "left must open the shared navigator overlay");
+            assert.ok(component, "enter must open the shared detail overlay");
             assert.equal(typeof component.handleInput, "function");
             return component;
         },
@@ -396,10 +396,11 @@ describe("registered extension path: session_start reload cleanup", () => {
         // 2) Open the shared overlay via the registered empty-editor Left path.
         nav.focusViaLeftKey();
 
-        // 3) Enter opens detail; x arms close confirmation → widget interval + health interval + live detail interval + arm timeout.
+        // 3) Enter opens detail; x arms close confirmation → subagent widget,
+        // health, shared main list, live detail, and arm timeout.
         const component = await nav.openDetailViaEnter();
         nav.press("x");
-        assert.equal(timerSpies.pendingIntervals(), 3, "widget, health, and detail tick intervals are live");
+        assert.equal(timerSpies.pendingIntervals(), 4, "widget, health, main-list, and detail tick intervals are live");
         assert.equal(timerSpies.pendingTimeouts(), 1, "close-arm timeout is live");
         const confirmAfterArm = nav.lastStatus("background-work-close");
         assert.equal(
@@ -418,7 +419,7 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
         // session_start path (disposeBackgroundWorkNavigator + CLOSE_CONFIRM clear).
-        assert.equal(timerSpies.pendingIntervals(), 2, "reload must clear detail interval while keeping widget and health tickers");
+        assert.equal(timerSpies.pendingIntervals(), 3, "reload must clear detail interval while keeping widget, health, and main-list tickers");
         assert.equal(timerSpies.pendingTimeouts(), 0, "reload must clear close-arm timeout");
         const confirmAfterReload = nav.lastStatus("background-work-close");
         assert.equal(confirmAfterReload, undefined, "reload clears CLOSE_CONFIRM_STATUS_KEY");

@@ -11,6 +11,11 @@ export type BackgroundWorkRow = {
   providerId: string;
   id: string;
   name?: string;
+  model?: string;
+  effort?: string;
+  tool?: string;
+  tokens?: string;
+  command?: string;
   status: string;
   statusTone: BackgroundWorkStatusTone;
   kind: string;
@@ -29,6 +34,7 @@ export type BackgroundWorkDetail = {
   statusTone: BackgroundWorkStatusTone;
   subtitle?: string;
   metadata: Array<{ label: string; value: string }>;
+  foldedSections?: Array<{ id: string; label: string; text: string; collapsedText?: string }>;
   evidence: { label: string; text: string };
   footerActions?: string[];
 };
@@ -46,7 +52,7 @@ export type BackgroundWorkProvider = {
   priority: number;
   visibleCount(): number;
   listRows(now: number): BackgroundWorkRow[];
-  detail(id: string, now: number): BackgroundWorkDetail | null;
+  detail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null;
   armCloseLabel(row: BackgroundWorkRow): string;
   close(id: string): BackgroundWorkCloseOutcome;
   onVisibleChanged?(notify: () => void): () => void;
@@ -65,6 +71,12 @@ type NavigatorState = {
   uiCtx?: ExtensionContext;
   deps?: HostDeps;
   lastHint?: string | null;
+  lastMainListLines?: string[];
+  mainListSelectedId?: string;
+  mainListFocused?: boolean;
+  mainListCloseArm?: { id: string; armedAt: number };
+  mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
+  mainListTimer?: ReturnType<typeof setInterval>;
   dispose?: () => void;
 };
 
@@ -74,8 +86,13 @@ const FACTORY_REFRESH = "__piBetterHarnessNavigatorRefresh";
 
 export const NAVIGATOR_STATUS_KEY = "background-work-nav";
 export const CLOSE_CONFIRM_STATUS_KEY = "background-work-close";
+export const MAIN_LIST_WIDGET_KEY = "background-work-list";
 export const DETAIL_TICK_MS = 1000;
 export const CLOSE_ARM_MS = 3000;
+export const DEFAULT_LOG_TAIL_ROWS = 10;
+export const LOG_TAIL_ROW_CHOICES = [10, 25, 50, 100] as const;
+const MAIN_LIST_TICK_MS = 1000;
+const MAIN_LIST_WIDTH = 100;
 
 function state(): NavigatorState {
   const g = globalThis as typeof globalThis & { [GLOBAL_KEY]?: NavigatorState };
@@ -142,19 +159,26 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   s.deps = deps;
   installNavigatorEditor(ctx.ui as any, deps);
   s.lastHint = undefined;
+  startMainListWidget(ctx);
   refreshBackgroundWorkNavigator(ctx);
+  refreshMainListWidget();
 }
 
 export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   const s = state();
   try { s.dispose?.(); } catch { /* ignore */ }
   s.dispose = undefined;
+  stopMainListWidget();
   const ui = (ctx ?? s.uiCtx)?.ui;
   if (ui && isNavigatorUiAvailable(ctx ?? s.uiCtx)) {
     try { applyNavigatorFooter(ui as any, 0); } catch { /* ignore */ }
     try { applyCloseConfirmFooter(ui as any, null); } catch { /* ignore */ }
+    try { (ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   }
   s.lastHint = undefined;
+  s.lastMainListLines = undefined;
+  s.mainListSelectedId = undefined;
+  s.mainListFocused = false;
   if (ctx && s.uiCtx === ctx) s.uiCtx = undefined;
 }
 
@@ -169,6 +193,7 @@ export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {
       applyNavigatorFooter(activeCtx!.ui as any, count);
       s.lastHint = hint;
     }
+    refreshMainListWidget();
   } catch { /* ignore */ }
 }
 
@@ -180,6 +205,58 @@ function visibleCount(): number {
   return providers().reduce((sum, provider) => {
     try { return sum + Math.max(0, provider.visibleCount()); } catch { return sum; }
   }, 0);
+}
+
+function startMainListWidget(ctx: ExtensionContext): void {
+  const s = state();
+  if (s.mainListTimer || !isNavigatorUiAvailable(ctx)) return;
+  s.mainListTimer = setInterval(() => refreshMainListWidget(), MAIN_LIST_TICK_MS);
+  s.mainListTimer.unref?.();
+}
+
+function stopMainListWidget(): void {
+  const s = state();
+  if (s.mainListTimer) clearInterval(s.mainListTimer);
+  s.mainListTimer = undefined;
+  clearMainListCloseArm();
+}
+
+function clearMainListCloseArm(): void {
+  const s = state();
+  if (s.mainListCloseArmTimer) clearTimeout(s.mainListCloseArmTimer);
+  s.mainListCloseArmTimer = undefined;
+  if (!s.mainListCloseArm) return;
+  s.mainListCloseArm = undefined;
+  try { applyCloseConfirmFooter((s.uiCtx as any).ui, null); } catch { /* ignore */ }
+}
+
+function refreshMainListWidget(): void {
+  const s = state();
+  const ctx = s.uiCtx;
+  const deps = s.deps;
+  if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
+  const rows = listRows();
+  syncMainListSelection(rows);
+  const lines = rows.length ? buildMainListLines(rows, MAIN_LIST_WIDTH, deps.truncate, themeFg(ctx), {
+    selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
+    focused: s.mainListFocused === true,
+  }) : undefined;
+  if (linesEqual(s.lastMainListLines, lines)) return;
+  try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, lines, { placement: "aboveEditor" }); } catch { /* ignore */ }
+  s.lastMainListLines = lines;
+}
+
+function themeFg(ctx: ExtensionContext): (color: string, value: string) => string {
+  const theme = (ctx.ui as any).theme;
+  return (color, value) => theme?.fg ? theme.fg(color, value) : value;
+}
+
+function linesEqual(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 type InternalRow = BackgroundWorkRow & { navigatorId: string; providerLabel: string };
@@ -206,11 +283,112 @@ function listRows(now = Date.now()): InternalRow[] {
   return rows.sort((a, b) => b.sortStartedAt - a.sortStartedAt || a.providerLabel.localeCompare(b.providerLabel));
 }
 
-function detailFor(navigatorId: string, now = Date.now()): BackgroundWorkDetail | null {
+function syncMainListSelection(rows: InternalRow[]): void {
+  const s = state();
+  if (rows.length === 0) {
+    s.mainListSelectedId = undefined;
+    s.mainListFocused = false;
+    return;
+  }
+  if (!s.mainListSelectedId || !rows.some((row) => row.navigatorId === s.mainListSelectedId)) {
+    s.mainListSelectedId = rows[0]!.navigatorId;
+  }
+}
+
+function selectedMainListRow(): InternalRow | undefined {
+  const rows = listRows();
+  syncMainListSelection(rows);
+  return rows.find((row) => row.navigatorId === state().mainListSelectedId) ?? rows[0];
+}
+
+function moveMainListSelection(delta: number): boolean {
+  const rows = listRows();
+  syncMainListSelection(rows);
+  const s = state();
+  const idx = rows.findIndex((row) => row.navigatorId === s.mainListSelectedId);
+  const next = Math.min(Math.max((idx >= 0 ? idx : 0) + delta, 0), Math.max(0, rows.length - 1));
+  const nextId = rows[next]?.navigatorId;
+  if (!nextId || nextId === s.mainListSelectedId) return false;
+  s.mainListSelectedId = nextId;
+  return true;
+}
+
+function focusMainList(): void {
+  const rows = listRows();
+  if (rows.length === 0) return;
+  const s = state();
+  syncMainListSelection(rows);
+  s.mainListFocused = true;
+  refreshMainListWidget();
+}
+
+function unfocusMainList(): void {
+  const s = state();
+  if (!s.mainListFocused) return;
+  s.mainListFocused = false;
+  clearMainListCloseArm();
+  refreshMainListWidget();
+}
+
+function buildMainListLines(
+  rows: InternalRow[],
+  width: number,
+  truncate: (s: string, width: number) => string,
+  fg: (color: string, value: string) => string,
+  options: { selectedId?: string; focused?: boolean } = {},
+): string[] {
+  const lines: string[] = [];
+  const grouped = new Map<string, InternalRow[]>();
+  for (const row of rows) {
+    const existing = grouped.get(row.providerLabel) ?? [];
+    existing.push(row);
+    grouped.set(row.providerLabel, existing);
+  }
+  lines.push(dim(`background work · ${rows.length}${options.focused ? " · focused" : ""}`, fg));
+  const orderedLabels = providers().map((provider) => provider.label).filter((label) => grouped.has(label));
+  for (const label of grouped.keys()) if (!orderedLabels.includes(label)) orderedLabels.push(label);
+  for (const label of orderedLabels) {
+    const group = grouped.get(label)!;
+    lines.push(section(label.toLowerCase(), width));
+    const isBackgroundTasks = group.some((row) => row.providerId === "background-tasks");
+    lines.push(dim(isBackgroundTasks
+      ? `   ${fit("name", 24)} ${fit("command/tool", 34)} ${fit("status", 10)} elapsed`
+      : `   ${fit("name", 22)} ${fit("model", 16)} ${fit("tool", 14)} ${fit("tokens", 18)} ${fit("status", 10)} elapsed`, fg));
+    for (const row of group) {
+      const selected = options.focused && row.navigatorId === options.selectedId;
+      lines.push(formatMainListRow(row, selected === true, isBackgroundTasks, fg));
+    }
+  }
+  lines.push(dim(`${options.focused ? "↑↓ select" : "← focus"} · Enter detail · x stop/dismiss · Esc unfocus`, fg));
+  return lines.map((line) => safeTruncate(line, width, truncate));
+}
+
+function formatMainListRow(row: InternalRow, selected: boolean, backgroundTask: boolean, fg: (color: string, value: string) => string): string {
+  const prefix = selected ? fg("accent", "› ") : "  ";
+  const name = row.name || row.id;
+  const status = fg(toneColor(row.statusTone, row.status), row.status);
+  if (backgroundTask) {
+    const command = row.command || row.tool || row.primary || "-";
+    return `${prefix}${fit(name, 24)} ${fit(command, 34)} ${fit(status, 10)} ${row.elapsed}`;
+  }
+  const model = row.model ? (row.effort ? `${row.model} ${row.effort}` : row.model) : "-";
+  const tool = row.tool || "-";
+  const tokens = row.tokens || row.primary || "-";
+  return `${prefix}${fit(name, 22)} ${fit(model, 16)} ${fit(tool, 14)} ${fit(tokens, 18)} ${fit(status, 10)} ${row.elapsed}`;
+}
+
+function fit(value: string, width: number): string {
+  const str = String(value ?? "");
+  const visible = visibleWidth(str);
+  if (visible >= width) return truncateVisible(str, width);
+  return str + " ".repeat(width - visible);
+}
+
+function detailFor(navigatorId: string, now = Date.now(), options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   const { providerId, id } = splitRowKey(navigatorId);
   const provider = state().providers.get(providerId);
   if (!provider) return null;
-  try { return provider.detail(id, now); } catch { return null; }
+  try { return provider.detail(id, now, options); } catch { return null; }
 }
 
 function closeFor(row: InternalRow): BackgroundWorkCloseOutcome {
@@ -249,8 +427,7 @@ function wrapEditor(inner: any, deps: HostDeps): unknown {
     get(target, prop) {
       if (prop === "handleInput") {
         return (data: string) => {
-          if (target.getText?.() === "" && deps.isOpenTrigger(data) && visibleCount() > 0) {
-            openNavigator();
+          if (target.getText?.() === "" && handleMainListInput(data, deps)) {
             return;
           }
           target.handleInput(data);
@@ -265,6 +442,65 @@ function wrapEditor(inner: any, deps: HostDeps): unknown {
   });
 }
 
+function handleMainListInput(data: string, deps: HostDeps): boolean {
+  const s = state();
+  const rows = listRows();
+  if (rows.length === 0) return false;
+  if (!s.mainListFocused) {
+    if (!deps.isOpenTrigger(data)) return false;
+    focusMainList();
+    return true;
+  }
+  if (deps.matchKey(data, "up")) {
+    clearMainListCloseArm();
+    if (moveMainListSelection(-1)) refreshMainListWidget();
+    return true;
+  }
+  if (deps.matchKey(data, "down")) {
+    clearMainListCloseArm();
+    if (moveMainListSelection(1)) refreshMainListWidget();
+    return true;
+  }
+  if (deps.matchKey(data, "enter")) {
+    openNavigator();
+    return true;
+  }
+  if (data === "x" || data === "X" || deps.matchKey(data, "x") || deps.matchKey(data, "X")) {
+    handleMainListCloseKey();
+    return true;
+  }
+  if (deps.matchKey(data, "escape") || deps.isOpenTrigger(data)) {
+    unfocusMainList();
+    return true;
+  }
+  return false;
+}
+
+function handleMainListCloseKey(): void {
+  const row = selectedMainListRow();
+  if (!row) return;
+  const s = state();
+  const now = Date.now();
+  const arm = s.mainListCloseArm;
+  if (arm?.id === row.navigatorId && now >= arm.armedAt && now < arm.armedAt + CLOSE_ARM_MS) {
+    clearMainListCloseArm();
+    closeFor(row);
+    s.mainListSelectedId = undefined;
+    refreshBackgroundWorkNavigator(s.uiCtx);
+    refreshMainListWidget();
+    return;
+  }
+  clearMainListCloseArm();
+  s.mainListCloseArm = { id: row.navigatorId, armedAt: now };
+  try { applyCloseConfirmFooter((s.uiCtx as any).ui, closeHintFor(row)); } catch { /* ignore */ }
+  s.mainListCloseArmTimer = setTimeout(() => {
+    clearMainListCloseArm();
+    refreshMainListWidget();
+  }, CLOSE_ARM_MS);
+  s.mainListCloseArmTimer.unref?.();
+  refreshMainListWidget();
+}
+
 function openNavigator(): void {
   const s = state();
   const ctx = s.uiCtx;
@@ -272,6 +508,7 @@ function openNavigator(): void {
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
   const rows = listRows();
   if (rows.length === 0) return;
+  const selectedId = selectedMainListRow()?.navigatorId ?? rows[0]!.navigatorId;
   try {
     try { s.dispose?.(); } catch { /* ignore */ }
     s.dispose = undefined;
@@ -280,7 +517,7 @@ function openNavigator(): void {
       const component = createOverlayComponent(rows, deps, tui, theme, done, () => {
         s.lastHint = undefined;
         refreshBackgroundWorkNavigator(ctx);
-      });
+      }, selectedId);
       disposeToken = () => component.dispose();
       s.dispose = disposeToken;
       return component;
@@ -301,11 +538,18 @@ function createOverlayComponent(
   theme: { fg?(color: string, value: string): string } | undefined,
   done: (v: null) => void,
   onClosed: () => void,
+  initialDetailId?: string,
 ) {
   const overlayState: OverlayState = { rows: initialRows, selected: 0 };
-  let mode: "list" | "detail" = "list";
-  let detail: BackgroundWorkDetail | null = null;
-  let detailId: string | null = null;
+  let mode: "list" | "detail" = initialDetailId ? "detail" : "list";
+  let logTailRows: number = DEFAULT_LOG_TAIL_ROWS;
+  const expandedSections = new Set<string>();
+  let detailId: string | null = initialDetailId ?? null;
+  let detail: BackgroundWorkDetail | null = detailId ? (detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? null) : null;
+  if (detailId) {
+    const idx = overlayState.rows.findIndex((row) => row.navigatorId === detailId);
+    if (idx >= 0) overlayState.selected = idx;
+  }
   let detailTimer: ReturnType<typeof setInterval> | undefined;
   let closeArm: { id: string; armedAt: number } | undefined;
   let closeArmTimer: ReturnType<typeof setTimeout> | undefined;
@@ -338,6 +582,16 @@ function createOverlayComponent(
     detailTimer = undefined;
   }
 
+  function startDetailTimer(): void {
+    stopDetailTimer();
+    detailTimer = setInterval(() => {
+      if (!detailId || mode !== "detail") return;
+      detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+      requestRender();
+    }, DETAIL_TICK_MS);
+    detailTimer.unref?.();
+  }
+
   function selectedRow(): InternalRow | undefined {
     if (mode === "detail" && detailId) return overlayState.rows.find((row) => row.navigatorId === detailId);
     return overlayState.rows[overlayState.selected];
@@ -348,17 +602,14 @@ function createOverlayComponent(
     if (!row) return;
     clearCloseArm();
     detailId = row.navigatorId;
-    detail = detailFor(row.navigatorId) ?? fallbackDetail(row);
+    expandedSections.clear();
+    detail = detailFor(row.navigatorId, Date.now(), { logTailLines: logTailRows }) ?? fallbackDetail(row);
     mode = "detail";
-    stopDetailTimer();
-    detailTimer = setInterval(() => {
-      if (!detailId || mode !== "detail") return;
-      detail = detailFor(detailId) ?? detail;
-      requestRender();
-    }, DETAIL_TICK_MS);
-    detailTimer.unref?.();
+    startDetailTimer();
     requestRender();
   }
+
+  if (detailId) startDetailTimer();
 
   function leaveDetail(): void {
     if (mode !== "detail") return;
@@ -368,6 +619,7 @@ function createOverlayComponent(
     mode = "list";
     detail = null;
     detailId = null;
+    expandedSections.clear();
     refreshRows();
     if (viewedId) {
       const idx = overlayState.rows.findIndex((row) => row.navigatorId === viewedId);
@@ -418,7 +670,7 @@ function createOverlayComponent(
   return {
     render(width: number) {
       const lines = mode === "detail"
-        ? buildDetailLines(detail, width, deps.truncate, fg)
+        ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows })
         : buildListLines(overlayState, width, deps.truncate, fg);
       return lines;
     },
@@ -429,7 +681,30 @@ function createOverlayComponent(
         return;
       }
       if (mode === "detail") {
-        if (deps.matchKey(data, "left")) leaveDetail();
+        if (deps.matchKey(data, "left")) close();
+        else if (deps.matchKey(data, "enter")) {
+          const first = detail?.foldedSections?.[0];
+          if (first) {
+            if (expandedSections.has(first.id)) expandedSections.delete(first.id);
+            else expandedSections.add(first.id);
+            requestRender();
+          }
+        }
+        else if (data === "[") {
+          logTailRows = previousLogTailRows(logTailRows);
+          if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+          requestRender();
+        }
+        else if (data === "]") {
+          logTailRows = nextLogTailRows(logTailRows);
+          if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+          requestRender();
+        }
+        else if (data === "l" || data === "L") {
+          logTailRows = cycleLogTailRows(logTailRows);
+          if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+          requestRender();
+        }
         else if (deps.matchKey(data, "escape")) close();
         return;
       }
@@ -499,28 +774,90 @@ function buildListLines(nav: OverlayState, width: number, truncate: (s: string, 
   return lines.map((line) => safeTruncate(line, width, truncate));
 }
 
-function buildDetailLines(detail: BackgroundWorkDetail | null, width: number, truncate: (s: string, width: number) => string, fg: (color: string, value: string) => string): string[] {
+function buildDetailLines(
+  detail: BackgroundWorkDetail | null,
+  width: number,
+  truncate: (s: string, width: number) => string,
+  fg: (color: string, value: string) => string,
+  options: { expandedSections?: Set<string>; logTailRows?: number } = {},
+): string[] {
   if (!detail) {
     return [rule("Work unavailable", width), dim("   ← back · Esc close", fg), "", dim(rule("", width), fg)].map((line) => safeTruncate(line, width, truncate));
   }
   const lines: string[] = [];
   lines.push(fg("accent", rule(detail.title, width)));
-  const actions = detail.footerActions?.length ? detail.footerActions.join(" · ") : "x close";
-  lines.push(dim(`   ← back · ${actions} · Esc close`, fg));
+  const foldedAction = detail.foldedSections?.length ? "Enter expand" : null;
+  const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "[ fewer", "] more", "l cycle", "Esc close"].filter(Boolean).join(" · ");
+  lines.push(dim(`   ← back · ${actions}`, fg));
   lines.push("");
   lines.push(`   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`);
   if (detail.subtitle) lines.push(`   summary  ${detail.subtitle}`);
   for (const item of detail.metadata) {
     lines.push(`   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`);
   }
+  if (detail.foldedSections?.length) {
+    lines.push("");
+    for (const section of detail.foldedSections) {
+      const expanded = options.expandedSections?.has(section.id) === true;
+      if (!expanded) {
+        lines.push(`   ${section.label.padEnd(8, " ").slice(0, 8)} ${section.collapsedText ?? truncateVisible(section.text, 56)} ${dim("folded", fg)}`);
+        continue;
+      }
+      lines.push(dim(sectionHeader(section.label, width), fg));
+      for (const raw of wrapDetailText(section.text, width - 6)) lines.push(`   ${raw}`);
+    }
+  }
   lines.push("");
-  lines.push(dim(section(detail.evidence.label, width), fg));
+  const tailRows = options.logTailRows ?? DEFAULT_LOG_TAIL_ROWS;
+  const evidenceLabel = /log/i.test(detail.evidence.label) ? `${detail.evidence.label} · latest ${tailRows} rows` : detail.evidence.label;
+  lines.push(dim(section(evidenceLabel, width), fg));
   const body = detail.evidence.text && detail.evidence.text.trim() ? detail.evidence.text : "(no output yet)";
   for (const raw of body.split(/\r?\n/)) lines.push(raw ? `   ${raw}` : "   ");
   lines.push("");
-  lines.push(dim(`   ← back · ${actions} · Esc close`, fg));
+  lines.push(dim(`   ← back · ${actions}`, fg));
   lines.push(dim(rule("", width), fg));
   return lines.map((line) => safeTruncate(line, width, truncate));
+}
+
+function sectionHeader(label: string, width: number): string {
+  return section(label, width);
+}
+
+function wrapDetailText(text: string, width: number): string[] {
+  const max = Math.max(16, width);
+  const words = String(text ?? "").split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    if (!line) {
+      line = word;
+    } else if (visibleWidth(`${line} ${word}`) <= max) {
+      line += ` ${word}`;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length ? lines : ["(empty)"];
+}
+
+function nextLogTailRows(current: number): number {
+  for (const value of LOG_TAIL_ROW_CHOICES) if (value > current) return value;
+  return LOG_TAIL_ROW_CHOICES[LOG_TAIL_ROW_CHOICES.length - 1];
+}
+
+function previousLogTailRows(current: number): number {
+  for (let i = LOG_TAIL_ROW_CHOICES.length - 1; i >= 0; i -= 1) {
+    const value = LOG_TAIL_ROW_CHOICES[i]!;
+    if (value < current) return value;
+  }
+  return LOG_TAIL_ROW_CHOICES[0];
+}
+
+function cycleLogTailRows(current: number): number {
+  const idx = LOG_TAIL_ROW_CHOICES.findIndex((value) => value === current);
+  return LOG_TAIL_ROW_CHOICES[(idx + 1) % LOG_TAIL_ROW_CHOICES.length];
 }
 
 function toneColor(tone: BackgroundWorkStatusTone | undefined, status: string): string {
