@@ -380,10 +380,14 @@ function formatMainListRow(row: InternalRow, selected: boolean, backgroundTask: 
 }
 
 function fit(value: string, width: number): string {
-  const str = String(value ?? "");
+  const str = singleLine(value);
   const visible = visibleWidth(str);
   if (visible >= width) return truncateVisible(str, width);
   return str + " ".repeat(width - visible);
+}
+
+function singleLine(value: unknown): string {
+  return String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim();
 }
 
 function detailFor(navigatorId: string, now = Date.now(), options?: { logTailLines?: number }): BackgroundWorkDetail | null {
@@ -817,7 +821,11 @@ function buildDetailLines(
     for (const section of detail.foldedSections) {
       const expanded = options.expandedSections?.has(section.id) === true;
       if (!expanded) {
-        lines.push(`   ${section.label.padEnd(8, " ").slice(0, 8)} ${section.collapsedText ?? truncateVisible(section.text, 56)} ${dim("folded", fg)}`);
+        const label = section.label.padEnd(8, " ").slice(0, 8);
+        const folded = dim("folded", fg);
+        const previewWidth = Math.max(8, width - visibleWidth(`   ${label}  ${folded}`));
+        const preview = truncateVisible(singleLine(section.collapsedText ?? section.text), previewWidth);
+        lines.push(`   ${label} ${preview} ${folded}`);
         continue;
       }
       lines.push(dim(sectionHeader(section.label, width), fg));
