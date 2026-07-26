@@ -90,14 +90,10 @@ import {
 } from "./tools.ts";
 import { stopRun } from "./stop.ts";
 import {
-    SPINNER,
-    TICK_MS,
     WIDGET_CLEAR,
     fmtElapsed,
     fmtSpend,
     shortModel,
-    buildWidgetLines,
-    nextWidgetAction,
     isSpendCacheFresh,
     resolveHealthLogExtraction,
 } from "./widget.ts";
@@ -118,25 +114,17 @@ const SUBAGENT_TOOLS = [
     "subagent_result",
 ];
 
-// ---- live status widget (Claude Code-style) ------------------------------
+// ---- retired live status widget ------------------------------------------
 //
-// Pi's setWidget(string[]) path disposes + rebuilds the above-editor component
-// tree on every call. Calling it at 1 Hz with a changing spinner/elapsed/spend
-// thrashes layout and makes neighboring ▶ job-* lines flicker. Mitigations:
-//   1. dirty-check via nextWidgetAction — skip identical frames
-//   2. fixed-width elapsed/tokens (buildWidgetLines) — stable geometry
-//   3. clear with undefined (WIDGET_CLEAR), never []
-//   4. cache spend/tool; only re-parseRun when log grows or TTL expires
-// Pure helpers live in widget.mjs / widget.ts so unit tests cover the contracts
-// without a live TUI.
+// The shared background-work navigator owns the active subagent list. This
+// legacy `subagents` widget key is now clear-only so users do not see the same
+// run twice (`background work · N` plus `Subagents · N running`). Pure widget
+// helpers remain for compatibility tests and older render contracts.
 
 /** Freshest UI-bearing context, captured from session_start / tool calls. */
 let uiCtx: ExtensionContext | undefined;
 let activeCallbackOrigin: RunCallbackOrigin | undefined;
 let ticker: ReturnType<typeof setInterval> | undefined;
-let frame = 0;
-/** Last lines successfully sent to setWidget (undefined ⇒ cleared / never set). */
-let lastWidgetLines: string[] | undefined;
 let widgetNavActive = false;
 let widgetNavSelectedId: string | undefined;
 
@@ -256,29 +244,12 @@ function spendFor(id: string, now: number): { usage: Usage; tool: string | null 
     return { usage: snap.usage, tool: snap.tool };
 }
 
-function applyWidget(linesOrClear: string[] | typeof WIDGET_CLEAR): void {
-    const ctx = uiCtx;
-    if (!ctx || !ctx.hasUI) return;
-    const action = nextWidgetAction(
-        lastWidgetLines,
-        linesOrClear === undefined ? null : linesOrClear,
-    );
-    if (action.op === "skip") return;
-    if (action.op === "clear") {
-        try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
-        lastWidgetLines = undefined;
-        return;
-    }
-    try { ctx.ui.setWidget("subagents", action.lines); } catch { /* ignore */ }
-    lastWidgetLines = action.lines;
-}
-
 /**
  * Observe health for a widget/navigator row. Best-effort; never throws into the tick.
  * Full log parse is gated by size/mtime so the 1 Hz frame does not re-read and
  * reparse every complete log when nothing changed (#67).
  *
- * When `displayStatus` is omitted, uses durable `meta.status` (widget path).
+ * When `displayStatus` is omitted, uses durable `meta.status`.
  * Navigator detail/list pass `effectiveStatus(meta)` so process liveness cannot
  * say "supervised" while the UI shows transient "exited" (#69).
  */
@@ -333,76 +304,24 @@ function syncWidgetNavSelection(running: RunMeta[]): void {
 }
 
 /**
- * Redraw the running-subagents widget above the editor; clear it when idle.
- * Includes current-parent `running` and non-terminal `orphaned` rows so degraded
- * health can appear passively (#67). Healthy/quiet rows stay on today's format.
+ * Clear the retired legacy subagent widget and refresh the shared navigator.
+ * The shared background-work navigator is now the only list surface; keeping
+ * this path as clear-only prevents the old `Subagents · N running` widget from
+ * duplicating the same run below `background work · N`.
  */
 function renderWidget(): void {
     const ctx = uiCtx;
     if (!ctx || !ctx.hasUI) return;
     updateNavigatorFooter(ctx);
-    // Live widget set: supervised running (#120 affordance) plus non-terminal
-    // orphaned so degraded health can appear passively (#67). Terminal lost is
-    // not kept here (list/result/notify cover it).
-    const running = listMetas().filter((m) => {
-        if (!ownedByThisParent(m)) return false;
-        if (isDismissed(m)) return false;
-        if (!belongsToActiveNavigatorSession(m)) return false;
-        const st = effectiveStatus(m);
-        return st === "running" || st === "orphaned";
-    });
-    syncWidgetNavSelection(running);
-    if (running.length === 0) {
-        applyWidget(WIDGET_CLEAR);
-        // Drop spend/health entries for runs that are no longer live so a restart
-        // does not show stale totals for a recycled id.
-        spendCache.clear();
-        healthLogCache.clear();
-        stopTicker();
-        return;
-    }
-    // Keep cache entries only for currently-running ids.
-    const live = new Set(running.map((m) => m.id));
-    for (const id of spendCache.keys()) {
-        if (!live.has(id)) spendCache.delete(id);
-    }
-    for (const id of healthLogCache.keys()) {
-        if (!live.has(id)) healthLogCache.delete(id);
-    }
-    frame = (frame + 1) % SPINNER.length;
-    const now = Date.now();
-    const spendById: Record<string, { usage: Usage; tool: string | null }> = {};
-    const healthById: Record<string, HealthObservation> = {};
-    for (const m of running) {
-        spendById[m.id] = spendFor(m.id, now);
-        const obs = observeWidgetHealth(m, now);
-        if (obs) healthById[m.id] = obs;
-    }
-    const widgetHintText = widgetNavActive ? "Enter to view · x to stop" : "← background work";
-    const widgetHint = ctx.ui.theme?.fg
-        ? ctx.ui.theme.fg("muted", widgetHintText)
-        : widgetHintText;
-    // buildWidgetLines includes shortModel(m.model) — preserves #14 list-show-model.
-    // healthById is silent for healthy/quiet; degraded appends a short suffix (#67).
-    // Keep the left-arrow affordance on the title line so the widget does not
-    // grow a separate hint row under the active runs.
-    const lines = buildWidgetLines({
-        running,
-        frame,
-        now,
-        spendById,
-        healthById,
-        affordanceHint: widgetHint,
-        selectedId: widgetNavActive ? widgetNavSelectedId : undefined,
-    });
-    applyWidget(lines);
+    try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
+    spendCache.clear();
+    healthLogCache.clear();
+    stopTicker();
 }
 
-/** Start the redraw loop if a UI is present and it isn't already running. */
+/** Clear the retired widget if a UI is present. */
 function ensureTicker(): void {
-    if (ticker || !uiCtx?.hasUI) return;
-    ticker = setInterval(renderWidget, TICK_MS);
-    ticker.unref?.(); // never keep the process alive on our account
+    if (!uiCtx?.hasUI) return;
     renderWidget();
 }
 
@@ -548,9 +467,8 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 // ---- subagent navigator (empty-editor ← list #45, live detail #46) --------
 // ---- subagent navigator (list #45, detail #46, two-press close #47) -------
 //
-// Human-facing TUI surface, kept separate from the passive live widget (which
-// is untouched). Glue points, all gated on isNavigatorUiAvailable so print/RPC
-// sessions never see any of it:
+// Human-facing TUI surface. Glue points, all gated on isNavigatorUiAvailable so
+// print/RPC sessions never see any of it:
 //   1. footer hint `← subagents · N` via the DEFAULT footer status mechanism
 //      (setStatus — the full footer is never replaced);
 //   2. an editor wrapper that intercepts bare ← only when the editor is empty
@@ -568,8 +486,8 @@ const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 
 /**
  * Observe health for a navigator row/detail (#69). Reuses the size/mtime-gated
- * log cache from the widget path so the overlay refresh does not reparse every
- * complete log on each paint. Passes effective/display status so detail
+ * log cache so the overlay refresh does not reparse every complete log on each
+ * paint. Passes effective/display status so detail
  * liveness matches the status line for legacy dead-running metadata.
  * Best-effort; never throws into the TUI.
  */
@@ -1276,24 +1194,14 @@ export default function (pi: ExtensionAPI) {
         disposeBackgroundWorkNavigator(ctx);
         widgetNavActive = false;
         widgetNavSelectedId = undefined;
-        lastWidgetLines = undefined;
         if (isNavigatorUiAvailable(ctx)) {
             try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
         }
         ensureNavigator(ctx);
         updateNavigatorFooter(ctx);
-        // Resume passive widget for supervised running and non-terminal orphaned (#67).
-        if (listMetas().some((m) => {
-            if (!ownedByThisParent(m) || isDismissed(m)) return false;
-            if (!belongsToActiveNavigatorSession(m)) return false;
-            const st = effectiveStatus(m);
-            return st === "running" || st === "orphaned";
-        })) {
-            ensureTicker();
-            renderWidget();
-        } else {
-            renderWidget();
-        }
+        // Clear the retired legacy widget so the shared navigator is the only
+        // list surface for running/orphaned subagents.
+        renderWidget();
         // Resume supervision reconciliation + durable health-callback recovery
         // across /reload while current-parent work still needs the ticker
         // (running/orphaned, or unmarked lost); it stops itself when idle.
@@ -1323,6 +1231,5 @@ export default function (pi: ExtensionAPI) {
             try { ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, undefined); } catch { /* ignore */ }
             try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
         }
-        lastWidgetLines = undefined;
     });
 }
