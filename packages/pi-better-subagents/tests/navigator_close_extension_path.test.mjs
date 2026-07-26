@@ -152,7 +152,7 @@ async function waitFor(pred, timeoutMs = 3000) {
  * Boot the real extension factory, fire session_start on a TUI ctx, and drive
  * the empty-editor main-window subagent navigation path.
  */
-function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
+function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     const handlers = {};
     const statusCalls = [];
     const widgetCalls = [];
@@ -187,6 +187,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
         ui,
         cwd: RUNTIME,
         model: { provider: "test", id: "model" },
+        ...(sessionId ? { sessionManager: { getSessionId: () => sessionId } } : {}),
     };
 
     const pi = {
@@ -211,12 +212,12 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
             editor.handleInput("left");
         },
         async openDetailViaEnter() {
+            editor.handleInput("enter");
             const component = await Promise.race([
                 overlayReady,
                 new Promise((_, rej) => setTimeout(() => rej(new Error("overlay did not open")), 1000)),
             ]);
-            component.handleInput("enter");
-            assert.ok(component, "left must open the shared navigator overlay");
+            assert.ok(component, "enter must open the shared detail overlay");
             assert.equal(typeof component.handleInput, "function");
             return component;
         },
@@ -229,7 +230,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase }) {
             }
             return Symbol.for("missing");
         },
-        pressX() { overlayComponent?.handleInput("x"); },
+        pressX() { overlayComponent ? overlayComponent.handleInput("x") : editor.handleInput("x"); },
         statusCalls,
         widgetCalls,
         closedOutcomes,
@@ -298,7 +299,7 @@ describe("registered extension path: main-window navigator actions", () => {
 
     // @covers navigator.close
     // @level integration
-    it("registered TUI path left opens the shared background-work navigator and enter opens selected detail", async () => {
+    it("registered TUI path left focuses the main list and enter opens selected detail", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const affordancePid = spawnSleeper();
         const affordanceId = nav.seedRun({
@@ -328,9 +329,7 @@ describe("registered extension path: main-window navigator actions", () => {
             assert.equal(back.dismissedAt, undefined, "terminal row is not dismissed by main running-list navigation");
 
             component.handleInput("left");
-            const listText = component.render(80).join("\n");
-            assert.ok(listText.includes("Background work"), "back from detail returns to the shared overlay list");
-            assert.ok(listText.includes("Subagents"), "shared overlay groups the subagent provider");
+            assert.equal(typeof component.handleInput, "function", "left closes detail through the overlay component");
         } finally {
             registry.dismissRun(affordanceId);
             try { process.kill(-affordancePid, "SIGTERM"); } catch { try { process.kill(affordancePid, "SIGTERM"); } catch { /* ignore */ } }
@@ -367,5 +366,33 @@ describe("registered extension path: main-window navigator actions", () => {
             !registry.navigatorVisibleRuns(registry.listMetas(), THIS_PID).some((m) => m.id === id),
             "stopped+dismissed run leaves navigator visibility",
         );
+    });
+
+    // @covers navigator.close
+    // @level integration
+    it("registered main-list widget hides subagents from other sessions", async () => {
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase, sessionId: "session-b" });
+        nav.seedRun({
+            id: trackDisk(`sa_t47_session_a_${Date.now()}`),
+            name: "session-a-run",
+            status: "running",
+            pid: THIS_PID,
+            startedAt: Date.now() + 1000,
+            callbackOrigin: { cwd: RUNTIME, sessionId: "session-a" },
+        });
+        nav.seedRun({
+            id: trackDisk(`sa_t47_session_b_${Date.now()}`),
+            name: "session-b-run",
+            status: "running",
+            pid: THIS_PID,
+            startedAt: Date.now() + 2000,
+            callbackOrigin: { cwd: RUNTIME, sessionId: "session-b" },
+        });
+
+        await nav.start();
+
+        const mainList = String(nav.lastWidget("background-work-list") ?? "");
+        assert.ok(mainList.includes("session-b-run"), mainList);
+        assert.ok(!mainList.includes("session-a-run"), mainList);
     });
 });

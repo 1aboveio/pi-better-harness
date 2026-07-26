@@ -198,6 +198,19 @@ function callbackSuppressionReason(meta: RunMeta, active: RunCallbackOrigin | un
     return undefined;
 }
 
+function belongsToActiveNavigatorSession(meta: RunMeta): boolean {
+    const active = activeCallbackOrigin;
+    if (!active) return false;
+    const origin = meta.callbackOrigin;
+    if (origin) {
+        if (origin.cwd !== active.cwd) return false;
+        if (origin.sessionId || active.sessionId) return origin.sessionId === active.sessionId;
+        return true;
+    }
+    if (active.sessionId) return false;
+    return meta.cwd === active.cwd;
+}
+
 function markCompletionCallbackSuppressed(id: string, reason: string, now: number = Date.now()): void {
     const meta = readMeta(id);
     if (!meta || meta.completionCallbackSuppressedAt !== undefined) return;
@@ -334,6 +347,7 @@ function renderWidget(): void {
     const running = listMetas().filter((m) => {
         if (!ownedByThisParent(m)) return false;
         if (isDismissed(m)) return false;
+        if (!belongsToActiveNavigatorSession(m)) return false;
         const st = effectiveStatus(m);
         return st === "running" || st === "orphaned";
     });
@@ -565,7 +579,7 @@ function observeNavigatorHealth(meta: RunMeta, now: number = Date.now()): Health
 /** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
 function navigatorRows() {
     const now = Date.now();
-    return buildNavigatorRows(navigatorVisibleRuns(listMetas()), {
+    return buildNavigatorRows(sessionVisibleNavigatorRuns(), {
         effectiveStatus,
         shortModel,
         fmtElapsed,
@@ -589,11 +603,15 @@ function navigatorRows() {
 
 /** Runs that should advertise/open the left-arrow navigator affordance. */
 function navigatorRunningRuns(): RunMeta[] {
-    return navigatorVisibleRuns(listMetas()).filter((m) => effectiveStatus(m) === "running");
+    return sessionVisibleNavigatorRuns().filter((m) => effectiveStatus(m) === "running");
 }
 
 function navigatorRunningCount(): number {
     return navigatorRunningRuns().length;
+}
+
+function sessionVisibleNavigatorRuns(): RunMeta[] {
+    return navigatorVisibleRuns(listMetas()).filter(belongsToActiveNavigatorSession);
 }
 
 /** Live detail snapshot for one run (registry + log parse + health). */
@@ -646,7 +664,7 @@ function statusTone(status: string): BackgroundWorkRow["statusTone"] {
 }
 
 function subagentWorkRows(now: number): BackgroundWorkRow[] {
-    const startedById = new Map(navigatorVisibleRuns(listMetas()).map((m) => [m.id, m.startedAt]));
+    const startedById = new Map(sessionVisibleNavigatorRuns().map((m) => [m.id, m.startedAt]));
     return navigatorRows().map((row) => {
         const bits = [];
         if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
@@ -656,6 +674,10 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             providerId: "subagents",
             id: row.id,
             name: row.name,
+            model: row.model,
+            effort: row.effort,
+            tool: row.tool,
+            tokens: row.spend,
             status: row.status,
             statusTone: statusTone(row.status),
             kind: "subagent",
@@ -1248,6 +1270,7 @@ export default function (pi: ExtensionAPI) {
         // Resume passive widget for supervised running and non-terminal orphaned (#67).
         if (listMetas().some((m) => {
             if (!ownedByThisParent(m) || isDismissed(m)) return false;
+            if (!belongsToActiveNavigatorSession(m)) return false;
             const st = effectiveStatus(m);
             return st === "running" || st === "orphaned";
         })) {
@@ -1264,6 +1287,7 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("session_before_switch", () => {
         activeCallbackOrigin = undefined;
+        disposeBackgroundWorkNavigator();
     });
 
     // Tear down the timer and clear the widget when the session ends.
