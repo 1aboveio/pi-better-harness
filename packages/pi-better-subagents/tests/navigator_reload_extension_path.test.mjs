@@ -388,19 +388,21 @@ describe("registered extension path: session_start reload cleanup", () => {
         const footerAfterStart = nav.lastStatus("background-work-nav");
         const widgetAfterStart = nav.lastWidget("subagents");
         assert.equal(footerAfterStart, runningHint, "first session_start publishes running-only count footer");
-        assert.ok(Array.isArray(widgetAfterStart), "running session_start paints the live widget");
-        assert.ok(widgetAfterStart[0].startsWith("Subagents · 1 running"), "live widget keeps the original running-count title");
-        assert.ok(widgetAfterStart[0].includes("<muted>← background work</>"), "live widget includes a muted shared navigator hint on the title row");
-        assert.ok(!widgetAfterStart.slice(1).some((line) => String(line).includes("← background work")), "live widget does not add a standalone left-arrow hint row");
+        assert.equal(widgetAfterStart, undefined, "running session_start clears the retired legacy subagent widget");
+        assert.ok(
+            nav.widgetCalls.some((c) => c[0] === "subagents" && c[1] === undefined),
+            "running session_start must explicitly clear the legacy subagent widget",
+        );
 
         // 2) Open the shared overlay via the registered empty-editor Left path.
         nav.focusViaLeftKey();
 
-        // 3) Enter opens detail; x arms close confirmation → subagent widget,
-        // health, shared main list, live detail, and arm timeout.
+        // 3) Enter opens detail; x arms close confirmation → health, shared
+        // main list, live detail, and arm timeout. The legacy subagent widget
+        // must not contribute a duplicate ticker/surface.
         const component = await nav.openDetailViaEnter();
         nav.press("x");
-        assert.equal(timerSpies.pendingIntervals(), 4, "widget, health, main-list, and detail tick intervals are live");
+        assert.equal(timerSpies.pendingIntervals(), 3, "health, main-list, and detail tick intervals are live");
         assert.equal(timerSpies.pendingTimeouts(), 1, "close-arm timeout is live");
         const confirmAfterArm = nav.lastStatus("background-work-close");
         assert.equal(
@@ -419,7 +421,7 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
         // session_start path (disposeBackgroundWorkNavigator + CLOSE_CONFIRM clear).
-        assert.equal(timerSpies.pendingIntervals(), 3, "reload must clear detail interval while keeping widget, health, and main-list tickers");
+        assert.equal(timerSpies.pendingIntervals(), 2, "reload must clear detail interval while keeping health and main-list tickers");
         assert.equal(timerSpies.pendingTimeouts(), 0, "reload must clear close-arm timeout");
         const confirmAfterReload = nav.lastStatus("background-work-close");
         assert.equal(confirmAfterReload, undefined, "reload clears CLOSE_CONFIRM_STATUS_KEY");
@@ -441,17 +443,14 @@ describe("registered extension path: session_start reload cleanup", () => {
         const footerAfterReload = nav.lastStatus("background-work-nav");
         const widgetAfterReload = nav.lastWidget("subagents");
         assert.equal(footerAfterReload, runningHint, "reload republishes running-only navigator count footer");
-        assert.ok(Array.isArray(widgetAfterReload), "reload repaints the live widget");
-        assert.ok(widgetAfterReload[0].startsWith("Subagents · 1 running"), "reload keeps the original widget title");
-        assert.ok(widgetAfterReload[0].includes("<muted>← background work</>"), "reload republishes the muted shared navigator hint on the title row");
-        assert.ok(!widgetAfterReload.slice(1).some((line) => String(line).includes("← background work")), "reload does not add a standalone widget left-arrow hint row");
+        assert.equal(widgetAfterReload, undefined, "reload keeps the retired legacy subagent widget cleared");
         assert.ok(
             nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "background-work-nav" && typeof c[1] === "string"),
             "reload path must re-invoke setStatus for the running count footer",
         );
         assert.ok(
-            nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && Array.isArray(c[1]) && String(c[1][0] ?? "").includes("<muted>← background work</>")),
-            "reload path must re-invoke setWidget for the title-row navigator hint",
+            nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && c[1] === undefined),
+            "reload path must clear the retired legacy subagent widget instead of repainting it",
         );
 
         // Seed still visible (reload is non-mutating for runs).

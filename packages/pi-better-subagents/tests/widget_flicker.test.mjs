@@ -411,21 +411,18 @@ describe("index.ts widget wiring (issue #13)", async () => {
         );
     });
 
-    // @covers widget.dirty-check
+    // @covers widget.retired
     // @level unit
-    it("imports and uses nextWidgetAction (dirty-check before setWidget)", () => {
-        assert.ok(
-            indexSource.includes("nextWidgetAction"),
-            "index.ts must dirty-check via nextWidgetAction before setWidget"
+    it("does not dirty-check or repaint the retired legacy widget", () => {
+        assert.doesNotMatch(
+            indexSource,
+            /import[\s\S]*nextWidgetAction[\s\S]*from "\.\/widget\.ts"/,
+            "index.ts must not keep the old dirty-checked widget repaint path"
         );
-    });
-
-    // @covers widget.render
-    // @level unit
-    it("imports and uses buildWidgetLines for the live widget", () => {
-        assert.ok(
-            indexSource.includes("buildWidgetLines"),
-            "index.ts must build live widget lines via buildWidgetLines"
+        assert.doesNotMatch(
+            indexSource,
+            /import[\s\S]*buildWidgetLines[\s\S]*from "\.\/widget\.ts"/,
+            "index.ts must not keep the old buildWidgetLines repaint path"
         );
     });
 
@@ -441,19 +438,9 @@ describe("index.ts widget wiring (issue #13)", async () => {
     // @covers widget.render
     // @level unit
     it("does not call parseRun unconditionally inside the live widget redraw body", () => {
-        // Extract renderWidget / applyWidgetFrame body and ensure parseRun is
-        // not a naked call without a cache gate nearby. We require the spend
-        // cache helper to appear before any parseRun in the widget path.
-        const widgetSection = indexSource.match(
-            /\/\/ ---- live status widget[\s\S]*?\/\/ ----(?! live)/
-        )?.[0] ?? indexSource;
-        // If parseRun appears in the live-widget section, isSpendCacheFresh must too.
-        if (widgetSection.includes("parseRun")) {
-            assert.ok(
-                widgetSection.includes("isSpendCacheFresh"),
-                "live widget section calls parseRun but does not gate on isSpendCacheFresh"
-            );
-        }
+        const renderWidgetBody = indexSource.match(/function renderWidget\(\): void \{[\s\S]*?\n\}/)?.[0] ?? "";
+        assert.doesNotMatch(renderWidgetBody, /\bparseRun\(/, "retired widget path must not parse logs");
+        assert.doesNotMatch(renderWidgetBody, /buildWidgetLines/, "retired widget path must not build list rows");
     });
 });
 
