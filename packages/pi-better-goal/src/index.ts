@@ -32,9 +32,22 @@ import {
 } from "./types.js";
 
 const POLL_INTERVAL_MS = 2_000;
+const DEFAULT_IDLE_CONTINUATION_DELAY_MS = 30_000;
 const WAKE_DISABLED =
   process.env.PI_BETTER_GOAL_DISABLE_WAKE === "1" ||
   process.env.PI_BETTER_EXTENSION_DISABLE_WAKE === "1";
+const IDLE_CONTINUATION_DELAY_MS = parseDurationEnv(
+  process.env.PI_BETTER_GOAL_IDLE_CONTINUATION_DELAY_MS,
+  DEFAULT_IDLE_CONTINUATION_DELAY_MS,
+);
+
+function parseDurationEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
 
 function continuationPrompt(goal: GoalSnapshot): string {
   return [
@@ -95,6 +108,8 @@ export default function (pi: ExtensionAPI): void {
   let lastWakeSignature = "";
   let lastAttentionSignature = "";
   let continuationQueuedFor: string | null = null;
+  let idleContinuationTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleContinuationSignature = "";
 
   const getGoal = (ctx: ExtensionContext): GoalSnapshot | null => currentGoalSnapshot(ctx);
 
@@ -102,6 +117,7 @@ export default function (pi: ExtensionAPI): void {
     pi.appendEntry(EXTENSION_NAME, goalSetEntry(goal, source));
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
+    clearIdleContinuation();
   };
 
   const clearGoal = (ctx: ExtensionContext, source: "command" | "tool" | "runtime"): void => {
@@ -109,12 +125,14 @@ export default function (pi: ExtensionAPI): void {
     pi.appendEntry(EXTENSION_NAME, goalClearEntry(current?.goalId ?? null, source));
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
+    clearIdleContinuation();
   };
 
   const queueGoalContinuation = (goal: GoalSnapshot): void => {
     if (goal.status !== "active" || continuationQueuedFor === goal.goalId) {
       return;
     }
+    clearIdleContinuation();
     continuationQueuedFor = goal.goalId;
     pi.sendMessage(
       {
@@ -122,6 +140,72 @@ export default function (pi: ExtensionAPI): void {
         content: continuationPrompt(goal),
         display: false,
         details: { kind: "continuation", goalId: goal.goalId },
+      },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+  };
+
+  function clearIdleContinuation(): void {
+    if (idleContinuationTimer) {
+      clearTimeout(idleContinuationTimer);
+      idleContinuationTimer = undefined;
+    }
+    idleContinuationSignature = "";
+  }
+
+  const scheduleIdleContinuation = (
+    goal: GoalSnapshot,
+    ctx: ExtensionContext,
+    kind: "continuation" | "background-drained",
+    snapshot?: ActivitySnapshot,
+  ): void => {
+    if (WAKE_DISABLED || goal.status !== "active" || continuationQueuedFor === goal.goalId) {
+      return;
+    }
+    const signature = `${goal.goalId}:${kind}`;
+    if (idleContinuationTimer && idleContinuationSignature === signature) {
+      return;
+    }
+    clearIdleContinuation();
+    idleContinuationSignature = signature;
+    idleContinuationTimer = setTimeout(() => {
+      idleContinuationTimer = undefined;
+      idleContinuationSignature = "";
+      void sendIdleContinuationAfterAudit(goal.goalId, ctx, kind, snapshot);
+    }, IDLE_CONTINUATION_DELAY_MS);
+    idleContinuationTimer.unref?.();
+  };
+
+  const sendIdleContinuationAfterAudit = async (
+    goalId: string,
+    ctx: ExtensionContext,
+    kind: "continuation" | "background-drained",
+    priorSnapshot?: ActivitySnapshot,
+  ): Promise<void> => {
+    const goal = currentGoalSnapshot(ctx);
+    if (goal?.status !== "active" || goal.goalId !== goalId || continuationQueuedFor === goal.goalId || foregroundRunning) {
+      return;
+    }
+    const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
+    latestSnapshot = snapshot;
+    pi.events.emit(EVENT_ACTIVITY, snapshot);
+    if (snapshot.foregroundRunning || snapshot.backgroundRunning) {
+      return;
+    }
+
+    continuationQueuedFor = goal.goalId;
+    const content = kind === "background-drained"
+      ? "Background activity for the active goal is no longer running. Inspect any subagent callbacks or final results, then continue the completion audit before marking the goal complete.\n\n" +
+        continuationPrompt(goal)
+      : continuationPrompt(goal);
+    pi.sendMessage(
+      {
+        customType: EXTENSION_NAME,
+        content,
+        display: false,
+        details: kind === "background-drained"
+          ? { kind, snapshot: priorSnapshot ?? snapshot }
+          : { kind, goalId: goal.goalId },
       },
       { triggerTurn: true, deliverAs: "followUp" },
     );
@@ -166,20 +250,13 @@ export default function (pi: ExtensionAPI): void {
         const wakeSignature = wakePlan.wakeSignature;
         if (wakeSignature !== lastWakeSignature) {
           lastWakeSignature = wakeSignature;
-          continuationQueuedFor = goal.goalId;
-          pi.sendMessage(
-            {
-              customType: EXTENSION_NAME,
-              content:
-                "Background activity for the active goal is no longer running. Inspect any subagent callbacks or final results, then continue the completion audit before marking the goal complete.\n\n" +
-                continuationPrompt(goal),
-              display: false,
-              details: { kind: "background-drained", snapshot },
-            },
-            { triggerTurn: true, deliverAs: "followUp" },
-          );
+          scheduleIdleContinuation(goal, ctx, "background-drained", snapshot);
         }
       }
+    }
+
+    if (snapshot.foregroundRunning || snapshot.backgroundRunning) {
+      clearIdleContinuation();
     }
 
     if (ctx.hasUI) {
@@ -436,6 +513,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("agent_start", async (_event, ctx) => {
     currentCtx = ctx;
     foregroundRunning = true;
+    clearIdleContinuation();
     continuationQueuedFor = null;
     await publishSnapshot(ctx);
   });
@@ -446,13 +524,14 @@ export default function (pi: ExtensionAPI): void {
     const snapshot = await publishSnapshot(ctx);
     const goal = getGoal(ctx);
     if (goal?.status === "active" && !snapshot.backgroundRunning) {
-      queueGoalContinuation(goal);
+      scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
     }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     stopPolling();
     foregroundRunning = false;
+    clearIdleContinuation();
     currentCtx = undefined;
     try {
       ctx.ui.setStatus(EXTENSION_NAME, undefined);

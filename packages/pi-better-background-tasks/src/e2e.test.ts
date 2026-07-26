@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
@@ -22,6 +23,20 @@ describe("extension e2e", () => {
       "bg_task_stop",
       "bg_task_watch",
     ].sort());
+  });
+
+  it("registers background tasks with pi-better-goal activity", () => {
+    const harness = createHarness();
+
+    expect(harness.goalProviders).toHaveLength(1);
+    expect(harness.goalProviders[0]).toMatchObject({
+      id: "background-tasks",
+      label: "Background Tasks",
+    });
+
+    harness.events.emit("pi-better-goal:ready", { version: "test" });
+    expect(harness.goalProviders).toHaveLength(2);
+    expect(harness.goalProviders[1]).toMatchObject({ id: "background-tasks" });
   });
 
   it("starts a watcher through bg_task_watch and inspects it through status/log tools", async () => {
@@ -102,7 +117,11 @@ function createHarness() {
   const tools = new Map<string, RegisteredTool>();
   const sessionStartHandlers: Array<() => unknown> = [];
   const messages: string[] = [];
+  const events = new EventEmitter();
+  const goalProviders: unknown[] = [];
+  events.on("pi-better-goal:register-provider", (provider) => goalProviders.push(provider));
   const pi = {
+    events,
     registerTool(tool: RegisteredTool) {
       tools.set(tool.name, tool);
     },
@@ -119,6 +138,8 @@ function createHarness() {
   return {
     tools,
     messages,
+    events,
+    goalProviders,
     async execute(name: string, params: Record<string, unknown>) {
       const tool = tools.get(name);
       if (!tool) throw new Error(`tool not registered: ${name}`);
