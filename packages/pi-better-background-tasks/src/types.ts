@@ -31,6 +31,11 @@ export interface CommandResult {
   endedAt: number;
 }
 
+export interface BackgroundTaskCallbackOrigin {
+  cwd: string;
+  sessionId?: string;
+}
+
 export interface BackgroundTaskMeta {
   id: string;
   name?: string;
@@ -48,6 +53,9 @@ export interface BackgroundTaskMeta {
   logPath: string;
   callback?: boolean;
   callbackSentAt?: number;
+  callbackOrigin?: BackgroundTaskCallbackOrigin;
+  callbackSuppressedAt?: number;
+  callbackSuppressedReason?: string;
   dismissedAt?: number;
   command?: string;
   argv?: string[];
