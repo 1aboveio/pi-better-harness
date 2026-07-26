@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "surface": "subagent.health-callback",
+      "command": "node --experimental-strip-types tests/smoke_health_callback.mjs",
+      "ranAt": "2026-07-26T04:12:53.210Z",
+      "status": "pass",
+      "steps": [
+        {
+          "name": "orphaned callback wording",
+          "status": "pass",
+          "detail": "ATTENTION: a background subagent lost supervision and is now orphaned.\nsubagent: smoke (sa_smoke_o) · status orphaned\n\nS"
+        },
+        {
+          "name": "lost callback wording",
+          "status": "pass",
+          "detail": "ATTENTION: a background subagent is lost.\nsubagent: smoke (sa_smoke_l) · status lost\n\nNo related process remains and no "
+        },
+        {
+          "name": "callback:true non-interrupting delivery",
+          "status": "pass",
+          "detail": "{\"deliverAs\":\"followUp\",\"triggerTurn\":true}"
+        },
+        {
+          "name": "callback:false suppresses model delivery",
+          "status": "pass",
+          "detail": ""
+        },
+        {
+          "name": "orphanedCallbackSentAt survives meta.json reload",
+          "status": "pass",
+          "detail": "got 1700000000000"
+        },
+        {
+          "name": "lostCallbackSentAt survives meta.json reload",
+          "status": "pass",
+          "detail": "got lost=1700000000001 orphaned=1700000000000"
+        }
+      ]
+    },
+    {
+      "surface": "subagent.result",
+      "command": "node --experimental-strip-types tests/smoke_health_callback.mjs",
+      "ranAt": "2026-07-26T04:12:53.210Z",
+      "status": "pass",
+      "steps": [
+        {
+          "name": "orphaned result diagnostic + best-current artifacts",
+          "status": "pass",
+          "detail": ""
+        },
+        {
+          "name": "lost result diagnostic + best-available artifacts",
+          "status": "pass",
+          "detail": ""
+        }
+      ]
+    }
+  ]
+}

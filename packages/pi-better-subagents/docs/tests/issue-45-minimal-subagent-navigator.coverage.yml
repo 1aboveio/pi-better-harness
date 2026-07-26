@@ -1,0 +1,27 @@
+# Coverage ownership for issue #45 — minimal subagent navigator from empty-editor ←.
+# Surfaces are pure TUI seams in navigator.mjs plus thin index.ts wiring (footer
+# status, editor composition, focused overlay). Depth floor is unit: no browser
+# route, no external I/O beyond the real tmpdir registry; pi-tui functions and
+# the editor are external boundaries injected by index.ts and faked in tests
+# (per the #43 testing decisions: pure state seam + thin wiring seam with fake
+# Pi UI/editor objects).
+id: issue-45-minimal-subagent-navigator
+source: "https://github.com/1aboveio/pi-better-subagents/issues/45"
+ref: "issue:45"
+# criteria path omitted: ACs live on the GitHub issue; no separate criteria.md.
+surfaces:
+  navigator.footer-hint:
+    # mutation: publishes/clears a footer status via ctx.ui.setStatus.
+    requiredLevels: [unit]
+    # Producer evidence attached; reviewer attestation promotes Unverified → Covered.
+    verified: false
+  navigator.editor-wrapper:
+    # mutation: intercepts/delegates editor input and opens the overlay;
+    # installs a (non-stacking, composing) editor factory.
+    requiredLevels: [unit]
+    verified: false
+  navigator.overlay:
+    # read: renders the visible-run list and moves selection; Escape closes.
+    # Never mutates run state in #45 (close/dismiss is #47).
+    requiredLevels: [unit]
+    verified: false

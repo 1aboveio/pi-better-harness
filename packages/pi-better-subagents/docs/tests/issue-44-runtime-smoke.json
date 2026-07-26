@@ -1,0 +1,37 @@
+[
+  {
+    "surface": "registry.dismissal",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-44-runtime-smoke.mjs",
+    "observed": "real tmpdir registry round-trip: legacy meta parses unchanged; dismissedAt persisted + idempotent; other fields preserved"
+  },
+  {
+    "surface": "registry.navigator-visibility",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-44-runtime-smoke.mjs",
+    "observed": "fresh disk reads: dismissed + foreign-parent excluded from navigatorVisibleRuns/Count; listMetas still lists dismissed"
+  },
+  {
+    "surface": "stop.shared",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-44-runtime-smoke.mjs",
+    "observed": "real detached sleep 30 SIGTERMed via process group (killed + endedAt on disk, group gone); stale 'running'+dead pid → not-running(exited), record untouched"
+  },
+  {
+    "surface": "tools.model-facing",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-44-runtime-smoke.mjs",
+    "observed": "factory-built handlers (the exact objects pi.registerTool receives): dismissed run listed/output/result-ed by id, stopped via subagent_stop with onStopped fired; killed+dismissed persisted; group gone"
+  },
+  {
+    "surface": "index.ts (extension entry)",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --experimental-strip-types --check index.ts",
+    "observed": "index.ts parses under node type-stripping; subagent_stop delegates to stopRun (index.ts)"
+  }
+]

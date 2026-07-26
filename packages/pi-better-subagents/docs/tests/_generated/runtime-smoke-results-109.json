@@ -1,0 +1,20 @@
+{
+  "unit": "#109",
+  "headNote": "#109 push-only remotes + source read-failure non-mutation. Smoke proves push-only read; push-only rewrite + create (absent remote) sync dual-destination; missing + unreadable-config source abort leaves target unchanged. #103 normal topologies remain covered by existing suite.",
+  "results": [
+    {
+      "surface": "git_remotes.read",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types -e '<inline push-only read + create/rewrite sync + missing/unreadable abort>'",
+      "observed": "SMOKE PASS: push-only read urls=[] pushUrls=2"
+    },
+    {
+      "surface": "git_remotes.sync",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types -e '<inline push-only read + create/rewrite sync + missing/unreadable abort>'",
+      "observed": "SMOKE PASS: push-only create+rewrite sync dual-destination; missing+unreadable abort left target unchanged"
+    }
+  ]
+}

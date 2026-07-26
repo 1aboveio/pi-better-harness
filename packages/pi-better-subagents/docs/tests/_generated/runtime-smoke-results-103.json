@@ -1,0 +1,22 @@
+{
+  "unit": "#103",
+  "headNote": "#103 scope = normal fetch-URL + pushurl topologies; push-only remotes and source-read-failure non-mutation deferred to #109. Smoke proves multi-url/no-pushurl happy path only (not the descoped edges). Rebased onto origin/main 6a8765291961c94b28bf3651808de49a6722edc1; headSha stamped after rebase evidence retarget.",
+  "results": [
+    {
+      "surface": "git_remotes.read",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types -e '<inline multi-url/no-pushurl read+sync+push smoke>'",
+      "observed": "SMOKE PASS (in-scope #103): multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2. Does not claim push-only remote or source-read-failure abort (#109)."
+    },
+    {
+      "surface": "git_remotes.sync",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types -e '<inline multi-url/no-pushurl read+sync+push smoke>'",
+      "observed": "SMOKE PASS (in-scope #103): multi-url/no-pushurl read+sync; push reached both urls; stale url+pushurl empty; model.urls.length=2. Does not claim push-only remote or source-read-failure abort (#109)."
+    }
+  ],
+  "headSha": "0a510f7bbb1d2d995571232bc32f567258a42f9d",
+  "deferredTo": "#109"
+}

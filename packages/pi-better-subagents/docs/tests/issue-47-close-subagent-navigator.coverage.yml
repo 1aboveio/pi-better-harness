@@ -1,0 +1,22 @@
+# Coverage ownership for issue #47 — two-press close in the subagent navigator.
+# Surface is a pure TUI seam in navigator.mjs plus thin index.ts wiring
+# (closeRun / onCloseConfirmHint / onClosed injection, session_shutdown clears
+# the confirm status key). Depth floor is unit (+ integration for the registered
+# production TUI path): no browser route; real tmpdir registry + real detached
+# sleep for stop/dismiss; pi UI/timer/clock are external boundaries injected by
+# index.ts and faked in tests (per the #43 testing decisions: pure state seam +
+# thin wiring seam with fake Pi UI/editor/timer objects). Close reuses #44
+# stopRun/dismissRun — no second persistence model. Integrated-review fix:
+# index.ts must import stopRun; proven by tests/navigator_close_extension_path.test.mjs
+# loading the real extension factory → session_start → overlay → second x.
+id: issue-47-close-subagent-navigator
+source: "https://github.com/1aboveio/pi-better-subagents/issues/47"
+ref: "issue:47"
+# criteria path omitted: ACs live on the GitHub issue; no separate criteria.md.
+surfaces:
+  navigator.close:
+    # mutation: arms/disarms Close confirmation, stops running runs via shared
+    # stopRun, dismisses via dismissRun, refreshes visible rows + footer hint.
+    requiredLevels: [unit]
+    # Producer evidence attached; reviewer attestation promotes Unverified → Covered.
+    verified: false

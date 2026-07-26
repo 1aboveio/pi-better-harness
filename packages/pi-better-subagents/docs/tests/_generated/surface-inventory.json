@@ -1,0 +1,222 @@
+{
+  "generatedAt": "2026-07-26T08:15:22.000Z",
+  "surfaces": [
+    {
+      "id": "widget.render",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "widget.clear",
+      "kind": "service",
+      "class": "mutation",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "widget.dirty-check",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "widget.geometry",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "widget.spend-cache",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "sandbox.backend-selection",
+      "kind": "service",
+      "class": "read",
+      "path": "sandbox.ts",
+      "reachable": true
+    },
+    {
+      "id": "sandbox.command-wrapper",
+      "kind": "service",
+      "class": "read",
+      "path": "sandbox.ts",
+      "reachable": true
+    },
+    {
+      "id": "sandbox.spawn-policy",
+      "kind": "service",
+      "class": "read",
+      "path": "index.ts",
+      "reachable": true
+    },
+    {
+      "id": "registry.process-identity",
+      "kind": "service",
+      "class": "read",
+      "path": "registry.ts",
+      "reachable": true
+    },
+    {
+      "id": "health.reconcile",
+      "kind": "service",
+      "class": "read",
+      "path": "health.ts",
+      "reachable": true
+    },
+    {
+      "id": "registry.dismissal",
+      "kind": "service",
+      "class": "mutation",
+      "path": "registry.ts",
+      "reachable": true
+    },
+    {
+      "id": "registry.navigator-visibility",
+      "kind": "service",
+      "class": "read",
+      "path": "registry.ts",
+      "reachable": true
+    },
+    {
+      "id": "stop.shared",
+      "kind": "service",
+      "class": "mutation",
+      "path": "stop.ts",
+      "reachable": true
+    },
+    {
+      "id": "tools.model-facing",
+      "kind": "service",
+      "class": "mutation",
+      "path": "tools.ts",
+      "reachable": true
+    },
+    {
+      "id": "navigator.footer-hint",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.editor-wrapper",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.overlay",
+      "kind": "service",
+      "class": "read",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.detail",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.close",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.hardening",
+      "kind": "service",
+      "class": "mutation",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.health",
+      "kind": "service",
+      "class": "read",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "navigator.detail-health",
+      "kind": "service",
+      "class": "read",
+      "path": "navigator.mjs",
+      "reachable": true
+    },
+    {
+      "id": "subagent.health-callback",
+      "kind": "service",
+      "class": "mutation",
+      "path": "completion.mjs",
+      "reachable": true
+    },
+    {
+      "id": "health.observation",
+      "kind": "service",
+      "class": "read",
+      "path": "health-observation.ts",
+      "reachable": true
+    },
+    {
+      "id": "health.event-facts",
+      "kind": "service",
+      "class": "read",
+      "path": "health-observation.ts",
+      "reachable": true
+    },
+    {
+      "id": "subagent.result",
+      "kind": "service",
+      "class": "read",
+      "path": "tools.ts",
+      "reachable": true
+    },
+    {
+      "id": "subagent.list-health",
+      "kind": "service",
+      "class": "read",
+      "path": "list.mjs",
+      "reachable": true
+    },
+    {
+      "id": "subagent.output-health",
+      "kind": "service",
+      "class": "read",
+      "path": "tools.ts",
+      "reachable": true
+    },
+    {
+      "id": "widget.health",
+      "kind": "service",
+      "class": "read",
+      "path": "widget.mjs",
+      "reachable": true
+    },
+    {
+      "id": "subagent.health-notify",
+      "kind": "service",
+      "class": "mutation",
+      "path": "index.ts",
+      "reachable": true
+    },
+    {
+      "id": "stop.orphaned-cleanup",
+      "kind": "service",
+      "class": "mutation",
+      "path": "stop.ts",
+      "reachable": true
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+# Coverage ownership for issue #48 — harden navigator rendering, reload,
+# lifecycle cleanup, and user-facing docs. Surface is characterization +
+# hardening of the completed navigator stack (#45 list, #46 detail, #47 close)
+# in navigator.mjs plus thin index.ts reload/teardown wiring and README docs.
+# Depth floor is unit (+ integration for the registered session_start reload
+# path): no browser route; pure seams + thin wiring with fake Pi UI/timer/clock
+# (per #43 testing decisions). Widget and non-TUI paths are regression-pinned,
+# not redesigned. Integrated-review fix: session_start reload cleanup must be
+# proven by tests/navigator_reload_extension_path.test.mjs loading the real
+# extension factory → session_start → overlay detail+arm → second session_start
+# (not source-token scanning of index.ts).
+id: issue-48-hardening-subagent-navigator
+source: "https://github.com/1aboveio/pi-better-subagents/issues/48"
+ref: "issue:48"
+# criteria path omitted: ACs live on the GitHub issue; no separate criteria.md.
+surfaces:
+  navigator.hardening:
+    # mutation: selection keep-by-id on row refresh, session_start dispose +
+    # confirm-clear on reload; read characterization of list/detail width,
+    # footer restore, editor dedupe, timer cleanup, non-TUI isolation, docs.
+    requiredLevels: [unit]
+    # Producer evidence attached; reviewer attestation promotes Unverified → Covered.
+    verified: false

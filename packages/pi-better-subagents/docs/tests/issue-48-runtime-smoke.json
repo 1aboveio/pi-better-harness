@@ -1,0 +1,9 @@
+[
+  {
+    "surface": "navigator.hardening",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-48-runtime-smoke.mjs",
+    "observed": "applyNavigatorRows keep-by-id + clamp; list/detail narrow post style-strip; overlay dismiss clamp; editor reload dedupe; dispose clears detail+arm timers+confirm; footer count/confirm clear; registered session_start reload disposes timers+confirm, no editor stack, republishes footer; TUI guard; strip-types index+navigator; README controls"
+  }
+]

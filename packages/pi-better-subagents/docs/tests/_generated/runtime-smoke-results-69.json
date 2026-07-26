@@ -1,0 +1,105 @@
+{
+  "issue": 69,
+  "generatedAt": "2026-07-26T11:33:11.962Z",
+  "passed": 19,
+  "failed": 0,
+  "total": 19,
+  "ok": true,
+  "steps": [
+    {
+      "name": "healthy not actionable",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "healthy facts empty",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "stale actionable",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "stale fact",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "compacting fact",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "fact cap ≤2",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "status colors",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "name first",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "model before status",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "effort adjacent",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "status near end before facts",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "width-safe colored rows",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "detail has process section",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "detail has compaction section",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "detail has active tool section",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "detail has model section",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "detail separates compaction before tool",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "detail callbacks",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "detail width-safe",
+      "status": "pass",
+      "detail": ""
+    }
+  ]
+}

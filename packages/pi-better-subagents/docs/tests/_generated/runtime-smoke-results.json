@@ -1,0 +1,23 @@
+[
+  {
+    "surface": "widget.render",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --test tests/widget_flicker.test.mjs",
+    "observed": "48 tests pass; pure helpers buildWidgetLines/nextWidgetAction/isSpendCacheFresh exercise happy path without TUI"
+  },
+  {
+    "surface": "widget.clear",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --test tests/widget_flicker.test.mjs",
+    "observed": "WIDGET_CLEAR === undefined; nextWidgetAction idle→clear; index.ts wiring uses WIDGET_CLEAR"
+  },
+  {
+    "surface": "index.ts (extension entry)",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --experimental-strip-types --check index.ts && node --test tests/*.test.mjs",
+    "observed": "index.ts parses; 48/48 unit tests pass including issue #13 wiring guards"
+  }
+]

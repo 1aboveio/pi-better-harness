@@ -1,0 +1,38 @@
+/**
+ * TypeScript re-export of navigator.mjs pure seams (list #45, detail #46, close #47).
+ * Logic lives in navigator.mjs for ESM unit-test compatibility (mirrors widget.ts).
+ */
+export {
+    NAVIGATOR_STATUS_KEY,
+    CLOSE_CONFIRM_STATUS_KEY,
+    DETAIL_TICK_MS,
+    CLOSE_ARM_MS,
+    navigatorFooterHint,
+    applyNavigatorFooter,
+    closeConfirmHint,
+    applyCloseConfirmFooter,
+    createCloseArm,
+    isCloseArmed,
+    disarmClose,
+    executeNavigatorClose,
+    isNavigatorUiAvailable,
+    buildNavigatorRows,
+    buildNavigatorDetail,
+    buildDetailLines,
+    createNavigatorState,
+    clampSelection,
+    moveSelection,
+    selectById,
+    applyNavigatorRows,
+    formatNavigatorRowText,
+    buildNavigatorLines,
+    navigatorSectionLabel,
+    createNavigatorOverlayComponent,
+    createNavigatorOverlayFactory,
+    showNavigator,
+    openTrackedNavigator,
+    disposeTrackedNavigator,
+    wrapEditor,
+    NAVIGATOR_FACTORY_MARK,
+    installNavigatorEditor,
+} from "./navigator.mjs";

@@ -1,0 +1,30 @@
+[
+  {
+    "surface": "navigator.footer-hint",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-45-runtime-smoke.mjs",
+    "observed": "real registry: visible count 1 (dismissed excluded) → setStatus('subagents-nav', '← subagents · 1'); count 0 → status cleared; guard: rpc blocked / print blocked / tui allowed"
+  },
+  {
+    "surface": "navigator.editor-wrapper",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-45-runtime-smoke.mjs",
+    "observed": "real registry canOpen: bare ← on empty editor opened the navigator once (not delegated); ← with text + 'a' delegated; 2 installs → 1 factory (no stacking)"
+  },
+  {
+    "surface": "navigator.overlay",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-45-runtime-smoke.mjs",
+    "observed": "real registry rows newest-first (running+terminal) rendered as overlay list; {overlay:true}; Down moved+repainted; Escape closed"
+  },
+  {
+    "surface": "index.ts (extension entry)",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --experimental-strip-types --check index.ts && node docs/tests/issue-45-runtime-smoke.mjs (registered RPC path)",
+    "observed": "index.ts parses under node type-stripping; footer hint via setStatus seam only (no setFooter); installNavigator/updateNavigatorFooter wired into session_start + subagent_spawn; registered extension RPC startup-through-shutdown: 0 setStatus (footer+close-confirm) / 0 editor / 0 overlay custom — non-TUI navigator isolation class complete; no global pi binary"
+  }
+]

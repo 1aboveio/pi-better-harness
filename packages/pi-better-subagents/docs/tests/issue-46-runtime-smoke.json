@@ -1,0 +1,16 @@
+[
+  {
+    "surface": "navigator.detail",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-46-runtime-smoke.mjs",
+    "observed": "real registry+parse detail fields; Enter→detail 1s timer; running→terminal on tick; ← back keeps selection + disposes; Escape closes + disposes; Pi custom()→done(null); narrow width ok; dispose idempotent; TUI guard intact"
+  },
+  {
+    "surface": "index.ts (extension entry)",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --experimental-strip-types --check index.ts + openTrackedNavigator session_shutdown path",
+    "observed": "index.ts parses; openTrackedNavigator + disposeTrackedNavigator wired; session_shutdown path clears active detail timer under Pi custom()→done(null); custom() rejection clears dispose slot with no unhandledRejection; no setFooter"
+  }
+]

@@ -1,0 +1,25 @@
+{
+  "results": [
+    {
+      "surface": "sandbox.backend-selection",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --test tests/sandbox_profile.test.mjs",
+      "observed": "Executable, absent, and non-executable bwrap PATH states exercise the real sandbox module without executing the discovered binary."
+    },
+    {
+      "surface": "sandbox.command-wrapper",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --test tests/sandbox_profile.test.mjs && node --experimental-strip-types --check sandbox.ts",
+      "observed": "The real builder emits the canonical workdir, read-only-root, writable /tmp, usable /dev, shared-network wrapper shape and preserves pi argv."
+    },
+    {
+      "surface": "sandbox.spawn-policy",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --test tests/sandbox_profile.test.mjs && node --experimental-strip-types --check index.ts",
+      "observed": "The real detached spawner invokes a failing external bwrap stub and the direct-child marker remains absent; explicit/default/opt-out policy paths are asserted."
+    }
+  ]
+}

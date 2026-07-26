@@ -1,0 +1,24 @@
+# Coverage ownership for issue #13 — TUI subagent widget flicker fix.
+# Surfaces are pure library helpers + the extension widget hot path.
+# Depth floor is unit (no browser route; no external I/O in the pure helpers).
+id: issue-13-widget-flicker
+source: "https://github.com/1aboveio/pi-better-subagents/issues/13"
+ref: "issue:13"
+# criteria path omitted: bug brief ACs live on the GitHub issue; no separate criteria.md.
+surfaces:
+  widget.render:
+    requiredLevels: [unit]
+    # Producer evidence attached; reviewer attestation promotes Unverified → Covered.
+    verified: false
+  widget.clear:
+    requiredLevels: [unit]
+    verified: false
+  widget.dirty-check:
+    requiredLevels: [unit]
+    verified: false
+  widget.geometry:
+    requiredLevels: [unit]
+    verified: false
+  widget.spend-cache:
+    requiredLevels: [unit]
+    verified: false

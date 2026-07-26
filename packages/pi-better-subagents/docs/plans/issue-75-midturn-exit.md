@@ -1,0 +1,11 @@
+# Issue 75: Mid-turn child exits
+
+Implementation Model: openai/gpt-5.6-terra @ high
+
+Public seams: `parseRun`, child-exit finalization, `subagent_result`, completion delivery.
+
+- [done] AC1/AC2: parse terminal/tool-execution coherence and classify exit-0 finalization as non-success. Proof: `tests/parse_run.test.mjs`, `tests/run_finalization.test.mjs` (`node --experimental-strip-types --test tests/parse_run.test.mjs tests/run_finalization.test.mjs tests/incomplete_result.test.mjs tests/callback_completion.test.mjs`: 31 pass).
+- [done] AC3/AC4: render an incomplete-run diagnostic with parsed output plus raw tail, and non-success callback wording. Proof: `tests/incomplete_result.test.mjs`, `tests/callback_completion.test.mjs` (same focused GREEN run).
+- [done] AC5/AC6: preserve coherent completion and existing failed/killed status behavior. Proof: `tests/run_finalization.test.mjs` (focused GREEN), `node --experimental-strip-types --test tests/*.test.mjs` (123 pass).
+- [done] Fix round `complete-stream-coherence`: scan terminal/tool metadata across the complete NDJSON stream while keeping assistant output, usage, displayed tools, and raw tails bounded to the #73 tail paths. The RED regression was `node --experimental-strip-types --test tests/parse_run.test.mjs` on `dc0d7ce`, where an unmatched pre-window start was erased by an in-window terminal event; GREEN is the same command after the chunked coherence scan. Adjacent cells checked: coherent terminal/no-open-tool completion, missing-terminal exit 0, matched id/id-less tools, nonzero exit compatibility, incomplete result diagnostics/callback wording, and #73 sparse oversized logs.
+- [done] Fix-round closeout: focused suite 32 pass; `node --experimental-strip-types --test tests/*.test.mjs` 124 pass; all TypeScript syntax checks pass; `node --experimental-strip-types tests/smoke_midturn_exit.mjs` emits `SMOKE PASS: full-stream coherence rejects a bounded-tail exit-0 run`; scope is `surface-bearing`; checklist validation and lint screens pass; `scan-diff` has an empty blocking findings channel. `coverage-ledger.mjs validate` exits 0 but cannot establish inventory/floors, and `ci-audit.mjs` confirms the pre-existing lack of coverage inventory/floor resolution and CI coverage-gate wiring.

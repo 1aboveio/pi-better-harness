@@ -1,0 +1,16 @@
+# Coverage ownership for issue #39 — platform-neutral sandbox backend selection.
+# These are internal extension-library surfaces; unit tests exercise the real
+# sandbox module and characterize the unchanged spawn-policy wiring.
+id: issue-39-sandbox-backend-selection
+source: "https://github.com/1aboveio/pi-better-subagents/issues/39"
+ref: "issue:39"
+surfaces:
+  sandbox.backend-selection:
+    requiredLevels: [unit]
+    verified: false
+  sandbox.command-wrapper:
+    requiredLevels: [unit]
+    verified: false
+  sandbox.spawn-policy:
+    requiredLevels: [unit]
+    verified: false

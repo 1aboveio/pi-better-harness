@@ -1,0 +1,53 @@
+Attempt: PI_CODING_AGENT_DIR with claimed compaction.reserveTokens=1_000_000,
+keepRecentTokens=200, print-mode `pi -p --mode json` on MiniMax-M3 (~24.6k-token
+prompt; assistant message_end.usage.totalTokens=24605).
+Result: completed normally with agent_end/agent_settled; NO compaction_start /
+compaction_end in the print stream (see skeleton).
+
+Cause of missing auto-compact events: UNVERIFIED (do not treat as settled).
+
+Arithmetic against the *claimed* settings contradicts the earlier "threshold
+impractical" story:
+  contextWindow (RPC get_state on same model family) = 512000
+  claimed reserveTokens = 1000000
+  threshold headroom = contextWindow - reserveTokens = -488000
+  installed shouldCompact(contextTokens, contextWindow, settings) is
+    settings.enabled && contextTokens > contextWindow - settings.reserveTokens
+  => shouldCompact(24605, 512000, {enabled:true, reserveTokens:1000000}) === true
+So absence of compaction_* CANNOT be attributed to "failed to cross threshold"
+under those claimed numbers.
+
+What was NOT captured for this print run (limitation of this discovery pass):
+  - effective settings actually loaded from PI_CODING_AGENT_DIR (no dump of
+    settingsManager.getCompactionSettings() / settings.json contents retained)
+  - whether autoCompactionEnabled was true at runtime
+  - prepareCompaction / findCutPoint outcome (firstKeptEntryId, messagesToSummarize)
+  - pi-coding-agent version used for the capture
+
+Plausible causes still open (any one would explain the log; none proven):
+  1. Claimed settings never became effective → default reserveTokens=16384 remains;
+     then shouldCompact(24605, 512000, default) === false (true "below threshold").
+  2. Settings were effective and shouldCompact was true, but the auto path's
+     prepareCompaction returned undefined ("session too small" / nothing to
+     summarize). In installed pi-coding-agent 0.82.0, _runAutoCompaction then
+     returns false WITHOUT emitting compaction_start/end (silent no-op). Manual
+     compact throws the same condition *after* emitting the envelope — which is
+     exactly what fixtures/compaction-rpc-manual.ndjson shows.
+  3. Other early returns in _runAutoCompaction (no model / auth) before emit.
+
+Code-path evidence (offline, not from the original print process):
+  - shouldCompact / DEFAULT_COMPACTION_SETTINGS:
+      @earendil-works/pi-coding-agent dist/core/compaction/compaction.js
+  - silent prepareCompaction miss (no events):
+      agent-session.js _runAutoCompaction: if (!preparation) return false;
+      (before compaction_start emit)
+  - empty-summary guard (0.82.0): prepareCompaction returns undefined when
+      messagesToSummarize.length === 0 && turnPrefixMessages.length === 0
+  - manual path always emits start then errors:
+      agent-session.js compact() emits compaction_start then throws
+      "Nothing to compact (session too small)"
+
+See also:
+  redacted/compaction-attempt-large-prompt.skeleton.ndjson
+  fixtures/compaction-rpc-manual.ndjson
+  docs/evidence/issue-64/NOTES.md § Compaction

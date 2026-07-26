@@ -1,0 +1,17 @@
+# Coverage ownership for issue #63 — process identity + orphaned/lost reconciliation.
+# Surfaces are the pure health-reconciliation seam (injectable ProcessProbe;
+# tests fake the OS) and the registry's durable process-identity metadata.
+# Depth floor is unit (no browser route; real-OS exercise lives in the
+# runtime smoke tests/smoke_health_reconcile.mjs).
+id: issue-63-process-identity-reconcile
+source: "https://github.com/1aboveio/pi-better-subagents/issues/63"
+ref: "issue:63"
+surfaces:
+  registry.process-identity:
+    requiredLevels: [unit]
+    # Producer evidence attached (tests + runtime smoke); reviewer attestation
+    # promotes Unverified → Covered.
+    verified: false
+  health.reconcile:
+    requiredLevels: [unit]
+    verified: false

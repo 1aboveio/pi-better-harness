@@ -1,0 +1,26 @@
+# Coverage ownership for issue #44 — durable navigator visibility + shared stop.
+# Surfaces are pure registry helpers + the shared stop path (library seams; the
+# TUI navigator that consumes them is #45–#48). Depth floor is unit (no browser
+# route; the only external I/O is a real detached `sleep` process in stop tests).
+id: issue-44-navigator-visibility-stop
+source: "https://github.com/1aboveio/pi-better-subagents/issues/44"
+ref: "issue:44"
+# criteria path omitted: ACs live on the GitHub issue; no separate criteria.md.
+surfaces:
+  registry.dismissal:
+    requiredLevels: [unit]
+    # Producer evidence attached; reviewer attestation promotes Unverified → Covered.
+    verified: false
+  registry.navigator-visibility:
+    requiredLevels: [unit]
+    verified: false
+  stop.shared:
+    requiredLevels: [unit]
+    verified: false
+  # The registered model-facing tool handlers (subagent_list / _output /
+  # _result / _stop) exactly as index.ts passes them to pi.registerTool —
+  # extracted to tools.ts so tests invoke the same execute functions the
+  # model reaches. Includes a mutation member (subagent_stop).
+  tools.model-facing:
+    requiredLevels: [unit]
+    verified: false

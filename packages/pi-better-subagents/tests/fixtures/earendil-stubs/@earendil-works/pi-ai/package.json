@@ -1,0 +1,8 @@
+{
+  "name": "@earendil-works/pi-ai",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  }
+}

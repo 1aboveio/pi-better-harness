@@ -1,0 +1,111 @@
+# Mergify — two-step merge queue (review-gated auto-enqueue).
+#
+# Step 1 (queue entry):  check-success = ci            — every PR
+# Step 2 (merge gate):   check-success = integration   — merge-queue branches only
+#
+# Enqueue: automatic after CI + review pass, or manually with
+# `@mergifyio queue` (or the queue checkbox).
+#
+# Docs: https://docs.mergify.com/merge-queue/two-step/
+# Validate:  mergify config validate
+# Simulate:  mergify config simulate https://github.com/1aboveio/pi-better-subagents/pull/<n>
+
+shared:
+  # PR gate — light checks from .github/workflows/ci.yml (job name: ci).
+  # Defined once; asserted as queue entry + merge-protection check-run.
+  gate: &gate check-success = ci
+
+  # Queue gate — integration tests from .github/workflows/integration-tests.yml
+  # (job name: integration). Runs only on mergify/merge-queue/* branches, so it
+  # is absent on ordinary PRs and must NOT be in queue_conditions.
+  queue_gate: &queue_gate check-success = integration
+
+queue_rules:
+  - name: default
+    # Mergify Merge Protections is a required ruleset check that fails pre-queue;
+    # inject GitHub requirements only at merge time so enqueue is not deadlocked.
+    branch_protection_injection_mode: merge
+
+    # Step 1: enter the queue after the cheap PR gate is green.
+    # `-draft` deliberately absent — see mergify skill docs.
+    queue_conditions:
+      - base = main
+      - *gate
+
+    # Step 2: merge only after the batch's integration suite is green.
+    # Not redundant with step 1: Mergify re-tests against base+batch.
+    merge_conditions:
+      - *gate
+      - *queue_gate
+
+    # Batch mode: 3 PRs → one integration run. REQUIRED GitHub setting:
+    # "Require branches to be up to date before merging" must be DISABLED.
+    batch_size: 3
+    batch_max_wait_time: 30 seconds
+    batch_max_failure_resolution_attempts: 10
+
+    # Inert under batch_size > 1 (queue branch is always fresh); kept so
+    # dropping to batch_size 1 does not silently change update behaviour.
+    update_method: rebase
+
+    merge_method: merge
+
+merge_queue:
+  max_parallel_checks: 3
+
+merge_protections_settings:
+  reporting_method: check-runs
+  post_comment: true
+  # Auto-enqueue only ready, reviewed PRs with no open change request.
+  # Manual `@mergifyio queue` remains available for write collaborators.
+  auto_merge_conditions:
+    - base = main
+    - "-draft"
+    - "#approved-reviews-by >= 1"
+    - "#changes-requested-reviews-by = 0"
+    - *gate
+
+merge_protections:
+  # Republish the PR gate as a stable Mergify check-run for the ruleset.
+  # Do NOT put the queue-only integration check here — it is absent on
+  # ordinary PRs and would strand every PR before enqueue.
+  - name: CI before merge
+    description: >-
+      Preliminary CI gate. Green when the `ci` check succeeded.
+    if:
+      - base = main
+    success_conditions:
+      - *gate
+
+# Escape hatch 1: jump the line, keep both gates.
+priority_rules:
+  - name: urgent — front of the queue
+    conditions:
+      - label = urgent
+    priority: high
+    # Mergify flipped this default true -> false on 2026-07-01. Set explicitly:
+    # an urgent PR cancels the in-flight checks of the batch it jumps ahead of,
+    # rather than waiting for that batch's `integration` run to finish.
+    allow_checks_interruption: true
+
+# Escape hatch 2: skip queue integration, but retain preliminary CI.
+pull_request_rules:
+  - name: emergency merge — skips queue integration, retains preliminary CI
+    conditions:
+      - base = main
+      - label = emergency-merge
+      - -draft
+      - *gate
+    actions:
+      merge:
+        method: merge
+      comment:
+        message: >-
+          Merged via the `emergency-merge` label — this bypassed the merge queue
+          integration run after preliminary CI passed. Please confirm the branch
+          is healthy.
+
+commands_restrictions:
+  queue:
+    conditions:
+      - sender-permission >= write

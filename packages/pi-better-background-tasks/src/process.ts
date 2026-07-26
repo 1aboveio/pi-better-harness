@@ -1,0 +1,97 @@
+import { spawn } from "node:child_process";
+import { appendFileSync, closeSync, mkdirSync, openSync, writeSync } from "node:fs";
+import { dirname } from "node:path";
+import type { ChildProcess } from "node:child_process";
+import type { CommandResult, CommandSpec } from "./types.js";
+
+export interface SpawnedProcess {
+  child: ChildProcess;
+  pgid?: number;
+}
+
+export function validateCommandSpec(spec: CommandSpec): void {
+  if (spec.shell === false) {
+    if (!spec.argv || spec.argv.length === 0 || !spec.argv[0]) {
+      throw new Error("argv with at least one element is required when shell:false");
+    }
+    return;
+  }
+  if (!spec.command || spec.command.trim().length === 0) {
+    throw new Error("command is required unless shell:false with argv is provided");
+  }
+}
+
+export function spawnCommand(spec: CommandSpec, logPath: string, detached: boolean): SpawnedProcess {
+  validateCommandSpec(spec);
+  mkdirSync(dirname(logPath), { recursive: true });
+  const fd = openSync(logPath, "a");
+  const child = spawnArgs(spec, detached, ["ignore", fd, fd]);
+  writeSync(fd, `\n--- spawn ${new Date().toISOString()} pid=${child.pid ?? "unknown"} ---\n`);
+  closeSync(fd);
+  child.on("close", (code, signal) => {
+    appendFileSync(logPath, `\n--- exit ${new Date().toISOString()} code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+  });
+  return { child, pgid: detached && child.pid ? child.pid : undefined };
+}
+
+export function runCommandOnce(spec: CommandSpec, maxBufferBytes = 1024 * 1024): Promise<CommandResult> {
+  validateCommandSpec(spec);
+  const startedAt = Date.now();
+  const child = spawnArgs(spec, false, ["ignore", "pipe", "pipe"]);
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    if (Buffer.byteLength(stdout) < maxBufferBytes) stdout += chunk.toString("utf8");
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    if (Buffer.byteLength(stderr) < maxBufferBytes) stderr += chunk.toString("utf8");
+  });
+  return new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (exitCode, signal) => {
+      resolve({ exitCode, signal, stdout, stderr, startedAt, endedAt: Date.now() });
+    });
+  });
+}
+
+export function stopProcessGroup(pid: number, pgid?: number): void {
+  const target = pgid ?? pid;
+  try {
+    process.kill(-target, "SIGTERM");
+    return;
+  } catch {
+    process.kill(pid, "SIGTERM");
+  }
+}
+
+export function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function spawnArgs(
+  spec: CommandSpec,
+  detached: boolean,
+  stdio: ["ignore", "pipe" | number, "pipe" | number],
+): ChildProcess {
+  const env = { ...process.env, ...spec.env };
+  if (spec.shell === false) {
+    const [command, ...args] = spec.argv!;
+    return spawn(command!, args, {
+      cwd: spec.cwd,
+      env,
+      detached,
+      stdio,
+    });
+  }
+  return spawn(process.env.SHELL || "/bin/bash", ["-lc", spec.command!], {
+    cwd: spec.cwd,
+    env,
+    detached,
+    stdio,
+  });
+}

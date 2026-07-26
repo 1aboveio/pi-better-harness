@@ -1,0 +1,9 @@
+[
+  {
+    "surface": "navigator.close",
+    "kind": "library",
+    "status": "pass",
+    "command": "node docs/tests/issue-47-runtime-smoke.mjs",
+    "observed": "real registry+stopRun/dismissRun: running→killed+dismissed (pg gone); terminal dismiss preserves status; finish-during→exited dismiss no kill rewrite; overlay two-press within 3s dismisses+hides; expiry/dispose disarm non-mutating; footer confirm coexists with count; tools list/output/result still resolve dismissed; TUI guard; index.ts imports stopRun + strip-types check; registered extension-path second-x suite green"
+  }
+]

@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "surface": "subagent.run-finalization",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "SMOKE PASS: finalizeRun persisted failed/incomplete_no_terminal_event and emitted ATTENTION callback"
+    },
+    {
+      "surface": "subagent.result",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "buildSubagentResultText includes lifecycle incomplete_no_terminal_event and does not present bare progress as the final answer"
+    },
+    {
+      "surface": "subagent.run-log-parser",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "real parseRunForLifecycle inside finalizeRun exposed unmatched bash tool start and sawEnd=false for the mid-turn log; full-stream grammar-validating scan owns top-level lifecycle fields only after complete JSON grammar validity and fails closed on unfinished/malformed records (trailing commas, invalid primitives/escapes, mismatched delimiters, duplicate semantic lifecycle keys incl. escaped equivalents) without retaining payloads"
+    },
+    {
+      "surface": "subagent.completion-callback",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "finalizeRun callback content uses ATTENTION wording and lifecycle incomplete_no_terminal_event"
+    }
+  ],
+  "limitations": [
+    {
+      "surface": "index.ts host package import",
+      "status": "accepted",
+      "reason": "Directly importing index.ts still requires @earendil-works/pi-ai; durable finalize/result authority is exercised via finalization.ts (the extracted first-party path index.ts delegates to)."
+    }
+  ],
+  "round3": {
+    "notes": "Large newline-free lifecycle scan proven by unit/integration tests (tight-heap child --max-old-space-size=16 for 8 MiB record; finalizeRun large agent_end complete; capped unknown fail-closed)."
+  },
+  "round4": {
+    "notes": "Structural lifecycle scanner authority: truncated early-type EOF and nested-type ordering fail closed via finalizeRun/buildSubagentResultText regressions; valid oversized top-level late-type remains complete; tight-heap large nl-free scan preserved."
+  },
+  "round5": {
+    "notes": "Complete JSON grammar authority: oversized trailing-comma agent_end and malformed tool_execution_end fail closed in scanner + finalize/result integration; valid oversized lifecycle events still complete; duplicate semantic lifecycle keys (incl. escaped equivalents) fail closed and cannot balance open tools."
+  },
+  "notes": "Complete JSON grammar authority + fail-closed duplicate semantic lifecycle keys: oversized trailing-comma agent_end and malformed tool_execution_end fail closed; duplicate toolCallId (incl. escaped equivalents) cannot balance open tools into clean completion; valid oversized lifecycle events still complete. headSha=7ef86cf496ef4a39653e85f4248e945a4e819391",
+  "headSha": "7ef86cf496ef4a39653e85f4248e945a4e819391",
+  "mergeBase": "6a8765291961c94b28bf3651808de49a6722edc1",
+  "recordedAt": "2026-07-26T02:09:47.471173Z"
+}

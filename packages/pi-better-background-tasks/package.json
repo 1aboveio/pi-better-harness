@@ -1,0 +1,39 @@
+{
+  "name": "pi-better-background-tasks",
+  "version": "0.1.0",
+  "description": "Generic durable background task and watcher tools for pi.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "background-tasks"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run src/conditions.test.ts src/runtime.test.ts",
+    "test:e2e": "vitest run src/e2e.test.ts",
+    "test:golden": "vitest run src/golden-path.test.ts",
+    "test:integration": "npm run test:e2e && npm run test:golden"
+  },
+  "files": [
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "typebox": "^1.1.38"
+  }
+}

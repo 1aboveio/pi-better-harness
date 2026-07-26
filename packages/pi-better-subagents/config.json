@@ -1,0 +1,14 @@
+{
+  "defaultModel": null,
+  "defaultTools": "read, bash, edit, write, web_search, web_fetch",
+  "maxConcurrent": 4,
+
+  "toolExtensions": {
+    "web_search": "npm:@juicesharp/rpiv-web-tools",
+    "web_fetch": "npm:@juicesharp/rpiv-web-tools"
+  },
+
+  "providerExtensions": {},
+
+  "inheritExtensions": false
+}

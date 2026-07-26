@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+*.log
+*.tgz
+dist/
+coverage/
+
+# pi local state
+.pi/

@@ -1,0 +1,46 @@
+{
+  "name": "pi-better-harness",
+  "version": "0.1.0",
+  "description": "Monorepo harness for Pi extension packages.",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "monorepo"
+  ],
+  "pi": {
+    "extensions": [
+      "./packages/pi-better-subagents/index.ts",
+      "./packages/pi-better-background-tasks/src/index.ts",
+      "./packages/pi-goal/src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "verify": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.82.0",
+    "@earendil-works/pi-coding-agent": "^0.82.0",
+    "@earendil-works/pi-tui": "^0.82.0",
+    "@types/node": "^25.0.0",
+    "tsx": "^4.22.3",
+    "typebox": "^1.1.39",
+    "typescript": "^6.0.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

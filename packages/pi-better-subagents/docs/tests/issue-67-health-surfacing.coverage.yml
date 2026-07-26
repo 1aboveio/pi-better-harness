@@ -1,0 +1,19 @@
+# Coverage ownership for issue #67 — surface health in tools + passive UI.
+# Surfaces: list/output/result health diagnostics and passive widget health suffix.
+# Depth floor is unit (no browser route). Runtime smoke: tests/smoke_health_surfacing.mjs.
+id: issue-67-health-surfacing
+source: "https://github.com/1aboveio/pi-better-subagents/issues/67"
+ref: "issue:67"
+surfaces:
+  subagent.list-health:
+    requiredLevels: [unit]
+    verified: false
+  subagent.output-health:
+    requiredLevels: [unit]
+    verified: false
+  widget.health:
+    requiredLevels: [unit]
+    verified: false
+  subagent.health-notify:
+    requiredLevels: [unit]
+    verified: false

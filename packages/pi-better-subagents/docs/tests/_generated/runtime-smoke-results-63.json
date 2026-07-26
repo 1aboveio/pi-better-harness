@@ -1,0 +1,38 @@
+{
+  "surface": "health.reconcile",
+  "command": "node tests/smoke_health_reconcile.mjs",
+  "ranAt": "2026-07-25T18:47:27.733Z",
+  "status": "pass",
+  "steps": [
+    {
+      "name": "capture process identity for a live child",
+      "status": "pass",
+      "detail": "pgid=unavailable startToken=unavailable"
+    },
+    {
+      "name": "supervised child stays running",
+      "status": "pass",
+      "detail": "reason=supervised"
+    },
+    {
+      "name": "child group-member readiness",
+      "status": "pass",
+      "detail": "memberPid=38903"
+    },
+    {
+      "name": "leader gone + group member alive → orphaned",
+      "status": "pass",
+      "detail": "reason=orphaned-group-alive; leaderExit=null"
+    },
+    {
+      "name": "orphaned is durable while process-group evidence remains",
+      "status": "pass",
+      "detail": "reason=orphaned-kept"
+    },
+    {
+      "name": "no process-group evidence → lost",
+      "status": "pass",
+      "detail": "reason=lost-no-evidence; groupAlive=false; polls=1"
+    }
+  ]
+}

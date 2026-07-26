@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+*.log
+
+# pi local state (should never be committed)
+.pi/

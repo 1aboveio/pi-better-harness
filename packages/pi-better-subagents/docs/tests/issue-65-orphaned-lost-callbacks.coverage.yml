@@ -1,0 +1,14 @@
+# Coverage ownership for issue #65 — orphaned/lost callbacks + diagnostic results.
+# Surfaces: coordinator health-callback delivery (formatters + health-tick wiring)
+# and strengthened subagent_result diagnostics for orphaned/lost. Depth floor is
+# unit (no browser route). Runtime smoke: tests/smoke_health_callback.mjs.
+id: issue-65-orphaned-lost-callbacks
+source: "https://github.com/1aboveio/pi-better-subagents/issues/65"
+ref: "issue:65"
+surfaces:
+  subagent.health-callback:
+    requiredLevels: [unit]
+    verified: false
+  subagent.result:
+    requiredLevels: [unit]
+    verified: false

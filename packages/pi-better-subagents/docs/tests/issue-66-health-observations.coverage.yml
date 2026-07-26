@@ -1,0 +1,13 @@
+# Coverage ownership for issue #66 — multi-dimensional health observations.
+# Surfaces are the pure observation seam and child-event fact extraction.
+# Depth floor is unit (no browser route; fakes are in-memory events / thresholds).
+id: issue-66-health-observations
+source: "https://github.com/1aboveio/pi-better-subagents/issues/66"
+ref: "issue:66"
+surfaces:
+  health.observation:
+    requiredLevels: [unit]
+    verified: false
+  health.event-facts:
+    requiredLevels: [unit]
+    verified: false

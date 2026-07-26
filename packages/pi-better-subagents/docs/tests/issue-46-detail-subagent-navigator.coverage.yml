@@ -1,0 +1,20 @@
+# Coverage ownership for issue #46 — live detail view navigation in the
+# subagent navigator. Surface is a pure TUI seam in navigator.mjs plus thin
+# index.ts wiring (getDetail/getRows injection, dispose on session_shutdown).
+# Depth floor is unit: no browser route, no external I/O beyond the real
+# tmpdir registry + log parse; pi-tui functions and timers are external
+# boundaries injected by index.ts and faked in tests (per the #43 testing
+# decisions: pure state seam + thin wiring seam with fake Pi UI/editor/timer
+# objects).
+id: issue-46-detail-subagent-navigator
+source: "https://github.com/1aboveio/pi-better-subagents/issues/46"
+ref: "issue:46"
+# criteria path omitted: ACs live on the GitHub issue; no separate criteria.md.
+surfaces:
+  navigator.detail:
+    # mutation: enters/leaves detail mode, starts/stops a refresh interval,
+    # reloads live run snapshots, and closes the overlay from detail.
+    # Never mutates run state in #46 (close/dismiss is #47).
+    requiredLevels: [unit]
+    # Producer evidence attached; reviewer attestation promotes Unverified → Covered.
+    verified: false

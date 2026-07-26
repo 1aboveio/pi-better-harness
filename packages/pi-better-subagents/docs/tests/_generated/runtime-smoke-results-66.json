@@ -1,0 +1,17 @@
+{
+  "generatedAt": "2026-07-26T05:48:44.191Z",
+  "results": [
+    {
+      "surface": "health.observation",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_health_observation.mjs",
+      "detail": "meaningfulAt=1784996704151; activity=stale; openTool=bash; orphanedLiveness=orphaned"
+    },
+    {
+      "surface": "health.event-facts",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_health_observation.mjs",
+      "detail": "meaningfulAt=1784996704151; activity=stale; openTool=bash; orphanedLiveness=orphaned"
+    }
+  ]
+}

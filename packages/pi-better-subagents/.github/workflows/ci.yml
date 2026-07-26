@@ -1,0 +1,56 @@
+name: CI
+
+# Step 1 of the two-step merge queue: fast preliminary checks on every PR.
+# Must pass before a PR can be enqueued (`queue_conditions` in .mergify.yml).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    name: ci
+    runs-on: [self-hosted, Linux, X64, docker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Lightweight only — real model/integration tests run in the queue gate
+      # (integration-tests.yml on mergify/merge-queue/* branches).
+      - name: Verify source files parse
+        run: |
+          set -euo pipefail
+          for f in *.ts; do
+            # Node 22 can type-strip .ts; fall back to a plain read if unavailable.
+            node --experimental-strip-types --check "$f" 2>/dev/null \
+              || node -e "require('fs').readFileSync(process.argv[1],'utf8')" "$f"
+            echo "ok  $f"
+          done
+
+      - name: Unit tests
+        run: node --test tests/*.test.mjs
+
+  macos-sandbox:
+    name: macos-sandbox
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Preserve the existing deterministic sandbox-exec assertions in the
+      # per-PR gate while the real-child queue lane runs on Ubuntu.
+      - name: Run macOS sandbox-exec confinement checks
+        run: |
+          set -euo pipefail
+          bash tests/test_sandbox_applied.sh
+          bash tests/test_sandbox_deny_outside.sh
+          bash tests/test_sandbox_wrapper_argv.sh
+          node --test tests/sandbox_profile.test.mjs

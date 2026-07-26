@@ -1,0 +1,13 @@
+# Coverage ownership for issue #69 — TUI navigator + detail health display.
+# Surfaces: navigator list row health/order/color and detail health sections.
+# Depth floor is unit (no browser route). Runtime smoke: tests/smoke_navigator_health.mjs.
+id: issue-69-tui-health
+source: "https://github.com/1aboveio/pi-better-subagents/issues/69"
+ref: "issue:69"
+surfaces:
+  navigator.health:
+    requiredLevels: [unit]
+    verified: false
+  navigator.detail-health:
+    requiredLevels: [unit]
+    verified: false

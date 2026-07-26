@@ -1,0 +1,73 @@
+{
+  "issue": 67,
+  "headSha": null,
+  "generatedAt": "2026-07-26T06:18:18.311Z",
+  "surfaces": [
+    {
+      "id": "subagent.list-health",
+      "status": "pass"
+    },
+    {
+      "id": "subagent.output-health",
+      "status": "pass"
+    },
+    {
+      "id": "widget.health",
+      "status": "pass"
+    },
+    {
+      "id": "subagent.health-notify",
+      "status": "pass",
+      "note": "wiring pin + #65 extension notify"
+    }
+  ],
+  "steps": [
+    {
+      "name": "list statuses include orphaned/lost",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "healthy not actionable",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "stale actionable",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "orphaned diagnostic",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "widget healthy silent",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "widget stale suffix",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "list shows orphaned status",
+      "status": "pass",
+      "detail": "\u2022 sa_orph  [orphaned]  xai/grok  1m 00s"
+    },
+    {
+      "name": "list shows stale only on degraded",
+      "status": "pass",
+      "detail": "\u2022 sa_ok  [running]  xai/grok  1m 00s | \u2022 sa_bad  [running]  xai/grok  1m 00s \u00b7 stale"
+    },
+    {
+      "name": "widget paints degraded suffix",
+      "status": "pass",
+      "detail": "  \u280b bad \u00b7 grok  1m 00s   \u00b7 stale"
+    }
+  ],
+  "pass": true,
+  "note": "headSha stamped in PR body / final HEAD after stack push"
+}

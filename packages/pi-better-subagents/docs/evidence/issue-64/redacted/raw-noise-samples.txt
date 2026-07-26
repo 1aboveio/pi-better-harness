@@ -1,0 +1,5 @@
+normal-model-response.log:1: Warning: No project session found with id 'disc64_normal_64519'; creating a new session with that id.
+model-error-bad-model.log:1: Warning: No project session found with id 'disc64_badmodel_69693'; creating a new session with that id.
+model-error-bad-model.log:2: Warning: Model "definitely-not-a-real-model-xyz" not found for provider "xai". Using custom model id.
+model-error-network.log:1: Warning: No project session found with id 'disc64_neterr_69693'; creating a new session with that id.
+tool-start-end.log:1: Warning: No project session found with id 'disc64_tools_66934'; creating a new session with that id.

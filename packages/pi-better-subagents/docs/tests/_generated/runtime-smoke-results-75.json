@@ -1,0 +1,18 @@
+{
+  "results": [
+    {
+      "surface": "subagent.run-finalization",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types tests/smoke_midturn_exit.mjs",
+      "observed": "SMOKE PASS: full-stream coherence rejects a bounded-tail exit-0 run"
+    }
+  ],
+  "limitations": [
+    {
+      "surface": "subagent_result registration",
+      "status": "blocked",
+      "reason": "Directly importing index.ts in this worktree fails because @earendil-works/pi-ai is not installed; index wiring is statically asserted by tests/incomplete_result.test.mjs and the repository unit suite passes."
+    }
+  ]
+}

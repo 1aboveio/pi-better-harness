@@ -1,0 +1,97 @@
+{
+  "issue": 68,
+  "generatedAt": "2026-07-26T08:15:22.727Z",
+  "headSha": "4cf18c7df009bf0e56503a17b7159f2900962ce4",
+  "surfaces": [
+    {
+      "id": "stop.orphaned-cleanup",
+      "status": "pass"
+    },
+    {
+      "id": "navigator.close",
+      "status": "pass"
+    }
+  ],
+  "steps": [
+    {
+      "name": "orphaned PG stop action",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "orphaned PG killed status",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "orphaned PG process gone",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "terminal evidence action",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "terminal evidence status",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "lost cleanup action",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "lost cleanup status",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "running stop action",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "running killed",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "running process gone",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "close hint stop wording",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "close action",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "close dismissed after terminal",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "tool resolved lost",
+      "status": "pass",
+      "detail": ""
+    },
+    {
+      "name": "stop.ts strip-types check",
+      "status": "pass",
+      "detail": ""
+    }
+  ],
+  "summary": {
+    "total": 15,
+    "pass": 15,
+    "fail": 0
+  }
+}

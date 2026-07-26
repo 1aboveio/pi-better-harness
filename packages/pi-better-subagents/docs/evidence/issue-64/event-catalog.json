@@ -1,0 +1,643 @@
+{
+  "normal-model-response": {
+    "source": "docs/evidence/issue-64/raw/normal-model-response.log",
+    "event_counts": {
+      "session": 1,
+      "agent_start": 1,
+      "turn_start": 1,
+      "message_start": 2,
+      "message_end": 2,
+      "message_update": 9,
+      "turn_end": 1,
+      "agent_end": 1,
+      "agent_settled": 1
+    },
+    "raw_noise_count": 1,
+    "bad_json_count": 0,
+    "raw_noise_samples": [
+      {
+        "line": 1,
+        "text": "Warning: No project session found with id 'disc64_normal_64519'; creating a new session with that id."
+      }
+    ]
+  },
+  "tool-start-end": {
+    "source": "docs/evidence/issue-64/raw/tool-start-end.log",
+    "event_counts": {
+      "session": 1,
+      "agent_start": 1,
+      "turn_start": 2,
+      "message_start": 4,
+      "message_end": 4,
+      "message_update": 19,
+      "tool_execution_start": 1,
+      "tool_execution_update": 2,
+      "tool_execution_end": 1,
+      "turn_end": 2,
+      "agent_end": 1,
+      "agent_settled": 1
+    },
+    "raw_noise_count": 1,
+    "tool_events": [
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "call_<redacted>",
+        "toolName": "bash",
+        "args": {
+          "command": "echo TOOL_OK"
+        }
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "call_<redacted>",
+        "toolName": "bash",
+        "args": {
+          "command": "echo TOOL_OK"
+        },
+        "partialResult": {
+          "content": []
+        }
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "call_<redacted>",
+        "toolName": "bash",
+        "args": {
+          "command": "echo TOOL_OK"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "TOOL_OK\n"
+            }
+          ],
+          "details": {}
+        }
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "call_<redacted>",
+        "toolName": "bash",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "TOOL_OK\n"
+            }
+          ]
+        },
+        "isError": false
+      }
+    ]
+  },
+  "usage-cost-events": {
+    "source": "docs/evidence/issue-64/raw/usage-cost-events.log",
+    "assistant_usage_samples": [
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "usage": {
+            "input": 14187,
+            "output": 62,
+            "cacheRead": 128,
+            "cacheWrite": 0,
+            "totalTokens": 14377,
+            "cost": {
+              "input": 0.0085122,
+              "output": 0.00014879999999999998,
+              "cacheRead": 1.536e-05,
+              "cacheWrite": 0,
+              "total": 0.00867636
+            },
+            "cacheWrite1h": 0
+          },
+          "stopReason": "toolUse"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "usage": {
+            "input": 60,
+            "output": 29,
+            "cacheRead": 14336,
+            "cacheWrite": 0,
+            "totalTokens": 14425,
+            "cost": {
+              "input": 3.6e-05,
+              "output": 6.96e-05,
+              "cacheRead": 0.0017203199999999998,
+              "cacheWrite": 0,
+              "total": 0.0018259199999999998
+            },
+            "cacheWrite1h": 0
+          },
+          "stopReason": "stop"
+        }
+      }
+    ]
+  },
+  "model-error-bad-model": {
+    "source": "docs/evidence/issue-64/raw/model-error-bad-model.log",
+    "event_counts": {
+      "session": 1,
+      "agent_start": 4,
+      "turn_start": 4,
+      "message_start": 5,
+      "message_end": 5,
+      "turn_end": 4,
+      "agent_end": 4,
+      "auto_retry_start": 3,
+      "auto_retry_end": 1,
+      "agent_settled": 1
+    },
+    "raw_noise_samples": [
+      {
+        "line": 1,
+        "text": "Warning: No project session found with id 'disc64_badmodel_69693'; creating a new session with that id."
+      },
+      {
+        "line": 2,
+        "text": "Warning: Model \"definitely-not-a-real-model-xyz\" not found for provider \"xai\". Using custom model id."
+      }
+    ],
+    "interesting": [
+      {
+        "type": "message_start",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-completions",
+          "provider": "xai",
+          "model": "definitely-not-a-real-model-xyz",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996728512,
+          "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-completions",
+          "provider": "xai",
+          "model": "definitely-not-a-real-model-xyz",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996728512,
+          "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+        }
+      },
+      {
+        "type": "auto_retry_start",
+        "attempt": 1,
+        "maxAttempts": 3,
+        "delayMs": 2000,
+        "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+      },
+      {
+        "type": "message_start",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-completions",
+          "provider": "xai",
+          "model": "definitely-not-a-real-model-xyz",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996731427,
+          "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-completions",
+          "provider": "xai",
+          "model": "definitely-not-a-real-model-xyz",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996731427,
+          "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+        }
+      },
+      {
+        "type": "auto_retry_start",
+        "attempt": 2,
+        "maxAttempts": 3,
+        "delayMs": 4000,
+        "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+      },
+      {
+        "type": "message_start",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-completions",
+          "provider": "xai",
+          "model": "definitely-not-a-real-model-xyz",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996736654,
+          "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-completions",
+          "provider": "xai",
+          "model": "definitely-not-a-real-model-xyz",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996736654,
+          "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+        }
+      },
+      {
+        "type": "auto_retry_start",
+        "attempt": 3,
+        "maxAttempts": 3,
+        "delayMs": 8000,
+        "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+      },
+      {
+        "type": "message_start",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-completions",
+          "provider": "xai",
+          "model": "definitely-not-a-real-model-xyz",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996745647,
+          "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-completions",
+          "provider": "xai",
+          "model": "definitely-not-a-real-model-xyz",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996745647,
+          "errorMessage": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+        }
+      },
+      {
+        "type": "auto_retry_end",
+        "success": false,
+        "attempt": 3,
+        "finalError": "503: {\"message\":\"Service temporarily unavailable\",\"type\":\"api_error\"}"
+      }
+    ]
+  },
+  "model-error-network": {
+    "source": "docs/evidence/issue-64/raw/model-error-network.log",
+    "event_counts": {
+      "session": 1,
+      "agent_start": 1,
+      "turn_start": 1,
+      "message_start": 2,
+      "message_end": 2,
+      "turn_end": 1,
+      "agent_end": 1,
+      "agent_settled": 1
+    },
+    "raw_noise_samples": [
+      {
+        "line": 1,
+        "text": "Warning: No project session found with id 'disc64_neterr_69693'; creating a new session with that id."
+      }
+    ],
+    "interesting": [
+      {
+        "type": "message_start",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-responses",
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996747003,
+          "errorMessage": "OpenAI API error (401): 401 status code (no body)"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "openai-responses",
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "timestamp": 1784996747003,
+          "errorMessage": "OpenAI API error (401): 401 status code (no body)"
+        }
+      }
+    ]
+  },
+  "compaction-rpc-manual": {
+    "source": "docs/evidence/issue-64/raw/compaction-rpc-manual.log",
+    "note": "RPC manual compact against a seeded session; emitted explicit compaction_start/end even though compaction failed (session too small for cut-point).",
+    "events": [
+      {
+        "type": "response",
+        "command": "get_state",
+        "success": true,
+        "data": {
+          "model": {
+            "id": "MiniMax-\u2026",
+            "name": "MiniMax-M3",
+            "api": "anthropic-messages",
+            "provider": "minimax-cn",
+            "baseUrl": "https://api.minimaxi.com/anthropic",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0.6,
+              "output": 2.4,
+              "cacheRead": 0.12,
+              "cacheWrite": 0
+            },
+            "contextWindow": 512000,
+            "maxTokens": 128000
+          },
+          "thinkingLevel": "medium",
+          "isStreaming": false,
+          "isCompacting": false,
+          "steeringMode": "one-at-a-time",
+          "followUpMode": "one-at-a-time",
+          "sessionFile": "<path>",
+          "sessionId": "<session>",
+          "autoCompactionEnabled": true,
+          "messageCount": 2,
+          "pendingMessageCount": 0
+        }
+      },
+      {
+        "type": "compaction_start",
+        "reason": "manual"
+      },
+      {
+        "type": "compaction_end",
+        "reason": "manual",
+        "aborted": false,
+        "willRetry": false,
+        "errorMessage": "Compaction failed: Nothing to compact (session too small)"
+      },
+      {
+        "type": "response",
+        "command": "compact",
+        "success": false,
+        "error": "Nothing to compact (session too small)"
+      },
+      {
+        "type": "response",
+        "command": "get_state",
+        "success": true,
+        "data": {
+          "model": {
+            "id": "MiniMax-\u2026",
+            "name": "MiniMax-M3",
+            "api": "anthropic-messages",
+            "provider": "minimax-cn",
+            "baseUrl": "https://api.minimaxi.com/anthropic",
+            "reasoning": true,
+            "input": [
+              "text",
+              "image"
+            ],
+            "cost": {
+              "input": 0.6,
+              "output": 2.4,
+              "cacheRead": 0.12,
+              "cacheWrite": 0
+            },
+            "contextWindow": 512000,
+            "maxTokens": 128000
+          },
+          "thinkingLevel": "medium",
+          "isStreaming": false,
+          "isCompacting": false,
+          "steeringMode": "one-at-a-time",
+          "followUpMode": "one-at-a-time",
+          "sessionFile": "<path>",
+          "sessionId": "<session>",
+          "autoCompactionEnabled": true,
+          "messageCount": 2,
+          "pendingMessageCount": 0
+        }
+      }
+    ]
+  },
+  "compaction-attempt-large-prompt": {
+    "source": "docs/evidence/issue-64/raw/compaction-attempt-large-prompt.log",
+    "event_counts": {
+      "session": 1,
+      "agent_start": 1,
+      "turn_start": 1,
+      "message_start": 2,
+      "message_end": 2,
+      "message_update": 11,
+      "turn_end": 1,
+      "agent_end": 1,
+      "agent_settled": 1
+    },
+    "compaction_events_seen": false,
+    "note": "Print-mode attempt with claimed compaction.reserveTokens=1000000, keepRecentTokens=200, MiniMax-M3 contextWindow=512000, assistant totalTokens\u224824605. No compaction_* events observed. CAUSE UNVERIFIED: under those claimed settings shouldCompact(24605, 512000, {enabled:true, reserveTokens:1000000}) is TRUE (threshold headroom = -488000), so absence cannot be attributed to failing to cross the threshold. Effective loaded settings / prepareCompaction cut-point outcome / agent version were not retained from the original process. See raw/compaction-attempt-large-prompt.NOTES.txt for open alternatives (settings not applied; or prepareCompaction undefined \u2192 silent auto no-op before compaction_start).",
+    "cause_status": "unverified",
+    "observed": {
+      "claimed_reserveTokens": 1000000,
+      "claimed_keepRecentTokens": 200,
+      "contextWindow_rpc_same_model_family": 512000,
+      "assistant_totalTokens": 24605,
+      "shouldCompact_under_claimed_settings": true,
+      "threshold_headroom_under_claimed_settings": -488000,
+      "effective_settings_captured": false,
+      "cut_point_outcome_captured": false
+    }
+  },
+  "raw-noise": {
+    "samples_path": "docs/evidence/issue-64/redacted/raw-noise-samples.txt",
+    "count": 5,
+    "samples": [
+      {
+        "source": "normal-model-response.log",
+        "line": 1,
+        "text": "Warning: No project session found with id 'disc64_normal_64519'; creating a new session with that id."
+      },
+      {
+        "source": "model-error-bad-model.log",
+        "line": 1,
+        "text": "Warning: No project session found with id 'disc64_badmodel_69693'; creating a new session with that id."
+      },
+      {
+        "source": "model-error-bad-model.log",
+        "line": 2,
+        "text": "Warning: Model \"definitely-not-a-real-model-xyz\" not found for provider \"xai\". Using custom model id."
+      },
+      {
+        "source": "model-error-network.log",
+        "line": 1,
+        "text": "Warning: No project session found with id 'disc64_neterr_69693'; creating a new session with that id."
+      },
+      {
+        "source": "tool-start-end.log",
+        "line": 1,
+        "text": "Warning: No project session found with id 'disc64_tools_66934'; creating a new session with that id."
+      }
+    ]
+  }
+}

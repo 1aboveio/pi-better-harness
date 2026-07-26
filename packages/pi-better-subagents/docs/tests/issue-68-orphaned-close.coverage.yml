@@ -1,0 +1,13 @@
+# Coverage ownership for issue #68 — orphaned stop / close cleanup.
+# Surfaces: shared stop cleanup for orphaned runs + TUI Close integration.
+# Depth floor is unit (no browser route). Runtime smoke: tests/smoke_orphaned_stop.mjs.
+id: issue-68-orphaned-close
+source: "https://github.com/1aboveio/pi-better-subagents/issues/68"
+ref: "issue:68"
+surfaces:
+  stop.orphaned-cleanup:
+    requiredLevels: [unit]
+    verified: false
+  navigator.close:
+    requiredLevels: [unit]
+    verified: false

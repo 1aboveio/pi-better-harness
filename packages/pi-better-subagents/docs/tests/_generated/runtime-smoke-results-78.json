@@ -1,0 +1,23 @@
+[
+  {
+    "surface": "subagent_spawn (git_clone_workspace path)",
+    "kind": "tool",
+    "status": "pass",
+    "command": "node --experimental-strip-types --test tests/git_clone_workspace_live.test.mjs",
+    "observed": "ExtensionAPI harness registered subagent_spawn and executed git_clone_workspace:true; disposable clone prepared at sandbox_dir with real .git/, preserved branch main and upstream origin; stub pi child invoked; run meta recorded sandbox cwd. Broken linked-worktree path rejects via subagent_spawn.execute with outside-sandbox message and does not reach the stub pi spawn marker."
+  },
+  {
+    "surface": "git-workspace.ts",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --experimental-strip-types --test tests/git_workspace.test.mjs",
+    "observed": "inspect/prepare/resolve paths exercised; remote preservation class-complete: whitespace local paths via structured git config --null (not remote -v), multi-remote + stale remote removal, fetch-only, distinct pushurl (push lands on push remote only); reference-if-able argv + unavailable-reference fallback; source branch name preserved and explicit checkout:side lands on symbolic branch side (not detached); rebase conflict+continue; product sandbox-exec Git workflow with outside-write denial; linked-worktree fail-fast with outside-sandbox message"
+  },
+  {
+    "surface": "batch.mjs mergeJobOptions (git_clone_workspace forwarding)",
+    "kind": "library",
+    "status": "pass",
+    "command": "node --experimental-strip-types --test tests/subagent_spawn_batch.test.mjs",
+    "observed": "mergeJobOptions forwards git_clone_workspace from shared-only, per-job-only, and per-job override (including false); production batch.mjs matches job.git_clone_workspace ?? shared?.git_clone_workspace so spawnSubagentRun receives the field"
+  }
+]
