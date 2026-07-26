@@ -47,5 +47,6 @@ agent which task finished and which tool to call for details.
 }
 ```
 
-Commands run through the user's shell by default. Pass `argv` and `shell:false`
-to avoid shell parsing.
+Commands run through `/bin/bash -lc` by default so shell-mode watchers behave
+consistently across sessions. Set `PI_BETTER_BACKGROUND_TASKS_SHELL` to override
+that shell, or pass `argv` and `shell:false` to avoid shell parsing.

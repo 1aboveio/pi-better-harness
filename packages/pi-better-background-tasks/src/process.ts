@@ -4,6 +4,8 @@ import { dirname } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { CommandResult, CommandSpec } from "./types.js";
 
+const DEFAULT_SHELL = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL || "/bin/bash";
+
 export interface SpawnedProcess {
   child: ChildProcess;
   pgid?: number;
@@ -88,7 +90,7 @@ function spawnArgs(
       stdio,
     });
   }
-  return spawn(process.env.SHELL || "/bin/bash", ["-lc", spec.command!], {
+  return spawn(DEFAULT_SHELL, ["-lc", spec.command!], {
     cwd: spec.cwd,
     env,
     detached,
