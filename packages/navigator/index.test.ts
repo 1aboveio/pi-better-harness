@@ -229,6 +229,8 @@ describe("shared background work navigator", () => {
   });
 
   it("groups the main list by provider and hides model columns for background tasks", () => {
+    const stdoutColumnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 132 });
     const unregisterSubagents = registerBackgroundWorkProvider({
       ...provider("subagents", "Subagents", 10, 200, () => undefined),
       listRows: () => [{
@@ -286,6 +288,8 @@ describe("shared background work navigator", () => {
       const text = lines.join("\n");
       for (const line of lines) assert.doesNotMatch(line, /[\r\n]/, "widget rows must not contain embedded newlines");
       assert.ok(text.indexOf("subagents") < text.indexOf("background tasks"), text);
+      const backgroundSection = lines.find((line) => /background tasks/.test(line));
+      assert.equal(backgroundSection?.length, 132, "main list section rule should span the terminal width");
       assert.match(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/);
       assert.match(text, /reviewer\s+grok-4\.5 high\s+bash\s+18\.2k tok/);
 
@@ -313,6 +317,8 @@ describe("shared background work navigator", () => {
       assert.equal(bgHeader.indexOf("status"), bgRow.indexOf("failed"));
       assert.equal(bgHeader.indexOf("elapsed"), bgRow.indexOf("2m 18s"));
     } finally {
+      if (stdoutColumnsDescriptor) Object.defineProperty(process.stdout, "columns", stdoutColumnsDescriptor);
+      else Reflect.deleteProperty(process.stdout, "columns");
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
       unregisterTasks();
