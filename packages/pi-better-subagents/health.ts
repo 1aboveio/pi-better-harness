@@ -199,14 +199,14 @@ export function reconcileRun(meta: ReconcileInput, probe: ProcessProbe, now: num
  * The scheduler stops when false.
  */
 export function needsMonitoring(
-    metas: ReadonlyArray<Pick<RunMeta, "spawnPid" | "status" | "lostCallbackSentAt">>,
+    metas: ReadonlyArray<Pick<RunMeta, "spawnPid" | "status" | "lostCallbackSentAt" | "lostCallbackSuppressedAt">>,
     parentPid: number = process.pid,
 ): boolean {
     return metas.some(
         (m) => ownedByThisParent(m, parentPid) && (
             m.status === "running"
             || m.status === "orphaned"
-            || (m.status === "lost" && m.lostCallbackSentAt === undefined)
+            || (m.status === "lost" && m.lostCallbackSentAt === undefined && m.lostCallbackSuppressedAt === undefined)
         ),
     );
 }
