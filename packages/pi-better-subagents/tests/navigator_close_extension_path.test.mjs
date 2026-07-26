@@ -395,4 +395,35 @@ describe("registered extension path: main-window navigator actions", () => {
         assert.ok(mainList.includes("session-b-run"), mainList);
         assert.ok(!mainList.includes("session-a-run"), mainList);
     });
+
+    // @covers navigator.close
+    // @level integration
+    it("registered main-list widget hides failed subagents after 30 seconds", async () => {
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
+        const now = Date.now();
+        const recentId = nav.seedRun({
+            id: trackDisk(`sa_t47_recent_failed_${now}`),
+            name: "recent-failed-run",
+            status: "failed",
+            pid: THIS_PID,
+            startedAt: now - 40_000,
+            endedAt: now - 29_000,
+        });
+        const oldId = nav.seedRun({
+            id: trackDisk(`sa_t47_old_failed_${now}`),
+            name: "old-failed-run",
+            status: "failed",
+            pid: THIS_PID,
+            startedAt: now - 50_000,
+            endedAt: now - 31_000,
+        });
+
+        await nav.start();
+
+        const mainList = String(nav.lastWidget("background-work-list") ?? "");
+        assert.ok(mainList.includes("recent-failed-run"), mainList);
+        assert.ok(!mainList.includes("old-failed-run"), mainList);
+        assert.equal(registry.readMeta(recentId).status, "failed");
+        assert.equal(registry.readMeta(oldId).status, "failed");
+    });
 });

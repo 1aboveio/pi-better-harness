@@ -17,6 +17,7 @@ import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskSt
 let unregister: (() => void) | undefined;
 let piRef: ExtensionAPI | undefined;
 let activeNavigatorOrigin: BackgroundTaskCallbackOrigin | undefined;
+const FAILED_NAVIGATOR_RETENTION_MS = 30_000;
 
 export function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
   piRef = pi;
@@ -46,8 +47,8 @@ const provider: BackgroundWorkProvider = {
   id: "background-tasks",
   label: "Background Tasks",
   priority: 20,
-  visibleCount: () => visibleMetas().filter((meta) => meta.status === "running").length,
-  listRows: (now) => visibleMetas().map((meta) => rowFromMeta(meta, now)),
+  visibleCount: () => visibleMetas(Date.now()).filter((meta) => meta.status === "running").length,
+  listRows: (now) => visibleMetas(now).map((meta) => rowFromMeta(meta, now)),
   detail: (id, now, options) => detailFromMeta(readMeta(id), now, options),
   armCloseLabel: (row) => row.status === "running" ? "x again to stop" : "x again to dismiss",
   close: (id) => {
@@ -63,8 +64,8 @@ const provider: BackgroundWorkProvider = {
   },
 };
 
-function visibleMetas(): BackgroundTaskMeta[] {
-  return listMetas().filter((meta) => meta.dismissedAt === undefined && belongsToActiveNavigatorSession(meta));
+function visibleMetas(now = Date.now()): BackgroundTaskMeta[] {
+  return listMetas().filter((meta) => meta.dismissedAt === undefined && belongsToActiveNavigatorSession(meta) && !isExpiredFailedNavigatorRow(meta, now));
 }
 
 function getNavigatorOrigin(ctx: ExtensionContext): BackgroundTaskCallbackOrigin {
@@ -88,6 +89,16 @@ function belongsToActiveNavigatorSession(meta: BackgroundTaskMeta): boolean {
   }
   if (active.sessionId) return false;
   return meta.cwd === active.cwd;
+}
+
+function isExpiredFailedNavigatorRow(meta: BackgroundTaskMeta, now: number): boolean {
+  if (!isUnsuccessfulTerminalStatus(meta.status)) return false;
+  const endedAt = meta.endedAt;
+  return typeof endedAt === "number" && now - endedAt >= FAILED_NAVIGATOR_RETENTION_MS;
+}
+
+function isUnsuccessfulTerminalStatus(status: BackgroundTaskStatus): boolean {
+  return status === "failed" || status === "cancelled" || status === "timed_out";
 }
 
 function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
