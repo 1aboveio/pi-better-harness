@@ -28,6 +28,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Cross-session leakage regressions
+        run: npm run test:cross-session
+
       - name: Package dry run
         run: npm pack --dry-run --workspaces
 

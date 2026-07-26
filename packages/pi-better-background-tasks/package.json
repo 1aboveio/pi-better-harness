@@ -18,6 +18,7 @@
     "test": "vitest run",
     "test:unit": "vitest run src/conditions.test.ts src/runtime.test.ts",
     "test:e2e": "vitest run src/e2e.test.ts",
+    "test:cross-session": "vitest run src/e2e.test.ts -t \"different session\"",
     "test:golden": "vitest run src/golden-path.test.ts",
     "test:integration": "npm run test:e2e && npm run test:golden"
   },
