@@ -14,6 +14,7 @@
   "scripts": {
     "typecheck": "node -e \"console.log('pi-better-subagents: typecheck skipped for legacy mixed TS/MJS package')\"",
     "test": "node --import tsx --test tests/*.test.mjs",
+    "test:cross-session": "node --import tsx --test --test-name-pattern \"callback session isolation\" tests/extension_health_lifecycle.test.mjs",
     "verify": "npm run typecheck && npm test"
   },
   "files": [
