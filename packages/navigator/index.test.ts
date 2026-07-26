@@ -289,11 +289,29 @@ describe("shared background work navigator", () => {
       assert.match(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/);
       assert.match(text, /reviewer\s+grok-4\.5 high\s+bash\s+18\.2k tok/);
 
+      const subagentHeader = lines.find((line) => /name\s+model\s+tool\s+tokens\s+status\s+elapsed/.test(line));
+      const subagentRow = lines.find((line) => /reviewer\s+grok-4\.5 high/.test(line));
+      assert.ok(subagentHeader, text);
+      assert.ok(subagentRow, text);
+      assert.equal(subagentHeader.indexOf("name"), subagentRow.indexOf("reviewer"));
+      assert.equal(subagentHeader.indexOf("model"), subagentRow.indexOf("grok-4.5 high"));
+      assert.equal(subagentHeader.indexOf("tool"), subagentRow.indexOf("bash"));
+      assert.equal(subagentHeader.indexOf("tokens"), subagentRow.indexOf("18.2k tok"));
+      assert.equal(subagentHeader.indexOf("status"), subagentRow.indexOf("running"));
+      assert.equal(subagentHeader.indexOf("elapsed"), subagentRow.indexOf("1m 04s"));
+
       const bgHeaderIndex = lines.findIndex((line) => /command\/tool/.test(line));
       assert.ok(bgHeaderIndex >= 0, text);
       assert.doesNotMatch(lines[bgHeaderIndex]!, /model|tokens/);
       assert.match(text, /watch-pr-14-merge\s+#!\/usr\/bin\/env bash/);
       assert.doesNotMatch(text, /pipefail\s+failed\s+2m 18s/);
+      const bgHeader = lines[bgHeaderIndex]!;
+      const bgRow = lines.find((line) => /watch-pr-14-merge\s+#!\/usr\/bin\/env bash/.test(line));
+      assert.ok(bgRow, text);
+      assert.equal(bgHeader.indexOf("name"), bgRow.indexOf("watch-pr-14-merge"));
+      assert.equal(bgHeader.indexOf("command/tool"), bgRow.indexOf("#!/usr/bin/env bash"));
+      assert.equal(bgHeader.indexOf("status"), bgRow.indexOf("failed"));
+      assert.equal(bgHeader.indexOf("elapsed"), bgRow.indexOf("2m 18s"));
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
