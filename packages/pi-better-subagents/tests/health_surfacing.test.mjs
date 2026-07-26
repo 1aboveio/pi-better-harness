@@ -445,9 +445,11 @@ describe("passive widget health surfacing", () => {
         const indexSource = readFileSync(join(ROOT, "index.ts"), "utf8");
         // Passive string[] only — no focus APIs on the widget helper surface.
         assert.doesNotMatch(widgetSource, /setFocus|tabIndex|onFocus|\.focus\(/);
-        assert.match(indexSource, /setWidget\("subagents"/);
-        // Health is painted via setWidget/buildWidgetLines, not navigator custom().
-        assert.match(indexSource, /buildWidgetLines\(\{[\s\S]{0,240}healthById[\s\S]{0,240}\}\)/);
+        assert.match(indexSource, /setWidget\("subagents", WIDGET_CLEAR\)/);
+        // The retired legacy widget is clear-only; health is now supplied to the
+        // shared navigator rows/details instead of painting a second list surface.
+        assert.doesNotMatch(indexSource, /buildWidgetLines\(\{[\s\S]{0,240}healthById[\s\S]{0,240}\}\)/);
+        assert.match(indexSource, /healthFor: \(m: RunMeta\) => observeNavigatorHealth\(m, now\)/);
         assert.doesNotMatch(indexSource, /healthById[\s\S]{0,120}custom\(/);
     });
 
@@ -522,16 +524,16 @@ describe("passive widget health surfacing", () => {
         assert.equal(rewritten.hit, false);
         assert.equal(extracts, 3);
 
-        // index.ts must gate the widget health path on the size/mtime helper.
+        // index.ts must gate the navigator health path on the size/mtime helper.
         const indexSource = readFileSync(join(ROOT, "index.ts"), "utf8");
         assert.match(indexSource, /resolveHealthLogExtraction/);
         assert.match(indexSource, /healthLogCache/);
-        const widgetSection = indexSource.match(
-            /\/\/ ---- live status widget[\s\S]*?\/\/ ----(?! live)/,
+        const healthSection = indexSource.match(
+            /function observeWidgetHealth[\s\S]*?function syncWidgetNavSelection/,
         )?.[0] ?? "";
-        assert.match(widgetSection, /resolveHealthLogExtraction/);
+        assert.match(healthSection, /resolveHealthLogExtraction/);
         // Direct extract still exists for the miss path, but must be behind the cache.
-        assert.match(widgetSection, /extractChildEventFactsFromLog/);
+        assert.match(healthSection, /extractChildEventFactsFromLog/);
     });
 });
 
