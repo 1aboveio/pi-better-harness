@@ -398,10 +398,10 @@ describe("registered extension path: main-window navigator actions", () => {
 
     // @covers navigator.close
     // @level integration
-    it("registered main-list widget hides failed subagents after 30 seconds", async () => {
+    it("registered main-list widget hides terminal subagents after 30 seconds", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const now = Date.now();
-        const recentId = nav.seedRun({
+        const recentFailedId = nav.seedRun({
             id: trackDisk(`sa_t47_recent_failed_${now}`),
             name: "recent-failed-run",
             status: "failed",
@@ -409,10 +409,26 @@ describe("registered extension path: main-window navigator actions", () => {
             startedAt: now - 40_000,
             endedAt: now - 29_000,
         });
-        const oldId = nav.seedRun({
+        const oldFailedId = nav.seedRun({
             id: trackDisk(`sa_t47_old_failed_${now}`),
             name: "old-failed-run",
             status: "failed",
+            pid: THIS_PID,
+            startedAt: now - 50_000,
+            endedAt: now - 31_000,
+        });
+        const recentCompletedId = nav.seedRun({
+            id: trackDisk(`sa_t47_recent_completed_${now}`),
+            name: "recent-completed-run",
+            status: "completed",
+            pid: THIS_PID,
+            startedAt: now - 40_000,
+            endedAt: now - 29_000,
+        });
+        const oldCompletedId = nav.seedRun({
+            id: trackDisk(`sa_t47_old_completed_${now}`),
+            name: "old-completed-run",
+            status: "completed",
             pid: THIS_PID,
             startedAt: now - 50_000,
             endedAt: now - 31_000,
@@ -422,8 +438,12 @@ describe("registered extension path: main-window navigator actions", () => {
 
         const mainList = String(nav.lastWidget("background-work-list") ?? "");
         assert.ok(mainList.includes("recent-failed-run"), mainList);
+        assert.ok(mainList.includes("recent-completed-run"), mainList);
         assert.ok(!mainList.includes("old-failed-run"), mainList);
-        assert.equal(registry.readMeta(recentId).status, "failed");
-        assert.equal(registry.readMeta(oldId).status, "failed");
+        assert.ok(!mainList.includes("old-completed-run"), mainList);
+        assert.equal(registry.readMeta(recentFailedId).status, "failed");
+        assert.equal(registry.readMeta(oldFailedId).status, "failed");
+        assert.equal(registry.readMeta(recentCompletedId).status, "completed");
+        assert.equal(registry.readMeta(oldCompletedId).status, "completed");
     });
 });

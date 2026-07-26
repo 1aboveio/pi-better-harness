@@ -159,25 +159,39 @@ describe("extension e2e", () => {
     }
   });
 
-  it("hides failed navigator rows after 30 seconds", async () => {
+  it("hides terminal navigator rows after 30 seconds", async () => {
     const harness = createHarness({ sessionId: "session-a", mode: "tui", hasUI: true });
-    const launch = await harness.execute("bg_task_spawn", {
+    const failedLaunch = await harness.execute("bg_task_spawn", {
       name: "recent-failure",
       shell: false,
       argv: [process.execPath, "-e", "process.exit(1)"],
       callback: false,
     });
-    const id = extractTaskId(launch);
+    const failedId = extractTaskId(failedLaunch);
+    const succeededLaunch = await harness.execute("bg_task_spawn", {
+      name: "recent-success",
+      shell: false,
+      argv: [process.execPath, "-e", "process.exit(0)"],
+      callback: false,
+    });
+    const succeededId = extractTaskId(succeededLaunch);
 
-    const failed = await waitForMeta(id, (meta) => meta?.status === "failed" && typeof meta.endedAt === "number");
+    const failed = await waitForMeta(failedId, (meta) => meta?.status === "failed" && typeof meta.endedAt === "number");
+    const succeeded = await waitForMeta(succeededId, (meta) => meta?.status === "succeeded" && typeof meta.endedAt === "number");
     await harness.fireSessionStart();
-    expect(harness.lastWidget("background-work-list")?.join("\n") ?? "").toContain("recent-failure");
+    let list = harness.lastWidget("background-work-list")?.join("\n") ?? "";
+    expect(list).toContain("recent-failure");
+    expect(list).toContain("recent-success");
 
     writeMeta({ ...failed!, endedAt: Date.now() - 31_000 });
+    writeMeta({ ...succeeded!, endedAt: Date.now() - 31_000 });
     await harness.fireSessionStart();
 
-    expect(harness.lastWidget("background-work-list")?.join("\n") ?? "").not.toContain("recent-failure");
-    expect(readMeta(id)?.status).toBe("failed");
+    list = harness.lastWidget("background-work-list")?.join("\n") ?? "";
+    expect(list).not.toContain("recent-failure");
+    expect(list).not.toContain("recent-success");
+    expect(readMeta(failedId)?.status).toBe("failed");
+    expect(readMeta(succeededId)?.status).toBe("succeeded");
   });
 });
 

@@ -564,7 +564,7 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 //      selection change, list↔detail return, and session_shutdown.
 
 let unregisterSubagentProvider: (() => void) | undefined;
-const FAILED_NAVIGATOR_RETENTION_MS = 30_000;
+const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 
 /**
  * Observe health for a navigator row/detail (#69). Reuses the size/mtime-gated
@@ -615,18 +615,18 @@ function sessionVisibleNavigatorRuns(): RunMeta[] {
     const now = Date.now();
     return navigatorVisibleRuns(listMetas())
         .filter(belongsToActiveNavigatorSession)
-        .filter((m) => !isExpiredFailedNavigatorRun(m, now));
+        .filter((m) => !isExpiredTerminalNavigatorRun(m, now));
 }
 
-function isExpiredFailedNavigatorRun(meta: RunMeta, now: number): boolean {
+function isExpiredTerminalNavigatorRun(meta: RunMeta, now: number): boolean {
     const status = effectiveStatus(meta);
-    if (!isUnsuccessfulTerminalRunStatus(status)) return false;
+    if (!isTerminalNavigatorStatus(status)) return false;
     const endedAt = meta.endedAt ?? meta.lostAt;
-    return typeof endedAt === "number" && now - endedAt >= FAILED_NAVIGATOR_RETENTION_MS;
+    return typeof endedAt === "number" && now - endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
 }
 
-function isUnsuccessfulTerminalRunStatus(status: string): boolean {
-    return status === "failed" || status === "killed" || status === "lost" || status === "exited";
+function isTerminalNavigatorStatus(status: string): boolean {
+    return status !== "running" && status !== "orphaned";
 }
 
 /** Live detail snapshot for one run (registry + log parse + health). */
