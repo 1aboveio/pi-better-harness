@@ -18,7 +18,7 @@ const CommandFields = {
   name: Type.Optional(Type.String({ description: "Human-readable task label." })),
   command: Type.Optional(Type.String({ description: "Shell command to run. Required unless shell:false with argv is used." })),
   argv: Type.Optional(Type.Array(Type.String(), { description: "Argument vector. Use with shell:false to avoid shell parsing." })),
-  shell: Type.Optional(Type.Boolean({ description: "Run command through the shell. Default true." })),
+  shell: Type.Optional(Type.Boolean({ description: "Run command through the package's bash-compatible shell. Default true." })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current pi cwd." })),
   env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Extra environment variables." })),
   callback: Type.Optional(Type.Boolean({ description: "Queue a follow-up when the task reaches a terminal state. Default true." })),
