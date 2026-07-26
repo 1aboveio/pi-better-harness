@@ -17,7 +17,7 @@ import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskSt
 let unregister: (() => void) | undefined;
 let piRef: ExtensionAPI | undefined;
 let activeNavigatorOrigin: BackgroundTaskCallbackOrigin | undefined;
-const FAILED_NAVIGATOR_RETENTION_MS = 30_000;
+const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 
 export function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
   piRef = pi;
@@ -65,7 +65,7 @@ const provider: BackgroundWorkProvider = {
 };
 
 function visibleMetas(now = Date.now()): BackgroundTaskMeta[] {
-  return listMetas().filter((meta) => meta.dismissedAt === undefined && belongsToActiveNavigatorSession(meta) && !isExpiredFailedNavigatorRow(meta, now));
+  return listMetas().filter((meta) => meta.dismissedAt === undefined && belongsToActiveNavigatorSession(meta) && !isExpiredTerminalNavigatorRow(meta, now));
 }
 
 function getNavigatorOrigin(ctx: ExtensionContext): BackgroundTaskCallbackOrigin {
@@ -91,14 +91,10 @@ function belongsToActiveNavigatorSession(meta: BackgroundTaskMeta): boolean {
   return meta.cwd === active.cwd;
 }
 
-function isExpiredFailedNavigatorRow(meta: BackgroundTaskMeta, now: number): boolean {
-  if (!isUnsuccessfulTerminalStatus(meta.status)) return false;
+function isExpiredTerminalNavigatorRow(meta: BackgroundTaskMeta, now: number): boolean {
+  if (meta.status === "running") return false;
   const endedAt = meta.endedAt;
-  return typeof endedAt === "number" && now - endedAt >= FAILED_NAVIGATOR_RETENTION_MS;
-}
-
-function isUnsuccessfulTerminalStatus(status: BackgroundTaskStatus): boolean {
-  return status === "failed" || status === "cancelled" || status === "timed_out";
+  return typeof endedAt === "number" && now - endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
 }
 
 function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
