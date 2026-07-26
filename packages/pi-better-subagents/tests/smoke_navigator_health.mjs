@@ -95,8 +95,8 @@ must("fact cap ≤2", formatNavigatorHealthFacts({
 }).length <= 2);
 
 must("status colors", statusThemeColor("completed") === "success"
-    && statusThemeColor("failed") === "danger"
-    && statusThemeColor("lost") === "danger"
+    && statusThemeColor("failed") === "error"
+    && statusThemeColor("lost") === "error"
     && statusThemeColor("orphaned") === "warning"
     && statusThemeColor("killed") === "warning"
     && statusThemeColor("running") === "accent");

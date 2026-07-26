@@ -180,7 +180,7 @@ export function formatNavigatorHealthFacts(obs) {
 
 /**
  * Semantic theme color for a durable/effective run status in the TUI.
- * completed → success; failed/lost → danger; killed/orphaned → warning;
+ * completed → success; failed/lost → error; killed/orphaned → warning;
  * running → accent; anything else → dim.
  *
  * @param {string|undefined|null} status
@@ -192,7 +192,7 @@ export function statusThemeColor(status) {
             return "success";
         case "failed":
         case "lost":
-            return "danger";
+            return "error";
         case "killed":
         case "orphaned":
             return "warning";
