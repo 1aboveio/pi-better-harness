@@ -63,6 +63,30 @@ describe("runtime", () => {
     expect(terminal?.lastExitCode).toBe(0);
   }, 30_000);
 
+  it("callback completion does not embed process output", async () => {
+    const messages: Array<{ message: string; options: unknown }> = [];
+    const pi = {
+      sendUserMessage: async (message: string, options: unknown) => { messages.push({ message, options }); },
+    } as unknown as ExtensionAPI;
+    const origin = { cwd: process.cwd(), sessionId: "session-a" };
+    const sentinel = "UNIQUE_BACKGROUND_LOG_PAYLOAD_SHOULD_NOT_DISPLAY";
+    const meta = spawnTask(pi, {
+      name: "callback process",
+      shell: false,
+      argv: [process.execPath, "-e", `console.log(${JSON.stringify(sentinel)})`],
+      callback: true,
+    }, process.cwd(), origin, () => origin);
+
+    const terminal = await waitForMeta(meta.id, (m) => m?.status === "succeeded" && Boolean(m.callbackSentAt), 30_000);
+
+    expect(terminal?.status).toBe("succeeded");
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.message).toContain("bg_task_status");
+    expect(messages[0]?.message).toContain("bg_task_log");
+    expect(messages[0]?.message).not.toContain(sentinel);
+    expect(messages[0]?.options).toMatchObject({ deliverAs: "followUp" });
+  }, 30_000);
+
   it("cancels a spawned process", async () => {
     const meta = spawnTask(fakePi, {
       name: "test cancellable process",

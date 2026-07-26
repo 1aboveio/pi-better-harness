@@ -138,8 +138,11 @@ export function registerTools(pi: ExtensionAPI): void {
     label: "BG Log",
     description: "Read a background task log. Use tail_lines for bounded output. Nonblocking.",
     parameters: LogParams,
+    renderResult(result: unknown, options: unknown, theme: unknown) {
+      return renderBackgroundTaskLogDisplay(result, options, theme);
+    },
     async execute(_toolCallId, params) {
-      return text(formatLog(params.id, params.tail_lines));
+      return logText(params.id, params.tail_lines);
     },
   });
 
@@ -161,9 +164,12 @@ export function registerTools(pi: ExtensionAPI): void {
     label: "BG Task",
     description: "Action wrapper for background tasks: spawn, watch, list, status, log, or stop. Spawn/watch return immediately; do not poll in foreground.",
     parameters: ActionParams,
+    renderResult(result: unknown, options: unknown, theme: unknown) {
+      return renderBackgroundTaskLogDisplay(result, options, theme);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return text(runAction(pi, params, ctx, activeSession, getActiveSession));
+      return actionText(pi, params, ctx, activeSession, getActiveSession);
     },
   });
 
@@ -172,15 +178,31 @@ export function registerTools(pi: ExtensionAPI): void {
     label: "BG Status",
     description: "Action wrapper for inspecting background tasks: list, status, log, or stop. Nonblocking.",
     parameters: StatusActionParams,
+    renderResult(result: unknown, options: unknown, theme: unknown) {
+      return renderBackgroundTaskLogDisplay(result, options, theme);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return text(runAction(pi, params, ctx, activeSession, getActiveSession));
+      return actionText(pi, params, ctx, activeSession, getActiveSession);
     },
   });
 }
 
 export function text(textValue: string, details?: unknown) {
   return { content: [{ type: "text" as const, text: textValue }], details };
+}
+
+function actionText(
+  pi: ExtensionAPI,
+  params: Record<string, unknown>,
+  ctx: ExtensionContext,
+  callbackOrigin: BackgroundTaskCallbackOrigin,
+  getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+) {
+  if (params.action === "log" && params.id) {
+    return logText(String(params.id), params.tail_lines as number | undefined);
+  }
+  return text(runAction(pi, params, ctx, callbackOrigin, getActiveSession));
 }
 
 function runAction(
@@ -261,6 +283,107 @@ function formatLog(id: string, tailLines?: number): string {
   const log = readLog(meta.logPath, tailLines ?? 80);
   const prefix = log.truncated ? `[showing tail of ${meta.logPath}]\n` : `[${meta.logPath}]\n`;
   return prefix + (log.text || "(log is empty)");
+}
+
+function logText(id: string, tailLines?: number) {
+  const body = formatLog(id, tailLines);
+  if (!readMeta(id)) return text(body);
+  return text(body, buildBackgroundTaskLogDisplayDetails(body));
+}
+
+export function buildBackgroundTaskLogDisplayDetails(body: string) {
+  const fullLines = String(body ?? "").split(/\r?\n/);
+  const head = fullLines[0] || "bg_task_log";
+  const rest = fullLines.slice(1);
+  const compactLines = nonEmptyPreviewLines(rest);
+  return {
+    kind: "background-task-log-display",
+    head,
+    fullLineCount: fullLines.length,
+    compactLines,
+    foldedLineCount: Math.max(0, rest.length - compactLines.length),
+  };
+}
+
+export function renderBackgroundTaskLogDisplay(result: unknown, options: unknown = {}, theme: unknown = {}) {
+  const fullText = resultTextContent(result);
+  const details = ((result as { details?: unknown })?.details as ReturnType<typeof buildBackgroundTaskLogDisplayDetails> | undefined);
+  if (!details || details.kind !== "background-task-log-display") return renderLines(fullText.split(/\r?\n/));
+  const expanded = (options as { expanded?: boolean })?.expanded === true;
+  const meta = `${details.fullLineCount} lines`;
+
+  if (expanded) {
+    return renderLines([
+      `${themed(theme, "accent", "bg_task_log")} ${themed(theme, "dim", `· ${meta}`)}`,
+      themed(theme, "dim", "Full displayed log. Click or collapse to fold."),
+      "",
+      ...fullText.split(/\r?\n/),
+    ], "wrap");
+  }
+
+  const folded = details.foldedLineCount > 0
+    ? themed(theme, "dim", `Folded ${details.foldedLineCount} display lines. Click or expand for full log. Model payload unchanged.`)
+    : themed(theme, "dim", "Compact log. Expand for full display if needed.");
+  return renderLines([
+    `${themed(theme, "accent", "bg_task_log")} ${themed(theme, "dim", `· ${meta}`)}`,
+    details.head,
+    "",
+    themed(theme, "dim", "preview"),
+    ...details.compactLines,
+    folded,
+  ]);
+}
+
+function resultTextContent(result: unknown): string {
+  const content = (result as { content?: Array<{ text?: string }> })?.content;
+  if (!Array.isArray(content)) return String(result ?? "");
+  return content.map((part) => part.text ?? "").join("\n");
+}
+
+function nonEmptyPreviewLines(lines: string[]): string[] {
+  const nonEmpty = lines.filter((line) => line.trim().length > 0).slice(0, 8);
+  return nonEmpty.length ? nonEmpty : lines.slice(0, 3);
+}
+
+function themed(theme: unknown, color: string, value: string): string {
+  const fg = (theme as { fg?: (color: string, text: string) => string })?.fg;
+  return typeof fg === "function" ? fg(color, value) : value;
+}
+
+function renderLines(lines: string[], mode: "truncate" | "wrap" = "truncate") {
+  return {
+    render(width: number = 80) {
+      return mode === "wrap"
+        ? lines.flatMap((line) => wrapLineToVisibleWidth(line, width))
+        : lines.map((line) => truncateToVisibleWidth(line, width));
+    },
+    invalidate() { /* stateless */ },
+  };
+}
+
+function wrapLineToVisibleWidth(line: string, width: number): string[] {
+  const str = String(line ?? "");
+  const max = Math.max(1, Number(width) || 80);
+  if (truncateToVisibleWidth(str, max) === str) return [str];
+  const out: string[] = [];
+  let current = "";
+  let visible = 0;
+  for (const char of str) {
+    if (visible >= max) {
+      out.push(current);
+      current = "";
+      visible = 0;
+    }
+    current += char;
+    visible += 1;
+  }
+  out.push(current);
+  return out;
+}
+
+function truncateToVisibleWidth(value: string, width: number): string {
+  const max = Math.max(0, Math.floor(width || 0));
+  return String(value ?? "").slice(0, max);
 }
 
 function formatStop(
