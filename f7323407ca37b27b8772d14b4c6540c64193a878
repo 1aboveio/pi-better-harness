@@ -1,0 +1,1 @@
+Diagnosed background-task navigator invisibility: refresh was called with non-TUI tool context and did not fall back to stored TUI context.
