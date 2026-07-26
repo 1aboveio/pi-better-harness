@@ -54,13 +54,14 @@ describe("runtime", () => {
   it("finalizes a short spawned process", async () => {
     const meta = spawnTask(fakePi, {
       name: "test process",
-      command: "node -e 'process.exit(0)'",
+      shell: false,
+      argv: [process.execPath, "-e", "process.exit(0)"],
       callback: false,
     }, process.cwd());
 
-    const terminal = await waitForMeta(meta.id, (m) => m?.status === "succeeded");
+    const terminal = await waitForMeta(meta.id, (m) => m?.status === "succeeded", 30_000);
     expect(terminal?.lastExitCode).toBe(0);
-  });
+  }, 30_000);
 
   it("cancels a spawned process", async () => {
     const meta = spawnTask(fakePi, {

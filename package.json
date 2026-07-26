@@ -22,6 +22,7 @@
   "scripts": {
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "test:cross-session": "npm run test:cross-session -w packages/pi-better-background-tasks && npm run test:cross-session -w packages/pi-better-subagents",
     "verify": "npm run typecheck && npm test"
   },
   "peerDependencies": {
