@@ -253,7 +253,7 @@ describe("shared background work navigator", () => {
         providerId: "background-tasks",
         id: "bg-1",
         name: "watch-pr-14-merge",
-        command: "gh pr view",
+        command: "#!/usr/bin/env bash\nset -uo pipefail\ngh pr view 14 --repo 1aboveio/pi-better-harness --json state,mergedAt,mergeCommit,statusCheckRollup",
         status: "failed",
         statusTone: "failed",
         kind: "watch",
@@ -284,6 +284,7 @@ describe("shared background work navigator", () => {
       });
       const lines = widgets.at(-1) ?? [];
       const text = lines.join("\n");
+      for (const line of lines) assert.doesNotMatch(line, /[\r\n]/, "widget rows must not contain embedded newlines");
       assert.ok(text.indexOf("subagents") < text.indexOf("background tasks"), text);
       assert.match(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/);
       assert.match(text, /reviewer\s+grok-4\.5 high\s+bash\s+18\.2k tok/);
@@ -291,7 +292,8 @@ describe("shared background work navigator", () => {
       const bgHeaderIndex = lines.findIndex((line) => /command\/tool/.test(line));
       assert.ok(bgHeaderIndex >= 0, text);
       assert.doesNotMatch(lines[bgHeaderIndex]!, /model|tokens/);
-      assert.match(text, /watch-pr-14-merge\s+gh pr view\s+failed\s+2m 18s/);
+      assert.match(text, /watch-pr-14-merge\s+#!\/usr\/bin\/env bash/);
+      assert.doesNotMatch(text, /pipefail\s+failed\s+2m 18s/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
@@ -331,7 +333,7 @@ describe("shared background work navigator", () => {
             id: "command",
             label: "command",
             text: "gh pr view 14 --repo 1aboveio/pi-better-harness --json state,mergedAt,mergeCommit,statusCheckRollup",
-            collapsedText: "gh pr view",
+            collapsedText: "#!/usr/bin/env bash\nset -uo pipefail\ngh pr view 14 --repo 1aboveio/pi-better-harness --json state,mergedAt,mergeCommit,statusCheckRollup",
           }],
           evidence: { label: "log tail", text: `latest ${options?.logTailLines ?? 0}` },
           footerActions: ["x stop"],
@@ -379,14 +381,18 @@ describe("shared background work navigator", () => {
         margin: { top: 1, right: 0, bottom: 3 + (widgets.at(-1)?.[1]?.length ?? 0), left: 0 },
       });
 
-      let rendered = component.render(120).join("\n");
+      let renderedLines = component.render(72);
+      for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
+      let rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 10);
       assert.match(rendered, /log tail · latest 10 rows/);
-      assert.match(rendered, /command\s+gh pr view\s+folded/);
+      assert.match(rendered, /command\s+#!\/usr\/bin\/env bash/);
+      assert.match(rendered, /folded/);
       assert.doesNotMatch(rendered, /statusCheckRollup/);
 
       component.handleInput("]");
-      rendered = component.render(120).join("\n");
+      renderedLines = component.render(72);
+      rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 25);
       assert.match(rendered, /log tail · latest 25 rows/);
       assert.match(rendered, /latest 25/);
