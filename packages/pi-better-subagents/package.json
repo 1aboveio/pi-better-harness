@@ -22,9 +22,6 @@
     "config.json",
     "README.md"
   ],
-  "dependencies": {
-    "navigator": "*"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

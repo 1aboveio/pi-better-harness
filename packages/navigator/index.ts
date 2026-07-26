@@ -1,5 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+export default function navigatorExtension(): void {
+  // Internal shared package. Pi may scan its symlink in the extension directory
+  // for sibling relative imports; loading it directly should be harmless.
+}
+
 export type BackgroundWorkStatusTone = "running" | "success" | "failed" | "warning" | "muted";
 
 export type BackgroundWorkRow = {

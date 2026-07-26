@@ -6,7 +6,7 @@ import {
   type BackgroundWorkDetail,
   type BackgroundWorkProvider,
   type BackgroundWorkRow,
-} from "navigator";
+} from "../../navigator/index.ts";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { readLog } from "./logs.js";
