@@ -4,7 +4,7 @@ import { readLog } from "./logs.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import { listMetas, readMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
-import type { BackgroundTaskMeta } from "./types.js";
+import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
 
 const ConditionSchema = Type.Union([
   Type.Object({ type: Type.Literal("exit_code"), equals: Type.Number() }),
@@ -72,8 +72,18 @@ const StatusActionParams = Type.Object({
 });
 
 export function registerTools(pi: ExtensionAPI): void {
-  pi.on("session_start", async () => {
-    for (const meta of listMetas()) resumeRunningTask(pi, meta);
+  let activeSession: BackgroundTaskCallbackOrigin | undefined;
+  const getActiveSession = () => activeSession;
+
+  pi.on("session_start", async (_event, ctx) => {
+    activeSession = getCallbackOrigin(ctx);
+    for (const meta of listMetas()) resumeRunningTask(pi, meta, getActiveSession);
+  });
+  pi.on("session_before_switch", () => {
+    activeSession = undefined;
+  });
+  pi.on("session_shutdown", () => {
+    activeSession = undefined;
   });
 
   pi.registerTool({
@@ -82,7 +92,8 @@ export function registerTools(pi: ExtensionAPI): void {
     description: "Start a long-running background process and return immediately with its task id. Never wait or poll in the foreground.",
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const meta = spawnTask(pi, params, ctx.cwd);
+      activeSession = getCallbackOrigin(ctx);
+      const meta = spawnTask(pi, params, ctx.cwd, activeSession, getActiveSession);
       refreshBackgroundTasksNavigator(ctx);
       return text(formatLaunch(meta));
     },
@@ -94,7 +105,8 @@ export function registerTools(pi: ExtensionAPI): void {
     description: "Poll a command in the background until success_when, failure_when, or timeout matches. Returns immediately with its task id.",
     parameters: WatchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const meta = startWatchTask(pi, params, ctx.cwd);
+      activeSession = getCallbackOrigin(ctx);
+      const meta = startWatchTask(pi, params, ctx.cwd, activeSession, getActiveSession);
       refreshBackgroundTasksNavigator(ctx);
       return text(formatLaunch(meta));
     },
@@ -137,7 +149,8 @@ export function registerTools(pi: ExtensionAPI): void {
     description: "Cancel a watcher or terminate a background process group. Nonblocking.",
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const result = formatStop(pi, params.id, ctx);
+      activeSession = getCallbackOrigin(ctx);
+      const result = formatStop(pi, params.id, ctx, getActiveSession);
       refreshBackgroundTasksNavigator(ctx);
       return text(result);
     },
@@ -149,7 +162,8 @@ export function registerTools(pi: ExtensionAPI): void {
     description: "Action wrapper for background tasks: spawn, watch, list, status, log, or stop. Spawn/watch return immediately; do not poll in foreground.",
     parameters: ActionParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return text(runAction(pi, params, ctx));
+      activeSession = getCallbackOrigin(ctx);
+      return text(runAction(pi, params, ctx, activeSession, getActiveSession));
     },
   });
 
@@ -159,7 +173,8 @@ export function registerTools(pi: ExtensionAPI): void {
     description: "Action wrapper for inspecting background tasks: list, status, log, or stop. Nonblocking.",
     parameters: StatusActionParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return text(runAction(pi, params, ctx));
+      activeSession = getCallbackOrigin(ctx);
+      return text(runAction(pi, params, ctx, activeSession, getActiveSession));
     },
   });
 }
@@ -168,13 +183,19 @@ export function text(textValue: string, details?: unknown) {
   return { content: [{ type: "text" as const, text: textValue }], details };
 }
 
-function runAction(pi: ExtensionAPI, params: Record<string, unknown>, ctx: ExtensionContext): string {
+function runAction(
+  pi: ExtensionAPI,
+  params: Record<string, unknown>,
+  ctx: ExtensionContext,
+  callbackOrigin: BackgroundTaskCallbackOrigin,
+  getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+): string {
   switch (params.action) {
     case "spawn":
-      return withNavigatorRefresh(ctx, formatLaunch(spawnTask(pi, params, ctx.cwd)));
+      return withNavigatorRefresh(ctx, formatLaunch(spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
     case "watch":
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
-      return withNavigatorRefresh(ctx, formatLaunch(startWatchTask(pi, params as never, ctx.cwd)));
+      return withNavigatorRefresh(ctx, formatLaunch(startWatchTask(pi, params as never, ctx.cwd, callbackOrigin, getActiveSession)));
     case "list":
       return formatList(resolveList(params.status as string[] | undefined, params.limit as number | undefined));
     case "status":
@@ -185,7 +206,7 @@ function runAction(pi: ExtensionAPI, params: Record<string, unknown>, ctx: Exten
       return formatLog(String(params.id), params.tail_lines as number | undefined);
     case "stop":
       if (!params.id) return "Invalid parameters: stop requires id.";
-      return withNavigatorRefresh(ctx, formatStop(pi, String(params.id), ctx));
+      return withNavigatorRefresh(ctx, formatStop(pi, String(params.id), ctx, getActiveSession));
     default:
       return `Unknown action: ${String(params.action)}`;
   }
@@ -194,6 +215,16 @@ function runAction(pi: ExtensionAPI, params: Record<string, unknown>, ctx: Exten
 function withNavigatorRefresh(ctx: ExtensionContext, result: string): string {
   refreshBackgroundTasksNavigator(ctx);
   return result;
+}
+
+function getCallbackOrigin(ctx: ExtensionContext): BackgroundTaskCallbackOrigin {
+  let sessionId: string | undefined;
+  try {
+    sessionId = ctx.sessionManager?.getSessionId();
+  } catch {
+    sessionId = undefined;
+  }
+  return { cwd: ctx.cwd, sessionId };
 }
 
 function resolveList(statuses?: string[], limit?: number): BackgroundTaskMeta[] {
@@ -232,8 +263,13 @@ function formatLog(id: string, tailLines?: number): string {
   return prefix + (log.text || "(log is empty)");
 }
 
-function formatStop(pi: ExtensionAPI, id: string, _ctx: ExtensionContext): string {
-  const meta = stopTask(pi, id);
+function formatStop(
+  pi: ExtensionAPI,
+  id: string,
+  _ctx: ExtensionContext,
+  getActiveSession?: () => BackgroundTaskCallbackOrigin | undefined,
+): string {
+  const meta = stopTask(pi, id, getActiveSession);
   if (!meta) return `No background task found for id ${id}.`;
   return `Background task ${id} is ${meta.status}.`;
 }
