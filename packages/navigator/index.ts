@@ -92,7 +92,7 @@ export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25, 50, 100] as const;
 const MAIN_LIST_TICK_MS = 1000;
-const MAIN_LIST_WIDTH = 100;
+const MAIN_LIST_FALLBACK_WIDTH = 100;
 const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 1;
 const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
 
@@ -239,13 +239,18 @@ function refreshMainListWidget(): void {
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
   const rows = listRows();
   syncMainListSelection(rows);
-  const lines = rows.length ? buildMainListLines(rows, MAIN_LIST_WIDTH, deps.truncate, themeFg(ctx), {
+  const lines = rows.length ? buildMainListLines(rows, mainListWidth(), deps.truncate, themeFg(ctx), {
     selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
     focused: s.mainListFocused === true,
   }) : undefined;
   if (linesEqual(s.lastMainListLines, lines)) return;
   try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, lines, { placement: "aboveEditor" }); } catch { /* ignore */ }
   s.lastMainListLines = lines;
+}
+
+function mainListWidth(): number {
+  const columns = process.stdout.columns;
+  return Number.isFinite(columns) && columns > 0 ? Math.floor(columns) : MAIN_LIST_FALLBACK_WIDTH;
 }
 
 function themeFg(ctx: ExtensionContext): (color: string, value: string) => string {
