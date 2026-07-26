@@ -12,10 +12,11 @@ import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { readLog } from "./logs.js";
 import { listMetas, readMeta, writeMeta } from "./registry.js";
 import { stopTask } from "./runtime.js";
-import type { BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
+import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
 let unregister: (() => void) | undefined;
 let piRef: ExtensionAPI | undefined;
+let activeNavigatorOrigin: BackgroundTaskCallbackOrigin | undefined;
 
 export function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
   piRef = pi;
@@ -24,12 +25,17 @@ export function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
 }
 
 export function ensureBackgroundTasksNavigator(ctx: ExtensionContext): void {
+  activeNavigatorOrigin = getNavigatorOrigin(ctx);
   ensureBackgroundWorkNavigator(ctx, {
     createDefaultEditor: (tui, theme, keybindings) => new CustomEditor(tui as never, theme as never, keybindings as never),
     isOpenTrigger: (data) => matchesKey(data, Key.left),
     matchKey: (data, keyId) => matchesKey(data, keyId as Parameters<typeof matchesKey>[1]),
     truncate: truncateToWidth,
   });
+}
+
+export function clearBackgroundTasksNavigatorSession(): void {
+  activeNavigatorOrigin = undefined;
 }
 
 export function refreshBackgroundTasksNavigator(ctx?: ExtensionContext): void {
@@ -42,7 +48,7 @@ const provider: BackgroundWorkProvider = {
   priority: 20,
   visibleCount: () => visibleMetas().filter((meta) => meta.status === "running").length,
   listRows: (now) => visibleMetas().map((meta) => rowFromMeta(meta, now)),
-  detail: (id, now) => detailFromMeta(readMeta(id), now),
+  detail: (id, now, options) => detailFromMeta(readMeta(id), now, options),
   armCloseLabel: (row) => row.status === "running" ? "x again to stop" : "x again to dismiss",
   close: (id) => {
     const meta = readMeta(id);
@@ -58,7 +64,30 @@ const provider: BackgroundWorkProvider = {
 };
 
 function visibleMetas(): BackgroundTaskMeta[] {
-  return listMetas().filter((meta) => meta.dismissedAt === undefined);
+  return listMetas().filter((meta) => meta.dismissedAt === undefined && belongsToActiveNavigatorSession(meta));
+}
+
+function getNavigatorOrigin(ctx: ExtensionContext): BackgroundTaskCallbackOrigin {
+  let sessionId: string | undefined;
+  try {
+    sessionId = ctx.sessionManager?.getSessionId();
+  } catch {
+    sessionId = undefined;
+  }
+  return { cwd: ctx.cwd, sessionId };
+}
+
+function belongsToActiveNavigatorSession(meta: BackgroundTaskMeta): boolean {
+  const active = activeNavigatorOrigin;
+  if (!active) return false;
+  const origin = meta.callbackOrigin;
+  if (origin) {
+    if (origin.cwd !== active.cwd) return false;
+    if (origin.sessionId || active.sessionId) return origin.sessionId === active.sessionId;
+    return true;
+  }
+  if (active.sessionId) return false;
+  return meta.cwd === active.cwd;
 }
 
 function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
@@ -71,16 +100,19 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
     statusTone: toneForStatus(meta.status),
     kind: meta.kind === "command_watch" ? "watch" : "process",
     elapsed,
-    primary: commandLabel(meta),
+    primary: compactCommandLabel(meta),
+    command: commandLabel(meta),
+    tool: compactCommandLabel(meta),
     secondary: secondaryLabel(meta),
     facts: factsForMeta(meta, now),
     sortStartedAt: meta.startedAt,
   };
 }
 
-function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number): BackgroundWorkDetail | null {
+function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   if (!meta) return null;
-  const log = readLog(meta.logPath, 80);
+  const log = readLog(meta.logPath, options?.logTailLines ?? 10);
+  const command = commandLabel(meta);
   const metadata = [
     { label: "provider", value: "Background Tasks" },
     { label: "kind", value: meta.kind === "command_watch" ? "watch" : "process" },
@@ -100,8 +132,14 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number): Back
     title: meta.name || meta.id,
     status: meta.status,
     statusTone: toneForStatus(meta.status),
-    subtitle: commandLabel(meta),
+    subtitle: compactCommandLabel(meta),
     metadata,
+    foldedSections: [{
+      id: "command",
+      label: "command",
+      text: command,
+      collapsedText: compactCommandLabel(meta),
+    }],
     evidence: {
       label: log.truncated ? "log tail" : "log",
       text: log.text || "(log is empty)",
@@ -125,6 +163,13 @@ function commandLabel(meta: BackgroundTaskMeta): string {
   if (meta.command) return meta.command;
   if (meta.argv?.length) return meta.argv.join(" ");
   return "(no command recorded)";
+}
+
+function compactCommandLabel(meta: BackgroundTaskMeta): string {
+  const value = commandLabel(meta).trim();
+  const parts = value.split(/\s+/).filter(Boolean);
+  if (parts.length <= 3) return value;
+  return parts.slice(0, 3).join(" ");
 }
 
 function secondaryLabel(meta: BackgroundTaskMeta): string | undefined {

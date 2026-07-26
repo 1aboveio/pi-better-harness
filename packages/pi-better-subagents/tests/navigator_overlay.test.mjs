@@ -147,7 +147,8 @@ describe("navigator footer hint", () => {
         const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
         const sharedSrc = readFileSync(new URL("../../navigator/index.ts", import.meta.url), "utf8");
         assert.ok(src.includes("function navigatorRunningCount"), "index.ts must expose a running-only affordance seam");
-        assert.ok(sharedSrc.includes("visibleCount() > 0"), "empty-editor left must require visible background work");
+        assert.ok(sharedSrc.includes("function handleMainListInput"), "empty-editor keys must route through the shared main-list input handler");
+        assert.ok(sharedSrc.includes("if (rows.length === 0) return false"), "main-list input must require visible background work");
         assert.ok(src.includes("visibleCount: () => navigatorRunningCount()"), "subagent provider footer count must count running runs only");
     });
 

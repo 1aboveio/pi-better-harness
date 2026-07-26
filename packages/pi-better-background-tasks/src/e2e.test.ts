@@ -134,13 +134,38 @@ describe("extension e2e", () => {
     expect(otherHarness.messages).toHaveLength(0);
     expect(terminal?.callbackSuppressedReason).toContain("origin session session-a does not match active session session-b");
   });
+
+  it("keeps navigator rows scoped to the active session", async () => {
+    const sessionA = createHarness({ sessionId: "session-a", mode: "tui", hasUI: true });
+    await sessionA.fireSessionStart();
+    const launch = await sessionA.execute("bg_task_spawn", {
+      name: "session-a-task",
+      shell: false,
+      argv: [process.execPath, "-e", "setTimeout(() => {}, 30_000)"],
+      callback: false,
+    });
+    const id = extractTaskId(launch);
+
+    try {
+      expect(sessionA.lastWidget("background-work-list")?.join("\n")).toContain("session-a-task");
+
+      const sessionB = createHarness({ sessionId: "session-b", mode: "tui", hasUI: true });
+      await sessionB.fireSessionStart();
+
+      expect(sessionB.lastWidget("background-work-list")?.join("\n") ?? "").not.toContain("session-a-task");
+      expect(sessionB.lastWidget("background-work-list")?.join("\n") ?? "").not.toContain(id);
+    } finally {
+      await sessionA.execute("bg_task_stop", { id });
+    }
+  });
 });
 
-function createHarness(options: { cwd?: string; sessionId?: string; failUserMessage?: boolean } = {}) {
+function createHarness(options: { cwd?: string; sessionId?: string; failUserMessage?: boolean; mode?: string; hasUI?: boolean } = {}) {
   const tools = new Map<string, RegisteredTool>();
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => unknown> = [];
   const messages: string[] = [];
   const messageAttempts: string[] = [];
+  const widgets: Array<[string, string[] | undefined]> = [];
   const events = new EventEmitter();
   const goalProviders: unknown[] = [];
   events.on("pi-better-goal:register-provider", (provider) => goalProviders.push(provider));
@@ -148,7 +173,16 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
   const sessionId = options.sessionId ?? "test-session";
   const context = {
     cwd,
-    hasUI: false,
+    mode: options.mode ?? "print",
+    hasUI: options.hasUI ?? false,
+    ui: {
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(key: string, value: string[] | undefined) { widgets.push([key, value]); },
+      getEditorComponent() { return undefined; },
+      setEditorComponent() {},
+      custom() { return Promise.resolve(null); },
+    },
     sessionManager: {
       getSessionId: () => sessionId,
     },
@@ -174,6 +208,7 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
     tools,
     messages,
     messageAttempts,
+    widgets,
     events,
     goalProviders,
     async execute(name: string, params: Record<string, unknown>) {
@@ -190,6 +225,12 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
     },
     async fireSessionStart() {
       for (const handler of sessionStartHandlers) await handler({ type: "session_start" }, context);
+    },
+    lastWidget(key: string) {
+      for (let i = widgets.length - 1; i >= 0; i -= 1) {
+        if (widgets[i]![0] === key) return widgets[i]![1];
+      }
+      return undefined;
     },
   };
 }
