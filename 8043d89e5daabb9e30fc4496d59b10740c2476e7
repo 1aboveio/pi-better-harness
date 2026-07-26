@@ -1,0 +1,1 @@
+Follow-up after PR #6: make cross-session leakage regressions a named CI gate and harden the merge-queue runtime timeout flake.
