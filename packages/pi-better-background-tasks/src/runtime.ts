@@ -9,6 +9,8 @@ import { isTerminalStatus } from "./types.js";
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const activePolls = new Set<string>();
 
+export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
+
 export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
 
 export interface SpawnTaskParams extends CommandSpec {
@@ -85,13 +87,14 @@ export function startWatchTask(
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const now = Date.now();
+  const timeoutSeconds = resolveWatchTimeoutSeconds(params.timeout_seconds);
   const meta: BackgroundTaskMeta = {
     id,
     name: params.name,
     kind: "command_watch",
     status: "running",
     startedAt: now,
-    deadlineAt: params.timeout_seconds ? now + params.timeout_seconds * 1000 : undefined,
+    deadlineAt: timeoutSeconds ? now + timeoutSeconds * 1000 : undefined,
     intervalMs: Math.max(1, params.interval_seconds ?? 30) * 1000,
     logPath: logPathFor(id),
     callback: params.callback,
@@ -111,6 +114,12 @@ export function startWatchTask(
   writeMeta(meta);
   scheduleWatch(pi, id, 0, getActiveSession);
   return meta;
+}
+
+function resolveWatchTimeoutSeconds(timeoutSeconds: number | undefined): number | undefined {
+  if (timeoutSeconds === undefined) return DEFAULT_WATCH_TIMEOUT_SECONDS;
+  if (timeoutSeconds <= 0) return undefined;
+  return timeoutSeconds;
 }
 
 export function resumeRunningTask(

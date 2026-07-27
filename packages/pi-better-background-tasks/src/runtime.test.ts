@@ -1,13 +1,51 @@
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta } from "./registry.js";
-import { spawnTask, startWatchTask, stopTask } from "./runtime.js";
+import { DEFAULT_WATCH_TIMEOUT_SECONDS, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 
 const fakePi = {
   sendUserMessage: async () => undefined,
 } as unknown as ExtensionAPI;
 
 describe("runtime", () => {
+  it("defaults command watchers to a 15 minute timeout", () => {
+    const before = Date.now();
+    const meta = startWatchTask(fakePi, {
+      name: "default timeout watcher",
+      command: "node -e 'console.log(JSON.stringify({status:\"pending\"}))'",
+      interval_seconds: 60,
+      callback: false,
+      success_when: { type: "json_path_equals", path: "$.status", value: "done" },
+    }, process.cwd());
+    const after = Date.now();
+
+    expect(meta.deadlineAt).toBeGreaterThanOrEqual(before + DEFAULT_WATCH_TIMEOUT_SECONDS * 1000);
+    expect(meta.deadlineAt).toBeLessThanOrEqual(after + DEFAULT_WATCH_TIMEOUT_SECONDS * 1000);
+  });
+
+  it("keeps explicit watcher timeouts and lets zero disable the default", () => {
+    const explicit = startWatchTask(fakePi, {
+      name: "explicit timeout watcher",
+      command: "node -e 'console.log(JSON.stringify({status:\"pending\"}))'",
+      interval_seconds: 60,
+      timeout_seconds: 42,
+      callback: false,
+      success_when: { type: "json_path_equals", path: "$.status", value: "done" },
+    }, process.cwd());
+    const disabled = startWatchTask(fakePi, {
+      name: "disabled timeout watcher",
+      command: "node -e 'console.log(JSON.stringify({status:\"pending\"}))'",
+      interval_seconds: 60,
+      timeout_seconds: 0,
+      callback: false,
+      success_when: { type: "json_path_equals", path: "$.status", value: "done" },
+    }, process.cwd());
+
+    expect(explicit.deadlineAt).toBeDefined();
+    expect(Math.round(((explicit.deadlineAt ?? 0) - explicit.startedAt) / 1000)).toBe(42);
+    expect(disabled.deadlineAt).toBeUndefined();
+  });
+
   it("runs a command watcher to success", async () => {
     const meta = startWatchTask(fakePi, {
       name: "test watcher",
