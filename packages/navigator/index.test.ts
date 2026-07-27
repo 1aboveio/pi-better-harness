@@ -436,4 +436,105 @@ describe("shared background work navigator", () => {
       unregister();
     }
   });
+
+  it("folds output evidence by default and expands it into wrapped rows", () => {
+    const output = [
+      "The live/current technical partition is `2026-07-26`, so July can only be safely evaluated with production data that has already landed and been reconciled.",
+      "row-02 context",
+      "row-03 context",
+      "row-04 context",
+      "row-05 context",
+      "row-06 context",
+      "row-07 context",
+      "row-08 context",
+      "row-09 context",
+      "row-10 context",
+      "row-11 visible after more",
+      "row-12 visible after more",
+    ].join("\n");
+    const unregister = registerBackgroundWorkProvider({
+      id: "subagents",
+      label: "Subagents",
+      priority: 10,
+      visibleCount: () => 1,
+      listRows: () => [{
+        providerId: "subagents",
+        id: "sa-1",
+        name: "backfill-2025-2026-act",
+        model: "gpt-5.5",
+        tool: "bash",
+        tokens: "27.7k tok",
+        status: "running",
+        statusTone: "running",
+        kind: "subagent",
+        elapsed: "52m 29s",
+        primary: "bash · 27.7k tok",
+        sortStartedAt: 300,
+      }],
+      detail: () => ({
+        providerId: "subagents",
+        id: "sa-1",
+        title: "backfill-2025-2026-act",
+        status: "running",
+        statusTone: "running",
+        subtitle: "current tool bash",
+        metadata: [{ label: "provider", value: "Subagents" }],
+        evidence: { label: "output", text: output },
+        footerActions: ["x stop"],
+      }),
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "subagents", id }),
+    });
+
+    let component: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+
+      let renderedLines = component.render(54);
+      let rendered = renderedLines.join("\n");
+      assert.match(rendered, /Enter expand/);
+      assert.match(rendered, /output · folded/);
+      assert.match(rendered, /folded/);
+      assert.doesNotMatch(rendered, /row-11 visible after more/);
+
+      component.handleInput("enter");
+      renderedLines = component.render(54);
+      rendered = renderedLines.join("\n");
+      assert.match(rendered, /Enter collapse/);
+      assert.match(rendered, /output · showing 10\/\d+ rows/);
+      assert.match(rendered, /July can only be safely\n\s+evaluated/);
+      assert.doesNotMatch(rendered, /row-11 visible after more/);
+      for (const line of renderedLines) assert.ok(line.length <= 54, `line exceeds width: ${line}`);
+
+      component.handleInput("]");
+      rendered = component.render(54).join("\n");
+      assert.match(rendered, /output · showing \d+\/\d+ rows/);
+      assert.match(rendered, /row-11 visible after more/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
 });

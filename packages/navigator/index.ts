@@ -96,6 +96,7 @@ const MAIN_LIST_TICK_MS = 1000;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
 const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 5;
 const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
+const EVIDENCE_SECTION_ID = "__evidence__";
 
 function state(): NavigatorState {
   const g = globalThis as typeof globalThis & { [GLOBAL_KEY]?: NavigatorState };
@@ -696,10 +697,10 @@ function createOverlayComponent(
       if (mode === "detail") {
         if (deps.matchKey(data, "left")) close();
         else if (deps.matchKey(data, "enter")) {
-          const first = detail?.foldedSections?.[0];
-          if (first) {
-            if (expandedSections.has(first.id)) expandedSections.delete(first.id);
-            else expandedSections.add(first.id);
+          const sectionId = firstToggleableSectionId(detail);
+          if (sectionId) {
+            if (expandedSections.has(sectionId)) expandedSections.delete(sectionId);
+            else expandedSections.add(sectionId);
             requestRender();
           }
         }
@@ -823,7 +824,10 @@ function buildDetailLines(
   }
   const lines: string[] = [];
   lines.push(fg("accent", rule(detail.title, width)));
-  const foldedAction = detail.foldedSections?.length ? "Enter expand" : null;
+  const toggleableSectionId = firstToggleableSectionId(detail);
+  const foldedAction = toggleableSectionId
+    ? (options.expandedSections?.has(toggleableSectionId) ? "Enter collapse" : "Enter expand")
+    : null;
   const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "[ fewer", "] more", "l cycle", "Esc close"].filter(Boolean).join(" · ");
   lines.push(dim(`   ← back · ${actions}`, fg));
   lines.push("");
@@ -850,10 +854,26 @@ function buildDetailLines(
   }
   lines.push("");
   const tailRows = options.logTailRows ?? DEFAULT_LOG_TAIL_ROWS;
-  const evidenceLabel = /log/i.test(detail.evidence.label) ? `${detail.evidence.label} · latest ${tailRows} rows` : detail.evidence.label;
-  lines.push(dim(section(evidenceLabel, width), fg));
   const body = detail.evidence.text && detail.evidence.text.trim() ? detail.evidence.text : "(no output yet)";
-  for (const raw of body.split(/\r?\n/)) lines.push(raw ? `   ${raw}` : "   ");
+  if (isFoldableEvidence(detail)) {
+    const expanded = options.expandedSections?.has(EVIDENCE_SECTION_ID) === true;
+    if (!expanded) {
+      lines.push(dim(section(`${detail.evidence.label} · folded`, width), fg));
+      const folded = dim("folded", fg);
+      const previewWidth = Math.max(8, width - visibleWidth(`    ${folded}`));
+      const preview = truncateVisible(singleLine(body), previewWidth);
+      lines.push(`   ${preview} ${folded}`);
+    } else {
+      const wrapped = wrapEvidenceText(body, width - 6);
+      const shown = wrapped.slice(0, tailRows);
+      lines.push(dim(section(`${detail.evidence.label} · showing ${shown.length}/${wrapped.length} rows`, width), fg));
+      for (const raw of shown) lines.push(raw ? `   ${raw}` : "   ");
+    }
+  } else {
+    const evidenceLabel = /log/i.test(detail.evidence.label) ? `${detail.evidence.label} · latest ${tailRows} rows` : detail.evidence.label;
+    lines.push(dim(section(evidenceLabel, width), fg));
+    for (const raw of body.split(/\r?\n/)) lines.push(raw ? `   ${raw}` : "   ");
+  }
   lines.push("");
   const footerLines = [dim(`   ← back · ${actions}`, fg), dim(rule("", width), fg)];
   padBeforeFooter(lines, footerLines.length, options.minRows);
@@ -865,6 +885,16 @@ function padBeforeFooter(lines: string[], footerLineCount: number, minRows: numb
   if (minRows === undefined || !Number.isFinite(minRows)) return;
   const target = Math.max(1, Math.floor(minRows));
   while (lines.length + footerLineCount < target) lines.push("");
+}
+
+function firstToggleableSectionId(detail: BackgroundWorkDetail | null | undefined): string | undefined {
+  const first = detail?.foldedSections?.[0];
+  if (first) return first.id;
+  return detail && isFoldableEvidence(detail) ? EVIDENCE_SECTION_ID : undefined;
+}
+
+function isFoldableEvidence(detail: BackgroundWorkDetail): boolean {
+  return !/log/i.test(detail.evidence.label);
 }
 
 function sectionHeader(label: string, width: number): string {
@@ -888,6 +918,18 @@ function wrapDetailText(text: string, width: number): string[] {
   }
   if (line) lines.push(line);
   return lines.length ? lines : ["(empty)"];
+}
+
+function wrapEvidenceText(text: string, width: number): string[] {
+  const rows: string[] = [];
+  for (const raw of String(text ?? "").split(/\r?\n/)) {
+    if (!raw.trim()) {
+      rows.push("");
+      continue;
+    }
+    rows.push(...wrapDetailText(raw, width));
+  }
+  return rows.length ? rows : ["(no output yet)"];
 }
 
 function nextLogTailRows(current: number): number {
