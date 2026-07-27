@@ -249,6 +249,14 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     };
 }
 
+function renderWidgetValue(value, width = 120) {
+    if (Array.isArray(value)) return value.join("\n");
+    if (typeof value === "function") {
+        return value({ requestRender() {} }, { fg: (_color, s) => s }).render(width).join("\n");
+    }
+    return String(value ?? "");
+}
+
 describe("registered extension path: main-window navigator actions", () => {
     let mod;
     let registry;
@@ -391,7 +399,7 @@ describe("registered extension path: main-window navigator actions", () => {
 
         await nav.start();
 
-        const mainList = String(nav.lastWidget("background-work-list") ?? "");
+        const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
         assert.ok(mainList.includes("session-b-run"), mainList);
         assert.ok(!mainList.includes("session-a-run"), mainList);
     });
@@ -436,7 +444,7 @@ describe("registered extension path: main-window navigator actions", () => {
 
         await nav.start();
 
-        const mainList = String(nav.lastWidget("background-work-list") ?? "");
+        const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
         assert.ok(mainList.includes("recent-failed-run"), mainList);
         assert.ok(mainList.includes("recent-completed-run"), mainList);
         assert.ok(!mainList.includes("old-failed-run"), mainList);
