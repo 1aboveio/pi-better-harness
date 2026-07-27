@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
 
 export default function navigatorExtension(): void {
   // Internal shared package. Pi may scan its symlink in the extension directory
@@ -72,6 +73,8 @@ type NavigatorState = {
   deps?: HostDeps;
   lastHint?: string | null;
   lastMainListLines?: string[];
+  mainListWidgetInstalled?: boolean;
+  mainListRequestRender?: () => void;
   mainListSelectedId?: string;
   mainListFocused?: boolean;
   mainListCloseArm?: { id: string; armedAt: number };
@@ -161,6 +164,9 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   const s = state();
   s.uiCtx = ctx;
   s.deps = deps;
+  try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+  s.mainListWidgetInstalled = false;
+  s.mainListRequestRender = undefined;
   installNavigatorEditor(ctx.ui as any, deps);
   s.lastHint = undefined;
   startMainListWidget(ctx);
@@ -181,6 +187,8 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   }
   s.lastHint = undefined;
   s.lastMainListLines = undefined;
+  s.mainListWidgetInstalled = false;
+  s.mainListRequestRender = undefined;
   s.detailOverlayRows = undefined;
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
@@ -242,31 +250,63 @@ function refreshMainListWidget(): void {
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
   const rows = listRows();
   syncMainListSelection(rows);
-  const lines = rows.length ? buildMainListLines(rows, mainListWidth(), deps.truncate, themeFg(ctx), {
+  s.lastMainListLines = rows.length ? buildMainListLines(rows, MAIN_LIST_FALLBACK_WIDTH, deps.truncate, themeFg(ctx), {
     selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
     focused: s.mainListFocused === true,
   }) : undefined;
-  if (linesEqual(s.lastMainListLines, lines)) return;
-  try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, lines, { placement: "aboveEditor" }); } catch { /* ignore */ }
-  s.lastMainListLines = lines;
-}
-
-function mainListWidth(): number {
-  const columns = process.stdout.columns;
-  return Number.isFinite(columns) && columns > 0 ? Math.floor(columns) : MAIN_LIST_FALLBACK_WIDTH;
+  if (!rows.length) {
+    if (!s.mainListWidgetInstalled) return;
+    try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+    s.mainListWidgetInstalled = false;
+    s.mainListRequestRender = undefined;
+    return;
+  }
+  if (!s.mainListWidgetInstalled) {
+    try {
+      (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown) => createMainListWidget(tui, theme, deps), { placement: "aboveEditor" });
+      s.mainListWidgetInstalled = true;
+    } catch { /* ignore */ }
+  }
+  try { s.mainListRequestRender?.(); } catch { /* ignore */ }
 }
 
 function themeFg(ctx: ExtensionContext): (color: string, value: string) => string {
-  const theme = (ctx.ui as any).theme;
-  return (color, value) => theme?.fg ? theme.fg(color, value) : value;
+  return themeFgFromTheme((ctx.ui as any).theme);
 }
 
-function linesEqual(a: string[] | undefined, b: string[] | undefined): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
-  return true;
+function themeFgFromTheme(theme: unknown): (color: string, value: string) => string {
+  const maybeTheme = theme as { fg?: (color: string, value: string) => string } | undefined;
+  return (color, value) => maybeTheme?.fg ? maybeTheme.fg(color, value) : value;
+}
+
+function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps): Component & { dispose?(): void } {
+  const requestRender = () => tui.requestRender?.();
+  state().mainListRequestRender = requestRender;
+  return {
+    render(width: number): string[] {
+      const rows = listRows();
+      syncMainListSelection(rows);
+      if (!rows.length) {
+        state().lastMainListLines = undefined;
+        return [];
+      }
+      const lines = buildMainListLines(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
+        selectedId: state().mainListFocused ? state().mainListSelectedId : undefined,
+        focused: state().mainListFocused === true,
+      });
+      state().lastMainListLines = lines;
+      return lines;
+    },
+    invalidate() { state().lastMainListLines = undefined; },
+    dispose() {
+      const s = state();
+      if (s.mainListRequestRender === requestRender) s.mainListRequestRender = undefined;
+    },
+  };
+}
+
+function renderWidth(width: number): number {
+  return Number.isFinite(width) && width > 0 ? Math.floor(width) : MAIN_LIST_FALLBACK_WIDTH;
 }
 
 type InternalRow = BackgroundWorkRow & { navigatorId: string; providerLabel: string };
@@ -359,7 +399,6 @@ function buildMainListLines(
   for (const label of grouped.keys()) if (!orderedLabels.includes(label)) orderedLabels.push(label);
   for (const label of orderedLabels) {
     const group = grouped.get(label)!;
-    lines.push(section(label.toLowerCase(), width));
     const isBackgroundTasks = group.some((row) => row.providerId === "background-tasks");
     lines.push(dim(isBackgroundTasks
       ? `  ${fit("name", 24)} ${fit("command/tool", 34)} ${fit("status", 10)} elapsed`
@@ -369,7 +408,7 @@ function buildMainListLines(
       lines.push(formatMainListRow(row, selected === true, isBackgroundTasks, fg));
     }
   }
-  lines.push(dim(`${options.focused ? "↑↓ select" : "← focus"} · Enter detail · x stop/dismiss · Esc unfocus`, fg));
+  lines.push(dim(options.focused ? "↑↓ select · Enter detail · x stop · Esc unfocus" : "<- to navigate", fg));
   return lines.map((line) => safeTruncate(line, width, truncate));
 }
 

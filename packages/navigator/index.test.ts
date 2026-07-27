@@ -45,6 +45,12 @@ function provider(id: string, label: string, priority: number, startedAt: number
   };
 }
 
+function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_color: string, value: string) => value }): string[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "function") return [];
+  return value({ requestRender() {} }, theme).render(width);
+}
+
 describe("shared background work navigator", () => {
   it("uses one footer/editor host for multiple providers and dispatches close by provider", () => {
     const closed: string[] = [];
@@ -52,13 +58,13 @@ describe("shared background work navigator", () => {
     const unregisterTasks = registerBackgroundWorkProvider(provider("background-tasks", "Background Tasks", 20, 100, (id) => closed.push(`tasks:${id}`)));
 
     const statuses: Array<[string, string | undefined]> = [];
-    const widgets: Array<[string, string[] | undefined]> = [];
+    const widgets: Array<[string, unknown]> = [];
     let component: any;
     const ui = {
       factory: undefined as any,
       theme: { fg: (_color: string, value: string) => value },
       setStatus(key: string, value: string | undefined) { statuses.push([key, value]); },
-      setWidget(key: string, value: string[] | undefined) { widgets.push([key, value]); },
+      setWidget(key: string, value: unknown) { widgets.push([key, value]); },
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
       custom(factory: any) {
@@ -80,13 +86,18 @@ describe("shared background work navigator", () => {
       assert.equal(statuses.at(-1)?.[1], "← background work · 2");
       assert.equal(ui.factory.__piBetterHarnessNavigatorFactory, true);
 
+      let list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
+      assert.match(list, /background work/);
+      assert.match(list, /Subagents row/);
+      assert.match(list, /Background Tasks row/);
+      assert.match(list, /<- to navigate/);
+      assert.doesNotMatch(list, /── background tasks/);
+
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       assert.equal(widgets.at(-1)?.[0], MAIN_LIST_WIDGET_KEY);
-      const list = widgets.at(-1)?.[1]?.join("\n") ?? "";
-      assert.match(list, /background work/);
-      assert.match(list, /subagents/);
-      assert.match(list, /background tasks/);
+      list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
+      assert.match(list, /↑↓ select · Enter detail · x stop · Esc unfocus/);
 
       editor.handleInput("enter");
       const detail = component.render(100).join("\n");
@@ -146,7 +157,7 @@ describe("shared background work navigator", () => {
 
   it("renders failed rows with Pi-supported theme colors", () => {
     const seenColors: string[] = [];
-    const widgets: Array<string[] | undefined> = [];
+    const widgets: unknown[] = [];
     const allowed = new Set(["accent", "success", "error", "warning", "dim"]);
     const unregister = registerBackgroundWorkProvider({
       id: "background-tasks",
@@ -193,7 +204,7 @@ describe("shared background work navigator", () => {
         },
       },
       setStatus() {},
-      setWidget(_key: string, value: string[] | undefined) { widgets.push(value); },
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
       custom(factory: any) {
@@ -211,7 +222,7 @@ describe("shared background work navigator", () => {
         truncate: (value, width) => value.slice(0, width),
       });
 
-      const renderedWidget = widgets.at(-1)?.join("\n") ?? "";
+      const renderedWidget = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
       assert.match(renderedWidget, /failed/);
       assert.match(renderedWidget, /lost/);
 
@@ -228,9 +239,9 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("groups the main list by provider and hides model columns for background tasks", () => {
+  it("renders the main list with the TUI render width and hides model columns for background tasks", () => {
     const stdoutColumnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
-    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 132 });
+    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 100 });
     const unregisterSubagents = registerBackgroundWorkProvider({
       ...provider("subagents", "Subagents", 10, 200, () => undefined),
       listRows: () => [{
@@ -265,12 +276,12 @@ describe("shared background work navigator", () => {
       }],
     });
 
-    const widgets: Array<string[] | undefined> = [];
+    const widgets: unknown[] = [];
     const ui = {
       factory: undefined as any,
       theme: { fg: (_color: string, value: string) => value },
       setStatus() {},
-      setWidget(_key: string, value: string[] | undefined) { widgets.push(value); },
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
       custom() { return Promise.resolve(null); },
@@ -284,12 +295,12 @@ describe("shared background work navigator", () => {
         matchKey: (data, key) => data === key,
         truncate: (value, width) => value.slice(0, width),
       });
-      const lines = widgets.at(-1) ?? [];
+      const lines = renderWidget(widgets.at(-1), 132, ui.theme);
       const text = lines.join("\n");
       for (const line of lines) assert.doesNotMatch(line, /[\r\n]/, "widget rows must not contain embedded newlines");
-      assert.ok(text.indexOf("subagents") < text.indexOf("background tasks"), text);
-      const backgroundSection = lines.find((line) => /background tasks/.test(line));
-      assert.equal(backgroundSection?.length, 132, "main list section rule should span the terminal width");
+      assert.ok(text.indexOf("reviewer") < text.indexOf("watch-pr-14-merge"), text);
+      assert.doesNotMatch(text, /── background tasks/, "main list should not render provider separator rows");
+      assert.match(text, /<- to navigate/);
       assert.match(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/);
       assert.match(text, /reviewer\s+grok-4\.5 high\s+bash\s+18\.2k tok/);
 
@@ -316,6 +327,11 @@ describe("shared background work navigator", () => {
       assert.equal(bgHeader.indexOf("command/tool"), bgRow.indexOf("#!/usr/bin/env bash"));
       assert.equal(bgHeader.indexOf("status"), bgRow.indexOf("failed"));
       assert.equal(bgHeader.indexOf("elapsed"), bgRow.indexOf("2m 18s"));
+
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      const focusedLines = renderWidget(widgets.at(-1), 132, ui.theme);
+      assert.match(focusedLines.join("\n"), /↑↓ select · Enter detail · x stop · Esc unfocus/);
     } finally {
       if (stdoutColumnsDescriptor) Object.defineProperty(process.stdout, "columns", stdoutColumnsDescriptor);
       else Reflect.deleteProperty(process.stdout, "columns");
@@ -369,12 +385,12 @@ describe("shared background work navigator", () => {
 
     let component: any;
     let customOptions: any;
-    const widgets: Array<[string, string[] | undefined]> = [];
+    const widgets: Array<[string, unknown]> = [];
     const ui = {
       factory: undefined as any,
       theme: { fg: (_color: string, value: string) => value },
       setStatus() {},
-      setWidget(key: string, value: string[] | undefined) { widgets.push([key, value]); },
+      setWidget(key: string, value: unknown) { widgets.push([key, value]); },
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
       custom(factory: any, options: any) {
@@ -398,7 +414,7 @@ describe("shared background work navigator", () => {
 
       const overlayOptions = customOptions?.overlayOptions?.();
       const { visible, ...layoutOptions } = overlayOptions;
-      const navigatorRows = widgets.at(-1)?.[1]?.length ?? 0;
+      const navigatorRows = renderWidget(widgets.at(-1)?.[1], 72, ui.theme).length;
       const bottomMargin = 3 + navigatorRows;
       assert.equal(customOptions?.overlay, true);
       assert.equal(typeof visible, "function");
