@@ -9,6 +9,14 @@ type RegisteredTool = {
   execute: (...args: any[]) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
 };
 
+function renderWidget(value: unknown, width = 120): string {
+  if (Array.isArray(value)) return value.join("\n");
+  if (typeof value === "function") {
+    return value({ requestRender() {} }, { fg: (_color: string, text: string) => text }).render(width).join("\n");
+  }
+  return "";
+}
+
 describe("extension e2e", () => {
   it("registers the public background task tools", () => {
     const harness = createHarness();
@@ -147,13 +155,13 @@ describe("extension e2e", () => {
     const id = extractTaskId(launch);
 
     try {
-      expect(sessionA.lastWidget("background-work-list")?.join("\n")).toContain("session-a-task");
+      expect(renderWidget(sessionA.lastWidget("background-work-list"))).toContain("session-a-task");
 
       const sessionB = createHarness({ sessionId: "session-b", mode: "tui", hasUI: true });
       await sessionB.fireSessionStart();
 
-      expect(sessionB.lastWidget("background-work-list")?.join("\n") ?? "").not.toContain("session-a-task");
-      expect(sessionB.lastWidget("background-work-list")?.join("\n") ?? "").not.toContain(id);
+      expect(renderWidget(sessionB.lastWidget("background-work-list"))).not.toContain("session-a-task");
+      expect(renderWidget(sessionB.lastWidget("background-work-list"))).not.toContain(id);
     } finally {
       await sessionA.execute("bg_task_stop", { id });
     }
@@ -179,7 +187,7 @@ describe("extension e2e", () => {
     const failed = await waitForMeta(failedId, (meta) => meta?.status === "failed" && typeof meta.endedAt === "number");
     const succeeded = await waitForMeta(succeededId, (meta) => meta?.status === "succeeded" && typeof meta.endedAt === "number");
     await harness.fireSessionStart();
-    let list = harness.lastWidget("background-work-list")?.join("\n") ?? "";
+    let list = renderWidget(harness.lastWidget("background-work-list"));
     expect(list).toContain("recent-failure");
     expect(list).toContain("recent-success");
 
@@ -187,7 +195,7 @@ describe("extension e2e", () => {
     writeMeta({ ...succeeded!, endedAt: Date.now() - 31_000 });
     await harness.fireSessionStart();
 
-    list = harness.lastWidget("background-work-list")?.join("\n") ?? "";
+    list = renderWidget(harness.lastWidget("background-work-list"));
     expect(list).not.toContain("recent-failure");
     expect(list).not.toContain("recent-success");
     expect(readMeta(failedId)?.status).toBe("failed");
@@ -200,7 +208,7 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => unknown> = [];
   const messages: string[] = [];
   const messageAttempts: string[] = [];
-  const widgets: Array<[string, string[] | undefined]> = [];
+  const widgets: Array<[string, unknown]> = [];
   const events = new EventEmitter();
   const goalProviders: unknown[] = [];
   events.on("pi-better-goal:register-provider", (provider) => goalProviders.push(provider));
@@ -213,7 +221,7 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
     ui: {
       theme: { fg: (_color: string, value: string) => value },
       setStatus() {},
-      setWidget(key: string, value: string[] | undefined) { widgets.push([key, value]); },
+      setWidget(key: string, value: unknown) { widgets.push([key, value]); },
       getEditorComponent() { return undefined; },
       setEditorComponent() {},
       custom() { return Promise.resolve(null); },
