@@ -26,6 +26,10 @@ Callbacks are terminal-only by default. When `callback` is not false, a task tha
 reaches a terminal state queues one follow-up message telling the foreground
 agent which task finished and which tool to call for details.
 
+Command watchers default to a 15 minute timeout when `timeout_seconds` is
+omitted. Pass `timeout_seconds: 0` to disable the watcher timeout explicitly.
+Spawned processes do not get a default timeout.
+
 ## Examples
 
 ```json

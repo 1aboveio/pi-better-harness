@@ -22,7 +22,7 @@ const CommandFields = {
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current pi cwd." })),
   env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Extra environment variables." })),
   callback: Type.Optional(Type.Boolean({ description: "Queue a follow-up when the task reaches a terminal state. Default true." })),
-  timeout_seconds: Type.Optional(Type.Number({ description: "Optional timeout in seconds." })),
+  timeout_seconds: Type.Optional(Type.Number({ description: "Optional timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to disable. Spawned processes have no default timeout." })),
 };
 
 const SpawnParams = Type.Object(CommandFields);
@@ -102,7 +102,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_watch",
     label: "BG Watch",
-    description: "Poll a command in the background until success_when, failure_when, or timeout matches. Returns immediately with its task id.",
+    description: "Poll a command in the background until success_when, failure_when, or timeout matches. Returns immediately with its task id. Default timeout 900 seconds; pass timeout_seconds:0 to disable.",
     parameters: WatchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
