@@ -20,11 +20,11 @@ describe("golden path: background process journey", () => {
     });
     const id = extractTaskId(launchText);
 
-    const initialStatus = JSON.parse(await harness.execute("bg_task_status", { id }));
+    const initialStatus = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true }));
     expect(initialStatus).toMatchObject({ id, kind: "process", status: "running" });
 
     await sleep(750);
-    const midStatus = JSON.parse(await harness.execute("bg_task_status", { id }));
+    const midStatus = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true }));
     expect(midStatus.status).toBe("running");
 
     const finalStatus = await waitForPublicStatus(harness, id, (status) => status.status === "succeeded");
@@ -80,11 +80,11 @@ async function waitForPublicStatus(
 ) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const status = JSON.parse(await harness.execute("bg_task_status", { id })) as Record<string, unknown>;
+    const status = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true })) as Record<string, unknown>;
     if (done(status)) return status;
     await sleep(50);
   }
-  const status = JSON.parse(await harness.execute("bg_task_status", { id })) as Record<string, unknown>;
+  const status = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true })) as Record<string, unknown>;
   throw new Error(`task ${id} did not reach expected golden-path state: ${JSON.stringify(status)}`);
 }
 
