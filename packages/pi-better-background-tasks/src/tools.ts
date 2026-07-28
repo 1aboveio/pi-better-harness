@@ -36,7 +36,7 @@ const WatchParams = Type.Object({
 
 const IdParams = Type.Object({
   id: Type.String({ description: "Background task id." }),
-  verbose: Type.Optional(Type.Boolean({ description: "Return full raw metadata JSON. Default false returns a compact summary." })),
+  verbose: Type.Optional(Type.Boolean({ description: "Return full raw metadata JSON. Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
 });
 const ListParams = Type.Object({
   status: Type.Optional(Type.Array(Type.String({ description: "Statuses to include." }))),
@@ -44,7 +44,7 @@ const ListParams = Type.Object({
 });
 const LogParams = Type.Object({
   id: Type.String({ description: "Background task id." }),
-  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing lines. Default 20. Set <=0 for full log." })),
+  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing lines. Default 20 for compact model ingestion. Set <=0 only when the full log is explicitly required." })),
 });
 
 const ActionParams = Type.Object({
@@ -130,7 +130,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_status",
     label: "BG Status",
-    description: "Inspect one background task metadata record. Nonblocking.",
+    description: "Inspect one background task. Default output is a compact model-facing summary; pass verbose:true only when full raw metadata is explicitly needed. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
     parameters: IdParams,
     async execute(_toolCallId, params) {
       const meta = readMeta(params.id);
@@ -141,7 +141,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_log",
     label: "BG Log",
-    description: "Read a background task log. Use tail_lines for bounded output. Nonblocking.",
+    description: "Read a background task log. Default output is a compact 20-line tail for model ingestion. Pass tail_lines for a bounded tail; pass tail_lines:0 only when the full log is explicitly required. Nonblocking.",
     parameters: LogParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -167,7 +167,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, or stop. Spawn/watch return immediately; do not poll in foreground.",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, or stop. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -181,7 +181,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_status",
     label: "BG Status",
-    description: "Action wrapper for inspecting background tasks: list, status, log, or stop. Nonblocking.",
+    description: "Action wrapper for inspecting background tasks: list, status, log, or stop. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or tail_lines:0 only for explicit full-data recovery.",
     parameters: StatusActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);

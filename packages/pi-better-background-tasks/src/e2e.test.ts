@@ -6,6 +6,7 @@ import { readMeta, writeMeta } from "./registry.js";
 
 type RegisteredTool = {
   name: string;
+  description?: string;
   execute: (...args: any[]) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
 };
 
@@ -31,6 +32,17 @@ describe("extension e2e", () => {
       "bg_task_stop",
       "bg_task_watch",
     ].sort());
+  });
+
+  it("documents compact default payloads in the tool registry", () => {
+    const harness = createHarness();
+
+    expect(harness.tools.get("bg_task_status")?.description).toContain("compact model-facing summary");
+    expect(harness.tools.get("bg_task_status")?.description).toContain("verbose:true only");
+    expect(harness.tools.get("bg_task_log")?.description).toContain("compact 20-line tail");
+    expect(harness.tools.get("bg_task_log")?.description).toContain("tail_lines:0 only");
+    expect(harness.tools.get("bg_task")?.description).toContain("action:status");
+    expect(harness.tools.get("bg_status")?.description).toContain("explicit full-data recovery");
   });
 
   it("registers background tasks with pi-better-goal activity", () => {
