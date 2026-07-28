@@ -296,7 +296,7 @@ async function notifyTerminal(
   const label = latest.name ? `${latest.name} (${latest.id})` : latest.id;
   try {
     await pi.sendUserMessage(
-      `Background task ${label} reached terminal status ${latest.status}. Inspect it with bg_task_status or bg_task_log before summarizing the result.`,
+      `Background task ${label} reached terminal status ${latest.status}. Inspect the compact result with bg_task_status id=${latest.id}; call bg_task_log only if the status summary is insufficient.`,
       { deliverAs: "followUp" },
     );
     latest.callbackSentAt = Date.now();

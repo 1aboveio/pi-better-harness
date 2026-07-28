@@ -63,7 +63,13 @@ describe("extension e2e", () => {
     await waitForMeta(id, (meta) => meta?.status === "succeeded");
 
     const statusText = await harness.execute("bg_task_status", { id });
-    expect(JSON.parse(statusText)).toMatchObject({ id, kind: "command_watch", status: "succeeded" });
+    expect(statusText).toContain(`Background task ${id}`);
+    expect(statusText).toContain("is succeeded");
+    expect(statusText).toContain("For full metadata use bg_task_status");
+    expect(statusText).not.toContain("success_when");
+
+    const verboseStatusText = await harness.execute("bg_task_status", { id, verbose: true });
+    expect(JSON.parse(verboseStatusText)).toMatchObject({ id, kind: "command_watch", status: "succeeded" });
 
     const logText = await harness.execute("bg_task_log", { id, tail_lines: 20 });
     expect(logText).toContain('"source":"e2e"');
@@ -115,6 +121,8 @@ describe("extension e2e", () => {
 
     expect(harness.messages).toHaveLength(1);
     expect(harness.messages[0]).toContain(id);
+    expect(harness.messages[0]).toContain("bg_task_status");
+    expect(harness.messages[0]).toContain("call bg_task_log only if");
 
     await harness.fireSessionStart();
     expect(harness.messages).toHaveLength(1);

@@ -120,7 +120,7 @@ describe("runtime", () => {
     expect(terminal?.status).toBe("succeeded");
     expect(messages).toHaveLength(1);
     expect(messages[0]?.message).toContain("bg_task_status");
-    expect(messages[0]?.message).toContain("bg_task_log");
+    expect(messages[0]?.message).toContain("only if the status summary is insufficient");
     expect(messages[0]?.message).not.toContain(sentinel);
     expect(messages[0]?.options).toMatchObject({ deliverAs: "followUp" });
   }, 30_000);
