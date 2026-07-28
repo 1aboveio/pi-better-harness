@@ -16,8 +16,8 @@ not special cases in the runtime.
 | `bg_task_spawn` | Start a long-running process and return immediately. |
 | `bg_task_watch` | Poll a command until success/failure/timeout. |
 | `bg_task_list` | List known tasks. |
-| `bg_task_status` | Inspect one task's metadata. |
-| `bg_task_log` | Read a task log tail or full log. |
+| `bg_task_status` | Inspect one task. Compact by default; pass `verbose:true` for full metadata JSON. |
+| `bg_task_log` | Read a bounded task log tail by default, or a full log on request. |
 | `bg_task_stop` | Cancel a watcher or terminate a process task. |
 | `bg_task` | Action-based wrapper for `spawn`, `watch`, `list`, `status`, `log`, `stop`. |
 | `bg_status` | Small action wrapper for `list`, `status`, `log`, `stop`. |
@@ -25,6 +25,11 @@ not special cases in the runtime.
 Callbacks are terminal-only by default. When `callback` is not false, a task that
 reaches a terminal state queues one follow-up message telling the foreground
 agent which task finished and which tool to call for details.
+
+Callbacks point to `bg_task_status` first. The default status response is a
+compact model-facing summary that omits large command bodies; use
+`verbose:true` only when full metadata is required. `bg_task_log` defaults to a
+20-line tail, and `tail_lines: 0` requests the full log explicitly.
 
 Command watchers default to a 15 minute timeout when `timeout_seconds` is
 omitted. Pass `timeout_seconds: 0` to disable the watcher timeout explicitly.

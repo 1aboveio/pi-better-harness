@@ -34,14 +34,17 @@ const WatchParams = Type.Object({
   failure_when: Type.Optional(ConditionSchema),
 });
 
-const IdParams = Type.Object({ id: Type.String({ description: "Background task id." }) });
+const IdParams = Type.Object({
+  id: Type.String({ description: "Background task id." }),
+  verbose: Type.Optional(Type.Boolean({ description: "Return full raw metadata JSON. Default false returns a compact summary." })),
+});
 const ListParams = Type.Object({
   status: Type.Optional(Type.Array(Type.String({ description: "Statuses to include." }))),
   limit: Type.Optional(Type.Number({ description: "Maximum tasks to show. Default 20." })),
 });
 const LogParams = Type.Object({
   id: Type.String({ description: "Background task id." }),
-  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing lines. Omit or set <=0 for full log." })),
+  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing lines. Default 20. Set <=0 for full log." })),
 });
 
 const ActionParams = Type.Object({
@@ -57,6 +60,7 @@ const ActionParams = Type.Object({
   status: Type.Optional(Type.Array(Type.String())),
   limit: Type.Optional(Type.Number()),
   tail_lines: Type.Optional(Type.Number()),
+  verbose: Type.Optional(Type.Boolean()),
   ...CommandFields,
   interval_seconds: Type.Optional(Type.Number()),
   success_when: Type.Optional(ConditionSchema),
@@ -69,6 +73,7 @@ const StatusActionParams = Type.Object({
   status: Type.Optional(Type.Array(Type.String())),
   limit: Type.Optional(Type.Number()),
   tail_lines: Type.Optional(Type.Number()),
+  verbose: Type.Optional(Type.Boolean()),
 });
 
 export function registerTools(pi: ExtensionAPI): void {
@@ -129,7 +134,7 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: IdParams,
     async execute(_toolCallId, params) {
       const meta = readMeta(params.id);
-      return text(meta ? formatStatus(meta) : `No background task found for id ${params.id}.`);
+      return text(formatStatus(meta, params.id, { verbose: params.verbose === true }));
     },
   });
 
@@ -222,7 +227,7 @@ function runAction(
       return formatList(resolveList(params.status as string[] | undefined, params.limit as number | undefined));
     case "status":
       if (!params.id) return "Invalid parameters: status requires id.";
-      return formatStatus(readMeta(String(params.id)) ?? undefined, String(params.id));
+      return formatStatus(readMeta(String(params.id)) ?? undefined, String(params.id), { verbose: params.verbose === true });
     case "log":
       if (!params.id) return "Invalid parameters: log requires id.";
       return formatLog(String(params.id), params.tail_lines as number | undefined);
@@ -272,15 +277,48 @@ function formatList(metas: BackgroundTaskMeta[]): string {
   }).join("\n");
 }
 
-function formatStatus(meta: BackgroundTaskMeta | undefined, id?: string): string {
+function formatStatus(meta: BackgroundTaskMeta | undefined, id?: string, options: { verbose?: boolean } = {}): string {
   if (!meta) return `No background task found${id ? ` for id ${id}` : ""}.`;
+  if (!options.verbose) return formatCompactStatus(meta);
   return JSON.stringify(meta, null, 2);
+}
+
+function formatCompactStatus(meta: BackgroundTaskMeta): string {
+  const lines = [
+    `Background task ${meta.id}${meta.name ? ` (${meta.name})` : ""} is ${meta.status}.`,
+    `kind: ${meta.kind}`,
+    `elapsed: ${formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt)}`,
+  ];
+  if (meta.deadlineAt && meta.status === "running") lines.push(`deadline: ${formatDuration(meta.deadlineAt - Date.now())} left`);
+  if (meta.lastExitCode !== undefined || meta.lastSignal !== undefined) lines.push(`last exit: ${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}`);
+  const reason = resultReason(meta.result);
+  if (reason) lines.push(`result: ${reason}`);
+  if (meta.error) lines.push(`error: ${oneLine(meta.error, 500)}`);
+  if (meta.lastState !== undefined) lines.push(`last state: ${oneLine(meta.lastState, 800)}`);
+  lines.push(`log: ${meta.logPath}`);
+  lines.push(`For full metadata use bg_task_status id=${meta.id} verbose=true. For logs use bg_task_log id=${meta.id} tail_lines=20, or tail_lines=0 for the full log.`);
+  return lines.join("\n");
+}
+
+function resultReason(result: unknown): string | undefined {
+  if (!result) return undefined;
+  if (typeof result === "object" && result !== null && "reason" in result) {
+    const reason = (result as { reason?: unknown }).reason;
+    return reason === undefined ? undefined : oneLine(reason, 500);
+  }
+  return oneLine(result, 500);
+}
+
+function oneLine(value: unknown, maxLength: number): string {
+  const raw = typeof value === "string" ? value : JSON.stringify(value);
+  const single = String(raw ?? "").replace(/\s+/g, " ").trim();
+  return single.length <= maxLength ? single : `${single.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 function formatLog(id: string, tailLines?: number): string {
   const meta = readMeta(id);
   if (!meta) return `No background task found for id ${id}.`;
-  const log = readLog(meta.logPath, tailLines ?? 80);
+  const log = readLog(meta.logPath, tailLines ?? 20);
   const prefix = log.truncated ? `[showing tail of ${meta.logPath}]\n` : `[${meta.logPath}]\n`;
   return prefix + (log.text || "(log is empty)");
 }
@@ -322,7 +360,7 @@ export function renderBackgroundTaskLogDisplay(result: unknown, options: unknown
   }
 
   const folded = details.foldedLineCount > 0
-    ? themed(theme, "dim", `Folded ${details.foldedLineCount} display lines. Click or expand for full log. Model payload unchanged.`)
+    ? themed(theme, "dim", `Folded ${details.foldedLineCount} display lines. Click or expand for the requested log payload.`)
     : themed(theme, "dim", "Compact log. Expand for full display if needed.");
   return renderLines([
     `${themed(theme, "accent", "bg_task_log")} ${themed(theme, "dim", `· ${meta}`)}`,
