@@ -2,8 +2,10 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BackgroundTaskMeta } from "./types.js";
+import { isTerminalStatus } from "./types.js";
 
 let seq = 0;
+const metaCache = new Map<string, BackgroundTaskMeta>();
 
 export function baseDir(): string {
   return join(tmpdir(), "pi-better-background-tasks");
@@ -37,12 +39,16 @@ export function ensureTaskDir(id: string): void {
 export function writeMeta(meta: BackgroundTaskMeta): void {
   ensureTaskDir(meta.id);
   writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
+  metaCache.set(meta.id, meta);
 }
 
 export function readMeta(id: string): BackgroundTaskMeta | undefined {
   try {
-    return JSON.parse(readFileSync(metaPathFor(id), "utf8")) as BackgroundTaskMeta;
+    const meta = JSON.parse(readFileSync(metaPathFor(id), "utf8")) as BackgroundTaskMeta;
+    metaCache.set(id, meta);
+    return meta;
   } catch {
+    metaCache.delete(id);
     return undefined;
   }
 }
@@ -54,8 +60,18 @@ export function listMetas(): BackgroundTaskMeta[] {
   } catch {
     return [];
   }
+  const liveIds = new Set(ids);
+  for (const cachedId of metaCache.keys()) {
+    if (!liveIds.has(cachedId)) metaCache.delete(cachedId);
+  }
   return ids
-    .map(readMeta)
+    .map(readMetaForSweep)
     .filter((meta): meta is BackgroundTaskMeta => meta !== undefined)
     .sort((a, b) => b.startedAt - a.startedAt);
+}
+
+function readMetaForSweep(id: string): BackgroundTaskMeta | undefined {
+  const cached = metaCache.get(id);
+  if (cached && isTerminalStatus(cached.status)) return cached;
+  return readMeta(id);
 }
