@@ -2,9 +2,10 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readLog } from "./logs.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
-import { listMetas, readMeta } from "./registry.js";
+import { listMetas, readMeta, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
+import { isTerminalStatus } from "./types.js";
 
 const ConditionSchema = Type.Union([
   Type.Object({ type: Type.Literal("exit_code"), equals: Type.Number() }),
@@ -55,6 +56,7 @@ const ActionParams = Type.Object({
     Type.Literal("status"),
     Type.Literal("log"),
     Type.Literal("stop"),
+    Type.Literal("clear"),
   ]),
   id: Type.Optional(Type.String()),
   status: Type.Optional(Type.Array(Type.String())),
@@ -68,7 +70,7 @@ const ActionParams = Type.Object({
 });
 
 const StatusActionParams = Type.Object({
-  action: Type.Union([Type.Literal("list"), Type.Literal("status"), Type.Literal("log"), Type.Literal("stop")]),
+  action: Type.Union([Type.Literal("list"), Type.Literal("status"), Type.Literal("log"), Type.Literal("stop"), Type.Literal("clear")]),
   id: Type.Optional(Type.String()),
   status: Type.Optional(Type.Array(Type.String())),
   limit: Type.Optional(Type.Number()),
@@ -167,7 +169,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, or stop. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -181,7 +183,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_status",
     label: "BG Status",
-    description: "Action wrapper for inspecting background tasks: list, status, log, or stop. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or tail_lines:0 only for explicit full-data recovery.",
+    description: "Action wrapper for inspecting background tasks: list, status, log, stop, or clear. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or tail_lines:0 only for explicit full-data recovery.",
     parameters: StatusActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -234,6 +236,8 @@ function runAction(
     case "stop":
       if (!params.id) return "Invalid parameters: stop requires id.";
       return withNavigatorRefresh(ctx, formatStop(pi, String(params.id), ctx, getActiveSession));
+    case "clear":
+      return withNavigatorRefresh(ctx, formatClear(params.status as string[] | undefined, callbackOrigin));
     default:
       return `Unknown action: ${String(params.action)}`;
   }
@@ -433,6 +437,34 @@ function formatStop(
   const meta = stopTask(pi, id, getActiveSession);
   if (!meta) return `No background task found for id ${id}.`;
   return `Background task ${id} is ${meta.status}.`;
+}
+
+function formatClear(statuses: string[] | undefined, active: BackgroundTaskCallbackOrigin): string {
+  const wanted = statuses && statuses.length > 0 ? new Set(statuses) : undefined;
+  const now = Date.now();
+  let cleared = 0;
+  for (const meta of listMetas()) {
+    if (meta.dismissedAt !== undefined) continue;
+    if (!isTerminalStatus(meta.status)) continue;
+    if (wanted && !wanted.has(meta.status)) continue;
+    if (!belongsToActiveToolSession(meta, active)) continue;
+    meta.dismissedAt = now;
+    writeMeta(meta);
+    cleared += 1;
+  }
+  const statusLabel = wanted ? ` matching ${Array.from(wanted).join(",")}` : "";
+  return `Dismissed ${cleared} terminal background task${cleared === 1 ? "" : "s"}${statusLabel}.`;
+}
+
+function belongsToActiveToolSession(meta: BackgroundTaskMeta, active: BackgroundTaskCallbackOrigin): boolean {
+  const origin = meta.callbackOrigin;
+  if (origin) {
+    if (origin.cwd !== active.cwd) return false;
+    if (origin.sessionId || active.sessionId) return origin.sessionId === active.sessionId;
+    return true;
+  }
+  if (active.sessionId) return false;
+  return meta.cwd === active.cwd;
 }
 
 function formatDuration(ms: number): string {

@@ -19,8 +19,12 @@ not special cases in the runtime.
 | `bg_task_status` | Inspect one task. Compact by default; pass `verbose:true` for full metadata JSON. |
 | `bg_task_log` | Read a bounded task log tail by default, or a full log on request. |
 | `bg_task_stop` | Cancel a watcher or terminate a process task. |
-| `bg_task` | Action-based wrapper for `spawn`, `watch`, `list`, `status`, `log`, `stop`. |
-| `bg_status` | Small action wrapper for `list`, `status`, `log`, `stop`. |
+| `bg_task` | Action-based wrapper for `spawn`, `watch`, `list`, `status`, `log`, `stop`, `clear`. |
+| `bg_status` | Small action wrapper for `list`, `status`, `log`, `stop`, `clear`. |
+
+`clear` dismisses terminal tasks for the active cwd/session so they no longer
+count as foreground attention. It keeps metadata and logs on disk for explicit
+inspection.
 
 Callbacks are terminal-only by default. When `callback` is not false, a task that
 reaches a terminal state queues one follow-up message telling the foreground
