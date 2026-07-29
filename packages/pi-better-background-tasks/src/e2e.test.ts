@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
@@ -220,6 +223,46 @@ describe("extension e2e", () => {
     expect(list).not.toContain("recent-success");
     expect(readMeta(failedId)?.status).toBe("failed");
     expect(readMeta(succeededId)?.status).toBe("succeeded");
+  });
+
+  it("clears terminal tasks for the active session without touching running or other-session tasks", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bg-clear-test-"));
+    const harness = createHarness({ cwd, sessionId: "session-a" });
+    const failedLaunch = await harness.execute("bg_task_spawn", {
+      name: "clearable-failure",
+      shell: false,
+      argv: [process.execPath, "-e", "process.exit(1)"],
+      callback: false,
+    });
+    const failedId = extractTaskId(failedLaunch);
+    const runningLaunch = await harness.execute("bg_task_spawn", {
+      name: "keep-running",
+      shell: false,
+      argv: [process.execPath, "-e", "setTimeout(() => {}, 30_000)"],
+      callback: false,
+    });
+    const runningId = extractTaskId(runningLaunch);
+    const otherSessionLaunch = await createHarness({ cwd, sessionId: "session-b" }).execute("bg_task_spawn", {
+      name: "other-session-failure",
+      shell: false,
+      argv: [process.execPath, "-e", "process.exit(1)"],
+      callback: false,
+    });
+    const otherSessionId = extractTaskId(otherSessionLaunch);
+
+    try {
+      await waitForMeta(failedId, (meta) => meta?.status === "failed");
+      await waitForMeta(otherSessionId, (meta) => meta?.status === "failed");
+
+      const cleared = await harness.execute("bg_status", { action: "clear" });
+
+      expect(cleared).toContain("Dismissed 1 terminal background task");
+      expect(readMeta(failedId)?.dismissedAt).toBeTypeOf("number");
+      expect(readMeta(runningId)?.dismissedAt).toBeUndefined();
+      expect(readMeta(otherSessionId)?.dismissedAt).toBeUndefined();
+    } finally {
+      await harness.execute("bg_task_stop", { id: runningId });
+    }
   });
 });
 

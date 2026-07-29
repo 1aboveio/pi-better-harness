@@ -28,12 +28,14 @@ export interface GoalBackgroundProviderSnapshot {
 
 export function collectBackgroundTaskGoalActivity(
   metas: BackgroundTaskMeta[] = listMetas(),
+  ctx?: ExtensionContext,
+  now = Date.now(),
 ): GoalBackgroundProviderSnapshot {
   return {
     providerId: "background-tasks",
     label: "Background Tasks",
     items: metas
-      .filter((meta) => meta.dismissedAt === undefined)
+      .filter((meta) => isVisibleGoalActivity(meta, ctx, now))
       .map(backgroundTaskToGoalItem),
   };
 }
@@ -43,7 +45,7 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
     pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
       id: "background-tasks",
       label: "Background Tasks",
-      getActivity: (_ctx: ExtensionContext) => collectBackgroundTaskGoalActivity(),
+      getActivity: (ctx: ExtensionContext) => collectBackgroundTaskGoalActivity(listMetas(), ctx),
     });
   };
 
@@ -52,6 +54,39 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
     readySubscriptions.add(pi);
   }
   emitProvider();
+}
+
+const TERMINAL_GOAL_ACTIVITY_RETENTION_MS = 30_000;
+
+function isVisibleGoalActivity(meta: BackgroundTaskMeta, ctx: ExtensionContext | undefined, now: number): boolean {
+  if (meta.dismissedAt !== undefined) return false;
+  if (ctx && !belongsToGoalActivitySession(meta, ctx)) return false;
+  if (meta.status === "running") return true;
+  if (!ctx) return true;
+  if (typeof meta.endedAt !== "number") return true;
+  return now - meta.endedAt < TERMINAL_GOAL_ACTIVITY_RETENTION_MS;
+}
+
+function belongsToGoalActivitySession(meta: BackgroundTaskMeta, ctx: ExtensionContext): boolean {
+  const active = getGoalActivityOrigin(ctx);
+  const origin = meta.callbackOrigin;
+  if (origin) {
+    if (origin.cwd !== active.cwd) return false;
+    if (origin.sessionId || active.sessionId) return origin.sessionId === active.sessionId;
+    return true;
+  }
+  if (active.sessionId) return false;
+  return meta.cwd === active.cwd;
+}
+
+function getGoalActivityOrigin(ctx: ExtensionContext) {
+  let sessionId: string | undefined;
+  try {
+    sessionId = ctx.sessionManager?.getSessionId();
+  } catch {
+    sessionId = undefined;
+  }
+  return { cwd: ctx.cwd, sessionId };
 }
 
 function backgroundTaskToGoalItem(meta: BackgroundTaskMeta): GoalBackgroundWorkItem {
