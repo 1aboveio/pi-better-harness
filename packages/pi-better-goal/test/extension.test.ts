@@ -75,7 +75,7 @@ test("only the slash command creates a goal and installs an observability-safe w
   await sessionStart({ reason: "startup" }, ctx);
 
   const widget = widgets.get("pi-better-goal");
-  assert.equal(widget?.options?.placement, "belowEditor");
+  assert.equal(widget?.options?.placement, "aboveEditor");
   assert.equal(typeof widget?.content, "function");
 
   const goalCommand = commands.get("goal");
@@ -96,8 +96,7 @@ test("only the slash command creates a goal and installs an observability-safe w
     { fg: (_color, text) => text },
   );
   const [line] = component.render(80);
-  assert.match(line ?? "", /Goal \[active\]: Ship slash-only goals/);
-  assert.match(line ?? "", /active \d+:\d{2} \| elapsed \d+:\d{2}$/);
+  assert.match(line ?? "", /▸ goal active \d+:\d{2} Ship slash-only goals/);
   component.dispose?.();
 
   const shutdown = handlers.get("session_shutdown");

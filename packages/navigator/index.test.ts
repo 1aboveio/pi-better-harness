@@ -83,15 +83,16 @@ describe("shared background work navigator", () => {
       });
 
       assert.equal(statuses.at(-1)?.[0], NAVIGATOR_STATUS_KEY);
-      assert.equal(statuses.at(-1)?.[1], "← background work · 2");
+      assert.equal(statuses.at(-1)?.[1], "← navigate · 2");
       assert.equal(ui.factory.__piBetterHarnessNavigatorFactory, true);
 
       let list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
-      assert.match(list, /background work/);
+      assert.doesNotMatch(list, /background work/);
       assert.match(list, /Subagents row/);
       assert.match(list, /Background Tasks row/);
-      assert.match(list, /<- to navigate/);
-      assert.doesNotMatch(list, /── background tasks/);
+      assert.match(list, /← to navigate/);
+      assert.doesNotMatch(list, /shortcuts/);
+      assert.match(list, /^▸ background tasks$/m);
 
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
@@ -148,7 +149,7 @@ describe("shared background work navigator", () => {
       count = 1;
       refreshBackgroundWorkNavigator(toolCtx);
 
-      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, "← background work · 1"]);
+      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, "← navigate · 1"]);
     } finally {
       disposeBackgroundWorkNavigator(tuiCtx);
       unregister();
@@ -223,9 +224,11 @@ describe("shared background work navigator", () => {
       });
 
       const renderedWidget = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
+      assert.doesNotMatch(renderedWidget, /background work/);
       assert.match(renderedWidget, /failed/);
       assert.match(renderedWidget, /lost/);
-      assert.doesNotMatch(renderedWidget, /^background tasks$/m, "single-provider rail should not render a redundant provider header");
+      assert.match(renderedWidget, /<dim>\s+failed, inspect log<\/>/);
+      assert.match(renderedWidget, /^<dim>▸<\/> <warning>background tasks<\/>$/m, "compact rail should keep the provider lane title visible");
       assert.doesNotMatch(renderedWidget, /^main$/m, "background work is not grouped under a confusing main lane");
 
       const editor = ui.factory({}, {}, {});
@@ -238,6 +241,67 @@ describe("shared background work navigator", () => {
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
+    }
+  });
+
+  it("renders running rows as a solid animated dot", () => {
+    let now = 0;
+    const dateNowDescriptor = Object.getOwnPropertyDescriptor(Date, "now");
+    Object.defineProperty(Date, "now", { configurable: true, value: () => now });
+
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 300, () => undefined),
+      listRows: () => [{
+        providerId: "subagents",
+        id: "subagent-1",
+        name: "reviewer",
+        status: "running",
+        statusTone: "running",
+        kind: "subagent",
+        elapsed: "1s",
+        primary: "gpt-5.5 · 1.0k tok",
+        sortStartedAt: 300,
+      }],
+    });
+
+    const widgets: unknown[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (color: string, value: string) => `<${color}>${value}</>` },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom() { return Promise.resolve(null); },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+
+      now = 0;
+      const first = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
+      now = 250;
+      const second = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
+      now = 500;
+      const third = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
+      now = 750;
+      const fourth = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
+
+      assert.match(first, /<dim>●<\/>\s+reviewer/);
+      assert.match(second, /<accent>●<\/>\s+reviewer/);
+      assert.match(third, /<accent>●<\/>\s+reviewer/);
+      assert.match(fourth, /<dim>●<\/>\s+reviewer/);
+      assert.doesNotMatch(`${first}\n${second}\n${third}\n${fourth}`, /<[a-z]+>[•·◌]<\/>\s+reviewer|◌/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+      if (dateNowDescriptor) Object.defineProperty(Date, "now", dateNowDescriptor);
     }
   });
 
@@ -303,24 +367,28 @@ describe("shared background work navigator", () => {
       assert.ok(text.indexOf("reviewer") < text.indexOf("watch-pr-14-merge"), text);
       assert.doesNotMatch(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/, "main list should not render table headers");
       assert.doesNotMatch(text, /command\/tool/, "main list should keep command evidence out of the primary row");
-      assert.match(text, /▸ background work\s+1 running · 1 failed/);
-      assert.match(text, /subagents/);
-      assert.match(text, /background tasks/);
-      assert.match(text, /<- to navigate/);
-      assert.match(text, /◌\s+reviewer\s+18\.2k tok/);
+      assert.doesNotMatch(text, /background work/);
+      assert.match(text, /^▸ subagents$/m);
+      assert.match(text, /^▸ background tasks$/m);
+      assert.match(text, /← to navigate/);
+      assert.doesNotMatch(text, /shortcuts/);
+      assert.match(text, /●\s+reviewer\s+grok-4\.5 high · tool bash · 18\.2k tok/);
 
-      const subagentRow = lines.find((line) => /◌\s+reviewer\s+18\.2k tok/.test(line));
+      const subagentRow = lines.find((line) => /●\s+reviewer\s+grok-4\.5 high · tool bash · 18\.2k tok/.test(line));
       assert.ok(subagentRow, text);
-      assert.ok(subagentRow.indexOf("◌") < subagentRow.indexOf("reviewer"));
-      assert.ok(subagentRow.indexOf("reviewer") < subagentRow.indexOf("18.2k tok"));
+      assert.ok(subagentRow.indexOf("●") < subagentRow.indexOf("reviewer"));
+      assert.ok(subagentRow.indexOf("reviewer") < subagentRow.indexOf("grok-4.5 high"));
+      assert.ok(subagentRow.indexOf("grok-4.5 high") < subagentRow.indexOf("tool bash"));
+      assert.ok(subagentRow.indexOf("tool bash") < subagentRow.indexOf("18.2k tok"));
       assert.ok(subagentRow.indexOf("18.2k tok") < subagentRow.indexOf("1m 04s"));
+      assert.match(subagentRow, /reviewer\s{10,}grok-4\.5 high · tool bash · 18\.2k tok/);
 
-      const bgRow = lines.find((line) => /✕\s+watch-pr-14-merge\s+condition failed/.test(line));
+      const bgRow = lines.find((line) => /✕\s+watch-pr-14-merge\s+failed, inspect log/.test(line));
       assert.ok(bgRow, text);
       assert.doesNotMatch(bgRow, /#!\/usr\/bin\/env bash|pipefail/, "raw command should not dominate the rail row");
       assert.ok(bgRow.indexOf("✕") < bgRow.indexOf("watch-pr-14-merge"));
-      assert.ok(bgRow.indexOf("watch-pr-14-merge") < bgRow.indexOf("condition failed"));
-      assert.ok(bgRow.indexOf("condition failed") < bgRow.indexOf("2m 18s"));
+      assert.ok(bgRow.indexOf("watch-pr-14-merge") < bgRow.indexOf("failed, inspect log"));
+      assert.ok(bgRow.indexOf("failed, inspect log") < bgRow.indexOf("2m 18s"));
 
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
@@ -335,7 +403,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("renders a single watcher with prototype-style strip, glyph row, and subordinate evidence", () => {
+  it("renders a single watcher as a compact row until focused", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("background-tasks", "Background Tasks", 20, 300, () => undefined),
       listRows: () => [{
@@ -375,11 +443,118 @@ describe("shared background work navigator", () => {
 
       const lines = renderWidget(widgets.at(-1), 118, ui.theme);
       const text = lines.join("\n");
-      assert.match(text, /▸ background work\s+1 running/);
-      assert.match(text, /◌\s+watch-pr-1396\s+every 1m 00s\s+23s/);
-      assert.match(text, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
-      assert.doesNotMatch(text, /^background tasks$/m, "single-provider rail should not render a redundant provider header");
+      assert.doesNotMatch(text, /background work/);
+      assert.match(text, /●\s+watch-pr-1396\s+every 1m 00s\s+23s/);
+      assert.doesNotMatch(text, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
+      assert.match(text, /^▸ background tasks$/m, "compact rail should keep the provider lane title visible");
       assert.doesNotMatch(text, /^main$/m, "background work is not grouped under a confusing main lane");
+
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      const focusedText = renderWidget(widgets.at(-1), 118, ui.theme).join("\n");
+      assert.match(focusedText, /↑↓ select · Enter detail · x stop · Esc unfocus/);
+      assert.doesNotMatch(focusedText, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("does not render duplicated evidence for a single subagent row", () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 300, () => undefined),
+      listRows: () => [{
+        providerId: "subagents",
+        id: "subagent-1",
+        name: "review-545-lifecycle-state-expan",
+        model: "gpt-5.5",
+        tokens: "8.3k tok (↑6.0k ↓2.3k)",
+        status: "completed",
+        statusTone: "success",
+        kind: "subagent",
+        elapsed: "5m 50s",
+        primary: "gpt-5.5 · 8.3k tok (↑6.0k ↓2.3k) · $0.1836",
+        sortStartedAt: 300,
+      }],
+    });
+
+    const widgets: unknown[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom() { return Promise.resolve(null); },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+
+      const text = renderWidget(widgets.at(-1), 132, ui.theme).join("\n");
+      assert.match(text, /✓\s+review-545-lifecycle-state-expan/);
+      assert.doesNotMatch(text, /evidence\s+gpt-5\.5/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("keeps distinct subagent tool evidence out of the compact rail", () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 300, () => undefined),
+      listRows: () => [{
+        providerId: "subagents",
+        id: "subagent-1",
+        name: "review-545-lifecycle-state-expan",
+        model: "gpt-5.5",
+        tokens: "8.3k tok (↑6.0k ↓2.3k)",
+        status: "running",
+        statusTone: "running",
+        kind: "subagent",
+        elapsed: "5m 50s",
+        primary: "gpt-5.5 · 8.3k tok (↑6.0k ↓2.3k) · $0.1836",
+        secondary: "tools bash",
+        sortStartedAt: 300,
+      }],
+    });
+
+    const widgets: unknown[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom() { return Promise.resolve(null); },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+
+      const text = renderWidget(widgets.at(-1), 132, ui.theme).join("\n");
+      assert.match(text, /●\s+review-545-lifecycle-state-expan/);
+      assert.doesNotMatch(text, /evidence\s+tools bash/);
+
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      const focusedText = renderWidget(widgets.at(-1), 132, ui.theme).join("\n");
+      assert.match(focusedText, /↑↓ select · Enter detail · x stop · Esc unfocus/);
+      assert.doesNotMatch(focusedText, /evidence\s+tools bash/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

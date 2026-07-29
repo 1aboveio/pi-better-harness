@@ -379,7 +379,7 @@ describe("registered extension path: session_start reload cleanup", () => {
             startedAt: 50,
             endedAt: 90,
         });
-        const runningHint = "← background work · 1";
+        const runningHint = "← navigate · 1";
 
         // 1) First session_start installs the empty-editor wrapper + running-only footer.
         await nav.start();
