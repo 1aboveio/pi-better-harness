@@ -16,7 +16,8 @@
     "extensions": [
       "./packages/pi-better-subagents/index.ts",
       "./packages/pi-better-background-tasks/src/index.ts",
-      "./packages/pi-better-goal/src/index.ts"
+      "./packages/pi-better-goal/src/index.ts",
+      "./packages/pi-better-read-aloud/src/index.ts"
     ]
   },
   "scripts": {
