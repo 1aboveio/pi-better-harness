@@ -1,5 +1,5 @@
 {
-  "name": "@1aboveio/pi-better-goal",
+  "name": "pi-better-goal",
   "version": "0.1.0",
   "description": "Background activity bridge for Pi goal continuations and async subagents.",
   "type": "module",

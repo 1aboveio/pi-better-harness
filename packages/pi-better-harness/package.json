@@ -10,9 +10,9 @@
   ],
   "pi": {
     "extensions": [
-      "node_modules/@1aboveio/pi-better-subagents/index.ts",
-      "node_modules/@1aboveio/pi-better-background-tasks/src/index.ts",
-      "node_modules/@1aboveio/pi-better-goal/src/index.ts"
+      "node_modules/pi-better-subagents/index.ts",
+      "node_modules/pi-better-background-tasks/src/index.ts",
+      "node_modules/pi-better-goal/src/index.ts"
     ]
   },
   "repository": {
@@ -28,8 +28,8 @@
     "README.md"
   ],
   "dependencies": {
-    "@1aboveio/pi-better-background-tasks": "0.1.0",
-    "@1aboveio/pi-better-goal": "0.1.0",
-    "@1aboveio/pi-better-subagents": "0.1.0"
+    "pi-better-background-tasks": "0.1.0",
+    "pi-better-goal": "0.1.0",
+    "pi-better-subagents": "0.1.0"
   }
 }
