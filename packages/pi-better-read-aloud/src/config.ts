@@ -5,6 +5,7 @@ export type ReadAloudConfigInput = {
   model?: string;
   voice?: string;
   format?: string;
+  body_format?: string;
   speed?: number;
   max_chars?: number;
 };
@@ -15,6 +16,7 @@ export type ReadAloudConfig = {
   model: string;
   voice: string;
   format: "mp3" | "wav" | "opus" | "aac" | "flac" | "pcm";
+  bodyFormat: "json" | "form";
   speed?: number;
   maxChars: number;
 };
@@ -25,6 +27,7 @@ const DEFAULT_VOICE = "alloy";
 const DEFAULT_FORMAT = "mp3";
 const DEFAULT_MAX_CHARS = 6000;
 const FORMATS = new Set(["mp3", "wav", "opus", "aac", "flac", "pcm"]);
+const BODY_FORMATS = new Set(["json", "form"]);
 
 export function resolveReadAloudConfig(input: ReadAloudConfigInput = {}, env: NodeJS.ProcessEnv = process.env): ReadAloudConfig {
   const rawUrl = input.url || env.PI_TTS_URL || env.PI_TTS_BASE_URL || env.OPENAI_BASE_URL || DEFAULT_BASE_URL;
@@ -32,6 +35,7 @@ export function resolveReadAloudConfig(input: ReadAloudConfigInput = {}, env: No
   const model = input.model || env.PI_TTS_MODEL || DEFAULT_MODEL;
   const voice = input.voice || env.PI_TTS_VOICE || DEFAULT_VOICE;
   const format = normalizeFormat(input.format || env.PI_TTS_FORMAT || DEFAULT_FORMAT);
+  const bodyFormat = normalizeBodyFormat(input.body_format || env.PI_TTS_BODY_FORMAT || "json");
   const speed = input.speed ?? numberFromEnv(env.PI_TTS_SPEED);
   const maxChars = input.max_chars ?? numberFromEnv(env.PI_TTS_MAX_CHARS) ?? DEFAULT_MAX_CHARS;
 
@@ -49,6 +53,7 @@ export function resolveReadAloudConfig(input: ReadAloudConfigInput = {}, env: No
     model,
     voice,
     format,
+    bodyFormat,
     speed,
     maxChars: Math.floor(maxChars),
   };
@@ -66,6 +71,12 @@ function normalizeFormat(value: string): ReadAloudConfig["format"] {
   const normalized = value.trim().toLowerCase();
   if (!FORMATS.has(normalized)) throw new Error(`Unsupported TTS response format: ${value}`);
   return normalized as ReadAloudConfig["format"];
+}
+
+function normalizeBodyFormat(value: string): ReadAloudConfig["bodyFormat"] {
+  const normalized = value.trim().toLowerCase();
+  if (!BODY_FORMATS.has(normalized)) throw new Error(`Unsupported TTS body format: ${value}`);
+  return normalized as ReadAloudConfig["bodyFormat"];
 }
 
 function numberFromEnv(value: string | undefined): number | undefined {

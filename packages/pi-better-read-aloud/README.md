@@ -11,9 +11,10 @@ Configure through environment variables:
 - `PI_TTS_MODEL`: TTS model. Defaults to `tts-1`.
 - `PI_TTS_VOICE`: voice. Defaults to `alloy`.
 - `PI_TTS_FORMAT`: `mp3`, `wav`, `opus`, `aac`, `flac`, or `pcm`. Defaults to `mp3`.
+- `PI_TTS_BODY_FORMAT`: request body format, `json` or `form`. Defaults to `json`; use `form` for form-encoded OpenAI-like proxies.
 - `PI_TTS_PLAYER`: local player command. Defaults to `afplay` on macOS and `ffplay` elsewhere.
 
-Tool parameters can override `url`, `api_key`/`apikey`, `model`, `voice`, `format`, `speed`, and `max_chars` per call. The API key is never echoed in tool output.
+Tool parameters can override `url`, `api_key`/`apikey`, `model`, `voice`, `format`, `body_format`, `speed`, and `max_chars` per call. The API key is never echoed in tool output.
 
 ## Tools
 
