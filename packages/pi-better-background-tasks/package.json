@@ -1,5 +1,5 @@
 {
-  "name": "pi-better-background-tasks",
+  "name": "@1aboveio/pi-better-background-tasks",
   "version": "0.1.0",
   "description": "Generic durable background task and watcher tools for pi.",
   "type": "module",
@@ -12,6 +12,18 @@
     "extensions": [
       "./src/index.ts"
     ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-background-tasks"
+  },
+  "bugs": {
+    "url": "https://github.com/1aboveio/pi-better-harness/issues"
+  },
+  "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-background-tasks#readme",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

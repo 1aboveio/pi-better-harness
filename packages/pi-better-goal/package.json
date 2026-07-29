@@ -1,5 +1,5 @@
 {
-  "name": "pi-better-goal",
+  "name": "@1aboveio/pi-better-goal",
   "version": "0.1.0",
   "description": "Background activity bridge for Pi goal continuations and async subagents.",
   "type": "module",
@@ -17,12 +17,16 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/1aboveio/pi-better-harness.git"
+    "url": "git+https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-goal"
   },
   "bugs": {
     "url": "https://github.com/1aboveio/pi-better-harness/issues"
   },
   "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-goal#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
