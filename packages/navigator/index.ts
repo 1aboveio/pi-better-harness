@@ -394,7 +394,7 @@ function buildMainListLines(
     existing.push(row);
     grouped.set(row.providerLabel, existing);
   }
-  lines.push(dim(`background work · ${mainListSummary(rows, options)}`, fg));
+  lines.push(mainListHeader(rows, width, fg, options));
   const orderedLabels = providers().map((provider) => provider.label).filter((label) => grouped.has(label));
   for (const label of grouped.keys()) if (!orderedLabels.includes(label)) orderedLabels.push(label);
   const showProviderLabels = orderedLabels.length > 1;
@@ -404,10 +404,20 @@ function buildMainListLines(
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
       lines.push(formatMainListRow(row, selected === true, fg, width));
+      const evidence = formatMainListEvidence(row, rows, selected === true, fg, width);
+      if (evidence) lines.push(evidence);
     }
   }
   lines.push(dim(options.focused ? "↑↓ select · Enter detail · x stop · Esc unfocus" : "<- to navigate", fg));
   return lines.map((line) => safeTruncate(line, width, truncate));
+}
+
+function mainListHeader(rows: InternalRow[], width: number, fg: (color: string, value: string) => string, options: { selectedId?: string; focused?: boolean }): string {
+  const label = `${fg("accent", "▸")} ${fg("accent", "background work")}`;
+  const summary = dim(mainListSummary(rows, options), fg);
+  const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
+  const gap = Math.max(1, available - visibleWidth(label) - visibleWidth(summary));
+  return `${label}${" ".repeat(gap)}${summary}`;
 }
 
 function mainListSummary(rows: InternalRow[], options: { selectedId?: string; focused?: boolean }): string {
@@ -431,15 +441,39 @@ function providerGroupLabel(label: string): string {
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
   const prefix = selected ? fg("accent", "› ") : "  ";
   const name = row.name || row.id;
-  const status = fg(toneColor(row.statusTone, row.status), row.status);
+  const status = fg(toneColor(row.statusTone, row.status), statusGlyph(row));
   const elapsed = singleLine(row.elapsed || "-");
   const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
   const elapsedWidth = Math.min(Math.max(visibleWidth(elapsed), 4), 12);
-  const statusWidth = 10;
+  const statusWidth = 2;
   const nameWidth = Math.min(32, Math.max(16, Math.floor(available * 0.28)));
   const fixedWidth = visibleWidth(prefix) + statusWidth + 1 + nameWidth + 1 + elapsedWidth;
   const summaryWidth = Math.max(8, available - fixedWidth - 1);
   return `${prefix}${fit(status, statusWidth)} ${fit(name, nameWidth)} ${fit(rowSummary(row), summaryWidth)} ${fitRight(elapsed, elapsedWidth)}`;
+}
+
+function formatMainListEvidence(row: InternalRow, rows: InternalRow[], selected: boolean, fg: (color: string, value: string) => string, width: number): string | null {
+  const evidence = rowEvidence(row);
+  if (!evidence) return null;
+  if (!selected && rows.length > 1) return null;
+  const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
+  const label = dim("evidence", fg);
+  const prefix = `     ${fit(label, 8)} `;
+  const textWidth = Math.max(8, available - visibleWidth(prefix));
+  return `${prefix}${dim(truncateVisible(evidence, textWidth), fg)}`;
+}
+
+function statusGlyph(row: InternalRow): string {
+  if (row.statusTone === "success") return "✓";
+  if (row.statusTone === "failed") return "✕";
+  if (row.statusTone === "warning") return "!";
+  if (row.statusTone === "running") return "◌";
+  return "·";
+}
+
+function rowEvidence(row: InternalRow): string {
+  if (row.providerId === "background-tasks") return singleLine(row.command || row.tool || row.primary || "");
+  return singleLine(row.primary || row.tool || row.secondary || "");
 }
 
 function rowSummary(row: InternalRow): string {

@@ -303,22 +303,22 @@ describe("shared background work navigator", () => {
       assert.ok(text.indexOf("reviewer") < text.indexOf("watch-pr-14-merge"), text);
       assert.doesNotMatch(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/, "main list should not render table headers");
       assert.doesNotMatch(text, /command\/tool/, "main list should keep command evidence out of the primary row");
-      assert.match(text, /background work · 1 running · 1 failed/);
+      assert.match(text, /▸ background work\s+1 running · 1 failed/);
       assert.match(text, /subagents/);
       assert.match(text, /background tasks/);
       assert.match(text, /<- to navigate/);
-      assert.match(text, /running\s+reviewer\s+18\.2k tok/);
+      assert.match(text, /◌\s+reviewer\s+18\.2k tok/);
 
-      const subagentRow = lines.find((line) => /running\s+reviewer\s+18\.2k tok/.test(line));
+      const subagentRow = lines.find((line) => /◌\s+reviewer\s+18\.2k tok/.test(line));
       assert.ok(subagentRow, text);
-      assert.ok(subagentRow.indexOf("running") < subagentRow.indexOf("reviewer"));
+      assert.ok(subagentRow.indexOf("◌") < subagentRow.indexOf("reviewer"));
       assert.ok(subagentRow.indexOf("reviewer") < subagentRow.indexOf("18.2k tok"));
       assert.ok(subagentRow.indexOf("18.2k tok") < subagentRow.indexOf("1m 04s"));
 
-      const bgRow = lines.find((line) => /failed\s+watch-pr-14-merge\s+condition failed/.test(line));
+      const bgRow = lines.find((line) => /✕\s+watch-pr-14-merge\s+condition failed/.test(line));
       assert.ok(bgRow, text);
       assert.doesNotMatch(bgRow, /#!\/usr\/bin\/env bash|pipefail/, "raw command should not dominate the rail row");
-      assert.ok(bgRow.indexOf("failed") < bgRow.indexOf("watch-pr-14-merge"));
+      assert.ok(bgRow.indexOf("✕") < bgRow.indexOf("watch-pr-14-merge"));
       assert.ok(bgRow.indexOf("watch-pr-14-merge") < bgRow.indexOf("condition failed"));
       assert.ok(bgRow.indexOf("condition failed") < bgRow.indexOf("2m 18s"));
 
@@ -332,6 +332,57 @@ describe("shared background work navigator", () => {
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
       unregisterTasks();
+    }
+  });
+
+  it("renders a single watcher with prototype-style strip, glyph row, and subordinate evidence", () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("background-tasks", "Background Tasks", 20, 300, () => undefined),
+      listRows: () => [{
+        providerId: "background-tasks",
+        id: "bg-1",
+        name: "watch-pr-1396",
+        command: "node ~/.agents/skills/mergify/scripts/watch-pr-delivery.mjs --repo 1aboveio/skyee-ai-risk --pr 1396",
+        status: "running",
+        statusTone: "running",
+        kind: "watch",
+        elapsed: "23s",
+        facts: ["every 1m 00s"],
+        primary: "every 1m 00s",
+        sortStartedAt: 300,
+      }],
+    });
+
+    const widgets: unknown[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom() { return Promise.resolve(null); },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+
+      const lines = renderWidget(widgets.at(-1), 118, ui.theme);
+      const text = lines.join("\n");
+      assert.match(text, /▸ background work\s+1 running/);
+      assert.match(text, /◌\s+watch-pr-1396\s+every 1m 00s\s+23s/);
+      assert.match(text, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
+      assert.doesNotMatch(text, /^background tasks$/m, "single-provider rail should not render a redundant provider header");
+      assert.doesNotMatch(text, /^main$/m, "background work is not grouped under a confusing main lane");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
     }
   });
 
