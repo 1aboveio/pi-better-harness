@@ -225,6 +225,8 @@ describe("shared background work navigator", () => {
       const renderedWidget = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
       assert.match(renderedWidget, /failed/);
       assert.match(renderedWidget, /lost/);
+      assert.doesNotMatch(renderedWidget, /^background tasks$/m, "single-provider rail should not render a redundant provider header");
+      assert.doesNotMatch(renderedWidget, /^main$/m, "background work is not grouped under a confusing main lane");
 
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
@@ -239,7 +241,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("renders the main list with the TUI render width and hides model columns for background tasks", () => {
+  it("renders the main list as a provider-grouped work rail at the TUI render width", () => {
     const stdoutColumnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
     Object.defineProperty(process.stdout, "columns", { configurable: true, value: 100 });
     const unregisterSubagents = registerBackgroundWorkProvider({
@@ -299,34 +301,26 @@ describe("shared background work navigator", () => {
       const text = lines.join("\n");
       for (const line of lines) assert.doesNotMatch(line, /[\r\n]/, "widget rows must not contain embedded newlines");
       assert.ok(text.indexOf("reviewer") < text.indexOf("watch-pr-14-merge"), text);
-      assert.doesNotMatch(text, /── background tasks/, "main list should not render provider separator rows");
+      assert.doesNotMatch(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/, "main list should not render table headers");
+      assert.doesNotMatch(text, /command\/tool/, "main list should keep command evidence out of the primary row");
+      assert.match(text, /background work · 1 running · 1 failed/);
+      assert.match(text, /subagents/);
+      assert.match(text, /background tasks/);
       assert.match(text, /<- to navigate/);
-      assert.match(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/);
-      assert.match(text, /reviewer\s+grok-4\.5 high\s+bash\s+18\.2k tok/);
+      assert.match(text, /running\s+reviewer\s+18\.2k tok/);
 
-      const subagentHeader = lines.find((line) => /name\s+model\s+tool\s+tokens\s+status\s+elapsed/.test(line));
-      const subagentRow = lines.find((line) => /reviewer\s+grok-4\.5 high/.test(line));
-      assert.ok(subagentHeader, text);
+      const subagentRow = lines.find((line) => /running\s+reviewer\s+18\.2k tok/.test(line));
       assert.ok(subagentRow, text);
-      assert.equal(subagentHeader.indexOf("name"), subagentRow.indexOf("reviewer"));
-      assert.equal(subagentHeader.indexOf("model"), subagentRow.indexOf("grok-4.5 high"));
-      assert.equal(subagentHeader.indexOf("tool"), subagentRow.indexOf("bash"));
-      assert.equal(subagentHeader.indexOf("tokens"), subagentRow.indexOf("18.2k tok"));
-      assert.equal(subagentHeader.indexOf("status"), subagentRow.indexOf("running"));
-      assert.equal(subagentHeader.indexOf("elapsed"), subagentRow.indexOf("1m 04s"));
+      assert.ok(subagentRow.indexOf("running") < subagentRow.indexOf("reviewer"));
+      assert.ok(subagentRow.indexOf("reviewer") < subagentRow.indexOf("18.2k tok"));
+      assert.ok(subagentRow.indexOf("18.2k tok") < subagentRow.indexOf("1m 04s"));
 
-      const bgHeaderIndex = lines.findIndex((line) => /command\/tool/.test(line));
-      assert.ok(bgHeaderIndex >= 0, text);
-      assert.doesNotMatch(lines[bgHeaderIndex]!, /model|tokens/);
-      assert.match(text, /watch-pr-14-merge\s+#!\/usr\/bin\/env bash/);
-      assert.doesNotMatch(text, /pipefail\s+failed\s+2m 18s/);
-      const bgHeader = lines[bgHeaderIndex]!;
-      const bgRow = lines.find((line) => /watch-pr-14-merge\s+#!\/usr\/bin\/env bash/.test(line));
+      const bgRow = lines.find((line) => /failed\s+watch-pr-14-merge\s+condition failed/.test(line));
       assert.ok(bgRow, text);
-      assert.equal(bgHeader.indexOf("name"), bgRow.indexOf("watch-pr-14-merge"));
-      assert.equal(bgHeader.indexOf("command/tool"), bgRow.indexOf("#!/usr/bin/env bash"));
-      assert.equal(bgHeader.indexOf("status"), bgRow.indexOf("failed"));
-      assert.equal(bgHeader.indexOf("elapsed"), bgRow.indexOf("2m 18s"));
+      assert.doesNotMatch(bgRow, /#!\/usr\/bin\/env bash|pipefail/, "raw command should not dominate the rail row");
+      assert.ok(bgRow.indexOf("failed") < bgRow.indexOf("watch-pr-14-merge"));
+      assert.ok(bgRow.indexOf("watch-pr-14-merge") < bgRow.indexOf("condition failed"));
+      assert.ok(bgRow.indexOf("condition failed") < bgRow.indexOf("2m 18s"));
 
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
