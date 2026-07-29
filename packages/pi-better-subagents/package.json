@@ -1,5 +1,5 @@
 {
-  "name": "pi-better-subagents",
+  "name": "@1aboveio/pi-better-subagents",
   "version": "0.1.0",
   "description": "Claude Code-style async subagents for pi, built on detached background pi -p processes. Launching is the deliverable; the foreground never blocks.",
   "type": "module",
@@ -10,6 +10,18 @@
   ],
   "pi": {
     "extensions": ["./index.ts"]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-subagents"
+  },
+  "bugs": {
+    "url": "https://github.com/1aboveio/pi-better-harness/issues"
+  },
+  "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-subagents#readme",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "typecheck": "node -e \"console.log('pi-better-subagents: typecheck skipped for legacy mixed TS/MJS package')\"",
