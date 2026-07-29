@@ -1,12 +1,29 @@
 # pi-better-harness
 
-Monorepo for three Pi extension packages:
+Monorepo for the Pi Better Harness extension packages:
 
 - `packages/pi-better-subagents`
 - `packages/pi-better-background-tasks`
 - `packages/pi-better-goal`
+- `packages/pi-better-harness`
 
-The root package exposes all three extension entrypoints through its `pi.extensions` manifest, so it can be installed as one Pi package. For local development, symlink the package directories into `~/.pi/agent/extensions/` and run `/reload` in Pi.
+The publishable meta package is `pi-better-harness`. It depends on the three
+core extension packages and exposes their entrypoints through its `pi.extensions`
+manifest. `@1aboveio/pi-better-read-aloud` is not included yet.
+
+## Install
+
+```sh
+pi install npm:pi-better-harness
+```
+
+Individual packages can also be installed directly:
+
+```sh
+pi install npm:@1aboveio/pi-better-subagents
+pi install npm:@1aboveio/pi-better-background-tasks
+pi install npm:@1aboveio/pi-better-goal
+```
 
 ## Development
 
@@ -15,6 +32,18 @@ npm install
 npm run typecheck
 npm test
 ```
+
+## Publish
+
+```sh
+npm publish -w packages/pi-better-background-tasks
+npm publish -w packages/pi-better-subagents
+npm publish -w packages/pi-better-goal
+npm publish -w packages/pi-better-harness
+```
+
+Publish the individual packages before the meta package so its dependencies are
+available from the npm registry.
 
 ## Local Pi Links
 
