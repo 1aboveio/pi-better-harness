@@ -307,7 +307,7 @@ export default function (pi: ExtensionAPI): void {
     }
     ctx.ui.setWidget(
       EXTENSION_NAME,
-      (tui, _theme) => {
+      (tui, theme) => {
         const timer = setInterval(() => tui.requestRender(), 1_000);
         timer.unref?.();
         return {
@@ -320,11 +320,14 @@ export default function (pi: ExtensionAPI): void {
             if (!goal) {
               return [];
             }
-            return [renderGoalClockLine(goal, width)];
+            const fg = typeof theme?.fg === "function"
+              ? (color: string, value: string) => theme.fg(color as never, value)
+              : undefined;
+            return [renderGoalClockLine(goal, width, undefined, fg)];
           },
         };
       },
-      { placement: "belowEditor" },
+      { placement: "aboveEditor" },
     );
   };
 

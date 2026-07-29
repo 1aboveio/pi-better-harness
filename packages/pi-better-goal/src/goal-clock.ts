@@ -48,24 +48,29 @@ export function renderGoalClockLine(
   goal: GoalSnapshot,
   width: number,
   now = Math.floor(Date.now() / 1000),
+  fg?: (color: string, value: string) => string,
 ): string {
   if (width <= 0) {
     return "";
   }
 
   const timing = goalTiming(goal, now);
-  const clocks =
-    `active ${formatClockDuration(timing.activeSeconds)}` +
-    ` | elapsed ${formatClockDuration(timing.elapsedSeconds)}`;
-  const prefix = `Goal [${goal.status}]: ${goal.objective}`;
-  const availablePrefix = width - visibleWidth(clocks) - 3;
-  const content =
-    availablePrefix > 0
-      ? `${truncateToWidth(prefix, availablePrefix)} | ${clocks}`
-      : truncateToWidth(
-          `A ${formatClockDuration(timing.activeSeconds)} E ${formatClockDuration(timing.elapsedSeconds)}`,
-          width,
-        );
-  const padding = " ".repeat(Math.max(0, width - visibleWidth(content)));
-  return padding + content;
+  const heading = `goal ${goal.status}`;
+  const active = formatClockDuration(timing.activeSeconds);
+  const fixedWidth = visibleWidth(`▸ ${heading} ${active} `);
+  if (fixedWidth >= width) {
+    return truncateToWidth(`▸ ${heading} ${active}`, width);
+  }
+  const objective = truncateToWidth(goal.objective, width - fixedWidth);
+  return styleGoalRailLine("▸", heading, `${active} ${objective}`, fg);
+}
+
+function styleGoalRailLine(
+  marker: string,
+  heading: string,
+  tail: string,
+  fg?: (color: string, value: string) => string,
+): string {
+  if (!fg) return `${marker} ${heading} ${tail}`;
+  return `${fg("dim", marker)} ${fg("warning", heading)} ${fg("dim", tail)}`;
 }

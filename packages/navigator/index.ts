@@ -95,11 +95,13 @@ export const DETAIL_TICK_MS = 1000;
 export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25, 50, 100] as const;
-const MAIN_LIST_TICK_MS = 1000;
+const MAIN_LIST_TICK_MS = 250;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
 const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 5;
 const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
 const EVIDENCE_SECTION_ID = "__evidence__";
+const RUNNING_DOT_GLYPH = "●";
+const RUNNING_DOT_FRAMES = ["dim", "accent", "accent", "dim"] as const;
 
 function state(): NavigatorState {
   const g = globalThis as typeof globalThis & { [GLOBAL_KEY]?: NavigatorState };
@@ -145,7 +147,7 @@ export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boole
 }
 
 export function navigatorFooterHint(count: number): string | null {
-  return count > 0 ? `← background work · ${count}` : null;
+  return count > 0 ? `← navigate · ${count}` : null;
 }
 
 export function applyNavigatorFooter(ui: { setStatus(key: string, value: string | undefined): void }, count: number): string | null {
@@ -394,95 +396,82 @@ function buildMainListLines(
     existing.push(row);
     grouped.set(row.providerLabel, existing);
   }
-  lines.push(mainListHeader(rows, width, fg, options));
   const orderedLabels = providers().map((provider) => provider.label).filter((label) => grouped.has(label));
   for (const label of grouped.keys()) if (!orderedLabels.includes(label)) orderedLabels.push(label);
-  const showProviderLabels = orderedLabels.length > 1;
-  for (const label of orderedLabels) {
+  for (let i = 0; i < orderedLabels.length; i += 1) {
+    const label = orderedLabels[i]!;
     const group = grouped.get(label)!;
-    if (showProviderLabels) lines.push(dim(providerGroupLabel(label), fg));
+    if (i > 0) lines.push("");
+    lines.push(providerGroupLabel(label, fg));
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
       lines.push(formatMainListRow(row, selected === true, fg, width));
-      const evidence = formatMainListEvidence(row, rows, selected === true, fg, width);
-      if (evidence) lines.push(evidence);
     }
   }
-  lines.push(dim(options.focused ? "↑↓ select · Enter detail · x stop · Esc unfocus" : "<- to navigate", fg));
+  lines.push("");
+  lines.push(shortcutsLine(options.focused === true, fg));
   return lines.map((line) => safeTruncate(line, width, truncate));
 }
 
-function mainListHeader(rows: InternalRow[], width: number, fg: (color: string, value: string) => string, options: { selectedId?: string; focused?: boolean }): string {
-  const label = `${fg("accent", "▸")} ${fg("accent", "background work")}`;
-  const summary = dim(mainListSummary(rows, options), fg);
-  const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
-  const gap = Math.max(1, available - visibleWidth(label) - visibleWidth(summary));
-  return `${label}${" ".repeat(gap)}${summary}`;
+function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
+  const keys = focused ? "↑↓ select · Enter detail · x stop · Esc unfocus" : "← to navigate";
+  return dim(keys, fg);
 }
 
-function mainListSummary(rows: InternalRow[], options: { selectedId?: string; focused?: boolean }): string {
-  if (options.focused) return `${options.selectedId ? "1 selected" : "focused"} · ${rows.length} visible`;
-  const running = rows.filter((row) => row.statusTone === "running").length;
-  const failed = rows.filter((row) => row.statusTone === "failed").length;
-  const warning = rows.filter((row) => row.statusTone === "warning").length;
-  const recent = Math.max(0, rows.length - running - failed - warning);
-  const parts: string[] = [];
-  if (running > 0) parts.push(`${running} running`);
-  if (failed > 0) parts.push(`${failed} failed`);
-  if (warning > 0) parts.push(`${warning} warning`);
-  if (recent > 0) parts.push(`${recent} recent`);
-  return parts.length ? parts.join(" · ") : `${rows.length} visible`;
-}
-
-function providerGroupLabel(label: string): string {
-  return singleLine(label).toLowerCase();
+function providerGroupLabel(label: string, fg: (color: string, value: string) => string): string {
+  const normalized = singleLine(label).toLowerCase();
+  return `${dim("▸", fg)} ${fg("warning", normalized)}`;
 }
 
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
   const prefix = selected ? fg("accent", "› ") : "  ";
   const name = row.name || row.id;
-  const status = fg(toneColor(row.statusTone, row.status), statusGlyph(row));
+  const indicator = statusIndicator(row);
+  const status = fg(indicator.color, indicator.glyph);
   const elapsed = singleLine(row.elapsed || "-");
   const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
   const elapsedWidth = Math.min(Math.max(visibleWidth(elapsed), 4), 12);
   const statusWidth = 2;
-  const nameWidth = Math.min(32, Math.max(16, Math.floor(available * 0.28)));
-  const fixedWidth = visibleWidth(prefix) + statusWidth + 1 + nameWidth + 1 + elapsedWidth;
-  const summaryWidth = Math.max(8, available - fixedWidth - 1);
-  return `${prefix}${fit(status, statusWidth)} ${fit(name, nameWidth)} ${fit(rowSummary(row), summaryWidth)} ${fitRight(elapsed, elapsedWidth)}`;
-}
-
-function formatMainListEvidence(row: InternalRow, rows: InternalRow[], selected: boolean, fg: (color: string, value: string) => string, width: number): string | null {
-  const evidence = rowEvidence(row);
-  if (!evidence) return null;
-  if (!selected && rows.length > 1) return null;
-  const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
-  const label = dim("evidence", fg);
-  const prefix = `     ${fit(label, 8)} `;
-  const textWidth = Math.max(8, available - visibleWidth(prefix));
-  return `${prefix}${dim(truncateVisible(evidence, textWidth), fg)}`;
+  const leftPrefixWidth = visibleWidth(prefix) + statusWidth + 1;
+  const maxNameWidth = Math.max(8, Math.floor(available * 0.36));
+  const nameWidth = Math.max(8, Math.min(44, maxNameWidth, available - leftPrefixWidth - elapsedWidth - 10));
+  const rightWidth = Math.max(8, available - leftPrefixWidth - nameWidth - 1);
+  const summaryWidth = Math.max(1, rightWidth - elapsedWidth - 1);
+  const left = `${prefix}${fit(status, statusWidth)} ${fit(name, nameWidth)}`;
+  const right = `${dim(fitRight(rowSummary(row), summaryWidth), fg)} ${fitRight(elapsed, elapsedWidth)}`;
+  const gap = Math.max(1, available - visibleWidth(left) - visibleWidth(right));
+  return `${left}${" ".repeat(gap)}${right}`;
 }
 
 function statusGlyph(row: InternalRow): string {
   if (row.statusTone === "success") return "✓";
   if (row.statusTone === "failed") return "✕";
-  if (row.statusTone === "warning") return "!";
-  if (row.statusTone === "running") return "◌";
+  if (row.statusTone === "warning") return "◇";
+  if (row.statusTone === "running") return RUNNING_DOT_GLYPH;
   return "·";
 }
 
-function rowEvidence(row: InternalRow): string {
-  if (row.providerId === "background-tasks") return singleLine(row.command || row.tool || row.primary || "");
-  return singleLine(row.primary || row.tool || row.secondary || "");
+function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; color: string } {
+  if (row.statusTone !== "running") return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
+  const frame = Math.floor(now / MAIN_LIST_TICK_MS) % RUNNING_DOT_FRAMES.length;
+  return { glyph: RUNNING_DOT_GLYPH, color: RUNNING_DOT_FRAMES[frame]! };
 }
 
 function rowSummary(row: InternalRow): string {
+  if (row.providerId === "subagents") {
+    const parts: string[] = [];
+    if (row.model) parts.push(row.effort ? `${singleLine(row.model)} ${singleLine(row.effort)}` : singleLine(row.model));
+    if (row.tool) parts.push(`tool ${singleLine(row.tool)}`);
+    if (row.tokens) parts.push(singleLine(row.tokens));
+    else if (row.primary) parts.push(singleLine(row.primary));
+    if (parts.length) return parts.join(" · ");
+  }
   const facts = row.facts?.map(singleLine).filter(Boolean).join(" · ");
   if (facts) return facts;
   if (row.providerId === "background-tasks") {
     if (row.statusTone === "running") return row.kind === "watch" ? "watching condition" : "process running";
     if (row.statusTone === "success") return "completed";
-    if (row.statusTone === "failed") return row.kind === "watch" ? "condition failed" : "inspect log";
+    if (row.statusTone === "failed") return "failed, inspect log";
     if (row.statusTone === "warning") return "needs attention";
     return row.kind || "background task";
   }
@@ -896,12 +885,12 @@ function fallbackDetail(row: InternalRow): BackgroundWorkDetail {
 
 function buildListLines(nav: OverlayState, width: number, truncate: (s: string, width: number) => string, fg: (color: string, value: string) => string): string[] {
   const lines: string[] = [];
-  lines.push(rule(`Background work · ${nav.rows.length}`, width));
+  lines.push(rule(`Work · ${nav.rows.length}`, width));
   const selected = nav.rows[nav.selected];
   const closeAction = selected ? "x close" : null;
   lines.push(dim(`   ${["↑↓ select", "Enter view", closeAction, "Esc close"].filter(Boolean).join(" · ")}`, fg));
   lines.push("");
-  if (nav.rows.length === 0) lines.push("   (no background work)");
+  if (nav.rows.length === 0) lines.push("   (no work)");
   let lastProvider = "";
   for (let i = 0; i < nav.rows.length; i += 1) {
     const row = nav.rows[i]!;
@@ -1107,6 +1096,7 @@ function fill(glyph: string, label: string, width: number): string {
 }
 
 function safeTruncate(line: string, width: number, truncate: (s: string, width: number) => string): string {
+  if (visibleWidth(line) <= width) return line;
   const cut = truncate(line, width);
   return visibleWidth(cut) > width ? truncateVisible(cut, width) : cut;
 }
