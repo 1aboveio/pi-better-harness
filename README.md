@@ -51,6 +51,10 @@ The publishable packages are:
 | `packages/pi-better-read-aloud` | `pi-better-read-aloud` | not yet |
 | `packages/navigator` | internal workspace | no |
 
+All four publishable packages carry the `pi-package` npm keyword. The bundle is
+the recommended install for most users, and the component packages remain
+available for people who want only one extension.
+
 ## Development
 
 Use Node.js 22 or newer.
@@ -136,6 +140,10 @@ Smoke-test the install path:
 ```sh
 pi install npm:pi-better-harness
 ```
+
+Pi's package gallery discovers npm packages tagged with the `pi-package` keyword.
+After npm publish, the bundle and the three component packages are all eligible
+to appear there.
 
 Then create the matching GitHub release:
 
