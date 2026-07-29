@@ -394,36 +394,69 @@ function buildMainListLines(
     existing.push(row);
     grouped.set(row.providerLabel, existing);
   }
-  lines.push(dim(`background work · ${rows.length}${options.focused ? " · focused" : ""}`, fg));
+  lines.push(dim(`background work · ${mainListSummary(rows, options)}`, fg));
   const orderedLabels = providers().map((provider) => provider.label).filter((label) => grouped.has(label));
   for (const label of grouped.keys()) if (!orderedLabels.includes(label)) orderedLabels.push(label);
+  const showProviderLabels = orderedLabels.length > 1;
   for (const label of orderedLabels) {
     const group = grouped.get(label)!;
-    const isBackgroundTasks = group.some((row) => row.providerId === "background-tasks");
-    lines.push(dim(isBackgroundTasks
-      ? `  ${fit("name", 24)} ${fit("command/tool", 34)} ${fit("status", 10)} elapsed`
-      : `  ${fit("name", 22)} ${fit("model", 16)} ${fit("tool", 14)} ${fit("tokens", 18)} ${fit("status", 10)} elapsed`, fg));
+    if (showProviderLabels) lines.push(dim(providerGroupLabel(label), fg));
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
-      lines.push(formatMainListRow(row, selected === true, isBackgroundTasks, fg));
+      lines.push(formatMainListRow(row, selected === true, fg, width));
     }
   }
   lines.push(dim(options.focused ? "↑↓ select · Enter detail · x stop · Esc unfocus" : "<- to navigate", fg));
   return lines.map((line) => safeTruncate(line, width, truncate));
 }
 
-function formatMainListRow(row: InternalRow, selected: boolean, backgroundTask: boolean, fg: (color: string, value: string) => string): string {
+function mainListSummary(rows: InternalRow[], options: { selectedId?: string; focused?: boolean }): string {
+  if (options.focused) return `${options.selectedId ? "1 selected" : "focused"} · ${rows.length} visible`;
+  const running = rows.filter((row) => row.statusTone === "running").length;
+  const failed = rows.filter((row) => row.statusTone === "failed").length;
+  const warning = rows.filter((row) => row.statusTone === "warning").length;
+  const recent = Math.max(0, rows.length - running - failed - warning);
+  const parts: string[] = [];
+  if (running > 0) parts.push(`${running} running`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (warning > 0) parts.push(`${warning} warning`);
+  if (recent > 0) parts.push(`${recent} recent`);
+  return parts.length ? parts.join(" · ") : `${rows.length} visible`;
+}
+
+function providerGroupLabel(label: string): string {
+  return singleLine(label).toLowerCase();
+}
+
+function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
   const prefix = selected ? fg("accent", "› ") : "  ";
   const name = row.name || row.id;
   const status = fg(toneColor(row.statusTone, row.status), row.status);
-  if (backgroundTask) {
-    const command = row.command || row.tool || row.primary || "-";
-    return `${prefix}${fit(name, 24)} ${fit(command, 34)} ${fit(status, 10)} ${row.elapsed}`;
+  const elapsed = singleLine(row.elapsed || "-");
+  const available = Math.max(24, width || MAIN_LIST_FALLBACK_WIDTH);
+  const elapsedWidth = Math.min(Math.max(visibleWidth(elapsed), 4), 12);
+  const statusWidth = 10;
+  const nameWidth = Math.min(32, Math.max(16, Math.floor(available * 0.28)));
+  const fixedWidth = visibleWidth(prefix) + statusWidth + 1 + nameWidth + 1 + elapsedWidth;
+  const summaryWidth = Math.max(8, available - fixedWidth - 1);
+  return `${prefix}${fit(status, statusWidth)} ${fit(name, nameWidth)} ${fit(rowSummary(row), summaryWidth)} ${fitRight(elapsed, elapsedWidth)}`;
+}
+
+function rowSummary(row: InternalRow): string {
+  const facts = row.facts?.map(singleLine).filter(Boolean).join(" · ");
+  if (facts) return facts;
+  if (row.providerId === "background-tasks") {
+    if (row.statusTone === "running") return row.kind === "watch" ? "watching condition" : "process running";
+    if (row.statusTone === "success") return "completed";
+    if (row.statusTone === "failed") return row.kind === "watch" ? "condition failed" : "inspect log";
+    if (row.statusTone === "warning") return "needs attention";
+    return row.kind || "background task";
   }
-  const model = row.model ? (row.effort ? `${row.model} ${row.effort}` : row.model) : "-";
-  const tool = row.tool || "-";
-  const tokens = row.tokens || row.primary || "-";
-  return `${prefix}${fit(name, 22)} ${fit(model, 16)} ${fit(tool, 14)} ${fit(tokens, 18)} ${fit(status, 10)} ${row.elapsed}`;
+  if (row.tokens) return row.tokens;
+  if (row.primary) return row.primary;
+  if (row.tool) return row.tool;
+  if (row.secondary) return row.secondary;
+  return row.kind || "work item";
 }
 
 function fit(value: string, width: number): string {
@@ -431,6 +464,13 @@ function fit(value: string, width: number): string {
   const visible = visibleWidth(str);
   if (visible >= width) return truncateVisible(str, width);
   return str + " ".repeat(width - visible);
+}
+
+function fitRight(value: string, width: number): string {
+  const str = singleLine(value);
+  const visible = visibleWidth(str);
+  if (visible >= width) return truncateVisible(str, width);
+  return " ".repeat(width - visible) + str;
 }
 
 function singleLine(value: unknown): string {
