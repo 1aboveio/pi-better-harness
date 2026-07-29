@@ -12,6 +12,7 @@ const ConfigFields = {
   model: Type.Optional(Type.String({ description: "OpenAI-compatible TTS model. Defaults to PI_TTS_MODEL or tts-1." })),
   voice: Type.Optional(Type.String({ description: "TTS voice. Defaults to PI_TTS_VOICE or alloy." })),
   format: Type.Optional(Type.String({ description: "Audio response format: mp3, wav, opus, aac, flac, or pcm. Defaults to PI_TTS_FORMAT or mp3." })),
+  body_format: Type.Optional(Type.String({ description: "Request body format: json for OpenAI-compatible APIs, or form for form-encoded proxies. Defaults to PI_TTS_BODY_FORMAT or json." })),
   speed: Type.Optional(Type.Number({ description: "Optional speech speed, 0.25 to 4. Defaults to PI_TTS_SPEED when set." })),
   max_chars: Type.Optional(Type.Number({ description: "Maximum characters sent to TTS. Defaults to PI_TTS_MAX_CHARS or 6000." })),
 };
