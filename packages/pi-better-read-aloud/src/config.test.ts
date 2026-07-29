@@ -15,6 +15,7 @@ describe("read-aloud config", () => {
       model: "tts-param",
       voice: "nova",
       format: "wav",
+      body_format: "form",
       max_chars: 123,
     }, {
       PI_TTS_API_KEY: "env-key",
@@ -27,6 +28,7 @@ describe("read-aloud config", () => {
       model: "tts-param",
       voice: "nova",
       format: "wav",
+      bodyFormat: "form",
       maxChars: 123,
     });
   });
