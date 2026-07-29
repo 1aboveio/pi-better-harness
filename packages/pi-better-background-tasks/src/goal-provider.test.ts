@@ -46,4 +46,35 @@ describe("goal provider", () => {
       attention: true,
     });
   });
+
+  it("scopes activity to the active cwd and session", () => {
+    const snapshot = collectBackgroundTaskGoalActivity([
+      meta({ id: "active-session", status: "running", callbackOrigin: { cwd: "/tmp/project", sessionId: "session-a" } }),
+      meta({ id: "other-session", status: "running", callbackOrigin: { cwd: "/tmp/project", sessionId: "session-b" } }),
+      meta({ id: "other-cwd", status: "running", callbackOrigin: { cwd: "/tmp/other", sessionId: "session-a" } }),
+      meta({ id: "legacy", status: "running" }),
+    ], context("/tmp/project", "session-a"));
+
+    expect(snapshot.items.map((item) => item.id)).toEqual(["active-session"]);
+  });
+
+  it("drops old terminal rows from goal attention", () => {
+    const now = 1_000_000;
+    const snapshot = collectBackgroundTaskGoalActivity([
+      meta({ id: "recent-failure", status: "failed", endedAt: now - 10_000, callbackOrigin: { cwd: "/tmp/project", sessionId: "session-a" } }),
+      meta({ id: "old-failure", status: "failed", endedAt: now - 31_000, callbackOrigin: { cwd: "/tmp/project", sessionId: "session-a" } }),
+      meta({ id: "running", status: "running", callbackOrigin: { cwd: "/tmp/project", sessionId: "session-a" } }),
+    ], context("/tmp/project", "session-a"), now);
+
+    expect(snapshot.items.map((item) => item.id)).toEqual(["recent-failure", "running"]);
+  });
 });
+
+function context(cwd: string, sessionId?: string) {
+  return {
+    cwd,
+    sessionManager: {
+      getSessionId: () => sessionId,
+    },
+  } as never;
+}
