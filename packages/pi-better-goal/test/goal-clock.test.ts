@@ -36,11 +36,19 @@ test("goal clock text shows the objective, status, and both clocks", () => {
   );
 });
 
-test("goal clock line is right-aligned and preserves both clocks", () => {
+test("goal clock line renders as a top-level rail heading", () => {
   const goal = createGoalSnapshot("A deliberately long objective that must truncate", null, 100);
   const line = renderGoalClockLine(goal, 54, 225);
 
   assert.equal(visibleWidth(line), 54);
-  assert.match(line, /active 2:05/);
-  assert.match(line, /elapsed 2:05$/);
+  assert.match(line, /^▸ goal active 2:05 A deliberately long objective/);
+  assert.doesNotMatch(line, /elapsed/);
+});
+
+test("goal clock line accents the first-level rail heading when themed", () => {
+  const goal = createGoalSnapshot("Ship footer clock", null, 100);
+  const line = renderGoalClockLine(goal, 80, 225, (color, value) => `<${color}>${value}</>`);
+
+  assert.ok(visibleWidth(line) <= 80);
+  assert.match(line, /^<dim>▸<\/> <warning>goal active<\/> <dim>2:05 Ship footer clock<\/>$/);
 });
