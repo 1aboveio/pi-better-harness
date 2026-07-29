@@ -1,5 +1,5 @@
 {
-  "name": "@1aboveio/pi-better-subagents",
+  "name": "pi-better-subagents",
   "version": "0.1.0",
   "description": "Claude Code-style async subagents for pi, built on detached background pi -p processes. Launching is the deliverable; the foreground never blocks.",
   "type": "module",

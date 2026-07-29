@@ -9,7 +9,7 @@ Monorepo for the Pi Better Harness extension packages:
 
 The publishable meta package is `pi-better-harness`. It depends on the three
 core extension packages and exposes their entrypoints through its `pi.extensions`
-manifest. `@1aboveio/pi-better-read-aloud` is not included yet.
+manifest. `pi-better-read-aloud` is not included yet.
 
 ## Install
 
@@ -20,9 +20,9 @@ pi install npm:pi-better-harness
 Individual packages can also be installed directly:
 
 ```sh
-pi install npm:@1aboveio/pi-better-subagents
-pi install npm:@1aboveio/pi-better-background-tasks
-pi install npm:@1aboveio/pi-better-goal
+pi install npm:pi-better-subagents
+pi install npm:pi-better-background-tasks
+pi install npm:pi-better-goal
 ```
 
 ## Development
