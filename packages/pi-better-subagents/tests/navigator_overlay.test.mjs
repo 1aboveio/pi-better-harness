@@ -28,7 +28,9 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir as osTmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import {
     writeMeta,
     readMeta,
@@ -54,6 +56,11 @@ import {
     wrapEditor,
     installNavigatorEditor,
 } from "../navigator.ts";
+// Hermetic registry: this file boots the real extension and fires
+// session_start, which runs whole-registry maintenance. A suite run must
+// never see a developer's live registry.
+process.env.TMPDIR = mkdtempSync(joinPath(osTmpdir(), "subagent-nav-overlay-"));
+
 import { fmtElapsed, shortModel } from "../widget.ts";
 
 const THIS_PID = process.pid;

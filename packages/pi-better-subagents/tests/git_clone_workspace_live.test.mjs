@@ -29,6 +29,14 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { register } from 'node:module';
 
+// Hermetic registry: this file drives real spawns, and the spawn path runs
+// whole-registry maintenance (daily cleanup + size cap). A suite run must
+// never sweep a developer's live registry.
+process.env.TMPDIR = (await import("node:fs")).mkdtempSync(
+    (await import("node:path")).join((await import("node:os")).tmpdir(), "subagent-test-"),
+);
+
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..');
 const STUB_PKG_ROOT = join(__dirname, 'fixtures', 'earendil-stubs');

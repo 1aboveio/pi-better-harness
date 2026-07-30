@@ -17,8 +17,15 @@
  */
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync } from "node:fs";
 import { rmSync } from "node:fs";
+import { tmpdir as osTmpdir } from "node:os";
+import { join as joinPath } from "node:path";
+
+// Hermetic registry: this file boots the real extension and fires
+// session_start, which runs whole-registry maintenance. A suite run must
+// never see a developer's live registry.
+process.env.TMPDIR = mkdtempSync(joinPath(osTmpdir(), "subagent-nav-hardening-"));
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
