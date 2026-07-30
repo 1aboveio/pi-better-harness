@@ -1,43 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#070b14"/><stop offset="0.55" stop-color="#0f172a"/><stop offset="1" stop-color="#172033"/></linearGradient>
-    <radialGradient id="wash" cx="74%" cy="18%" r="70%"><stop offset="0" stop-color="#ffb454" stop-opacity="0.22"/><stop offset="0.44" stop-color="#35d07f" stop-opacity="0.13"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#000" flood-opacity="0.38"/></filter>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111d"/>
+      <stop offset="0.55" stop-color="#101827"/>
+      <stop offset="1" stop-color="#172033"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000" flood-opacity="0.34"/>
+    </filter>
+    <clipPath id="bodyClip"><rect x="82" y="108" width="1036" height="468" rx="8"/></clipPath>
   </defs>
-  <rect width="1200" height="675" fill="url(#bg)"/><rect width="1200" height="675" fill="url(#wash)"/>
-  <g opacity="0.12"><path d="M78 0 V675" stroke="#94a3b8"/><path d="M174 0 V675" stroke="#94a3b8"/><path d="M270 0 V675" stroke="#94a3b8"/><path d="M366 0 V675" stroke="#94a3b8"/><path d="M462 0 V675" stroke="#94a3b8"/><path d="M558 0 V675" stroke="#94a3b8"/><path d="M654 0 V675" stroke="#94a3b8"/><path d="M750 0 V675" stroke="#94a3b8"/><path d="M846 0 V675" stroke="#94a3b8"/><path d="M942 0 V675" stroke="#94a3b8"/><path d="M1038 0 V675" stroke="#94a3b8"/><path d="M1134 0 V675" stroke="#94a3b8"/><path d="M0 86 H1200" stroke="#94a3b8"/><path d="M0 164 H1200" stroke="#94a3b8"/><path d="M0 242 H1200" stroke="#94a3b8"/><path d="M0 320 H1200" stroke="#94a3b8"/><path d="M0 398 H1200" stroke="#94a3b8"/><path d="M0 476 H1200" stroke="#94a3b8"/><path d="M0 554 H1200" stroke="#94a3b8"/></g>
-  <g filter="url(#shadow)"><rect x="58" y="52" width="1084" height="568" rx="28" fill="#0b1220" stroke="#334155" stroke-width="2"/></g>
-  <rect x="58" y="52" width="1084" height="52" rx="28" fill="#111827"/><path d="M58 80 h1084" stroke="#253044"/>
-  <circle cx="92" cy="78" r="7" fill="#ef4444"/><circle cx="118" cy="78" r="7" fill="#f59e0b"/><circle cx="144" cy="78" r="7" fill="#22c55e"/>
-  <text x="176" y="84" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#94a3b8" letter-spacing="0">pi session</text>
-  <rect x="946" y="65" width="150" height="28" rx="14" fill="#ffb454" fill-opacity="0.16" stroke="#ffb454"/><text x="974" y="84" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14" font-weight="800" fill="#ffb454" letter-spacing="0">task watcher</text>
-  <text x="94" y="156" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="38" font-weight="800" fill="#f8fafc" letter-spacing="0">pi-better-background-tasks</text><text x="96" y="203" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="600" fill="#cbd5e1" letter-spacing="0">Durable shell work</text><text x="96" y="234" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="600" fill="#cbd5e1" letter-spacing="0">without blocking the turn</text>
-  
-      <rect x="96" y="267" width="642" height="42" rx="10" fill="#111827" opacity="0.92"/>
-      <text x="120" y="292" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f8fafc" letter-spacing="0">you  </text>
-      <text x="190" y="292" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1d5db" letter-spacing="0">Queue this PR and tell me when it merges.</text>
-      <rect x="96" y="321" width="642" height="42" rx="10" fill="#122033" opacity="0.92"/>
-      <text x="120" y="346" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#ffb454" letter-spacing="0">tool </text>
-      <text x="190" y="346" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1d5db" letter-spacing="0">bg_task_watch    PR #74 merge   running</text>
-      <rect x="96" y="375" width="642" height="42" rx="10" fill="#111827" opacity="0.92"/>
-      <text x="120" y="400" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#cbd5e1" letter-spacing="0">pi   </text>
-      <text x="190" y="400" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1d5db" letter-spacing="0">Watcher started. I will continue when it exits.</text>
-      <rect x="96" y="429" width="642" height="42" rx="10" fill="#122033" opacity="0.92"/>
-      <text x="120" y="454" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#ffb454" letter-spacing="0">tool </text>
-      <text x="190" y="454" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1d5db" letter-spacing="0">bg_task_status   queued by Mergify</text>
-  <rect x="94" y="520" width="646" height="58" rx="14" fill="#111827" stroke="#263449"/><text x="120" y="556" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="18" font-weight="700" fill="#e5e7eb" letter-spacing="0">pi install npm:pi-better-background-tasks</text>
-  <rect x="772" y="140" width="350" height="438" rx="22" fill="#0f172a" stroke="#334155" stroke-width="2"/><text x="800" y="185" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="28" font-weight="800" fill="#f8fafc" letter-spacing="0">Task Rail</text><text x="802" y="214" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="15" font-weight="600" fill="#94a3b8" letter-spacing="0">live state, compact and inspectable</text>
-      <rect x="790" y="219" width="312" height="62" rx="14" fill="#111827" stroke="#273449" stroke-width="1.5"/>
-      <circle cx="818" cy="246" r="7" fill="#ffb454"/>
-      <text x="838" y="242" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f8fafc" letter-spacing="0">PR #74 merge</text>
-      <text x="838" y="268" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="500" fill="#94a3b8" letter-spacing="0">watch · 03:22</text>
-      <rect x="790" y="295" width="312" height="62" rx="14" fill="#111827" stroke="#273449" stroke-width="1.5"/>
-      <circle cx="818" cy="322" r="7" fill="#ffb454"/>
-      <text x="838" y="318" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f8fafc" letter-spacing="0">dev server</text>
-      <text x="838" y="344" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="500" fill="#94a3b8" letter-spacing="0">shell · 12:08</text>
-      <rect x="790" y="371" width="312" height="62" rx="14" fill="#111827" stroke="#273449" stroke-width="1.5"/>
-      <circle cx="818" cy="398" r="7" fill="#35d07f"/>
-      <text x="838" y="394" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f8fafc" letter-spacing="0">verify</text>
-      <text x="838" y="420" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="500" fill="#94a3b8" letter-spacing="0">shell · passed</text>
-  <rect x="94" y="592" width="1006" height="1" fill="#243044"/><text x="96" y="608" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="15" font-weight="500" fill="#94a3b8" letter-spacing="0">logs and metadata survive reloads</text>
+  <rect width="1200" height="675" fill="url(#bg)"/>
+  <g opacity="0.08">
+    <path d="M78 0 V675" stroke="#94a3b8"/>
+    <path d="M174 0 V675" stroke="#94a3b8"/>
+    <path d="M270 0 V675" stroke="#94a3b8"/>
+    <path d="M366 0 V675" stroke="#94a3b8"/>
+    <path d="M462 0 V675" stroke="#94a3b8"/>
+    <path d="M558 0 V675" stroke="#94a3b8"/>
+    <path d="M654 0 V675" stroke="#94a3b8"/>
+    <path d="M750 0 V675" stroke="#94a3b8"/>
+    <path d="M846 0 V675" stroke="#94a3b8"/>
+    <path d="M942 0 V675" stroke="#94a3b8"/>
+    <path d="M1038 0 V675" stroke="#94a3b8"/>
+    <path d="M1134 0 V675" stroke="#94a3b8"/>
+    <path d="M0 86 H1200" stroke="#94a3b8"/>
+    <path d="M0 164 H1200" stroke="#94a3b8"/>
+    <path d="M0 242 H1200" stroke="#94a3b8"/>
+    <path d="M0 320 H1200" stroke="#94a3b8"/>
+    <path d="M0 398 H1200" stroke="#94a3b8"/>
+    <path d="M0 476 H1200" stroke="#94a3b8"/>
+    <path d="M0 554 H1200" stroke="#94a3b8"/>
+    <path d="M0 632 H1200" stroke="#94a3b8"/>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="58" y="48" width="1084" height="578" rx="16" fill="#090f1a" stroke="#334155" stroke-width="2"/>
+  </g>
+  <rect x="58" y="48" width="1084" height="52" rx="16" fill="#111827"/>
+  <path d="M58 100 H1142" stroke="#263244"/>
+  <circle cx="92" cy="74" r="7" fill="#ef4444"/>
+  <circle cx="118" cy="74" r="7" fill="#f59e0b"/>
+  <circle cx="144" cy="74" r="7" fill="#22c55e"/>
+  <text x="174" y="80" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="15" font-weight="700" fill="#cbd5e1">pi-better-background-tasks</text>
+  <text x="990" y="80" text-anchor="end" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="600" fill="#94a3b8">durable shell tasks</text>
+  <rect x="1002" y="59" width="110" height="30" rx="15" fill="#172554" stroke="#60a5fa"/>
+  <text x="1057" y="79" text-anchor="middle" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="13" font-weight="700" fill="#bfdbfe">actual UI</text>
+  <text x="94" y="132" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="18" font-weight="700" fill="#e5e7eb">processes + watchers</text>
+  <g clip-path="url(#bodyClip)">
+  <text x="98" y="162" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="800" fill="#f8fafc">$ pi -e npm:pi-better-background-tasks</text>
+<text x="98" y="186" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">pi session ready · package preview uses rendered extension state</text>
+<text x="98" y="210" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#94a3b8"></text>
+<rect x="82" y="215" width="1036" height="27" rx="7" fill="#0f172a" opacity="0.9"/><text x="98" y="234" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="800" fill="#7dd3fc">[background-work navigator]</text>
+<text x="98" y="258" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">▸ background tasks</text>
+<text x="98" y="282" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">  ✓  pack dry run                                                exit 0  22s</text>
+<text x="98" y="306" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">  ●  merge queue                                 every 30s · 12m left 3m 30s</text>
+<text x="98" y="330" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1fae5">  ●  dev server                                       process running 6m 12s</text>
+<text x="98" y="354" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#94a3b8"></text>
+<text x="98" y="378" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">← to navigate</text>
+<text x="98" y="402" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#94a3b8"></text>
+<rect x="82" y="407" width="1036" height="27" rx="7" fill="#0f172a" opacity="0.9"/><text x="98" y="426" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="800" fill="#7dd3fc">[task detail]</text>
+<text x="98" y="450" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">Background Tasks / dev server</text>
+<text x="98" y="474" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1fae5">status     running</text>
+<text x="98" y="498" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">kind       process</text>
+<text x="98" y="522" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">elapsed    6m 12s</text>
+<text x="98" y="546" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">cwd        /Users/exoulster/projects/pi-better-harness</text>
+<text x="98" y="570" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#dbeafe">command    npm run dev</text>
+  </g>
+  <rect x="82" y="584" width="1036" height="34" rx="8" fill="#0f172a" stroke="#243044"/>
+  <text x="98" y="606" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="16" fill="#93c5fd">← navigate · 3     ↑↓ select · Enter detail · x stop · Esc unfocus</text>
 </svg>
