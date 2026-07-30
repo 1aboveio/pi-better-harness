@@ -9,6 +9,14 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
 
+// Hermetic registry: this file drives real spawns, and the spawn path runs
+// whole-registry maintenance (daily cleanup + size cap). A suite run must
+// never sweep a developer's live registry.
+process.env.TMPDIR = (await import("node:fs")).mkdtempSync(
+    (await import("node:path")).join((await import("node:os")).tmpdir(), "subagent-test-"),
+);
+
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(__dirname, '..', 'index.ts');
 const indexSource = readFileSync(indexPath, 'utf8');

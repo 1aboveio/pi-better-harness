@@ -22,6 +22,14 @@ import {
 import { homedir, platform, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+// Hermetic registry: this file drives real spawns, and the spawn path runs
+// whole-registry maintenance (daily cleanup + size cap). A suite run must
+// never sweep a developer's live registry.
+process.env.TMPDIR = (await import("node:fs")).mkdtempSync(
+    (await import("node:path")).join((await import("node:os")).tmpdir(), "subagent-test-"),
+);
+
+
 const {
     inspectGitWorkspace,
     prepareGitCloneWorkspace,
