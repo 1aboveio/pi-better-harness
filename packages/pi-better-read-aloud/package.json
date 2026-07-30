@@ -4,7 +4,6 @@
   "description": "OpenAI-compatible text-to-speech read-aloud tools for Pi.",
   "type": "module",
   "keywords": [
-    "pi-package",
     "pi-extension",
     "tts",
     "read-aloud"
