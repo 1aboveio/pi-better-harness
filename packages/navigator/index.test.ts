@@ -403,6 +403,84 @@ describe("shared background work navigator", () => {
     }
   });
 
+  it("moves focus in the same order as the rendered provider sections", () => {
+    const unregisterSubagents = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      listRows: () => [{
+        providerId: "subagents",
+        id: "sa-older",
+        name: "reviewer",
+        model: "grok-4.5",
+        status: "running",
+        statusTone: "running",
+        kind: "subagent",
+        elapsed: "1m 04s",
+        primary: "grok-4.5",
+        sortStartedAt: 100,
+      }],
+    });
+    const unregisterTasks = registerBackgroundWorkProvider({
+      ...provider("background-tasks", "Background Tasks", 20, 300, () => undefined),
+      listRows: () => [{
+        providerId: "background-tasks",
+        id: "bg-newer",
+        name: "watch-pr-merge",
+        status: "running",
+        statusTone: "running",
+        kind: "watch",
+        elapsed: "22s",
+        primary: "gh pr view",
+        sortStartedAt: 300,
+      }],
+    });
+
+    const widgets: unknown[] = [];
+    let component: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+
+      const visual = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
+      assert.ok(visual.indexOf("reviewer") < visual.indexOf("watch-pr-merge"), visual);
+
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      let focused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
+      assert.match(focused, /^› ●\s+reviewer/m, "initial focus should land on the first visible provider section");
+      assert.doesNotMatch(focused, /^› ●\s+watch-pr-merge/m);
+
+      editor.handleInput("down");
+      focused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
+      assert.match(focused, /^› ●\s+watch-pr-merge/m, "down should move to the next visual section");
+
+      editor.handleInput("up");
+      editor.handleInput("enter");
+      assert.match(component.render(100).join("\n"), /Subagents detail/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregisterSubagents();
+      unregisterTasks();
+    }
+  });
+
   it("renders a single watcher as a compact row until focused", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("background-tasks", "Background Tasks", 20, 300, () => undefined),
