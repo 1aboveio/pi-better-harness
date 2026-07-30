@@ -7,9 +7,17 @@
  * polluted `--mode text` output never reaches the caller.
  *
  * Large logs: reading the whole file can exceed Node's max string length
- * (~536 MB) and makes live output expensive. parseRun() therefore reads only a
- * bounded tail; final answers live at the end of completed logs, and recent
- * activity is what a live caller needs.
+ * (~536 MB) and makes live output expensive, so nothing here ever reads a whole
+ * log. `tailLog` serves humans a bounded raw tail, and parseRun() folds the
+ * stream INCREMENTALLY: each call reads only the bytes appended since the last
+ * one (see log-cursor.ts) and merges them into the run's accumulated result.
+ *
+ * That is both cheaper and more accurate than the bounded tail it replaced.
+ * Token spend accumulates from `message_end` events, so a tail-only parse
+ * silently under-counted every run whose log outgrew the window — it said so in
+ * a diagnostic, but the number was still wrong. An accumulating fold counts
+ * every event it has ever seen, and only a bounded COLD start (a log already
+ * huge the first time this process looks at it) leaves a gap.
  */
 
 import {
@@ -19,6 +27,7 @@ import {
     readSync,
     statSync,
 } from "node:fs";
+import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { logPathFor } from "./registry.ts";
 
 interface ContentBlock { type: string; text?: string; name?: string }
@@ -990,127 +999,292 @@ export function parseRunForLifecycle(id: string): ParsedRun {
     return withLifecycleEvidence(parseRun(id), scanLifecycleEvidence(id));
 }
 
-/** Parse the log for run `id`. Tolerant of partial/streaming logs. */
-export function parseRun(id: string): ParsedRun {
-    const usage: Usage = { input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 };
-    const tail = readTail(logPathFor(id), maxParseBytes());
-    const diagnostics: string[] = [];
+// ---- incremental parse state ----------------------------------------------
+//
+// A run's parsed result is an accumulating fold: `finalText` and `lastActivity`
+// are latest-wins, `usage` and `toolCalls` accumulate, `sawEnd` is sticky, and
+// open tool calls are a running map. So the whole thing folds forward over
+// appended bytes — no re-reading, and no window past which spend stops counting.
 
-    // For NDJSON parsing we need complete lines; drop an initial partial line
-    // that was split by the byte-boundary read. The raw-tail fallback (tailLog)
-    // keeps those bytes so large single-line events are still visible to users.
-    let parseText = tail.text;
-    if (tail.truncated) {
-        const firstNewline = parseText.indexOf("\n");
-        if (firstNewline !== -1) {
-            parseText = parseText.slice(firstNewline + 1);
+/** Event types the fold below consumes. Everything else cannot move a field. */
+const PARSE_EVENT_TYPES: ReadonlySet<string> = new Set([
+    "agent_end",
+    "agent_settled",
+    "message_end",
+    "turn_end",
+    "message_update",
+    "tool_execution_start",
+    "tool_execution_end",
+]);
+
+/** Leading `{"type":"…"` of an NDJSON line, read without parsing it. */
+const LEADING_TYPE = /^\s*\{\s*"type"\s*:\s*"([A-Za-z0-9_.-]+)"/;
+
+/** The line's event type when it can be read cheaply, else undefined. */
+function peekType(line: string): string | undefined {
+    return LEADING_TYPE.exec(line)?.[1];
+}
+
+interface ParseState {
+    cursor: LogCursor;
+    usage: Usage;
+    finalText: string;
+    lastActivity: string;
+    toolCalls: string[];
+    openToolCalls: Map<string, UnmatchedToolCall>;
+    anonymousToolCall: number;
+    sawEnd: boolean;
+    /** Bytes were skipped by a bounded cold start on an already-large log. */
+    windowTruncated: boolean;
+    /** Log size at the last read, for the truncation diagnostic. */
+    totalBytes: number;
+    /** Any event has ever been folded for this run. */
+    sawAnyEvent: boolean;
+    error?: string;
+}
+
+/** Runs tracked at once; a backstop against unbounded state, not a policy. */
+const MAX_TRACKED_PARSE_RUNS = 64;
+
+const parseStates = new Map<string, ParseState>();
+
+/** Forget a run's accumulated parse (or all of them). */
+export function resetParseRunCursor(id?: string): void {
+    if (id === undefined) parseStates.clear();
+    else parseStates.delete(id);
+}
+
+function freshState(cursor: LogCursor): ParseState {
+    return {
+        cursor,
+        usage: { input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 },
+        finalText: "",
+        lastActivity: "",
+        toolCalls: [],
+        openToolCalls: new Map(),
+        anonymousToolCall: 0,
+        sawEnd: false,
+        windowTruncated: false,
+        totalBytes: 0,
+        sawAnyEvent: false,
+    };
+}
+
+/** Copy of the accumulated state, for folding an unterminated trailing line. */
+function speculativeCopy(state: ParseState): ParseState {
+    return {
+        ...state,
+        usage: { ...state.usage },
+        toolCalls: [...state.toolCalls],
+        openToolCalls: new Map(state.openToolCalls),
+    };
+}
+
+function rememberParseState(id: string, state: ParseState): void {
+    parseStates.delete(id);
+    parseStates.set(id, state);
+    while (parseStates.size > MAX_TRACKED_PARSE_RUNS) {
+        const oldest = parseStates.keys().next();
+        if (oldest.done) break;
+        parseStates.delete(oldest.value);
+    }
+}
+
+/**
+ * Which lines of an appended batch must actually be parsed.
+ *
+ * Every fact-bearing line does, except `message_update` — the high-volume type,
+ * ~98% of a log's bytes, whose only contribution is the latest-wins
+ * `lastActivity` peek. Within one batch only the LAST update that yields text
+ * can survive, so walk back from the end and keep the first that does. Earlier
+ * updates are then provably unobservable, and are never parsed at all.
+ */
+function selectParsableLines(lines: readonly string[]): Array<{ index: number; event: Record<string, unknown> }> {
+    const parsed: Array<{ index: number; event: Record<string, unknown> }> = [];
+    let liveUpdate: { index: number; event: Record<string, unknown> } | undefined;
+
+    // Backward pass: find the newest message_update that would set lastActivity.
+    for (let i = lines.length - 1; i >= 0 && !liveUpdate; i--) {
+        const s = lines[i]!.trim();
+        if (!s || s[0] !== "{") continue;
+        if (peekType(s) !== "message_update") continue;
+        const event = tryParse(s);
+        if (!event) continue;
+        if (activityTextOf(event) !== undefined) liveUpdate = { index: i, event };
+    }
+
+    // Forward pass: everything else, in order, so relative ordering is exact.
+    for (let i = 0; i < lines.length; i++) {
+        if (liveUpdate && i === liveUpdate.index) {
+            parsed.push(liveUpdate);
+            continue;
+        }
+        const s = lines[i]!.trim();
+        if (!s || s[0] !== "{") continue;
+        const type = peekType(s);
+        if (type === "message_update") continue; // superseded or textless
+        if (type !== undefined && !PARSE_EVENT_TYPES.has(type)) continue;
+        const event = tryParse(s);
+        if (event) parsed.push({ index: i, event });
+    }
+    return parsed;
+}
+
+function tryParse(line: string): Record<string, unknown> | undefined {
+    try {
+        return JSON.parse(line) as Record<string, unknown>;
+    } catch {
+        return undefined;
+    }
+}
+
+/** The live-progress text a `message_update` contributes, if any. */
+function activityTextOf(e: Record<string, unknown>): string | undefined {
+    const m = e.message as Msg | undefined;
+    const t = messageText(m);
+    if (t) return t;
+    if (Array.isArray(m?.content)) {
+        const think = m!.content.find((b) => b?.type === "thinking") as { thinking?: string } | undefined;
+        if (think?.thinking) return `(thinking) ${think.thinking}`;
+    }
+    return undefined;
+}
+
+/** Fold one event into the run's accumulated state. */
+function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
+    const type = e.type as string | undefined;
+    state.sawAnyEvent = true;
+
+    // Authoritative final answer: the last assistant message at run end.
+    if (type === "agent_end") {
+        if (Array.isArray(e.messages)) {
+            for (let i = e.messages.length - 1; i >= 0; i--) {
+                const m = e.messages[i] as Msg;
+                if (m?.role === "assistant") { const t = messageText(m); if (t) state.finalText = t; break; }
+            }
+        }
+        state.sawEnd = true;
+    }
+    if (type === "agent_settled") state.sawEnd = true;
+
+    // Progress signal + fallback final: finalized assistant turns.
+    // Accumulate spend from `message_end` only (fires once per turn), so
+    // multi-turn tool-using runs sum correctly without double counting.
+    if (type === "message_end") {
+        const m = e.message as Msg | undefined;
+        if (m?.role === "assistant") {
+            const t = messageText(m);
+            // Latest finalized assistant text wins, so a run without a
+            // terminal `agent_end` still yields its LAST answer, not its first.
+            if (t) { state.lastActivity = t; state.finalText = t; }
+            const u = m?.usage;
+            if (u) {
+                state.usage.input += u.input ?? 0;
+                state.usage.output += u.output ?? 0;
+                state.usage.cacheRead += u.cacheRead ?? 0;
+                state.usage.costUSD += u.cost?.total ?? 0;
+            }
+        }
+    }
+    if (type === "turn_end") {
+        const m = e.message as Msg | undefined;
+        if (m?.role === "assistant") {
+            const t = messageText(m);
+            if (t) { state.lastActivity = t; if (!state.finalText) state.finalText = t; }
         }
     }
 
-    if (tail.error) {
-        diagnostics.push(`Log unreadable: ${tail.error}`);
-        return { finalText: "", lastActivity: "", toolCalls: [], unmatchedToolCalls: [], sawEnd: false, usage, diagnostics };
+    // Live streaming: latest partial text or thinking.
+    if (type === "message_update") {
+        const t = activityTextOf(e);
+        if (t) state.lastActivity = t;
     }
-    if (tail.totalBytes === 0) {
-        return { finalText: "", lastActivity: "", toolCalls: [], unmatchedToolCalls: [], sawEnd: false, usage, diagnostics };
+
+    // Tool activity. Pi emits a toolCallId for normal events; fall back to
+    // tool-name matching when replaying older/id-less streams.
+    const toolCallId = typeof e.toolCallId === "string" ? e.toolCallId : undefined;
+    if (type === "tool_execution_start") {
+        const toolName = typeof e.toolName === "string" ? e.toolName : "unknown";
+        if (state.toolCalls[state.toolCalls.length - 1] !== toolName) state.toolCalls.push(toolName);
+        state.openToolCalls.set(toolCallId ?? `anonymous:${state.anonymousToolCall++}`, { id: toolCallId, toolName });
     }
-    if (tail.truncated) {
+    if (type === "tool_execution_end") {
+        if (toolCallId) {
+            state.openToolCalls.delete(toolCallId);
+        } else if (typeof e.toolName === "string") {
+            const matching = [...state.openToolCalls].find(([, call]) => call.toolName === e.toolName);
+            if (matching) state.openToolCalls.delete(matching[0]);
+        }
+    }
+}
+
+/**
+ * Parse the log for run `id`. Tolerant of partial/streaming logs.
+ *
+ * Incremental: only bytes appended since the previous call for this id are read
+ * and folded, so a live caller never re-reads a log that can reach gigabytes. A
+ * rotated, truncated, or rewritten log is detected and re-read from a bounded
+ * tail (see log-cursor.ts).
+ */
+export function parseRun(id: string): ParsedRun {
+    const previous = parseStates.get(id);
+    const read = readAppendedLines(logPathFor(id), previous?.cursor, maxParseBytes());
+    const state = read.restarted || !previous ? freshState(read.cursor) : previous;
+    state.cursor = read.cursor;
+    if (read.totalBytes > 0) state.totalBytes = read.totalBytes;
+    if (read.truncated) state.windowTruncated = true;
+    state.error = read.error;
+    rememberParseState(id, state);
+
+    if (read.error !== undefined) {
+        return {
+            finalText: "", lastActivity: "", toolCalls: [], unmatchedToolCalls: [], sawEnd: false,
+            usage: { input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 },
+            diagnostics: [`Log unreadable: ${read.error}`],
+        };
+    }
+
+    for (const { event } of selectParsableLines(read.lines)) foldParseEvent(state, event);
+
+    // A log whose final line was never terminated — a writer mid-event, or one
+    // that simply did not end with a newline — still has to be readable. Fold it
+    // into a COPY: the cursor has not consumed those bytes, so the same line
+    // will arrive again as a complete line, and folding it durably here would
+    // double-count its spend.
+    const view = read.partial ? speculativeCopy(state) : state;
+    if (read.partial) {
+        for (const { event } of selectParsableLines([read.partial])) foldParseEvent(view, event);
+    }
+
+    const diagnostics: string[] = [];
+    if (view.windowTruncated) {
         diagnostics.push(
-            `Log truncated: parsed last ${fmtBytes(maxParseBytes())} of ${fmtBytes(tail.totalBytes)}. ` +
-            "Only recent activity is reflected in tokens/tools.",
+            `Log truncated: this session began reading at the last ${fmtBytes(maxParseBytes())} ` +
+            `of ${fmtBytes(view.totalBytes)}. Events before that point are not counted in tokens/tools.`,
         );
     }
-
-    let finalText = "";
-    let lastActivity = "";
-    const toolCalls: string[] = [];
-    const openToolCalls = new Map<string, UnmatchedToolCall>();
-    let anonymousToolCall = 0;
-    let sawEnd = false;
-
-    for (const line of parseText.split("\n")) {
-        const s = line.trim();
-        if (!s || s[0] !== "{") continue; // skip banners / warnings / blanks
-        let e: Record<string, unknown>;
-        try { e = JSON.parse(s); } catch { continue; }
-
-        const type = e.type as string | undefined;
-
-        // Authoritative final answer: the last assistant message at run end.
-        if (type === "agent_end") {
-            if (Array.isArray(e.messages)) {
-                for (let i = e.messages.length - 1; i >= 0; i--) {
-                    const m = e.messages[i] as Msg;
-                    if (m?.role === "assistant") { const t = messageText(m); if (t) finalText = t; break; }
-                }
-            }
-            sawEnd = true;
+    if (!view.sawAnyEvent) {
+        if (view.totalBytes === 0) {
+            return {
+                finalText: "", lastActivity: "", toolCalls: [], unmatchedToolCalls: [], sawEnd: false,
+                usage: { input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 }, diagnostics: [],
+            };
         }
-        if (type === "agent_settled") sawEnd = true;
-
-        // Progress signal + fallback final: finalized assistant turns.
-        // Accumulate spend from `message_end` only (fires once per turn), so
-        // multi-turn tool-using runs sum correctly without double counting.
-        if (type === "message_end") {
-            const m = e.message as Msg | undefined;
-            if (m?.role === "assistant") {
-                const t = messageText(m);
-                // Latest finalized assistant text wins, so a run without a
-                // terminal `agent_end` still yields its LAST answer, not its first.
-                if (t) { lastActivity = t; finalText = t; }
-                const u = m?.usage;
-                if (u) {
-                    usage.input += u.input ?? 0;
-                    usage.output += u.output ?? 0;
-                    usage.cacheRead += u.cacheRead ?? 0;
-                    usage.costUSD += u.cost?.total ?? 0;
-                }
-            }
-        }
-        if (type === "turn_end") {
-            const m = e.message as Msg | undefined;
-            if (m?.role === "assistant") {
-                const t = messageText(m);
-                if (t) { lastActivity = t; if (!finalText) finalText = t; }
-            }
-        }
-
-        // Live streaming: latest partial text or thinking.
-        if (type === "message_update") {
-            const m = e.message as Msg | undefined;
-            const t = messageText(m);
-            if (t) lastActivity = t;
-            else if (Array.isArray(m?.content)) {
-                const think = m!.content.find((b) => b?.type === "thinking") as { thinking?: string } | undefined;
-                if (think?.thinking) lastActivity = `(thinking) ${think.thinking}`;
-            }
-        }
-
-        // Tool activity. Pi emits a toolCallId for normal events; fall back to
-        // tool-name matching when replaying older/id-less streams.
-        const toolCallId = typeof e.toolCallId === "string" ? e.toolCallId : undefined;
-        if (type === "tool_execution_start") {
-            const toolName = typeof e.toolName === "string" ? e.toolName : "unknown";
-            if (toolCalls[toolCalls.length - 1] !== toolName) toolCalls.push(toolName);
-            openToolCalls.set(toolCallId ?? `anonymous:${anonymousToolCall++}`, { id: toolCallId, toolName });
-        }
-        if (type === "tool_execution_end") {
-            if (toolCallId) {
-                openToolCalls.delete(toolCallId);
-            } else if (typeof e.toolName === "string") {
-                const matching = [...openToolCalls].find(([, call]) => call.toolName === e.toolName);
-                if (matching) openToolCalls.delete(matching[0]);
-            }
-        }
-    }
-
-    if (!finalText && !lastActivity && toolCalls.length === 0) {
         diagnostics.push("No parseable assistant/tool events found in the log tail.");
     }
 
-    usage.total = usage.input + usage.output;
-    return { finalText, lastActivity, toolCalls, unmatchedToolCalls: [...openToolCalls.values()], sawEnd, usage, diagnostics };
+    const usage: Usage = { ...view.usage, total: view.usage.input + view.usage.output };
+    return {
+        finalText: view.finalText,
+        lastActivity: view.lastActivity,
+        toolCalls: [...view.toolCalls],
+        unmatchedToolCalls: [...view.openToolCalls.values()],
+        sawEnd: view.sawEnd,
+        usage,
+        diagnostics,
+    };
 }
+
 /** Build the human-readable body for subagent_output. Exported for unit testing. */
 export function formatSubagentOutputBody(
     head: string,
