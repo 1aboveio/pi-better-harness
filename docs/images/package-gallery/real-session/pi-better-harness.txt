@@ -1,0 +1,23 @@
+$ pi -e . --name gallery-capture
+real Pi TUI session · pi-better-harness extensions loaded
+
+ Goal set: Capture package gallery screenshot
+
+ ⠸ Working...
+
+▸ goal active 0:01 Capture package gallery screenshot
+▸ subagents
+  ●  reviewer                                                                                 grok-4.5 · grok-4.5 2m 10s
+  ●  test scout                                                                                     gpt-5 · gpt-5 3m 26s
+
+▸ background tasks
+› ●  merge queue                                                                         every 30s · 11m 58s left 3m 32s
+  ●  dev server                                                                                   process running 6m 14s
+
+↑↓ select · Enter detail · x stop · Esc unfocus
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+~/projects/pi-better-harness (stack/exoulster/keep-both-gallery-styles) • gallery-capture
+0.1%/128k (auto)                                                                                    (openai) gpt-4o-mini
+bg 4

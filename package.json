@@ -21,6 +21,7 @@
     ]
   },
   "scripts": {
+    "gallery:capture-real": "node scripts/capture-real-pi-session-gallery.mjs",
     "gallery:render": "node --import tsx scripts/render-package-gallery.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
