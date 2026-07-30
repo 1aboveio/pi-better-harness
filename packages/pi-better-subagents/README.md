@@ -1,8 +1,10 @@
 # pi-better-subagents
 
-Detached, sandboxed subagents for [Pi](https://pi.dev).
+`pi-better-subagents` is a Pi extension for detached, sandboxed subagent runs that keep the foreground Pi session free.
 
-Delegate work and keep going. Each subagent runs in its own `pi -p` child process, reports back when finished, and leaves the foreground session free for the human.
+## Quick Answer
+
+Use `pi-better-subagents` when you want Pi to launch independent agent work without blocking the current conversation. Each subagent runs in its own `pi -p` child process, reports back when finished, and keeps durable logs for later inspection.
 
 ## Core Features
 
@@ -24,11 +26,21 @@ Try it for one run:
 pi -e npm:pi-better-subagents
 ```
 
-Linux sandboxing uses `bubblewrap` when available:
+Linux sandboxing uses `bubblewrap` when available, for example from `sudo apt-get install bubblewrap`.
 
-```sh
-sudo apt-get install bubblewrap
-```
+## When To Use
+
+Use this package for independent coding, review, research, or verification work that can finish later. Do not use it for steps that need immediate foreground interaction or user clarification.
+
+## Compatibility
+
+| Requirement | Support |
+|-------------|---------|
+| Pi | Required |
+| Install method | `pi install npm:pi-better-subagents` |
+| macOS sandboxing | Supported by default |
+| Linux sandboxing | Uses `bubblewrap` when available |
+| Development runtime | Node.js 22+ |
 
 ## Update Or Remove
 
@@ -41,3 +53,4 @@ pi remove npm:pi-better-subagents
 
 - Repository: https://github.com/1aboveio/pi-better-harness
 - Detailed notes: https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md
+- License: https://github.com/1aboveio/pi-better-harness/blob/main/LICENSE

@@ -1,8 +1,10 @@
 # pi-better-background-tasks
 
-Durable background processes and watchers for [Pi](https://pi.dev).
+`pi-better-background-tasks` is a Pi extension for durable background shell tasks, watchers, logs, and status inspection.
 
-Use it when work should keep running while the foreground session stays free: dev servers, long scripts, queue watchers, deploy checks, log tails, and other command-driven tasks.
+## Quick Answer
+
+Use `pi-better-background-tasks` when a command should keep running while the foreground Pi session stays free. It is best for dev servers, long scripts, queue watchers, deploy checks, log tails, and other command-driven work.
 
 ## Core Features
 
@@ -23,6 +25,20 @@ Try it for one run:
 pi -e npm:pi-better-background-tasks
 ```
 
+## When To Use
+
+Use this package for shell commands that need logs, status, cancellation, or completion notifications across a Pi turn.
+
+Do not use it for short commands where the foreground session should wait for the result directly.
+
+## Compatibility
+
+| Requirement | Support |
+|-------------|---------|
+| Pi | Required |
+| Install method | `pi install npm:pi-better-background-tasks` |
+| Development runtime | Node.js 22+ |
+
 ## Update Or Remove
 
 ```sh
@@ -34,3 +50,4 @@ pi remove npm:pi-better-background-tasks
 
 - Repository: https://github.com/1aboveio/pi-better-harness
 - Detailed notes: https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-background-tasks/docs/usage.md
+- License: https://github.com/1aboveio/pi-better-harness/blob/main/LICENSE
