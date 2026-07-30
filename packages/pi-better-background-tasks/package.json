@@ -1,6 +1,6 @@
 {
   "name": "pi-better-background-tasks",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Generic durable background task and watcher tools for pi.",
   "type": "module",
   "keywords": [

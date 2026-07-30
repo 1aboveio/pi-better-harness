@@ -1,29 +1,24 @@
 # pi-better-harness
 
-Pi Better Harness is a small set of Pi extensions for keeping long-running work
-observable while the foreground agent stays responsive.
+Pi Better Harness is a small set of Pi extensions for keeping long-running work visible while the foreground agent stays responsive.
 
-The npm package `pi-better-harness` is a meta package. Installing it loads the
-three core extensions:
+## What You Get
 
-| Package | Purpose |
-| ------- | ------- |
-| `pi-better-subagents` | Launch detached `pi -p` subagents, inspect their output, and receive completion callbacks. |
-| `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
-| `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
+- `pi-better-subagents`: run delegated Pi work in detached, sandboxed child processes.
+- `pi-better-background-tasks`: keep shell processes and watchers running without blocking the current turn.
+- `pi-better-goal`: track the active objective and wake the foreground when background work drains.
 
-`pi-better-read-aloud` lives in this repo but is intentionally not part of the
-meta package yet.
+`pi-better-read-aloud` lives in this repo but is not published or included in the meta package yet.
 
 ## Install
 
-Install the full harness through Pi:
+Install the full bundle:
 
 ```sh
 pi install npm:pi-better-harness
 ```
 
-Install only one extension when you do not want the full bundle:
+Install only one part:
 
 ```sh
 pi install npm:pi-better-subagents
@@ -31,29 +26,11 @@ pi install npm:pi-better-background-tasks
 pi install npm:pi-better-goal
 ```
 
-For a temporary one-off run without changing Pi settings:
+Try the bundle for one run without saving it to Pi settings:
 
 ```sh
 pi -e npm:pi-better-harness
 ```
-
-## Packages
-
-This repository is a private npm workspace. The root package is not published.
-The publishable packages are:
-
-| Workspace | npm package | Included in meta package |
-| --------- | ----------- | ------------------------ |
-| `packages/pi-better-harness` | `pi-better-harness` | yes |
-| `packages/pi-better-subagents` | `pi-better-subagents` | yes |
-| `packages/pi-better-background-tasks` | `pi-better-background-tasks` | yes |
-| `packages/pi-better-goal` | `pi-better-goal` | yes |
-| `packages/pi-better-read-aloud` | `pi-better-read-aloud` | not yet |
-| `packages/navigator` | internal workspace | no |
-
-All four publishable packages carry the `pi-package` npm keyword. The bundle is
-the recommended install for most users, and the component packages remain
-available for people who want only one extension.
 
 ## Development
 
@@ -64,104 +41,15 @@ npm install
 npm run verify
 ```
 
-Useful narrower checks:
-
-```sh
-npm run typecheck
-npm test
-npm run test:cross-session
-```
-
-## Local Pi Development
-
-Pi can load this repo directly from the root `pi.extensions` manifest:
-
-```sh
-pi install .
-```
-
-For a temporary run:
+Load this checkout directly in Pi while developing:
 
 ```sh
 pi -e .
 ```
 
-You can also install individual workspace directories while iterating:
+## Docs
 
-```sh
-pi install ./packages/pi-better-subagents
-pi install ./packages/pi-better-background-tasks
-pi install ./packages/pi-better-goal
-```
-
-## Release Checklist
-
-Start from a clean, up-to-date `main` branch:
-
-```sh
-git switch main
-git pull --ff-only origin main
-git status --short
-```
-
-Verify the workspace and npm package contents:
-
-```sh
-npm run verify
-npm publish --dry-run -w packages/pi-better-background-tasks --registry=https://registry.npmjs.org/
-npm publish --dry-run -w packages/pi-better-subagents --registry=https://registry.npmjs.org/
-npm publish --dry-run -w packages/pi-better-goal --registry=https://registry.npmjs.org/
-npm publish --dry-run -w packages/pi-better-harness --registry=https://registry.npmjs.org/
-```
-
-Publish the dependency packages before the meta package:
-
-```sh
-npm publish -w packages/pi-better-background-tasks --registry=https://registry.npmjs.org/
-npm publish -w packages/pi-better-subagents --registry=https://registry.npmjs.org/
-npm publish -w packages/pi-better-goal --registry=https://registry.npmjs.org/
-npm publish -w packages/pi-better-harness --registry=https://registry.npmjs.org/
-```
-
-The explicit registry flag matters on machines whose npm registry is configured
-to a mirror.
-
-Confirm the packages are visible:
-
-```sh
-npm view pi-better-background-tasks version --registry=https://registry.npmjs.org/
-npm view pi-better-subagents version --registry=https://registry.npmjs.org/
-npm view pi-better-goal version --registry=https://registry.npmjs.org/
-npm view pi-better-harness version --registry=https://registry.npmjs.org/
-```
-
-Smoke-test the install path:
-
-```sh
-pi install npm:pi-better-harness
-```
-
-Pi's package gallery discovers npm packages tagged with the `pi-package` keyword.
-After npm publish, the bundle and the three component packages are all eligible
-to appear there.
-
-Then create the matching GitHub release:
-
-```sh
-gh release create v0.1.0 \
-  --title "v0.1.0" \
-  --notes "Initial npm release of Pi Better Harness.
-
-Install:
-\`\`\`sh
-pi install npm:pi-better-harness
-\`\`\`
-
-Packages:
-- pi-better-harness
-- pi-better-subagents
-- pi-better-background-tasks
-- pi-better-goal
-
-pi-better-read-aloud is intentionally not included yet."
-```
+- [Development and release notes](docs/development-and-release.md)
+- [Subagents details](packages/pi-better-subagents/docs/usage.md)
+- [Background tasks details](packages/pi-better-background-tasks/docs/usage.md)
+- [Goal details](packages/pi-better-goal/docs/usage.md)

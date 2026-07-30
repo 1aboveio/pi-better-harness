@@ -1,6 +1,6 @@
 {
   "name": "pi-better-goal",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Background activity bridge for Pi goal continuations and async subagents.",
   "type": "module",
   "main": "src/index.ts",
