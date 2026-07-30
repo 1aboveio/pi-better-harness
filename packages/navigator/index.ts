@@ -328,11 +328,16 @@ function listRows(now = Date.now()): InternalRow[] {
   for (const provider of providers()) {
     let providerRows: BackgroundWorkRow[] = [];
     try { providerRows = provider.listRows(now) ?? []; } catch { providerRows = []; }
-    for (const row of providerRows) {
+    const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
+    for (const row of orderedProviderRows) {
       rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
     }
   }
-  return rows.sort((a, b) => b.sortStartedAt - a.sortStartedAt || a.providerLabel.localeCompare(b.providerLabel));
+  return rows;
+}
+
+function rowDisplayName(row: Pick<BackgroundWorkRow, "name" | "id">): string {
+  return singleLine(row.name || row.id);
 }
 
 function syncMainListSelection(rows: InternalRow[]): void {
