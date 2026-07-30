@@ -458,6 +458,37 @@ describe("index.ts widget wiring (issue #13)", async () => {
         );
     });
 
+    // @covers subagent.registry-scan
+    // @level unit
+    it("scans the registry once per row rebuild, and never caches across rebuilds", () => {
+        // listMetas reads and parses one meta.json per run, and a rebuild needs
+        // the visible set twice (start times, then rows). Pass one snapshot down.
+        const rebuild = indexSource.match(/function subagentWorkRows[\s\S]*?\n}/)?.[0] ?? "";
+        assert.ok(rebuild, "subagentWorkRows located");
+        assert.equal(
+            (rebuild.match(/sessionVisibleNavigatorRuns\(/g) ?? []).length,
+            1,
+            "one registry scan per rebuild",
+        );
+        assert.match(rebuild, /navigatorRows\(visible, now\)/, "the snapshot is threaded, not re-read");
+
+        // A cache across rebuilds would hide runs created by another pi process.
+        const helper = indexSource.match(/function sessionVisibleNavigatorRuns[\s\S]*?\n}/)?.[0] ?? "";
+        assert.match(helper, /listMetas\(\)/);
+        assert.doesNotMatch(helper, /withinRefreshFloor|Memo/, "no memo across calls");
+    });
+
+    // @covers subagent.size-cap
+    // @level unit
+    it("enforces the registry byte cap off the hot path and clears retired caches", () => {
+        assert.match(indexSource, /enforceRegistrySizeCapOnce\(\{ config: cfg \}\)/);
+        const rebuild = indexSource.match(/function subagentWorkRows[\s\S]*?\n}/)?.[0] ?? "";
+        assert.doesNotMatch(rebuild, /enforceRegistrySizeCapOnce/, "never rides the row rebuild");
+        const spawnSweep = indexSource.match(/const capped = enforceRegistrySizeCapOnce[\s\S]*?\n        }/)?.[0] ?? "";
+        assert.match(spawnSweep, /resetChildEventLogCursor\(id\)/, "retired runs drop retained events");
+        assert.match(spawnSweep, /healthLogCache\.delete\(id\)/);
+    });
+
     // @covers widget.retired
     // @level unit
     it("does not dirty-check or repaint the retired legacy widget", () => {

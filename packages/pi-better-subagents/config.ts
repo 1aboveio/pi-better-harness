@@ -49,6 +49,12 @@ export interface SubagentConfig {
     cleanupTerminalRunRetentionMs?: number | null;
     /** Retention for child pi session files during once-daily cleanup. Default: 7 days. */
     cleanupSessionRetentionMs?: number | null;
+    /**
+     * Total registry byte budget. Enforced between daily sweeps, oldest terminal
+     * run first — age alone cannot bound a directory that can grow by gigabytes
+     * in an afternoon. Default: 2 GiB. See cleanup.ts.
+     */
+    maxRegistryBytes?: number | null;
 }
 
 /** Concurrency cap when config.json sets none. */

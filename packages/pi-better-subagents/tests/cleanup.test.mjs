@@ -15,7 +15,12 @@ const RUNTIME = mkdtempSync(join(tmpdir(), "subagent-cleanup-"));
 process.env.TMPDIR = RUNTIME;
 
 const {
+    DEFAULT_MAX_REGISTRY_BYTES,
+    SIZE_SWEEP_INTERVAL_MS,
     cleanupStatePath,
+    collectSizeCapEntries,
+    enforceRegistrySizeCapOnce,
+    planRegistrySizeCap,
     runDailyCleanupOnce,
 } = await import("../cleanup.ts");
 const {
@@ -109,5 +114,136 @@ describe("daily cleanup", () => {
         });
         assert.equal(next.ran, true, "next local day runs cleanup again");
         assert.equal(existsSync(runDir(secondOld)), false, "next-day cleanup prunes old terminal artifacts");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Registry size cap. Age alone could not bound this directory: 63 GB
+// accumulated inside five days, so the seven-day window above never saw it.
+// ---------------------------------------------------------------------------
+
+function sizeEntry(id, overrides = {}) {
+    return { id, status: "completed", endedAt: DAY - DAY_MS, dirMtimeMs: DAY - DAY_MS, bytes: 1000, ...overrides };
+}
+
+describe("planRegistrySizeCap", () => {
+    it("does nothing while the registry fits", () => {
+        const plan = planRegistrySizeCap([sizeEntry("a"), sizeEntry("b")], { maxBytes: 10_000 });
+        assert.deepEqual(plan.remove, []);
+        assert.equal(plan.keptBytes, 2000);
+        assert.equal(plan.overBudget, false);
+    });
+
+    it("retires oldest terminal runs until the registry fits", () => {
+        const plan = planRegistrySizeCap([
+            sizeEntry("newest", { endedAt: DAY - 1 * DAY_MS, bytes: 6000 }),
+            sizeEntry("oldest", { endedAt: DAY - 3 * DAY_MS, bytes: 6000 }),
+            sizeEntry("middle", { endedAt: DAY - 2 * DAY_MS, bytes: 6000 }),
+        ], { maxBytes: 10_000 });
+        assert.deepEqual(plan.remove, ["oldest", "middle"], "oldest first");
+        assert.equal(plan.reclaimedBytes, 12_000);
+        assert.equal(plan.keptBytes, 6000);
+    });
+
+    it("never retires a running or orphaned run to meet the cap, and says so", () => {
+        for (const status of ["running", "orphaned"]) {
+            const plan = planRegistrySizeCap(
+                [sizeEntry("live", { status, endedAt: undefined, bytes: 50_000 })],
+                { maxBytes: 1000 },
+            );
+            assert.deepEqual(plan.remove, [], status);
+            assert.equal(plan.overBudget, true, `${status}: over budget is reported, not forced`);
+        }
+    });
+
+    it("never retires a run the calling pi owns", () => {
+        // A size sweep goes after the newest large runs, which is exactly the
+        // live session's own work — it can still answer subagent_result for them.
+        const plan = planRegistrySizeCap([
+            sizeEntry("mine", { bytes: 9000 }),
+            sizeEntry("theirs", { endedAt: DAY - 5 * DAY_MS, bytes: 9000 }),
+        ], { maxBytes: 10_000, protectedIds: new Set(["mine"]) });
+        assert.deepEqual(plan.remove, ["theirs"]);
+    });
+
+    it("leaves a metadata-less directory to the age sweep", () => {
+        // Size is not evidence about a directory that may be a run mid-spawn.
+        const plan = planRegistrySizeCap(
+            [sizeEntry("bare", { status: undefined, bytes: 50_000 })],
+            { maxBytes: 1000 },
+        );
+        assert.deepEqual(plan.remove, []);
+        assert.equal(plan.overBudget, true);
+    });
+});
+
+describe("enforceRegistrySizeCapOnce", () => {
+    it("measures real directories, retires oldest first, and rate-limits itself", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+
+        const old = "sa_cap_old";
+        const recent = "sa_cap_recent";
+        const live = "sa_cap_live";
+        for (const [id, over] of [
+            [old, { endedAt: DAY - 5 * DAY_MS }],
+            [recent, { endedAt: DAY - 1 * DAY_MS }],
+            [live, { status: "running", endedAt: undefined }],
+        ]) {
+            writeMeta(meta(id, over));
+            writeFileSync(logPathFor(id), "x".repeat(4000));
+        }
+
+        const entries = collectSizeCapEntries();
+        assert.equal(entries.length, 3, "every run measured");
+        assert.ok(entries.every((e) => e.bytes >= 4000), "bytes counted from disk");
+
+        // 12 KB of logs against a 9 KB cap, with the live run untouchable.
+        // spawnPid is this process, so own-run protection must be overridden to
+        // observe the byte bound at all — which is itself the protection's proof.
+        const result = enforceRegistrySizeCapOnce({
+            now: DAY,
+            maxBytes: 9000,
+            force: true,
+            protectedIds: new Set(),
+        });
+        assert.equal(result.ran, true);
+        assert.deepEqual(result.removed, [old], "oldest terminal run retired");
+        assert.equal(existsSync(runDir(recent)), true, "newer terminal run kept");
+        assert.equal(existsSync(runDir(live)), true, "live run kept");
+        assert.deepEqual(result.errors, []);
+
+        // Inside the interval the sweep does not run again.
+        writeMeta(meta("sa_cap_second", { endedAt: DAY - 6 * DAY_MS }));
+        writeFileSync(logPathFor("sa_cap_second"), "y".repeat(9000));
+        const skipped = enforceRegistrySizeCapOnce({ now: DAY + 60_000, maxBytes: 1000, protectedIds: new Set() });
+        assert.equal(skipped.ran, false, "rate-limited between sweeps");
+        assert.equal(existsSync(runDir("sa_cap_second")), true);
+
+        const later = enforceRegistrySizeCapOnce({
+            now: DAY + SIZE_SWEEP_INTERVAL_MS,
+            maxBytes: 1000,
+            protectedIds: new Set(),
+        });
+        assert.equal(later.ran, true, "runs again once the interval has passed");
+    });
+
+    it("protects this pi's own runs by default", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        // meta() stamps spawnPid = process.pid, so every fixture is "ours".
+        const id = "sa_cap_owned";
+        writeMeta(meta(id, { endedAt: DAY - 9 * DAY_MS }));
+        writeFileSync(logPathFor(id), "z".repeat(50_000));
+
+        const result = enforceRegistrySizeCapOnce({ now: DAY, maxBytes: 1000, force: true });
+        assert.deepEqual(result.removed, [], "an owned run survives the cap");
+        assert.equal(result.overBudget, true, "and the shortfall is reported");
+        assert.equal(existsSync(runDir(id)), true);
+    });
+
+    it("defaults to a 2 GiB budget — tighter than a single observed log", () => {
+        // One run's log has been seen past 3 GB, so the budget must be smaller
+        // than "a few of those" or it never binds.
+        assert.equal(DEFAULT_MAX_REGISTRY_BYTES, 2 * 1024 * 1024 * 1024);
+        assert.equal(SIZE_SWEEP_INTERVAL_MS, 10 * 60 * 1000);
     });
 });
