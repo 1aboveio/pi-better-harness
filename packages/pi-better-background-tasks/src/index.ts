@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { disposeBackgroundWorkNavigator } from "../../navigator/index.ts";
+import { disposeBackgroundWorkNavigator } from "./shared-navigator.ts";
 import { registerBackgroundTasksGoalProvider } from "./goal-provider.js";
 import { clearBackgroundTasksNavigatorSession, ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
 import { registerTools } from "./tools.js";
