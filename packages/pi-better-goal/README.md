@@ -1,8 +1,10 @@
 # pi-better-goal
 
-Goal tracking for [Pi](https://pi.dev), with background-aware continuation.
+`pi-better-goal` is a Pi extension for goal tracking with background-aware continuation.
 
-It keeps the active objective visible, tracks active versus elapsed time, and prevents Pi from treating foreground idleness as completion while background work is still running.
+## Quick Answer
+
+Use `pi-better-goal` when a Pi session should keep an explicit objective visible until the foreground work and registered background activity are both done. It tracks active versus elapsed time and wakes the foreground when background work drains.
 
 ## Core Features
 
@@ -23,6 +25,21 @@ Try it for one run:
 pi -e npm:pi-better-goal
 ```
 
+## When To Use
+
+Use this package for longer Pi sessions where subagents, background tasks, or other providers may still be active after the foreground message is idle.
+
+Do not use it when you only need a note or checklist outside Pi's runtime state.
+
+## Compatibility
+
+| Requirement | Support |
+|-------------|---------|
+| Pi | Required |
+| Install method | `pi install npm:pi-better-goal` |
+| Background providers | Works with registered providers |
+| Development runtime | Node.js 22+ |
+
 ## Update Or Remove
 
 ```sh
@@ -34,3 +51,4 @@ pi remove npm:pi-better-goal
 
 - Repository: https://github.com/1aboveio/pi-better-harness
 - Detailed notes: https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-goal/docs/usage.md
+- License: https://github.com/1aboveio/pi-better-harness/blob/main/LICENSE

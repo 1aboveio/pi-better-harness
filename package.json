@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Monorepo harness for Pi extension packages.",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "workspaces": [
     "packages/*"

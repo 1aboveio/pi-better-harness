@@ -1,12 +1,16 @@
 {
   "name": "pi-better-harness",
-  "version": "0.1.3",
-  "description": "Meta package for the core Pi Better Harness extensions.",
+  "version": "0.1.4",
+  "description": "Pi extension bundle for subagents, durable background tasks, and goal tracking.",
+  "license": "MIT",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi-extension",
-    "pi-better-harness"
+    "pi-better-harness",
+    "subagents",
+    "background-tasks",
+    "goal-tracking"
   ],
   "pi": {
     "extensions": [
@@ -29,8 +33,8 @@
     "README.md"
   ],
   "dependencies": {
-    "pi-better-background-tasks": "0.1.3",
-    "pi-better-goal": "0.1.3",
-    "pi-better-subagents": "0.1.3"
+    "pi-better-background-tasks": "0.1.4",
+    "pi-better-goal": "0.1.4",
+    "pi-better-subagents": "0.1.4"
   }
 }
