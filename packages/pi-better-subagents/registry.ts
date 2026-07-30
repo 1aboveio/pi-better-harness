@@ -70,6 +70,20 @@ export interface RunMeta {
     lostCallbackSentAt?: number;
     /** PID of the pi process that launched this run (for cross-restart ownership). */
     spawnPid: number;
+    /**
+     * Start-identity token of the SPAWNING pi, captured at spawn where the OS
+     * exposes one. Optional and additive: older metadata parses unchanged. Only
+     * equality is meaningful — a different token proves the parent pid was
+     * recycled by an unrelated process, which is how `isAbandonedByParent` tells
+     * a dead session's leftovers from a live session's runs.
+     */
+    spawnPidStartTime?: string;
+    /**
+     * When another pi adopted this record because its own spawning pi was gone
+     * (status reconciliation only — no callback was delivered). Additive and
+     * diagnostic: it explains a `lost` record nobody's session reported.
+     */
+    adoptedFromLostParentAt?: number;
     model?: string;
     cwd: string;
     /** First ~200 chars of the task prompt, for listings. */
