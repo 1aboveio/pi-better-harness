@@ -39,7 +39,10 @@ jobs:
           npm --version
 
       - name: Install dependencies
-        run: npm ci
+        # The lockfile records registry tarball URLs from registry.npmmirror.com.
+        # npm 11 defaults allow-remote=none, so allow committed lockfile URLs
+        # during install while publish still targets registry.npmjs.org below.
+        run: npm ci --allow-remote=all
 
       - name: Verify workspace
         run: npm run verify
