@@ -1,6 +1,6 @@
 {
   "name": "pi-better-subagents",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude Code-style async subagents for pi, built on detached background pi -p processes. Launching is the deliverable; the foreground never blocks.",
   "type": "module",
   "keywords": [
@@ -9,7 +9,8 @@
     "subagents"
   ],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-subagents.png"
   },
   "repository": {
     "type": "git",
