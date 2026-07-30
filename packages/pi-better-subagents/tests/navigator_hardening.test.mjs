@@ -653,19 +653,24 @@ describe("navigator hardening: non-TUI + widget isolation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Docs pin — user-facing controls described in README
+// Docs pin — user-facing README stays compact; detailed controls live in docs.
 // ---------------------------------------------------------------------------
 describe("navigator hardening: documentation", () => {
     // @covers navigator.hardening
     // @level unit
-    it("README documents empty-editor ←, list/detail controls, two-press x, navigator-only dismiss, tools", () => {
+    it("keeps the README concise while detailed navigator controls live in docs", () => {
         const readme = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "README.md"), "utf8");
-        assert.ok(/subagent navigator|navigator/i.test(readme), "README mentions the navigator");
-        assert.ok(/empty|←|left/i.test(readme), "README describes empty-editor ← open");
-        assert.ok(/↑|up|down|enter|esc/i.test(readme), "README describes list/detail controls");
-        assert.ok(/two-press|x again|press x/i.test(readme), "README describes two-press x stop\/dismiss");
-        assert.ok(/x` arms Stop|x` arms Stop/i.test(readme), "README labels the x action as Stop instead of Close");
-        assert.ok(/dismiss/i.test(readme), "README describes dismissal");
-        assert.ok(/subagent_list|subagent_stop|tool/i.test(readme), "README notes tool access unchanged");
+        assert.ok(readme.split(/\r?\n/).length <= 60, "README stays human-facing and concise");
+        assert.ok(/Live background-work navigator/i.test(readme), "README mentions the navigator as a core feature");
+        assert.ok(/Detailed notes/i.test(readme), "README links to detailed docs");
+
+        const usage = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "docs", "usage.md"), "utf8");
+        assert.ok(/subagent navigator|navigator/i.test(usage), "usage docs mention the navigator");
+        assert.ok(/empty|←|left/i.test(usage), "usage docs describe empty-editor ← open");
+        assert.ok(/↑|up|down|enter|esc/i.test(usage), "usage docs describe list/detail controls");
+        assert.ok(/two-press|x again|press x/i.test(usage), "usage docs describe two-press x stop/dismiss");
+        assert.ok(/x` arms Stop|x` arms Stop/i.test(usage), "usage docs label the x action as Stop instead of Close");
+        assert.ok(/dismiss/i.test(usage), "usage docs describe dismissal");
+        assert.ok(/subagent_list|subagent_stop|tool/i.test(usage), "usage docs note tool access unchanged");
     });
 });
