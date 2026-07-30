@@ -153,12 +153,47 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ github.event.inputs.version }}"
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/tmp/release-tag.txt
+          TAG_STATUS=$?
+          set -e
+          case "$TAG_STATUS" in
+            0)
+              git fetch origin "refs/tags/v${VERSION}:refs/tags/v${VERSION}"
+              TAG_SHA="$(git rev-list -n 1 "v${VERSION}")"
+              if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+                echo "v${VERSION} already points to ${TAG_SHA}, expected ${GITHUB_SHA}." >&2
+                exit 1
+              fi
+              ;;
+            2)
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git tag -a "v${VERSION}" "$GITHUB_SHA" -m "Release v${VERSION}"
+              git push origin "refs/tags/v${VERSION}"
+              ;;
+            *)
+              echo "Could not determine whether v${VERSION} already exists." >&2
+              exit "$TAG_STATUS"
+              ;;
+          esac
+
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            echo "Release v${VERSION} already exists."
+            echo "Release v${VERSION} already exists at the verified tag."
             exit 0
           fi
 
+          awk -v version="$VERSION" '
+            $0 ~ "^## \\[" version "\\]" { in_release = 1; next }
+            in_release && /^## / { exit }
+            in_release { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          if ! grep -q '[^[:space:]]' /tmp/release-notes.md; then
+            echo "CHANGELOG.md has no release notes for ${VERSION}." >&2
+            exit 1
+          fi
+
           gh release create "v${VERSION}" \
-            --target "$GITHUB_SHA" \
+            --verify-tag \
             --title "v${VERSION}" \
-            --notes $'## Changes\n- Publish Pi Better Harness packages to npm.\n- Include navigator ordering and standalone npm packaging fixes.'
+            --notes-file /tmp/release-notes.md
