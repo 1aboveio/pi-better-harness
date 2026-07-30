@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#070b14"/><stop offset="0.55" stop-color="#0f172a"/><stop offset="1" stop-color="#172033"/></linearGradient>
+    <radialGradient id="wash" cx="74%" cy="18%" r="70%"><stop offset="0" stop-color="#f472b6" stop-opacity="0.22"/><stop offset="0.44" stop-color="#35d07f" stop-opacity="0.13"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#000" flood-opacity="0.38"/></filter>
+  </defs>
+  <rect width="1200" height="675" fill="url(#bg)"/><rect width="1200" height="675" fill="url(#wash)"/>
+  <g opacity="0.12"><path d="M78 0 V675" stroke="#94a3b8"/><path d="M174 0 V675" stroke="#94a3b8"/><path d="M270 0 V675" stroke="#94a3b8"/><path d="M366 0 V675" stroke="#94a3b8"/><path d="M462 0 V675" stroke="#94a3b8"/><path d="M558 0 V675" stroke="#94a3b8"/><path d="M654 0 V675" stroke="#94a3b8"/><path d="M750 0 V675" stroke="#94a3b8"/><path d="M846 0 V675" stroke="#94a3b8"/><path d="M942 0 V675" stroke="#94a3b8"/><path d="M1038 0 V675" stroke="#94a3b8"/><path d="M1134 0 V675" stroke="#94a3b8"/><path d="M0 86 H1200" stroke="#94a3b8"/><path d="M0 164 H1200" stroke="#94a3b8"/><path d="M0 242 H1200" stroke="#94a3b8"/><path d="M0 320 H1200" stroke="#94a3b8"/><path d="M0 398 H1200" stroke="#94a3b8"/><path d="M0 476 H1200" stroke="#94a3b8"/><path d="M0 554 H1200" stroke="#94a3b8"/></g>
+  <g filter="url(#shadow)"><rect x="58" y="52" width="1084" height="568" rx="28" fill="#0b1220" stroke="#334155" stroke-width="2"/></g>
+  <rect x="58" y="52" width="1084" height="52" rx="28" fill="#111827"/><path d="M58 80 h1084" stroke="#253044"/>
+  <circle cx="92" cy="78" r="7" fill="#ef4444"/><circle cx="118" cy="78" r="7" fill="#f59e0b"/><circle cx="144" cy="78" r="7" fill="#22c55e"/>
+  <text x="176" y="84" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="15" font-weight="600" fill="#94a3b8" letter-spacing="0">pi session</text>
+  <rect x="946" y="65" width="150" height="28" rx="14" fill="#f472b6" fill-opacity="0.16" stroke="#f472b6"/><text x="974" y="84" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14" font-weight="800" fill="#f472b6" letter-spacing="0">goal state</text>
+  <text x="94" y="156" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="38" font-weight="800" fill="#f8fafc" letter-spacing="0">pi-better-goal</text><text x="96" y="203" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="600" fill="#cbd5e1" letter-spacing="0">Current objective</text><text x="96" y="234" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="600" fill="#cbd5e1" letter-spacing="0">aware of background work</text>
+  
+      <rect x="96" y="267" width="642" height="42" rx="10" fill="#111827" opacity="0.92"/>
+      <text x="120" y="292" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f8fafc" letter-spacing="0">you  </text>
+      <text x="190" y="292" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1d5db" letter-spacing="0">/goal Publish the Pi packages</text>
+      <rect x="96" y="321" width="642" height="42" rx="10" fill="#111827" opacity="0.92"/>
+      <text x="120" y="346" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#cbd5e1" letter-spacing="0">pi   </text>
+      <text x="190" y="346" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1d5db" letter-spacing="0">Goal set. Active work keeps the session alive.</text>
+      <rect x="96" y="375" width="642" height="42" rx="10" fill="#122033" opacity="0.92"/>
+      <text x="120" y="400" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f472b6" letter-spacing="0">tool </text>
+      <text x="190" y="400" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1d5db" letter-spacing="0">get_background_activity   2 active providers</text>
+      <rect x="96" y="429" width="642" height="42" rx="10" fill="#111827" opacity="0.92"/>
+      <text x="120" y="454" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#cbd5e1" letter-spacing="0">pi   </text>
+      <text x="190" y="454" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="500" fill="#d1d5db" letter-spacing="0">I will mark the goal complete after verification.</text>
+  <rect x="94" y="520" width="646" height="58" rx="14" fill="#111827" stroke="#263449"/><text x="120" y="556" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="20" font-weight="700" fill="#e5e7eb" letter-spacing="0">pi install npm:pi-better-goal</text>
+  <rect x="772" y="140" width="350" height="438" rx="22" fill="#0f172a" stroke="#334155" stroke-width="2"/><text x="800" y="185" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="28" font-weight="800" fill="#f8fafc" letter-spacing="0">Goal Clock</text><text x="802" y="214" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="15" font-weight="600" fill="#94a3b8" letter-spacing="0">live state, compact and inspectable</text>
+      <rect x="790" y="219" width="312" height="62" rx="14" fill="#111827" stroke="#273449" stroke-width="1.5"/>
+      <circle cx="818" cy="246" r="7" fill="#f472b6"/>
+      <text x="838" y="242" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f8fafc" letter-spacing="0">Publish packages</text>
+      <text x="838" y="268" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="500" fill="#94a3b8" letter-spacing="0">goal · 09:41</text>
+      <rect x="790" y="295" width="312" height="62" rx="14" fill="#111827" stroke="#273449" stroke-width="1.5"/>
+      <circle cx="818" cy="322" r="7" fill="#f472b6"/>
+      <text x="838" y="318" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f8fafc" letter-spacing="0">subagents</text>
+      <text x="838" y="344" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="500" fill="#94a3b8" letter-spacing="0">provider · 1 run</text>
+      <rect x="790" y="371" width="312" height="62" rx="14" fill="#111827" stroke="#273449" stroke-width="1.5"/>
+      <circle cx="818" cy="398" r="7" fill="#f472b6"/>
+      <text x="838" y="394" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="700" fill="#f8fafc" letter-spacing="0">bg tasks</text>
+      <text x="838" y="420" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="500" fill="#94a3b8" letter-spacing="0">provider · 1 task</text>
+  <rect x="94" y="592" width="1006" height="1" fill="#243044"/><text x="96" y="608" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="15" font-weight="500" fill="#94a3b8" letter-spacing="0">active time pauses and resumes with the goal</text>
+</svg>
