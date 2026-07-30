@@ -1,8 +1,10 @@
 # pi-better-harness
 
-Meta package for the core Pi Better Harness extensions.
+`pi-better-harness` is a Pi meta package that installs the core Pi Better Harness extensions for delegated subagents, durable background tasks, and goal tracking.
 
-Install it once to load:
+## Quick Answer
+
+Use `pi-better-harness` when you want the full background-work bundle for Pi in one install. It loads:
 
 - `pi-better-subagents` for detached, sandboxed subagent runs.
 - `pi-better-background-tasks` for durable shell tasks and watchers.
@@ -30,6 +32,18 @@ pi install npm:pi-better-background-tasks
 pi install npm:pi-better-goal
 ```
 
+## When To Use
+
+Use this package when you want all three core extensions loaded together. Install an individual package instead when you only need subagents, shell task supervision, or goal tracking.
+
+## Compatibility
+
+| Requirement | Support |
+|-------------|---------|
+| Pi | Required |
+| Install method | `pi install npm:pi-better-harness` |
+| Development runtime | Node.js 22+ |
+
 ## Update Or Remove
 
 ```sh
@@ -41,3 +55,4 @@ pi remove npm:pi-better-harness
 
 - Repository: https://github.com/1aboveio/pi-better-harness
 - Detailed notes: https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-harness/docs/usage.md
+- License: https://github.com/1aboveio/pi-better-harness/blob/main/LICENSE
