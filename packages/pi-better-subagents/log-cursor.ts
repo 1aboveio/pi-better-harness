@@ -40,6 +40,13 @@ export interface LogCursor {
 export interface LogRead {
     /** Complete lines appended since the previous cursor, in order. */
     lines: string[];
+    /**
+     * Bytes after the last newline: a line still being written, or a final line
+     * whose writer never terminated it. NOT consumed by the cursor, so a caller
+     * that folds it must do so speculatively — it will be delivered again, as a
+     * complete line, once its newline arrives.
+     */
+    partial?: string;
     /** Cursor to pass to the next call. */
     cursor: LogCursor;
     /** Log size observed for this read. */
@@ -153,7 +160,8 @@ export function readAppendedLines(
             // unless it is an oversized partial we already skipped into, which
             // would otherwise be re-read forever.
             const offset = startedMidLine ? start + buf.length : start;
-            return { lines: [], cursor: { offset, head }, totalBytes: size, truncated, restarted };
+            const partial = startedMidLine ? undefined : buf.toString("utf-8");
+            return { lines: [], partial, cursor: { offset, head }, totalBytes: size, truncated, restarted };
         }
 
         const text = buf.subarray(0, lastNewline + 1).toString("utf-8");
@@ -161,8 +169,14 @@ export function readAppendedLines(
         lines.pop(); // trailing "" after the final newline
         if (startedMidLine) lines.shift(); // partial first line
 
+        // Anything after the final newline is unterminated: hand it over
+        // separately rather than pretending it is a line.
+        const trailing = buf.subarray(lastNewline + 1);
+        const partial = trailing.length > 0 ? trailing.toString("utf-8") : undefined;
+
         return {
             lines,
+            partial,
             cursor: { offset: start + lastNewline + 1, head },
             totalBytes: size,
             truncated,
