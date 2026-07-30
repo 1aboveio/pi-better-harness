@@ -261,11 +261,14 @@ function psNumber(args: string[]): number | undefined {
 
 // Re-export observation seam so health consumers can import from one module.
 export {
+    CHILD_EVENT_FACT_TYPES,
     DEFAULT_HEALTH_THRESHOLDS,
     extractChildEventFacts,
     extractChildEventFactsFromLog,
     loadHealthThresholdsFromConfig,
+    mayAffectChildEventFacts,
     observeRunHealth,
+    resetChildEventLogCursor,
     resolveHealthThresholds,
 } from "./health-observation.ts";
 export type {

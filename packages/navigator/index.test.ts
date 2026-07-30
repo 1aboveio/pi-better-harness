@@ -284,13 +284,16 @@ describe("shared background work navigator", () => {
         truncate: (value, width) => value.slice(0, width),
       });
 
+      // One frame per row rebuild (MAIN_LIST_TICK_MS): the dot advances once a
+      // second, so a repaint always shows movement without the rebuild — which
+      // stats and parses every run's log — running any faster.
       now = 0;
       const first = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 250;
+      now = 1000;
       const second = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 500;
+      now = 2000;
       const third = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 750;
+      now = 3000;
       const fourth = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
 
       assert.match(first, /<dim>●<\/>\s+reviewer/);

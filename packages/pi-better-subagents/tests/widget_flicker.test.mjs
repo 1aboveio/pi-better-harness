@@ -32,6 +32,8 @@ import {
     fmtSpendFixed,
     fmtTokensFixed,
     isSpendCacheFresh,
+    withinRefreshFloor,
+    HOT_PATH_REFRESH_FLOOR_MS,
     linesEqual,
     nextWidgetAction,
 } from "../widget.mjs";
@@ -329,6 +331,51 @@ describe("widget spend cache", () => {
     it("isSpendCacheFresh is false for missing cache", () => {
         assert.equal(isSpendCacheFresh(null, 1000, 0), false);
         assert.equal(isSpendCacheFresh(undefined, 1000, 0), false);
+    });
+
+    // ---- hot-path refresh floor -------------------------------------------
+    //
+    // The size rule above is right: new output means new numbers. But a live
+    // child appends on every frame, so on its own that rule re-reads a log as
+    // fast as the timer fires. The floor bounds how often that can happen.
+
+    // @covers widget.refresh-floor
+    // @level unit
+    it("withinRefreshFloor holds a cache that was just refreshed, even though the log grew", () => {
+        const now = 100_000;
+        const cached = { refreshedAt: now - 200, logSize: 4096 };
+        assert.equal(isSpendCacheFresh(cached, now, 8192, SPEND_REFRESH_MS), false, "growth alone would re-read");
+        assert.equal(withinRefreshFloor(cached, now, HOT_PATH_REFRESH_FLOOR_MS), true, "floor reuses it anyway");
+    });
+
+    // @covers widget.refresh-floor
+    // @level unit
+    it("withinRefreshFloor releases the cache once the floor has passed", () => {
+        const now = 100_000;
+        const cached = { refreshedAt: now - HOT_PATH_REFRESH_FLOOR_MS };
+        assert.equal(withinRefreshFloor(cached, now, HOT_PATH_REFRESH_FLOOR_MS), false);
+    });
+
+    // @covers widget.refresh-floor
+    // @level unit
+    it("withinRefreshFloor needs both a stamp and a now, and ignores a future stamp", () => {
+        const now = 100_000;
+        assert.equal(withinRefreshFloor(null, now), false);
+        assert.equal(withinRefreshFloor({ refreshedAt: now }, undefined), false, "no now: size/mtime rules stand");
+        assert.equal(withinRefreshFloor({ logSize: 1 }, now), false, "no stamp");
+        assert.equal(
+            withinRefreshFloor({ refreshedAt: now + 60_000 }, now),
+            false,
+            "a clock step must not pin the cache",
+        );
+        assert.equal(withinRefreshFloor({ refreshedAt: now }, now, 0), false, "floor of 0 disables it");
+    });
+
+    // @covers widget.refresh-floor
+    // @level unit
+    it("floors log reads at 1s — below the 1 Hz row rebuild it protects", () => {
+        assert.equal(HOT_PATH_REFRESH_FLOOR_MS, 1000);
+        assert.ok(HOT_PATH_REFRESH_FLOOR_MS <= SPEND_REFRESH_MS, "the floor never outlives the spend TTL");
     });
 
     // @covers widget.spend-cache

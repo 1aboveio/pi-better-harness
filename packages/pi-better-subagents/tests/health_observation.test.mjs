@@ -12,14 +12,17 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, utimesSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync, utimesSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+    CHILD_EVENT_FACT_TYPES,
     DEFAULT_HEALTH_THRESHOLDS,
     extractChildEventFacts,
     extractChildEventFactsFromLog,
+    mayAffectChildEventFacts,
     observeRunHealth,
+    resetChildEventLogCursor,
     resolveHealthThresholds,
 } from "../health-observation.ts";
 import { logPathFor, runDir } from "../registry.ts";
@@ -731,5 +734,191 @@ describe("extractChildEventFactsFromLog — fixtures + raw diagnostic", () => {
         assert.equal(secondObs.activity, "stale", "raw mtime refresh must not promote activity to healthy");
         assert.ok(secondObs.compactFacts.some((f) => /\bstale\b/i.test(f)));
         assert.notEqual(secondObs.activity, "healthy");
+    });
+});
+
+describe("extractChildEventFactsFromLog — incremental reading", () => {
+    const ids = [];
+    after(() => {
+        for (const id of ids) {
+            resetChildEventLogCursor(id);
+            cleanup(id);
+        }
+    });
+
+    function startLog(prefix) {
+        const id = uniqueId(prefix);
+        ids.push(id);
+        mkdirSync(runDir(id), { recursive: true });
+        writeFileSync(logPathFor(id), "", "utf-8");
+        resetChildEventLogCursor(id);
+        return id;
+    }
+
+    function append(id, ...events) {
+        appendFileSync(logPathFor(id), events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf-8");
+    }
+
+    it("accumulates facts across appends instead of re-reading the whole log", () => {
+        const id = startLog("sa_hobs_incr");
+        append(id, { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", at: NOW - 5_000 });
+
+        const first = extractChildEventFactsFromLog(id, { now: NOW });
+        assert.equal(first.facts.activeTools.length, 1, "open tool seen");
+        assert.equal(first.facts.lastMeaningfulAt, NOW - 5_000);
+
+        // The close arrives in a later read; it must be matched against the open
+        // event from the earlier read, which only an accumulated fold can do.
+        append(id, { type: "tool_execution_end", toolCallId: "c1", toolName: "bash", isError: false, at: NOW - 1_000 });
+        const second = extractChildEventFactsFromLog(id, { now: NOW });
+        assert.equal(second.facts.activeTools.length, 0, "tool closed against the earlier open event");
+        assert.equal(second.facts.lastMeaningfulAt, NOW - 1_000);
+    });
+
+    it("reads only appended bytes: events outside the read window stay unseen", () => {
+        // A tiny read budget makes the cold-start window observable. The first
+        // read can only reach the tail; a full re-read on the second call would
+        // pick the skipped event up, and an accumulating incremental read cannot.
+        const previous = process.env.PI_SUBAGENT_MAX_HEALTH_READ_BYTES;
+        process.env.PI_SUBAGENT_MAX_HEALTH_READ_BYTES = "400";
+        try {
+            const id = startLog("sa_hobs_window");
+            append(id, { type: "tool_execution_start", toolCallId: "old", toolName: "bash", at: NOW - 90_000 });
+            // Filler that cannot move a fact, pushing the open event out of window.
+            for (let i = 0; i < 6; i++) {
+                append(id, { type: "message_update", at: NOW - 80_000 + i, text: "x".repeat(60) });
+            }
+            append(id, { type: "compaction_start", at: NOW - 40_000 });
+
+            const first = extractChildEventFactsFromLog(id, { now: NOW });
+            assert.equal(first.rawLog.windowTruncated, true, "cold start was bounded");
+            assert.equal(first.facts.compacting, true, "in-window event seen");
+            assert.equal(first.facts.activeTools.length, 0, "out-of-window event not seen");
+
+            append(id, { type: "compaction_end", reason: "manual", at: NOW - 30_000 });
+            const second = extractChildEventFactsFromLog(id, { now: NOW });
+            assert.equal(second.facts.compacting, false, "appended event folded onto the accumulated state");
+            assert.ok(second.facts.lastCompaction, "compaction end recorded");
+            assert.equal(
+                second.facts.activeTools.length,
+                0,
+                "the skipped event is still unseen — the log was not re-read from the start",
+            );
+        } finally {
+            if (previous === undefined) delete process.env.PI_SUBAGENT_MAX_HEALTH_READ_BYTES;
+            else process.env.PI_SUBAGENT_MAX_HEALTH_READ_BYTES = previous;
+        }
+    });
+
+    it("re-reads from scratch when a log is rewritten", () => {
+        const id = startLog("sa_hobs_rewrite");
+        append(id, { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", at: NOW - 5_000 });
+        const first = extractChildEventFactsFromLog(id, { now: NOW });
+        assert.equal(first.facts.activeTools.length, 1);
+
+        writeFileSync(logPathFor(id), JSON.stringify({ type: "session", id: "x" }) + "\n", "utf-8");
+        const second = extractChildEventFactsFromLog(id, { now: NOW });
+        assert.equal(second.facts.activeTools.length, 0, "stale events dropped with the old log");
+        assert.equal(second.facts.lastMeaningfulAt, undefined);
+    });
+
+    it("resetChildEventLogCursor forgets accumulated events for a run", () => {
+        const id = startLog("sa_hobs_reset");
+        append(id, { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", at: NOW - 5_000 });
+        assert.equal(extractChildEventFactsFromLog(id, { now: NOW }).facts.activeTools.length, 1);
+
+        resetChildEventLogCursor(id);
+        // Same bytes, fresh state: a cold read sees the same facts again.
+        assert.equal(extractChildEventFactsFromLog(id, { now: NOW }).facts.activeTools.length, 1);
+    });
+
+    it("bounds retained state: tracking many runs cannot grow without limit", () => {
+        // Backstop for a caller that forgets to reset a dismissed run. The oldest
+        // tracked run is evicted, which only costs it a cold re-read.
+        const tracked = [];
+        for (let i = 0; i < 70; i++) {
+            const id = startLog(`sa_hobs_many_${i}`);
+            tracked.push(id);
+            append(id, { type: "compaction_start", at: NOW - 1_000 });
+            assert.equal(extractChildEventFactsFromLog(id, { now: NOW }).facts.compacting, true);
+        }
+        // The newest run keeps its accumulated state: appending a close is folded
+        // onto the open it already saw.
+        const newest = tracked.at(-1);
+        append(newest, { type: "compaction_end", reason: "done", at: NOW });
+        const still = extractChildEventFactsFromLog(newest, { now: NOW });
+        assert.equal(still.facts.compacting, false);
+        assert.ok(still.facts.lastCompaction, "state survived for a recently read run");
+    });
+
+    it("drops the oldest retained events rather than growing without bound", () => {
+        const id = startLog("sa_hobs_budget");
+        // 9 MiB of fact-relevant events, past the 8 MiB retention budget.
+        for (let i = 0; i < 9; i++) {
+            append(id, { type: "tool_execution_update", at: NOW - 9_000 + i, note: "z".repeat(1024 * 1024) });
+        }
+        const read = extractChildEventFactsFromLog(id, { now: NOW });
+        assert.equal(read.rawLog.eventsDropped, true, "a drop is reported, not silent");
+        assert.equal(read.facts.lastMeaningfulAt, NOW - 9_000 + 8, "surviving events still fold");
+    });
+
+    it("logText callers bypass the cursor entirely", () => {
+        const id = startLog("sa_hobs_text");
+        append(id, { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", at: NOW - 5_000 });
+
+        const supplied = extractChildEventFactsFromLog(id, {
+            now: NOW,
+            logText: JSON.stringify({ type: "compaction_start", at: NOW - 2_000 }) + "\n",
+        });
+        assert.equal(supplied.facts.compacting, true, "supplied text is folded");
+        assert.equal(supplied.facts.activeTools.length, 0, "log on disk is not read");
+
+        // The bypass must not have advanced or seeded any cursor for this id.
+        const fromDisk = extractChildEventFactsFromLog(id, { now: NOW });
+        assert.equal(fromDisk.facts.activeTools.length, 1, "disk read still sees the open tool");
+        assert.equal(fromDisk.facts.compacting, false);
+    });
+});
+
+describe("mayAffectChildEventFacts — pre-parse filter", () => {
+    it("rejects the high-volume types the fold ignores", () => {
+        assert.equal(mayAffectChildEventFacts('{"type":"message_update","message":{}}'), false);
+        assert.equal(mayAffectChildEventFacts('{"type":"message_start"}'), false);
+        assert.equal(mayAffectChildEventFacts('{"type":"turn_start"}'), false);
+    });
+
+    it("keeps every type the fold consumes", () => {
+        for (const type of CHILD_EVENT_FACT_TYPES) {
+            assert.equal(mayAffectChildEventFacts(`{"type":"${type}"}`), true, type);
+        }
+    });
+
+    it("keeps lines whose type it cannot read cheaply, so the fold stays authoritative", () => {
+        assert.equal(mayAffectChildEventFacts('{"at":1,"type":"message_end"}'), true, "type not leading");
+        assert.equal(mayAffectChildEventFacts('{ "type" : "message_update" }'), false, "whitespace tolerated");
+        assert.equal(mayAffectChildEventFacts("{}"), true);
+    });
+
+    it("names every type the fold branches on", () => {
+        // Anti-drift: a new branch in extractChildEventFacts that this set does
+        // not name would be silently filtered out of incremental reads.
+        const source = readFileSync(join(ROOT, "health-observation.ts"), "utf-8");
+        const fold = source.slice(
+            source.indexOf("export function extractChildEventFacts("),
+            source.indexOf("export function extractChildEventFactsFromLog("),
+        );
+        assert.ok(fold.length > 0, "fold body located");
+        // `(type === "x")`, not `typeof e.type === "string"`.
+        const branched = [...fold.matchAll(/(?:^|[\s(])type === "([A-Za-z0-9_]+)"/gm)].map((m) => m[1]);
+        assert.ok(branched.length >= 11, `expected the fold's branches, saw ${branched.length}`);
+        for (const type of branched) {
+            assert.ok(
+                CHILD_EVENT_FACT_TYPES.has(type),
+                `extractChildEventFacts branches on "${type}" — add it to CHILD_EVENT_FACT_TYPES`,
+            );
+        }
+        for (const type of CHILD_EVENT_FACT_TYPES) {
+            assert.ok(branched.includes(type), `CHILD_EVENT_FACT_TYPES names "${type}" but the fold ignores it`);
+        }
     });
 });
