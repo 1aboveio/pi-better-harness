@@ -1,6 +1,6 @@
 {
   "name": "pi-better-harness",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Meta package for the core Pi Better Harness extensions.",
   "type": "module",
   "keywords": [
@@ -13,7 +13,8 @@
       "node_modules/pi-better-subagents/index.ts",
       "node_modules/pi-better-background-tasks/src/index.ts",
       "node_modules/pi-better-goal/src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-harness.png"
   },
   "repository": {
     "type": "git",
@@ -28,8 +29,8 @@
     "README.md"
   ],
   "dependencies": {
-    "pi-better-background-tasks": "0.1.0",
-    "pi-better-goal": "0.1.0",
-    "pi-better-subagents": "0.1.0"
+    "pi-better-background-tasks": "0.1.1",
+    "pi-better-goal": "0.1.1",
+    "pi-better-subagents": "0.1.1"
   }
 }
