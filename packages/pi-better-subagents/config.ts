@@ -45,6 +45,10 @@ export interface SubagentConfig {
     healthStaleMs?: number | null;
     healthLongToolMs?: number | null;
     healthLongCompactionMs?: number | null;
+    /** Retention for terminal run directories during once-daily cleanup. Default: 7 days. */
+    cleanupTerminalRunRetentionMs?: number | null;
+    /** Retention for child pi session files during once-daily cleanup. Default: 7 days. */
+    cleanupSessionRetentionMs?: number | null;
 }
 
 /** Concurrency cap when config.json sets none. */
