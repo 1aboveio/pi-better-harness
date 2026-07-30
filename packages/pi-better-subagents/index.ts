@@ -104,6 +104,7 @@ import {
     buildNavigatorRows,
     buildNavigatorDetail,
 } from "./navigator.ts";
+import { runDailyCleanupOnce } from "./cleanup.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -196,6 +197,10 @@ function callbackSuppressionReason(meta: RunMeta, active: RunCallbackOrigin | un
 function belongsToActiveNavigatorSession(meta: RunMeta): boolean {
     const active = activeCallbackOrigin;
     if (!active) return false;
+    return belongsToOrigin(meta, active);
+}
+
+function belongsToOrigin(meta: RunMeta, active: RunCallbackOrigin): boolean {
     const origin = meta.callbackOrigin;
     if (origin) {
         if (origin.cwd !== active.cwd) return false;
@@ -204,6 +209,26 @@ function belongsToActiveNavigatorSession(meta: RunMeta): boolean {
     }
     if (active.sessionId) return false;
     return meta.cwd === active.cwd;
+}
+
+function hasSelfProcessIdentity(meta: RunMeta): boolean {
+    return meta.pid === process.pid || meta.pgid === process.pid;
+}
+
+function stopCurrentSessionSubagents(ctx: ExtensionContext): void {
+    const origin = callbackOriginFromContext(ctx);
+    for (const summary of listMetas()) {
+        if (!ownedByThisParent(summary)) continue;
+        if (summary.status !== "running" && summary.status !== "orphaned") continue;
+        if (!belongsToOrigin(summary, origin)) continue;
+        // Automatic shutdown cleanup must not let corrupt or synthetic metadata
+        // signal the foreground Pi process itself.
+        if (hasSelfProcessIdentity(summary)) continue;
+        try { stopRun(summary.id); } catch { /* best-effort shutdown cleanup */ }
+        spendCache.delete(summary.id);
+        healthLogCache.delete(summary.id);
+        resetChildEventLogCursor(summary.id);
+    }
 }
 
 function markCompletionCallbackSuppressed(id: string, reason: string, now: number = Date.now()): void {
@@ -842,6 +867,9 @@ export default function (pi: ExtensionAPI) {
         sandboxDir?: string;
     }> {
         const cfg = loadConfig();
+        // Best-effort daily hygiene for durable tmp state. The marker makes
+        // this effectively free after the first subagent launch each day.
+        runDailyCleanupOnce({ config: cfg });
         const callbackOrigin = callbackOriginFromContext(ctx);
         activeCallbackOrigin = callbackOrigin;
 
@@ -1239,6 +1267,10 @@ export default function (pi: ExtensionAPI) {
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (_event, ctx) => {
+        // The foreground Pi session owns this work. Stop current-session
+        // running/orphaned children before dropping the session origin, so they
+        // cannot become live process groups with no coordinator.
+        stopCurrentSessionSubagents(ctx);
         activeCallbackOrigin = undefined;
         stopTicker();
         stopHealthTicker();

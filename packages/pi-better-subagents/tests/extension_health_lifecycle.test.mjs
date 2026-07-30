@@ -221,6 +221,75 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
     });
 });
 
+describe("session_shutdown child ownership", () => {
+    it("kills current-session running subagents and records killed", async () => {
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "shutdown-kill" });
+        try {
+            const { id, pid } = await spawnRun(h);
+            assert.equal(readMeta(id).status, "running");
+            await h.shutdown();
+            const meta = readMeta(id);
+            assert.equal(meta.status, "killed", "shutdown must close current-session running work as killed");
+            assert.equal(meta.lifecycleClassification, "killed");
+            assert.equal(typeof meta.endedAt, "number");
+            assert.equal(
+                await waitFor(() => !realProcessProbe.pidExists(pid), { timeoutMs: 3000 }),
+                true,
+                "shutdown must terminate the child process group",
+            );
+            rmSync(runDir(id), { recursive: true, force: true });
+        } finally {
+            await h.shutdown();
+        }
+    });
+
+    it("does not kill same-parent runs from a different foreground session", async () => {
+        const cwd = tmpdir();
+        const h = makeHarness({ cwd, sessionId: "session-b" });
+        let id;
+        let pid;
+        try {
+            ({ id, pid } = await spawnRun(h));
+            const launched = readMeta(id);
+            writeMeta({ ...launched, callbackOrigin: { cwd, sessionId: "session-a" } });
+            await h.shutdown();
+            const meta = readMeta(id);
+            assert.equal(meta.status, "running", "other-session run must stay running");
+            assert.equal(realProcessProbe.pidExists(pid), true, "other-session child must not be killed");
+        } finally {
+            if (pid) killProcessTree(pid, "SIGKILL");
+            if (id) rmSync(runDir(id), { recursive: true, force: true });
+            await h.shutdown();
+        }
+    });
+
+    it("does not signal the foreground process when corrupt metadata points at itself", async () => {
+        const cwd = tmpdir();
+        const h = makeHarness({ cwd, sessionId: "self-pid-guard" });
+        const id = nextRunId();
+        try {
+            writeMeta({
+                id,
+                status: "running",
+                pid: process.pid,
+                pgid: process.pid,
+                spawnPid: process.pid,
+                cwd,
+                callbackOrigin: { cwd, sessionId: "self-pid-guard" },
+                promptPreview: "self pid guard",
+                startedAt: Date.now(),
+                logPath: join(runDir(id), "output.log"),
+                sessionId: id,
+            });
+            await h.shutdown();
+            assert.equal(readMeta(id).status, "running", "self-referential metadata must be left untouched");
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+            await h.shutdown();
+        }
+    });
+});
+
 describe("AC9 — health ticker production lifecycle (fake clock)", () => {
     const fixture = () => {
         const id = nextRunId();
