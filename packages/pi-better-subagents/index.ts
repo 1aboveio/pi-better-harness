@@ -63,6 +63,7 @@ import {
     observeRunHealth,
     realProcessProbe,
     reconcileRun,
+    resetChildEventLogCursor,
     type ChildEventFacts,
     type HealthObservation,
     type ProcessProbe,
@@ -96,6 +97,7 @@ import {
     shortModel,
     isSpendCacheFresh,
     resolveHealthLogExtraction,
+    withinRefreshFloor,
 } from "./widget.ts";
 import {
     executeNavigatorClose,
@@ -142,8 +144,13 @@ type HealthLogSnap = {
     rawLog: RawLogDiagnostic;
     logSize: number;
     mtimeMs?: number;
+    refreshedAt: number;
 };
-/** Per-run health-log parse cache — size/mtime gated (no full reparse every tick). */
+/**
+ * Per-run health-log parse cache — size/mtime gated and floored by
+ * HOT_PATH_REFRESH_FLOOR_MS, so a child writing continuously cannot make every
+ * frame re-read its log.
+ */
 const healthLogCache = new Map<string, HealthLogSnap>();
 
 function logStatOf(id: string): { size: number; mtimeMs?: number } {
@@ -226,10 +233,17 @@ function isHealthCallbackHandled(meta: RunMeta, status: "orphaned" | "lost"): bo
         : meta.lostCallbackSentAt !== undefined || meta.lostCallbackSuppressedAt !== undefined;
 }
 
-/** Refresh spend/tool for a run only when the cache is stale or the log grew. */
+/**
+ * Refresh spend/tool for a run only when the cache is stale or the log grew —
+ * and never more often than the hot-path refresh floor, since a live child grows
+ * its log on every frame and each refresh re-parses a bounded log tail.
+ */
 function spendFor(id: string, now: number): { usage: Usage; tool: string | null } {
-    const logSize = logSizeOf(id);
     const cached = spendCache.get(id);
+    if (withinRefreshFloor(cached, now)) {
+        return { usage: cached!.usage, tool: cached!.tool };
+    }
+    const logSize = logSizeOf(id);
     if (isSpendCacheFresh(cached, now, logSize)) {
         return { usage: cached!.usage, tool: cached!.tool };
     }
@@ -259,11 +273,14 @@ function observeWidgetHealth(
     displayStatus?: RunMeta["status"] | "exited",
 ): HealthObservation | undefined {
     try {
-        const { size: logSize, mtimeMs } = logStatOf(meta.id);
         const cached = healthLogCache.get(meta.id);
+        // Inside the floor nothing is read at all — not even the log's stat.
+        const { size: logSize, mtimeMs } = withinRefreshFloor(cached, now)
+            ? { size: cached!.logSize, mtimeMs: cached!.mtimeMs }
+            : logStatOf(meta.id);
         const resolved = resolveHealthLogExtraction(
             cached,
-            { logSize, mtimeMs },
+            { logSize, mtimeMs, now },
             () => extractChildEventFactsFromLog(meta.id, { now }),
         );
         if (!resolved.hit) {
@@ -272,6 +289,7 @@ function observeWidgetHealth(
                 rawLog: resolved.rawLog as RawLogDiagnostic,
                 logSize,
                 mtimeMs,
+                refreshedAt: now,
             });
         }
         const status = displayStatus ?? meta.status;
@@ -316,6 +334,7 @@ function renderWidget(): void {
     try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
     spendCache.clear();
     healthLogCache.clear();
+    resetChildEventLogCursor();
     stopTicker();
 }
 
@@ -568,12 +587,17 @@ function navigatorDetail(id: string) {
 
 /** Shared #44 stop+dismiss path used by navigator Close (#47). */
 function navigatorCloseRun(id: string) {
-    return executeNavigatorClose(id, {
+    const outcome = executeNavigatorClose(id, {
         readMeta,
         effectiveStatus,
         stopRun,
         dismissRun,
     });
+    // A closed row is off the hot path: release its caches and retained events.
+    spendCache.delete(id);
+    healthLogCache.delete(id);
+    resetChildEventLogCursor(id);
+    return outcome;
 }
 
 /** Publish/clear the Close confirmation footer hint (TUI only). */
@@ -1219,6 +1243,9 @@ export default function (pi: ExtensionAPI) {
         stopTicker();
         stopHealthTicker();
         spendCache.clear();
+        healthLogCache.clear();
+        // Release the incremental log cursors' retained events with the session.
+        resetChildEventLogCursor();
         // Always dispose navigator detail timers (no UI call — just clearInterval).
         // Safe in every mode; the dispose hook is only set when a TUI overlay opened.
         disposeBackgroundWorkNavigator(ctx);

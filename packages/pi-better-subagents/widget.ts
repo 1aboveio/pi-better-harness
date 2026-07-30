@@ -25,4 +25,6 @@ export {
     isSpendCacheFresh,
     isHealthLogCacheFresh,
     resolveHealthLogExtraction,
+    HOT_PATH_REFRESH_FLOOR_MS,
+    withinRefreshFloor,
 } from "./widget.mjs";

@@ -35,6 +35,7 @@ import {
     buildWidgetLines,
     isHealthLogCacheFresh,
     resolveHealthLogExtraction,
+    HOT_PATH_REFRESH_FLOOR_MS,
 } from "../widget.mjs";
 import { observeRunHealth, extractChildEventFacts } from "../health-observation.ts";
 import { formatSubagentOutputBody } from "../parse.ts";
@@ -534,6 +535,50 @@ describe("passive widget health surfacing", () => {
         assert.match(healthSection, /resolveHealthLogExtraction/);
         // Direct extract still exists for the miss path, but must be behind the cache.
         assert.match(healthSection, /extractChildEventFactsFromLog/);
+    });
+
+    // @covers widget.refresh-floor
+    // @level unit
+    it("a continuously growing log is re-read at most once per refresh floor", () => {
+        // Regression: a live child appends on every frame, so the size/mtime
+        // rules above are always stale and the hot path re-read each log as fast
+        // as the timer fired — a whole multi-gigabyte log, four times a second.
+        let extracts = 0;
+        const extract = () => {
+            extracts += 1;
+            return { facts: emptyFacts({}), rawLog: { sizeBytes: 4096 + extracts } };
+        };
+
+        let cached = null;
+        let logSize = 4096;
+        let hits = 0;
+        // Ten frames inside one floor, each seeing a bigger log.
+        for (let frame = 0; frame < 10; frame++) {
+            const now = NOW + frame * 100;
+            const resolved = resolveHealthLogExtraction(cached, { logSize, mtimeMs: 100 + frame, now }, extract);
+            if (resolved.hit) hits += 1;
+            if (!resolved.hit) {
+                cached = { facts: resolved.facts, rawLog: resolved.rawLog, logSize, mtimeMs: 100 + frame, refreshedAt: now };
+            }
+            logSize += 1_000_000;
+        }
+        assert.equal(extracts, 1, "one read per floor, however fast the log grows");
+        assert.equal(hits, 9);
+
+        // Past the floor the grown log is read again — the floor delays, never pins.
+        const later = NOW + HOT_PATH_REFRESH_FLOOR_MS;
+        const afterFloor = resolveHealthLogExtraction(cached, { logSize, mtimeMs: 999, now: later }, extract);
+        assert.equal(afterFloor.hit, false);
+        assert.equal(extracts, 2);
+
+        // Both hot-path readers in index.ts must apply the floor.
+        const indexSource = readFileSync(join(ROOT, "index.ts"), "utf8");
+        const healthSection = indexSource.match(
+            /function observeWidgetHealth[\s\S]*?function syncWidgetNavSelection/,
+        )?.[0] ?? "";
+        assert.match(healthSection, /withinRefreshFloor/, "health path must apply the floor");
+        const spendSection = indexSource.match(/function spendFor[\s\S]*?\n}/)?.[0] ?? "";
+        assert.match(spendSection, /withinRefreshFloor/, "spend path must apply the floor");
     });
 });
 

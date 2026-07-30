@@ -10,7 +10,8 @@
  * and must not collapse into stale. Raw log mtime/size is diagnostic only.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
+import { DEFAULT_MAX_READ_BYTES, readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { logPathFor } from "./registry.ts";
 import type { RunStatus } from "./registry.ts";
 import { loadConfig, type SubagentConfig } from "./config.ts";
@@ -119,6 +120,14 @@ export interface RawLogDiagnostic {
     mtimeMs?: number;
     sizeBytes?: number;
     error?: string;
+    /**
+     * Bytes of the log were never read: a bounded cold start on an already-huge
+     * log, or a log that outran the per-read budget. Diagnostic only — facts
+     * from a partial window are still facts, they are just not the whole run.
+     */
+    windowTruncated?: boolean;
+    /** Retained fact-relevant events were dropped to stay inside the memory budget. */
+    eventsDropped?: boolean;
 }
 
 type LooseEvent = Record<string, unknown>;
@@ -182,6 +191,43 @@ function pushError(history: ModelErrorEntry[], entry: ModelErrorEntry, max = 8):
     if (!entry.message) return;
     history.push(entry);
     while (history.length > max) history.shift();
+}
+
+/**
+ * Every event type `extractChildEventFacts` below branches on. The fold has no
+ * default branch — an event of any other type (`message_update` and friends,
+ * which are 98% of a log by volume) cannot move a single fact — so incremental
+ * readers may drop unlisted types before parsing them without changing any
+ * observation. Keep in step with the fold: `health_observation.test.mjs` fails
+ * if the fold branches on a type this set does not name, or names one the fold
+ * no longer reads.
+ */
+export const CHILD_EVENT_FACT_TYPES: ReadonlySet<string> = new Set([
+    "tool_execution_start",
+    "tool_execution_update",
+    "tool_execution_end",
+    "compaction_start",
+    "compaction_end",
+    "auto_retry_start",
+    "auto_retry_end",
+    "message_end",
+    "turn_end",
+    "agent_end",
+    "agent_settled",
+]);
+
+/** Leading `{"type":"…"` of an NDJSON event line, read without parsing it. */
+const LEADING_TYPE = /^\s*\{\s*"type"\s*:\s*"([A-Za-z0-9_.-]+)"/;
+
+/**
+ * Whether a raw log line could move any fact. Lines whose type we can read
+ * cheaply and that the fold ignores are rejected without a `JSON.parse`; a line
+ * whose shape we cannot read cheaply is kept, so the fold stays authoritative.
+ */
+export function mayAffectChildEventFacts(line: string): boolean {
+    const match = LEADING_TYPE.exec(line);
+    if (!match) return true;
+    return CHILD_EVENT_FACT_TYPES.has(match[1]!);
 }
 
 /**
@@ -371,9 +417,99 @@ export function extractChildEventFacts(events: ReadonlyArray<unknown>): ChildEve
     };
 }
 
+/** Parse the fact-relevant events out of raw NDJSON lines. */
+function parseFactEvents(lines: Iterable<string>): { events: unknown[]; sizes: number[] } {
+    const events: unknown[] = [];
+    const sizes: number[] = [];
+    for (const line of lines) {
+        const s = line.trim();
+        if (!s || s[0] !== "{") continue;
+        if (!mayAffectChildEventFacts(s)) continue;
+        try {
+            events.push(JSON.parse(s));
+            sizes.push(s.length);
+        } catch {
+            // bad JSON — ignore (noise / partial line)
+        }
+    }
+    return { events, sizes };
+}
+
+// ---- incremental log reading ----------------------------------------------
+//
+// Logs are append-only and reach gigabytes, so facts are folded from an
+// accumulated event list that grows by the bytes appended since the last read
+// (see log-cursor.ts). Only the types the fold consumes are retained, which is
+// ~2% of a log's lines; `message_update` alone is 98% of the volume and cannot
+// move a fact. The retained list is capped, oldest-first, and a drop is
+// reported as a diagnostic rather than silently changing an observation.
+
+/** Memory budget for one run's retained fact-relevant events. */
+const MAX_RETAINED_EVENT_BYTES = 8 * 1024 * 1024; // 8 MiB
+
+function maxHealthReadBytes(): number {
+    const raw = process.env.PI_SUBAGENT_MAX_HEALTH_READ_BYTES;
+    if (!raw) return DEFAULT_MAX_READ_BYTES;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_READ_BYTES;
+}
+
+/**
+ * Runs tracked at once. A backstop, not a policy: callers are expected to reset
+ * a dismissed run, and this bounds the leak if one forgets.
+ */
+const MAX_TRACKED_RUNS = 64;
+
+interface FactLogState {
+    cursor: LogCursor;
+    events: unknown[];
+    /** Retained source bytes per event, index-aligned with `events`. */
+    sizes: number[];
+    /** Sum of `sizes`, for the drop-oldest budget. */
+    bytes: number;
+    truncated: boolean;
+    dropped: boolean;
+}
+
+const factLogStates = new Map<string, FactLogState>();
+
+/**
+ * Forget the incremental read position for a run (or all runs). Call after a run
+ * is dismissed, and in tests that rewrite a log under a reused id.
+ */
+export function resetChildEventLogCursor(id?: string): void {
+    if (id === undefined) factLogStates.clear();
+    else factLogStates.delete(id);
+}
+
+function rememberState(id: string, state: FactLogState): void {
+    // Re-insert so the map orders least-recently-read first.
+    factLogStates.delete(id);
+    factLogStates.set(id, state);
+    while (factLogStates.size > MAX_TRACKED_RUNS) {
+        const oldest = factLogStates.keys().next();
+        if (oldest.done) break;
+        factLogStates.delete(oldest.value);
+    }
+}
+
+function trimToBudget(state: FactLogState): void {
+    while (state.bytes > MAX_RETAINED_EVENT_BYTES && state.events.length > 1) {
+        state.events.shift();
+        state.bytes -= state.sizes.shift() ?? 0;
+        state.dropped = true;
+    }
+    if (state.bytes < 0) state.bytes = 0;
+}
+
 /**
  * Read a run log for event facts + raw mtime/size diagnostics.
  * Raw log write time never promotes activity health by itself.
+ *
+ * Reads incrementally: only bytes appended since the previous call for this id
+ * are parsed, so a hot-path caller never re-reads a whole multi-gigabyte log.
+ * Pass `logText` to fold a caller-supplied log instead, which bypasses the
+ * cursor entirely.
  */
 export function extractChildEventFactsFromLog(
     id: string,
@@ -389,33 +525,42 @@ export function extractChildEventFactsFromLog(
         rawLog.error = err instanceof Error ? err.message : String(err);
     }
 
-    let text = opts.logText;
-    if (text === undefined) {
-        try {
-            text = readFileSync(path, "utf-8");
-        } catch (err) {
-            rawLog.error = rawLog.error ?? (err instanceof Error ? err.message : String(err));
-            return { facts: emptyFacts(), rawLog };
-        }
-    }
-
-    const events: unknown[] = [];
-    for (const line of text.split("\n")) {
-        const s = line.trim();
-        if (!s || s[0] !== "{") continue;
-        try {
-            events.push(JSON.parse(s));
-        } catch {
-            // bad JSON — ignore (noise / partial line)
-        }
-    }
-
     // Do not synthesise wall-clock timestamps from raw mtime / now. Untimestamped
     // events still contribute structural facts (open tools, compacting, model
     // phase); activity age only moves on parsed-event write provenance.
     // `opts.now` is accepted for API symmetry with callers but must not mint times.
     void opts.now;
-    return { facts: extractChildEventFacts(events), rawLog };
+
+    if (opts.logText !== undefined) {
+        const { events } = parseFactEvents(opts.logText.split("\n"));
+        return { facts: extractChildEventFacts(events), rawLog };
+    }
+
+    const previous = factLogStates.get(id);
+    const read = readAppendedLines(path, previous?.cursor, maxHealthReadBytes());
+    if (read.error !== undefined) {
+        rawLog.error = rawLog.error ?? read.error;
+        if (!previous) return { facts: emptyFacts(), rawLog };
+    }
+
+    const state: FactLogState = read.restarted || !previous
+        ? { cursor: read.cursor, events: [], sizes: [], bytes: 0, truncated: false, dropped: false }
+        : previous;
+    state.cursor = read.cursor;
+    state.truncated = state.truncated || read.truncated;
+
+    const parsed = parseFactEvents(read.lines);
+    if (parsed.events.length > 0) {
+        state.events.push(...parsed.events);
+        state.sizes.push(...parsed.sizes);
+        for (const size of parsed.sizes) state.bytes += size;
+        trimToBudget(state);
+    }
+    rememberState(id, state);
+
+    if (state.truncated) rawLog.windowTruncated = true;
+    if (state.dropped) rawLog.eventsDropped = true;
+    return { facts: extractChildEventFacts(state.events), rawLog };
 }
 
 // ---- observation ----------------------------------------------------------

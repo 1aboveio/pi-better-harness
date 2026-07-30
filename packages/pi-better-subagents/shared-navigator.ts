@@ -95,7 +95,11 @@ export const DETAIL_TICK_MS = 1000;
 export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25, 50, 100] as const;
-const MAIN_LIST_TICK_MS = 250;
+// Row rebuild cadence. Each tick asks every provider for rows, which stats and
+// parses run logs, so this is a per-provider I/O cadence and not a paint rate:
+// the widget repaints from render() whenever the TUI asks. 1 Hz matches
+// DETAIL_TICK_MS and the elapsed/spinner resolution the rows can actually show.
+const MAIN_LIST_TICK_MS = 1000;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
 const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 5;
 const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
