@@ -28,7 +28,7 @@ import {
     type BackgroundWorkDetail,
     type BackgroundWorkProvider,
     type BackgroundWorkRow,
-} from "../navigator/index.ts";
+} from "./shared-navigator.ts";
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
