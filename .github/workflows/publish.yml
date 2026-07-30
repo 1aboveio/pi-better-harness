@@ -1,0 +1,139 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 0.1.2"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    environment: npm-publish
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install latest npm with trusted publishing support
+        run: npm install --global npm@latest
+
+      - name: Show toolchain
+        run: |
+          node --version
+          npm --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify workspace
+        run: npm run verify
+
+      - name: Check package versions
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.version }}"
+          for path in \
+            packages/pi-better-background-tasks/package.json \
+            packages/pi-better-subagents/package.json \
+            packages/pi-better-goal/package.json \
+            packages/pi-better-harness/package.json
+          do
+            node -e "const p=require('./$path'); if (p.version !== '$VERSION') throw new Error('$path has '+p.version+', expected $VERSION')"
+          done
+
+      - name: Check published versions
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.version }}"
+          for pkg in \
+            pi-better-background-tasks \
+            pi-better-subagents \
+            pi-better-goal \
+            pi-better-harness
+          do
+            if npm view "${pkg}@${VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+              echo "${pkg}@${VERSION} is already published; this workflow will skip it."
+            else
+              echo "${pkg}@${VERSION} is not published yet."
+            fi
+          done
+
+      - name: Pack dry run
+        run: |
+          set -euo pipefail
+
+          npm pack --dry-run -w packages/pi-better-background-tasks --json --registry=https://registry.npmjs.org/ > /tmp/pi-bg-pack.json
+          node -e 'const p=require("/tmp/pi-bg-pack.json")[0]; if(!p.files.some(f=>f.path==="src/shared-navigator.ts")) throw new Error("background-tasks missing shared navigator")'
+
+          npm pack --dry-run -w packages/pi-better-subagents --json --registry=https://registry.npmjs.org/ > /tmp/pi-subagents-pack.json
+          node -e 'const p=require("/tmp/pi-subagents-pack.json")[0]; if(!p.files.some(f=>f.path==="shared-navigator.ts")) throw new Error("subagents missing shared navigator")'
+
+          npm pack --dry-run -w packages/pi-better-goal --json --registry=https://registry.npmjs.org/ > /tmp/pi-goal-pack.json
+          npm pack --dry-run -w packages/pi-better-harness --json --registry=https://registry.npmjs.org/ > /tmp/pi-harness-pack.json
+
+      - name: Publish packages
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.version }}"
+
+          publish_workspace() {
+            local pkg="$1"
+            local workspace="$2"
+            if npm view "${pkg}@${VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+              echo "Skipping ${pkg}@${VERSION}; already published."
+              return
+            fi
+            npm publish -w "$workspace" --registry=https://registry.npmjs.org/
+          }
+
+          publish_workspace pi-better-background-tasks packages/pi-better-background-tasks
+          publish_workspace pi-better-subagents packages/pi-better-subagents
+          publish_workspace pi-better-goal packages/pi-better-goal
+          publish_workspace pi-better-harness packages/pi-better-harness
+
+      - name: Verify npm versions
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.version }}"
+          for pkg in \
+            pi-better-background-tasks \
+            pi-better-subagents \
+            pi-better-goal \
+            pi-better-harness
+          do
+            actual="$(npm view "$pkg" version --registry=https://registry.npmjs.org/)"
+            test "$actual" = "$VERSION"
+            echo "$pkg@$actual"
+          done
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.event.inputs.version }}"
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} already exists."
+            exit 0
+          fi
+
+          gh release create "v${VERSION}" \
+            --target "$GITHUB_SHA" \
+            --title "v${VERSION}" \
+            --notes $'## Changes\n- Publish Pi Better Harness packages to npm.\n- Include navigator ordering and standalone npm packaging fixes.'
