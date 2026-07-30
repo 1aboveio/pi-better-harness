@@ -198,6 +198,44 @@ export function reconcileRun(meta: ReconcileInput, probe: ProcessProbe, now: num
  *   coordinator recovery can still fire after reload (#65).
  * The scheduler stops when false.
  */
+/**
+ * True when the pi that spawned this run is provably gone, so no live process
+ * can be its owner.
+ *
+ * Reconciliation is owner-gated (a pi must not adjudicate another pi's
+ * children), and retention only ever retires TERMINAL records. Those two
+ * correct rules trap a `running`/`orphaned` record whose parent died without a
+ * clean shutdown: nobody is its owner, so nothing reconciles it to `lost`, so it
+ * never becomes eligible for retention and lives forever. One such record was
+ * observed holding 1.1 GB indefinitely.
+ *
+ * Deliberately conservative about liveness. `pidExists` counts EPERM as
+ * existing, so a pid owned by another user reads as alive, and an unavailable
+ * start token proves nothing (per ProcessProbe's contract) — both push toward
+ * "not abandoned", i.e. toward doing nothing. A recycled parent pid therefore
+ * makes this return false and the record simply stays as it is, which is the
+ * safe direction: this must never declare a LIVE session's parent dead.
+ */
+export function isAbandonedByParent(
+    meta: Pick<RunMeta, "spawnPid" | "spawnPidStartTime">,
+    probe: ProcessProbe,
+    parentPid: number = process.pid,
+): boolean {
+    const spawnPid = meta.spawnPid;
+    // No recorded parent: abandonment is unprovable, so never assume it.
+    if (typeof spawnPid !== "number" || spawnPid <= 0) return false;
+    // Our own runs are never abandoned — that is the owner path.
+    if (spawnPid === parentPid) return false;
+    if (!probe.pidExists(spawnPid)) return true;
+    // The pid is alive. If both tokens are known and differ, the original parent
+    // exited and an unrelated process inherited the number.
+    const recorded = meta.spawnPidStartTime;
+    if (recorded === undefined) return false;
+    const current = probe.startToken(spawnPid);
+    if (current === undefined) return false;
+    return current !== recorded;
+}
+
 export function needsMonitoring(
     metas: ReadonlyArray<Pick<RunMeta, "spawnPid" | "status" | "lostCallbackSentAt" | "lostCallbackSuppressedAt">>,
     parentPid: number = process.pid,

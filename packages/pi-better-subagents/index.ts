@@ -59,6 +59,7 @@ import {
     captureProcessIdentity,
     extractChildEventFactsFromLog,
     loadHealthThresholdsFromConfig,
+    isAbandonedByParent,
     needsMonitoring,
     observeRunHealth,
     realProcessProbe,
@@ -441,6 +442,9 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
 function reconcileHealth(): void {
     const ctx = uiCtx;
     const pi = healthPi;
+    // Free work while the loop is already running: nothing else will ever
+    // reconcile a record whose parent is gone.
+    reconcileAbandonedRuns();
     for (const summary of listMetas()) {
         if (!ownedByThisParent(summary)) continue;
         // running/orphaned: process reconcile. lost: durable callback recovery only.
@@ -479,6 +483,59 @@ function reconcileHealth(): void {
     }
     // Stop existing the moment nothing current-parent needs monitoring/recovery.
     if (!needsMonitoring(listMetas())) stopHealthTicker();
+}
+
+/**
+ * This pi's own start-identity token, recorded on every run it spawns so a later
+ * process can tell "my parent is gone" from "my parent's pid was recycled".
+ */
+function parentStartToken(): string | undefined {
+    try {
+        return realProcessProbe.startToken(process.pid);
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Reconcile records whose spawning pi is provably gone.
+ *
+ * Reconciliation above is owner-gated — a pi must not adjudicate another pi's
+ * children — and retention only ever retires TERMINAL records. Those two correct
+ * rules trap a `running`/`orphaned` record whose parent died without a clean
+ * shutdown: no live process is its owner, so nothing moves it to `lost`, so it
+ * never becomes eligible for retention and lives forever. One such record was
+ * observed pinning 1.1 GB indefinitely.
+ *
+ * Adoption is status-only and uses exactly the same evidence rules: reconcileRun
+ * owns the verdict. Deliberately NOT done: no notify (this session did not launch
+ * the run, so reporting it would be noise about someone else's work), no callback
+ * delivery (the coordinator it was meant for no longer exists), and no effect on
+ * ticker lifetime — an adopted record never keeps this session's loop alive. It is
+ * swept when the loop happens to run, and once at session start.
+ *
+ * Best-effort; never throws into a caller.
+ */
+function reconcileAbandonedRuns(now: number = Date.now()): number {
+    let adopted = 0;
+    try {
+        for (const summary of listMetas()) {
+            if (ownedByThisParent(summary)) continue;
+            if (summary.status !== "running" && summary.status !== "orphaned") continue;
+            if (!isAbandonedByParent(summary, realProcessProbe)) continue;
+            // Re-read under the id: another pi may have adopted it since the snapshot.
+            const meta = readMeta(summary.id);
+            if (!meta) continue;
+            if (meta.status !== "running" && meta.status !== "orphaned") continue;
+            const result = reconcileRun(meta, realProcessProbe, now);
+            if (!result.changed) continue;
+            Object.assign(meta, result.patch, { status: result.status });
+            meta.adoptedFromLostParentAt = meta.adoptedFromLostParentAt ?? now;
+            writeMeta(meta);
+            adopted += 1;
+        }
+    } catch { /* best-effort */ }
+    return adopted;
 }
 
 /** Start the reconciliation loop if it isn't already running. */
@@ -979,7 +1036,7 @@ export default function (pi: ExtensionAPI) {
 
         const meta: RunMeta = {
             id, name: p.name, status: "running",
-            pid: spawned.pid, spawnPid: process.pid, model, cwd,
+            pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model, cwd,
             ...identity,
             promptPreview: p.prompt.slice(0, 200),
             startedAt: Date.now(), logPath: logPathFor(id), sessionId: id,
@@ -1263,6 +1320,9 @@ export default function (pi: ExtensionAPI) {
         // - Repaint the widget even if its last in-memory lines match; the host
         //   may have dropped extension UI during reload/session replacement.
         ensureSubagentProvider();
+        // Adopt records left non-terminal by a pi that died without a clean
+        // shutdown, so the age sweep can eventually retire them.
+        reconcileAbandonedRuns();
         disposeBackgroundWorkNavigator(ctx);
         widgetNavActive = false;
         widgetNavSelectedId = undefined;
