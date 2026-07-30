@@ -11,6 +11,7 @@ import { join, relative } from "node:path";
 import {
     baseDir,
     listMetas,
+    ownedByThisParent,
     readMeta,
     runDir,
     sessionsDir,
@@ -21,9 +22,30 @@ import type { SubagentConfig } from "./config.ts";
 
 export const DEFAULT_CLEANUP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * Total registry budget. Age alone cannot bound this directory: 63 GB
+ * accumulated inside five days, so a seven-day window never saw it. A
+ * `message_update` event re-serialises the whole accumulated message, so one
+ * long-running subagent can write gigabytes in an afternoon.
+ *
+ * Deliberately tight. A single run's log has been observed past 3 GB, so a
+ * budget generous enough to hold several of those defeats the purpose: what a
+ * developer wants back is the disk, and what they lose is a log nothing reads
+ * once its result has been delivered.
+ */
+export const DEFAULT_MAX_REGISTRY_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+/**
+ * How often the size bound may be enforced. Independent of the daily marker:
+ * the point of a size cap is to react inside a day, and it only stats run
+ * directories rather than walking the session tree.
+ */
+export const SIZE_SWEEP_INTERVAL_MS = 10 * 60 * 1000; // 10min
+
 interface CleanupState {
     lastLocalDate?: string;
     lastRunAt?: number;
+    lastSizeSweepAt?: number;
 }
 
 export interface DailyCleanupResult {
@@ -42,6 +64,64 @@ export interface DailyCleanupOptions {
 }
 
 const TERMINAL_CLEANUP_STATUSES = new Set<RunStatus>(["completed", "failed", "killed", "lost"]);
+
+export interface SizeCapEntry {
+    id: string;
+    status?: RunStatus;
+    /** End of the run, when recorded; oldest-first ordering uses it. */
+    endedAt?: number;
+    dirMtimeMs: number;
+    bytes: number;
+}
+
+export interface SizeCapPlan {
+    remove: string[];
+    reclaimedBytes: number;
+    keptBytes: number;
+    /** The cap could not be met without deleting live or protected runs. */
+    overBudget: boolean;
+}
+
+export interface SizeCapLimits {
+    maxBytes: number;
+    /**
+     * Runs the calling pi owns. Never removed: unlike the age bound, a size
+     * sweep goes after the NEWEST large runs once a cap is exceeded, which is
+     * exactly the live session's own work — the session can still deliver their
+     * callbacks and answer `subagent_result` for them.
+     */
+    protectedIds?: ReadonlySet<string>;
+}
+
+/**
+ * Choose run directories to retire so the registry fits `maxBytes`,
+ * oldest-terminal-first. Pure; the caller supplies the entries.
+ */
+export function planRegistrySizeCap(
+    entries: readonly SizeCapEntry[],
+    limits: SizeCapLimits,
+): SizeCapPlan {
+    let kept = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+    const remove: string[] = [];
+    if (kept <= limits.maxBytes) {
+        return { remove, reclaimedBytes: 0, keptBytes: kept, overBudget: false };
+    }
+
+    const candidates = entries
+        .filter((entry) => entry.status !== undefined
+            && TERMINAL_CLEANUP_STATUSES.has(entry.status)
+            && !limits.protectedIds?.has(entry.id))
+        .sort((a, b) => (a.endedAt ?? a.dirMtimeMs) - (b.endedAt ?? b.dirMtimeMs));
+
+    let reclaimed = 0;
+    for (const candidate of candidates) {
+        if (kept <= limits.maxBytes) break;
+        remove.push(candidate.id);
+        kept -= candidate.bytes;
+        reclaimed += candidate.bytes;
+    }
+    return { remove, reclaimedBytes: reclaimed, keptBytes: kept, overBudget: kept > limits.maxBytes };
+}
 
 export function cleanupStatePath(): string {
     return join(baseDir(), "cleanup-state.json");
@@ -207,4 +287,117 @@ export function runDailyCleanupOnce(options: DailyCleanupOptions = {}): DailyCle
     }
 
     return { ran: true, dateKey, removedRunDirs, removedSessionPaths, errors };
+}
+
+/** Bytes held under one run directory. Best-effort; unreadable entries count 0. */
+function dirBytes(dir: string): number {
+    let bytes = 0;
+    let entries;
+    try {
+        entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return 0;
+    }
+    for (const entry of entries) {
+        const path = join(dir, entry.name);
+        try {
+            bytes += entry.isDirectory() ? dirBytes(path) : statSync(path).size;
+        } catch { /* vanished mid-scan */ }
+    }
+    return bytes;
+}
+
+/** Read the registry into size-cap entries. */
+export function collectSizeCapEntries(): SizeCapEntry[] {
+    let ids: string[];
+    try {
+        ids = readdirSync(join(baseDir(), "runs"));
+    } catch {
+        return [];
+    }
+    const entries: SizeCapEntry[] = [];
+    for (const id of ids) {
+        const dir = runDir(id);
+        const meta = readMeta(id);
+        entries.push({
+            id,
+            status: meta?.status,
+            endedAt: meta ? terminalTimestamp(meta) : undefined,
+            dirMtimeMs: safeStatMtime(dir) ?? 0,
+            bytes: dirBytes(dir),
+        });
+    }
+    return entries;
+}
+
+export interface SizeCapResult extends SizeCapPlan {
+    ran: boolean;
+    removed: string[];
+    errors: string[];
+}
+
+export interface SizeCapOptions {
+    now?: number;
+    config?: Pick<SubagentConfig, "maxRegistryBytes">;
+    maxBytes?: number;
+    /** Bypass the interval marker (tests, explicit operator sweeps). */
+    force?: boolean;
+    protectedIds?: ReadonlySet<string>;
+}
+
+/**
+ * Enforce the registry byte budget, at most once per SIZE_SWEEP_INTERVAL_MS.
+ * Complements the daily age sweep: age retires history, this bounds the peak a
+ * single busy day can reach. Best-effort; never throws into a caller.
+ */
+export function enforceRegistrySizeCapOnce(options: SizeCapOptions = {}): SizeCapResult {
+    const now = options.now ?? Date.now();
+    const idle: SizeCapResult = {
+        ran: false,
+        remove: [],
+        removed: [],
+        reclaimedBytes: 0,
+        keptBytes: 0,
+        overBudget: false,
+        errors: [],
+    };
+
+    const state = readCleanupState();
+    if (!options.force
+        && typeof state.lastSizeSweepAt === "number"
+        && now - state.lastSizeSweepAt >= 0
+        && now - state.lastSizeSweepAt < SIZE_SWEEP_INTERVAL_MS) {
+        return idle;
+    }
+
+    const configured = options.config?.maxRegistryBytes;
+    const maxBytes = options.maxBytes
+        ?? (Number.isFinite(configured) && configured! > 0 ? configured! : DEFAULT_MAX_REGISTRY_BYTES);
+
+    const errors: string[] = [];
+    const protectedIds = options.protectedIds ?? ownRunIds();
+    const plan = planRegistrySizeCap(collectSizeCapEntries(), { maxBytes, protectedIds });
+    const removed: string[] = [];
+    for (const id of plan.remove) {
+        if (removePath(runDir(id), errors)) removed.push(id);
+    }
+
+    try {
+        writeCleanupState({ ...state, lastSizeSweepAt: now });
+    } catch (err) {
+        errors.push(`${cleanupStatePath()}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    return { ...plan, ran: true, removed, errors };
+}
+
+/** Run ids owned by this pi process, which a size sweep must never remove. */
+function ownRunIds(): Set<string> {
+    const own = new Set<string>();
+    try {
+        for (const meta of listMetas()) {
+            if (ownedByThisParent(meta)) own.add(meta.id);
+        }
+    } catch { /* registry unreadable: protect nothing, remove nothing new */ }
+    return own;
 }

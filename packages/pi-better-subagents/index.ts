@@ -104,7 +104,7 @@ import {
     buildNavigatorRows,
     buildNavigatorDetail,
 } from "./navigator.ts";
-import { runDailyCleanupOnce } from "./cleanup.ts";
+import { enforceRegistrySizeCapOnce, runDailyCleanupOnce } from "./cleanup.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -540,9 +540,9 @@ function observeNavigatorHealth(meta: RunMeta, now: number = Date.now()): Health
 }
 
 /** Rows for the overlay: visible current-parent runs, newest first (#44 seam). */
-function navigatorRows() {
-    const now = Date.now();
-    return buildNavigatorRows(sessionVisibleNavigatorRuns(), {
+function navigatorRows(visible?: RunMeta[], at?: number) {
+    const now = at ?? Date.now();
+    return buildNavigatorRows(visible ?? sessionVisibleNavigatorRuns(now), {
         effectiveStatus,
         shortModel,
         fmtElapsed,
@@ -573,8 +573,17 @@ function navigatorRunningCount(): number {
     return navigatorRunningRuns().length;
 }
 
-function sessionVisibleNavigatorRuns(): RunMeta[] {
-    const now = Date.now();
+/**
+ * The visible run set. `listMetas` reads and parses one `meta.json` per run in
+ * the registry, so a caller that needs this twice should scan once and pass the
+ * snapshot down (see `subagentWorkRows`) rather than ask again.
+ *
+ * Deliberately NOT cached across calls. A time-based memo here was tried and
+ * reverted: it made a run created outside this process — another pi session's
+ * spawn, or a test seeding one — invisible until the window expired, and the
+ * navigator then acted on a set that no longer matched the registry.
+ */
+function sessionVisibleNavigatorRuns(now: number = Date.now()): RunMeta[] {
     return navigatorVisibleRuns(listMetas())
         .filter(belongsToActiveNavigatorSession)
         .filter((m) => !isExpiredTerminalNavigatorRun(m, now));
@@ -646,8 +655,11 @@ function statusTone(status: string): BackgroundWorkRow["statusTone"] {
 }
 
 function subagentWorkRows(now: number): BackgroundWorkRow[] {
-    const startedById = new Map(sessionVisibleNavigatorRuns().map((m) => [m.id, m.startedAt]));
-    return navigatorRows().map((row) => {
+    // One registry scan per rebuild: both the start times and the rows below are
+    // built from this snapshot.
+    const visible = sessionVisibleNavigatorRuns(now);
+    const startedById = new Map(visible.map((m) => [m.id, m.startedAt]));
+    return navigatorRows(visible, now).map((row) => {
         const bits = [];
         if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
         if (row.tool) bits.push(row.tool);
@@ -870,6 +882,14 @@ export default function (pi: ExtensionAPI) {
         // Best-effort daily hygiene for durable tmp state. The marker makes
         // this effectively free after the first subagent launch each day.
         runDailyCleanupOnce({ config: cfg });
+        // Age retires history; this bounds the peak one busy day can reach.
+        // Rate-limited inside cleanup.ts, and never on the UI hot path.
+        const capped = enforceRegistrySizeCapOnce({ config: cfg });
+        for (const id of capped.removed) {
+            spendCache.delete(id);
+            healthLogCache.delete(id);
+            resetChildEventLogCursor(id);
+        }
         const callbackOrigin = callbackOriginFromContext(ctx);
         activeCallbackOrigin = callbackOrigin;
 
