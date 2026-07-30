@@ -30,7 +30,7 @@ import {
     type BackgroundWorkRow,
 } from "./shared-navigator.ts";
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
-import { parseRun, type Usage } from "./parse.ts";
+import { parseRun, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
@@ -361,6 +361,7 @@ function renderWidget(): void {
     spendCache.clear();
     healthLogCache.clear();
     resetChildEventLogCursor();
+    resetParseRunCursor();
     stopTicker();
 }
 
@@ -688,6 +689,7 @@ function navigatorCloseRun(id: string) {
     spendCache.delete(id);
     healthLogCache.delete(id);
     resetChildEventLogCursor(id);
+    resetParseRunCursor(id);
     return outcome;
 }
 
@@ -946,6 +948,7 @@ export default function (pi: ExtensionAPI) {
             spendCache.delete(id);
             healthLogCache.delete(id);
             resetChildEventLogCursor(id);
+            resetParseRunCursor(id);
         }
         const callbackOrigin = callbackOriginFromContext(ctx);
         activeCallbackOrigin = callbackOrigin;
@@ -1356,8 +1359,9 @@ export default function (pi: ExtensionAPI) {
         stopHealthTicker();
         spendCache.clear();
         healthLogCache.clear();
-        // Release the incremental log cursors' retained events with the session.
+        // Release the incremental log cursors' retained state with the session.
         resetChildEventLogCursor();
+        resetParseRunCursor();
         // Always dispose navigator detail timers (no UI call — just clearInterval).
         // Safe in every mode; the dispose hook is only set when a TUI overlay opened.
         disposeBackgroundWorkNavigator(ctx);

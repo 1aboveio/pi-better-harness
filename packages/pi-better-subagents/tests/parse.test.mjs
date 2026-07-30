@@ -13,9 +13,9 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, openSync, closeSync, writeSync, ftruncateSync, unlinkSync, rmSync, existsSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, ftruncateSync, mkdirSync, openSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { constants as bufferConstants } from "node:buffer";
-import { parseRun, tailLog, formatSubagentOutputBody, formatSubagentResultBody } from "../parse.ts";
+import { parseRun, resetParseRunCursor, tailLog, formatSubagentOutputBody, formatSubagentResultBody } from "../parse.ts";
 import { logPathFor, runDir } from "../registry.ts";
 
 // Per-process, per-invocation run IDs for the parseRun and tailLog suites.
@@ -158,7 +158,11 @@ describe("parseRun", () => {
         assert.ok(!diag.includes("GB"), `diagnostic must not misreport bytes as GB, got: ${diag}`);
     });
 
-    it("pins the default 32.0 MB truncation diagnostic wording", () => {
+    // The wording changed with incremental parsing, and the change is the point:
+    // the bound is now a COLD-START gap on an already-huge log, not a window that
+    // permanently caps what tokens/tools reflect. Everything appended after this
+    // session started reading is counted.
+    it("pins the default 32.0 MB cold-start truncation diagnostic wording", () => {
         const original = process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES;
         delete process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES;
         try {
@@ -169,7 +173,8 @@ describe("parseRun", () => {
             const r = parseRun(PARSE_RUN_ID);
             assert.equal(r.finalText, "tail answer");
             assert.deepEqual(r.diagnostics, [
-                "Log truncated: parsed last 32.0 MB of 32.0 MB. Only recent activity is reflected in tokens/tools.",
+                "Log truncated: this session began reading at the last 32.0 MB of 32.0 MB. "
+                + "Events before that point are not counted in tokens/tools.",
             ]);
         } finally {
             if (original !== undefined) process.env.PI_SUBAGENT_MAX_LOG_PARSE_BYTES = original;
@@ -265,5 +270,115 @@ describe("formatSubagentResultBody", () => {
     it("appends diagnostics when present", () => {
         const out = formatSubagentResultBody("[head]", "final", "raw", ["truncated"]);
         assert.ok(out.includes("[parser: truncated]"));
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Incremental parsing. parseRun folds appended bytes into an accumulated result
+// instead of re-reading a bounded tail every call — cheaper on a live log, and
+// more accurate, because spend accumulates from message_end events and a
+// tail-only parse silently stopped counting the ones that fell out of the window.
+// ---------------------------------------------------------------------------
+describe("parseRun — incremental", () => {
+    const INCR_ID = `sa_parse_incr_${process.pid}_${Date.now()}`;
+    after(() => cleanup(INCR_ID));
+
+    function append(id, lines) {
+        mkdirSync(runDir(id), { recursive: true });
+        appendFileSync(logPathFor(id), lines.map((l) => `${l}\n`).join(""), "utf-8");
+    }
+
+    it("accumulates spend across reads instead of only what a window holds", () => {
+        resetParseRunCursor(INCR_ID);
+        rmSync(runDir(INCR_ID), { recursive: true, force: true });
+        append(INCR_ID, [
+            event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "one" }], usage: { input: 10, output: 5 } } }),
+        ]);
+        const first = parseRun(INCR_ID);
+        assert.equal(first.usage.input, 10);
+        assert.equal(first.finalText, "one");
+
+        append(INCR_ID, [
+            event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "two" }], usage: { input: 7, output: 3 } } }),
+        ]);
+        const second = parseRun(INCR_ID);
+        assert.equal(second.usage.input, 17, "spend from BOTH reads");
+        assert.equal(second.usage.output, 8);
+        assert.equal(second.usage.total, 25);
+        assert.equal(second.finalText, "two", "latest finalized answer wins");
+    });
+
+    it("matches a tool end against a start seen in an earlier read", () => {
+        resetParseRunCursor(INCR_ID);
+        rmSync(runDir(INCR_ID), { recursive: true, force: true });
+        append(INCR_ID, [event("tool_execution_start", { toolName: "bash", toolCallId: "c1" })]);
+        assert.equal(parseRun(INCR_ID).unmatchedToolCalls.length, 1, "open across reads");
+
+        append(INCR_ID, [event("tool_execution_end", { toolName: "bash", toolCallId: "c1" })]);
+        const closed = parseRun(INCR_ID);
+        assert.deepEqual(closed.unmatchedToolCalls, [], "closed against the earlier start");
+        assert.deepEqual(closed.toolCalls, ["bash"], "recorded once");
+    });
+
+    it("reads an unterminated final line without consuming it twice", () => {
+        // A writer mid-event, or a log that simply never ended with a newline.
+        // The bytes must be readable now, and must not double-count when the
+        // newline finally arrives.
+        resetParseRunCursor(INCR_ID);
+        rmSync(runDir(INCR_ID), { recursive: true, force: true });
+        mkdirSync(runDir(INCR_ID), { recursive: true });
+        const line = event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "unterminated" }], usage: { input: 4, output: 2 } } });
+        writeFileSync(logPathFor(INCR_ID), line, "utf-8"); // no trailing newline
+
+        const speculative = parseRun(INCR_ID);
+        assert.equal(speculative.finalText, "unterminated", "visible immediately");
+        assert.equal(speculative.usage.input, 4);
+
+        const again = parseRun(INCR_ID);
+        assert.equal(again.usage.input, 4, "re-reading the same partial does not double count");
+
+        appendFileSync(logPathFor(INCR_ID), "\n", "utf-8");
+        const completed = parseRun(INCR_ID);
+        assert.equal(completed.usage.input, 4, "completing the line does not double count either");
+        assert.equal(completed.finalText, "unterminated");
+    });
+
+    it("re-reads from scratch when the log is rewritten", () => {
+        resetParseRunCursor(INCR_ID);
+        rmSync(runDir(INCR_ID), { recursive: true, force: true });
+        append(INCR_ID, [event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "old" }], usage: { input: 100, output: 100 } } })]);
+        assert.equal(parseRun(INCR_ID).usage.input, 100);
+
+        writeLog(INCR_ID, [event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "new" }], usage: { input: 1, output: 1 } } })]);
+        const after = parseRun(INCR_ID);
+        assert.equal(after.usage.input, 1, "stale spend dropped with the old log");
+        assert.equal(after.finalText, "new");
+    });
+
+    it("keeps the live-activity peek while parsing only the newest update", () => {
+        resetParseRunCursor(INCR_ID);
+        rmSync(runDir(INCR_ID), { recursive: true, force: true });
+        append(INCR_ID, [
+            event("message_update", { message: { role: "assistant", content: [{ type: "text", text: "partial one" }] } }),
+            event("message_update", { message: { role: "assistant", content: [{ type: "text", text: "partial two" }] } }),
+        ]);
+        assert.equal(parseRun(INCR_ID).lastActivity, "partial two", "latest update wins");
+
+        // An update carrying nothing must not erase the previous peek.
+        append(INCR_ID, [event("message_update", { message: { role: "assistant", content: [] } })]);
+        assert.equal(parseRun(INCR_ID).lastActivity, "partial two", "textless update changes nothing");
+
+        // Thinking-only updates still count as activity.
+        append(INCR_ID, [event("message_update", { message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }] } })]);
+        assert.equal(parseRun(INCR_ID).lastActivity, "(thinking) hmm");
+    });
+
+    it("resetParseRunCursor forgets a run's accumulated result", () => {
+        resetParseRunCursor(INCR_ID);
+        rmSync(runDir(INCR_ID), { recursive: true, force: true });
+        append(INCR_ID, [event("message_end", { message: { role: "assistant", content: [{ type: "text", text: "x" }], usage: { input: 9, output: 1 } } })]);
+        assert.equal(parseRun(INCR_ID).usage.input, 9);
+        resetParseRunCursor(INCR_ID);
+        assert.equal(parseRun(INCR_ID).usage.input, 9, "a cold re-read of the same bytes gives the same answer");
     });
 });
