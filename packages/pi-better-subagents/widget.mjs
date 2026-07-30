@@ -24,6 +24,35 @@ export const TICK_MS = 1000;
 export const SPEND_REFRESH_MS = 5000;
 
 /**
+ * Floor on how often any one run's log may be re-read on the UI hot path.
+ *
+ * The size/mtime freshness rules below correctly re-read a log that changed —
+ * but a live child writes continuously, so "changed" is true on every frame and
+ * the rules alone degenerate into re-reading each log as fast as the timer
+ * fires. This floor bounds that: within the floor a cached parse is reused even
+ * though the log grew. It only ever delays new numbers by the floor, and only
+ * for a run that is actively writing.
+ */
+export const HOT_PATH_REFRESH_FLOOR_MS = 1000;
+
+/**
+ * Whether a cached parse is inside the hot-path refresh floor and must be
+ * reused. Requires an explicit `now` and a `refreshedAt` stamp, so callers that
+ * pass neither keep the pure size/mtime semantics.
+ *
+ * @param {{ refreshedAt?: number }|null|undefined} cached
+ * @param {number} [now]
+ * @param {number} [floorMs]
+ */
+export function withinRefreshFloor(cached, now, floorMs = HOT_PATH_REFRESH_FLOOR_MS) {
+    if (!cached || typeof now !== "number" || typeof cached.refreshedAt !== "number") return false;
+    if (!(floorMs > 0)) return false;
+    // A stamp from the future (clock step) must not pin the cache forever.
+    const age = now - cached.refreshedAt;
+    return age >= 0 && age < floorMs;
+}
+
+/**
  * Value that clears the widget. pi only clears on `undefined`; `[]` leaves an
  * empty residual widget node.
  */
@@ -201,16 +230,19 @@ export function isHealthLogCacheFresh(cached, logSize, mtimeMs) {
 }
 
 /**
- * Resolve child-event facts via size/mtime cache. Calls `extract` only on miss
- * so the widget hot path can bound full-log reparses across frames.
+ * Resolve child-event facts via the size/mtime cache, under the hot-path
+ * refresh floor. Calls `extract` only on miss, so a frame never re-reads a log
+ * that has not changed, and never re-reads one that changed more often than
+ * `identity.now`/`floorMs` allow.
  *
- * @param {{ facts: unknown, rawLog: unknown, logSize?: number, mtimeMs?: number }|null|undefined} cached
- * @param {{ logSize: number, mtimeMs?: number }} identity
+ * @param {{ facts: unknown, rawLog: unknown, logSize?: number, mtimeMs?: number, refreshedAt?: number }|null|undefined} cached
+ * @param {{ logSize: number, mtimeMs?: number, now?: number, floorMs?: number }} identity
  * @param {() => { facts: unknown, rawLog: unknown }} extract
  * @returns {{ facts: unknown, rawLog: unknown, hit: boolean }}
  */
 export function resolveHealthLogExtraction(cached, identity, extract) {
-    if (isHealthLogCacheFresh(cached, identity.logSize, identity.mtimeMs)) {
+    if (withinRefreshFloor(cached, identity.now, identity.floorMs)
+        || isHealthLogCacheFresh(cached, identity.logSize, identity.mtimeMs)) {
         return { facts: cached.facts, rawLog: cached.rawLog, hit: true };
     }
     const { facts, rawLog } = extract();
