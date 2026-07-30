@@ -120,15 +120,31 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ github.event.inputs.version }}"
+          verify_package() {
+            local pkg="$1"
+            for attempt in {1..12}; do
+              if npm view "${pkg}@${VERSION}" version --registry=https://registry.npmjs.org/ >/tmp/npm-version.txt 2>/tmp/npm-version.err; then
+                actual="$(cat /tmp/npm-version.txt)"
+                if [ "$actual" = "$VERSION" ]; then
+                  echo "$pkg@$actual"
+                  return
+                fi
+              fi
+              echo "Waiting for ${pkg}@${VERSION} to be visible on npm (attempt ${attempt}/12)."
+              sleep 10
+            done
+            cat /tmp/npm-version.err >&2 || true
+            echo "${pkg}@${VERSION} did not become visible on npm." >&2
+            exit 1
+          }
+
           for pkg in \
             pi-better-background-tasks \
             pi-better-subagents \
             pi-better-goal \
             pi-better-harness
           do
-            actual="$(npm view "$pkg" version --registry=https://registry.npmjs.org/)"
-            test "$actual" = "$VERSION"
-            echo "$pkg@$actual"
+            verify_package "$pkg"
           done
 
       - name: Create GitHub release
