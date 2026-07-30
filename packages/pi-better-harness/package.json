@@ -1,6 +1,6 @@
 {
   "name": "pi-better-harness",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Meta package for the core Pi Better Harness extensions.",
   "type": "module",
   "keywords": [
@@ -29,8 +29,8 @@
     "README.md"
   ],
   "dependencies": {
-    "pi-better-background-tasks": "0.1.1",
-    "pi-better-goal": "0.1.1",
-    "pi-better-subagents": "0.1.1"
+    "pi-better-background-tasks": "0.1.2",
+    "pi-better-goal": "0.1.2",
+    "pi-better-subagents": "0.1.2"
   }
 }
