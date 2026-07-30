@@ -51,6 +51,13 @@ import { join } from "node:path";
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
+// Hermetic registry: this file boots the real extension and fires
+// session_start, which runs registry maintenance (cleanup, size cap,
+// abandoned-record reconciliation). Those act on the WHOLE registry, so a
+// suite run must never see a developer's live one.
+const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-ext-health-"));
+process.env.TMPDIR = HERMETIC_TMPDIR;
+
 const { default: betterSubagents, setIdentityProbeForTests, isHealthTickerActive } = await import("../index.ts");
 const { readMeta, writeMeta, nextRunId, runDir } = await import("../registry.ts");
 const { realProcessProbe, OLD_METADATA_LOST_CONFIRM_TICKS } = await import("../health.ts");
