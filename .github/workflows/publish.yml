@@ -81,11 +81,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          check_pack_file() {
+            local file="$1"
+            local required_path="$2"
+            node -e 'const data=require(process.argv[1]); const p=Array.isArray(data) ? data[0] : Object.values(data)[0]; if (!p?.files?.some((f) => f.path === process.argv[2])) throw new Error(`missing ${process.argv[2]}`);' "$file" "$required_path"
+          }
+
           npm pack --dry-run -w packages/pi-better-background-tasks --json --registry=https://registry.npmjs.org/ > /tmp/pi-bg-pack.json
-          node -e 'const p=require("/tmp/pi-bg-pack.json")[0]; if(!p.files.some(f=>f.path==="src/shared-navigator.ts")) throw new Error("background-tasks missing shared navigator")'
+          check_pack_file /tmp/pi-bg-pack.json src/shared-navigator.ts
 
           npm pack --dry-run -w packages/pi-better-subagents --json --registry=https://registry.npmjs.org/ > /tmp/pi-subagents-pack.json
-          node -e 'const p=require("/tmp/pi-subagents-pack.json")[0]; if(!p.files.some(f=>f.path==="shared-navigator.ts")) throw new Error("subagents missing shared navigator")'
+          check_pack_file /tmp/pi-subagents-pack.json shared-navigator.ts
 
           npm pack --dry-run -w packages/pi-better-goal --json --registry=https://registry.npmjs.org/ > /tmp/pi-goal-pack.json
           npm pack --dry-run -w packages/pi-better-harness --json --registry=https://registry.npmjs.org/ > /tmp/pi-harness-pack.json
