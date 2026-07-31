@@ -4,15 +4,17 @@
 
 ## Quick Answer
 
-Use Pi Better Harness when a Pi session needs to keep moving while related work runs elsewhere. Install the bundle with `pi install npm:pi-better-harness`, or install only the individual extension you need.
+Use Pi Better Harness when a Pi session needs to keep moving while related work runs elsewhere. Install all three extensions as standalone Pi packages with `npx pi-better-harness install`, or install only the individual extension you need.
 
-## Install The Bundle
+## Install All Three
 
-Install the full bundle:
+Install all three extensions with standalone package identities:
 
 ```sh
-pi install npm:pi-better-harness
+npx pi-better-harness install
 ```
+
+Remove all three with `npx pi-better-harness uninstall`. Add `--local` to either command for project-local Pi settings.
 
 Install only one part:
 
@@ -22,10 +24,10 @@ pi install npm:pi-better-background-tasks
 pi install npm:pi-better-goal
 ```
 
-Try the bundle for one run without saving it to Pi settings:
+The backward-compatible bundled installation remains available:
 
 ```sh
-pi -e npm:pi-better-harness
+pi install npm:pi-better-harness
 ```
 
 ## When To Use
