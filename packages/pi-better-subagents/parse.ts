@@ -23,10 +23,10 @@
 import {
     closeSync,
     openSync,
-    readFileSync,
     readSync,
     statSync,
 } from "node:fs";
+import { readBoundedTail } from "./shared-log-utils.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { logPathFor } from "./registry.ts";
 
@@ -87,63 +87,7 @@ interface TailRead {
  * Read at most `maxBytes` from the end of `path`. Avoids `readFileSync` so logs
  * larger than Node's max string length can still be tailed for live output.
  */
-function readTail(path: string, maxBytes: number): TailRead {
-    let totalBytes = 0;
-    try {
-        totalBytes = statSync(path).size;
-    } catch {
-        return { text: "", truncated: false, totalBytes: 0, error: "log not found" };
-    }
-
-    if (totalBytes === 0) {
-        return { text: "", truncated: false, totalBytes: 0 };
-    }
-
-    if (totalBytes <= maxBytes) {
-        try {
-            return { text: readFileSync(path, "utf-8"), truncated: false, totalBytes };
-        } catch (e) {
-            return {
-                text: "",
-                truncated: false,
-                totalBytes,
-                error: `read failed: ${(e as Error).message}`,
-            };
-        }
-    }
-
-    let fd: number;
-    try {
-        fd = openSync(path, "r");
-    } catch (e) {
-        return {
-            text: "",
-            truncated: true,
-            totalBytes,
-            error: `open failed: ${(e as Error).message}`,
-        };
-    }
-
-    const buf = Buffer.alloc(maxBytes);
-    const offset = totalBytes - maxBytes;
-    let read = 0;
-    try {
-        read = readSync(fd, buf, 0, maxBytes, offset);
-    } catch (e) {
-        closeSync(fd);
-        return {
-            text: "",
-            truncated: true,
-            totalBytes,
-            error: `tail read failed: ${(e as Error).message}`,
-        };
-    }
-    closeSync(fd);
-
-    const text = buf.toString("utf-8", 0, read);
-
-    return { text, truncated: true, totalBytes };
-}
+const readTail: (path: string, maxBytes: number) => TailRead = readBoundedTail;
 
 /** Last `n` lines of a run's log, or a placeholder if empty/unreadable. */
 export function tailLog(id: string, n: number, maxBytes = maxRawTailBytes()): string {

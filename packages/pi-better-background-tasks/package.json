@@ -30,6 +30,8 @@
     "access": "public"
   },
   "scripts": {
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run src/conditions.test.ts src/runtime.test.ts",

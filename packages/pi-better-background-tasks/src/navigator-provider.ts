@@ -133,6 +133,10 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
   if (meta.lastCheckedAt) metadata.push({ label: "checked", value: `${formatDuration(now - meta.lastCheckedAt)} ago` });
   if (meta.lastExitCode !== undefined) metadata.push({ label: "exit", value: String(meta.lastExitCode) });
   if (meta.error) metadata.push({ label: "error", value: meta.error });
+  if (meta.logDiscardedBytes) {
+    const count = meta.logRetentionEvents ?? 1;
+    metadata.push({ label: "log dropped", value: `${formatBytes(meta.logDiscardedBytes)} in ${count} compaction${count === 1 ? "" : "s"}` });
+  }
   return {
     providerId: "background-tasks",
     id: meta.id,
@@ -146,6 +150,7 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
       label: "command",
       text: command,
       collapsedText: compactCommandLabel(meta),
+      expandedByDefault: true,
     }],
     evidence: {
       label: log.truncated ? "log tail" : "log",
@@ -209,4 +214,10 @@ function formatDuration(ms: number): string {
   const hours = Math.floor(minutes / 60);
   const min = minutes % 60;
   return `${hours}h ${min.toString().padStart(2, "0")}m`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }

@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendLine, appendWatchResult } from "./logs.js";
+import { appendLine, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
 import { evaluateCondition } from "./conditions.js";
 import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, writeMeta } from "./registry.js";
@@ -8,6 +8,8 @@ import { isTerminalStatus } from "./types.js";
 
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const activePolls = new Set<string>();
+const logRetentionTimers = new Map<string, ReturnType<typeof setInterval>>();
+const LOG_RETENTION_CHECK_MS = 1000;
 
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 
@@ -17,6 +19,7 @@ export interface SpawnTaskParams extends CommandSpec {
   name?: string;
   callback?: boolean;
   timeout_seconds?: number;
+  max_log_bytes?: number;
 }
 
 export interface WatchTaskParams extends CommandSpec {
@@ -24,6 +27,7 @@ export interface WatchTaskParams extends CommandSpec {
   callback?: boolean;
   interval_seconds?: number;
   timeout_seconds?: number;
+  max_log_bytes?: number;
   success_when: Condition;
   failure_when?: Condition;
 }
@@ -56,15 +60,20 @@ export function spawnTask(
     shell: params.shell ?? true,
     cwd,
     env: params.env,
+    maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     pid: spawned.child.pid,
     pgid: spawned.pgid,
     spawnPid: process.pid,
   };
   writeMeta(meta);
+  scheduleLogRetention(id);
   spawned.child.unref();
   spawned.child.on("close", (exitCode, signal) => {
+    stopLogRetention(id);
     const latest = readMeta(id);
-    if (!latest || isTerminalStatus(latest.status)) return;
+    if (!latest) return;
+    enforceLogRetention(latest);
+    if (isTerminalStatus(latest.status)) return;
     latest.status = exitCode === 0 ? "succeeded" : "failed";
     latest.endedAt = Date.now();
     latest.lastExitCode = exitCode;
@@ -104,6 +113,7 @@ export function startWatchTask(
     shell: params.shell ?? true,
     cwd,
     env: params.env,
+    maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     spawnPid: process.pid,
     successWhen: params.success_when,
     failureWhen: params.failure_when,
@@ -135,6 +145,7 @@ export function resumeRunningTask(
     scheduleWatch(pi, meta.id, 0, getActiveSession);
     return meta;
   }
+  if (meta.kind === "process") scheduleLogRetention(meta.id);
   if (meta.kind === "process" && meta.pid && !processExists(meta.pid)) {
     meta.status = "failed";
     meta.endedAt = Date.now();
@@ -158,6 +169,7 @@ export function stopTask(pi: ExtensionAPI, id: string, getActiveSession?: Active
   meta.result = { reason: "cancelled" };
   writeMeta(meta);
   clearWatchTimer(id);
+  stopLogRetention(id);
   if (meta.kind === "process" && meta.pid) {
     try {
       stopProcessGroup(meta.pid, meta.pgid);
@@ -198,6 +210,7 @@ async function pollWatch(pi: ExtensionAPI, id: string, getActiveSession?: Active
     appendWatchResult(meta.logPath, result);
     const latest = readMeta(id);
     if (!latest || latest.status !== "running") return;
+    enforceLogRetention(latest);
     latest.lastCheckedAt = Date.now();
     latest.lastExitCode = result.exitCode;
     latest.lastSignal = result.signal;
@@ -253,6 +266,7 @@ function finalize(
   }
   writeMeta(meta);
   clearWatchTimer(meta.id);
+  stopLogRetention(meta.id);
   void notifyTerminal(pi, meta, getActiveSession);
 }
 
@@ -334,6 +348,34 @@ function commandSpecFromMeta(meta: BackgroundTaskMeta): CommandSpec {
     cwd: meta.cwd,
     env: meta.env,
   };
+}
+
+function scheduleLogRetention(id: string): void {
+  stopLogRetention(id);
+  const timer = setInterval(() => {
+    const meta = readMeta(id);
+    if (!meta || meta.status !== "running" || meta.kind !== "process") {
+      stopLogRetention(id);
+      return;
+    }
+    enforceLogRetention(meta);
+  }, LOG_RETENTION_CHECK_MS);
+  timer.unref();
+  logRetentionTimers.set(id, timer);
+}
+
+function stopLogRetention(id: string): void {
+  const timer = logRetentionTimers.get(id);
+  if (timer) clearInterval(timer);
+  logRetentionTimers.delete(id);
+}
+
+function enforceLogRetention(meta: BackgroundTaskMeta): void {
+  const compacted = retainLogTail(meta.logPath, resolveMaxLogBytes(meta.maxLogBytes));
+  if (!compacted) return;
+  meta.logDiscardedBytes = (meta.logDiscardedBytes ?? 0) + compacted.discardedBytes;
+  meta.logRetentionEvents = (meta.logRetentionEvents ?? 0) + 1;
+  writeMeta(meta);
 }
 
 function extractLastState(result: { stdout: string }): unknown {

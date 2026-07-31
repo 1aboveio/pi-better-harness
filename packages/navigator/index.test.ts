@@ -642,7 +642,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("opens detail only as an overlay with a rolling tail size and folded command", () => {
+  it("opens detail only as an overlay with a 10/25 rolling tail and default-expanded command", () => {
     const detailCalls: Array<number | undefined> = [];
     const unregister = registerBackgroundWorkProvider({
       id: "background-tasks",
@@ -675,6 +675,7 @@ describe("shared background work navigator", () => {
             label: "command",
             text: "gh pr view 14 --repo 1aboveio/pi-better-harness --json state,mergedAt,mergeCommit,statusCheckRollup",
             collapsedText: "#!/usr/bin/env bash\nset -uo pipefail\ngh pr view 14 --repo 1aboveio/pi-better-harness --json state,mergedAt,mergeCommit,statusCheckRollup",
+            expandedByDefault: true,
           }],
           evidence: { label: "log tail", text: `latest ${options?.logTailLines ?? 0}` },
           footerActions: ["x stop"],
@@ -734,11 +735,11 @@ describe("shared background work navigator", () => {
       let rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 10);
       assert.match(rendered, /log tail · latest 10 rows/);
-      assert.match(rendered, /command\s+#!\/usr\/bin\/env bash/);
-      assert.match(rendered, /folded/);
-      assert.doesNotMatch(rendered, /statusCheckRollup/);
+      assert.match(rendered, /command/);
+      assert.match(rendered, /statusCheckRollup/);
+      assert.doesNotMatch(rendered, /command.*folded/);
 
-      component.handleInput("]");
+      component.handleInput("l");
       renderedLines = component.render(72);
       rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 25);
@@ -747,7 +748,10 @@ describe("shared background work navigator", () => {
 
       component.handleInput("enter");
       rendered = component.render(120).join("\n");
-      assert.match(rendered, /statusCheckRollup/);
+      assert.match(rendered, /command.*folded/);
+
+      component.handleInput("l");
+      assert.equal(detailCalls.at(-1), 10);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
@@ -845,7 +849,7 @@ describe("shared background work navigator", () => {
       assert.doesNotMatch(rendered, /row-11 visible after more/);
       for (const line of renderedLines) assert.ok(line.length <= 54, `line exceeds width: ${line}`);
 
-      component.handleInput("]");
+      component.handleInput("l");
       rendered = component.render(54).join("\n");
       assert.match(rendered, /output · showing \d+\/\d+ rows/);
       assert.match(rendered, /row-11 visible after more/);

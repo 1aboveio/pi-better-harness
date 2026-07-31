@@ -22,6 +22,7 @@ const CommandFields = {
   shell: Type.Optional(Type.Boolean({ description: "Run command through the package's bash-compatible shell. Default true." })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current pi cwd." })),
   env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Extra environment variables." })),
+  max_log_bytes: Type.Optional(Type.Number({ description: "Maximum retained raw-log bytes. Default 4194304 (4 MiB). Older output is compacted while the task runs." })),
   callback: Type.Optional(Type.Boolean({ description: "Queue a follow-up when the task reaches a terminal state. Default true." })),
   timeout_seconds: Type.Optional(Type.Number({ description: "Optional timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to disable. Spawned processes have no default timeout." })),
 };
@@ -143,7 +144,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_log",
     label: "BG Log",
-    description: "Read a background task log. Default output is a compact 20-line tail for model ingestion. Pass tail_lines for a bounded tail; pass tail_lines:0 only when the full log is explicitly required. Nonblocking.",
+    description: "Read a background task log. Default output is a compact 20-line terminal-aware tail for model ingestion. Pass tail_lines for a bounded tail; tail_lines:0 returns the retained raw log, capped at 512 KiB for safe recovery. Nonblocking.",
     parameters: LogParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -299,8 +300,9 @@ function formatCompactStatus(meta: BackgroundTaskMeta): string {
   if (reason) lines.push(`result: ${reason}`);
   if (meta.error) lines.push(`error: ${oneLine(meta.error, 500)}`);
   if (meta.lastState !== undefined) lines.push(`last state: ${oneLine(meta.lastState, 800)}`);
+  if (meta.logDiscardedBytes) lines.push(`log retention: ${meta.logDiscardedBytes} bytes discarded in ${meta.logRetentionEvents ?? 1} compaction(s).`);
   lines.push(`log: ${meta.logPath}`);
-  lines.push(`For full metadata use bg_task_status id=${meta.id} verbose=true. For logs use bg_task_log id=${meta.id} tail_lines=20, or tail_lines=0 for the full log.`);
+  lines.push(`For full metadata use bg_task_status id=${meta.id} verbose=true. For logs use bg_task_log id=${meta.id} tail_lines=20, or tail_lines=0 for the retained raw log.`);
   return lines.join("\n");
 }
 
