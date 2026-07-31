@@ -17,7 +17,7 @@ not special cases in the runtime.
 | `bg_task_watch` | Poll a command until success/failure/timeout. |
 | `bg_task_list` | List known tasks. |
 | `bg_task_status` | Inspect one task. Compact by default; pass `verbose:true` for full metadata JSON. |
-| `bg_task_log` | Read a bounded task log tail by default, or a full log on request. |
+| `bg_task_log` | Read a bounded, terminal-aware task log tail. |
 | `bg_task_stop` | Cancel a watcher or terminate a process task. |
 | `bg_task` | Action-based wrapper for `spawn`, `watch`, `list`, `status`, `log`, `stop`, `clear`. |
 | `bg_status` | Small action wrapper for `list`, `status`, `log`, `stop`, `clear`. |
@@ -33,7 +33,22 @@ agent which task finished and which tool to call for details.
 Callbacks point to `bg_task_status` first. The default status response is a
 compact model-facing summary that omits large command bodies; use
 `verbose:true` only when full metadata is required. `bg_task_log` defaults to a
-20-line tail, and `tail_lines: 0` requests the full log explicitly.
+20-line terminal-aware tail. `tail_lines: 0` returns the retained raw log, up
+to a 512 KiB safe-read cap.
+
+## Log Retention
+
+Background processes retain at most 4 MiB of raw output by default. When output
+crosses that budget, the task keeps its newest raw bytes in the same log inode
+and records the discarded-byte count in task status and detail metadata. This
+preserves detached-process output while preventing progress-heavy commands from
+growing a log without bound during supervision.
+
+Set `max_log_bytes` on `bg_task_spawn` or `bg_task_watch` to use a different
+budget, with a minimum of 64 KiB. The detail page always shows 10 terminal
+display rows initially; `l` switches between 10 and 25 rows. Carriage-return
+progress redraws such as `rsync --progress` are collapsed to their latest
+visible state, leaving subsequent error lines readable.
 
 Command watchers default to a 15 minute timeout when `timeout_seconds` is
 omitted. Pass `timeout_seconds: 0` to disable the watcher timeout explicitly.
