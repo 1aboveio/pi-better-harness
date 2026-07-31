@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-07-31
+
+### Changed
+
+- show both package-gallery images in every published package README ([#118](https://github.com/1aboveio/pi-better-harness/pull/118))
+
 ## [0.1.7] - 2026-07-31
 
 ### Added
