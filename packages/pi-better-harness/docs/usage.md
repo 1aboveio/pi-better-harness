@@ -2,7 +2,7 @@
 
 Meta package for the core Pi Better Harness extensions.
 
-Install it once to load the background-work tools used most often in Pi:
+Use it to manage the background-work tools used most often in Pi:
 
 - `pi-better-subagents` for detached subagent runs and completion callbacks
 - `pi-better-background-tasks` for durable shell tasks and command watchers
@@ -12,15 +12,19 @@ Install it once to load the background-work tools used most often in Pi:
 
 ## Install
 
-```sh
-pi install npm:pi-better-harness
-```
-
-For a temporary run without saving the package to Pi settings:
+Install all three extensions as standalone Pi packages:
 
 ```sh
-pi -e npm:pi-better-harness
+npx pi-better-harness install
 ```
+
+Use project-local Pi settings:
+
+```sh
+npx pi-better-harness install --local
+```
+
+For backward-compatible bundled loading, use `pi install npm:pi-better-harness`.
 
 ## Included Tools
 
@@ -47,8 +51,8 @@ pi install npm:pi-better-goal
 ## Update Or Remove
 
 ```sh
-pi update npm:pi-better-harness
-pi remove npm:pi-better-harness
+npx pi-better-harness uninstall
+npx pi-better-harness uninstall --local
 ```
 
 ## Source

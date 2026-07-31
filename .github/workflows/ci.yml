@@ -36,6 +36,8 @@ jobs:
           npm pack --dry-run --workspaces
           npm pack --dry-run -w packages/pi-better-harness --json > /tmp/pi-harness-pack.json
           for path in \
+            bin/pi-better-harness.mjs \
+            lib/cli.mjs \
             extensions/subagents/index.ts \
             extensions/background-tasks/index.ts \
             extensions/goal/index.ts \

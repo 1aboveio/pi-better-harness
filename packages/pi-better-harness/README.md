@@ -4,7 +4,7 @@
 
 ## Quick Answer
 
-Use `pi-better-harness` when you want the full background-work bundle for Pi in one install. It loads:
+Use `pi-better-harness` when you want the full background-work set for Pi. It manages:
 
 - `pi-better-subagents` for detached, sandboxed subagent runs.
 - `pi-better-background-tasks` for durable shell tasks and watchers.
@@ -18,42 +18,45 @@ Use `pi-better-harness` when you want the full background-work bundle for Pi in 
 
 ## Install
 
+Install the three extensions as standalone Pi packages, so Pi displays and manages each by its own package name:
+
+```sh
+npx pi-better-harness install
+```
+
+For project-local Pi settings:
+
+```sh
+npx pi-better-harness install --local
+```
+
+The bundled installation remains available for compatibility:
+
 ```sh
 pi install npm:pi-better-harness
 ```
 
-Try it for one run without saving it to Pi settings:
-
-```sh
-pi -e npm:pi-better-harness
-```
-
-## Install Individual Packages
-
-```sh
-pi install npm:pi-better-subagents
-pi install npm:pi-better-background-tasks
-pi install npm:pi-better-goal
-```
-
 ## When To Use
 
-Use this package when you want all three core extensions loaded together. Install an individual package instead when you only need subagents, shell task supervision, or goal tracking.
+Use the installer when you want all three core extensions with standalone package identities. Install an individual package instead when you only need subagents, shell task supervision, or goal tracking.
 
 ## Compatibility
 
 | Requirement | Support |
 |-------------|---------|
 | Pi | Required |
-| Install method | `pi install npm:pi-better-harness` |
+| Recommended install | `npx pi-better-harness install` |
 | Development runtime | Node.js 22+ |
 
 ## Update Or Remove
 
+Remove all three standalone packages:
+
 ```sh
-pi update npm:pi-better-harness
-pi remove npm:pi-better-harness
+npx pi-better-harness uninstall
 ```
+
+Add `--local` to remove them from project-local settings.
 
 ## More Detail
 

@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-07-31
+
+### Added
+
+- add `npx pi-better-harness install` and `uninstall` shortcuts for managing all three standalone component packages, with optional project-local scope
+
 ## [0.1.10] - 2026-07-31
 
 ### Changed
