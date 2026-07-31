@@ -32,7 +32,16 @@ jobs:
         run: npm run test:cross-session
 
       - name: Package dry run
-        run: npm pack --dry-run --workspaces
+        run: |
+          npm pack --dry-run --workspaces
+          npm pack --dry-run -w packages/pi-better-harness --json > /tmp/pi-harness-pack.json
+          for path in \
+            node_modules/pi-better-subagents/index.ts \
+            node_modules/pi-better-background-tasks/src/index.ts \
+            node_modules/pi-better-goal/src/index.ts
+          do
+            node -e 'const [pack] = require(process.argv[1]); if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
+          done
 
   macos-sandbox:
     name: macos-sandbox
