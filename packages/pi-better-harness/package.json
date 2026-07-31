@@ -1,6 +1,6 @@
 {
   "name": "pi-better-harness",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Pi extension bundle for subagents, durable background tasks, and goal tracking.",
   "license": "MIT",
   "type": "module",
@@ -14,9 +14,9 @@
   ],
   "pi": {
     "extensions": [
-      "node_modules/pi-better-subagents/index.ts",
-      "node_modules/pi-better-background-tasks/src/index.ts",
-      "node_modules/pi-better-goal/src/index.ts"
+      "extensions/subagents/index.ts",
+      "extensions/background-tasks/index.ts",
+      "extensions/goal/index.ts"
     ],
     "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-harness.png"
   },
@@ -30,15 +30,16 @@
   },
   "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme",
   "files": [
-    "README.md"
+    "README.md",
+    "extensions/**/*.ts"
   ],
   "scripts": {
     "prepack": "node ../../scripts/stage-harness-dependencies.mjs"
   },
   "dependencies": {
-    "pi-better-background-tasks": "0.1.9",
-    "pi-better-goal": "0.1.9",
-    "pi-better-subagents": "0.1.9"
+    "pi-better-background-tasks": "0.1.10",
+    "pi-better-goal": "0.1.10",
+    "pi-better-subagents": "0.1.10"
   },
   "bundledDependencies": [
     "pi-better-background-tasks",
