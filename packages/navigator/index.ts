@@ -35,7 +35,7 @@ export type BackgroundWorkDetail = {
   statusTone: BackgroundWorkStatusTone;
   subtitle?: string;
   metadata: Array<{ label: string; value: string }>;
-  foldedSections?: Array<{ id: string; label: string; text: string; collapsedText?: string }>;
+  foldedSections?: Array<{ id: string; label: string; text: string; collapsedText?: string; expandedByDefault?: boolean }>;
   evidence: { label: string; text: string };
   footerActions?: string[];
 };
@@ -94,7 +94,7 @@ export const MAIN_LIST_WIDGET_KEY = "background-work-list";
 export const DETAIL_TICK_MS = 1000;
 export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
-export const LOG_TAIL_ROW_CHOICES = [10, 25, 50, 100] as const;
+export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
 // Row rebuild cadence. Each tick asks every provider for rows, which stats and
 // parses run logs, so this is a per-provider I/O cadence and not a paint rate:
 // the widget repaints from render() whenever the TUI asks. 1 Hz matches
@@ -671,6 +671,7 @@ function createOverlayComponent(
   const expandedSections = new Set<string>();
   let detailId: string | null = initialDetailId ?? null;
   let detail: BackgroundWorkDetail | null = detailId ? (detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? null) : null;
+  applyDefaultExpandedSections(detail, expandedSections);
   if (detailId) {
     const idx = overlayState.rows.findIndex((row) => row.navigatorId === detailId);
     if (idx >= 0) overlayState.selected = idx;
@@ -729,6 +730,7 @@ function createOverlayComponent(
     detailId = row.navigatorId;
     expandedSections.clear();
     detail = detailFor(row.navigatorId, Date.now(), { logTailLines: logTailRows }) ?? fallbackDetail(row);
+    applyDefaultExpandedSections(detail, expandedSections);
     mode = "detail";
     startDetailTimer();
     requestRender();
@@ -814,16 +816,6 @@ function createOverlayComponent(
             else expandedSections.add(sectionId);
             requestRender();
           }
-        }
-        else if (data === "[") {
-          logTailRows = previousLogTailRows(logTailRows);
-          if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
-          requestRender();
-        }
-        else if (data === "]") {
-          logTailRows = nextLogTailRows(logTailRows);
-          if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
-          requestRender();
         }
         else if (data === "l" || data === "L") {
           logTailRows = cycleLogTailRows(logTailRows);
@@ -939,7 +931,7 @@ function buildDetailLines(
   const foldedAction = toggleableSectionId
     ? (options.expandedSections?.has(toggleableSectionId) ? "Enter collapse" : "Enter expand")
     : null;
-  const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "[ fewer", "] more", "l cycle", "Esc close"].filter(Boolean).join(" · ");
+  const actions = [foldedAction, ...(detail.footerActions?.length ? detail.footerActions : ["x close"]), "l 10/25", "Esc close"].filter(Boolean).join(" · ");
   lines.push(dim(`   ← back · ${actions}`, fg));
   lines.push("");
   lines.push(`   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`);
@@ -1004,6 +996,12 @@ function firstToggleableSectionId(detail: BackgroundWorkDetail | null | undefine
   return detail && isFoldableEvidence(detail) ? EVIDENCE_SECTION_ID : undefined;
 }
 
+function applyDefaultExpandedSections(detail: BackgroundWorkDetail | null, expandedSections: Set<string>): void {
+  for (const section of detail?.foldedSections ?? []) {
+    if (section.expandedByDefault) expandedSections.add(section.id);
+  }
+}
+
 function isFoldableEvidence(detail: BackgroundWorkDetail): boolean {
   return !/log/i.test(detail.evidence.label);
 }
@@ -1041,19 +1039,6 @@ function wrapEvidenceText(text: string, width: number): string[] {
     rows.push(...wrapDetailText(raw, width));
   }
   return rows.length ? rows : ["(no output yet)"];
-}
-
-function nextLogTailRows(current: number): number {
-  for (const value of LOG_TAIL_ROW_CHOICES) if (value > current) return value;
-  return LOG_TAIL_ROW_CHOICES[LOG_TAIL_ROW_CHOICES.length - 1];
-}
-
-function previousLogTailRows(current: number): number {
-  for (let i = LOG_TAIL_ROW_CHOICES.length - 1; i >= 0; i -= 1) {
-    const value = LOG_TAIL_ROW_CHOICES[i]!;
-    if (value < current) return value;
-  }
-  return LOG_TAIL_ROW_CHOICES[0];
 }
 
 function cycleLogTailRows(current: number): number {

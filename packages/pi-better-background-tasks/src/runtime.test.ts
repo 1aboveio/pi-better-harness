@@ -101,6 +101,22 @@ describe("runtime", () => {
     expect(terminal?.lastExitCode).toBe(0);
   }, 30_000);
 
+  it("retains bounded output from a noisy spawned process", async () => {
+    const meta = spawnTask(fakePi, {
+      name: "bounded process log",
+      shell: false,
+      argv: [process.execPath, "-e", "process.stdout.write('x'.repeat(200000))"],
+      max_log_bytes: 64 * 1024,
+      callback: false,
+    }, process.cwd());
+
+    const terminal = await waitForMeta(meta.id, (m) => m?.status === "succeeded" && Boolean(m.logDiscardedBytes), 30_000);
+
+    expect(terminal?.maxLogBytes).toBe(64 * 1024);
+    expect(terminal?.logDiscardedBytes).toBeGreaterThan(0);
+    expect(terminal?.logRetentionEvents).toBe(1);
+  }, 30_000);
+
   it("callback completion does not embed process output", async () => {
     const messages: Array<{ message: string; options: unknown }> = [];
     const pi = {

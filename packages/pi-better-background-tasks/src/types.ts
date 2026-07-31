@@ -62,6 +62,9 @@ export interface BackgroundTaskMeta {
   shell?: boolean;
   cwd: string;
   env?: Record<string, string>;
+  maxLogBytes?: number;
+  logDiscardedBytes?: number;
+  logRetentionEvents?: number;
   pid?: number;
   pgid?: number;
   spawnPid: number;
