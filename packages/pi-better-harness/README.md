@@ -12,6 +12,10 @@ Use `pi-better-harness` when you want the full background-work bundle for Pi in 
 
 `pi-better-read-aloud` is intentionally not included yet.
 
+## Screenshots
+
+<p><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-harness.png" alt="pi-better-harness rendered in Pi" width="49%" /><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/overview/pi-better-harness.png" alt="pi-better-harness package overview" width="49%" /></p>
+
 ## Install
 
 ```sh

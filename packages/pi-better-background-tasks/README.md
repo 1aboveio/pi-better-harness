@@ -6,6 +6,10 @@
 
 Use `pi-better-background-tasks` when a command should keep running while the foreground Pi session stays free. It is best for dev servers, long scripts, queue watchers, deploy checks, log tails, and other command-driven work.
 
+## Screenshots
+
+<p><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-background-tasks.png" alt="pi-better-background-tasks rendered in Pi" width="49%" /><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/overview/pi-better-background-tasks.png" alt="pi-better-background-tasks package overview" width="49%" /></p>
+
 ## Core Features
 
 - Start long-running commands without blocking the current turn.
