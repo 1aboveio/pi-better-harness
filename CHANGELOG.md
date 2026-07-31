@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-07-31
+
+### Changed
+
+- expose clean harness extension entry points so Pi displays `pi-better-harness:subagents`, `pi-better-harness:background-tasks`, and `pi-better-harness:goal`
+
 ## [0.1.9] - 2026-07-31
 
 ### Fixed
