@@ -95,6 +95,9 @@ jobs:
 
           npm pack --dry-run -w packages/pi-better-goal --json --registry=https://registry.npmjs.org/ > /tmp/pi-goal-pack.json
           npm pack --dry-run -w packages/pi-better-harness --json --registry=https://registry.npmjs.org/ > /tmp/pi-harness-pack.json
+          check_pack_file /tmp/pi-harness-pack.json extensions/subagents/index.ts
+          check_pack_file /tmp/pi-harness-pack.json extensions/background-tasks/index.ts
+          check_pack_file /tmp/pi-harness-pack.json extensions/goal/index.ts
           check_pack_file /tmp/pi-harness-pack.json node_modules/pi-better-subagents/index.ts
           check_pack_file /tmp/pi-harness-pack.json node_modules/pi-better-background-tasks/src/index.ts
           check_pack_file /tmp/pi-harness-pack.json node_modules/pi-better-goal/src/index.ts

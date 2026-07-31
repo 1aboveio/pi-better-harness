@@ -1,0 +1,1 @@
+export { default } from "../../node_modules/pi-better-goal/src/index.ts";
