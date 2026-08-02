@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-08-02
+
+### Fixed
+
+- **goal**: keep equal spacing between Goal and navigator sections, and hide completed goals after the shared 30-second terminal retention window
+
 ## [0.1.13] - 2026-08-02
 
 ### Added
