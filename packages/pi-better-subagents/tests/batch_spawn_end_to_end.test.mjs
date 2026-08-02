@@ -592,13 +592,13 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.equal(meta.batchName, undefined);
     });
 
-    it("passes thinking effort to the child and records it for the navigator", async () => {
+    it("parses model@effort and records the resolved effort for the navigator", async () => {
         const { tools } = loadExtension(mod);
         const ctx = makeCtx();
 
         const res = await tools.subagent_spawn.execute(
             "tc-thinking",
-            { prompt: "reason carefully", thinking: "high", tools: "read,bash", sandbox: false },
+            { prompt: "reason carefully", model: "gpt-5.5@high", tools: "read,bash", sandbox: false },
             null,
             null,
             ctx,
@@ -616,6 +616,9 @@ describe("subagent_spawn_batch end-to-end", () => {
         const thinkingIndex = argv.indexOf("--thinking");
         assert.notEqual(thinkingIndex, -1, "child argv must include --thinking");
         assert.equal(argv[thinkingIndex + 1], "high");
+        const modelIndex = argv.indexOf("--model");
+        assert.notEqual(modelIndex, -1, "child argv must include --model");
+        assert.equal(argv[modelIndex + 1], "gpt-5.5");
     });
 
     it("rejects an invalid single-spawn thinking level before spawning", async () => {
