@@ -18,6 +18,7 @@
 import {
     mkdtempSync,
     mkdirSync,
+    readFileSync,
     writeFileSync,
     chmodSync,
     rmSync,
@@ -160,6 +161,7 @@ function writeRunningMeta({ writeMeta, nextRunId }, name) {
 
 function fakePiScript() {
     return `#!/bin/bash
+original_args=("$@")
 if [ -n "$PI_SLEEP_SECONDS" ]; then
   sleep "$PI_SLEEP_SECONDS"
 fi
@@ -175,6 +177,7 @@ done
 base=$(dirname "$sess")
 log="$base/runs/$id/output.log"
 mkdir -p "$(dirname "$log")"
+printf '%s\\n' "\${original_args[@]}" > "$base/runs/$id/argv.txt"
 printf '%s\\n' '{"type":"agent_settled"}' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}' > "$log"
 `;
 }
@@ -587,6 +590,47 @@ describe("subagent_spawn_batch end-to-end", () => {
         const meta = registry.readMeta(match[1]);
         assert.equal(meta.batchId, undefined);
         assert.equal(meta.batchName, undefined);
+    });
+
+    it("passes thinking effort to the child and records it for the navigator", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+
+        const res = await tools.subagent_spawn.execute(
+            "tc-thinking",
+            { prompt: "reason carefully", thinking: "high", tools: "read,bash", sandbox: false },
+            null,
+            null,
+            ctx,
+        );
+        const id = res.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+        assert.ok(id);
+        await waitForFinished(registry.readMeta, id);
+
+        const meta = registry.readMeta(id);
+        assert.equal(meta.effort, "high");
+        const argv = readFileSync(
+            join(RUNTIME, "pi-better-subagents", "runs", id, "argv.txt"),
+            "utf8",
+        ).trim().split("\n");
+        const thinkingIndex = argv.indexOf("--thinking");
+        assert.notEqual(thinkingIndex, -1, "child argv must include --thinking");
+        assert.equal(argv[thinkingIndex + 1], "high");
+    });
+
+    it("rejects an invalid single-spawn thinking level before spawning", async () => {
+        const { tools } = loadExtension(mod);
+        await assert.rejects(
+            () => tools.subagent_spawn.execute(
+                "tc-invalid-thinking",
+                { prompt: "x", thinking: "extreme", tools: "read,bash", sandbox: false },
+                null,
+                null,
+                makeCtx(),
+            ),
+            /thinking must be one of: off, minimal, low, medium, high, xhigh, max/,
+        );
+        assert.equal(registry.listMetas().length, 0);
     });
 
     it("batch-launched run ids work with subagent_output", async () => {

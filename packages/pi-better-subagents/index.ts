@@ -106,6 +106,7 @@ import {
     buildNavigatorDetail,
 } from "./navigator.ts";
 import { enforceRegistrySizeCapOnce, runDailyCleanupOnce } from "./cleanup.ts";
+import { assertThinkingLevel, type ThinkingLevel } from "./thinking.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -613,11 +614,7 @@ function navigatorRows(visible?: RunMeta[], at?: number) {
             const snap = spendFor(m.id, now);
             return snap.tool ?? "";
         },
-        // Effort is shown when available on metadata; Pi does not always expose it.
-        effortFor: (m: RunMeta) => {
-            const any = m as RunMeta & { effort?: string; modelEffort?: string };
-            return any.effort ?? any.modelEffort;
-        },
+        effortFor: (m: RunMeta) => m.effort,
         healthFor: (m: RunMeta) => observeNavigatorHealth(m, now),
     });
 }
@@ -668,10 +665,7 @@ function navigatorDetail(id: string, now: number = Date.now()) {
         fmtElapsed,
         fmtSpend,
         now,
-        effortFor: (m: RunMeta) => {
-            const any = m as RunMeta & { effort?: string; modelEffort?: string };
-            return any.effort ?? any.modelEffort;
-        },
+        effortFor: (m: RunMeta) => m.effort,
         healthFor: (m: RunMeta) => observeNavigatorHealth(m, now),
     });
 }
@@ -917,7 +911,7 @@ export default function (pi: ExtensionAPI) {
     ensureSubagentProvider();
 
     type SpawnParams = {
-        prompt: string; name?: string; model?: string; tools?: string;
+        prompt: string; name?: string; model?: string; thinking?: ThinkingLevel; tools?: string;
         exclude_tools?: string; clean?: boolean; sandbox?: boolean;
         sandbox_dir?: string; callback?: boolean; cwd?: string;
         git_clone_workspace?: boolean; approve?: boolean; allow_nested?: boolean;
@@ -941,6 +935,7 @@ export default function (pi: ExtensionAPI) {
         warn: string;
         sandboxDir?: string;
     }> {
+        assertThinkingLevel(p.thinking);
         const cfg = loadConfig();
         // Best-effort daily hygiene for durable tmp state. The marker makes
         // this effectively free after the first subagent launch each day.
@@ -1017,6 +1012,7 @@ export default function (pi: ExtensionAPI) {
             "--session-id", id,
             ...extArgs,
             ...(model ? ["--model", model] : []),
+            ...(p.thinking ? ["--thinking", p.thinking] : []),
             ...(allow ? ["--tools", allow] : []),
             ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
             ...(p.approve ? ["--approve"] : []),
@@ -1043,7 +1039,8 @@ export default function (pi: ExtensionAPI) {
 
         const meta: RunMeta = {
             id, name: p.name, status: "running",
-            pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model, cwd,
+            pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model,
+            effort: p.thinking, cwd,
             ...identity,
             promptPreview: p.prompt.slice(0, 200),
             startedAt: Date.now(), logPath: logPathFor(id), sessionId: id,
@@ -1096,6 +1093,7 @@ export default function (pi: ExtensionAPI) {
             prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained." }),
             name: Type.Optional(Type.String({ description: "Short label for the run (e.g. 'reviewer')." })),
             model: Type.Optional(Type.String({ description: "Model as provider/id (default: inherit foreground model)." })),
+            thinking: Type.Optional(Type.String({ description: "Reasoning effort for the child: off, minimal, low, medium, high, xhigh, or max (default: Pi/model default)." })),
             tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
             clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO extensions at all (only built-ins: read, bash, edit, write). Default false — the extensions backing the requested tools load, so web_fetch and model auth (e.g. xai) work." })),
@@ -1161,6 +1159,7 @@ export default function (pi: ExtensionAPI) {
             batchName: Type.Optional(Type.String({ description: "Optional display label for the batch." })),
             shared: Type.Optional(Type.Object({
                 model: Type.Optional(Type.String({ description: "Model as provider/id (default: inherit foreground model)." })),
+                thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
                 tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
                 exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
                 sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE: kernel-confine writes to the working dir." })),
@@ -1176,6 +1175,7 @@ export default function (pi: ExtensionAPI) {
                 prompt: Type.String({ description: "The task for this job." }),
                 name: Type.Optional(Type.String({ description: "Short label for this job." })),
                 model: Type.Optional(Type.String()),
+                thinking: Type.Optional(Type.String()),
                 tools: Type.Optional(Type.String()),
                 exclude_tools: Type.Optional(Type.String()),
                 sandbox: Type.Optional(Type.Boolean()),

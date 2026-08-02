@@ -42,6 +42,7 @@ describe("mergeJobOptions", () => {
     it("per-job options override shared options", () => {
         const shared = {
             model: "shared/model",
+            thinking: "medium",
             tools: "read,bash",
             clean: false,
             sandbox: true,
@@ -57,6 +58,7 @@ describe("mergeJobOptions", () => {
             prompt: "do it",
             name: "job-a",
             model: "job/model",
+            thinking: "high",
             tools: "read,edit",
             clean: true,
             sandbox: false,
@@ -74,6 +76,7 @@ describe("mergeJobOptions", () => {
         assert.equal(merged.prompt, "do it");
         assert.equal(merged.name, "job-a");
         assert.equal(merged.model, "job/model");
+        assert.equal(merged.thinking, "high");
         assert.equal(merged.tools, "read,edit");
         assert.equal(merged.clean, true);
         assert.equal(merged.sandbox, false);
@@ -87,7 +90,7 @@ describe("mergeJobOptions", () => {
     });
 
     it("shared options fill in missing per-job values, preserving false booleans", () => {
-        const shared = { sandbox: true, callback: false, clean: false, git_clone_workspace: true };
+        const shared = { thinking: "low", sandbox: true, callback: false, clean: false, git_clone_workspace: true };
         const job = { prompt: "x" };
 
         const merged = mergeJobOptions(shared, job);
@@ -96,6 +99,7 @@ describe("mergeJobOptions", () => {
         assert.equal(merged.callback, false);
         assert.equal(merged.clean, false);
         assert.equal(merged.git_clone_workspace, true, "shared git_clone_workspace must forward when job omits it");
+        assert.equal(merged.thinking, "low");
         assert.equal(merged.model, undefined);
     });
 
@@ -180,6 +184,13 @@ describe("validateBatchPlan", () => {
         assert.throws(
             () => validateBatchPlan({ shared: {}, jobs: [{}], config: CFG }),
             /job 1 is missing a non-empty prompt/,
+        );
+    });
+
+    it("rejects an unsupported thinking level", () => {
+        assert.throws(
+            () => validateBatchPlan({ shared: {}, jobs: [{ prompt: "x", thinking: "extreme" }], config: CFG }),
+            /job 1 thinking must be one of: off, minimal, low, medium, high, xhigh, max/,
         );
     });
 
