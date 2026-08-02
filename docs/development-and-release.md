@@ -96,6 +96,11 @@ pi install ./packages/pi-better-goal
 
 ## Release Checklist
 
+Packages are versioned and published independently. A release changes only the
+manifest for the package being released. When a component package changes, bump
+`pi-better-harness` separately only if the meta package should bundle that new
+component version. Release changed components before releasing the meta package.
+
 Start from a clean, up-to-date `main` branch:
 
 ```sh
@@ -104,64 +109,48 @@ git pull --ff-only origin main
 git status --short
 ```
 
-Verify the workspace and npm package contents:
+Verify the workspace and the package being released:
 
 ```sh
 npm run verify
-npm publish --dry-run -w packages/pi-better-background-tasks --registry=https://registry.npmjs.org/
-npm publish --dry-run -w packages/pi-better-subagents --registry=https://registry.npmjs.org/
 npm publish --dry-run -w packages/pi-better-goal --registry=https://registry.npmjs.org/
-npm publish --dry-run -w packages/pi-better-harness --registry=https://registry.npmjs.org/
 ```
 
-Publish the dependency packages before the meta package:
+Add package-scoped notes to `CHANGELOG.md`; independent packages can use the
+same semantic version without colliding:
+
+```md
+## [pi-better-goal@0.1.15] - 2026-08-02
+
+### Fixed
+
+- Description of the released Goal change.
+```
+
+Commit the manifest, lockfile, and changelog changes through the normal PR and
+merge queue. After merge, dispatch `.github/workflows/publish.yml` and select the
+single npm package to release. The workflow reads the version from that package's
+manifest, publishes only its workspace, and creates a package-scoped tag and
+GitHub release such as `pi-better-goal@0.1.15`.
+
+Confirm that package is visible:
 
 ```sh
-npm publish -w packages/pi-better-background-tasks --registry=https://registry.npmjs.org/
-npm publish -w packages/pi-better-subagents --registry=https://registry.npmjs.org/
-npm publish -w packages/pi-better-goal --registry=https://registry.npmjs.org/
-npm publish -w packages/pi-better-harness --registry=https://registry.npmjs.org/
+npm view pi-better-goal version --registry=https://registry.npmjs.org/
 ```
 
 The explicit registry flag matters on machines whose npm registry is configured
 to a mirror.
 
-Confirm the packages are visible:
+Smoke-test the released package's install path:
 
 ```sh
-npm view pi-better-background-tasks version --registry=https://registry.npmjs.org/
-npm view pi-better-subagents version --registry=https://registry.npmjs.org/
-npm view pi-better-goal version --registry=https://registry.npmjs.org/
-npm view pi-better-harness version --registry=https://registry.npmjs.org/
-```
-
-Smoke-test the install path:
-
-```sh
-pi install npm:pi-better-harness
+pi install npm:pi-better-goal
 ```
 
 Pi's package gallery discovers npm packages tagged with the `pi-package` keyword.
 After npm publish, the bundle and the three component packages are all eligible
 to appear there.
 
-Then create the matching GitHub release:
-
-```sh
-gh release create v0.1.0 \
-  --title "v0.1.0" \
-  --notes "Initial npm release of Pi Better Harness.
-
-Install:
-\`\`\`sh
-pi install npm:pi-better-harness
-\`\`\`
-
-Packages:
-- pi-better-harness
-- pi-better-subagents
-- pi-better-background-tasks
-- pi-better-goal
-
-pi-better-read-aloud is intentionally not included yet."
-```
+The publish workflow creates the package-scoped Git tag and GitHub release after
+npm verification succeeds.
