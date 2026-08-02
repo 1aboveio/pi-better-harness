@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-goal@0.1.15] - 2026-08-02
+
+### Changed
+
+- **goal**: establish package-scoped releases for the Goal spacing and 30-second completion-retention behavior
+
 ## [0.1.14] - 2026-08-02
 
 ### Fixed
