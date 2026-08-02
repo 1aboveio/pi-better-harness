@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-08-02
+
+### Added
+
+- **subagents**: configure child reasoning effort with `thinking` or a validated `model@effort` shorthand, including shared and per-job batch options
+
 ## [0.1.12] - 2026-08-02
 
 ### Added
