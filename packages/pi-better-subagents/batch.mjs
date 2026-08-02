@@ -9,6 +9,7 @@
 
 import { BUILTIN_TOOLS } from "./extensions.mjs";
 import { SAFE_CLEAN_TOOLS } from "./config.ts";
+import { assertThinkingLevel } from "./thinking.ts";
 
 const VALID_CAPACITY_MODES = new Set(["reject", "launch-available"]);
 
@@ -21,6 +22,7 @@ export function mergeJobOptions(shared, job) {
         prompt: job.prompt,
         name: job.name ?? shared?.name,
         model: job.model ?? shared?.model,
+        thinking: job.thinking ?? shared?.thinking,
         tools: job.tools ?? shared?.tools,
         exclude_tools: job.exclude_tools ?? shared?.exclude_tools,
         clean: job.clean ?? shared?.clean,
@@ -74,6 +76,7 @@ export function validateBatchPlan({ shared, jobs, onCapacity, config }) {
         seenPrompts.add(job.prompt);
 
         const merged = mergeJobOptions(shared, job);
+        assertThinkingLevel(merged.thinking, `job ${i + 1} thinking`);
         if (merged.clean === true) {
             // Validate the effective tool allowlist, which resolves in this order:
             // per-job tools → shared tools → config.defaultTools → clean-safe built-ins.
