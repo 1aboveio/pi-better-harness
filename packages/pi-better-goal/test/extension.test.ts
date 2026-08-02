@@ -95,8 +95,11 @@ test("only the slash command creates a goal and installs an observability-safe w
     { requestRender: () => undefined },
     { fg: (_color, text) => text },
   );
-  const [line] = component.render(80);
+  const rendered = component.render(80);
+  assert.equal(rendered.length, 2);
+  const [line, sectionGap] = rendered;
   assert.match(line ?? "", /▸ goal active \d+:\d{2} Ship slash-only goals/);
+  assert.equal(sectionGap, "", "goal keeps the same one-row gap used between navigator sections");
   component.dispose?.();
 
   const shutdown = handlers.get("session_shutdown");
