@@ -17,7 +17,13 @@ import {
   validateObjective,
   validateTokenBudget,
 } from "./goal-state.js";
-import { goalTiming, isGoalClockVisible, renderGoalClockLine } from "./goal-clock.js";
+import {
+  goalClockRefreshDelayMs,
+  goalTiming,
+  isGoalClockVisible,
+  renderGoalClockLine,
+} from "./goal-clock.js";
+import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { collectSubagentActivity } from "./subagents.js";
 import {
   EVENT_ACTIVITY,
@@ -110,6 +116,7 @@ export default function (pi: ExtensionAPI): void {
   let continuationQueuedFor: string | null = null;
   let idleContinuationTimer: ReturnType<typeof setTimeout> | undefined;
   let idleContinuationSignature = "";
+  let refreshGoalWidget: (() => void) | undefined;
 
   const getGoal = (ctx: ExtensionContext): GoalSnapshot | null => currentGoalSnapshot(ctx);
 
@@ -118,6 +125,7 @@ export default function (pi: ExtensionAPI): void {
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
+    refreshGoalWidget?.();
   };
 
   const clearGoal = (ctx: ExtensionContext, source: "command" | "tool" | "runtime"): void => {
@@ -126,6 +134,7 @@ export default function (pi: ExtensionAPI): void {
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
+    refreshGoalWidget?.();
   };
 
   const queueGoalContinuation = (goal: GoalSnapshot): void => {
@@ -308,18 +317,26 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.setWidget(
       EXTENSION_NAME,
       (tui, theme) => {
-        const timer = setInterval(() => tui.requestRender(), 1_000);
-        timer.unref?.();
+        const scheduler = createRenderScheduler(() => tui.requestRender());
+        const refresh = (): void => scheduler.request();
+        refreshGoalWidget = refresh;
+
         return {
           dispose() {
-            clearInterval(timer);
+            scheduler.dispose();
+            if (refreshGoalWidget === refresh) {
+              refreshGoalWidget = undefined;
+            }
           },
           invalidate() {},
           render(width: number): string[] {
             const goal = getGoal(ctx);
+            scheduler.cancel();
             if (!goal || !isGoalClockVisible(goal)) {
               return [];
             }
+            const nextRenderDelay = goalClockRefreshDelayMs(goal);
+            if (nextRenderDelay !== null) scheduler.schedule(nextRenderDelay);
             const fg = typeof theme?.fg === "function"
               ? (color: string, value: string) => theme.fg(color as never, value)
               : undefined;

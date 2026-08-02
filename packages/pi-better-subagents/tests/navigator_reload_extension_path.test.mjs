@@ -397,13 +397,12 @@ describe("registered extension path: session_start reload cleanup", () => {
         // 2) Open the shared overlay via the registered empty-editor Left path.
         nav.focusViaLeftKey();
 
-        // 3) Enter opens detail; x arms close confirmation → health, shared
-        // main list, live detail, and arm timeout. The legacy subagent widget
-        // must not contribute a duplicate ticker/surface.
+        // 3) Enter opens detail; x arms close confirmation. Health remains the
+        // only interval; UI refresh and arm expiry are cancellable one-shots.
         const component = await nav.openDetailViaEnter();
         nav.press("x");
-        assert.equal(timerSpies.pendingIntervals(), 3, "health, main-list, and detail tick intervals are live");
-        assert.equal(timerSpies.pendingTimeouts(), 1, "close-arm timeout is live");
+        assert.equal(timerSpies.pendingIntervals(), 1, "health is the only live interval");
+        assert.equal(timerSpies.pendingTimeouts(), 2, "detail refresh and close-arm deadlines are live");
         const confirmAfterArm = nav.lastStatus("background-work-close");
         assert.equal(
             typeof confirmAfterArm,
@@ -421,8 +420,8 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
         // session_start path (disposeBackgroundWorkNavigator + CLOSE_CONFIRM clear).
-        assert.equal(timerSpies.pendingIntervals(), 2, "reload must clear detail interval while keeping health and main-list tickers");
-        assert.equal(timerSpies.pendingTimeouts(), 0, "reload must clear close-arm timeout");
+        assert.equal(timerSpies.pendingIntervals(), 1, "reload keeps only the domain health interval");
+        assert.equal(timerSpies.pendingTimeouts(), 0, "reload clears detail refresh and close-arm deadlines");
         const confirmAfterReload = nav.lastStatus("background-work-close");
         assert.equal(confirmAfterReload, undefined, "reload clears CLOSE_CONFIRM_STATUS_KEY");
         assert.ok(
