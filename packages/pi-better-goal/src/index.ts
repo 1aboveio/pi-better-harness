@@ -323,7 +323,7 @@ export default function (pi: ExtensionAPI): void {
             const fg = typeof theme?.fg === "function"
               ? (color: string, value: string) => theme.fg(color as never, value)
               : undefined;
-            return [renderGoalClockLine(goal, width, undefined, fg)];
+            return [renderGoalClockLine(goal, width, undefined, fg), ""];
           },
         };
       },
