@@ -7,6 +7,18 @@ export interface GoalTiming {
   elapsedSeconds: number;
 }
 
+export const COMPLETED_GOAL_RETENTION_SECONDS = 30;
+
+export function isGoalClockVisible(
+  goal: GoalSnapshot,
+  now = Math.floor(Date.now() / 1000),
+): boolean {
+  if (goal.status !== "complete" || goal.completedAt === null) {
+    return true;
+  }
+  return now - goal.completedAt < COMPLETED_GOAL_RETENTION_SECONDS;
+}
+
 export function goalTiming(goal: GoalSnapshot, now = Math.floor(Date.now() / 1000)): GoalTiming {
   const activeDelta =
     goal.status === "active" && goal.activeStartedAt !== null

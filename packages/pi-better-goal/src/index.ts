@@ -17,7 +17,7 @@ import {
   validateObjective,
   validateTokenBudget,
 } from "./goal-state.js";
-import { goalTiming, renderGoalClockLine } from "./goal-clock.js";
+import { goalTiming, isGoalClockVisible, renderGoalClockLine } from "./goal-clock.js";
 import { collectSubagentActivity } from "./subagents.js";
 import {
   EVENT_ACTIVITY,
@@ -317,7 +317,7 @@ export default function (pi: ExtensionAPI): void {
           invalidate() {},
           render(width: number): string[] {
             const goal = getGoal(ctx);
-            if (!goal) {
+            if (!goal || !isGoalClockVisible(goal)) {
               return [];
             }
             const fg = typeof theme?.fg === "function"
