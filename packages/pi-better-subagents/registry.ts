@@ -85,6 +85,8 @@ export interface RunMeta {
      */
     adoptedFromLostParentAt?: number;
     model?: string;
+    /** Reasoning effort passed to the child via Pi's --thinking option. */
+    effort?: string;
     cwd: string;
     /** First ~200 chars of the task prompt, for listings. */
     promptPreview: string;
