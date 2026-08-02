@@ -10,7 +10,7 @@ import {
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { readLog } from "./logs.js";
-import { listMetas, readMeta, writeMeta } from "./registry.js";
+import { listMetas, onMetaChanged, readMeta, writeMeta } from "./registry.js";
 import { stopTask } from "./runtime.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
@@ -62,6 +62,7 @@ const provider: BackgroundWorkProvider = {
     writeMeta(meta);
     return { action: "dismissed", providerId: "background-tasks", id, status: meta.status };
   },
+  onVisibleChanged: onMetaChanged,
 };
 
 function visibleMetas(now = Date.now()): BackgroundTaskMeta[] {
@@ -113,6 +114,9 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
     secondary: secondaryLabel(meta),
     facts: factsForMeta(meta, now),
     sortStartedAt: meta.startedAt,
+    expiresAt: meta.status === "running" || meta.endedAt === undefined
+      ? undefined
+      : meta.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS,
   };
 }
 

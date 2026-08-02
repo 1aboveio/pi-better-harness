@@ -471,7 +471,7 @@ describe("passive widget health surfacing", () => {
     // @covers widget.health
     // @level unit
     it("widget health log parse is cached by size/mtime across frames", () => {
-        // Unchanged logs must not re-invoke extract on every 1 Hz frame.
+        // Unchanged logs must not re-invoke extract across repeated renders.
         const factsA = emptyFacts({ lastMeaningfulAt: NOW - 5_000 });
         const rawA = { mtimeMs: 100, sizeBytes: 4096 };
         let extracts = 0;

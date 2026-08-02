@@ -35,6 +35,8 @@
     "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-goal.png"
   },
   "scripts": {
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm test"

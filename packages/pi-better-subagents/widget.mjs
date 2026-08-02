@@ -216,7 +216,7 @@ export function isSpendCacheFresh(cached, now, logSize, ttlMs = SPEND_REFRESH_MS
 /**
  * Whether a cached health-log parse is still valid for the widget tick.
  * Invalidates on log size or mtime change so growth/rewrite re-extracts, while
- * unchanged logs skip the synchronous full-log reparse on every 1 Hz frame.
+ * unchanged logs skip synchronous full-log reparses across repeated renders.
  *
  * @param {{ logSize?: number, mtimeMs?: number }|null|undefined} cached
  * @param {number} logSize

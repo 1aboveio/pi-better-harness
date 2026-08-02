@@ -47,6 +47,7 @@ import {
     writeMeta,
     readMeta,
     listMetas,
+    onMetaChanged,
     effectiveStatus,
     ownedByThisParent,
     navigatorVisibleRuns,
@@ -287,7 +288,7 @@ function spendFor(id: string, now: number): { usage: Usage; tool: string | null 
 
 /**
  * Observe health for a widget/navigator row. Best-effort; never throws into the tick.
- * Full log parse is gated by size/mtime so the 1 Hz frame does not re-read and
+ * Full log parse is gated by size/mtime so event/detail refresh does not re-read and
  * reparse every complete log when nothing changed (#67).
  *
  * When `displayStatus` is omitted, uses durable `meta.status`.
@@ -386,7 +387,7 @@ function stopTicker(): void {
 // Reconciliation never kills anything; it only writes truth. The ticker
 // exists only while current-parent running/orphaned work needs monitoring.
 
-/** How often supervision is reconciled. Independent of the 1 Hz widget tick. */
+/** How often supervision is reconciled. Independent of TUI render scheduling. */
 const HEALTH_TICK_MS = 15_000;
 let healthTicker: ReturnType<typeof setInterval> | undefined;
 /** ExtensionAPI retained so health transitions can deliver coordinator follow-ups (#65). */
@@ -710,7 +711,7 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
     // One registry scan per rebuild: both the start times and the rows below are
     // built from this snapshot.
     const visible = sessionVisibleNavigatorRuns(now);
-    const startedById = new Map(visible.map((m) => [m.id, m.startedAt]));
+    const metaById = new Map(visible.map((m) => [m.id, m]));
     return navigatorRows(visible, now).map((row) => {
         const bits = [];
         if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
@@ -730,7 +731,14 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             elapsed: row.elapsed,
             primary: bits.join(" · ") || "subagent run",
             facts: row.healthFacts,
-            sortStartedAt: startedById.get(row.id) ?? now,
+            sortStartedAt: metaById.get(row.id)?.startedAt ?? now,
+            expiresAt: (() => {
+                const meta = metaById.get(row.id);
+                const endedAt = meta?.endedAt ?? meta?.lostAt;
+                return meta && isTerminalNavigatorStatus(effectiveStatus(meta)) && typeof endedAt === "number"
+                    ? endedAt + TERMINAL_NAVIGATOR_RETENTION_MS
+                    : undefined;
+            })(),
         };
     });
 }
@@ -756,7 +764,7 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         statusTone: statusTone(detail.status),
         subtitle: detail.currentTool ? `current tool ${detail.currentTool}` : undefined,
         metadata,
-        // The shared navigator refreshes this provider once a second while the
+        // The shared navigator refreshes this provider on a coarse deadline while the
         // detail overlay is open. Read the selected logical tail rows each
         // time so the evidence behaves like `tail -f`, not a single parsed
         // activity/result snapshot.
@@ -779,6 +787,7 @@ function ensureSubagentProvider(): void {
             const outcome = navigatorCloseRun(id) as { action: string; id: string; status?: string };
             return { ...outcome, providerId: "subagents" };
         },
+        onVisibleChanged: onMetaChanged,
     };
     unregisterSubagentProvider = registerBackgroundWorkProvider(provider);
 }
