@@ -148,6 +148,7 @@ function metaPathFor(id: string): string {
 }
 
 let seq = 0;
+const metaChangedListeners = new Set<() => void>();
 /** Monotonic, readable, collision-free run id: `sa_<base36-time>_<seq>`. */
 export function nextRunId(): string {
     seq += 1;
@@ -157,6 +158,14 @@ export function nextRunId(): string {
 export function writeMeta(meta: RunMeta): void {
     mkdirSync(runDir(meta.id), { recursive: true });
     writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
+    for (const listener of metaChangedListeners) {
+        try { listener(); } catch { /* best effort */ }
+    }
+}
+
+export function onMetaChanged(listener: () => void): () => void {
+    metaChangedListeners.add(listener);
+    return () => metaChangedListeners.delete(listener);
 }
 
 export function readMeta(id: string): RunMeta | undefined {

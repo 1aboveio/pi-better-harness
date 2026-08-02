@@ -8,6 +8,7 @@ export interface GoalTiming {
 }
 
 export const COMPLETED_GOAL_RETENTION_SECONDS = 30;
+export const ACTIVE_GOAL_REFRESH_MS = 10_000;
 
 export function isGoalClockVisible(
   goal: GoalSnapshot,
@@ -17,6 +18,17 @@ export function isGoalClockVisible(
     return true;
   }
   return now - goal.completedAt < COMPLETED_GOAL_RETENTION_SECONDS;
+}
+
+export function goalClockRefreshDelayMs(goal: GoalSnapshot, nowMs = Date.now()): number | null {
+  if (goal.status === "active") {
+    return ACTIVE_GOAL_REFRESH_MS;
+  }
+  if (goal.status !== "complete" || goal.completedAt === null) {
+    return null;
+  }
+  const deadlineMs = (goal.completedAt + COMPLETED_GOAL_RETENTION_SECONDS) * 1_000;
+  return deadlineMs > nowMs ? deadlineMs - nowMs : null;
 }
 
 export function goalTiming(goal: GoalSnapshot, now = Math.floor(Date.now() / 1000)): GoalTiming {

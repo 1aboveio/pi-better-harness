@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
+import { createRenderScheduler, type RenderScheduler } from "./shared-render-scheduler.ts";
 
 export default function navigatorExtension(): void {
   // Internal shared package. Pi may scan its symlink in the extension directory
@@ -25,6 +26,7 @@ export type BackgroundWorkRow = {
   secondary?: string;
   facts?: string[];
   sortStartedAt: number;
+  expiresAt?: number;
 };
 
 export type BackgroundWorkDetail = {
@@ -79,7 +81,7 @@ type NavigatorState = {
   mainListFocused?: boolean;
   mainListCloseArm?: { id: string; armedAt: number };
   mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
-  mainListTimer?: ReturnType<typeof setInterval>;
+  mainListDeadlineScheduler?: RenderScheduler;
   detailOverlayRows?: number;
   dispose?: () => void;
 };
@@ -91,15 +93,10 @@ const FACTORY_REFRESH = "__piBetterHarnessNavigatorRefresh";
 export const NAVIGATOR_STATUS_KEY = "background-work-nav";
 export const CLOSE_CONFIRM_STATUS_KEY = "background-work-close";
 export const MAIN_LIST_WIDGET_KEY = "background-work-list";
-export const DETAIL_TICK_MS = 1000;
+export const DETAIL_TICK_MS = 10_000;
 export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
-// Row rebuild cadence. Each tick asks every provider for rows, which stats and
-// parses run logs, so this is a per-provider I/O cadence and not a paint rate:
-// the widget repaints from render() whenever the TUI asks. 1 Hz matches
-// DETAIL_TICK_MS and the elapsed/spinner resolution the rows can actually show.
-const MAIN_LIST_TICK_MS = 1000;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
 const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 5;
 const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
@@ -173,9 +170,10 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
+  s.mainListDeadlineScheduler?.dispose();
+  s.mainListDeadlineScheduler = createRenderScheduler(() => refreshMainListWidget());
   installNavigatorEditor(ctx.ui as any, deps);
   s.lastHint = undefined;
-  startMainListWidget(ctx);
   refreshBackgroundWorkNavigator(ctx);
   refreshMainListWidget();
 }
@@ -193,6 +191,8 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   }
   s.lastHint = undefined;
   s.lastMainListLines = undefined;
+  s.mainListDeadlineScheduler?.dispose();
+  s.mainListDeadlineScheduler = undefined;
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
   s.detailOverlayRows = undefined;
@@ -226,17 +226,7 @@ function visibleCount(): number {
   }, 0);
 }
 
-function startMainListWidget(ctx: ExtensionContext): void {
-  const s = state();
-  if (s.mainListTimer || !isNavigatorUiAvailable(ctx)) return;
-  s.mainListTimer = setInterval(() => refreshMainListWidget(), MAIN_LIST_TICK_MS);
-  s.mainListTimer.unref?.();
-}
-
 function stopMainListWidget(): void {
-  const s = state();
-  if (s.mainListTimer) clearInterval(s.mainListTimer);
-  s.mainListTimer = undefined;
   clearMainListCloseArm();
 }
 
@@ -254,7 +244,16 @@ function refreshMainListWidget(): void {
   const ctx = s.uiCtx;
   const deps = s.deps;
   if (!ctx || !deps || !isNavigatorUiAvailable(ctx)) return;
-  const rows = listRows();
+  const now = Date.now();
+  const rows = listRows(now);
+  s.mainListDeadlineScheduler?.cancel();
+  const nextExpiry = rows.reduce<number | undefined>((next, row) => {
+    if (row.expiresAt === undefined || row.expiresAt <= now) return next;
+    return next === undefined ? row.expiresAt : Math.min(next, row.expiresAt);
+  }, undefined);
+  if (nextExpiry !== undefined) {
+    s.mainListDeadlineScheduler?.schedule(nextExpiry - now);
+  }
   syncMainListSelection(rows);
   s.lastMainListLines = rows.length ? buildMainListLines(rows, MAIN_LIST_FALLBACK_WIDTH, deps.truncate, themeFg(ctx), {
     selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
@@ -462,7 +461,7 @@ function statusGlyph(row: InternalRow): string {
 
 function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; color: string } {
   if (row.statusTone !== "running") return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
-  const frame = Math.floor(now / MAIN_LIST_TICK_MS) % RUNNING_DOT_FRAMES.length;
+  const frame = Math.floor(now / DETAIL_TICK_MS) % RUNNING_DOT_FRAMES.length;
   return { glyph: RUNNING_DOT_GLYPH, color: RUNNING_DOT_FRAMES[frame]! };
 }
 
@@ -676,7 +675,6 @@ function createOverlayComponent(
     const idx = overlayState.rows.findIndex((row) => row.navigatorId === detailId);
     if (idx >= 0) overlayState.selected = idx;
   }
-  let detailTimer: ReturnType<typeof setInterval> | undefined;
   let closeArm: { id: string; armedAt: number } | undefined;
   let closeArmTimer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
@@ -686,6 +684,13 @@ function createOverlayComponent(
   function requestRender(): void {
     try { tui.requestRender(); } catch { /* ignore */ }
   }
+
+  const detailScheduler = createRenderScheduler(() => {
+    if (!detailId || mode !== "detail" || closed) return;
+    detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+    requestRender();
+    startDetailTimer();
+  });
 
   function refreshRows(): void {
     const selectedId = overlayState.rows[overlayState.selected]?.navigatorId;
@@ -704,18 +709,14 @@ function createOverlayComponent(
   }
 
   function stopDetailTimer(): void {
-    if (detailTimer) clearInterval(detailTimer);
-    detailTimer = undefined;
+    detailScheduler.cancel();
   }
 
   function startDetailTimer(): void {
-    stopDetailTimer();
-    detailTimer = setInterval(() => {
-      if (!detailId || mode !== "detail") return;
-      detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
-      requestRender();
-    }, DETAIL_TICK_MS);
-    detailTimer.unref?.();
+    detailScheduler.cancel();
+    if (detail?.status === "running" || detail?.status === "orphaned") {
+      detailScheduler.schedule(DETAIL_TICK_MS);
+    }
   }
 
   function selectedRow(): InternalRow | undefined {
@@ -759,7 +760,7 @@ function createOverlayComponent(
     if (closed) return;
     closed = true;
     clearCloseArm();
-    stopDetailTimer();
+    detailScheduler.dispose();
     try { done(null); } catch { /* ignore */ }
   }
 
@@ -842,7 +843,7 @@ function createOverlayComponent(
     invalidate() {},
     dispose() {
       clearCloseArm();
-      stopDetailTimer();
+      detailScheduler.dispose();
     },
   };
 }

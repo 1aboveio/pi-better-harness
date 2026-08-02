@@ -6,6 +6,7 @@ import { isTerminalStatus } from "./types.js";
 
 let seq = 0;
 const metaCache = new Map<string, BackgroundTaskMeta>();
+const metaChangedListeners = new Set<() => void>();
 
 export function baseDir(): string {
   return join(tmpdir(), "pi-better-background-tasks");
@@ -40,6 +41,14 @@ export function writeMeta(meta: BackgroundTaskMeta): void {
   ensureTaskDir(meta.id);
   writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
   metaCache.set(meta.id, meta);
+  for (const listener of metaChangedListeners) {
+    try { listener(); } catch { /* best effort */ }
+  }
+}
+
+export function onMetaChanged(listener: () => void): () => void {
+  metaChangedListeners.add(listener);
+  return () => metaChangedListeners.delete(listener);
 }
 
 export function readMeta(id: string): BackgroundTaskMeta | undefined {

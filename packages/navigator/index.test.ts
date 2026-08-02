@@ -156,6 +156,49 @@ describe("shared background work navigator", () => {
     }
   });
 
+  it("keeps the main list timer-free and renders provider changes immediately", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let notifyVisibleChanged: (() => void) | undefined;
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("background-tasks", "Background Tasks", 20, 100, () => undefined),
+      onVisibleChanged(notify) {
+        notifyVisibleChanged = notify;
+        return () => { notifyVisibleChanged = undefined; };
+      },
+    });
+    let widgetFactory: any;
+    const ui = {
+      factory: undefined as any,
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { if (typeof value === "function") widgetFactory = value; },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      let renders = 0;
+      const component = widgetFactory({ requestRender: () => { renders += 1; } }, {});
+      component.render(100);
+
+      t.mock.timers.tick(60_000);
+      assert.equal(renders, 0, "running rows do not drive periodic full-screen renders");
+
+      notifyVisibleChanged?.();
+      assert.equal(renders, 1, "provider state changes render immediately");
+      component.dispose?.();
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("renders failed rows with Pi-supported theme colors", () => {
     const seenColors: string[] = [];
     const widgets: unknown[] = [];
@@ -284,16 +327,15 @@ describe("shared background work navigator", () => {
         truncate: (value, width) => value.slice(0, width),
       });
 
-      // One frame per row rebuild (MAIN_LIST_TICK_MS): the dot advances once a
-      // second, so a repaint always shows movement without the rebuild — which
-      // stats and parses every run's log — running any faster.
+      // Animation advances only when another event causes a render; it does not
+      // own a repaint loop.
       now = 0;
       const first = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 1000;
+      now = 10_000;
       const second = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 2000;
+      now = 20_000;
       const third = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 3000;
+      now = 30_000;
       const fourth = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
 
       assert.match(first, /<dim>●<\/>\s+reviewer/);

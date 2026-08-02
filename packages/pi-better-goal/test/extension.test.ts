@@ -26,7 +26,7 @@ interface WidgetRecord {
 }
 
 test("only the slash command creates a goal and installs an observability-safe widget", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const entries: SessionEntry[] = [];
   const commands = new Map<string, CommandDefinition>();
   const tools = new Map<string, ToolDefinition>();
@@ -78,28 +78,45 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.equal(widget?.options?.placement, "aboveEditor");
   assert.equal(typeof widget?.content, "function");
 
+  let renderRequests = 0;
+  const factory = widget?.content as (
+    tui: { requestRender(): void },
+    theme: { fg(color: string, text: string): string },
+  ) => { render(width: number): string[]; dispose?(): void };
+  const component = factory(
+    { requestRender: () => { renderRequests += 1; } },
+    { fg: (_color, text) => text },
+  );
+  assert.deepEqual(component.render(80), []);
+  t.mock.timers.tick(30_000);
+  assert.equal(renderRequests, 0, "an absent goal must not drive periodic full-screen renders");
+
   const goalCommand = commands.get("goal");
   assert.ok(goalCommand);
   await goalCommand.handler("Ship slash-only goals", ctx);
+  assert.equal(renderRequests, 1, "setting a goal requests one immediate render");
 
   const getGoal = tools.get("get_goal");
   assert.ok(getGoal);
   const result = await getGoal.execute("test", {}, undefined, undefined, ctx);
   assert.equal((result.details as { goal: { objective: string } }).goal.objective, "Ship slash-only goals");
 
-  const factory = widget?.content as (
-    tui: { requestRender(): void },
-    theme: { fg(color: string, text: string): string },
-  ) => { render(width: number): string[]; dispose?(): void };
-  const component = factory(
-    { requestRender: () => undefined },
-    { fg: (_color, text) => text },
-  );
   const rendered = component.render(80);
   assert.equal(rendered.length, 2);
   const [line, sectionGap] = rendered;
   assert.match(line ?? "", /▸ goal active \d+:\d{2} Ship slash-only goals/);
   assert.equal(sectionGap, "", "goal keeps the same one-row gap used between navigator sections");
+
+  t.mock.timers.tick(9_999);
+  assert.equal(renderRequests, 1, "active clock does not repaint every second");
+  t.mock.timers.tick(1);
+  assert.equal(renderRequests, 2, "active clock requests one coarse refresh");
+
+  await goalCommand.handler("clear", ctx);
+  assert.equal(renderRequests, 3, "clearing a goal requests one immediate render");
+  assert.deepEqual(component.render(80), []);
+  t.mock.timers.tick(30_000);
+  assert.equal(renderRequests, 3, "cleared goal remains timer-free");
   component.dispose?.();
 
   const shutdown = handlers.get("session_shutdown");

@@ -373,7 +373,7 @@ describe("widget spend cache", () => {
 
     // @covers widget.refresh-floor
     // @level unit
-    it("floors log reads at 1s — below the 1 Hz row rebuild it protects", () => {
+    it("floors repeated event-driven log reads at 1s", () => {
         assert.equal(HOT_PATH_REFRESH_FLOOR_MS, 1000);
         assert.ok(HOT_PATH_REFRESH_FLOOR_MS <= SPEND_REFRESH_MS, "the floor never outlives the spend TTL");
     });
@@ -426,7 +426,7 @@ describe("widget action → setWidget contract", () => {
 
 // ---------------------------------------------------------------------------
 // index.ts wiring — must use helpers + undefined clear + dirty-check + cache
-// These fail against the pre-fix 1 Hz thrash path (RED → GREEN for #13).
+// These fail against the pre-fix repaint-thrash path (RED → GREEN for #13).
 // ---------------------------------------------------------------------------
 describe("index.ts widget wiring (issue #13)", async () => {
     const { readFileSync } = await import("node:fs");

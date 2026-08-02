@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { formatGoalClock, goalTiming, isGoalClockVisible, renderGoalClockLine } from "../src/goal-clock.js";
+import { formatGoalClock, goalClockRefreshDelayMs, goalTiming, isGoalClockVisible, renderGoalClockLine } from "../src/goal-clock.js";
 import { createGoalSnapshot, goalWithStatus } from "../src/goal-state.js";
 
 test("goal timing tracks active and elapsed time across pause and completion", () => {
@@ -33,6 +33,17 @@ test("completed goal clock stays visible for 30 seconds, then hides", () => {
   assert.equal(isGoalClockVisible(complete, 219), true);
   assert.equal(isGoalClockVisible(complete, 220), false);
   assert.equal(isGoalClockVisible(createGoalSnapshot("Still active", null, 100), 10_000), true);
+});
+
+test("goal clock schedules only active refreshes and completed expiry", () => {
+  const active = createGoalSnapshot("Ship footer clock", null, 100);
+  const paused = goalWithStatus(active, "paused", 130);
+  const complete = goalWithStatus(active, "complete", 190);
+
+  assert.equal(goalClockRefreshDelayMs(active, 200_000), 10_000);
+  assert.equal(goalClockRefreshDelayMs(paused, 200_000), null);
+  assert.equal(goalClockRefreshDelayMs(complete, 219_000), 1_000);
+  assert.equal(goalClockRefreshDelayMs(complete, 220_000), null);
 });
 
 test("goal clock text shows the objective, status, and both clocks", () => {
