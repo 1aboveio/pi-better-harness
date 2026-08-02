@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-08-02
+
+### Added
+
+- **subagents**: show a shared, rolling 10- or 25-row live log tail in the detail view while it is open
+
 ## [0.1.11] - 2026-07-31
 
 ### Added

@@ -193,6 +193,12 @@ describe("tailLog", () => {
         assert.equal(tailLog(TAIL_RUN_ID, 1), "line 4");
     });
 
+    it("uses terminal display rows so a trailing newline does not consume a tail row", () => {
+        mkdirSync(runDir(TAIL_RUN_ID), { recursive: true });
+        writeFileSync(logPathFor(TAIL_RUN_ID), "line 1\nline 2\nline 3\n", "utf-8");
+        assert.equal(tailLog(TAIL_RUN_ID, 2), "line 2\nline 3");
+    });
+
     it("returns '(no output yet)' for an empty or missing log", () => {
         cleanup(TAIL_RUN_ID);
         assert.equal(tailLog(TAIL_RUN_ID, 10), "(no output yet)");

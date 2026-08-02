@@ -26,7 +26,7 @@ import {
     readSync,
     statSync,
 } from "node:fs";
-import { readBoundedTail } from "./shared-log-utils.ts";
+import { readBoundedTail, tailTerminalDisplay } from "./shared-log-utils.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { logPathFor } from "./registry.ts";
 
@@ -89,13 +89,11 @@ interface TailRead {
  */
 const readTail: (path: string, maxBytes: number) => TailRead = readBoundedTail;
 
-/** Last `n` lines of a run's log, or a placeholder if empty/unreadable. */
+/** Last `n` terminal display rows of a run's log, or a placeholder if empty/unreadable. */
 export function tailLog(id: string, n: number, maxBytes = maxRawTailBytes()): string {
     const tail = readTail(logPathFor(id), maxBytes);
     if (tail.error || tail.text.trim() === "") return "(no output yet)";
-    const lines = tail.text.split("\n");
-    const kept = lines.slice(Math.max(0, lines.length - n));
-    const out = kept.join("\n").trim();
+    const out = tailTerminalDisplay(tail.text, n).trim();
     return out === "" ? "(no output yet)" : out;
 }
 
