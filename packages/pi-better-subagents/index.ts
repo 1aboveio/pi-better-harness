@@ -30,7 +30,7 @@ import {
     type BackgroundWorkRow,
 } from "./shared-navigator.ts";
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
-import { parseRun, resetParseRunCursor, type Usage } from "./parse.ts";
+import { parseRun, resetParseRunCursor, tailLog, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
@@ -659,8 +659,7 @@ function isTerminalNavigatorStatus(status: string): boolean {
 }
 
 /** Live detail snapshot for one run (registry + log parse + health). */
-function navigatorDetail(id: string) {
-    const now = Date.now();
+function navigatorDetail(id: string, now: number = Date.now()) {
     return buildNavigatorDetail(id, {
         readMeta,
         effectiveStatus,
@@ -742,9 +741,10 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
     });
 }
 
-function subagentWorkDetail(id: string, now: number): BackgroundWorkDetail | null {
-    const detail = navigatorDetail(id);
+function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
+    const detail = navigatorDetail(id, now);
     if (!detail) return null;
+    const logTailLines = options?.logTailLines ?? 10;
     const metadata = [
         { label: "provider", value: "Subagents" },
         { label: "model", value: detail.effort ? `${detail.model} · effort ${detail.effort}` : detail.model },
@@ -762,7 +762,11 @@ function subagentWorkDetail(id: string, now: number): BackgroundWorkDetail | nul
         statusTone: statusTone(detail.status),
         subtitle: detail.currentTool ? `current tool ${detail.currentTool}` : undefined,
         metadata,
-        evidence: { label: "output", text: detail.output || "(no output yet)" },
+        // The shared navigator refreshes this provider once a second while the
+        // detail overlay is open. Read the selected logical tail rows each
+        // time so the evidence behaves like `tail -f`, not a single parsed
+        // activity/result snapshot.
+        evidence: { label: "log tail", text: tailLog(id, logTailLines) },
         footerActions: [detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
     };
 }
@@ -775,7 +779,7 @@ function ensureSubagentProvider(): void {
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
         listRows: (now) => subagentWorkRows(now),
-        detail: (id, now) => subagentWorkDetail(id, now),
+        detail: (id, now, options) => subagentWorkDetail(id, now, options),
         armCloseLabel: (row) => row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
         close: (id) => {
             const outcome = navigatorCloseRun(id) as { action: string; id: string; status?: string };
