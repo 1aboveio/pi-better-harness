@@ -9,7 +9,10 @@ import {
   type BackgroundDrainTracker,
 } from "./activity.js";
 import {
+  continuationStateEntry,
+  createContinuationState,
   createGoalSnapshot,
+  currentContinuationState,
   currentGoalSnapshot,
   goalClearEntry,
   goalSetEntry,
@@ -17,6 +20,7 @@ import {
   validateObjective,
   validateTokenBudget,
 } from "./goal-state.js";
+import { continuationEvidence, type ContinuationEvidence } from "./continuation.js";
 import {
   goalClockRefreshDelayMs,
   goalTiming,
@@ -39,12 +43,17 @@ import {
 
 const POLL_INTERVAL_MS = 2_000;
 const DEFAULT_IDLE_CONTINUATION_DELAY_MS = 30_000;
+const DEFAULT_MAX_NO_PROGRESS_RETRIES = 3;
 const WAKE_DISABLED =
   process.env.PI_BETTER_GOAL_DISABLE_WAKE === "1" ||
   process.env.PI_BETTER_EXTENSION_DISABLE_WAKE === "1";
 const IDLE_CONTINUATION_DELAY_MS = parseDurationEnv(
   process.env.PI_BETTER_GOAL_IDLE_CONTINUATION_DELAY_MS,
   DEFAULT_IDLE_CONTINUATION_DELAY_MS,
+);
+const MAX_NO_PROGRESS_RETRIES = parseRetryLimit(
+  process.env.PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES,
+  DEFAULT_MAX_NO_PROGRESS_RETRIES,
 );
 
 function parseDurationEnv(raw: string | undefined, fallback: number): number {
@@ -53,6 +62,14 @@ function parseDurationEnv(raw: string | undefined, fallback: number): number {
   }
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseRetryLimit(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") {
+    return fallback;
+  }
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function continuationPrompt(goal: GoalSnapshot): string {
@@ -65,12 +82,15 @@ function continuationPrompt(goal: GoalSnapshot): string {
   ].join("\n");
 }
 
-function formatGoal(goal: GoalSnapshot | null): string {
+function formatGoal(goal: GoalSnapshot | null, continuation: ReturnType<typeof currentContinuationState> = null): string {
   if (!goal) {
     return "No goal is set.";
   }
   const budget = goal.tokenBudget === null ? "none" : String(goal.tokenBudget);
   const timing = goalTiming(goal);
+  const continuationStatus = continuation?.blocked
+    ? `Automatic continuation: waiting after ${continuation.noProgressRetries} identical retries (${continuation.lastEvidenceSummary})`
+    : `Automatic continuation: retry limit ${MAX_NO_PROGRESS_RETRIES}`;
   return [
     `Goal: ${goal.objective}`,
     `Status: ${goal.status}`,
@@ -78,6 +98,7 @@ function formatGoal(goal: GoalSnapshot | null): string {
     `Tokens used: ${goal.usage.tokensUsed}`,
     `Active time: ${timing.activeSeconds}s`,
     `Elapsed time: ${timing.elapsedSeconds}s`,
+    continuationStatus,
   ].join("\n");
 }
 
@@ -117,8 +138,17 @@ export default function (pi: ExtensionAPI): void {
   let idleContinuationTimer: ReturnType<typeof setTimeout> | undefined;
   let idleContinuationSignature = "";
   let refreshGoalWidget: (() => void) | undefined;
+  let lastAgentEvidence: ContinuationEvidence | null = null;
 
   const getGoal = (ctx: ExtensionContext): GoalSnapshot | null => currentGoalSnapshot(ctx);
+
+  const appendContinuationState = (state: ReturnType<typeof createContinuationState>): void => {
+    pi.appendEntry(EXTENSION_NAME, continuationStateEntry(state));
+  };
+
+  const resetContinuationState = (goal: GoalSnapshot): void => {
+    appendContinuationState(createContinuationState(goal.goalId));
+  };
 
   const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: "command" | "tool" | "runtime"): void => {
     pi.appendEntry(EXTENSION_NAME, goalSetEntry(goal, source));
@@ -143,6 +173,7 @@ export default function (pi: ExtensionAPI): void {
     }
     clearIdleContinuation();
     continuationQueuedFor = goal.goalId;
+    resetContinuationState(goal);
     pi.sendMessage(
       {
         customType: EXTENSION_NAME,
@@ -169,6 +200,9 @@ export default function (pi: ExtensionAPI): void {
     snapshot?: ActivitySnapshot,
   ): void => {
     if (WAKE_DISABLED || goal.status !== "active" || continuationQueuedFor === goal.goalId) {
+      return;
+    }
+    if (kind === "continuation" && currentContinuationState(ctx, goal.goalId)?.blocked) {
       return;
     }
     const signature = `${goal.goalId}:${kind}`;
@@ -202,6 +236,10 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
 
+    // A background drain is a meaningful external state transition and reopens a held goal.
+    if (kind === "background-drained") {
+      resetContinuationState(goal);
+    }
     continuationQueuedFor = goal.goalId;
     const content = kind === "background-drained"
       ? "Background activity for the active goal is no longer running. Inspect any subagent callbacks or final results, then continue the completion audit before marking the goal complete.\n\n" +
@@ -269,9 +307,13 @@ export default function (pi: ExtensionAPI): void {
     }
 
     if (ctx.hasUI) {
+      const goal = getGoal(ctx);
+      const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
       const status = snapshot.backgroundRunning
         ? `bg ${snapshot.activeBackgroundCount}${snapshot.unhealthyBackgroundCount ? `, ${snapshot.unhealthyBackgroundCount} unhealthy` : ""}`
-        : undefined;
+        : continuation?.blocked
+          ? "waiting: no progress"
+          : undefined;
       try {
         ctx.ui.setStatus(EXTENSION_NAME, status);
       } catch {
@@ -365,7 +407,7 @@ export default function (pi: ExtensionAPI): void {
       const current = getGoal(ctx);
 
       if (!trimmed) {
-        ctx.ui.notify(formatGoal(current), "info");
+        ctx.ui.notify(formatGoal(current, current ? currentContinuationState(ctx, current.goalId) : null), "info");
         return;
       }
 
@@ -434,9 +476,10 @@ export default function (pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const goal = getGoal(ctx);
+      const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
       return {
-        content: [{ type: "text", text: formatGoal(goal) }],
-        details: { goal, timing: goal ? goalTiming(goal) : null, hasGoal: goal !== null },
+        content: [{ type: "text", text: formatGoal(goal, continuation) }],
+        details: { goal, continuation, timing: goal ? goalTiming(goal) : null, hasGoal: goal !== null },
       };
     },
   });
@@ -512,6 +555,16 @@ export default function (pi: ExtensionAPI): void {
     startPolling();
   });
 
+  pi.on("input", async (event, ctx) => {
+    if (event.source === "extension") {
+      return;
+    }
+    const goal = getGoal(ctx);
+    if (goal?.status === "active") {
+      resetContinuationState(goal);
+    }
+  });
+
   pi.on("before_agent_start", async (event, ctx) => {
     currentCtx = ctx;
     const goal = currentGoalSnapshot(ctx);
@@ -535,7 +588,12 @@ export default function (pi: ExtensionAPI): void {
     foregroundRunning = true;
     clearIdleContinuation();
     continuationQueuedFor = null;
+    lastAgentEvidence = null;
     await publishSnapshot(ctx);
+  });
+
+  pi.on("agent_end", async (event, _ctx) => {
+    lastAgentEvidence = continuationEvidence(event.messages);
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
@@ -544,6 +602,30 @@ export default function (pi: ExtensionAPI): void {
     const snapshot = await publishSnapshot(ctx);
     const goal = getGoal(ctx);
     if (goal?.status === "active" && !snapshot.backgroundRunning) {
+      const previous = currentContinuationState(ctx, goal.goalId) ?? createContinuationState(goal.goalId);
+      const evidence = lastAgentEvidence ?? continuationEvidence([]);
+      const repeated = previous.lastEvidenceSignature === evidence.signature;
+      const noProgressRetries = repeated ? previous.noProgressRetries + 1 : 0;
+      const blocked = repeated && noProgressRetries >= MAX_NO_PROGRESS_RETRIES;
+      appendContinuationState({
+        goalId: goal.goalId,
+        lastEvidenceSignature: evidence.signature,
+        lastEvidenceSummary: evidence.summary,
+        noProgressRetries,
+        blocked,
+        updatedAt: Math.floor(Date.now() / 1000),
+      });
+      if (blocked) {
+        refreshGoalWidget?.();
+        if (ctx.hasUI) {
+          ctx.ui.setStatus(EXTENSION_NAME, "waiting: no progress");
+          ctx.ui.notify(
+            `Goal automatic continuation is waiting after ${noProgressRetries} identical retries (${evidence.summary}). New input or background activity will resume it.`,
+            "warning",
+          );
+        }
+        return;
+      }
       scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
     }
   });

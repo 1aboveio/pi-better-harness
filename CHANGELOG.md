@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-goal@0.1.16] - 2026-08-04
+
+### Fixed
+
+- **goal**: bound self-sustaining continuation loops after repeated identical tool outcomes while preserving retries for changed evidence, interactive input, and background-drain events
+
 ## [pi-better-goal@0.1.15] - 2026-08-02
 
 ### Changed
