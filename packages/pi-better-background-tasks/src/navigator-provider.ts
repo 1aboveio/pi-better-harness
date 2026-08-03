@@ -12,6 +12,7 @@ import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { readLog } from "./logs.js";
 import { listMetas, onMetaChanged, readMeta, writeMeta } from "./registry.js";
 import { stopTask } from "./runtime.js";
+import { observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
 let unregister: (() => void) | undefined;
@@ -135,6 +136,10 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
   ];
   if (meta.deadlineAt) metadata.push({ label: "deadline", value: formatDuration(meta.deadlineAt - now) });
   if (meta.lastCheckedAt) metadata.push({ label: "checked", value: `${formatDuration(now - meta.lastCheckedAt)} ago` });
+  if (meta.status === "running") {
+    const stall = observeBackgroundTaskStall(meta, now);
+    if (stall.state !== "healthy") metadata.push({ label: "activity", value: stall.state });
+  }
   if (meta.lastExitCode !== undefined) metadata.push({ label: "exit", value: String(meta.lastExitCode) });
   if (meta.error) metadata.push({ label: "error", value: meta.error });
   if (meta.logDiscardedBytes) {
@@ -198,6 +203,11 @@ function secondaryLabel(meta: BackgroundTaskMeta): string | undefined {
 
 function factsForMeta(meta: BackgroundTaskMeta, now: number): string[] {
   const facts: string[] = [];
+  if (meta.status === "running") {
+    const stall = observeBackgroundTaskStall(meta, now);
+    if (stall.state === "stalled") facts.push("stalled");
+    else if (stall.state === "quiet") facts.push("quiet");
+  }
   if (meta.kind === "command_watch" && meta.intervalMs) facts.push(`every ${formatDuration(meta.intervalMs)}`);
   if (meta.deadlineAt && meta.status === "running") facts.push(`${formatDuration(meta.deadlineAt - now)} left`);
   if (meta.result && meta.status !== "running") {

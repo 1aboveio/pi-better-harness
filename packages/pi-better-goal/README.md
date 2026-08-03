@@ -16,6 +16,7 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 - A compact goal widget that does not replace Pi's footer.
 - Background activity tracking for subagents and other registered providers.
 - A progress-aware follow-up loop that holds after repeated identical outcomes.
+- An observable-progress stall state for active goals.
 
 ## Install
 

@@ -1,0 +1,22 @@
+{
+  "name": "stall-detector",
+  "version": "0.1.0",
+  "description": "Observable-progress stall classification primitives for Pi extensions.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --strict --skipLibCheck --types node index.ts index.test.ts",
+    "test": "node --import tsx --test index.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

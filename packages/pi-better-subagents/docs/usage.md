@@ -32,6 +32,15 @@ launch is the result · completion triggers fetch · the foreground never blocks
 - **Observable.** A live status widget and on-demand queries show each run's
   elapsed time and token/cost spend.
 
+### Observable progress
+
+Subagent health uses the shared 60-second quiet and 5-minute stalled defaults,
+while preserving its stricter child-event semantics: active tool calls,
+compaction, and model retry/error phases explain silence rather than becoming
+stale. For a cross-extension override, set `PI_BETTER_STALL_QUIET_MS` and
+`PI_BETTER_STALL_MS` in milliseconds. Existing subagent `config.json` health
+thresholds continue to take precedence for subagent health.
+
 ## Tools
 
 | Tool | Blocks? | What it does |

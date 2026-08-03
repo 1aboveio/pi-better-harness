@@ -4,7 +4,23 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [pi-better-background-tasks@0.1.15] - 2026-08-04
+
+### Added
+
+- **background-tasks**: report quiet and stalled running tasks from observable process output or completed watcher polls; stalled tasks remain advisory and never trigger automatic termination
+
+## [pi-better-goal@0.1.17] - 2026-08-04
+
+### Added
+
+- **goal**: report observable goal progress and stalled state while preserving foreground and active-background exemptions
+
+## [pi-better-subagents@0.1.15] - 2026-08-04
+
+### Changed
+
+- **subagents**: use shared observable-progress stall thresholds while preserving model, tool, compaction, and terminal health semantics
 
 ## [pi-better-goal@0.1.16] - 2026-08-04
 

@@ -16,6 +16,7 @@ Use `pi-better-background-tasks` when a command should keep running while the fo
 - Watch commands until success, failure, or timeout.
 - Keep task metadata and logs available across reloads.
 - Show active work in Pi's background-work navigator.
+- Flag running tasks with no observable output or completed poll as stalled.
 
 ## Install
 
