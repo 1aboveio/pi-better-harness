@@ -25,6 +25,15 @@ interface GoalLike {
 
 export type GoalEntrySource = "command" | "tool" | "runtime";
 
+export interface ContinuationState {
+  goalId: string;
+  lastEvidenceSignature: string | null;
+  lastEvidenceSummary: string;
+  noProgressRetries: number;
+  blocked: boolean;
+  updatedAt: number;
+}
+
 export type GoalCustomEntry =
   | {
       version: 1;
@@ -38,6 +47,12 @@ export type GoalCustomEntry =
       kind: "clear";
       source: GoalEntrySource;
       clearedGoalId: string | null;
+      at: number;
+    }
+  | {
+      version: 1;
+      kind: "continuation-state";
+      state: ContinuationState;
       at: number;
     };
 
@@ -54,6 +69,23 @@ function isGoalLike(value: unknown): value is GoalLike {
     typeof candidate.goalId === "string" &&
     typeof candidate.objective === "string" &&
     isGoalStatus(candidate.status)
+  );
+}
+
+function isContinuationState(value: unknown): value is ContinuationState {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<ContinuationState>;
+  return (
+    typeof candidate.goalId === "string" &&
+    (candidate.lastEvidenceSignature === null || typeof candidate.lastEvidenceSignature === "string") &&
+    typeof candidate.lastEvidenceSummary === "string" &&
+    typeof candidate.noProgressRetries === "number" &&
+    Number.isInteger(candidate.noProgressRetries) &&
+    candidate.noProgressRetries >= 0 &&
+    typeof candidate.blocked === "boolean" &&
+    typeof candidate.updatedAt === "number"
   );
 }
 
@@ -141,6 +173,21 @@ export function goalClearEntry(clearedGoalId: string | null, source: GoalEntrySo
   return { version: 1, kind: "clear", source, clearedGoalId, at: unixSeconds() };
 }
 
+export function createContinuationState(goalId: string, now = unixSeconds()): ContinuationState {
+  return {
+    goalId,
+    lastEvidenceSignature: null,
+    lastEvidenceSummary: "",
+    noProgressRetries: 0,
+    blocked: false,
+    updatedAt: now,
+  };
+}
+
+export function continuationStateEntry(state: ContinuationState): GoalCustomEntry {
+  return { version: 1, kind: "continuation-state", state, at: unixSeconds() };
+}
+
 export function goalWithStatus(
   goal: GoalSnapshot,
   status: GoalStatus,
@@ -214,4 +261,18 @@ export function reconstructGoalSnapshot(entries: Iterable<SessionEntryLike>): Go
 
 export function currentGoalSnapshot(ctx: ExtensionContext): GoalSnapshot | null {
   return reconstructGoalSnapshot(ctx.sessionManager.getBranch() as Iterable<SessionEntryLike>);
+}
+
+export function currentContinuationState(ctx: ExtensionContext, goalId: string): ContinuationState | null {
+  let state: ContinuationState | null = null;
+  for (const entry of ctx.sessionManager.getBranch() as Iterable<SessionEntryLike>) {
+    if (entry.type !== "custom" || entry.customType !== EXTENSION_NAME || !entry.data || typeof entry.data !== "object") {
+      continue;
+    }
+    const data = entry.data as { kind?: unknown; state?: unknown };
+    if (data.kind === "continuation-state" && isContinuationState(data.state) && data.state.goalId === goalId) {
+      state = data.state;
+    }
+  }
+  return state;
 }

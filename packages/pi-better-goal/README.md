@@ -15,7 +15,7 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 - `/goal` runtime for starting, pausing, resuming, completing, and clearing the current objective.
 - A compact goal widget that does not replace Pi's footer.
 - Background activity tracking for subagents and other registered providers.
-- A follow-up wake when active background work drains to zero.
+- A progress-aware follow-up loop that holds after repeated identical outcomes.
 
 ## Install
 

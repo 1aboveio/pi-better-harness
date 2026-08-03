@@ -11,9 +11,9 @@ import type {
 import extension from "../src/index.js";
 
 interface SessionEntry {
-  type: "custom";
-  customType: string;
-  data: unknown;
+  type: string;
+  customType?: string;
+  data?: unknown;
 }
 
 interface CommandDefinition {
@@ -232,6 +232,63 @@ test("idle goal continuation rechecks background activity before waking", async 
   assert.equal(messages.length, 0, "new background activity during the grace period cancels the wake");
 });
 
+test("identical autonomous outcomes pause continuation until interactive input resets the ledger", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  assert.equal(messages.length, 1, "setting a goal starts its first autonomous turn");
+
+  const identicalOutcome = {
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call", name: "bash", arguments: { command: "git status --short" } }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call",
+        toolName: "bash",
+        isError: false,
+        content: [{ type: "text", text: "" }],
+      },
+    ],
+  };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await handlers.get("agent_start")?.({}, ctx);
+    await handlers.get("agent_end")?.(identicalOutcome, ctx);
+    await handlers.get("agent_settled")?.({}, ctx);
+    t.mock.timers.tick(30_000);
+    await flushPromises();
+  }
+  assert.equal(messages.length, 4, "the initial turn plus three no-progress retries are allowed");
+
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_end")?.(identicalOutcome, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(messages.length, 4, "the fourth identical outcome holds automatic continuation");
+
+  const blocked = latestContinuationState(entries);
+  assert.equal(blocked?.blocked, true);
+  assert.equal(blocked?.noProgressRetries, 3);
+
+  await handlers.get("input")?.({ source: "interactive" }, ctx);
+  const reset = latestContinuationState(entries);
+  assert.equal(reset?.blocked, false);
+  assert.equal(reset?.noProgressRetries, 0);
+
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_end")?.(identicalOutcome, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(messages.length, 5, "interactive input reopens the autonomous loop");
+});
+
 function createContinuationHarness() {
   const entries: SessionEntry[] = [];
   const commands = new Map<string, CommandDefinition>();
@@ -271,7 +328,21 @@ function createContinuationHarness() {
   } as unknown as ExtensionAPI;
 
   extension(pi);
-  return { commands, handlers, messages, ctx, events };
+  return { commands, handlers, messages, ctx, entries, events };
+}
+
+function latestContinuationState(entries: SessionEntry[]) {
+  let state: { blocked?: boolean; noProgressRetries?: number } | undefined;
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== "pi-better-goal" || !entry.data || typeof entry.data !== "object") {
+      continue;
+    }
+    const data = entry.data as { kind?: unknown; state?: unknown };
+    if (data.kind === "continuation-state" && data.state && typeof data.state === "object") {
+      state = data.state as { blocked?: boolean; noProgressRetries?: number };
+    }
+  }
+  return state;
 }
 
 async function flushPromises(): Promise<void> {

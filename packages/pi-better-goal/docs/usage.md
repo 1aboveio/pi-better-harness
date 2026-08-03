@@ -46,6 +46,36 @@ The widget does not replace Pi's footer, so custom footer extensions such as
 
 Set `PI_BETTER_GOAL_DISABLE_WAKE=1` to disable hidden background-drain wakeups.
 
+## Progress-Aware Continuation
+
+An active goal remains self-sustaining: after an idle foreground turn, the
+extension schedules a hidden continuation after the configured grace period.
+It records a durable per-goal continuation state in the session so repeated
+turns remain bounded across extension reloads and session resumes.
+
+The extension fingerprints each completed turn from its tool names and
+canonicalized arguments, tool results, and final assistant text. Call IDs,
+timestamps, reasoning, usage, and provider metadata do not affect the
+fingerprint. Only the SHA-256 digest and tool-name summary are persisted; raw
+arguments and results are not copied into extension state.
+
+When a turn produces the same fingerprint as the prior autonomous turn, it
+counts as a no-progress retry. By default, the original turn plus three
+identical retries are allowed. The next identical outcome keeps the goal
+active but holds further automatic continuations and reports `waiting: no
+progress` in the status area. It never marks the goal complete.
+
+Any changed result, an interactive user input, `/goal resume`, or a
+background-drained wake resets the retry ledger. Configure the number of
+identical retries after the initial outcome with:
+
+```sh
+PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES=3
+```
+
+Set it to `0` to hold after the first repeated identical outcome. Invalid or
+negative values fall back to the default.
+
 ## Install Locally
 
 From this directory:
