@@ -260,6 +260,7 @@ describe("finalizeRun integration", () => {
 
             assert.match(messages[0].message.content, /completed/i);
             assert.doesNotMatch(messages[0].message.content, /ATTENTION/i);
+            assert.doesNotMatch(messages[0].message.content, /read|tools:/i);
 
             const rendered = buildSubagentResultText(id);
             assert.ok(rendered);

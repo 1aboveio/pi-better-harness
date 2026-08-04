@@ -1,0 +1,20 @@
+{
+  "unit": "#150",
+  "headNote": "#150 outcome-focused completion callbacks. Smoke drives the real formatter and the real finalizeRun-to-delivery path with long repetitive tool traces (200-entry formatter trace; 120 tool events in the finalization log): delivered callbacks keep label/verdict/stat/lifecycle + subagent_result handoff and omit the trace across completed/failed/incomplete; durable detail remains in subagent_result.",
+  "results": [
+    {
+      "surface": "subagent.completion-callback",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types docs/tests/issue-150-runtime-smoke.mjs",
+      "observed": "SMOKE PASS: subagent.completion-callback — outcome metadata + handoff retained, long trace omitted (completed/failed/incomplete)"
+    },
+    {
+      "surface": "subagent.run-finalization",
+      "kind": "library",
+      "status": "pass",
+      "command": "node --experimental-strip-types docs/tests/issue-150-runtime-smoke.mjs",
+      "observed": "SMOKE PASS: subagent.run-finalization — finalizeRun delivery omits 120-call trace; detail remains in subagent_result"
+    }
+  ]
+}
