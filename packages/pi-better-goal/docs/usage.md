@@ -76,6 +76,17 @@ PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES=3
 Set it to `0` to hold after the first repeated identical outcome. Invalid or
 negative values fall back to the default.
 
+## Observable Progress
+
+`get_goal` reports `Observable progress: healthy`, `quiet`, or `stalled` for
+an active goal. Changed foreground evidence, interactive input, and a
+background-drain transition advance its progress anchor. A running foreground
+turn or active background work can be quiet but is not reported as stalled.
+
+The shared defaults are quiet after 60 seconds and stalled after 5 minutes.
+Set `PI_BETTER_STALL_QUIET_MS` and `PI_BETTER_STALL_MS` in milliseconds to
+override them across the harness extensions.
+
 ## Install Locally
 
 From this directory:

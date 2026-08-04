@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
 import { evaluateCondition } from "./conditions.js";
@@ -51,6 +52,7 @@ export function spawnTask(
     kind: "process",
     status: "running",
     startedAt: now,
+    lastProgressAt: now,
     deadlineAt: params.timeout_seconds ? now + params.timeout_seconds * 1000 : undefined,
     logPath,
     callback: params.callback,
@@ -103,6 +105,7 @@ export function startWatchTask(
     kind: "command_watch",
     status: "running",
     startedAt: now,
+    lastProgressAt: now,
     deadlineAt: timeoutSeconds ? now + timeoutSeconds * 1000 : undefined,
     intervalMs: Math.max(1, params.interval_seconds ?? 30) * 1000,
     logPath: logPathFor(id),
@@ -212,6 +215,7 @@ async function pollWatch(pi: ExtensionAPI, id: string, getActiveSession?: Active
     if (!latest || latest.status !== "running") return;
     enforceLogRetention(latest);
     latest.lastCheckedAt = Date.now();
+    latest.lastProgressAt = latest.lastCheckedAt;
     latest.lastExitCode = result.exitCode;
     latest.lastSignal = result.signal;
     latest.lastState = extractLastState(result);
@@ -371,6 +375,15 @@ function stopLogRetention(id: string): void {
 }
 
 function enforceLogRetention(meta: BackgroundTaskMeta): void {
+  try {
+    const mtimeMs = Math.trunc(statSync(meta.logPath).mtimeMs);
+    if (mtimeMs > (meta.lastProgressAt ?? meta.startedAt)) {
+      meta.lastProgressAt = mtimeMs;
+      writeMeta(meta);
+    }
+  } catch {
+    // Logs are optional progress evidence; retention still proceeds if absent.
+  }
   const compacted = retainLogTail(meta.logPath, resolveMaxLogBytes(meta.maxLogBytes));
   if (!compacted) return;
   meta.logDiscardedBytes = (meta.logDiscardedBytes ?? 0) + compacted.discardedBytes;

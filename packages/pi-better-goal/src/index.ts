@@ -21,6 +21,7 @@ import {
   validateTokenBudget,
 } from "./goal-state.js";
 import { continuationEvidence, type ContinuationEvidence } from "./continuation.js";
+import { observeGoalStall } from "./stall.js";
 import {
   goalClockRefreshDelayMs,
   goalTiming,
@@ -82,7 +83,11 @@ function continuationPrompt(goal: GoalSnapshot): string {
   ].join("\n");
 }
 
-function formatGoal(goal: GoalSnapshot | null, continuation: ReturnType<typeof currentContinuationState> = null): string {
+function formatGoal(
+  goal: GoalSnapshot | null,
+  continuation: ReturnType<typeof currentContinuationState> = null,
+  stall = observeGoalStall(goal, continuation),
+): string {
   if (!goal) {
     return "No goal is set.";
   }
@@ -98,6 +103,7 @@ function formatGoal(goal: GoalSnapshot | null, continuation: ReturnType<typeof c
     `Tokens used: ${goal.usage.tokensUsed}`,
     `Active time: ${timing.activeSeconds}s`,
     `Elapsed time: ${timing.elapsedSeconds}s`,
+    `Observable progress: ${stall?.state ?? "unknown"}`,
     continuationStatus,
   ].join("\n");
 }
@@ -309,10 +315,16 @@ export default function (pi: ExtensionAPI): void {
     if (ctx.hasUI) {
       const goal = getGoal(ctx);
       const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
+      const goalStall = observeGoalStall(goal, continuation, {
+        foregroundRunning,
+        backgroundRunning: latestSnapshot?.backgroundRunning ?? false,
+      });
       const status = snapshot.backgroundRunning
         ? `bg ${snapshot.activeBackgroundCount}${snapshot.unhealthyBackgroundCount ? `, ${snapshot.unhealthyBackgroundCount} unhealthy` : ""}`
         : continuation?.blocked
           ? "waiting: no progress"
+          : goalStall?.state === "stalled"
+            ? "goal stalled"
           : undefined;
       try {
         ctx.ui.setStatus(EXTENSION_NAME, status);
@@ -407,7 +419,8 @@ export default function (pi: ExtensionAPI): void {
       const current = getGoal(ctx);
 
       if (!trimmed) {
-        ctx.ui.notify(formatGoal(current, current ? currentContinuationState(ctx, current.goalId) : null), "info");
+        const continuation = current ? currentContinuationState(ctx, current.goalId) : null;
+        ctx.ui.notify(formatGoal(current, continuation, observeGoalStall(current, continuation, { foregroundRunning })), "info");
         return;
       }
 
@@ -477,9 +490,13 @@ export default function (pi: ExtensionAPI): void {
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const goal = getGoal(ctx);
       const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
+      const stall = observeGoalStall(goal, continuation, {
+        foregroundRunning,
+        backgroundRunning: latestSnapshot?.backgroundRunning ?? false,
+      });
       return {
-        content: [{ type: "text", text: formatGoal(goal, continuation) }],
-        details: { goal, continuation, timing: goal ? goalTiming(goal) : null, hasGoal: goal !== null },
+        content: [{ type: "text", text: formatGoal(goal, continuation, stall) }],
+        details: { goal, continuation, stall, timing: goal ? goalTiming(goal) : null, hasGoal: goal !== null },
       };
     },
   });
@@ -607,13 +624,17 @@ export default function (pi: ExtensionAPI): void {
       const repeated = previous.lastEvidenceSignature === evidence.signature;
       const noProgressRetries = repeated ? previous.noProgressRetries + 1 : 0;
       const blocked = repeated && noProgressRetries >= MAX_NO_PROGRESS_RETRIES;
+      const now = Date.now();
       appendContinuationState({
         goalId: goal.goalId,
         lastEvidenceSignature: evidence.signature,
         lastEvidenceSummary: evidence.summary,
+        ...(repeated
+          ? (previous.lastProgressAt !== undefined ? { lastProgressAt: previous.lastProgressAt } : {})
+          : { lastProgressAt: now }),
         noProgressRetries,
         blocked,
-        updatedAt: Math.floor(Date.now() / 1000),
+        updatedAt: Math.floor(now / 1000),
       });
       if (blocked) {
         refreshGoalWidget?.();

@@ -29,6 +29,8 @@ export interface ContinuationState {
   goalId: string;
   lastEvidenceSignature: string | null;
   lastEvidenceSummary: string;
+  /** Millisecond timestamp of the last changed foreground or external evidence. */
+  lastProgressAt?: number;
   noProgressRetries: number;
   blocked: boolean;
   updatedAt: number;
@@ -81,6 +83,7 @@ function isContinuationState(value: unknown): value is ContinuationState {
     typeof candidate.goalId === "string" &&
     (candidate.lastEvidenceSignature === null || typeof candidate.lastEvidenceSignature === "string") &&
     typeof candidate.lastEvidenceSummary === "string" &&
+    (candidate.lastProgressAt === undefined || (typeof candidate.lastProgressAt === "number" && Number.isFinite(candidate.lastProgressAt))) &&
     typeof candidate.noProgressRetries === "number" &&
     Number.isInteger(candidate.noProgressRetries) &&
     candidate.noProgressRetries >= 0 &&
@@ -178,6 +181,7 @@ export function createContinuationState(goalId: string, now = unixSeconds()): Co
     goalId,
     lastEvidenceSignature: null,
     lastEvidenceSummary: "",
+    lastProgressAt: now * 1000,
     noProgressRetries: 0,
     blocked: false,
     updatedAt: now,

@@ -8,6 +8,7 @@ function meta(overrides: Partial<BackgroundTaskMeta>): BackgroundTaskMeta {
     kind: "process",
     status: "running",
     startedAt: 100,
+    lastProgressAt: Date.now(),
     logPath: "/tmp/bg_test_1.log",
     cwd: "/tmp/project",
     spawnPid: 123,

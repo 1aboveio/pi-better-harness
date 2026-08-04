@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { listMetas } from "./registry.js";
 import type { BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
+import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.js";
 
 const GOAL_READY_EVENT = "pi-better-goal:ready";
 const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
@@ -92,11 +93,14 @@ function getGoalActivityOrigin(ctx: ExtensionContext) {
 function backgroundTaskToGoalItem(meta: BackgroundTaskMeta): GoalBackgroundWorkItem {
   const active = meta.status === "running";
   const terminal = isTerminalStatus(meta.status);
-  const attention = terminal && meta.status !== "succeeded";
+  const stall = observeBackgroundTaskStall(meta);
+  const unhealthy = active && stall.state === "stalled";
+  const attention = (terminal && meta.status !== "succeeded") || unhealthy;
   const item: GoalBackgroundWorkItem = {
     id: meta.id,
     status: meta.status,
     active,
+    unhealthy,
     terminal,
     attention,
     startedAt: meta.startedAt,
@@ -108,6 +112,8 @@ function backgroundTaskToGoalItem(meta: BackgroundTaskMeta): GoalBackgroundWorkI
       argv: meta.argv,
       logPath: meta.logPath,
       spawnPid: meta.spawnPid,
+      lastProgressAt: backgroundTaskProgressAt(meta),
+      stall: stall.state,
     },
   };
   if (meta.name !== undefined) item.label = meta.name;

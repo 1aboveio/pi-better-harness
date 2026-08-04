@@ -54,6 +54,22 @@ Command watchers default to a 15 minute timeout when `timeout_seconds` is
 omitted. Pass `timeout_seconds: 0` to disable the watcher timeout explicitly.
 Spawned processes do not get a default timeout.
 
+## Observable Progress
+
+Running tasks are classified as `healthy`, `quiet`, or `stalled` from observable
+progress. A process advances when its output log advances; a watcher advances
+when its poll command returns. The navigator shows quiet or stalled tasks, and
+stalled tasks are marked unhealthy in goal activity. This is advisory only: it
+does not stop or fail a process.
+
+The shared defaults are quiet after 60 seconds and stalled after 5 minutes.
+Override either threshold in milliseconds for all installed harness extensions:
+
+```sh
+PI_BETTER_STALL_QUIET_MS=120000
+PI_BETTER_STALL_MS=600000
+```
+
 ## Examples
 
 ```json
