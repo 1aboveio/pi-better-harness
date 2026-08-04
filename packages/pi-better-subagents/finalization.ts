@@ -69,7 +69,6 @@ export function finalizeRun(
     const el = fmtElapsed(meta.endedAt - meta.startedAt);
     const spend = fmtSpend(r.usage);
     const stat = `${el}${spend ? ` · ${spend}` : ""}`;
-    const tools = r.toolCalls.length ? r.toolCalls.join(", ") : undefined;
 
     // A finished run is no longer in the widget; redraw (and stop the ticker if
     // it was the last one).
@@ -94,7 +93,6 @@ export function finalizeRun(
         label,
         verdict,
         stat,
-        tools,
         callback,
         incomplete: outcome.incomplete,
         lifecycleClassification: outcome.classification,

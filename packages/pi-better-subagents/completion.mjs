@@ -16,16 +16,15 @@
  * - Announces the subagent finished
  * - Tells the model to call/use subagent_result id="<id>"
  * - Does NOT contain "--- result ---" or any result payload
- * - MAY include label, verdict, stat, and tools list
+ * - Includes label, verdict, stat, and lifecycle classification when available
+ * - Omits tool history; detailed execution evidence belongs in subagent_result
  * 
  * @param p.id - The run id
  * @param p.label - Human-readable label (e.g., "reviewer (abc123)")
  * @param p.verdict - Status line (e.g., "✓ completed" or "✗ failed (exit 1)")
  * @param p.stat - Statistics line (e.g., "45s · 1.2k tok · $0.0034")
- * @param p.tools - Optional tools used (e.g., "read,bash,web_fetch")
  */
 export function formatCallbackTrigger(p) {
-    const tools = p.tools ? ` ·${p.tools.replace(/\n/, " ")}` : "";
     const lifecycle = p.lifecycleClassification ? ` · lifecycle ${p.lifecycleClassification}` : "";
     const announcement = p.incomplete
         ? "ATTENTION: a background subagent exited unexpectedly before producing a coherent final result."
@@ -33,7 +32,7 @@ export function formatCallbackTrigger(p) {
     const instruction = p.incomplete
         ? `Inspect the diagnostic with subagent_result id="${p.id}" before deciding how to continue.`
         : `Ingest this signal and call subagent_result id="${p.id}" to retrieve the actual result, then use/present it as appropriate.`;
-    return `${announcement}\nsubagent: ${p.label} · ${p.verdict} · ${p.stat}${tools}${lifecycle}\n\n${instruction}`;
+    return `${announcement}\nsubagent: ${p.label} · ${p.verdict} · ${p.stat}${lifecycle}\n\n${instruction}`;
 }
 
 /**
@@ -74,7 +73,6 @@ export function formatCallbackQuiet(p) {
  * @param p.label    - Human-readable label
  * @param p.verdict  - Status line (e.g. "✓ completed")
  * @param p.stat     - Statistics line (e.g. "45s · 1.2k tok")
- * @param p.tools    - Optional tools list
  * @param p.callback - Whether to trigger a turn (true) or be quiet (false)
  * @param p.resultText - The parsed final answer; MUST NOT appear in content
  */
@@ -86,7 +84,6 @@ export function buildCompletionDelivery(p) {
                 label: p.label,
                 verdict: p.verdict,
                 stat: p.stat,
-                tools: p.tools,
                 incomplete: p.incomplete,
                 lifecycleClassification: p.lifecycleClassification,
             }),
