@@ -46,6 +46,8 @@ export interface BackgroundTaskMeta {
   deadlineAt?: number;
   intervalMs?: number;
   lastCheckedAt?: number;
+  /** Latest command completion or observed process log output. */
+  lastProgressAt?: number;
   lastExitCode?: number | null;
   lastSignal?: NodeJS.Signals | null;
   lastState?: unknown;

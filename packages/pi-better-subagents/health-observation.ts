@@ -15,6 +15,7 @@ import { DEFAULT_MAX_READ_BYTES, readAppendedLines, type LogCursor } from "./log
 import { logPathFor } from "./registry.ts";
 import type { RunStatus } from "./registry.ts";
 import { loadConfig, type SubagentConfig } from "./config.ts";
+import { observeStall } from "./shared-stall-detector.ts";
 
 // ---- thresholds -----------------------------------------------------------
 
@@ -42,6 +43,13 @@ function positiveMs(n: unknown, fallback: number): number {
     return Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback;
 }
 
+function envDuration(name: string): number | undefined {
+    const raw = process.env[name];
+    if (!raw || raw.trim() === "") return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
 /** Merge partial thresholds / config keys onto defaults. */
 export function resolveHealthThresholds(
     partial?: Partial<HealthThresholds> | Pick<
@@ -63,7 +71,11 @@ export function resolveHealthThresholds(
 
 /** Load thresholds from extension config.json (best-effort). */
 export function loadHealthThresholdsFromConfig(config: SubagentConfig = loadConfig()): HealthThresholds {
-    return resolveHealthThresholds(config);
+    return resolveHealthThresholds({
+        ...config,
+        healthQuietMs: config.healthQuietMs ?? envDuration("PI_BETTER_STALL_QUIET_MS"),
+        healthStaleMs: config.healthStaleMs ?? envDuration("PI_BETTER_STALL_MS"),
+    });
 }
 
 // ---- event facts ----------------------------------------------------------
@@ -703,37 +715,28 @@ export function observeRunHealth(input: ObserveRunHealthInput): HealthObservatio
         || modelState === "retrying"
         || modelState === "error";
 
-    let activity: ActivityHealth = "healthy";
-    if (
-        input.status === "failed"
+    const terminal = input.status === "failed"
         || input.status === "completed"
         || input.status === "killed"
         || input.status === "lost"
-        || input.status === "exited"
-    ) {
-        // Terminal runs are not residual-stale workers.
-        if (meaningfulAgeMs !== undefined && meaningfulAgeMs >= thresholds.quietMs) activity = "quiet";
-        else activity = "healthy";
-    } else if (explainedByPhase) {
-        // Active known phase: never residual stale.
-        if (meaningfulAgeMs !== undefined && meaningfulAgeMs >= thresholds.quietMs) activity = "quiet";
-        else activity = "healthy";
-    } else if (meaningfulAgeMs === undefined) {
-        if (input.startedAt !== undefined) {
-            const age = Math.max(0, now - input.startedAt);
-            if (age >= thresholds.staleMs) activity = "stale";
-            else if (age >= thresholds.quietMs) activity = "quiet";
-            else activity = "healthy";
-        } else {
-            activity = "stale";
-        }
-    } else if (meaningfulAgeMs >= thresholds.staleMs) {
-        activity = "stale";
-    } else if (meaningfulAgeMs >= thresholds.quietMs) {
-        activity = "quiet";
-    } else {
-        activity = "healthy";
-    }
+        || input.status === "exited";
+    const stall = observeStall({
+        now,
+        lastProgressAt: facts.lastMeaningfulAt,
+        startedAt: input.startedAt,
+        // Terminal work and explicit model/tool/compaction phases can be quiet,
+        // but neither is an unexplained stalled worker.
+        exempt: terminal || explainedByPhase,
+        thresholds: { quietMs: thresholds.quietMs, stallMs: thresholds.staleMs },
+    });
+    const activity: ActivityHealth = stall.state === "stalled"
+        ? "stale"
+        : stall.state === "quiet"
+            ? "quiet"
+            // Legacy metadata without any timestamp remains conservative.
+            : stall.state === "unknown" && !terminal && !explainedByPhase
+                ? "stale"
+                : "healthy";
 
     const process: ProcessObservation = {
         liveness: processLiveness(input.status, input.process?.supervised),
