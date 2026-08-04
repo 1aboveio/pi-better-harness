@@ -110,18 +110,18 @@ describe('formatCallbackTrigger', () => {
         );
     });
 
-    it('may include label, verdict, and stat', () => {
+    it('includes outcome metadata but omits the execution trace', () => {
         const result = formatCallbackTrigger({
             id: 'abc123',
             label: 'my-agent (abc123)',
             verdict: '✓ completed',
             stat: '1m 30s · 5.2k tok',
-            tools: 'read,bash',
+            tools: Array.from({ length: 100 }, (_, index) => index % 2 ? 'bash' : 'read').join(','),
         });
         assert.ok(result.includes('my-agent'), 'Should include label');
         assert.ok(result.includes('✓ completed'), 'Should include verdict');
         assert.ok(result.includes('1m 30s'), 'Should include stat');
-        assert.ok(result.includes('read,bash'), 'Should include tools list');
+        assert.doesNotMatch(result, /read|bash|tools:/, 'Callback must omit the execution trace');
     });
 });
 
@@ -240,18 +240,18 @@ describe('buildCompletionDelivery', () => {
         assert.ok(!d.content.includes('RESULT_PART'), 'huge resultText must not leak into content');
     });
 
-    it('callback:true uses formatCallbackTrigger output (id, label, verdict, stat, tools)', () => {
+    it('callback:true preserves outcome metadata while omitting tool history', () => {
         const d = buildCompletionDelivery({
             id: 'sa_format', label: 'reviewer (sa_format)', verdict: '✓ completed',
-            stat: '30s · 800 tok · $0.0012', tools: 'read,bash',
+            stat: '30s · 800 tok · $0.0012', tools: 'read,bash,read,bash,read,bash',
             callback: true, resultText: 'THE ACTUAL RESULT SHOULD NOT APPEAR',
         });
         assert.ok(d.content.includes('reviewer (sa_format)'));
         assert.ok(d.content.includes('✓ completed'));
         assert.ok(d.content.includes('30s'));
-        assert.ok(d.content.includes('read,bash'));
         assert.ok(d.content.includes('sa_format'));
         assert.ok(!d.content.includes('THE ACTUAL RESULT SHOULD NOT APPEAR'));
+        assert.doesNotMatch(d.content, /read|bash|tools:/);
     });
 
     it('finalization.ts calls buildCompletionDelivery in finalizeRun', async () => {
