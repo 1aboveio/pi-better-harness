@@ -54,6 +54,7 @@ export type BackgroundWorkProvider = {
   label: string;
   priority: number;
   visibleCount(): number;
+  parentRow?(now: number): BackgroundWorkRow | null;
   listRows(now: number): BackgroundWorkRow[];
   detail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null;
   armCloseLabel(row: BackgroundWorkRow): string;
@@ -411,6 +412,16 @@ function buildMainListLines(
     const group = grouped.get(label)!;
     if (i > 0) lines.push("");
     lines.push(providerGroupLabel(label, fg));
+    const provider = state().providers.get(group[0]!.providerId);
+    let parentRow: BackgroundWorkRow | null = null;
+    try { parentRow = provider?.parentRow?.(Date.now()) ?? null; } catch { parentRow = null; }
+    if (parentRow) {
+      lines.push(formatMainListRow({
+        ...parentRow,
+        navigatorId: rowKey(parentRow.providerId, parentRow.id),
+        providerLabel: label,
+      }, false, fg, width));
+    }
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
       lines.push(formatMainListRow(row, selected === true, fg, width));
@@ -976,7 +987,10 @@ function buildDetailLines(
   } else {
     const evidenceLabel = /log/i.test(detail.evidence.label) ? `${detail.evidence.label} · latest ${tailRows} rows` : detail.evidence.label;
     lines.push(dim(section(evidenceLabel, width), fg));
-    for (const raw of body.split(/\r?\n/)) lines.push(raw ? `   ${raw}` : "   ");
+    const wrapped = /log/i.test(detail.evidence.label)
+      ? wrapLogText(body, width - 6)
+      : body.split(/\r?\n/);
+    for (const raw of wrapped) lines.push(raw ? `   ${raw}` : "   ");
   }
   lines.push("");
   const footerLines = [dim(`   ← back · ${actions}`, fg), dim(rule("", width), fg)];
@@ -1040,6 +1054,82 @@ function wrapEvidenceText(text: string, width: number): string[] {
     rows.push(...wrapDetailText(raw, width));
   }
   return rows.length ? rows : ["(no output yet)"];
+}
+
+/**
+ * Wrap terminal log rows without flattening entries together. Continuations
+ * retain the source indentation, and long paths/JSON tokens are hard-wrapped
+ * so the final width guard never has to discard their suffix.
+ */
+export function wrapLogText(text: string, width: number): string[] {
+  const max = Math.max(8, Math.floor(width));
+  const rows: string[] = [];
+  for (const source of String(text ?? "").split(/\r?\n/)) {
+    if (!source) {
+      rows.push("");
+      continue;
+    }
+    const sourceIndent = source.match(/^[ \t]*/)?.[0] ?? "";
+    const indent = sourceIndent.replace(/\t/g, "  ");
+    let remaining = source.slice(sourceIndent.length);
+    const contentWidth = Math.max(1, max - visibleWidth(indent));
+    if (!remaining) {
+      rows.push(indent);
+      continue;
+    }
+    while (visibleWidth(remaining) > contentWidth) {
+      let [head, tail] = splitVisiblePrefix(remaining, contentWidth);
+      const minSoftBreak = Math.floor(contentWidth * 0.45);
+      const delimiterBreak = lastDelimiterBreak(head);
+      const whitespace = head.match(/\s+\S*$/)?.index;
+      if (delimiterBreak > minSoftBreak) {
+        tail = head.slice(delimiterBreak) + tail;
+        head = head.slice(0, delimiterBreak);
+      } else if (whitespace !== undefined && whitespace > minSoftBreak) {
+        tail = head.slice(whitespace).trimStart() + tail;
+        head = head.slice(0, whitespace).trimEnd();
+      }
+      rows.push(indent + head);
+      remaining = tail.trimStart();
+    }
+    rows.push(indent + remaining);
+  }
+  return rows.length ? rows : [""];
+}
+
+function lastDelimiterBreak(value: string): number {
+  let last = -1;
+  for (const match of value.matchAll(/[\/,}:]/g)) last = match.index + 1;
+  return last;
+}
+
+function splitVisiblePrefix(value: string, width: number): [string, string] {
+  const max = Math.max(0, Math.floor(width));
+  let visible = 0;
+  let index = 0;
+  while (index < value.length && visible < max) {
+    if (value[index] === "\u001b" || value[index] === "\u009b") {
+      const match = value.slice(index).match(ANSI_RE);
+      if (match?.index === 0) {
+        index += match[0].length;
+        continue;
+      }
+    }
+    if (value[index] === "<") {
+      const close = value.indexOf(">", index);
+      if (close !== -1) {
+        const tag = value.slice(index, close + 1);
+        if (/^<\/?[a-zA-Z][\w-]*>$/.test(tag) || tag === "</>") {
+          index = close + 1;
+          continue;
+        }
+      }
+    }
+    const codePoint = value.codePointAt(index)!;
+    index += codePoint > 0xFFFF ? 2 : 1;
+    visible += 1;
+  }
+  return [value.slice(0, index), value.slice(index)];
 }
 
 function cycleLogTailRows(current: number): number {

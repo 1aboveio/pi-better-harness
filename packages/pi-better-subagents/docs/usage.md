@@ -270,6 +270,9 @@ is unchanged in every mode.
 - While the main-window list is focused, the title hint changes to
   `Enter to view · x to stop`; the selected row is marked with `›`. Press
   `↓` from the bottom row to return to the input line.
+- The Subagents lane pins an informational `main` row above child runs. It
+  shows the foreground model, effort, active tool, context tokens, and active
+  elapsed time. It is not selectable and can never become an `x` stop target.
 - `↑` moves to the previous row when multiple running rows are shown. `↓`
   moves toward the input line, returning to normal input from the bottom row.
 - `Enter` opens the selected run's live detail view. `x` stops the selected
@@ -280,6 +283,10 @@ is unchanged in every mode.
 
 - Detail uses the same command-sheet treatment, with section rules for the
   inspector groups and command bars at the top and bottom of the view.
+- Tool-call log rows wrap within the detail width instead of truncating. Source
+  row boundaries and indentation are retained, with long paths and JSON values
+  preferring delimiter breaks before a hard wrap. Header and metadata geometry
+  is unchanged.
 - Shows status (colorized), model/effort, elapsed, tools, spend, and parsed
   output, plus sectioned health: process identity/liveness, activity,
   compaction, active tool, model call/error, last log write, thresholds, and
