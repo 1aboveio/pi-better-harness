@@ -46,11 +46,15 @@ test("subagent details use the shared 10/25 rolling log tail", async () => {
 
     const handlers = new Map();
     let component;
+    let mainListWidget;
+    let idle = true;
     const ui = {
         factory: undefined,
         theme: { fg: (_color, value) => value },
         setStatus() {},
-        setWidget() {},
+        setWidget(key, value) {
+            if (key === "background-work-list" && typeof value === "function") mainListWidget = value;
+        },
         getEditorComponent() { return this.factory; },
         setEditorComponent(factory) { this.factory = factory; },
         custom(factory) {
@@ -64,6 +68,9 @@ test("subagent details use the shared 10/25 rolling log tail", async () => {
         ui,
         cwd,
         model: { provider: "test", id: "test" },
+        thinkingLevel: "high",
+        isIdle: () => idle,
+        getContextUsage: () => ({ tokens: 109_300, contextWindow: 200_000, percent: 54.65 }),
         sessionManager: { getSessionId: () => sessionId },
     };
     const pi = {
@@ -75,6 +82,17 @@ test("subagent details use the shared 10/25 rolling log tail", async () => {
     betterSubagents(pi);
     try {
         await handlers.get("session_start")({}, ctx);
+        const renderMainList = (width = 120) => mainListWidget({ requestRender() {} }, ui.theme).render(width).join("\n");
+        let mainList = renderMainList();
+        assert.match(mainList, /·\s+main\s+test high · 109\.3k tok\s+idle/);
+        assert.ok(mainList.indexOf("main") < mainList.indexOf("tail verifier"), mainList);
+
+        idle = false;
+        await handlers.get("agent_start")({}, ctx);
+        await handlers.get("tool_execution_start")({ toolCallId: "main-tool-1", toolName: "read" }, ctx);
+        mainList = renderMainList();
+        assert.match(mainList, /●\s+main\s+test high · tool read · 109\.3k tok/);
+
         const editor = ui.factory({}, {}, {});
         editor.handleInput("<left>");
         editor.handleInput("<enter>");
@@ -91,13 +109,15 @@ test("subagent details use the shared 10/25 rolling log tail", async () => {
         assert.match(rendered, /row-1/);
         assert.match(rendered, /row-12/);
 
-        appendFileSync(logPath, "row-13\n");
+        appendFileSync(logPath, "row-13\ntool read /Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/shared-navigator.ts\n");
         component.handleInput("l");
-        rendered = component.render(160).join("\n");
+        const narrowLines = component.render(54);
+        rendered = narrowLines.join("\n");
         assert.match(rendered, /log tail · latest 10 rows/);
         assert.doesNotMatch(rendered, /row-3\n/);
-        assert.match(rendered, /row-4/);
         assert.match(rendered, /row-13/);
+        assert.match(rendered, /shared-navigator\.ts/);
+        assert.ok(narrowLines.every((line) => line.length <= 54), rendered);
     } finally {
         disposeBackgroundWorkNavigator(ctx);
     }
