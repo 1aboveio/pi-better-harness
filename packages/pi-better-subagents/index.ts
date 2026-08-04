@@ -96,6 +96,7 @@ import {
     WIDGET_CLEAR,
     fmtElapsed,
     fmtSpend,
+    fmtTokens,
     shortModel,
     isSpendCacheFresh,
     resolveHealthLogExtraction,
@@ -587,6 +588,8 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 
 let unregisterSubagentProvider: (() => void) | undefined;
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
+let mainAgentStartedAt: number | undefined;
+const mainAgentTools = new Map<string, string>();
 
 /**
  * Observe health for a navigator row/detail (#69). Reuses the size/mtime-gated
@@ -743,6 +746,37 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
     });
 }
 
+function mainAgentWorkRow(now: number): BackgroundWorkRow {
+    let running = mainAgentStartedAt !== undefined;
+    try { running ||= uiCtx?.isIdle() === false; } catch { /* use event state */ }
+    const model = shortModel(uiCtx?.model?.id);
+    const effort = uiCtx?.thinkingLevel;
+    const tool = [...mainAgentTools.values()].at(-1);
+    let contextTokens: number | null | undefined;
+    try { contextTokens = uiCtx?.getContextUsage()?.tokens; } catch { contextTokens = undefined; }
+    const tokens = typeof contextTokens === "number" ? `${fmtTokens(contextTokens)} tok` : undefined;
+    const bits = [
+        effort ? `${model} ${effort}` : model,
+        tool ? `tool ${tool}` : undefined,
+        tokens,
+    ].filter((bit): bit is string => Boolean(bit));
+    return {
+        providerId: "subagents",
+        id: "main",
+        name: "main",
+        model,
+        effort,
+        tool,
+        tokens,
+        status: running ? "running" : "idle",
+        statusTone: running ? "running" : "muted",
+        kind: "main agent",
+        elapsed: running && mainAgentStartedAt !== undefined ? fmtElapsed(now - mainAgentStartedAt) : "idle",
+        primary: bits.join(" · "),
+        sortStartedAt: mainAgentStartedAt ?? now,
+    };
+}
+
 function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
     const detail = navigatorDetail(id, now);
     if (!detail) return null;
@@ -780,6 +814,7 @@ function ensureSubagentProvider(): void {
         label: "Subagents",
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
+        parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
         armCloseLabel: (row) => row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
@@ -1322,11 +1357,49 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool(subagentStopTool(Type, { onStopped: renderWidget }));
 
     // ---- live-status lifecycle -----------------------------------------
+    pi.on("agent_start", async (_event, ctx) => {
+        uiCtx = ctx;
+        mainAgentStartedAt = Date.now();
+        mainAgentTools.clear();
+        refreshBackgroundWorkNavigator(ctx);
+    });
+
+    pi.on("tool_execution_start", async (event, ctx) => {
+        mainAgentTools.set(event.toolCallId, event.toolName);
+        refreshBackgroundWorkNavigator(ctx);
+    });
+
+    pi.on("tool_execution_end", async (event, ctx) => {
+        mainAgentTools.delete(event.toolCallId);
+        refreshBackgroundWorkNavigator(ctx);
+    });
+
+    pi.on("message_end", async (event, ctx) => {
+        if (event.message.role === "assistant") refreshBackgroundWorkNavigator(ctx);
+    });
+
+    pi.on("model_select", async (_event, ctx) => {
+        refreshBackgroundWorkNavigator(ctx);
+    });
+
+    pi.on("thinking_level_select", async (_event, ctx) => {
+        refreshBackgroundWorkNavigator(ctx);
+    });
+
+    pi.on("agent_settled", async (_event, ctx) => {
+        mainAgentStartedAt = undefined;
+        mainAgentTools.clear();
+        refreshBackgroundWorkNavigator(ctx);
+    });
+
     // Capture a UI-bearing context and, if runs from a prior session are still
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
         uiCtx = ctx;
+        try { mainAgentStartedAt = ctx.isIdle() ? undefined : Date.now(); }
+        catch { mainAgentStartedAt = undefined; }
+        mainAgentTools.clear();
         activeCallbackOrigin = callbackOriginFromContext(ctx);
         // Reload / session switch hardening (#48):
         // - Drop any leftover overlay timers/confirm state from a prior session
@@ -1359,6 +1432,8 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("session_before_switch", () => {
         activeCallbackOrigin = undefined;
+        mainAgentStartedAt = undefined;
+        mainAgentTools.clear();
         disposeBackgroundWorkNavigator();
     });
 
@@ -1369,6 +1444,8 @@ export default function (pi: ExtensionAPI) {
         // cannot become live process groups with no coordinator.
         stopCurrentSessionSubagents(ctx);
         activeCallbackOrigin = undefined;
+        mainAgentStartedAt = undefined;
+        mainAgentTools.clear();
         stopTicker();
         stopHealthTicker();
         spendCache.clear();

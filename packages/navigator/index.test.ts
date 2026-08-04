@@ -8,6 +8,7 @@ import {
   ensureBackgroundWorkNavigator,
   refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
+  wrapLogText,
   type BackgroundWorkProvider,
 } from "./index.ts";
 
@@ -526,6 +527,66 @@ describe("shared background work navigator", () => {
     }
   });
 
+  it("renders a provider parent row without adding it to keyboard navigation", () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      parentRow: () => ({
+        providerId: "subagents",
+        id: "main",
+        name: "main",
+        model: "gpt-5.6",
+        effort: "high",
+        tool: "read",
+        tokens: "109.3k tok",
+        status: "running",
+        statusTone: "running",
+        kind: "main agent",
+        elapsed: "11m 07s",
+        primary: "gpt-5.6 high · tool read · 109.3k tok",
+        sortStartedAt: 0,
+      }),
+    });
+    const widgets: unknown[] = [];
+    let component: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+
+      const list = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
+      assert.match(list, /●\s+main\s+gpt-5\.6 high · tool read · 109\.3k tok/);
+      assert.ok(list.indexOf("main") < list.indexOf("Subagents row"), list);
+
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      const focused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
+      assert.doesNotMatch(focused, /^› ●\s+main/m, "parent row is informational, not a stop target");
+      assert.match(focused, /^› ●\s+Subagents row/m);
+      editor.handleInput("enter");
+      assert.match(component.render(100).join("\n"), /Subagents detail/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("renders a single watcher as a compact row until focused", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("background-tasks", "Background Tasks", 20, 300, () => undefined),
@@ -899,5 +960,16 @@ describe("shared background work navigator", () => {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
     }
+  });
+
+  it("wraps tool-call log rows without truncating long paths", () => {
+    const path = "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/shared-navigator.ts";
+    const source = `tool read {\"path\":\"${path}\",\"offset\":880}`;
+    const rows = wrapLogText(source, 32);
+
+    assert.ok(rows.length > 2, rows.join("\n"));
+    assert.ok(rows.every((row) => row.length <= 32), rows.join("\n"));
+    assert.equal(rows.join("").replace(/\s+/g, ""), source.replace(/\s+/g, ""));
+    assert.match(rows.join(""), /shared-navigator\.ts/);
   });
 });
