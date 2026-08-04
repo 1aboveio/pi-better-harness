@@ -27,5 +27,5 @@ Shared gitdir is write-denied (sandbox-exec). Use GIT_INDEX_FILE + GIT_OBJECT_DI
 - [x] context collected
 - [x] RED — 3 failures on the trace leak (formatCallbackTrigger trace case, buildCompletionDelivery trace case, run_finalization complete-exit assertion)
 - [x] GREEN — focused files pass; package suite 601 pass / 1 fail (git-workspace outside-write-denial test: environmental, sandbox denies its $HOME mkdir; reproduces on untouched main checkout)
-- [ ] gates
+- [x] gates — scope-class: surface-bearing/highRisk:false; lint-tests PR-lane+whole-tree 0 findings; ledger validate 31 inherited Unverified (pre-existing, no drift); checklist validate rc=0 (6 package-relative-locator warnings, repo convention); scan-diff findings channel empty
 - [ ] PR open
