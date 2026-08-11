@@ -4,6 +4,7 @@ import { appendLine, appendWatchResult, retainLogTail, resolveMaxLogBytes } from
 import { evaluateCondition } from "./conditions.js";
 import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, writeMeta } from "./registry.js";
+import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, CommandSpec, Condition, TerminalResult } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 
@@ -304,24 +305,37 @@ async function notifyTerminal(
   if (meta.callback === false || meta.callbackSentAt || meta.callbackSuppressedAt) return;
   const latest = readMeta(meta.id) ?? meta;
   if (latest.callback === false || latest.callbackSentAt || latest.callbackSuppressedAt) return;
-  const suppressionReason = getCallbackSuppressionReason(latest, getActiveSession?.());
-  if (suppressionReason) {
-    latest.callbackSuppressedAt = Date.now();
-    latest.callbackSuppressedReason = suppressionReason;
-    writeMeta(latest);
-    return;
-  }
   const label = latest.name ? `${latest.name} (${latest.id})` : latest.id;
-  try {
-    await pi.sendUserMessage(
-      `Background task ${label} reached terminal status ${latest.status}. Inspect the compact result with bg_task_status id=${latest.id}; call bg_task_log only if the status summary is insufficient.`,
-      { deliverAs: "followUp" },
-    );
-    latest.callbackSentAt = Date.now();
-    writeMeta(latest);
-  } catch {
-    // Leave callbackSentAt unset so the originating session can attempt delivery once.
-  }
+  getCallbackBatcher(pi).enqueue({
+    source: "background-task",
+    id: latest.id,
+    label,
+    status: latest.status,
+    detailTool: "bg_task_status",
+    callback: true,
+    isDelivered: () => {
+      const current = readMeta(latest.id);
+      return current?.callbackSentAt !== undefined || current?.callbackSuppressedAt !== undefined;
+    },
+    getSuppressionReason: () => {
+      const current = readMeta(latest.id);
+      if (!current) return "background task metadata is unavailable";
+      return getCallbackSuppressionReason(current, getActiveSession?.());
+    },
+    onDelivered: (at) => {
+      const current = readMeta(latest.id);
+      if (!current || current.callbackSentAt !== undefined || current.callbackSuppressedAt !== undefined) return;
+      current.callbackSentAt = at;
+      writeMeta(current);
+    },
+    onSuppressed: (reason, at) => {
+      const current = readMeta(latest.id);
+      if (!current || current.callbackSentAt !== undefined || current.callbackSuppressedAt !== undefined) return;
+      current.callbackSuppressedAt = at;
+      current.callbackSuppressedReason = reason;
+      writeMeta(current);
+    },
+  });
 }
 
 function getCallbackSuppressionReason(

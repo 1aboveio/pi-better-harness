@@ -102,6 +102,9 @@ export interface RunMeta {
     sessionId: string;
     /** Foreground session that is allowed to receive unsolicited callbacks. */
     callbackOrigin?: RunCallbackOrigin;
+    /** Durable ordinary-completion callback recovery and successful-handoff markers. */
+    completionCallbackPendingAt?: number;
+    completionCallbackSentAt?: number;
     completionCallbackSuppressedAt?: number;
     completionCallbackSuppressedReason?: string;
     orphanedCallbackSuppressedAt?: number;

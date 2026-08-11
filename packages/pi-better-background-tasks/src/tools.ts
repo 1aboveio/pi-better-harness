@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readLog } from "./logs.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
+import { cancelCallbackBatch } from "./shared-callback-batcher.js";
 import { listMetas, readMeta, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
@@ -89,9 +90,11 @@ export function registerTools(pi: ExtensionAPI): void {
   });
   pi.on("session_before_switch", () => {
     activeSession = undefined;
+    cancelCallbackBatch(pi);
   });
   pi.on("session_shutdown", () => {
     activeSession = undefined;
+    cancelCallbackBatch(pi);
   });
 
   pi.registerTool({

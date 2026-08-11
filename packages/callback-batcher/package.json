@@ -1,0 +1,22 @@
+{
+  "name": "callback-batcher",
+  "version": "0.1.0",
+  "description": "Internal shared callback batching for Pi background-work extensions.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --types node --strict --skipLibCheck index.ts index.test.ts integration.test.ts",
+    "test": "node --import tsx --test *.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

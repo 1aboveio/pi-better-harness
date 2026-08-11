@@ -57,14 +57,17 @@ thresholds continue to take precedence for subagent health.
 - **Process isolation.** Each run is a `detached` + `unref`'d `pi -p` process.
   Its context can't clog the parent, its crash can't corrupt parent state, and
   its output is durable in a log file.
-- **Completion triggers a turn that fetches the result.** When the child exits,
-  a lightweight trigger is sent with `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })` —
-  it waits until the foreground agent has no pending tool calls (never cutting
-  into work mid-stream), then the model calls `subagent_result` and presents the
-  result. The actual result is never embedded in the trigger to avoid double-display.
-  The run itself never blocks the foreground; the single nudge happens only at
-  the end. Prefer `callback:false` to finish quietly and read the result on demand
-  via `subagent_result`.
+- **Completions trigger one batched turn that fetches durable results.** Ordinary
+  terminal callbacks accumulate for 100 ms and share one
+  `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })` notification
+  with background-task completions from the same Pi host. Each row contains only
+  source, id, label, terminal status, and the `subagent_result` lookup. Full
+  results and logs stay in durable tools and are never embedded in the callback.
+  Set `PI_BETTER_CALLBACK_BATCH_MS` to `0` through `5000` milliseconds to tune
+  the accumulation window; invalid values use 100 ms. A failed handoff keeps the
+  pending records retryable, and `/reload` recovers records explicitly marked
+  pending. `callback:false` sends no model message; read the durable result later
+  with `subagent_result`.
 - **The prompt guidelines forbid polling.** The foreground agent is told, in the
   tool guidelines, that spawning is done and it must not loop on `output`/`result`
   or sleep to wait.
@@ -358,12 +361,18 @@ reconciles process-group evidence only (see `docs/adr/0002-process-group-only-su
   ATTENTION follow-up + diagnostic `subagent_result` path with best-available
   artifacts.
 
-Callbacks use the same non-interrupting `{ deliverAs: "followUp", triggerTurn: true }`
-mechanics as completion, with distinct ATTENTION wording. Per-status markers on
-`meta.json` (`orphanedCallbackSentAt` / `lostCallbackSentAt`) are written only after
-a successful handoff and dedupe across reloads and repeated health ticks. Persisted
-unmarked orphaned/lost states are recovered on the health ticker after `/reload`
-even when process evidence does not produce a fresh transition.
+Orphaned/lost callbacks use the same non-interrupting
+`{ deliverAs: "followUp", triggerTurn: true }` mechanics, but bypass the ordinary
+completion accumulation window and retain distinct ATTENTION wording. Per-status
+markers on `meta.json` (`orphanedCallbackSentAt` / `lostCallbackSentAt`) are written
+only after a successful handoff and dedupe across reloads and repeated health ticks.
+Persisted unmarked orphaned/lost states are recovered on the health ticker after
+`/reload` even when process evidence does not produce a fresh transition.
+
+Pi's optional `followUpMode: all` remains useful when completion groups arrive
+after an earlier 100 ms batch has already flushed: Pi can consume those queued
+follow-ups in one later agent turn. This extension does not change Pi core or
+Pi's default follow-up mode.
 
 ### Surfacing health (tools + passive widget)
 
