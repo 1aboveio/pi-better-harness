@@ -137,7 +137,7 @@ describe("extension e2e", () => {
     expect(harness.messages).toHaveLength(1);
     expect(harness.messages[0]).toContain(id);
     expect(harness.messages[0]).toContain("bg_task_status");
-    expect(harness.messages[0]).toContain("call bg_task_log only if");
+    expect(harness.messages[0]).toContain("Full results and logs are intentionally omitted");
 
     await harness.fireSessionStart();
     expect(harness.messages).toHaveLength(1);
@@ -301,10 +301,10 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
     on(eventName: string, handler: (event: unknown, ctx: unknown) => unknown) {
       if (eventName === "session_start") sessionStartHandlers.push(handler);
     },
-    async sendUserMessage(message: string) {
-      messageAttempts.push(message);
+    sendMessage(message: { content: string }) {
+      messageAttempts.push(message.content);
       if (options.failUserMessage) throw new Error("simulated send failure");
-      messages.push(message);
+      messages.push(message.content);
     },
   } as unknown as ExtensionAPI;
 

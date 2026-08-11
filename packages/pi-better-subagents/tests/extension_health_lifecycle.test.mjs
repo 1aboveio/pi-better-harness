@@ -59,6 +59,7 @@ const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-ext-health-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
 
 const { default: betterSubagents, setIdentityProbeForTests, isHealthTickerActive } = await import("../index.ts");
+const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, nextRunId, runDir } = await import("../registry.ts");
 const { realProcessProbe, OLD_METADATA_LOST_CONFIRM_TICKS } = await import("../health.ts");
 const { killProcessTree } = await import("../spawn.ts");
@@ -98,7 +99,10 @@ function makeHarness(options = {}) {
     const pi = {
         registerTool: (def) => tools.set(def.name, def),
         on: (event, fn) => handlers.set(event, fn),
-        sendMessage: (message, options) => sent.push({ message, options }),
+        sendMessage: (message, sendOptions) => {
+            if (options.sendMessage) return options.sendMessage(message, sendOptions, sent);
+            sent.push({ message, options: sendOptions });
+        },
     };
     const ctx = {
         cwd,
@@ -109,12 +113,12 @@ function makeHarness(options = {}) {
     };
     betterSubagents(pi);
     const shutdown = () => handlers.get("session_shutdown")?.({}, ctx);
-    return { tools, handlers, sent, notes, ctx, shutdown };
+    return { pi, tools, handlers, sent, notes, ctx, shutdown };
 }
 
-async function spawnRun({ tools, ctx }) {
+async function spawnRun({ tools, ctx }, overrides = {}) {
     const res = await tools.get("subagent_spawn").execute(
-        "tc", { prompt: "lifecycle test task", clean: true, sandbox: false, cwd: tmpdir() },
+        "tc", { prompt: "lifecycle test task", clean: true, sandbox: false, cwd: tmpdir(), ...overrides },
         undefined, undefined, ctx,
     );
     const out = res.content[0].text;
@@ -343,6 +347,115 @@ describe("AC9 — health ticker production lifecycle (fake clock)", () => {
     });
 });
 
+describe("completion callback batching", () => {
+    // @covers subagent.completion-callback
+    // @level integration
+    // @fails-without-fix subagent.completion-callback
+    it("batches real child exits and keeps callback:false silent in a mixed group", async () => {
+        const previousWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
+        process.env.PI_BETTER_CALLBACK_BATCH_MS = "5000";
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "completion-batch" });
+        let runs = [];
+        try {
+            const first = await spawnRun(h, { name: "first", callback: true });
+            const second = await spawnRun(h, { name: "second", callback: true });
+            const quiet = await spawnRun(h, { name: "quiet", callback: false });
+            runs = [first, second, quiet];
+
+            for (const run of runs) killProcessTree(run.pid, "SIGKILL");
+            const batcher = getCallbackBatcher(h.pi);
+            const terminal = await waitFor(() => {
+                const metas = runs.map((run) => readMeta(run.id));
+                return metas.every((meta) => meta && meta.status !== "running" && meta.status !== "orphaned")
+                    && batcher.pendingCount() === 2;
+            });
+            assert.equal(terminal, true, "two callback-enabled terminal runs enter the shared batch");
+            assert.equal(h.sent.length, 0, "long test window holds the aggregate until explicit flush");
+
+            assert.equal(await batcher.flush(), true);
+            const completionMessages = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+            assert.equal(completionMessages.length, 1);
+            const content = completionMessages[0].message.content;
+            assert.match(content, /2 background completions are ready/);
+            assert.match(content, new RegExp(first.id));
+            assert.match(content, new RegExp(second.id));
+            assert.doesNotMatch(content, new RegExp(quiet.id));
+            assert.match(content, /subagent_result/);
+            assert.doesNotMatch(content, /lifecycle test task|--- result ---/);
+            assert.ok(readMeta(first.id).completionCallbackSentAt > 0);
+            assert.ok(readMeta(second.id).completionCallbackSentAt > 0);
+            assert.equal(readMeta(quiet.id).completionCallbackSentAt, undefined);
+            assert.equal(readMeta(quiet.id).completionCallbackPendingAt, undefined);
+        } finally {
+            for (const run of runs) rmSync(runDir(run.id), { recursive: true, force: true });
+            h.shutdown();
+            if (previousWindow === undefined) delete process.env.PI_BETTER_CALLBACK_BATCH_MS;
+            else process.env.PI_BETTER_CALLBACK_BATCH_MS = previousWindow;
+        }
+    });
+
+    // @covers subagent.completion-callback
+    // @level integration
+    // @fails-without-fix subagent.completion-callback
+    it("recovers durable pending callbacks after reload and retries a failed aggregate without early markers", async () => {
+        let failNext = true;
+        const h = makeHarness({
+            cwd: tmpdir(),
+            sessionId: "session-b",
+            sendMessage(message, options, sent) {
+                if (message.customType === "background-completion-batch" && failNext) {
+                    failNext = false;
+                    throw new Error("simulated aggregate handoff failure");
+                }
+                sent.push({ message, options });
+            },
+        });
+        const now = Date.now();
+        const ids = [nextRunId(), nextRunId(), nextRunId()];
+        for (const id of ids) dirOnly.push(id);
+        const base = {
+            status: "completed",
+            pid: DEAD_PID,
+            spawnPid: process.pid,
+            cwd: h.ctx.cwd,
+            promptPreview: "durable callback recovery",
+            startedAt: now - 2_000,
+            endedAt: now - 1_000,
+            exitCode: 0,
+            logPath: "",
+            sessionId: "child-session",
+            callback: true,
+            completionCallbackPendingAt: now - 1_000,
+        };
+        try {
+            writeMeta({ ...base, id: ids[0], name: "active-a", logPath: join(runDir(ids[0]), "output.log"), callbackOrigin: { cwd: h.ctx.cwd, sessionId: "session-b" } });
+            writeMeta({ ...base, id: ids[1], name: "active-b", logPath: join(runDir(ids[1]), "output.log"), callbackOrigin: { cwd: h.ctx.cwd, sessionId: "session-b" } });
+            writeMeta({ ...base, id: ids[2], name: "foreign", logPath: join(runDir(ids[2]), "output.log"), callbackOrigin: { cwd: h.ctx.cwd, sessionId: "session-a" } });
+
+            await h.handlers.get("session_start")({}, h.ctx);
+            const batcher = getCallbackBatcher(h.pi);
+            assert.equal(batcher.pendingCount(), 3, "reload recovers every unhandled pending record before ownership filtering");
+
+            assert.equal(await batcher.flush(), false);
+            assert.equal(readMeta(ids[0]).completionCallbackSentAt, undefined);
+            assert.equal(readMeta(ids[1]).completionCallbackSentAt, undefined);
+            assert.equal(readMeta(ids[2]).completionCallbackSentAt, undefined);
+            assert.ok(readMeta(ids[2]).completionCallbackSuppressedAt > 0, "foreign record is durably suppressed");
+
+            assert.equal(await batcher.flush(), true);
+            const messages = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+            assert.equal(messages.length, 1);
+            assert.match(messages[0].message.content, new RegExp(ids[0]));
+            assert.match(messages[0].message.content, new RegExp(ids[1]));
+            assert.doesNotMatch(messages[0].message.content, new RegExp(ids[2]));
+            assert.ok(readMeta(ids[0]).completionCallbackSentAt > 0);
+            assert.ok(readMeta(ids[1]).completionCallbackSentAt > 0);
+        } finally {
+            h.shutdown();
+        }
+    });
+});
+
 describe("terminal exit evidence supersedes provisional health reconciliation", () => {
     it("a health tick's provisional lost is superseded by the child's real exit", async () => {
         await withFakeClock(async () => {
@@ -369,9 +482,10 @@ describe("terminal exit evidence supersedes provisional health reconciliation", 
                 assert.ok(final, "coherent child exit must supersede the provisional lost write");
                 assert.notEqual(final.status, "lost", "provisional lost must not remain");
                 assert.ok("exitCode" in final, "the real exit code is recorded");
+                assert.equal(await getCallbackBatcher(h.pi).flush(), true);
                 assert.ok(
-                    h.sent.some((s) => s.message.customType === "subagent-complete"),
-                    "the completion callback is still delivered",
+                    h.sent.some((s) => s.message.customType === "background-completion-batch" && s.message.content.includes(id)),
+                    "the superseding completion remains present in the aggregate callback",
                 );
             } finally {
                 setIdentityProbeForTests(undefined);

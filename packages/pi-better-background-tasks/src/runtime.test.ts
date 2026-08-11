@@ -1,7 +1,9 @@
+import { rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readMeta } from "./registry.js";
-import { DEFAULT_WATCH_TIMEOUT_SECONDS, spawnTask, startWatchTask, stopTask } from "./runtime.js";
+import { getCallbackBatcher } from "./shared-callback-batcher.js";
+import { readMeta, taskDir, writeMeta } from "./registry.js";
+import { DEFAULT_WATCH_TIMEOUT_SECONDS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 
 const fakePi = {
   sendUserMessage: async () => undefined,
@@ -120,7 +122,7 @@ describe("runtime", () => {
   it("callback completion does not embed process output", async () => {
     const messages: Array<{ message: string; options: unknown }> = [];
     const pi = {
-      sendUserMessage: async (message: string, options: unknown) => { messages.push({ message, options }); },
+      sendMessage: (message: { content: string }, options: unknown) => { messages.push({ message: message.content, options }); },
     } as unknown as ExtensionAPI;
     const origin = { cwd: process.cwd(), sessionId: "session-a" };
     const sentinel = "UNIQUE_BACKGROUND_LOG_PAYLOAD_SHOULD_NOT_DISPLAY";
@@ -136,10 +138,93 @@ describe("runtime", () => {
     expect(terminal?.status).toBe("succeeded");
     expect(messages).toHaveLength(1);
     expect(messages[0]?.message).toContain("bg_task_status");
-    expect(messages[0]?.message).toContain("only if the status summary is insufficient");
+    expect(messages[0]?.message).toContain("Full results and logs are intentionally omitted");
     expect(messages[0]?.message).not.toContain(sentinel);
     expect(messages[0]?.options).toMatchObject({ deliverAs: "followUp" });
   }, 30_000);
+
+  // @covers background-task.terminal-callback
+  // @level integration
+  // @fails-without-fix background-task.terminal-callback
+  it("batches terminal metadata replay, excludes callback:false and raw payloads, then marks successful handoff", async () => {
+    const messages: string[] = [];
+    const pi = {
+      sendMessage: (message: { content: string }) => { messages.push(message.content); },
+    } as unknown as ExtensionAPI;
+    const origin = { cwd: process.cwd(), sessionId: "batch-session" };
+    const ids = [`bg_batch_a_${Date.now()}`, `bg_batch_b_${Date.now()}`, `bg_batch_quiet_${Date.now()}`];
+    const metas = [
+      terminalMeta(ids[0]!, origin, { name: "build", status: "succeeded", result: { raw: "RESULT_SENTINEL_A" } }),
+      terminalMeta(ids[1]!, origin, { name: "test", status: "failed", result: { raw: "RAW_LOG_SENTINEL_B" } }),
+      terminalMeta(ids[2]!, origin, { name: "quiet", status: "succeeded", callback: false }),
+    ];
+
+    try {
+      for (const meta of metas) writeMeta(meta);
+      for (const meta of metas) resumeRunningTask(pi, meta, () => origin);
+      expect(await getCallbackBatcher(pi).flush()).toBe(true);
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain("2 background completions are ready");
+      expect(messages[0]).toContain(ids[0]);
+      expect(messages[0]).toContain(ids[1]);
+      expect(messages[0]).not.toContain(ids[2]);
+      expect(messages[0]).toContain("bg_task_status");
+      expect(messages[0]).not.toMatch(/RESULT_SENTINEL_A|RAW_LOG_SENTINEL_B/);
+      expect(readMeta(ids[0]!)?.callbackSentAt).toBeTypeOf("number");
+      expect(readMeta(ids[1]!)?.callbackSentAt).toBeTypeOf("number");
+      expect(readMeta(ids[2]!)?.callbackSentAt).toBeUndefined();
+    } finally {
+      for (const id of ids) rmSync(taskDir(id), { recursive: true, force: true });
+    }
+  });
+
+  // @covers background-task.terminal-callback
+  // @level integration
+  // @fails-without-fix background-task.terminal-callback
+  it("keeps a failed batch retryable, writes no early markers, and suppresses a foreign session", async () => {
+    let failNext = true;
+    const messages: string[] = [];
+    const pi = {
+      sendMessage: (message: { content: string }) => {
+        if (failNext) {
+          failNext = false;
+          throw new Error("simulated batch handoff failure");
+        }
+        messages.push(message.content);
+      },
+    } as unknown as ExtensionAPI;
+    const active = { cwd: process.cwd(), sessionId: "session-b" };
+    const foreign = { cwd: process.cwd(), sessionId: "session-a" };
+    const ids = [`bg_retry_a_${Date.now()}`, `bg_retry_b_${Date.now()}`, `bg_foreign_${Date.now()}`];
+    const metas = [
+      terminalMeta(ids[0]!, active, { name: "retry-a" }),
+      terminalMeta(ids[1]!, active, { name: "retry-b" }),
+      terminalMeta(ids[2]!, foreign, { name: "foreign" }),
+    ];
+
+    try {
+      for (const meta of metas) writeMeta(meta);
+      for (const meta of metas) resumeRunningTask(pi, meta, () => active);
+      const batcher = getCallbackBatcher(pi);
+
+      expect(await batcher.flush()).toBe(false);
+      expect(readMeta(ids[0]!)?.callbackSentAt).toBeUndefined();
+      expect(readMeta(ids[1]!)?.callbackSentAt).toBeUndefined();
+      expect(readMeta(ids[2]!)?.callbackSentAt).toBeUndefined();
+      expect(readMeta(ids[2]!)?.callbackSuppressedAt).toBeTypeOf("number");
+
+      expect(await batcher.flush()).toBe(true);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain(ids[0]);
+      expect(messages[0]).toContain(ids[1]);
+      expect(messages[0]).not.toContain(ids[2]);
+      expect(readMeta(ids[0]!)?.callbackSentAt).toBeTypeOf("number");
+      expect(readMeta(ids[1]!)?.callbackSentAt).toBeTypeOf("number");
+    } finally {
+      for (const id of ids) rmSync(taskDir(id), { recursive: true, force: true });
+    }
+  });
 
   it("cancels a spawned process", async () => {
     const meta = spawnTask(fakePi, {
@@ -154,6 +239,29 @@ describe("runtime", () => {
     expect(readMeta(meta.id)?.result).toMatchObject({ reason: "cancelled" });
   });
 });
+
+function terminalMeta(
+  id: string,
+  callbackOrigin: { cwd: string; sessionId?: string },
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    id,
+    name: "terminal fixture",
+    kind: "process" as const,
+    status: "succeeded" as const,
+    startedAt: Date.now() - 1_000,
+    endedAt: Date.now(),
+    lastProgressAt: Date.now(),
+    logPath: `${taskDir(id)}/output.log`,
+    callback: true,
+    callbackOrigin,
+    cwd: callbackOrigin.cwd,
+    spawnPid: process.pid,
+    result: { reason: "fixture" },
+    ...overrides,
+  };
+}
 
 async function waitForMeta(
   id: string,

@@ -1,0 +1,30 @@
+{
+  "issue": 159,
+  "head": "a100c357cadb3af8e86eab21dbf8908aa006b5c3",
+  "results": [
+    {
+      "surface": "background-callback.batch",
+      "status": "pass",
+      "command": "npm test -w packages/callback-batcher",
+      "observed": "7 tests passed: aggregation, single-event debounce, bounded payload exclusion, concurrent failure/retry, callback:false/isolation, urgent bypass, and cross-family shared singleton"
+    },
+    {
+      "surface": "background-task.terminal-callback",
+      "status": "pass",
+      "command": "npx vitest run packages/pi-better-background-tasks/src/runtime.test.ts -t \"batches terminal metadata replay|keeps a failed batch retryable\"",
+      "observed": "1 file passed; 2 callback integration tests passed"
+    },
+    {
+      "surface": "subagent.completion-callback",
+      "status": "pass",
+      "command": "node --import tsx --test --test-name-pattern \"completion callback batching|#65\" packages/pi-better-subagents/tests/extension_health_lifecycle.test.mjs",
+      "observed": "2 completion callback batching/recovery tests passed"
+    },
+    {
+      "surface": "subagent.health-callback",
+      "status": "pass",
+      "command": "node --import tsx --test --test-name-pattern \"completion callback batching|#65\" packages/pi-better-subagents/tests/extension_health_lifecycle.test.mjs",
+      "observed": "7 orphaned/lost callback tests passed; urgent delivery, callback:false, durable dedupe, reload recovery, and send-failure retry remain green"
+    }
+  ]
+}
