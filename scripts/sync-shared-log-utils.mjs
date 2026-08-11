@@ -6,6 +6,7 @@ const logUtilsSource = resolve(root, "packages/log-utils/index.ts");
 const navigatorSource = resolve(root, "packages/navigator/index.ts");
 const renderSchedulerSource = resolve(root, "packages/render-scheduler/index.ts");
 const stallDetectorSource = resolve(root, "packages/stall-detector/index.ts");
+const callbackBatcherSource = resolve(root, "packages/callback-batcher/index.ts");
 const banner = "// Generated from packages/log-utils/index.ts. Do not edit directly.\n";
 const logUtilsTargets = [
   resolve(root, "packages/pi-better-background-tasks/src/shared-log-utils.ts"),
@@ -26,10 +27,15 @@ const stallDetectorTargets = [
   resolve(root, "packages/pi-better-subagents/shared-stall-detector.ts"),
   resolve(root, "packages/pi-better-goal/src/shared-stall-detector.ts"),
 ];
+const callbackBatcherTargets = [
+  resolve(root, "packages/pi-better-background-tasks/src/shared-callback-batcher.ts"),
+  resolve(root, "packages/pi-better-subagents/shared-callback-batcher.ts"),
+];
 const logUtilsContent = `${banner}${readFileSync(logUtilsSource, "utf8")}`;
 const navigatorContent = readFileSync(navigatorSource, "utf8");
 const renderSchedulerContent = `// Generated from packages/render-scheduler/index.ts. Do not edit directly.\n${readFileSync(renderSchedulerSource, "utf8")}`;
 const stallDetectorContent = `// Generated from packages/stall-detector/index.ts. Do not edit directly.\n${readFileSync(stallDetectorSource, "utf8")}`;
+const callbackBatcherContent = `// Generated from packages/callback-batcher/index.ts. Do not edit directly.\n${readFileSync(callbackBatcherSource, "utf8")}`;
 
 for (const target of logUtilsTargets) {
   writeFileSync(target, logUtilsContent);
@@ -45,4 +51,8 @@ for (const target of renderSchedulerTargets) {
 
 for (const target of stallDetectorTargets) {
   writeFileSync(target, stallDetectorContent);
+}
+
+for (const target of callbackBatcherTargets) {
+  writeFileSync(target, callbackBatcherContent);
 }

@@ -84,6 +84,7 @@ import {
     getSharedCapacityGate,
 } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.ts";
+import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
 import {
     text,
     subagentListTool,
@@ -237,10 +238,56 @@ function stopCurrentSessionSubagents(ctx: ExtensionContext): void {
 
 function markCompletionCallbackSuppressed(id: string, reason: string, now: number = Date.now()): void {
     const meta = readMeta(id);
-    if (!meta || meta.completionCallbackSuppressedAt !== undefined) return;
+    if (!meta || meta.completionCallbackSentAt !== undefined || meta.completionCallbackSuppressedAt !== undefined) return;
     meta.completionCallbackSuppressedAt = now;
     meta.completionCallbackSuppressedReason = reason;
     writeMeta(meta);
+}
+
+function markCompletionCallbackSent(id: string, now: number): void {
+    const meta = readMeta(id);
+    if (!meta || meta.completionCallbackSentAt !== undefined || meta.completionCallbackSuppressedAt !== undefined) return;
+    meta.completionCallbackSentAt = now;
+    writeMeta(meta);
+}
+
+/** Queue one durable ordinary terminal event on the host-shared batch. */
+function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
+    const meta = readMeta(id);
+    if (!meta
+        || meta.callback === false
+        || meta.completionCallbackPendingAt === undefined
+        || meta.completionCallbackSentAt !== undefined
+        || meta.completionCallbackSuppressedAt !== undefined) return;
+    const label = meta.name ? `${meta.name} (${id})` : id;
+    getCallbackBatcher(pi).enqueue({
+        source: "subagent",
+        id,
+        label,
+        status: meta.status,
+        detailTool: "subagent_result",
+        callback: true,
+        isDelivered: () => {
+            const current = readMeta(id);
+            return current?.completionCallbackSentAt !== undefined
+                || current?.completionCallbackSuppressedAt !== undefined;
+        },
+        getSuppressionReason: () => {
+            const current = readMeta(id);
+            if (!current) return "subagent metadata is unavailable";
+            return callbackSuppressionReason(current);
+        },
+        onDelivered: (at) => markCompletionCallbackSent(id, at),
+        onSuppressed: (reason, at) => markCompletionCallbackSuppressed(id, reason, at),
+    });
+}
+
+/** Recover only records explicitly marked pending; legacy terminal runs never replay. */
+function recoverCompletionCallbacks(pi: ExtensionAPI): void {
+    for (const meta of listMetas()) {
+        if (!ownedByThisParent(meta)) continue;
+        enqueueCompletionCallback(pi, meta.id);
+    }
 }
 
 function markHealthCallbackSuppressed(meta: RunMeta, status: "orphaned" | "lost", reason: string, now: number): void {
@@ -409,12 +456,6 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
     if (!pi) return;
     if (isHealthCallbackHandled(meta, status)) return;
 
-    const suppressionReason = callbackSuppressionReason(meta);
-    if (suppressionReason) {
-        markHealthCallbackSuppressed(meta, status, suppressionReason, now);
-        return;
-    }
-
     const callback = meta.callback !== false;
     const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
     const delivery = buildHealthCallbackDelivery({ id: meta.id, label, status, callback });
@@ -426,20 +467,35 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
         writeMeta(meta);
         return;
     }
-    try {
-        pi.sendMessage(
-            { customType: "subagent-health", content: delivery.content, display: true },
-            delivery.options,
-        );
-    } catch {
-        // Handoff failed — leave marker unset so a later tick/reload can retry.
-        // Never let a delivery failure break the health ticker.
-        return;
-    }
-    // Marker = successful handoff (sendMessage returned), not mere attempt.
-    if (status === "orphaned") meta.orphanedCallbackSentAt = now;
-    else meta.lostCallbackSentAt = now;
-    writeMeta(meta);
+    void getCallbackBatcher(pi).deliverUrgent({
+        source: "subagent",
+        id: meta.id,
+        label,
+        status,
+        customType: "subagent-health",
+        content: delivery.content,
+        isDelivered: () => {
+            const current = readMeta(meta.id);
+            return current ? isHealthCallbackHandled(current, status) : true;
+        },
+        getSuppressionReason: () => {
+            const current = readMeta(meta.id);
+            if (!current) return "subagent metadata is unavailable";
+            return callbackSuppressionReason(current);
+        },
+        onDelivered: (at) => {
+            const current = readMeta(meta.id);
+            if (!current || isHealthCallbackHandled(current, status)) return;
+            if (status === "orphaned") current.orphanedCallbackSentAt = at;
+            else current.lostCallbackSentAt = at;
+            writeMeta(current);
+        },
+        onSuppressed: (reason, at) => {
+            const current = readMeta(meta.id);
+            if (!current || isHealthCallbackHandled(current, status)) return;
+            markHealthCallbackSuppressed(current, status, reason, at);
+        },
+    });
 }
 
 /** One reconciliation + durable health-callback recovery pass. */
@@ -935,16 +991,7 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
         notify: (message, level) => {
             try { ctx.ui.notify(message, level); } catch { /* ignore */ }
         },
-        sendMessage: (message, options) => {
-            const meta = readMeta(id);
-            if (!meta) return;
-            const suppressionReason = callbackSuppressionReason(meta);
-            if (suppressionReason) {
-                markCompletionCallbackSuppressed(id, suppressionReason);
-                return;
-            }
-            pi.sendMessage(message, options);
-        },
+        sendMessage: () => enqueueCompletionCallback(pi, id),
     });
 }
 
@@ -1401,6 +1448,7 @@ export default function (pi: ExtensionAPI) {
         catch { mainAgentStartedAt = undefined; }
         mainAgentTools.clear();
         activeCallbackOrigin = callbackOriginFromContext(ctx);
+        recoverCompletionCallbacks(pi);
         // Reload / session switch hardening (#48):
         // - Drop any leftover overlay timers/confirm state from a prior session
         //   (defensive if the host skipped session_shutdown before re-start).
@@ -1432,6 +1480,7 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("session_before_switch", () => {
         activeCallbackOrigin = undefined;
+        cancelCallbackBatch(pi);
         mainAgentStartedAt = undefined;
         mainAgentTools.clear();
         disposeBackgroundWorkNavigator();
@@ -1444,6 +1493,7 @@ export default function (pi: ExtensionAPI) {
         // cannot become live process groups with no coordinator.
         stopCurrentSessionSubagents(ctx);
         activeCallbackOrigin = undefined;
+        cancelCallbackBatch(pi);
         mainAgentStartedAt = undefined;
         mainAgentTools.clear();
         stopTicker();

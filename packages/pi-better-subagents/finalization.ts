@@ -62,6 +62,13 @@ export function finalizeRun(
     if (outcome.incomplete) meta.failureReason = "incomplete-stream";
     meta.exitCode = code;
     meta.endedAt = Date.now();
+    const callback = meta.callback !== false;
+    if (callback
+        && meta.completionCallbackPendingAt === undefined
+        && meta.completionCallbackSentAt === undefined
+        && meta.completionCallbackSuppressedAt === undefined) {
+        meta.completionCallbackPendingAt = meta.endedAt;
+    }
     writeMeta(meta);
 
     const label = meta.name ? `${meta.name} (${id})` : id;
@@ -84,10 +91,9 @@ export function finalizeRun(
         /* ignore */
     }
 
-    const callback = meta.callback !== false; // default: trigger completion
-    // buildCompletionDelivery is the single place sendMessage content/options are
-    // assembled. resultText is accepted here so callers/tests can pass it without
-    // breaking, but it is NEVER put into content — the result lives in subagent_result.
+    // buildCompletionDelivery remains the compatibility formatter for callers and
+    // direct finalizer tests. Production callback:true delivery is coalesced by the
+    // host wrapper; callback:false never invokes a model-message hook.
     const delivery = buildCompletionDelivery({
         id,
         label,
@@ -98,10 +104,12 @@ export function finalizeRun(
         lifecycleClassification: outcome.classification,
         resultText: r.finalText || r.lastActivity || "",
     });
-    hooks.sendMessage?.(
-        { customType: "subagent-complete", content: delivery.content, display: true },
-        delivery.options,
-    );
+    if (callback) {
+        hooks.sendMessage?.(
+            { customType: "subagent-complete", content: delivery.content, display: true },
+            delivery.options,
+        );
+    }
 
     return {
         applied: true,

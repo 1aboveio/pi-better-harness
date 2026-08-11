@@ -26,15 +26,27 @@ not special cases in the runtime.
 count as foreground attention. It keeps metadata and logs on disk for explicit
 inspection.
 
-Callbacks are terminal-only by default. When `callback` is not false, a task that
-reaches a terminal state queues one follow-up message telling the foreground
-agent which task finished and which tool to call for details.
+Callbacks are terminal-only by default. Ordinary callback-enabled terminal
+transitions accumulate for 100 ms and produce one compact follow-up, shared with
+subagent completions loaded in the same Pi host. Every row includes source, id,
+label, terminal status, and its durable status/result tool. `callback:false`
+never enters the batch and sends no model follow-up.
 
-Callbacks point to `bg_task_status` first. The default status response is a
-compact model-facing summary that omits large command bodies; use
-`verbose:true` only when full metadata is required. `bg_task_log` defaults to a
-20-line terminal-aware tail. `tail_lines: 0` returns the retained raw log, up
-to a 512 KiB safe-read cap.
+Set `PI_BETTER_CALLBACK_BATCH_MS` to `0` through `5000` milliseconds to tune the
+accumulation window; invalid values use 100 ms. A single event flushes when that
+bounded window expires. Failed sends leave all affected events unmarked and
+retryable; ownership is rechecked at flush so another cwd/session is suppressed.
+
+Callbacks point to `bg_task_status` first. The aggregate never contains result
+objects or raw logs. The default status response is a compact model-facing
+summary that omits large command bodies; use `verbose:true` only when full
+metadata is required. `bg_task_log` defaults to a 20-line terminal-aware tail.
+`tail_lines: 0` returns the retained raw log, up to a 512 KiB safe-read cap.
+
+Pi's optional `followUpMode: all` still helps when a later completion arrives
+after an earlier 100 ms aggregate has already flushed: Pi can consume queued
+follow-ups together in one later agent turn. This extension does not change Pi
+core or Pi's default follow-up mode.
 
 ## Log Retention
 
