@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-background-tasks@0.1.16] - 2026-08-11
+
+### Changed
+
+- **background-tasks**: batch completion callbacks into one bounded follow-up while preserving retry, session isolation, and urgent health notifications
+
+## [pi-better-subagents@0.1.18] - 2026-08-11
+
+### Changed
+
+- **subagents**: batch completion callbacks across subagent and background-task sources while preserving durable retries and urgent health notifications
+
 ## [pi-better-subagents@0.1.17] - 2026-08-04
 
 ### Added
