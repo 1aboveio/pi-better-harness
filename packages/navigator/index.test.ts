@@ -527,7 +527,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("renders a provider parent row without adding it to keyboard navigation", () => {
+  it("selects the main parent row first and Enter returns to the foreground", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("subagents", "Subagents", 10, 100, () => undefined),
       parentRow: () => ({
@@ -577,10 +577,20 @@ describe("shared background work navigator", () => {
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       const focused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
-      assert.doesNotMatch(focused, /^› ●\s+main/m, "parent row is informational, not a stop target");
-      assert.match(focused, /^› ●\s+Subagents row/m);
+      assert.match(focused, /^› ●\s+main/m, "navigation should start on main");
       editor.handleInput("enter");
-      assert.match(component.render(100).join("\n"), /Subagents detail/);
+      const unfocused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
+      assert.doesNotMatch(unfocused, /^› /m, "Enter on main returns focus to the foreground");
+      assert.equal(component, undefined, "main must not open a detail overlay");
+
+      editor.handleInput("left");
+      editor.handleInput("down");
+      const subagentFocused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
+      assert.match(subagentFocused, /^› ●\s+Subagents row/m);
+      editor.handleInput("enter");
+      const openedComponent: any = component;
+      assert.ok(openedComponent, "subagent selection opens its detail overlay");
+      assert.match(openedComponent.render(100).join("\n"), /Subagents detail/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

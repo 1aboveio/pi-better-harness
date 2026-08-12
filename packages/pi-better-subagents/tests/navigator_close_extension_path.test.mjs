@@ -328,6 +328,7 @@ describe("registered extension path: main-window navigator actions", () => {
         try {
             await nav.start();
             nav.focusViaLeftKey();
+            nav.pressEditor("down");
             const component = await nav.openDetailViaEnter();
             const text = component.render(80).join("\n").replace(/<\/?[a-z]*>/g, "");
             assert.ok(text.includes("live-affordance"), text);
@@ -363,6 +364,12 @@ describe("registered extension path: main-window navigator actions", () => {
         nav.pressX();
         nav.pressX();
         let back = registry.readMeta(id);
+        assert.equal(back.status, "running", "main is not a stoppable navigator target");
+
+        nav.pressEditor("down");
+        nav.pressX();
+        nav.pressX();
+        back = registry.readMeta(id);
         assert.equal(back.status, "killed", "main-list x must mark killed via shared stopRun");
         assert.equal(typeof back.dismissedAt, "number", "main-list x must dismiss");
         assert.equal(

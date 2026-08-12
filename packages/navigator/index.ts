@@ -39,6 +39,11 @@ export type BackgroundWorkDetail = {
   metadata: Array<{ label: string; value: string }>;
   foldedSections?: Array<{ id: string; label: string; text: string; collapsedText?: string; expandedByDefault?: boolean }>;
   evidence: { label: string; text: string };
+  transcript?: Array<
+    | { type: "assistant"; content: Array<{ type: string; text?: string; thinking?: string }>; streaming: boolean }
+    | { type: "tool"; id?: string; name: string; args?: unknown; result?: unknown; isError: boolean; state: "running" | "completed" }
+  >;
+  transcriptDiagnostic?: string;
   footerActions?: string[];
 };
 
@@ -67,6 +72,7 @@ type HostDeps = {
   isOpenTrigger: (data: string) => boolean;
   matchKey: (data: string, keyId: string) => boolean;
   truncate: (s: string, width: number) => string;
+  createTranscriptComponent?: (detail: BackgroundWorkDetail, theme: unknown) => Component;
 };
 
 type NavigatorState = {
@@ -315,7 +321,7 @@ function renderWidth(width: number): number {
   return Number.isFinite(width) && width > 0 ? Math.floor(width) : MAIN_LIST_FALLBACK_WIDTH;
 }
 
-type InternalRow = BackgroundWorkRow & { navigatorId: string; providerLabel: string };
+type InternalRow = BackgroundWorkRow & { navigatorId: string; providerLabel: string; parentRow?: boolean };
 
 function rowKey(providerId: string, id: string): string {
   return `${providerId}:${id}`;
@@ -333,6 +339,18 @@ function listRows(now = Date.now()): InternalRow[] {
     let providerRows: BackgroundWorkRow[] = [];
     try { providerRows = provider.listRows(now) ?? []; } catch { providerRows = []; }
     const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
+    if (orderedProviderRows.length > 0) {
+      let parentRow: BackgroundWorkRow | null = null;
+      try { parentRow = provider.parentRow?.(now) ?? null; } catch { parentRow = null; }
+      if (parentRow) {
+        rows.push({
+          ...parentRow,
+          navigatorId: rowKey(parentRow.providerId, parentRow.id),
+          providerLabel: provider.label,
+          parentRow: true,
+        });
+      }
+    }
     for (const row of orderedProviderRows) {
       rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
     }
@@ -378,7 +396,7 @@ function focusMainList(): void {
   const rows = listRows();
   if (rows.length === 0) return;
   const s = state();
-  syncMainListSelection(rows);
+  s.mainListSelectedId = rows.find((row) => row.parentRow && row.id === "main")?.navigatorId ?? rows[0]!.navigatorId;
   s.mainListFocused = true;
   refreshMainListWidget();
 }
@@ -412,16 +430,6 @@ function buildMainListLines(
     const group = grouped.get(label)!;
     if (i > 0) lines.push("");
     lines.push(providerGroupLabel(label, fg));
-    const provider = state().providers.get(group[0]!.providerId);
-    let parentRow: BackgroundWorkRow | null = null;
-    try { parentRow = provider?.parentRow?.(Date.now()) ?? null; } catch { parentRow = null; }
-    if (parentRow) {
-      lines.push(formatMainListRow({
-        ...parentRow,
-        navigatorId: rowKey(parentRow.providerId, parentRow.id),
-        providerLabel: label,
-      }, false, fg, width));
-    }
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
       lines.push(formatMainListRow(row, selected === true, fg, width));
@@ -527,13 +535,14 @@ function detailFor(navigatorId: string, now = Date.now(), options?: { logTailLin
 }
 
 function closeFor(row: InternalRow): BackgroundWorkCloseOutcome {
+  if (row.parentRow) return { action: "not-closable", providerId: row.providerId, id: row.id };
   const provider = state().providers.get(row.providerId);
   if (!provider) return { action: "missing", providerId: row.providerId, id: row.id };
   try { return provider.close(row.id); } catch { return { action: "missing", providerId: row.providerId, id: row.id }; }
 }
 
 function closeHintFor(row: InternalRow | undefined): string | null {
-  if (!row) return null;
+  if (!row || row.parentRow) return null;
   const provider = state().providers.get(row.providerId);
   if (!provider) return null;
   try { return `${provider.armCloseLabel(row)} ${row.name || row.id}`; } catch { return null; }
@@ -597,7 +606,9 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
     return true;
   }
   if (deps.matchKey(data, "enter")) {
-    openNavigator();
+    const selected = selectedMainListRow();
+    if (selected?.parentRow) unfocusMainList();
+    else openNavigator();
     return true;
   }
   if (data === "x" || data === "X" || deps.matchKey(data, "x") || deps.matchKey(data, "X")) {
@@ -613,7 +624,7 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
 
 function handleMainListCloseKey(): void {
   const row = selectedMainListRow();
-  if (!row) return;
+  if (!row || row.parentRow) return;
   const s = state();
   const now = Date.now();
   const arm = s.mainListCloseArm;
@@ -659,6 +670,7 @@ function openNavigator(): void {
     }, { overlay: true, overlayOptions: detailOverlayOptions });
     const clear = () => {
       if (s.dispose === disposeToken) s.dispose = undefined;
+      unfocusMainList();
     };
     void Promise.resolve(opened).then(clear, clear);
   } catch { /* keep foreground usable */ }
@@ -689,6 +701,8 @@ function createOverlayComponent(
   let closeArm: { id: string; armedAt: number } | undefined;
   let closeArmTimer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
+  let transcriptDetail: BackgroundWorkDetail | null = null;
+  let transcriptComponent: Component | null = null;
 
   const fg = (color: string, value: string) => theme?.fg ? theme.fg(color, value) : value;
 
@@ -808,10 +822,25 @@ function createOverlayComponent(
 
   return {
     render(width: number) {
-      const lines = mode === "detail"
+      if (mode === "detail" && detail?.transcript && deps.createTranscriptComponent) {
+        if (transcriptDetail !== detail || !transcriptComponent) {
+          transcriptDetail = detail;
+          transcriptComponent = deps.createTranscriptComponent(detail, theme);
+        }
+        return buildTranscriptDetailLines(
+          detail,
+          transcriptComponent.render(width),
+          width,
+          deps.truncate,
+          fg,
+          { minRows: state().detailOverlayRows },
+        );
+      }
+      transcriptDetail = null;
+      transcriptComponent = null;
+      return mode === "detail"
         ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: state().detailOverlayRows })
         : buildListLines(overlayState, width, deps.truncate, fg);
-      return lines;
     },
     handleInput(data: string) {
       if (closed) return;
@@ -851,12 +880,39 @@ function createOverlayComponent(
         close();
       }
     },
-    invalidate() {},
+    invalidate() { transcriptComponent?.invalidate(); },
     dispose() {
       clearCloseArm();
       detailScheduler.dispose();
     },
   };
+}
+
+function buildTranscriptDetailLines(
+  detail: BackgroundWorkDetail,
+  transcriptLines: string[],
+  width: number,
+  truncate: (s: string, width: number) => string,
+  fg: (color: string, value: string) => string,
+  options: { minRows?: number } = {},
+): string[] {
+  const actions = [...(detail.footerActions ?? ["x close"]), "Esc close"].join(" · ");
+  const lines: string[] = [
+    fg("accent", rule(detail.title, width)),
+    dim(`   ← main · ${actions}`, fg),
+    "",
+    `   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`,
+  ];
+  if (detail.subtitle) lines.push(`   summary  ${detail.subtitle}`);
+  for (const item of detail.metadata) lines.push(`   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`);
+  lines.push("", dim(section("transcript", width), fg));
+  if (detail.transcriptDiagnostic) lines.push(`   ${dim(detail.transcriptDiagnostic, fg)}`);
+  lines.push(...(transcriptLines.length ? transcriptLines : ["   (no transcript yet)"]));
+  lines.push("");
+  const footerLines = [dim(`   ← main · ${actions}`, fg), dim(rule("", width), fg)];
+  padBeforeFooter(lines, footerLines.length, options.minRows);
+  lines.push(...footerLines);
+  return lines.map((line) => safeTruncate(line, width, truncate));
 }
 
 function detailOverlayOptions() {

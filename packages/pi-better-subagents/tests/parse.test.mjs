@@ -15,7 +15,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, closeSync, existsSync, ftruncateSync, mkdirSync, openSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { constants as bufferConstants } from "node:buffer";
-import { parseRun, resetParseRunCursor, tailLog, formatSubagentOutputBody, formatSubagentResultBody } from "../parse.ts";
+import { parseRun, readRunTranscript, resetParseRunCursor, tailLog, formatSubagentOutputBody, formatSubagentResultBody } from "../parse.ts";
 import { logPathFor, runDir } from "../registry.ts";
 
 // Per-process, per-invocation run IDs for the parseRun and tailLog suites.
@@ -386,5 +386,54 @@ describe("parseRun — incremental", () => {
         assert.equal(parseRun(INCR_ID).usage.input, 9);
         resetParseRunCursor(INCR_ID);
         assert.equal(parseRun(INCR_ID).usage.input, 9, "a cold re-read of the same bytes gives the same answer");
+    });
+});
+
+describe("readRunTranscript", () => {
+    const id = uniqueRunId("sa_transcript_test");
+    after(() => cleanup(id));
+
+    it("keeps assistant Markdown, thinking data, and paired tool events", () => {
+        writeLog(id, [
+            event("message_end", { message: { role: "assistant", content: [
+                { type: "thinking", thinking: "inspect first" },
+                { type: "text", text: "## Finding\n\nUse **Markdown**." },
+            ] } }),
+            event("tool_execution_start", { toolCallId: "c1", toolName: "read", args: { path: "README.md" } }),
+            event("tool_execution_end", { toolCallId: "c1", toolName: "read", result: { content: [{ type: "text", text: "file body" }] }, isError: false }),
+            event("message_update", { message: { role: "assistant", content: [{ type: "text", text: "partial one" }] } }),
+            event("message_update", { message: { role: "assistant", content: [{ type: "text", text: "partial two" }] } }),
+        ]);
+
+        const transcript = readRunTranscript(id);
+        assert.equal(transcript.entries.length, 3);
+        assert.deepEqual(transcript.entries[0], {
+            type: "assistant",
+            content: [
+                { type: "thinking", thinking: "inspect first" },
+                { type: "text", text: "## Finding\n\nUse **Markdown**." },
+            ],
+            streaming: false,
+        });
+        assert.deepEqual(transcript.entries[1], {
+            type: "tool",
+            id: "c1",
+            name: "read",
+            args: { path: "README.md" },
+            result: { content: [{ type: "text", text: "file body" }] },
+            isError: false,
+            state: "completed",
+        });
+        assert.equal(transcript.entries[2].content[0].text, "partial two");
+        assert.equal(transcript.entries[2].streaming, true);
+    });
+
+    it("bounds retained visible entries", () => {
+        writeLog(id, Array.from({ length: 8 }, (_, i) => event("message_end", {
+            message: { role: "assistant", content: [{ type: "text", text: `turn ${i}` }] },
+        })));
+        const transcript = readRunTranscript(id, { maxEntries: 3 });
+        assert.deepEqual(transcript.entries.map((entry) => entry.content[0].text), ["turn 5", "turn 6", "turn 7"]);
+        assert.equal(transcript.truncated, true);
     });
 });
