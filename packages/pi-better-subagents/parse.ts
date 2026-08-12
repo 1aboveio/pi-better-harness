@@ -30,7 +30,7 @@ import { readBoundedTail, tailTerminalDisplay } from "./shared-log-utils.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { logPathFor } from "./registry.ts";
 
-interface ContentBlock { type: string; text?: string; name?: string }
+interface ContentBlock { type: string; text?: string; thinking?: string; name?: string }
 interface Cost { total?: number }
 interface MsgUsage { input?: number; output?: number; cacheRead?: number; cost?: Cost }
 interface Msg { role?: string; content?: string | ContentBlock[]; usage?: MsgUsage }
@@ -128,6 +128,121 @@ export interface ParsedRun {
     usage: Usage;
     /** Diagnostics about truncation or parse failure, surfaced to the user. */
     diagnostics: string[];
+}
+
+export type TranscriptEntry =
+    | { type: "assistant"; content: ContentBlock[]; streaming: boolean }
+    | {
+        type: "tool";
+        id?: string;
+        name: string;
+        args?: unknown;
+        result?: unknown;
+        isError: boolean;
+        state: "running" | "completed";
+    };
+
+export interface RunTranscript {
+    entries: TranscriptEntry[];
+    truncated: boolean;
+    diagnostic?: string;
+}
+
+const DEFAULT_TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
+const DEFAULT_TRANSCRIPT_ENTRIES = 40;
+
+function transcriptContent(msg: Msg | undefined): ContentBlock[] {
+    if (!msg) return [];
+    if (typeof msg.content === "string") {
+        return msg.content.trim() ? [{ type: "text", text: msg.content }] : [];
+    }
+    if (!Array.isArray(msg.content)) return [];
+    return msg.content.filter((block) =>
+        block && (
+            (block.type === "text" && typeof block.text === "string" && block.text.trim()) ||
+            (block.type === "thinking" && typeof (block as { thinking?: unknown }).thinking === "string")
+        ),
+    );
+}
+
+/** Bounded, display-oriented transcript fold for the subagent detail view. */
+export function readRunTranscript(
+    id: string,
+    options: { maxBytes?: number; maxEntries?: number } = {},
+): RunTranscript {
+    const maxBytes = Math.max(1024, options.maxBytes ?? DEFAULT_TRANSCRIPT_TAIL_BYTES);
+    const maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_TRANSCRIPT_ENTRIES);
+    const tail = readTail(logPathFor(id), maxBytes);
+    if (tail.error) return { entries: [], truncated: false, diagnostic: `Log unreadable: ${tail.error}` };
+
+    const lines = tail.text.split(/\r?\n/);
+    if (tail.truncated) lines.shift();
+    const entries: TranscriptEntry[] = [];
+    const tools = new Map<string, Extract<TranscriptEntry, { type: "tool" }>>();
+    let anonymousTool = 0;
+    let liveAssistant: Extract<TranscriptEntry, { type: "assistant" }> | undefined;
+
+    for (const line of lines) {
+        const event = tryParse(line.trim());
+        if (!event) continue;
+        const type = event.type;
+        if (type === "message_end") {
+            const message = event.message as Msg | undefined;
+            if (message?.role !== "assistant") continue;
+            const content = transcriptContent(message);
+            if (content.length) entries.push({ type: "assistant", content, streaming: false });
+            liveAssistant = undefined;
+            continue;
+        }
+        if (type === "message_update") {
+            const message = event.message as Msg | undefined;
+            if (message?.role !== "assistant") continue;
+            const content = transcriptContent(message);
+            if (content.length) liveAssistant = { type: "assistant", content, streaming: true };
+            continue;
+        }
+        if (type === "tool_execution_start") {
+            const idValue = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
+            const key = idValue ?? `anonymous:${anonymousTool++}`;
+            const tool: Extract<TranscriptEntry, { type: "tool" }> = {
+                type: "tool",
+                id: idValue,
+                name: typeof event.toolName === "string" ? event.toolName : "unknown",
+                args: event.args,
+                isError: false,
+                state: "running",
+            };
+            entries.push(tool);
+            tools.set(key, tool);
+            continue;
+        }
+        if (type === "tool_execution_end") {
+            const idValue = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
+            let tool = idValue ? tools.get(idValue) : undefined;
+            if (!tool && typeof event.toolName === "string") {
+                tool = [...tools.values()].reverse().find((candidate) => candidate.name === event.toolName && candidate.state === "running");
+            }
+            if (!tool) {
+                tool = {
+                    type: "tool",
+                    id: idValue,
+                    name: typeof event.toolName === "string" ? event.toolName : "unknown",
+                    isError: event.isError === true,
+                    state: "completed",
+                };
+                entries.push(tool);
+            }
+            tool.result = event.result;
+            tool.isError = event.isError === true;
+            tool.state = "completed";
+        }
+    }
+    if (liveAssistant) entries.push(liveAssistant);
+    return {
+        entries: entries.slice(-maxEntries),
+        truncated: tail.truncated || entries.length > maxEntries,
+        diagnostic: tail.truncated ? `Showing the latest ${fmtBytes(maxBytes)} of the transcript.` : undefined,
+    };
 }
 
 /**

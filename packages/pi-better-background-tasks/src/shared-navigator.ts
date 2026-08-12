@@ -39,6 +39,11 @@ export type BackgroundWorkDetail = {
   metadata: Array<{ label: string; value: string }>;
   foldedSections?: Array<{ id: string; label: string; text: string; collapsedText?: string; expandedByDefault?: boolean }>;
   evidence: { label: string; text: string };
+  transcript?: Array<
+    | { type: "assistant"; content: Array<{ type: string; text?: string; thinking?: string }>; streaming: boolean }
+    | { type: "tool"; id?: string; name: string; args?: unknown; result?: unknown; isError: boolean; state: "running" | "completed" }
+  >;
+  transcriptDiagnostic?: string;
   footerActions?: string[];
 };
 
@@ -54,6 +59,7 @@ export type BackgroundWorkProvider = {
   label: string;
   priority: number;
   visibleCount(): number;
+  showSection?(rows: BackgroundWorkRow[], now: number): boolean;
   parentRow?(now: number): BackgroundWorkRow | null;
   listRows(now: number): BackgroundWorkRow[];
   detail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null;
@@ -67,6 +73,7 @@ type HostDeps = {
   isOpenTrigger: (data: string) => boolean;
   matchKey: (data: string, keyId: string) => boolean;
   truncate: (s: string, width: number) => string;
+  createTranscriptComponent?: (detail: BackgroundWorkDetail, theme: unknown) => Component;
 };
 
 type NavigatorState = {
@@ -83,6 +90,7 @@ type NavigatorState = {
   mainListCloseArm?: { id: string; armedAt: number };
   mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
   mainListDeadlineScheduler?: RenderScheduler;
+  editorComponent?: Component;
   detailOverlayRows?: number;
   dispose?: () => void;
 };
@@ -99,8 +107,7 @@ export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
-const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 5;
-const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
+const DETAIL_OVERLAY_FOOTER_ROWS = 3;
 const EVIDENCE_SECTION_ID = "__evidence__";
 const RUNNING_DOT_GLYPH = "●";
 const RUNNING_DOT_FRAMES = ["dim", "accent", "accent", "dim"] as const;
@@ -315,7 +322,7 @@ function renderWidth(width: number): number {
   return Number.isFinite(width) && width > 0 ? Math.floor(width) : MAIN_LIST_FALLBACK_WIDTH;
 }
 
-type InternalRow = BackgroundWorkRow & { navigatorId: string; providerLabel: string };
+type InternalRow = BackgroundWorkRow & { navigatorId: string; providerLabel: string; parentRow?: boolean };
 
 function rowKey(providerId: string, id: string): string {
   return `${providerId}:${id}`;
@@ -333,6 +340,19 @@ function listRows(now = Date.now()): InternalRow[] {
     let providerRows: BackgroundWorkRow[] = [];
     try { providerRows = provider.listRows(now) ?? []; } catch { providerRows = []; }
     const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
+    let showSection = orderedProviderRows.length > 0 || provider.parentRow !== undefined;
+    try { showSection = provider.showSection?.(orderedProviderRows, now) ?? showSection; } catch { showSection = false; }
+    if (!showSection) continue;
+    let parentRow: BackgroundWorkRow | null = null;
+    try { parentRow = provider.parentRow?.(now) ?? null; } catch { parentRow = null; }
+    if (parentRow) {
+      rows.push({
+        ...parentRow,
+        navigatorId: rowKey(parentRow.providerId, parentRow.id),
+        providerLabel: provider.label,
+        parentRow: true,
+      });
+    }
     for (const row of orderedProviderRows) {
       rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });
     }
@@ -378,7 +398,7 @@ function focusMainList(): void {
   const rows = listRows();
   if (rows.length === 0) return;
   const s = state();
-  syncMainListSelection(rows);
+  s.mainListSelectedId = rows.find((row) => row.parentRow && row.id === "main")?.navigatorId ?? rows[0]!.navigatorId;
   s.mainListFocused = true;
   refreshMainListWidget();
 }
@@ -412,16 +432,6 @@ function buildMainListLines(
     const group = grouped.get(label)!;
     if (i > 0) lines.push("");
     lines.push(providerGroupLabel(label, fg));
-    const provider = state().providers.get(group[0]!.providerId);
-    let parentRow: BackgroundWorkRow | null = null;
-    try { parentRow = provider?.parentRow?.(Date.now()) ?? null; } catch { parentRow = null; }
-    if (parentRow) {
-      lines.push(formatMainListRow({
-        ...parentRow,
-        navigatorId: rowKey(parentRow.providerId, parentRow.id),
-        providerLabel: label,
-      }, false, fg, width));
-    }
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
       lines.push(formatMainListRow(row, selected === true, fg, width));
@@ -433,13 +443,13 @@ function buildMainListLines(
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
-  const keys = focused ? "↑↓ select · Enter detail · x stop · Esc unfocus" : "← to navigate";
+  const keys = focused ? "↑↓ switch · Enter detail · x stop · Esc unfocus" : "← to navigate";
   return dim(keys, fg);
 }
 
 function providerGroupLabel(label: string, fg: (color: string, value: string) => string): string {
   const normalized = singleLine(label).toLowerCase();
-  return `${dim("▸", fg)} ${fg("warning", normalized)}`;
+  return fg("warning", normalized);
 }
 
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
@@ -527,13 +537,14 @@ function detailFor(navigatorId: string, now = Date.now(), options?: { logTailLin
 }
 
 function closeFor(row: InternalRow): BackgroundWorkCloseOutcome {
+  if (row.parentRow) return { action: "not-closable", providerId: row.providerId, id: row.id };
   const provider = state().providers.get(row.providerId);
   if (!provider) return { action: "missing", providerId: row.providerId, id: row.id };
   try { return provider.close(row.id); } catch { return { action: "missing", providerId: row.providerId, id: row.id }; }
 }
 
 function closeHintFor(row: InternalRow | undefined): string | null {
-  if (!row) return null;
+  if (!row || row.parentRow) return null;
   const provider = state().providers.get(row.providerId);
   if (!provider) return null;
   try { return `${provider.armCloseLabel(row)} ${row.name || row.id}`; } catch { return null; }
@@ -558,6 +569,7 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 }
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
+  if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
   return new Proxy(inner, {
     get(target, prop) {
       if (prop === "handleInput") {
@@ -588,16 +600,24 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
   }
   if (deps.matchKey(data, "up")) {
     clearMainListCloseArm();
-    if (moveMainListSelection(-1)) refreshMainListWidget();
+    if (moveMainListSelection(-1)) {
+      refreshMainListWidget();
+      if (!selectedMainListRow()?.parentRow) openNavigator();
+    }
     return true;
   }
   if (deps.matchKey(data, "down")) {
     clearMainListCloseArm();
-    if (moveMainListSelection(1)) refreshMainListWidget();
+    if (moveMainListSelection(1)) {
+      refreshMainListWidget();
+      if (!selectedMainListRow()?.parentRow) openNavigator();
+    }
     return true;
   }
   if (deps.matchKey(data, "enter")) {
-    openNavigator();
+    const selected = selectedMainListRow();
+    if (selected?.parentRow) unfocusMainList();
+    else openNavigator();
     return true;
   }
   if (data === "x" || data === "X" || deps.matchKey(data, "x") || deps.matchKey(data, "X")) {
@@ -613,7 +633,7 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
 
 function handleMainListCloseKey(): void {
   const row = selectedMainListRow();
-  if (!row) return;
+  if (!row || row.parentRow) return;
   const s = state();
   const now = Date.now();
   const arm = s.mainListCloseArm;
@@ -689,6 +709,8 @@ function createOverlayComponent(
   let closeArm: { id: string; armedAt: number } | undefined;
   let closeArmTimer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
+  let transcriptDetail: BackgroundWorkDetail | null = null;
+  let transcriptComponent: Component | null = null;
 
   const fg = (color: string, value: string) => theme?.fg ? theme.fg(color, value) : value;
 
@@ -704,10 +726,22 @@ function createOverlayComponent(
   });
 
   function refreshRows(): void {
-    const selectedId = overlayState.rows[overlayState.selected]?.navigatorId;
+    const selectedId = state().mainListSelectedId ?? overlayState.rows[overlayState.selected]?.navigatorId;
     overlayState.rows = listRows();
     const nextIdx = selectedId ? overlayState.rows.findIndex((row) => row.navigatorId === selectedId) : -1;
     overlayState.selected = nextIdx >= 0 ? nextIdx : Math.min(overlayState.selected, Math.max(0, overlayState.rows.length - 1));
+  }
+
+  function selectOverlayRow(next: number): void {
+    overlayState.selected = Math.min(Math.max(0, overlayState.rows.length - 1), Math.max(0, next));
+    state().mainListSelectedId = overlayState.rows[overlayState.selected]?.navigatorId;
+    clearCloseArm();
+    refreshMainListWidget();
+  }
+
+  function activateSelectedRow(): void {
+    if (selectedRow()?.parentRow) close();
+    else openDetail();
   }
 
   function clearCloseArm(): void {
@@ -731,13 +765,16 @@ function createOverlayComponent(
   }
 
   function selectedRow(): InternalRow | undefined {
-    if (mode === "detail" && detailId) return overlayState.rows.find((row) => row.navigatorId === detailId);
     return overlayState.rows[overlayState.selected];
   }
 
   function openDetail(): void {
     const row = selectedRow();
     if (!row) return;
+    if (row.parentRow) {
+      close();
+      return;
+    }
     clearCloseArm();
     detailId = row.navigatorId;
     expandedSections.clear();
@@ -808,10 +845,43 @@ function createOverlayComponent(
 
   return {
     render(width: number) {
-      const lines = mode === "detail"
-        ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: state().detailOverlayRows })
-        : buildListLines(overlayState, width, deps.truncate, fg);
-      return lines;
+      refreshRows();
+      const railLines = mode === "detail"
+        ? buildMainListLines(overlayState.rows, width, deps.truncate, fg, {
+            selectedId: selectedRow()?.navigatorId,
+            focused: true,
+          })
+        : [];
+      const editorLines = mode === "detail" ? renderEditorLines(width) : [];
+      const bottomLines = [...railLines, ...editorLines];
+      const overlayRows = state().detailOverlayRows;
+      const detailRows = overlayRows === undefined ? undefined : Math.max(1, overlayRows - bottomLines.length);
+      let contentLines: string[];
+      if (mode === "detail" && detail?.transcript && deps.createTranscriptComponent) {
+        if (transcriptDetail !== detail || !transcriptComponent) {
+          transcriptDetail = detail;
+          transcriptComponent = deps.createTranscriptComponent(detail, theme);
+        }
+        contentLines = buildTranscriptDetailLines(
+          detail,
+          transcriptComponent.render(width),
+          width,
+          deps.truncate,
+          fg,
+          { minRows: detailRows },
+        );
+      } else {
+        transcriptDetail = null;
+        transcriptComponent = null;
+        contentLines = mode === "detail"
+          ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows })
+          : buildListLines(overlayState, width, deps.truncate, fg);
+      }
+      if (mode !== "detail") return contentLines;
+      if (detailRows === undefined) return [...contentLines, ...bottomLines];
+      const fittedContent = contentLines.slice(0, detailRows);
+      while (fittedContent.length < detailRows) fittedContent.push("");
+      return [...fittedContent, ...bottomLines];
     },
     handleInput(data: string) {
       if (closed) return;
@@ -820,10 +890,25 @@ function createOverlayComponent(
         return;
       }
       if (mode === "detail") {
-        if (deps.matchKey(data, "left")) close();
+        if (deps.matchKey(data, "up")) {
+          selectOverlayRow(overlayState.selected - 1);
+          activateSelectedRow();
+        }
+        else if (deps.matchKey(data, "down")) {
+          selectOverlayRow(overlayState.selected + 1);
+          activateSelectedRow();
+        }
+        else if (deps.matchKey(data, "left")) {
+          const mainIdx = overlayState.rows.findIndex((row) => row.parentRow && row.id === "main");
+          if (mainIdx >= 0) selectOverlayRow(mainIdx);
+          close();
+        }
         else if (deps.matchKey(data, "enter")) {
-          const sectionId = firstToggleableSectionId(detail);
-          if (sectionId) {
+          const row = selectedRow();
+          if (row?.parentRow || row?.navigatorId !== detailId) openDetail();
+          else {
+            const sectionId = firstToggleableSectionId(detail);
+            if (!sectionId) return;
             if (expandedSections.has(sectionId)) expandedSections.delete(sectionId);
             else expandedSections.add(sectionId);
             requestRender();
@@ -834,7 +919,10 @@ function createOverlayComponent(
           if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
           requestRender();
         }
-        else if (deps.matchKey(data, "escape")) close();
+        else if (deps.matchKey(data, "escape")) {
+          unfocusMainList();
+          close();
+        }
         return;
       }
       if (deps.matchKey(data, "up")) {
@@ -851,7 +939,7 @@ function createOverlayComponent(
         close();
       }
     },
-    invalidate() {},
+    invalidate() { transcriptComponent?.invalidate(); },
     dispose() {
       clearCloseArm();
       detailScheduler.dispose();
@@ -859,24 +947,59 @@ function createOverlayComponent(
   };
 }
 
+function buildTranscriptDetailLines(
+  detail: BackgroundWorkDetail,
+  transcriptLines: string[],
+  width: number,
+  truncate: (s: string, width: number) => string,
+  fg: (color: string, value: string) => string,
+  options: { minRows?: number } = {},
+): string[] {
+  const actions = [...(detail.footerActions ?? ["x close"]), "Esc close"].join(" · ");
+  const lines: string[] = [
+    fg("accent", rule(detail.title, width)),
+    dim(`   ← main · ${actions}`, fg),
+    "",
+    `   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`,
+  ];
+  if (detail.subtitle) lines.push(`   summary  ${detail.subtitle}`);
+  for (const item of detail.metadata) lines.push(`   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`);
+  lines.push("", dim(section("transcript", width), fg));
+  if (detail.transcriptDiagnostic) lines.push(`   ${dim(detail.transcriptDiagnostic, fg)}`);
+  lines.push(...(transcriptLines.length ? transcriptLines : ["   (no transcript yet)"]));
+  lines.push("");
+  const footerLines = [dim(`   ← main · ${actions}`, fg), dim(rule("", width), fg)];
+  padBeforeFooter(lines, footerLines.length, options.minRows);
+  lines.push(...footerLines);
+  return lines.map((line) => safeTruncate(line, width, truncate));
+}
+
 function detailOverlayOptions() {
-  const navigatorRows = state().lastMainListLines?.length ?? 0;
-  const marginBottom = DETAIL_OVERLAY_FOOTER_MARGIN_ROWS + navigatorRows;
+  const marginBottom = DETAIL_OVERLAY_FOOTER_ROWS;
   return {
     anchor: "top-left" as const,
     width: "100%" as const,
     maxHeight: "100%" as const,
     margin: {
-      top: DETAIL_OVERLAY_HEADER_MARGIN_ROWS,
+      top: 0,
       right: 0,
       bottom: marginBottom,
       left: 0,
     },
     visible: (_termWidth: number, termHeight: number) => {
-      state().detailOverlayRows = Math.max(1, termHeight - DETAIL_OVERLAY_HEADER_MARGIN_ROWS - marginBottom);
+      state().detailOverlayRows = Math.max(1, termHeight - marginBottom);
       return true;
     },
   };
+}
+
+function renderEditorLines(width: number): string[] {
+  try {
+    const lines = state().editorComponent?.render(width);
+    if (lines?.length) return lines;
+  } catch { /* use an empty editor-shaped fallback */ }
+  const border = "─".repeat(Math.max(1, width));
+  return [border, "", border];
 }
 
 function fallbackDetail(row: InternalRow): BackgroundWorkDetail {

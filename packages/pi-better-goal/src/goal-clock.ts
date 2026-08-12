@@ -81,20 +81,19 @@ export function renderGoalClockLine(
   const timing = goalTiming(goal, now);
   const heading = `goal ${goal.status}`;
   const active = formatClockDuration(timing.activeSeconds);
-  const fixedWidth = visibleWidth(`▸ ${heading} ${active} `);
+  const fixedWidth = visibleWidth(`${heading} ${active} `);
   if (fixedWidth >= width) {
-    return truncateToWidth(`▸ ${heading} ${active}`, width);
+    return truncateToWidth(`${heading} ${active}`, width);
   }
   const objective = truncateToWidth(goal.objective, width - fixedWidth);
-  return styleGoalRailLine("▸", heading, `${active} ${objective}`, fg);
+  return styleGoalRailLine(heading, `${active} ${objective}`, fg);
 }
 
 function styleGoalRailLine(
-  marker: string,
   heading: string,
   tail: string,
   fg?: (color: string, value: string) => string,
 ): string {
-  if (!fg) return `${marker} ${heading} ${tail}`;
-  return `${fg("dim", marker)} ${fg("warning", heading)} ${fg("dim", tail)}`;
+  if (!fg) return `${heading} ${tail}`;
+  return `${fg("warning", heading)} ${fg("dim", tail)}`;
 }

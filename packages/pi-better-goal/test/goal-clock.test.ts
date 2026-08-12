@@ -60,7 +60,7 @@ test("goal clock line renders as a top-level rail heading", () => {
   const line = renderGoalClockLine(goal, 54, 225);
 
   assert.equal(visibleWidth(line), 54);
-  assert.match(line, /^▸ goal active 2:05 A deliberately long objective/);
+  assert.match(line, /^goal active 2:05 A deliberately long objective/);
   assert.doesNotMatch(line, /elapsed/);
 });
 
@@ -69,5 +69,5 @@ test("goal clock line accents the first-level rail heading when themed", () => {
   const line = renderGoalClockLine(goal, 80, 225, (color, value) => `<${color}>${value}</>`);
 
   assert.ok(visibleWidth(line) <= 80);
-  assert.match(line, /^<dim>▸<\/> <warning>goal active<\/> <dim>2:05 Ship footer clock<\/>$/);
+  assert.match(line, /^<warning>goal active<\/> <dim>2:05 Ship footer clock<\/>$/);
 });

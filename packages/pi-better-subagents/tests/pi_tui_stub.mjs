@@ -1,7 +1,4 @@
-/**
- * Stub of `@earendil-works/pi-tui` for extension-level tests.
- * Navigator glue uses Key / matchesKey / truncateToWidth only.
- */
+/** Stub of the public pi-tui surface used by extension-level tests. */
 export const Key = {
     left: "left",
     x: "x",
@@ -21,4 +18,11 @@ export function truncateToWidth(s, w) {
     const str = String(s ?? "");
     const width = Number(w) || 0;
     return str.length > width ? str.slice(0, Math.max(0, width)) : str;
+}
+
+export class Container {
+    constructor() { this.children = []; }
+    addChild(child) { this.children.push(child); }
+    render(width) { return this.children.flatMap((child) => child.render(width)); }
+    invalidate() { for (const child of this.children) child.invalidate?.(); }
 }
