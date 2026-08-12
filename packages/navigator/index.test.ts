@@ -93,7 +93,7 @@ describe("shared background work navigator", () => {
       assert.match(list, /Background Tasks row/);
       assert.match(list, /← to navigate/);
       assert.doesNotMatch(list, /shortcuts/);
-      assert.match(list, /^▸ background tasks$/m);
+      assert.match(list, /^background tasks$/m);
 
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
@@ -272,7 +272,7 @@ describe("shared background work navigator", () => {
       assert.match(renderedWidget, /failed/);
       assert.match(renderedWidget, /lost/);
       assert.match(renderedWidget, /<dim>\s+failed, inspect log<\/>/);
-      assert.match(renderedWidget, /^<dim>▸<\/> <warning>background tasks<\/>$/m, "compact rail should keep the provider lane title visible");
+      assert.match(renderedWidget, /^<warning>background tasks<\/>$/m, "compact rail should keep the provider lane title visible");
       assert.doesNotMatch(renderedWidget, /^main$/m, "background work is not grouped under a confusing main lane");
 
       const editor = ui.factory({}, {}, {});
@@ -414,14 +414,15 @@ describe("shared background work navigator", () => {
       assert.doesNotMatch(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/, "main list should not render table headers");
       assert.doesNotMatch(text, /command\/tool/, "main list should keep command evidence out of the primary row");
       assert.doesNotMatch(text, /background work/);
-      assert.match(text, /^▸ subagents$/m);
-      assert.match(text, /^▸ background tasks$/m);
+      assert.match(text, /^subagents$/m);
+      assert.match(text, /^background tasks$/m);
       assert.match(text, /← to navigate/);
       assert.doesNotMatch(text, /shortcuts/);
       assert.match(text, /●\s+reviewer\s+grok-4\.5 high · tool bash · 18\.2k tok/);
 
       const subagentRow = lines.find((line) => /●\s+reviewer\s+grok-4\.5 high · tool bash · 18\.2k tok/.test(line));
       assert.ok(subagentRow, text);
+      assert.ok(subagentRow.startsWith("●"), "unselected subagent rows start at column zero");
       assert.ok(subagentRow.indexOf("●") < subagentRow.indexOf("reviewer"));
       assert.ok(subagentRow.indexOf("reviewer") < subagentRow.indexOf("grok-4.5 high"));
       assert.ok(subagentRow.indexOf("grok-4.5 high") < subagentRow.indexOf("tool bash"));
@@ -431,6 +432,7 @@ describe("shared background work navigator", () => {
 
       const bgRow = lines.find((line) => /✕\s+watch-pr-14-merge\s+failed, inspect log/.test(line));
       assert.ok(bgRow, text);
+      assert.ok(bgRow.startsWith("✕"), "unselected background-task rows start at column zero");
       assert.doesNotMatch(bgRow, /#!\/usr\/bin\/env bash|pipefail/, "raw command should not dominate the rail row");
       assert.ok(bgRow.indexOf("✕") < bgRow.indexOf("watch-pr-14-merge"));
       assert.ok(bgRow.indexOf("watch-pr-14-merge") < bgRow.indexOf("failed, inspect log"));
@@ -647,7 +649,7 @@ describe("shared background work navigator", () => {
       editor.handleInput("down");
       let detailScreen = component.render(100).join("\n");
       assert.match(detailScreen, /alpha content/);
-      assert.match(detailScreen, /▸ subagents/);
+      assert.match(detailScreen, /subagents/);
       assert.match(detailScreen, /^› ●\s+alpha/m, "the active detail visibly retains the navigation rail");
       assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+alpha/m);
 
@@ -751,7 +753,7 @@ describe("shared background work navigator", () => {
       assert.doesNotMatch(text, /background work/);
       assert.match(text, /●\s+watch-pr-1396\s+every 1m 00s\s+23s/);
       assert.doesNotMatch(text, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
-      assert.match(text, /^▸ background tasks$/m, "compact rail should keep the provider lane title visible");
+      assert.match(text, /^background tasks$/m, "compact rail should keep the provider lane title visible");
       assert.doesNotMatch(text, /^main$/m, "background work is not grouped under a confusing main lane");
 
       const editor = ui.factory({}, {}, {});

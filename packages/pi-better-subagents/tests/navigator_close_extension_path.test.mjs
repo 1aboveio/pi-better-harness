@@ -452,7 +452,7 @@ describe("registered extension path: main-window navigator actions", () => {
         await nav.start();
 
         const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
-        assert.ok(!mainList.includes("▸ subagents"), mainList);
+        assert.ok(!mainList.includes("subagents"), mainList);
         assert.ok(!mainList.includes("recent-failed-run"), mainList);
         assert.ok(!mainList.includes("recent-completed-run"), mainList);
         assert.ok(!mainList.includes("old-failed-run"), mainList);

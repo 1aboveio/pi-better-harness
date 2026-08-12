@@ -449,11 +449,11 @@ function shortcutsLine(focused: boolean, fg: (color: string, value: string) => s
 
 function providerGroupLabel(label: string, fg: (color: string, value: string) => string): string {
   const normalized = singleLine(label).toLowerCase();
-  return `${dim("▸", fg)} ${fg("warning", normalized)}`;
+  return fg("warning", normalized);
 }
 
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
-  const prefix = selected ? fg("accent", "› ") : "  ";
+  const prefix = selected ? fg("accent", "› ") : "";
   const name = row.name || row.id;
   const indicator = statusIndicator(row);
   const status = fg(indicator.color, indicator.glyph);
