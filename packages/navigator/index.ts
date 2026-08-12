@@ -107,7 +107,6 @@ export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
-const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 5;
 const DETAIL_OVERLAY_FOOTER_ROWS = 3;
 const EVIDENCE_SECTION_ID = "__evidence__";
 const RUNNING_DOT_GLYPH = "●";
@@ -982,13 +981,13 @@ function detailOverlayOptions() {
     width: "100%" as const,
     maxHeight: "100%" as const,
     margin: {
-      top: DETAIL_OVERLAY_HEADER_MARGIN_ROWS,
+      top: 0,
       right: 0,
       bottom: marginBottom,
       left: 0,
     },
     visible: (_termWidth: number, termHeight: number) => {
-      state().detailOverlayRows = Math.max(1, termHeight - DETAIL_OVERLAY_HEADER_MARGIN_ROWS - marginBottom);
+      state().detailOverlayRows = Math.max(1, termHeight - marginBottom);
       return true;
     },
   };

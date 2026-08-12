@@ -946,7 +946,7 @@ describe("shared background work navigator", () => {
       const bottomMargin = 3;
       assert.equal(customOptions?.overlay, true);
       assert.equal(typeof visible, "function");
-      const topMargin = 5;
+      const topMargin = 0;
       assert.equal(visible(120, 40), true);
       assert.deepEqual(layoutOptions, {
         anchor: "top-left",
@@ -956,7 +956,7 @@ describe("shared background work navigator", () => {
       });
 
       let renderedLines = component.render(72);
-      assert.equal(renderedLines.length, 40 - topMargin - bottomMargin, "detail overlay should include the persistent navigator and input above the native footer");
+      assert.equal(renderedLines.length, 40 - bottomMargin, "detail overlay should own the full terminal height above the native footer");
       assert.match(renderedLines.slice(-(navigatorRows + 3), -3).join("\n"), /↑↓ switch/, "the persistent navigator remains above the input");
       assert.deepEqual(renderedLines.slice(-3), ["─".repeat(72), "", "─".repeat(72)], "the detail screen retains the three-row input box");
       for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
