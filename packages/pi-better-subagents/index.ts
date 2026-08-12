@@ -14,6 +14,8 @@
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
@@ -30,7 +32,7 @@ import {
     type BackgroundWorkRow,
 } from "./shared-navigator.ts";
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
-import { parseRun, resetParseRunCursor, tailLog, type Usage } from "./parse.ts";
+import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
@@ -836,7 +838,8 @@ function mainAgentWorkRow(now: number): BackgroundWorkRow {
 function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
     const detail = navigatorDetail(id, now);
     if (!detail) return null;
-    const logTailLines = options?.logTailLines ?? 10;
+    void options;
+    const transcript = readRunTranscript(id);
     const metadata = [
         { label: "provider", value: "Subagents" },
         { label: "model", value: detail.effort ? `${detail.model} · effort ${detail.effort}` : detail.model },
@@ -854,13 +857,63 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         statusTone: statusTone(detail.status),
         subtitle: detail.currentTool ? `current tool ${detail.currentTool}` : undefined,
         metadata,
-        // The shared navigator refreshes this provider on a coarse deadline while the
-        // detail overlay is open. Read the selected logical tail rows each
-        // time so the evidence behaves like `tail -f`, not a single parsed
-        // activity/result snapshot.
-        evidence: { label: "log tail", text: tailLog(id, logTailLines) },
+        evidence: { label: "transcript", text: detail.output || "(no transcript yet)" },
+        transcript: transcript.entries,
+        transcriptDiagnostic: transcript.diagnostic,
         footerActions: [detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
     };
+}
+
+function createSubagentTranscriptComponent(detail: BackgroundWorkDetail, theme: unknown) {
+    const ContainerComponent = (PiTui as any).Container;
+    const AssistantComponent = (PiCodingAgent as any).AssistantMessageComponent;
+    const ToolComponent = (PiCodingAgent as any).ToolExecutionComponent;
+    const markdownTheme = typeof (PiCodingAgent as any).getMarkdownTheme === "function"
+        ? (PiCodingAgent as any).getMarkdownTheme()
+        : {};
+    if (!ContainerComponent || !AssistantComponent || !ToolComponent) {
+        return {
+            render: () => (detail.transcript ?? []).flatMap((entry) => entry.type === "assistant"
+                ? entry.content.filter((block) => block.type === "text").flatMap((block) => String(block.text ?? "").split("\n"))
+                : [`[${entry.state}] ${entry.name}`]),
+            invalidate() {},
+        };
+    }
+    const container = new ContainerComponent();
+    const ui = { requestRender: () => { try { (uiCtx?.ui as any)?.requestRender?.(); } catch { /* ignore */ } } };
+    for (const entry of detail.transcript ?? []) {
+        if (entry.type === "assistant") {
+            const message = {
+                role: "assistant" as const,
+                content: entry.content,
+                stopReason: entry.streaming ? undefined : "stop",
+                timestamp: Date.now(),
+            };
+            const component = new AssistantComponent(message as any, true, markdownTheme, "Thinking...", 1);
+            component.updateContent(message as any, entry.streaming);
+            container.addChild(component);
+            continue;
+        }
+        const component = new ToolComponent(
+            entry.name,
+            entry.id ?? `transcript-${entry.name}`,
+            entry.args ?? {},
+            { showImages: false },
+            undefined,
+            ui as any,
+            uiCtx?.cwd ?? process.cwd(),
+        );
+        component.markExecutionStarted();
+        component.setArgsComplete();
+        if (entry.state === "completed") {
+            const result = entry.result && typeof entry.result === "object"
+                ? entry.result as any
+                : { content: entry.result == null ? [] : [{ type: "text", text: String(entry.result) }] };
+            component.updateResult({ ...result, isError: entry.isError });
+        }
+        container.addChild(component);
+    }
+    return container;
 }
 
 function ensureSubagentProvider(): void {
@@ -870,6 +923,7 @@ function ensureSubagentProvider(): void {
         label: "Subagents",
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
+        showSection: (rows) => rows.some((row) => row.status === "running"),
         parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
@@ -961,6 +1015,7 @@ function ensureNavigator(ctx: ExtensionContext): void {
             isOpenTrigger: (data: string) => matchesKey(data, Key.left),
             matchKey: (data: string, keyId: string) => matchesKey(data, keyId),
             truncate: truncateToWidth,
+            createTranscriptComponent: createSubagentTranscriptComponent,
         });
     } catch { /* ignore */ }
 }

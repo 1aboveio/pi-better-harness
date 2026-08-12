@@ -1,13 +1,13 @@
 /**
- * Extension-level contract for the shared 10/25 log-tail detail surface.
+ * Extension-level contract for the Pi-style subagent transcript detail surface.
  *
- * // @covers subagent.navigator-log-tail
+ * // @covers subagent.navigator-transcript
  * // @level integration
  */
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,23 +22,30 @@ const { logPathFor, runDir, writeMeta } = await import("../registry.ts");
 
 after(() => rmSync(tempDir, { recursive: true, force: true }));
 
-test("subagent details use the shared 10/25 rolling log tail", async () => {
+test("subagent details render a structured Pi-style transcript", async () => {
     const id = `sa_shared_tail_${Date.now()}`;
     const cwd = join(tempDir, "workspace");
     const sessionId = "shared-tail-session";
     const logPath = logPathFor(id);
     mkdirSync(runDir(id), { recursive: true });
-    writeFileSync(logPath, Array.from({ length: 12 }, (_, index) => `row-${index + 1}`).join("\n") + "\n");
+    writeFileSync(logPath, [
+        JSON.stringify({ type: "message_end", message: { role: "assistant", content: [
+            { type: "thinking", thinking: "inspect the navigator" },
+            { type: "text", text: "## Finding\n\nUse **Pi Markdown**." },
+        ] } }),
+        JSON.stringify({ type: "tool_execution_start", toolCallId: "c1", toolName: "read", args: { path: "shared-navigator.ts" } }),
+        JSON.stringify({ type: "tool_execution_end", toolCallId: "c1", toolName: "read", result: { content: [{ type: "text", text: "file body" }] }, isError: false }),
+    ].join("\n") + "\n");
     writeMeta({
         id,
         name: "tail verifier",
-        status: "completed",
-        pid: 0,
+        status: "running",
+        pid: process.pid,
         spawnPid: process.pid,
         cwd,
         promptPreview: "verify shared tail",
         startedAt: Date.now() - 1_000,
-        endedAt: Date.now(),
+
         logPath,
         sessionId: id,
         callbackOrigin: { cwd, sessionId },
@@ -95,27 +102,19 @@ test("subagent details use the shared 10/25 rolling log tail", async () => {
 
         const editor = ui.factory({}, {}, {});
         editor.handleInput("<left>");
+        assert.match(renderMainList(), /^› ●\s+main/m, "left starts on main");
+        editor.handleInput("<down>");
         editor.handleInput("<enter>");
 
         let rendered = component.render(160).join("\n");
-        assert.match(rendered, /log tail · latest 10 rows/);
-        assert.doesNotMatch(rendered, /row-1\n/);
-        assert.match(rendered, /row-3/);
-        assert.match(rendered, /row-12/);
+        assert.match(rendered, /transcript/);
+        assert.match(rendered, /Thinking\.\.\./);
+        assert.match(rendered, /## Finding/);
+        assert.match(rendered, /Use \*\*Pi Markdown\*\*\./);
+        assert.match(rendered, /read.*shared-navigator\.ts/);
 
-        component.handleInput("l");
-        rendered = component.render(160).join("\n");
-        assert.match(rendered, /log tail · latest 25 rows/);
-        assert.match(rendered, /row-1/);
-        assert.match(rendered, /row-12/);
-
-        appendFileSync(logPath, "row-13\ntool read /Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/shared-navigator.ts\n");
-        component.handleInput("l");
         const narrowLines = component.render(54);
         rendered = narrowLines.join("\n");
-        assert.match(rendered, /log tail · latest 10 rows/);
-        assert.doesNotMatch(rendered, /row-3\n/);
-        assert.match(rendered, /row-13/);
         assert.match(rendered, /shared-navigator\.ts/);
         assert.ok(narrowLines.every((line) => line.length <= 54), rendered);
     } finally {

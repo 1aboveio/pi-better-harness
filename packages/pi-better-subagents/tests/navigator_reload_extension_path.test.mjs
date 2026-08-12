@@ -76,6 +76,19 @@ export class CustomEditor {
     setText(t) { this._text = String(t ?? ""); }
     handleInput() {}
 }
+export class AssistantMessageComponent {
+    updateContent() {}
+    render() { return []; }
+    invalidate() {}
+}
+export class ToolExecutionComponent {
+    markExecutionStarted() {}
+    setArgsComplete() {}
+    updateResult() {}
+    render() { return []; }
+    invalidate() {}
+}
+export function getMarkdownTheme() { return {}; }
 `,
     });
     writeStubPackage("@earendil-works/pi-tui", {
@@ -91,6 +104,12 @@ export function truncateToWidth(s, w) {
     const str = String(s ?? "");
     const width = Number(w) || 0;
     return str.length > width ? str.slice(0, Math.max(0, width)) : str;
+}
+export class Container {
+    constructor() { this.children = []; }
+    addChild(child) { this.children.push(child); }
+    render(width) { return this.children.flatMap((child) => child.render(width)); }
+    invalidate() { for (const child of this.children) child.invalidate?.(); }
 }
 `,
     });
@@ -397,8 +416,10 @@ describe("registered extension path: session_start reload cleanup", () => {
         // 2) Open the shared overlay via the registered empty-editor Left path.
         nav.focusViaLeftKey();
 
-        // 3) Enter opens detail; x arms close confirmation. Health remains the
+        // 3) Main is selected by default; Down selects the run, then Enter opens
+        // detail and x arms close confirmation. Health remains the
         // only interval; UI refresh and arm expiry are cancellable one-shots.
+        nav.pressEditor("down");
         const component = await nav.openDetailViaEnter();
         nav.press("x");
         assert.equal(timerSpies.pendingIntervals(), 1, "health is the only live interval");
