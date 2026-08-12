@@ -422,7 +422,7 @@ describe("shared background work navigator", () => {
 
       const subagentRow = lines.find((line) => /●\s+reviewer\s+grok-4\.5 high · tool bash · 18\.2k tok/.test(line));
       assert.ok(subagentRow, text);
-      assert.ok(subagentRow.startsWith("●"), "unselected subagent rows start at column zero");
+      assert.ok(subagentRow.startsWith("  ●"), "unselected subagent rows reserve the selection-arrow gutter");
       assert.ok(subagentRow.indexOf("●") < subagentRow.indexOf("reviewer"));
       assert.ok(subagentRow.indexOf("reviewer") < subagentRow.indexOf("grok-4.5 high"));
       assert.ok(subagentRow.indexOf("grok-4.5 high") < subagentRow.indexOf("tool bash"));
@@ -432,7 +432,7 @@ describe("shared background work navigator", () => {
 
       const bgRow = lines.find((line) => /✕\s+watch-pr-14-merge\s+failed, inspect log/.test(line));
       assert.ok(bgRow, text);
-      assert.ok(bgRow.startsWith("✕"), "unselected background-task rows start at column zero");
+      assert.ok(bgRow.startsWith("  ✕"), "unselected background-task rows reserve the selection-arrow gutter");
       assert.doesNotMatch(bgRow, /#!\/usr\/bin\/env bash|pipefail/, "raw command should not dominate the rail row");
       assert.ok(bgRow.indexOf("✕") < bgRow.indexOf("watch-pr-14-merge"));
       assert.ok(bgRow.indexOf("watch-pr-14-merge") < bgRow.indexOf("failed, inspect log"));
@@ -956,8 +956,9 @@ describe("shared background work navigator", () => {
       });
 
       let renderedLines = component.render(72);
-      assert.equal(renderedLines.length, 40 - topMargin - bottomMargin, "detail overlay should fill the content region and paint its visible navigator rail");
-      assert.match(renderedLines.slice(-navigatorRows).join("\n"), /↑↓ switch/, "the detail screen ends with the navigation rail");
+      assert.equal(renderedLines.length, 40 - topMargin - bottomMargin, "detail overlay should include the persistent navigator and input above the native footer");
+      assert.match(renderedLines.slice(-(navigatorRows + 3), -3).join("\n"), /↑↓ switch/, "the persistent navigator remains above the input");
+      assert.deepEqual(renderedLines.slice(-3), ["─".repeat(72), "", "─".repeat(72)], "the detail screen retains the three-row input box");
       for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
       let rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 10);

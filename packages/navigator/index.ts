@@ -90,6 +90,7 @@ type NavigatorState = {
   mainListCloseArm?: { id: string; armedAt: number };
   mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
   mainListDeadlineScheduler?: RenderScheduler;
+  editorComponent?: Component;
   detailOverlayRows?: number;
   dispose?: () => void;
 };
@@ -107,7 +108,7 @@ export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
 const DETAIL_OVERLAY_HEADER_MARGIN_ROWS = 5;
-const DETAIL_OVERLAY_FOOTER_MARGIN_ROWS = 3;
+const DETAIL_OVERLAY_FOOTER_ROWS = 3;
 const EVIDENCE_SECTION_ID = "__evidence__";
 const RUNNING_DOT_GLYPH = "●";
 const RUNNING_DOT_FRAMES = ["dim", "accent", "accent", "dim"] as const;
@@ -453,7 +454,7 @@ function providerGroupLabel(label: string, fg: (color: string, value: string) =>
 }
 
 function formatMainListRow(row: InternalRow, selected: boolean, fg: (color: string, value: string) => string, width: number): string {
-  const prefix = selected ? fg("accent", "› ") : "";
+  const prefix = selected ? fg("accent", "› ") : "  ";
   const name = row.name || row.id;
   const indicator = statusIndicator(row);
   const status = fg(indicator.color, indicator.glyph);
@@ -569,6 +570,7 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 }
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
+  if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
   return new Proxy(inner, {
     get(target, prop) {
       if (prop === "handleInput") {
@@ -851,7 +853,10 @@ function createOverlayComponent(
             focused: true,
           })
         : [];
-      const detailRows = Math.max(1, (state().detailOverlayRows ?? 1) - railLines.length - 1);
+      const editorLines = mode === "detail" ? renderEditorLines(width) : [];
+      const bottomLines = [...railLines, ...editorLines];
+      const overlayRows = state().detailOverlayRows;
+      const detailRows = overlayRows === undefined ? undefined : Math.max(1, overlayRows - bottomLines.length);
       let contentLines: string[];
       if (mode === "detail" && detail?.transcript && deps.createTranscriptComponent) {
         if (transcriptDetail !== detail || !transcriptComponent) {
@@ -873,7 +878,11 @@ function createOverlayComponent(
           ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows })
           : buildListLines(overlayState, width, deps.truncate, fg);
       }
-      return mode === "detail" ? [...contentLines, "", ...railLines] : contentLines;
+      if (mode !== "detail") return contentLines;
+      if (detailRows === undefined) return [...contentLines, ...bottomLines];
+      const fittedContent = contentLines.slice(0, detailRows);
+      while (fittedContent.length < detailRows) fittedContent.push("");
+      return [...fittedContent, ...bottomLines];
     },
     handleInput(data: string) {
       if (closed) return;
@@ -967,7 +976,7 @@ function buildTranscriptDetailLines(
 }
 
 function detailOverlayOptions() {
-  const marginBottom = DETAIL_OVERLAY_FOOTER_MARGIN_ROWS;
+  const marginBottom = DETAIL_OVERLAY_FOOTER_ROWS;
   return {
     anchor: "top-left" as const,
     width: "100%" as const,
@@ -983,6 +992,15 @@ function detailOverlayOptions() {
       return true;
     },
   };
+}
+
+function renderEditorLines(width: number): string[] {
+  try {
+    const lines = state().editorComponent?.render(width);
+    if (lines?.length) return lines;
+  } catch { /* use an empty editor-shaped fallback */ }
+  const border = "─".repeat(Math.max(1, width));
+  return [border, "", border];
 }
 
 function fallbackDetail(row: InternalRow): BackgroundWorkDetail {
