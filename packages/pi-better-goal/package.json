@@ -1,6 +1,6 @@
 {
   "name": "pi-better-goal",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Pi extension for goal tracking with background-aware continuation.",
   "license": "MIT",
   "type": "module",

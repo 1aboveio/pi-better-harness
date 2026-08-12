@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-subagents@0.1.19] - 2026-08-12
+
+### Changed
+
+- **subagents**: render bounded Pi-style structured transcripts and keep the shared navigator, input box, and full-height detail view stable while switching between the foreground and active subagents
+
+## [pi-better-background-tasks@0.1.17] - 2026-08-12
+
+### Changed
+
+- **background-tasks**: use the persistent shared activity navigator with stable selection gutters and input geometry in detail views
+
+## [pi-better-goal@0.1.18] - 2026-08-12
+
+### Changed
+
+- **goal**: align the goal clock with the flattened shared activity-rail section and row layout
+
 ## [pi-better-background-tasks@0.1.16] - 2026-08-11
 
 ### Changed
