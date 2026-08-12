@@ -923,6 +923,7 @@ function ensureSubagentProvider(): void {
         label: "Subagents",
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
+        showSection: (rows) => rows.some((row) => row.status === "running"),
         parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),

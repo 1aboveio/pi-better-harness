@@ -39,13 +39,13 @@ test("subagent details render a structured Pi-style transcript", async () => {
     writeMeta({
         id,
         name: "tail verifier",
-        status: "completed",
-        pid: 0,
+        status: "running",
+        pid: process.pid,
         spawnPid: process.pid,
         cwd,
         promptPreview: "verify shared tail",
         startedAt: Date.now() - 1_000,
-        endedAt: Date.now(),
+
         logPath,
         sessionId: id,
         callbackOrigin: { cwd, sessionId },

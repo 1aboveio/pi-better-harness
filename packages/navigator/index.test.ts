@@ -669,11 +669,15 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("keeps the main navigation destination mounted with no subagents", () => {
+  it("hides a provider section when its active-work policy rejects retained rows", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("subagents", "Subagents", 10, 100, () => undefined),
       visibleCount: () => 0,
-      listRows: () => [],
+      listRows: () => [{
+        providerId: "subagents", id: "finished", name: "finished", status: "completed", statusTone: "success",
+        kind: "subagent", elapsed: "1m", primary: "done", sortStartedAt: 100,
+      }],
+      showSection: (rows) => rows.some((row) => row.status === "running"),
       parentRow: () => ({
         providerId: "subagents", id: "main", name: "main", status: "running", statusTone: "running",
         kind: "main agent", elapsed: "1m", primary: "foreground", sortStartedAt: 0,
@@ -697,10 +701,7 @@ describe("shared background work navigator", () => {
         matchKey: (data, key) => data === key,
         truncate: (value, width) => value.slice(0, width),
       });
-      const installedWidget = widgets.at(-1);
-      assert.equal(typeof installedWidget, "function", "the persistent navigator is mounted without child rows");
-      assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /●\s+main/);
-      assert.doesNotMatch(renderWidget(installedWidget, 100, ui.theme).join("\n"), /Subagents row/);
+      assert.equal(widgets.at(-1), undefined, "the section and its main row are hidden without active subagents");
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

@@ -59,6 +59,7 @@ export type BackgroundWorkProvider = {
   label: string;
   priority: number;
   visibleCount(): number;
+  showSection?(rows: BackgroundWorkRow[], now: number): boolean;
   parentRow?(now: number): BackgroundWorkRow | null;
   listRows(now: number): BackgroundWorkRow[];
   detail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null;
@@ -339,6 +340,9 @@ function listRows(now = Date.now()): InternalRow[] {
     let providerRows: BackgroundWorkRow[] = [];
     try { providerRows = provider.listRows(now) ?? []; } catch { providerRows = []; }
     const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
+    let showSection = orderedProviderRows.length > 0 || provider.parentRow !== undefined;
+    try { showSection = provider.showSection?.(orderedProviderRows, now) ?? showSection; } catch { showSection = false; }
+    if (!showSection) continue;
     let parentRow: BackgroundWorkRow | null = null;
     try { parentRow = provider.parentRow?.(now) ?? null; } catch { parentRow = null; }
     if (parentRow) {

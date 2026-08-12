@@ -413,7 +413,7 @@ describe("registered extension path: main-window navigator actions", () => {
 
     // @covers navigator.close
     // @level integration
-    it("registered main-list widget hides terminal subagents after 30 seconds", async () => {
+    it("registered main-list widget hides the section when only terminal subagents remain", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const now = Date.now();
         const recentFailedId = nav.seedRun({
@@ -452,8 +452,9 @@ describe("registered extension path: main-window navigator actions", () => {
         await nav.start();
 
         const mainList = renderWidgetValue(nav.lastWidget("background-work-list"));
-        assert.ok(mainList.includes("recent-failed-run"), mainList);
-        assert.ok(mainList.includes("recent-completed-run"), mainList);
+        assert.ok(!mainList.includes("▸ subagents"), mainList);
+        assert.ok(!mainList.includes("recent-failed-run"), mainList);
+        assert.ok(!mainList.includes("recent-completed-run"), mainList);
         assert.ok(!mainList.includes("old-failed-run"), mainList);
         assert.ok(!mainList.includes("old-completed-run"), mainList);
         assert.equal(registry.readMeta(recentFailedId).status, "failed");
