@@ -441,7 +441,7 @@ function buildMainListLines(
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
-  const keys = focused ? "↑↓ select · Enter detail · x stop · Esc unfocus" : "← to navigate";
+  const keys = focused ? "↑↓ switch · Enter detail · x stop · Esc unfocus" : "← to navigate";
   return dim(keys, fg);
 }
 
@@ -597,12 +597,18 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
   }
   if (deps.matchKey(data, "up")) {
     clearMainListCloseArm();
-    if (moveMainListSelection(-1)) refreshMainListWidget();
+    if (moveMainListSelection(-1)) {
+      refreshMainListWidget();
+      if (!selectedMainListRow()?.parentRow) openNavigator();
+    }
     return true;
   }
   if (deps.matchKey(data, "down")) {
     clearMainListCloseArm();
-    if (moveMainListSelection(1)) refreshMainListWidget();
+    if (moveMainListSelection(1)) {
+      refreshMainListWidget();
+      if (!selectedMainListRow()?.parentRow) openNavigator();
+    }
     return true;
   }
   if (deps.matchKey(data, "enter")) {
@@ -670,7 +676,6 @@ function openNavigator(): void {
     }, { overlay: true, overlayOptions: detailOverlayOptions });
     const clear = () => {
       if (s.dispose === disposeToken) s.dispose = undefined;
-      unfocusMainList();
     };
     void Promise.resolve(opened).then(clear, clear);
   } catch { /* keep foreground usable */ }
@@ -718,10 +723,22 @@ function createOverlayComponent(
   });
 
   function refreshRows(): void {
-    const selectedId = overlayState.rows[overlayState.selected]?.navigatorId;
+    const selectedId = state().mainListSelectedId ?? overlayState.rows[overlayState.selected]?.navigatorId;
     overlayState.rows = listRows();
     const nextIdx = selectedId ? overlayState.rows.findIndex((row) => row.navigatorId === selectedId) : -1;
     overlayState.selected = nextIdx >= 0 ? nextIdx : Math.min(overlayState.selected, Math.max(0, overlayState.rows.length - 1));
+  }
+
+  function selectOverlayRow(next: number): void {
+    overlayState.selected = Math.min(Math.max(0, overlayState.rows.length - 1), Math.max(0, next));
+    state().mainListSelectedId = overlayState.rows[overlayState.selected]?.navigatorId;
+    clearCloseArm();
+    refreshMainListWidget();
+  }
+
+  function activateSelectedRow(): void {
+    if (selectedRow()?.parentRow) close();
+    else openDetail();
   }
 
   function clearCloseArm(): void {
@@ -745,13 +762,16 @@ function createOverlayComponent(
   }
 
   function selectedRow(): InternalRow | undefined {
-    if (mode === "detail" && detailId) return overlayState.rows.find((row) => row.navigatorId === detailId);
     return overlayState.rows[overlayState.selected];
   }
 
   function openDetail(): void {
     const row = selectedRow();
     if (!row) return;
+    if (row.parentRow) {
+      close();
+      return;
+    }
     clearCloseArm();
     detailId = row.navigatorId;
     expandedSections.clear();
@@ -822,6 +842,7 @@ function createOverlayComponent(
 
   return {
     render(width: number) {
+      refreshRows();
       if (mode === "detail" && detail?.transcript && deps.createTranscriptComponent) {
         if (transcriptDetail !== detail || !transcriptComponent) {
           transcriptDetail = detail;
@@ -849,10 +870,25 @@ function createOverlayComponent(
         return;
       }
       if (mode === "detail") {
-        if (deps.matchKey(data, "left")) close();
+        if (deps.matchKey(data, "up")) {
+          selectOverlayRow(overlayState.selected - 1);
+          activateSelectedRow();
+        }
+        else if (deps.matchKey(data, "down")) {
+          selectOverlayRow(overlayState.selected + 1);
+          activateSelectedRow();
+        }
+        else if (deps.matchKey(data, "left")) {
+          const mainIdx = overlayState.rows.findIndex((row) => row.parentRow && row.id === "main");
+          if (mainIdx >= 0) selectOverlayRow(mainIdx);
+          close();
+        }
         else if (deps.matchKey(data, "enter")) {
-          const sectionId = firstToggleableSectionId(detail);
-          if (sectionId) {
+          const row = selectedRow();
+          if (row?.parentRow || row?.navigatorId !== detailId) openDetail();
+          else {
+            const sectionId = firstToggleableSectionId(detail);
+            if (!sectionId) return;
             if (expandedSections.has(sectionId)) expandedSections.delete(sectionId);
             else expandedSections.add(sectionId);
             requestRender();
@@ -863,7 +899,10 @@ function createOverlayComponent(
           if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
           requestRender();
         }
-        else if (deps.matchKey(data, "escape")) close();
+        else if (deps.matchKey(data, "escape")) {
+          unfocusMainList();
+          close();
+        }
         return;
       }
       if (deps.matchKey(data, "up")) {

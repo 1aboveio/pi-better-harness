@@ -99,7 +99,7 @@ describe("shared background work navigator", () => {
       editor.handleInput("left");
       assert.equal(widgets.at(-1)?.[0], MAIN_LIST_WIDGET_KEY);
       list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
-      assert.match(list, /↑↓ select · Enter detail · x stop · Esc unfocus/);
+      assert.match(list, /↑↓ switch · Enter detail · x stop · Esc unfocus/);
 
       editor.handleInput("enter");
       const detail = component.render(100).join("\n");
@@ -439,7 +439,7 @@ describe("shared background work navigator", () => {
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       const focusedLines = renderWidget(widgets.at(-1), 132, ui.theme);
-      assert.match(focusedLines.join("\n"), /↑↓ select · Enter detail · x stop · Esc unfocus/);
+      assert.match(focusedLines.join("\n"), /↑↓ switch · Enter detail · x stop · Esc unfocus/);
     } finally {
       if (stdoutColumnsDescriptor) Object.defineProperty(process.stdout, "columns", stdoutColumnsDescriptor);
       else Reflect.deleteProperty(process.stdout, "columns");
@@ -597,6 +597,73 @@ describe("shared background work navigator", () => {
     }
   });
 
+  it("keeps the navigator mounted while arrow selection replaces only the content region", () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      parentRow: () => ({
+        providerId: "subagents", id: "main", name: "main", status: "running", statusTone: "running",
+        kind: "main agent", elapsed: "1m", primary: "foreground", sortStartedAt: 0,
+      }),
+      listRows: () => [
+        { providerId: "subagents", id: "alpha", name: "alpha", status: "running", statusTone: "running", kind: "subagent", elapsed: "2s", primary: "alpha work", sortStartedAt: 200 },
+        { providerId: "subagents", id: "beta", name: "beta", status: "running", statusTone: "running", kind: "subagent", elapsed: "1s", primary: "beta work", sortStartedAt: 100 },
+      ],
+      detail: (id) => ({
+        providerId: "subagents", id, title: `${id} detail`, status: "running", statusTone: "running",
+        metadata: [], evidence: { label: "output", text: `${id} content` },
+      }),
+    });
+    const widgets: unknown[] = [];
+    let component: any;
+    let overlayCloses = 0;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => { overlayCloses += 1; });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const installedWidget = widgets.at(-1);
+      const widgetCalls = widgets.length;
+      const editor = ui.factory({}, {}, {});
+
+      editor.handleInput("left");
+      assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+main/m);
+
+      editor.handleInput("down");
+      assert.match(component.render(100).join("\n"), /alpha content/);
+      assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+alpha/m);
+
+      component.handleInput("down");
+      assert.match(component.render(100).join("\n"), /beta content/);
+      assert.doesNotMatch(component.render(100).join("\n"), /alpha content/);
+      assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+beta/m);
+
+      component.handleInput("up");
+      component.handleInput("up");
+      assert.equal(overlayCloses, 1, "selecting main closes only the replaceable content overlay");
+      assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+main/m);
+      assert.equal(widgets.length, widgetCalls, "the navigator widget remains the same mounted component");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("renders a single watcher as a compact row until focused", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("background-tasks", "Background Tasks", 20, 300, () => undefined),
@@ -646,7 +713,7 @@ describe("shared background work navigator", () => {
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       const focusedText = renderWidget(widgets.at(-1), 118, ui.theme).join("\n");
-      assert.match(focusedText, /↑↓ select · Enter detail · x stop · Esc unfocus/);
+      assert.match(focusedText, /↑↓ switch · Enter detail · x stop · Esc unfocus/);
       assert.doesNotMatch(focusedText, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
@@ -747,7 +814,7 @@ describe("shared background work navigator", () => {
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       const focusedText = renderWidget(widgets.at(-1), 132, ui.theme).join("\n");
-      assert.match(focusedText, /↑↓ select · Enter detail · x stop · Esc unfocus/);
+      assert.match(focusedText, /↑↓ switch · Enter detail · x stop · Esc unfocus/);
       assert.doesNotMatch(focusedText, /evidence\s+tools bash/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
