@@ -645,12 +645,17 @@ describe("shared background work navigator", () => {
       assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+main/m);
 
       editor.handleInput("down");
-      assert.match(component.render(100).join("\n"), /alpha content/);
+      let detailScreen = component.render(100).join("\n");
+      assert.match(detailScreen, /alpha content/);
+      assert.match(detailScreen, /▸ subagents/);
+      assert.match(detailScreen, /^› ●\s+alpha/m, "the active detail visibly retains the navigation rail");
       assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+alpha/m);
 
       component.handleInput("down");
-      assert.match(component.render(100).join("\n"), /beta content/);
-      assert.doesNotMatch(component.render(100).join("\n"), /alpha content/);
+      detailScreen = component.render(100).join("\n");
+      assert.match(detailScreen, /beta content/);
+      assert.doesNotMatch(detailScreen, /alpha content/);
+      assert.match(detailScreen, /^› ●\s+beta/m, "the visible rail follows detail selection");
       assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+beta/m);
 
       component.handleInput("up");
@@ -935,7 +940,7 @@ describe("shared background work navigator", () => {
       const overlayOptions = customOptions?.overlayOptions?.();
       const { visible, ...layoutOptions } = overlayOptions;
       const navigatorRows = renderWidget(widgets.at(-1)?.[1], 72, ui.theme).length;
-      const bottomMargin = 3 + navigatorRows;
+      const bottomMargin = 3;
       assert.equal(customOptions?.overlay, true);
       assert.equal(typeof visible, "function");
       const topMargin = 5;
@@ -948,7 +953,8 @@ describe("shared background work navigator", () => {
       });
 
       let renderedLines = component.render(72);
-      assert.equal(renderedLines.length, 40 - topMargin - bottomMargin, "detail overlay should fill the rows between header and navigator");
+      assert.equal(renderedLines.length, 40 - topMargin - bottomMargin, "detail overlay should fill the content region and paint its visible navigator rail");
+      assert.match(renderedLines.slice(-navigatorRows).join("\n"), /↑↓ switch/, "the detail screen ends with the navigation rail");
       for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
       let rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 10);

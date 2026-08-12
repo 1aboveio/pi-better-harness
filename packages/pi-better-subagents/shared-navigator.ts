@@ -841,25 +841,35 @@ function createOverlayComponent(
   return {
     render(width: number) {
       refreshRows();
+      const railLines = mode === "detail"
+        ? buildMainListLines(overlayState.rows, width, deps.truncate, fg, {
+            selectedId: selectedRow()?.navigatorId,
+            focused: true,
+          })
+        : [];
+      const detailRows = Math.max(1, (state().detailOverlayRows ?? 1) - railLines.length - 1);
+      let contentLines: string[];
       if (mode === "detail" && detail?.transcript && deps.createTranscriptComponent) {
         if (transcriptDetail !== detail || !transcriptComponent) {
           transcriptDetail = detail;
           transcriptComponent = deps.createTranscriptComponent(detail, theme);
         }
-        return buildTranscriptDetailLines(
+        contentLines = buildTranscriptDetailLines(
           detail,
           transcriptComponent.render(width),
           width,
           deps.truncate,
           fg,
-          { minRows: state().detailOverlayRows },
+          { minRows: detailRows },
         );
+      } else {
+        transcriptDetail = null;
+        transcriptComponent = null;
+        contentLines = mode === "detail"
+          ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows })
+          : buildListLines(overlayState, width, deps.truncate, fg);
       }
-      transcriptDetail = null;
-      transcriptComponent = null;
-      return mode === "detail"
-        ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: state().detailOverlayRows })
-        : buildListLines(overlayState, width, deps.truncate, fg);
+      return mode === "detail" ? [...contentLines, "", ...railLines] : contentLines;
     },
     handleInput(data: string) {
       if (closed) return;
@@ -953,8 +963,7 @@ function buildTranscriptDetailLines(
 }
 
 function detailOverlayOptions() {
-  const navigatorRows = state().lastMainListLines?.length ?? 0;
-  const marginBottom = DETAIL_OVERLAY_FOOTER_MARGIN_ROWS + navigatorRows;
+  const marginBottom = DETAIL_OVERLAY_FOOTER_MARGIN_ROWS;
   return {
     anchor: "top-left" as const,
     width: "100%" as const,
