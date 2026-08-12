@@ -339,17 +339,15 @@ function listRows(now = Date.now()): InternalRow[] {
     let providerRows: BackgroundWorkRow[] = [];
     try { providerRows = provider.listRows(now) ?? []; } catch { providerRows = []; }
     const orderedProviderRows = [...providerRows].sort((a, b) => b.sortStartedAt - a.sortStartedAt || rowDisplayName(a).localeCompare(rowDisplayName(b)));
-    if (orderedProviderRows.length > 0) {
-      let parentRow: BackgroundWorkRow | null = null;
-      try { parentRow = provider.parentRow?.(now) ?? null; } catch { parentRow = null; }
-      if (parentRow) {
-        rows.push({
-          ...parentRow,
-          navigatorId: rowKey(parentRow.providerId, parentRow.id),
-          providerLabel: provider.label,
-          parentRow: true,
-        });
-      }
+    let parentRow: BackgroundWorkRow | null = null;
+    try { parentRow = provider.parentRow?.(now) ?? null; } catch { parentRow = null; }
+    if (parentRow) {
+      rows.push({
+        ...parentRow,
+        navigatorId: rowKey(parentRow.providerId, parentRow.id),
+        providerLabel: provider.label,
+        parentRow: true,
+      });
     }
     for (const row of orderedProviderRows) {
       rows.push({ ...row, navigatorId: rowKey(provider.id, row.id), providerLabel: provider.label });

@@ -664,6 +664,44 @@ describe("shared background work navigator", () => {
     }
   });
 
+  it("keeps the main navigation destination mounted with no subagents", () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      visibleCount: () => 0,
+      listRows: () => [],
+      parentRow: () => ({
+        providerId: "subagents", id: "main", name: "main", status: "running", statusTone: "running",
+        kind: "main agent", elapsed: "1m", primary: "foreground", sortStartedAt: 0,
+      }),
+    });
+    const widgets: unknown[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const installedWidget = widgets.at(-1);
+      assert.equal(typeof installedWidget, "function", "the persistent navigator is mounted without child rows");
+      assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /●\s+main/);
+      assert.doesNotMatch(renderWidget(installedWidget, 100, ui.theme).join("\n"), /Subagents row/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("renders a single watcher as a compact row until focused", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("background-tasks", "Background Tasks", 20, 300, () => undefined),
