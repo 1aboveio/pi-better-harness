@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-background-tasks@0.1.18] - 2026-08-14
+
+### Fixed
+
+- **background-tasks**: cancelled tasks record a durable callback suppression instead of queueing a completion follow-up, so an explicit stop never wakes the agent and stays silent across session restarts
+
 ## [pi-better-goal@0.1.19] - 2026-08-13
 
 ### Added
