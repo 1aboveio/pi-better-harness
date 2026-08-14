@@ -23,7 +23,7 @@ interface GoalLike {
   completedAt?: number | null;
 }
 
-export type GoalEntrySource = "command" | "tool" | "runtime";
+export type GoalEntrySource = "command" | "tool" | "runtime" | "shortcut";
 
 export interface ContinuationState {
   goalId: string;
