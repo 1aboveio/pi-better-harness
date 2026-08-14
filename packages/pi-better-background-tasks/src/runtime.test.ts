@@ -238,6 +238,30 @@ describe("runtime", () => {
     expect(stopped?.status).toBe("cancelled");
     expect(readMeta(meta.id)?.result).toMatchObject({ reason: "cancelled" });
   });
+
+  it("queues no terminal callback for a cancelled task", async () => {
+    const messages: Array<{ message: string; options: unknown }> = [];
+    const pi = {
+      sendMessage: (message: { content: string }, options: unknown) => { messages.push({ message: message.content, options }); },
+    } as unknown as ExtensionAPI;
+    const meta = spawnTask(pi, {
+      name: "cancelled callback task",
+      command: "node -e 'setTimeout(() => {}, 10000)'",
+      callback: true,
+    }, process.cwd());
+
+    const stopped = stopTask(pi, meta.id);
+    expect(stopped?.status).toBe("cancelled");
+
+    // If a callback had been enqueued it would flush within the 100 ms batch window.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(messages).toHaveLength(0);
+
+    const terminal = readMeta(meta.id);
+    expect(terminal?.callbackSentAt).toBeUndefined();
+    expect(terminal?.callbackSuppressedAt).toBeTypeOf("number");
+    expect(terminal?.callbackSuppressedReason).toContain("cancelled");
+  });
 });
 
 function terminalMeta(

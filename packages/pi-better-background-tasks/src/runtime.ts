@@ -305,6 +305,15 @@ async function notifyTerminal(
   if (meta.callback === false || meta.callbackSentAt || meta.callbackSuppressedAt) return;
   const latest = readMeta(meta.id) ?? meta;
   if (latest.callback === false || latest.callbackSentAt || latest.callbackSuppressedAt) return;
+  // Cancellation is an explicit action by the agent or user, so a completion
+  // wakeup would be noise. Record the suppression durably so the session_start
+  // replay path never fires a callback for a cancelled task either.
+  if (latest.status === "cancelled") {
+    latest.callbackSuppressedAt = Date.now();
+    latest.callbackSuppressedReason = "task was cancelled; no completion callback is needed";
+    writeMeta(latest);
+    return;
+  }
   const label = latest.name ? `${latest.name} (${latest.id})` : latest.id;
   getCallbackBatcher(pi).enqueue({
     source: "background-task",
