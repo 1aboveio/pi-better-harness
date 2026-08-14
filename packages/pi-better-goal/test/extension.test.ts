@@ -295,19 +295,17 @@ test("identical autonomous outcomes pause continuation until interactive input r
   assert.equal(messages.length, 5, "interactive input reopens the autonomous loop");
 });
 
-test("escape pauses the active goal and suppresses pokes while paused", async (t) => {
+test("an aborted run pauses the active goal and suppresses pokes while paused", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
-  const { commands, handlers, messages, ctx, entries, shortcuts } = createContinuationHarness();
+  const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
 
   await handlers.get("session_start")?.({}, ctx);
   await commands.get("goal")?.handler("keep watching", ctx);
   assert.equal(messages.length, 1, "setting a goal starts its first autonomous turn");
   messages.length = 0;
 
-  const escape = shortcuts.get("escape");
-  assert.ok(escape, "escape shortcut is registered");
-
-  await escape.handler(ctx);
+  const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] };
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
   assert.equal(latestGoal(entries)?.status, "paused");
 
   await handlers.get("agent_start")?.({}, ctx);
@@ -317,9 +315,9 @@ test("escape pauses the active goal and suppresses pokes while paused", async (t
   assert.equal(messages.length, 0, "paused goals are never poked");
 });
 
-test("escape pause cancels an already-scheduled idle continuation", async (t) => {
+test("an aborted run cancels an already-scheduled idle continuation", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
-  const { commands, handlers, messages, ctx, entries, shortcuts } = createContinuationHarness();
+  const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
 
   await handlers.get("session_start")?.({}, ctx);
   await commands.get("goal")?.handler("keep watching", ctx);
@@ -329,7 +327,8 @@ test("escape pause cancels an already-scheduled idle continuation", async (t) =>
   await handlers.get("agent_settled")?.({}, ctx);
   assert.equal(messages.length, 0, "the continuation waits for the grace period");
 
-  await shortcuts.get("escape")?.handler(ctx);
+  const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] };
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
   assert.equal(latestGoal(entries)?.status, "paused");
 
   t.mock.timers.tick(30_000);
@@ -337,31 +336,30 @@ test("escape pause cancels an already-scheduled idle continuation", async (t) =>
   assert.equal(messages.length, 0, "pausing before the grace period elapses cancels the poke");
 });
 
-test("escape while the agent is running pauses the goal and interrupts the turn", async (t) => {
+test("an aborted run pauses the goal while the agent is running", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
-  const { commands, handlers, ctx, entries, shortcuts, setBusy, getAborts } = createContinuationHarness();
+  const { commands, handlers, ctx, entries, setBusy } = createContinuationHarness();
 
   await handlers.get("session_start")?.({}, ctx);
   await commands.get("goal")?.handler("keep watching", ctx);
 
   setBusy(true);
-  await shortcuts.get("escape")?.handler(ctx);
+  const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] };
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
   setBusy(false);
 
-  assert.equal(getAborts(), 1, "escape while running interrupts the agent turn");
   assert.equal(latestGoal(entries)?.status, "paused");
 });
 
-test("escape without an active goal only preserves interrupt behavior", async (t) => {
+test("an aborted run without an active goal creates no goal", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
-  const { handlers, ctx, shortcuts, setBusy, getAborts } = createContinuationHarness();
+  const { handlers, ctx, entries } = createContinuationHarness();
 
   await handlers.get("session_start")?.({}, ctx);
-  setBusy(true);
-  await shortcuts.get("escape")?.handler(ctx);
-  setBusy(false);
+  const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] };
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
 
-  assert.equal(getAborts(), 1, "escape still interrupts a running agent when no goal is set");
+  assert.equal(latestGoal(entries), undefined, "an abort without a goal creates nothing");
 });
 
 function createContinuationHarness() {
