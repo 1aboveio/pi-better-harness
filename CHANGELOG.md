@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] - 2026-08-14
+
+### Changed
+
+- **harness**: bundle goal 0.1.19, background-tasks 0.1.18, and subagents 0.1.19
+
 ## [pi-better-background-tasks@0.1.18] - 2026-08-14
 
 ### Fixed
