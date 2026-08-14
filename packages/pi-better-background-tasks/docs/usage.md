@@ -32,6 +32,12 @@ subagent completions loaded in the same Pi host. Every row includes source, id,
 label, terminal status, and its durable status/result tool. `callback:false`
 never enters the batch and sends no model follow-up.
 
+Cancelled tasks never produce a callback: stopping a task is an explicit action
+by the agent or user, so a completion wakeup would be noise. The cancellation is
+recorded as a durable callback suppression, so a cancelled task is also silent
+across a session restart. `timed_out`, `failed`, and `succeeded` transitions
+still fire callbacks.
+
 Set `PI_BETTER_CALLBACK_BATCH_MS` to `0` through `5000` milliseconds to tune the
 accumulation window; invalid values use 100 ms. A single event flushes when that
 bounded window expires. Failed sends leave all affected events unmarked and
