@@ -8,6 +8,7 @@ It ships one extension that:
 - treats current-parent `running` and `orphaned` subagents as active background work
 - owns `/goal` plus the `get_goal` and `update_goal` tools; only `/goal <objective>` can create a goal
 - shows the current goal with active and elapsed clocks in a right-aligned widget above custom footers such as `pi-observability`
+- pauses the active goal on `escape` (while still interrupting a running agent turn) and never pokes a paused goal
 - publishes a typed activity snapshot on `pi.events`
 - adds goal-aware prompt context while background work is active, so foreground idleness is not confused with goal completion
 - sends a hidden follow-up when active background work drains to zero, including `callback:false` subagent runs
@@ -32,6 +33,15 @@ Model-callable tools:
 - `get_goal`
 - `update_goal`
 - `get_background_activity`
+
+## Pause With Escape
+
+Press `escape` to pause the active goal. The goal moves to `paused`, its
+active clock stops, and any pending or future automatic continuation pokes
+are cancelled: a paused goal is never poked. While the agent is still
+streaming, `escape` also interrupts the turn, preserving its built-in
+meaning. `escape` without an active goal does nothing; use `/goal resume`
+to reopen the autonomous loop.
 
 ## Goal Clock
 

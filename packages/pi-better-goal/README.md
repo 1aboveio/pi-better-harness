@@ -13,6 +13,7 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 ## Core Features
 
 - `/goal` runtime for starting, pausing, resuming, completing, and clearing the current objective.
+- `escape` pauses the active goal; paused goals are never poked.
 - A compact goal widget that does not replace Pi's footer.
 - Background activity tracking for subagents and other registered providers.
 - A progress-aware follow-up loop that holds after repeated identical outcomes.

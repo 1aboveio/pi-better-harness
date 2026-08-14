@@ -59,6 +59,9 @@ test("only the slash command creates a goal and installs an observability-safe w
     registerTool(tool: ToolDefinition) {
       tools.set(tool.name, tool);
     },
+    registerShortcut() {
+      // Not asserted in this test.
+    },
     on(event: string, handler: (event: unknown, context: ExtensionContext) => unknown) {
       handlers.set(event, handler);
     },
@@ -157,6 +160,9 @@ test("external active background providers suppress idle goal continuation", asy
     },
     registerTool() {
       // Not needed for this regression.
+    },
+    registerShortcut() {
+      // Not asserted in this test.
     },
     on(event: string, handler: (event: unknown, context: ExtensionContext) => unknown) {
       handlers.set(event, handler);
@@ -289,16 +295,91 @@ test("identical autonomous outcomes pause continuation until interactive input r
   assert.equal(messages.length, 5, "interactive input reopens the autonomous loop");
 });
 
+test("escape pauses the active goal and suppresses pokes while paused", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries, shortcuts } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  assert.equal(messages.length, 1, "setting a goal starts its first autonomous turn");
+  messages.length = 0;
+
+  const escape = shortcuts.get("escape");
+  assert.ok(escape, "escape shortcut is registered");
+
+  await escape.handler(ctx);
+  assert.equal(latestGoal(entries)?.status, "paused");
+
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(messages.length, 0, "paused goals are never poked");
+});
+
+test("escape pause cancels an already-scheduled idle continuation", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries, shortcuts } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  messages.length = 0;
+
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.equal(messages.length, 0, "the continuation waits for the grace period");
+
+  await shortcuts.get("escape")?.handler(ctx);
+  assert.equal(latestGoal(entries)?.status, "paused");
+
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(messages.length, 0, "pausing before the grace period elapses cancels the poke");
+});
+
+test("escape while the agent is running pauses the goal and interrupts the turn", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, ctx, entries, shortcuts, setBusy, getAborts } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+
+  setBusy(true);
+  await shortcuts.get("escape")?.handler(ctx);
+  setBusy(false);
+
+  assert.equal(getAborts(), 1, "escape while running interrupts the agent turn");
+  assert.equal(latestGoal(entries)?.status, "paused");
+});
+
+test("escape without an active goal only preserves interrupt behavior", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { handlers, ctx, shortcuts, setBusy, getAborts } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  setBusy(true);
+  await shortcuts.get("escape")?.handler(ctx);
+  setBusy(false);
+
+  assert.equal(getAborts(), 1, "escape still interrupts a running agent when no goal is set");
+});
+
 function createContinuationHarness() {
   const entries: SessionEntry[] = [];
   const commands = new Map<string, CommandDefinition>();
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const messages: unknown[] = [];
   const events = new EventEmitter();
+  const shortcuts = new Map<string, { handler(ctx: ExtensionContext): Promise<void> | void }>();
+  let idle = true;
+  let aborts = 0;
 
   const ctx = {
     hasUI: false,
-    isIdle: () => true,
+    isIdle: () => idle,
+    abort: () => {
+      aborts += 1;
+    },
     sessionManager: { getBranch: () => entries },
     ui: {
       confirm: async () => true,
@@ -322,13 +403,42 @@ function createContinuationHarness() {
     registerTool() {
       // Not needed for these continuation regressions.
     },
+    registerShortcut(name: string, shortcut: { handler(ctx: ExtensionContext): Promise<void> | void }) {
+      shortcuts.set(name, shortcut);
+    },
     on(event: string, handler: (event: unknown, context: ExtensionContext) => unknown) {
       handlers.set(event, handler);
     },
   } as unknown as ExtensionAPI;
 
   extension(pi);
-  return { commands, handlers, messages, ctx, entries, events };
+  return {
+    commands,
+    handlers,
+    messages,
+    ctx,
+    entries,
+    events,
+    shortcuts,
+    setBusy: (busy: boolean) => {
+      idle = !busy;
+    },
+    getAborts: () => aborts,
+  };
+}
+
+function latestGoal(entries: SessionEntry[]) {
+  let goal: { status?: string } | undefined;
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== "pi-better-goal" || !entry.data || typeof entry.data !== "object") {
+      continue;
+    }
+    const data = entry.data as { kind?: unknown; goal?: unknown };
+    if (data.kind === "set" && data.goal && typeof data.goal === "object") {
+      goal = data.goal as { status?: string };
+    }
+  }
+  return goal;
 }
 
 function latestContinuationState(entries: SessionEntry[]) {
