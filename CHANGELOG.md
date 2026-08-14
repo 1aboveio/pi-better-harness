@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-goal@0.1.20] - 2026-08-14
+
+### Fixed
+
+- **goal**: pause the active goal when a running turn is interrupted (escape / ctrl+c), replacing an `escape` shortcut that pi's reserved built-in `app.interrupt` always skipped
+
 ## [pi-better-harness@0.1.16] - 2026-08-14
 
 ### Changed
