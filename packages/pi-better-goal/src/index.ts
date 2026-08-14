@@ -19,6 +19,7 @@ import {
   goalWithStatus,
   validateObjective,
   validateTokenBudget,
+  type GoalEntrySource,
 } from "./goal-state.js";
 import { continuationEvidence, type ContinuationEvidence } from "./continuation.js";
 import { observeGoalStall } from "./stall.js";
@@ -148,6 +149,9 @@ export default function (pi: ExtensionAPI): void {
 
   const getGoal = (ctx: ExtensionContext): GoalSnapshot | null => currentGoalSnapshot(ctx);
 
+  /** Only active goals receive autonomous pokes; paused, complete, and budget-limited goals never do. */
+  const isPokeable = (goal: GoalSnapshot | null): goal is GoalSnapshot => goal?.status === "active";
+
   const appendContinuationState = (state: ReturnType<typeof createContinuationState>): void => {
     pi.appendEntry(EXTENSION_NAME, continuationStateEntry(state));
   };
@@ -156,7 +160,7 @@ export default function (pi: ExtensionAPI): void {
     appendContinuationState(createContinuationState(goal.goalId));
   };
 
-  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: "command" | "tool" | "runtime"): void => {
+  const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource): void => {
     pi.appendEntry(EXTENSION_NAME, goalSetEntry(goal, source));
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
@@ -164,7 +168,7 @@ export default function (pi: ExtensionAPI): void {
     refreshGoalWidget?.();
   };
 
-  const clearGoal = (ctx: ExtensionContext, source: "command" | "tool" | "runtime"): void => {
+  const clearGoal = (ctx: ExtensionContext, source: GoalEntrySource): void => {
     const current = getGoal(ctx);
     pi.appendEntry(EXTENSION_NAME, goalClearEntry(current?.goalId ?? null, source));
     continuationQueuedFor = null;
@@ -174,7 +178,7 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const queueGoalContinuation = (goal: GoalSnapshot): void => {
-    if (goal.status !== "active" || continuationQueuedFor === goal.goalId) {
+    if (!isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
     }
     clearIdleContinuation();
@@ -205,7 +209,7 @@ export default function (pi: ExtensionAPI): void {
     kind: "continuation" | "background-drained",
     snapshot?: ActivitySnapshot,
   ): void => {
-    if (WAKE_DISABLED || goal.status !== "active" || continuationQueuedFor === goal.goalId) {
+    if (WAKE_DISABLED || !isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
     }
     if (kind === "continuation" && currentContinuationState(ctx, goal.goalId)?.blocked) {
@@ -232,7 +236,7 @@ export default function (pi: ExtensionAPI): void {
     priorSnapshot?: ActivitySnapshot,
   ): Promise<void> => {
     const goal = currentGoalSnapshot(ctx);
-    if (goal?.status !== "active" || goal.goalId !== goalId || continuationQueuedFor === goal.goalId || foregroundRunning) {
+    if (!isPokeable(goal) || goal.goalId !== goalId || continuationQueuedFor === goal.goalId || foregroundRunning) {
       return;
     }
     const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
@@ -299,7 +303,7 @@ export default function (pi: ExtensionAPI): void {
       const goal = currentGoalSnapshot(ctx);
       const wakePlan = planBackgroundDrainWake(backgroundDrainTracker, goal, snapshot);
       backgroundDrainTracker = wakePlan.nextTracker;
-      if (goal?.status === "active" && wakePlan.wakeSignature) {
+      if (isPokeable(goal) && wakePlan.wakeSignature) {
         const wakeSignature = wakePlan.wakeSignature;
         if (wakeSignature !== lastWakeSignature) {
           lastWakeSignature = wakeSignature;
@@ -539,6 +543,24 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerShortcut("escape", {
+    description: "Pause the active goal (also interrupts a running agent turn)",
+    handler: (ctx) => {
+      const goal = getGoal(ctx);
+      const running = !ctx.isIdle();
+      if (isPokeable(goal)) {
+        setGoal(goalWithStatus(goal, "paused"), ctx, "shortcut");
+        if (ctx.hasUI) {
+          ctx.ui.notify("Goal paused.", "info");
+        }
+      }
+      if (running) {
+        // ESC keeps its built-in interrupt meaning while the agent is streaming.
+        ctx.abort();
+      }
+    },
+  });
+
   pi.registerCommand("better-activity", {
     description: "Show foreground/background activity known to pi-better-goal",
     handler: async (_args, ctx) => {
@@ -586,7 +608,7 @@ export default function (pi: ExtensionAPI): void {
     currentCtx = ctx;
     const goal = currentGoalSnapshot(ctx);
     const snapshot = await publishSnapshot(ctx);
-    if (goal?.status !== "active") {
+    if (!isPokeable(goal)) {
       return;
     }
 
@@ -618,37 +640,38 @@ export default function (pi: ExtensionAPI): void {
     foregroundRunning = false;
     const snapshot = await publishSnapshot(ctx);
     const goal = getGoal(ctx);
-    if (goal?.status === "active" && !snapshot.backgroundRunning) {
-      const previous = currentContinuationState(ctx, goal.goalId) ?? createContinuationState(goal.goalId);
-      const evidence = lastAgentEvidence ?? continuationEvidence([]);
-      const repeated = previous.lastEvidenceSignature === evidence.signature;
-      const noProgressRetries = repeated ? previous.noProgressRetries + 1 : 0;
-      const blocked = repeated && noProgressRetries >= MAX_NO_PROGRESS_RETRIES;
-      const now = Date.now();
-      appendContinuationState({
-        goalId: goal.goalId,
-        lastEvidenceSignature: evidence.signature,
-        lastEvidenceSummary: evidence.summary,
-        ...(repeated
-          ? (previous.lastProgressAt !== undefined ? { lastProgressAt: previous.lastProgressAt } : {})
-          : { lastProgressAt: now }),
-        noProgressRetries,
-        blocked,
-        updatedAt: Math.floor(now / 1000),
-      });
-      if (blocked) {
-        refreshGoalWidget?.();
-        if (ctx.hasUI) {
-          ctx.ui.setStatus(EXTENSION_NAME, "waiting: no progress");
-          ctx.ui.notify(
-            `Goal automatic continuation is waiting after ${noProgressRetries} identical retries (${evidence.summary}). New input or background activity will resume it.`,
-            "warning",
-          );
-        }
-        return;
-      }
-      scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
+    if (!isPokeable(goal) || snapshot.backgroundRunning) {
+      return;
     }
+    const previous = currentContinuationState(ctx, goal.goalId) ?? createContinuationState(goal.goalId);
+    const evidence = lastAgentEvidence ?? continuationEvidence([]);
+    const repeated = previous.lastEvidenceSignature === evidence.signature;
+    const noProgressRetries = repeated ? previous.noProgressRetries + 1 : 0;
+    const blocked = repeated && noProgressRetries >= MAX_NO_PROGRESS_RETRIES;
+    const now = Date.now();
+    appendContinuationState({
+      goalId: goal.goalId,
+      lastEvidenceSignature: evidence.signature,
+      lastEvidenceSummary: evidence.summary,
+      ...(repeated
+        ? (previous.lastProgressAt !== undefined ? { lastProgressAt: previous.lastProgressAt } : {})
+        : { lastProgressAt: now }),
+      noProgressRetries,
+      blocked,
+      updatedAt: Math.floor(now / 1000),
+    });
+    if (blocked) {
+      refreshGoalWidget?.();
+      if (ctx.hasUI) {
+        ctx.ui.setStatus(EXTENSION_NAME, "waiting: no progress");
+        ctx.ui.notify(
+          `Goal automatic continuation is waiting after ${noProgressRetries} identical retries (${evidence.summary}). New input or background activity will resume it.`,
+          "warning",
+        );
+      }
+      return;
+    }
+    scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
