@@ -10,6 +10,12 @@ All notable changes to this project are documented in this file. The format is b
 
 - **goal**: pause the active goal on `escape` (preserving the interrupt of a running agent turn) and never poke paused goals
 
+## [0.1.15] - 2026-08-13
+
+### Changed
+
+- **harness**: bundle goal 0.1.19, background-tasks 0.1.17, and subagents 0.1.19
+
 ## [pi-better-subagents@0.1.19] - 2026-08-12
 
 ### Changed
