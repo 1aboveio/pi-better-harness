@@ -74,6 +74,26 @@ function parseRetryLimit(raw: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+/**
+ * True when the agent loop ended because the running turn was interrupted
+ * (escape / ctrl+c). An aborted run leaves a final assistant message whose
+ * stopReason is "aborted".
+ */
+function wasTurnAborted(messages: readonly unknown[]): boolean {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    const candidate = message as { role?: unknown; stopReason?: unknown };
+    if (candidate.role !== "assistant") {
+      continue;
+    }
+    return candidate.stopReason === "aborted";
+  }
+  return false;
+}
+
 function continuationPrompt(goal: GoalSnapshot): string {
   return [
     "Continue working toward the active thread goal.",
@@ -543,24 +563,6 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerShortcut("escape", {
-    description: "Pause the active goal (also interrupts a running agent turn)",
-    handler: (ctx) => {
-      const goal = getGoal(ctx);
-      const running = !ctx.isIdle();
-      if (isPokeable(goal)) {
-        setGoal(goalWithStatus(goal, "paused"), ctx, "shortcut");
-        if (ctx.hasUI) {
-          ctx.ui.notify("Goal paused.", "info");
-        }
-      }
-      if (running) {
-        // ESC keeps its built-in interrupt meaning while the agent is streaming.
-        ctx.abort();
-      }
-    },
-  });
-
   pi.registerCommand("better-activity", {
     description: "Show foreground/background activity known to pi-better-goal",
     handler: async (_args, ctx) => {
@@ -631,8 +633,21 @@ export default function (pi: ExtensionAPI): void {
     await publishSnapshot(ctx);
   });
 
-  pi.on("agent_end", async (event, _ctx) => {
+  pi.on("agent_end", async (event, ctx) => {
     lastAgentEvidence = continuationEvidence(event.messages);
+    // `escape` is a pi-reserved built-in shortcut (`app.interrupt`), so extensions
+    // cannot register it. Observe the interrupt instead: when a running turn is
+    // aborted (escape / ctrl+c while streaming), pause the active goal so it does
+    // not auto-continue after the user stopped the agent.
+    if (wasTurnAborted(event.messages)) {
+      const goal = getGoal(ctx);
+      if (isPokeable(goal)) {
+        setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
+        if (ctx.hasUI) {
+          ctx.ui.notify("Goal paused (interrupted).", "info");
+        }
+      }
+    }
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
