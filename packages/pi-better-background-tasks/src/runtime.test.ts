@@ -713,6 +713,49 @@ describe("runtime", () => {
 
   // @covers background-task.ssh-spawn
   // @level integration
+  // @fails-without-fix background-task.ssh-spawn
+  it("kills a remote tmux session when stopped while session creation is in flight", async () => {
+    const messages: string[] = [];
+    const pi = {
+      sendMessage: (message: { content: string }) => { messages.push(message.content); },
+    } as unknown as ExtensionAPI;
+    const delayedStart = deferred<ReturnType<typeof successfulResult>>();
+    const runner = new FakeRemoteRunner([
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      delayedStart.promise,
+      successfulResult(""),
+    ]);
+    const meta = spawnTask(pi, {
+      command: "sleep 300",
+      callback: true,
+      ssh: { host: "race.example", user: "deploy" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    await runner.waitForRunCalls(2);
+    const stopping = stopTask(pi, meta.id);
+    delayedStart.resolve(successfulResult(""));
+    const stopped = await stopping;
+
+    expect(runner.runCalls.map((call) => call.command)).toEqual([
+      expect.stringContaining("command -v tmux"),
+      expect.stringContaining(`new-session -d -s 'pi-bg-${meta.id}'`),
+      `tmux kill-session -t 'pi-bg-${meta.id}'`,
+    ]);
+    expect(stopped).toMatchObject({
+      status: "cancelled",
+      result: { reason: "cancelled" },
+      remote: {
+        session: "tmux",
+        sessionName: `pi-bg-${meta.id}`,
+        stopMessage: `Killed remote tmux session pi-bg-${meta.id} on deploy@race.example.`,
+      },
+    });
+    expect(messages).toHaveLength(0);
+    expect(readMeta(meta.id)?.callbackSuppressedReason).toContain("cancelled");
+  });
+
+  // @covers background-task.ssh-spawn
+  // @level integration
   it("queues normal terminal callbacks for succeeded and failed remote jobs", async () => {
     const messages: string[] = [];
     const pi = {
@@ -967,4 +1010,10 @@ async function waitForMeta(
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   return readMeta(id);
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((fulfill) => { resolve = fulfill; });
+  return { promise, resolve };
 }

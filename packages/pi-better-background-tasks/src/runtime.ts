@@ -23,6 +23,7 @@ const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const processTimeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const activeRemoteTasks = new Map<string, ResolvedSshRemoteTask>();
+const remoteSessionStarts = new Map<string, Promise<CommandResult>>();
 const activePolls = new Set<string>();
 const logRetentionTimers = new Map<string, ReturnType<typeof setInterval>>();
 const LOG_RETENTION_CHECK_MS = 1000;
@@ -169,7 +170,14 @@ async function launchRemoteTmux(
       return;
     }
 
-    const started = await remoteTask.startTmuxSession(bootstrap.tmuxPath);
+    const startAttempt = remoteTask.startTmuxSession(bootstrap.tmuxPath);
+    remoteSessionStarts.set(id, startAttempt);
+    let started: CommandResult;
+    try {
+      started = await startAttempt;
+    } finally {
+      if (remoteSessionStarts.get(id) === startAttempt) remoteSessionStarts.delete(id);
+    }
     const afterStart = readMeta(id);
     if (!afterStart || afterStart.status !== "running" || afterStart.stopRequestedAt) return;
     if (started.exitCode !== 0) {
@@ -413,11 +421,19 @@ export async function stopTask(
   clearRemoteSessionTimer(id);
   clearProcessTimeout(id);
 
-  if (meta.remote?.session === "tmux" && meta.remote.sessionStarted !== false) {
+  const remoteStartAttempt = remoteSessionStarts.get(id);
+  const remote = meta.remote;
+  const remoteSessionMayExist = remote?.session === "tmux"
+    && (remote.sessionStarted !== false || remoteStartAttempt !== undefined);
+  if (remoteStartAttempt) {
+    try { await remoteStartAttempt; } catch { /* A failed SSH result can still leave the detached session running. */ }
+  }
+
+  if (remoteSessionMayExist) {
     const remoteTask = activeRemoteTasks.get(id);
     if (!remoteTask) {
       meta.stopRequestedAt = undefined;
-      meta.error = `Cannot stop remote tmux session ${meta.remote.sessionName}: its active SSH controller is unavailable.`;
+      meta.error = `Cannot stop remote tmux session ${remote.sessionName}: its active SSH controller is unavailable.`;
       writeMeta(meta);
       scheduleRemoteSessionPoll(pi, id, REMOTE_SESSION_POLL_MS, getActiveSession);
       return meta;
@@ -427,13 +443,13 @@ export async function stopTask(
       if (stopped.exitCode !== 0) {
         const detail = stopped.stderr.trim() || stopped.stdout.trim() || "remote tmux returned no diagnostic";
         meta.stopRequestedAt = undefined;
-        meta.error = `Could not kill remote tmux session ${meta.remote.sessionName} on ${meta.ssh?.target} (exit ${stopped.exitCode ?? "unknown"}): ${detail}`;
+        meta.error = `Could not kill remote tmux session ${remote.sessionName} on ${meta.ssh?.target} (exit ${stopped.exitCode ?? "unknown"}): ${detail}`;
         writeMeta(meta);
         scheduleRemoteSessionPoll(pi, id, REMOTE_SESSION_POLL_MS, getActiveSession);
         return meta;
       }
-      meta.remote.stopMessage = `Killed remote tmux session ${meta.remote.sessionName} on ${meta.ssh?.target}.`;
-      appendLine(meta.logPath, `--- ${meta.remote.stopMessage} ---`);
+      remote.stopMessage = `Killed remote tmux session ${remote.sessionName} on ${meta.ssh?.target}.`;
+      appendLine(meta.logPath, `--- ${remote.stopMessage} ---`);
     } catch (error) {
       meta.stopRequestedAt = undefined;
       meta.error = error instanceof Error ? error.message : String(error);
