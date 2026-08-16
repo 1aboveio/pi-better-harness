@@ -26,8 +26,8 @@ const SshSchema = Type.Object({
 });
 
 const RemoteSchema = Type.Object({
-  session: Type.Optional(Type.Union([Type.Literal("tmux"), Type.Literal("direct")], { description: "Remote session mode. SSH spawn defaults to durable tmux; explicit direct skips tmux but has weaker stop semantics." })),
-  install_tmux: Type.Optional(Type.Boolean({ description: "Allow SSH spawn to install tmux non-interactively when missing. Defaults true in tmux mode and is ignored in direct mode." })),
+  session: Type.Optional(Type.Union([Type.Literal("tmux"), Type.Literal("direct")], { description: "Remote session mode. SSH spawn defaults to durable tmux. Watch always uses direct one-shot polls. Explicit direct spawn has weaker stop semantics." })),
+  install_tmux: Type.Optional(Type.Boolean({ description: "Allow SSH spawn to install tmux non-interactively when missing. Defaults true in tmux mode and is ignored for watch and direct spawn." })),
   workdir: Type.Optional(Type.String({ description: "Remote working directory for the spawned command." })),
 });
 
@@ -130,7 +130,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_watch",
     label: "BG Watch",
-    description: "Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, pass structured ssh fields and provide the remote command in command. Returns immediately with its task id. Default timeout 900 seconds; pass timeout_seconds:0 to disable.",
+    description: "Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, pass structured ssh fields and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. Returns immediately with its task id. Default timeout 900 seconds; pass timeout_seconds:0 to disable.",
     parameters: WatchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -190,7 +190,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. structured ssh spawn defaults to durable tmux; remote.session=direct is a weaker-stop escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, pass structured ssh fields and provide the remote command in command. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);

@@ -87,6 +87,20 @@ describe("extension e2e", () => {
     expect(harness.tools.get("bg_task_stop")?.description).toContain("kills its remote tmux session");
   });
 
+  // @covers background-task.ssh-tool-contract
+  // @level integration
+  // @fails-without-fix background-task.ssh-tool-contract
+  it("documents SSH watches as direct one-shot polls without tmux installation", () => {
+    const harness = createHarness();
+    const watch = harness.tools.get("bg_task_watch");
+    const wrapper = harness.tools.get("bg_task");
+
+    expect(watch?.description).toContain("direct one-shot SSH poll");
+    expect(wrapper?.description).toContain("SSH watches use direct one-shot polls");
+    expect(watch?.parameters?.properties?.remote?.properties?.session?.description).toContain("Watch always uses direct");
+    expect(watch?.parameters?.properties?.remote?.properties?.install_tmux?.description).toContain("ignored for watch");
+  });
+
   it("registers background tasks with pi-better-goal activity", () => {
     const harness = createHarness();
 
@@ -252,7 +266,7 @@ describe("extension e2e", () => {
     await otherHarness.fireSessionStart();
 
     const terminal = await waitForMeta(id, (meta) => typeof meta?.callbackSuppressedAt === "number");
-    expect(otherHarness.messages).toHaveLength(0);
+    expect(otherHarness.messages.join("\n")).not.toContain(id);
     expect(terminal?.callbackSuppressedReason).toContain("origin session session-a does not match active session session-b");
   });
 

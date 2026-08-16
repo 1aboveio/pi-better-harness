@@ -470,6 +470,13 @@ async function pollWatch(
       }
     }
 
+    const transportFailure = sshTransportFailure(latest, result);
+    if (transportFailure) {
+      latest.error = transportFailure;
+      finalize(latest, { status: "failed", reason: transportFailure, commandResult: result }, pi, getActiveSession);
+      return;
+    }
+
     if (latest.successWhen) {
       const success = evaluateCondition(latest.successWhen, result);
       if (success.matched) {
@@ -483,7 +490,13 @@ async function pollWatch(
   } catch (error) {
     const meta = readMeta(id);
     if (meta && meta.status === "running") {
-      finalize(meta, { status: "failed", reason: error instanceof Error ? error.message : String(error) }, pi, getActiveSession);
+      const detail = readableError(error);
+      const reason = meta.ssh ? `SSH poll to ${meta.ssh.target} failed: ${detail}` : detail;
+      if (meta.ssh) {
+        meta.error = reason;
+        appendLine(meta.logPath, `--- poll error ${new Date().toISOString()} ---\n${reason}`);
+      }
+      finalize(meta, { status: "failed", reason }, pi, getActiveSession);
     }
   } finally {
     activePolls.delete(id);
@@ -516,6 +529,17 @@ function finalize(
   activeRemoteTasks.delete(meta.id);
   stopLogRetention(meta.id);
   void notifyTerminal(pi, meta, getActiveSession);
+}
+
+function sshTransportFailure(meta: BackgroundTaskMeta, result: CommandResult): string | undefined {
+  if (!meta.ssh || result.exitCode !== 255) return undefined;
+  const detail = readableError(result.stderr || result.stdout);
+  return `SSH poll to ${meta.ssh.target} failed with exit 255${detail ? `: ${detail}` : ""}`;
+}
+
+function readableError(error: unknown): string {
+  const value = error instanceof Error ? error.message : String(error);
+  return value.replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
 function scheduleProcessTimeout(
