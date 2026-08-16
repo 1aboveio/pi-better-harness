@@ -69,6 +69,26 @@ describe("SSH remote-task preset", () => {
     expect(runner.runCalls).toEqual([resolved.commandSpec]);
   });
 
+  // @covers background-task.ssh-watch
+  // @level unit
+  // @fails-without-fix background-task.ssh-watch
+  it("normalizes every SSH watch to direct mode without tmux installation", () => {
+    const omitted = expandSshRemoteTaskPreset({
+      operation: "watch",
+      command: "echo ready",
+      ssh: { host: "watch.example" },
+    });
+    const requestedTmux = expandSshRemoteTaskPreset({
+      operation: "watch",
+      command: "echo ready",
+      ssh: { host: "watch.example" },
+      remote: { session: "tmux", install_tmux: true },
+    });
+
+    expect(omitted.metadata.remote).toMatchObject({ session: "direct", installTmux: false });
+    expect(requestedTmux.metadata.remote).toMatchObject({ session: "direct", installTmux: false });
+  });
+
   // @covers background-task.ssh-preset
   // @level unit
   it("keeps required safety options when extra options try to override them", () => {

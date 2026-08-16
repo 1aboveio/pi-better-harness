@@ -94,8 +94,12 @@ export function expandSshRemoteTaskPreset(
   };
   const remote: ResolvedRemoteTaskMetadata = {
     command,
-    ...(intent.remote?.session ? { session: intent.remote.session } : {}),
-    ...(intent.remote?.install_tmux !== undefined ? { installTmux: intent.remote.install_tmux } : {}),
+    ...(intent.operation === "watch"
+      ? { session: "direct", installTmux: false }
+      : {
+        ...(intent.remote?.session ? { session: intent.remote.session } : {}),
+        ...(intent.remote?.install_tmux !== undefined ? { installTmux: intent.remote.install_tmux } : {}),
+      }),
     ...(intent.remote?.workdir !== undefined ? { workdir: intent.remote.workdir } : {}),
   };
 
