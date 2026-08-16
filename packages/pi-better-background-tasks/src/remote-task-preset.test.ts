@@ -1,8 +1,36 @@
 import { describe, expect, it } from "vitest";
 import { expandSshRemoteTaskPreset } from "./remote-task-preset.js";
-import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
+import { FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
 
 describe("SSH remote-task preset", () => {
+  // @covers background-task.ssh-tmux-bootstrap
+  // @level unit
+  it("reports a present remote tmux with a usable path and version", async () => {
+    const runner = new FakeRemoteRunner([
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+    ]);
+    const resolved = expandSshRemoteTaskPreset({
+      operation: "spawn",
+      command: "make release",
+      ssh: { host: "build.example", user: "deploy" },
+    }, runner);
+
+    await expect(resolved.bootstrapTmux()).resolves.toEqual({
+      status: "present",
+      target: "deploy@build.example",
+      tmuxPath: "/usr/bin/tmux",
+      tmuxVersion: "tmux 3.4",
+      mutated: false,
+      message: "tmux 3.4 is available at /usr/bin/tmux on deploy@build.example.",
+    });
+    expect(runner.runCalls).toEqual([
+      expect.objectContaining({
+        argv: expect.arrayContaining(["deploy@build.example", expect.stringContaining("command -v tmux")]),
+        shell: false,
+      }),
+    ]);
+  });
+
   // @covers background-task.ssh-preset
   // @level unit
   it("expands structured SSH intent into safe argv and delegates through the injected runner", async () => {

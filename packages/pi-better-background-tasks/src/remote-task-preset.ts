@@ -25,12 +25,22 @@ export interface SshRemoteTaskIntent {
   remote?: RemoteTaskParams;
 }
 
+export interface TmuxBootstrapPresentResult {
+  status: "present";
+  target: string;
+  tmuxPath: string;
+  tmuxVersion: string;
+  mutated: false;
+  message: string;
+}
+
 export interface ResolvedSshRemoteTask {
   commandSpec: CommandSpec;
   metadata: {
     ssh: ResolvedSshIdentity;
     remote: ResolvedRemoteTaskMetadata;
   };
+  bootstrapTmux(): Promise<TmuxBootstrapPresentResult>;
   spawn(logPath: string, detached: boolean): SpawnedProcess;
   runOnce(maxBufferBytes?: number): Promise<CommandResult>;
 }
@@ -41,6 +51,7 @@ const processRemoteRunner: RemoteRunner = {
 };
 
 const REQUIRED_SSH_OPTIONS = new Set(["batchmode", "connecttimeout", "requesttty"]);
+const TMUX_PROBE_COMMAND = "tmux_path=$(command -v tmux) && printf '%s\\n' \"$tmux_path\" && \"$tmux_path\" -V";
 
 export function expandSshRemoteTaskPreset(
   intent: SshRemoteTaskIntent,
@@ -102,8 +113,31 @@ export function expandSshRemoteTaskPreset(
   return {
     commandSpec,
     metadata: { ssh, remote },
+    bootstrapTmux: async () => {
+      const result = await runner.runOnce(withRemoteCommand(commandSpec, TMUX_PROBE_COMMAND));
+      const [tmuxPath, tmuxVersion] = result.stdout.trim().split("\n");
+      if (result.exitCode !== 0 || !tmuxPath || !tmuxVersion) {
+        throw new Error(`tmux is not available on ${target}`);
+      }
+      return {
+        status: "present",
+        target,
+        tmuxPath,
+        tmuxVersion,
+        mutated: false,
+        message: `${tmuxVersion} is available at ${tmuxPath} on ${target}.`,
+      };
+    },
     spawn: (logPath, detached) => runner.spawn(commandSpec, logPath, detached),
     runOnce: (maxBufferBytes) => runner.runOnce(commandSpec, maxBufferBytes),
+  };
+}
+
+function withRemoteCommand(spec: CommandSpec, remoteCommand: string): CommandSpec {
+  return {
+    ...spec,
+    command: remoteCommand,
+    argv: [...(spec.argv?.slice(0, -1) ?? []), remoteCommand],
   };
 }
 
