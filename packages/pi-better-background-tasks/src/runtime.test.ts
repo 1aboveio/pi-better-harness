@@ -185,6 +185,7 @@ describe("runtime", () => {
     expect(runner.runCalls[1]?.command).toContain("printf");
     expect(runner.runCalls[1]?.command).toContain("remote spawn");
     expect(runner.runCalls[2]?.command).toContain("tail -c +1");
+    expect(runner.runCalls[2]?.command).toContain("head -c");
     expect(readFileSync(meta.logPath, "utf8")).toContain(output.trim());
     expect(terminal).toMatchObject({
       status: "succeeded",
@@ -194,6 +195,7 @@ describe("runtime", () => {
         sessionName: `pi-bg-${meta.id}`,
         logOffset: Buffer.byteLength(output),
         bootstrapStatus: "present",
+        sessionStarted: true,
       },
     });
   });

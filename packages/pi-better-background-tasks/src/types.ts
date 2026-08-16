@@ -66,6 +66,7 @@ export interface ResolvedRemoteTaskMetadata {
   bootstrapStatus?: "pending" | "present" | "installed" | "needs_user" | "unknown_package_manager" | "install_failed" | "timed_out";
   bootstrapMessage?: string;
   tmuxInstalled?: boolean;
+  sessionStarted?: boolean;
   logOffset?: number;
   warning?: string;
   stopMessage?: string;

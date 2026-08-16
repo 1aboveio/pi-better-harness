@@ -174,6 +174,7 @@ async function launchRemoteTmux(
       return;
     }
     appendLine(afterStart.logPath, `--- remote tmux session ${afterStart.remote?.sessionName} started on ${afterStart.ssh?.target} ---`);
+    afterStart.remote = { ...afterStart.remote!, sessionStarted: true };
     afterStart.lastProgressAt = Date.now();
     writeMeta(afterStart);
     scheduleRemoteSessionPoll(pi, id, 0, getActiveSession);
@@ -363,7 +364,7 @@ export async function stopTask(
   clearWatchTimer(id);
   clearRemoteSessionTimer(id);
 
-  if (meta.remote?.session === "tmux") {
+  if (meta.remote?.session === "tmux" && meta.remote.sessionStarted !== false) {
     const remoteTask = activeRemoteTasks.get(id);
     if (!remoteTask) {
       meta.stopRequestedAt = undefined;

@@ -112,6 +112,7 @@ const REQUIRED_SSH_OPTIONS = new Set(["batchmode", "connecttimeout", "requesttty
 const DIRECT_STOP_WARNING = "Direct SSH mode has weak stop semantics: stopping the local SSH client may leave the remote process running.";
 const TMUX_STATUS_PREFIX = "__PI_BG_STATUS__=";
 const TMUX_SIZE_PREFIX = "__PI_BG_SIZE__=";
+const TMUX_CAPTURE_CHUNK_BYTES = 256 * 1024;
 const TMUX_PROBE_COMMAND = "tmux_path=$(command -v tmux) || exit 127; printf '%s\\n' \"$tmux_path\" && \"$tmux_path\" -V";
 const TMUX_PACKAGE_MANAGERS: TmuxPackageManager[] = ["apt-get", "dnf", "yum", "apk", "pacman", "zypper", "brew"];
 const TMUX_INSTALL_COMMANDS: Record<TmuxPackageManager, string> = {
@@ -192,7 +193,7 @@ export function expandSshRemoteTaskPreset(
     session,
     installTmux,
     ...(intent.remote?.workdir !== undefined ? { workdir: intent.remote.workdir } : {}),
-    ...(sessionName ? { sessionName, bootstrapStatus: "pending" } : {}),
+    ...(sessionName ? { sessionName, bootstrapStatus: "pending", sessionStarted: false } : {}),
     ...(session === "direct" && intent.operation === "spawn" ? { warning: DIRECT_STOP_WARNING } : {}),
   };
 
@@ -265,8 +266,12 @@ function tmuxPollCommand(sessionName: string, logOffset: number): string {
     `if test -f ${shellQuote(exitPath)}; then status=$(cat ${shellQuote(exitPath)}); elif ! tmux has-session -t ${shellQuote(sessionName)} 2>/dev/null; then status=missing; fi`,
     `size=$(wc -c < ${shellQuote(logPath)} 2>/dev/null || printf '0')`,
     "size=$(printf '%s' \"$size\" | tr -d '[:space:]')",
-    `printf '${TMUX_STATUS_PREFIX}%s\\n${TMUX_SIZE_PREFIX}%s\\n' "$status" "$size"`,
-    `if test "$size" -gt ${normalizedOffset}; then tail -c +${normalizedOffset + 1} ${shellQuote(logPath)}; fi`,
+    `next_offset=$(( ${normalizedOffset} + ${TMUX_CAPTURE_CHUNK_BYTES} ))`,
+    "if test \"$next_offset\" -gt \"$size\"; then next_offset=$size; fi",
+    "reported_status=$status",
+    "if test \"$next_offset\" -lt \"$size\"; then reported_status=running; fi",
+    `printf '${TMUX_STATUS_PREFIX}%s\\n${TMUX_SIZE_PREFIX}%s\\n' "$reported_status" "$next_offset"`,
+    `if test "$next_offset" -gt ${normalizedOffset}; then tail -c +${normalizedOffset + 1} ${shellQuote(logPath)} | head -c $(( next_offset - ${normalizedOffset} )); fi`,
   ].join("; ");
 }
 
