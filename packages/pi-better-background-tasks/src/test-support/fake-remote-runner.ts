@@ -6,9 +6,9 @@ export class FakeRemoteRunner implements RemoteRunner {
   readonly spawnCalls: Array<{ spec: CommandSpec; logPath: string; detached: boolean }> = [];
   readonly runCalls: CommandSpec[] = [];
   private readonly children: EventEmitter[] = [];
-  private readonly scriptedResults: CommandResult[];
+  private readonly scriptedResults: Array<CommandResult | Error>;
 
-  constructor(results: CommandResult[] = [successfulResult("done\n")]) {
+  constructor(results: Array<CommandResult | Error> = [successfulResult("done\n")]) {
     this.scriptedResults = [...results];
   }
 
@@ -24,7 +24,9 @@ export class FakeRemoteRunner implements RemoteRunner {
 
   async runOnce(spec: CommandSpec): Promise<CommandResult> {
     this.runCalls.push(spec);
-    return this.scriptedResults.shift() ?? successfulResult("");
+    const scripted = this.scriptedResults.shift() ?? successfulResult("");
+    if (scripted instanceof Error) throw scripted;
+    return scripted;
   }
 
   closeSpawn(exitCode: number | null, index = this.children.length - 1): void {

@@ -1,4 +1,4 @@
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
@@ -99,6 +99,124 @@ describe("runtime", () => {
       lastExitCode: 0,
       result: { reason: "success condition matched" },
     });
+  });
+
+  // @covers background-task.ssh-watch
+  // @level integration
+  it.each([
+    ["exit code", { type: "exit_code", equals: 7 } as const, remoteResult({ exitCode: 7 })],
+    ["stdout contains", { type: "stdout_contains", value: "ready" } as const, remoteResult({ stdout: "remote ready\n" })],
+    ["stderr contains", { type: "stderr_contains", value: "degraded" } as const, remoteResult({ exitCode: 1, stderr: "remote degraded\n" })],
+    ["JSON path equals", { type: "json_path_equals", path: "$.deployment.state", value: "ready" } as const, remoteResult({ stdout: '{"deployment":{"state":"ready"}}\n' })],
+    ["JSON path exists", { type: "json_path_exists", path: "$.deployment.id" } as const, remoteResult({ stdout: '{"deployment":{"id":"dep-187"}}\n' })],
+  ])("evaluates remote poll %s conditions", async (_label, condition, result) => {
+    const runner = new FakeRemoteRunner([result]);
+    const meta = startWatchTask(fakePi, {
+      name: "remote condition watcher",
+      command: "check deployment",
+      interval_seconds: 60,
+      timeout_seconds: 5,
+      callback: false,
+      ssh: { host: "conditions.example" },
+      success_when: condition,
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "succeeded");
+    expect(terminal).toMatchObject({
+      status: "succeeded",
+      lastExitCode: result.exitCode,
+      result: { reason: "success condition matched", matchedCondition: condition },
+    });
+    expect(runner.runCalls).toHaveLength(1);
+  });
+
+  // @covers background-task.ssh-watch
+  // @level integration
+  it("retains scripted remote poll evidence and gives failure conditions precedence", async () => {
+    const runner = new FakeRemoteRunner([
+      remoteResult({ stdout: "deployment pending\n" }),
+      remoteResult({ stdout: "deployment ready\n", stderr: "remote fatal\n" }),
+    ]);
+    const meta = startWatchTask(fakePi, {
+      name: "remote interval watcher",
+      command: "check deployment",
+      interval_seconds: 1,
+      timeout_seconds: 5,
+      callback: false,
+      ssh: { host: "intervals.example" },
+      success_when: { type: "stdout_contains", value: "ready" },
+      failure_when: { type: "stderr_contains", value: "fatal" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "failed");
+    const log = readFileSync(meta.logPath, "utf8");
+
+    expect(terminal?.result).toMatchObject({
+      reason: "failure condition matched",
+      matchedCondition: { type: "stderr_contains", value: "fatal" },
+    });
+    expect(runner.runCalls).toHaveLength(2);
+    expect(log.match(/--- check /g)).toHaveLength(2);
+    expect(log).toContain("deployment pending");
+    expect(log).toContain("deployment ready");
+    expect(log).toContain("[stderr]\nremote fatal");
+  });
+
+  // @covers background-task.ssh-watch
+  // @level integration
+  // @fails-without-fix background-task.ssh-watch
+  it("fails SSH transport exits immediately with readable connection evidence", async () => {
+    const runner = new FakeRemoteRunner([
+      remoteResult({ exitCode: 255, stderr: "ssh: connect to host unavailable.example port 22: Connection timed out\n" }),
+    ]);
+    const meta = startWatchTask(fakePi, {
+      name: "remote connection watcher",
+      command: "check deployment",
+      interval_seconds: 60,
+      timeout_seconds: 5,
+      callback: false,
+      ssh: { host: "unavailable.example" },
+      success_when: { type: "stdout_contains", value: "ready" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status !== "running");
+    const log = readFileSync(meta.logPath, "utf8");
+
+    expect(terminal).toMatchObject({
+      status: "failed",
+      lastExitCode: 255,
+      error: "SSH poll to unavailable.example failed with exit 255: ssh: connect to host unavailable.example port 22: Connection timed out",
+      result: { reason: "SSH poll to unavailable.example failed with exit 255: ssh: connect to host unavailable.example port 22: Connection timed out" },
+    });
+    expect(log).toContain("exit=255");
+    expect(log).toContain("Connection timed out");
+  });
+
+  // @covers background-task.ssh-watch
+  // @level integration
+  // @fails-without-fix background-task.ssh-watch
+  it("persists remote poll runner errors before failing the watch", async () => {
+    const runner = new FakeRemoteRunner([new Error("spawn ssh ENOENT")]);
+    const meta = startWatchTask(fakePi, {
+      name: "remote runner error watcher",
+      command: "check deployment",
+      interval_seconds: 60,
+      timeout_seconds: 5,
+      callback: false,
+      ssh: { host: "runner-error.example" },
+      success_when: { type: "stdout_contains", value: "ready" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "failed");
+    const log = readFileSync(meta.logPath, "utf8");
+
+    expect(terminal).toMatchObject({
+      status: "failed",
+      error: "SSH poll to runner-error.example failed: spawn ssh ENOENT",
+      result: { reason: "SSH poll to runner-error.example failed: spawn ssh ENOENT" },
+    });
+    expect(log).toContain("--- poll error");
+    expect(log).toContain("spawn ssh ENOENT");
   });
 
   it("finalizes a command watcher when failure_when matches", async () => {
@@ -352,6 +470,24 @@ describe("runtime", () => {
     expect(terminal?.callbackSuppressedReason).toContain("cancelled");
   });
 });
+
+function remoteResult(overrides: Partial<{
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}> = {}) {
+  const now = Date.now();
+  return {
+    exitCode: 0,
+    signal: null,
+    stdout: "",
+    stderr: "",
+    startedAt: now,
+    endedAt: now,
+    ...overrides,
+  };
+}
 
 function terminalMeta(
   id: string,
