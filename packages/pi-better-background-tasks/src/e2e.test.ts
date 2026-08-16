@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -124,6 +124,43 @@ describe("extension e2e", () => {
     expect(wrapper?.description).toContain("SSH watches use direct one-shot polls");
   });
 
+  // @covers background-task.ssh-docs
+  // @level integration
+  // @fails-without-fix background-task.ssh-docs
+  it("ships the complete Remote SSH operator contract in package usage docs", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    const usage = readFileSync(new URL("../docs/usage.md", import.meta.url), "utf8");
+
+    expect(readme).toContain("## Remote SSH");
+    expect(readme).toContain("structured `ssh`");
+    expect(readme).toContain("spawn");
+    expect(readme).toContain("watch");
+    for (const required of [
+      "\"ssh\": {",
+      "\"remote\": {",
+      "Spawn + SSH",
+      "Watch + SSH",
+      "apt-get",
+      "dnf",
+      "yum",
+      "apk",
+      "pacman",
+      "zypper",
+      "brew",
+      "sudo -n",
+      "needs-user",
+      "fails closed",
+      "remote.session=direct",
+      "may still be running",
+      "timeout_seconds",
+      "/reload",
+      "ControlMaster",
+      "multiplexing",
+    ]) {
+      expect(usage).toContain(required);
+    }
+  });
+
   it("registers background tasks with pi-better-goal activity", () => {
     const harness = createHarness();
 
@@ -200,6 +237,7 @@ describe("extension e2e", () => {
 
     try {
       const status = await harness.execute("bg_task_status", { id });
+      const verboseStatus = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true }));
       const list = await harness.execute("bg_task_list", { status: ["running"], limit: 100 });
       await harness.fireSessionStart();
       const navigator = renderWidget(harness.lastWidget("background-work-list"));
@@ -208,6 +246,15 @@ describe("extension e2e", () => {
       expect(status).toContain("remote mode: tmux");
       expect(status).toContain(`remote session: pi-bg-${id}`);
       expect(status).toContain("remote setup: Installed tmux with apt-get on builder@remote.example");
+      expect(verboseStatus).toMatchObject({
+        ssh: { host: "remote.example", user: "builder", target: "builder@remote.example" },
+        remote: {
+          session: "tmux",
+          sessionName: `pi-bg-${id}`,
+          bootstrapStatus: "installed",
+          tmuxInstalled: true,
+        },
+      });
       expect(list.split("\n").find((line) => line.startsWith(id))).toContain("builder@remote.example tmux");
       expect(navigator).toContain("builder@remote.example");
       expect(navigator).toContain("tmux");

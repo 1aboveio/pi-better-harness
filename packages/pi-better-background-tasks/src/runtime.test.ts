@@ -545,6 +545,7 @@ describe("runtime", () => {
     }, process.cwd(), undefined, undefined, { remoteRunner: runner });
 
     expect(runner.spawnCalls).toHaveLength(0);
+    expect(formatLaunch(meta)).toContain(`Remote: builder@remote.example mode=tmux session=pi-bg-${meta.id}.`);
     expect(meta).toMatchObject({
       command: "printf 'remote spawn'",
       shell: false,
@@ -601,6 +602,7 @@ describe("runtime", () => {
       warning: "Direct SSH mode has weak stop semantics: stopping the local SSH client may leave the remote process running.",
     });
     expect(meta.remote?.sessionName).toBeUndefined();
+    expect(formatLaunch(meta)).toContain("Remote: direct.example mode=direct.");
     expect(formatLaunch(meta)).toContain("Warning: Direct SSH mode has weak stop semantics");
 
     const stopped = await stopTask(fakePi, meta.id);
