@@ -1,0 +1,24 @@
+{
+  "issue": 189,
+  "head": "3b7e47e7c1512c17c2bbe37b56930e4f59cd216b",
+  "results": [
+    {
+      "surface": "background-task.ssh-resume",
+      "status": "pass",
+      "command": "npm exec -w packages/pi-better-background-tasks -- vitest run src/runtime.test.ts -t 'resumes a persisted|kills a tmux-backed|times out a direct SSH watch|reports weak remote-stop'",
+      "observed": "exit 0; 5 lifecycle tests passed; persisted tmux and direct-watch supervision resumed through FakeRemoteRunner without duplicate session creation"
+    },
+    {
+      "surface": "background-task.ssh-timeout",
+      "status": "pass",
+      "command": "npm exec -w packages/pi-better-background-tasks -- vitest run src/runtime.test.ts -t 'resumes a persisted|kills a tmux-backed|times out a direct SSH watch|reports weak remote-stop'",
+      "observed": "exit 0; tmux kill, direct-watch deadline, and direct-spawn weak-stop timeout paths reached timed_out"
+    },
+    {
+      "surface": "background-task.ssh-tool-contract",
+      "status": "pass",
+      "command": "npm exec -w packages/pi-better-background-tasks -- vitest run src/e2e.test.ts -t 'structured SSH operator contract|Remote SSH operator contract|shows SSH target identity' && npm pack --dry-run -w packages/pi-better-background-tasks",
+      "observed": "exit 0; 3 public extension contract tests passed; package dry-run packed 20 files including the Remote SSH README"
+    }
+  ]
+}
