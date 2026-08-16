@@ -1,12 +1,10 @@
-import { EventEmitter } from "node:events";
 import { rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
 import { DEFAULT_WATCH_TIMEOUT_SECONDS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
-import type { RemoteRunner } from "./remote-task-preset.js";
-import type { CommandResult, CommandSpec } from "./types.js";
+import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
 
 const fakePi = {
   sendUserMessage: async () => undefined,
@@ -151,6 +149,8 @@ describe("runtime", () => {
     const meta = spawnTask(fakePi, {
       name: "remote process",
       command: "printf 'remote spawn'",
+      argv: ["sh", "-c", "printf 'unsafe local wrapper'"],
+      shell: true,
       callback: false,
       ssh: { host: "remote.example", user: "builder" },
       remote: { session: "tmux", install_tmux: true, workdir: "/srv/build" },
@@ -352,36 +352,6 @@ describe("runtime", () => {
     expect(terminal?.callbackSuppressedReason).toContain("cancelled");
   });
 });
-
-class FakeRemoteRunner implements RemoteRunner {
-  readonly spawnCalls: Array<{ spec: CommandSpec; logPath: string; detached: boolean }> = [];
-  readonly runCalls: CommandSpec[] = [];
-  private readonly child = Object.assign(new EventEmitter(), {
-    pid: undefined as number | undefined,
-    unref() {},
-  });
-
-  spawn(spec: CommandSpec, logPath: string, detached: boolean) {
-    this.spawnCalls.push({ spec, logPath, detached });
-    return { child: this.child as never };
-  }
-
-  async runOnce(spec: CommandSpec): Promise<CommandResult> {
-    this.runCalls.push(spec);
-    return {
-      exitCode: 0,
-      signal: null,
-      stdout: "done\n",
-      stderr: "",
-      startedAt: Date.now(),
-      endedAt: Date.now(),
-    };
-  }
-
-  closeSpawn(exitCode: number | null): void {
-    this.child.emit("close", exitCode, null);
-  }
-}
 
 function terminalMeta(
   id: string,

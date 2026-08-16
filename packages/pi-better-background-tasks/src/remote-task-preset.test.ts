@@ -1,26 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { expandSshRemoteTaskPreset } from "./remote-task-preset.js";
-import type { CommandResult, CommandSpec } from "./types.js";
-
-class FakeRemoteRunner {
-  readonly runCalls: CommandSpec[] = [];
-
-  spawn(): never {
-    throw new Error("spawn was not expected");
-  }
-
-  async runOnce(spec: CommandSpec): Promise<CommandResult> {
-    this.runCalls.push(spec);
-    return {
-      exitCode: 0,
-      signal: null,
-      stdout: "ok\n",
-      stderr: "",
-      startedAt: 1,
-      endedAt: 2,
-    };
-  }
-}
+import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
 
 describe("SSH remote-task preset", () => {
   // @covers background-task.ssh-preset
@@ -87,5 +67,48 @@ describe("SSH remote-task preset", () => {
 
     await resolved.runOnce();
     expect(runner.runCalls).toEqual([resolved.commandSpec]);
+  });
+
+  // @covers background-task.ssh-preset
+  // @level unit
+  it("keeps required safety options when extra options try to override them", () => {
+    const resolved = expandSshRemoteTaskPreset({
+      operation: "spawn",
+      command: "uname -a",
+      ssh: {
+        host: "safe.example",
+        options: {
+          BatchMode: "no",
+          connecttimeout: "120",
+          RequestTTY: "force",
+          Compression: "yes",
+        },
+      },
+    });
+
+    expect(resolved.commandSpec.argv).toEqual([
+      "ssh",
+      "-o", "BatchMode=yes",
+      "-o", "ConnectTimeout=10",
+      "-T",
+      "-o", "Compression=yes",
+      "--",
+      "safe.example",
+      "uname -a",
+    ]);
+  });
+
+  // @covers background-task.ssh-preset
+  // @level unit
+  it("requires a host and remote command for SSH intent", () => {
+    expect(() => expandSshRemoteTaskPreset({
+      operation: "watch",
+      command: "echo ready",
+      ssh: { host: "  " },
+    })).toThrow("ssh.host is required");
+    expect(() => expandSshRemoteTaskPreset({
+      operation: "watch",
+      ssh: { host: "ready.example" },
+    })).toThrow("command is required when ssh is set");
   });
 });
