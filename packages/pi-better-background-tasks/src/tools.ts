@@ -26,9 +26,9 @@ const SshSchema = Type.Object({
 });
 
 const RemoteSchema = Type.Object({
-  session: Type.Optional(Type.Union([Type.Literal("tmux"), Type.Literal("direct")], { description: "Requested remote session mode for later lifecycle handling." })),
-  install_tmux: Type.Optional(Type.Boolean({ description: "Whether later remote lifecycle handling may install tmux." })),
-  workdir: Type.Optional(Type.String({ description: "Remote working directory for later lifecycle handling." })),
+  session: Type.Optional(Type.Union([Type.Literal("tmux"), Type.Literal("direct")], { description: "Remote session mode. SSH spawn defaults to durable tmux; explicit direct skips tmux but has weaker stop semantics." })),
+  install_tmux: Type.Optional(Type.Boolean({ description: "Allow SSH spawn to install tmux non-interactively when missing. Defaults true in tmux mode and is ignored in direct mode." })),
+  workdir: Type.Optional(Type.String({ description: "Remote working directory for the spawned command." })),
 });
 
 const CommandFields = {
@@ -117,7 +117,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_spawn",
     label: "BG Spawn",
-    description: "Start a long-running background process and return immediately with its task id. For remote work, pass structured ssh fields and provide the remote command in command. Never wait or poll in the foreground.",
+    description: "Start a long-running background process and return immediately with its task id. structured ssh spawn defaults to a remote tmux session with durable local logs and real remote stop. Explicit remote.session=direct skips tmux, but direct mode has weaker stop semantics and may leave the remote process running. Never wait or poll in the foreground.",
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -177,7 +177,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_stop",
     label: "BG Stop",
-    description: "Cancel a watcher or terminate a background process group. Nonblocking.",
+    description: "Cancel a watcher or terminate a background task. For a tmux-backed SSH task, stop kills its remote tmux session before marking it cancelled. Direct SSH stop only tears down the local client and may leave the remote process running.",
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -190,7 +190,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote spawn/watch, pass structured ssh fields and provide the remote command in command. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. structured ssh spawn defaults to durable tmux; remote.session=direct is a weaker-stop escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -288,10 +288,14 @@ function resolveList(statuses?: string[], limit?: number): BackgroundTaskMeta[] 
   return metas.slice(0, Math.max(1, Math.min(limit ?? 20, 100)));
 }
 
-function formatLaunch(meta: BackgroundTaskMeta): string {
+export function formatLaunch(meta: BackgroundTaskMeta): string {
   const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
-  const remote = meta.ssh ? ` Remote: ${meta.ssh.target}.` : "";
-  return `Started background ${meta.kind} ${label}. Status: ${meta.status}.${remote} Log: ${meta.logPath}`;
+  const remote = meta.ssh
+    ? ` Remote: ${meta.ssh.target}${meta.remote?.session ? ` mode=${meta.remote.session}` : ""}${meta.remote?.sessionName ? ` session=${meta.remote.sessionName}` : ""}.`
+    : "";
+  const setup = meta.remote?.bootstrapMessage ? ` Remote setup: ${meta.remote.bootstrapMessage}` : "";
+  const warning = meta.remote?.warning ? ` Warning: ${meta.remote.warning}` : "";
+  return `Started background ${meta.kind} ${label}. Status: ${meta.status}.${remote}${setup}${warning} Log: ${meta.logPath}`;
 }
 
 function formatList(metas: BackgroundTaskMeta[]): string {
@@ -299,7 +303,7 @@ function formatList(metas: BackgroundTaskMeta[]): string {
   return metas.map((meta) => {
     const age = formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt);
     const label = meta.name ? `${meta.name} ` : "";
-    const remote = meta.ssh ? ` ${meta.ssh.target}` : "";
+    const remote = meta.ssh ? ` ${meta.ssh.target}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : "";
     return `${meta.id} ${label}${meta.kind} ${meta.status} ${age}${remote}`;
   }).join("\n");
 }
@@ -317,6 +321,11 @@ function formatCompactStatus(meta: BackgroundTaskMeta): string {
     `elapsed: ${formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt)}`,
   ];
   if (meta.ssh) lines.push(`remote: ${meta.ssh.target}`);
+  if (meta.remote?.session) lines.push(`remote mode: ${meta.remote.session}`);
+  if (meta.remote?.sessionName) lines.push(`remote session: ${meta.remote.sessionName}`);
+  if (meta.remote?.bootstrapMessage) lines.push(`remote setup: ${oneLine(meta.remote.bootstrapMessage, 500)}`);
+  if (meta.remote?.warning) lines.push(`warning: ${oneLine(meta.remote.warning, 500)}`);
+  if (meta.remote?.stopMessage) lines.push(`remote stop: ${oneLine(meta.remote.stopMessage, 500)}`);
   if (meta.deadlineAt && meta.status === "running") lines.push(`deadline: ${formatDuration(meta.deadlineAt - Date.now())} left`);
   if (meta.lastExitCode !== undefined || meta.lastSignal !== undefined) lines.push(`last exit: ${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}`);
   const reason = resultReason(meta.result);

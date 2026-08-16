@@ -245,7 +245,7 @@ function tmuxStartCommand(tmuxPath: string, sessionName: string, command: string
   const exitPath = tmuxExitPath(sessionName);
   const script = [
     ...(workdir ? [`cd -- ${shellQuote(workdir)}`] : []),
-    `{ ${command}; } >${shellQuote(logPath)} 2>&1`,
+    `sh -lc ${shellQuote(command)} >${shellQuote(logPath)} 2>&1`,
     "exit_code=$?",
     `printf '%s\\n' "$exit_code" >${shellQuote(exitPath)}`,
     "exit \"$exit_code\"",

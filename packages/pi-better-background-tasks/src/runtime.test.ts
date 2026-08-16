@@ -4,7 +4,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
 import { DEFAULT_WATCH_TIMEOUT_SECONDS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
-import { FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
+import { formatLaunch } from "./tools.js";
+import { failedResult, FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
 
 const fakePi = {
   sendUserMessage: async () => undefined,
@@ -195,6 +196,168 @@ describe("runtime", () => {
         bootstrapStatus: "present",
       },
     });
+  });
+
+  // @covers background-task.ssh-spawn
+  // @level integration
+  it("runs explicit direct mode without bootstrap and warns that stop is local-only", async () => {
+    const runner = new FakeRemoteRunner();
+    const meta = spawnTask(fakePi, {
+      command: "short remote job",
+      callback: false,
+      ssh: { host: "direct.example" },
+      remote: { session: "direct", install_tmux: true },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    expect(runner.runCalls).toHaveLength(0);
+    expect(runner.spawnCalls).toHaveLength(1);
+    expect(meta.remote).toMatchObject({
+      session: "direct",
+      installTmux: false,
+      warning: "Direct SSH mode has weak stop semantics: stopping the local SSH client may leave the remote process running.",
+    });
+    expect(meta.remote?.sessionName).toBeUndefined();
+    expect(formatLaunch(meta)).toContain("Warning: Direct SSH mode has weak stop semantics");
+
+    const stopped = await stopTask(fakePi, meta.id);
+
+    expect(runner.runCalls).toHaveLength(0);
+    expect(stopped).toMatchObject({
+      status: "cancelled",
+      result: { reason: "cancelled local SSH client; the remote process may still be running" },
+    });
+    expect(stopped?.remote?.stopMessage).toBeUndefined();
+  });
+
+  // @covers background-task.ssh-spawn
+  // @level integration
+  it("persists and discloses a successful automatic tmux installation", async () => {
+    const runner = new FakeRemoteRunner([
+      failedResult(127, "tmux: not found\n"),
+      successfulResult("user=root\nuid=0\npm=apt-get\nprivilege=root\n"),
+      successfulResult(""),
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult(""),
+      successfulResult("__PI_BG_STATUS__=0\n__PI_BG_SIZE__=0\n"),
+    ]);
+    const meta = spawnTask(fakePi, {
+      command: "deploy release",
+      callback: false,
+      ssh: { host: "fresh.example", user: "root" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "succeeded");
+
+    expect(runner.runCalls[2]?.command).toBe("apt-get update && apt-get install -y tmux");
+    expect(terminal?.remote).toMatchObject({
+      session: "tmux",
+      bootstrapStatus: "installed",
+      tmuxInstalled: true,
+      bootstrapMessage: "Installed tmux with apt-get on root@fresh.example; tmux 3.4 is available at /usr/bin/tmux.",
+    });
+    expect(readFileSync(meta.logPath, "utf8")).toContain("Installed tmux with apt-get on root@fresh.example");
+  });
+
+  // @covers background-task.ssh-spawn
+  // @level integration
+  it("fails closed with bootstrap guidance instead of downgrading to direct SSH", async () => {
+    const runner = new FakeRemoteRunner([
+      failedResult(127, "tmux: not found\n"),
+      successfulResult("user=deploy\nuid=1000\npm=apt-get\nprivilege=needs_user\n"),
+    ]);
+    const meta = spawnTask(fakePi, {
+      command: "deploy release",
+      callback: false,
+      ssh: { host: "locked.example", user: "deploy" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "failed");
+
+    expect(runner.spawnCalls).toHaveLength(0);
+    expect(runner.runCalls).toHaveLength(2);
+    expect(terminal).toMatchObject({
+      status: "failed",
+      remote: {
+        session: "tmux",
+        bootstrapStatus: "needs_user",
+        tmuxInstalled: false,
+      },
+    });
+    expect(terminal?.error).toContain("automatic installation cannot use passwordless sudo");
+    expect(terminal?.error).toContain("ssh -t 'deploy@locked.example' 'sudo apt-get update && sudo apt-get install -y tmux'");
+    expect(terminal?.error).toContain("ssh 'deploy@locked.example' 'command -v tmux && tmux -V'");
+  });
+
+  // @covers background-task.ssh-spawn
+  // @level integration
+  it("kills the remote tmux session before cancelling without a completion callback", async () => {
+    const messages: string[] = [];
+    const pi = {
+      sendMessage: (message: { content: string }) => { messages.push(message.content); },
+    } as unknown as ExtensionAPI;
+    const runner = new FakeRemoteRunner([
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult(""),
+      successfulResult("__PI_BG_STATUS__=running\n__PI_BG_SIZE__=0\n"),
+      successfulResult(""),
+    ]);
+    const meta = spawnTask(pi, {
+      command: "sleep 300",
+      callback: true,
+      ssh: { host: "stop.example", user: "deploy" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    await waitForMeta(meta.id, (current) => current?.remote?.bootstrapStatus === "present" && current.lastCheckedAt !== undefined);
+    const stopped = await stopTask(pi, meta.id);
+
+    expect(runner.runCalls.at(-1)?.command).toBe(`tmux kill-session -t 'pi-bg-${meta.id}'`);
+    expect(stopped).toMatchObject({
+      status: "cancelled",
+      result: { reason: "cancelled" },
+      remote: {
+        session: "tmux",
+        sessionName: `pi-bg-${meta.id}`,
+        stopMessage: `Killed remote tmux session pi-bg-${meta.id} on deploy@stop.example.`,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(messages).toHaveLength(0);
+    expect(readMeta(meta.id)?.callbackSuppressedReason).toContain("cancelled");
+  });
+
+  // @covers background-task.ssh-spawn
+  // @level integration
+  it("queues normal terminal callbacks for succeeded and failed remote jobs", async () => {
+    const messages: string[] = [];
+    const pi = {
+      sendMessage: (message: { content: string }) => { messages.push(message.content); },
+    } as unknown as ExtensionAPI;
+    const runnerForExit = (exitCode: number) => new FakeRemoteRunner([
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult(""),
+      successfulResult(`__PI_BG_STATUS__=${exitCode}\n__PI_BG_SIZE__=0\n`),
+    ]);
+    const succeeded = spawnTask(pi, {
+      name: "remote success",
+      command: "exit 0",
+      ssh: { host: "callbacks.example" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runnerForExit(0) });
+    const failed = spawnTask(pi, {
+      name: "remote failure",
+      command: "exit 7",
+      ssh: { host: "callbacks.example" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runnerForExit(7) });
+
+    const succeededTerminal = await waitForMeta(succeeded.id, (current) => current?.status === "succeeded" && current.callbackSentAt !== undefined);
+    const failedTerminal = await waitForMeta(failed.id, (current) => current?.status === "failed" && current.callbackSentAt !== undefined);
+
+    expect(succeededTerminal).toMatchObject({ status: "succeeded", lastExitCode: 0 });
+    expect(failedTerminal).toMatchObject({ status: "failed", lastExitCode: 7 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain(succeeded.id);
+    expect(messages[0]).toContain(failed.id);
+    expect(messages[0]).toContain("status=succeeded");
+    expect(messages[0]).toContain("status=failed");
   });
 
   it("retains bounded output from a noisy spawned process", async () => {

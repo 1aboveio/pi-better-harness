@@ -78,8 +78,13 @@ describe("extension e2e", () => {
         "workdir",
       ]);
       expect(properties?.command?.description).toContain("remote command when ssh is set");
+      expect(properties?.remote?.properties?.session?.description).toContain("tmux");
+      expect(properties?.remote?.properties?.session?.description).toContain("direct");
       expect(tool?.description).toContain("structured ssh");
     }
+    expect(harness.tools.get("bg_task_spawn")?.description).toContain("defaults to a remote tmux session");
+    expect(harness.tools.get("bg_task_spawn")?.description).toContain("direct mode has weaker stop semantics");
+    expect(harness.tools.get("bg_task_stop")?.description).toContain("kills its remote tmux session");
   });
 
   it("registers background tasks with pi-better-goal activity", () => {
@@ -145,7 +150,15 @@ describe("extension e2e", () => {
       cwd: process.cwd(),
       spawnPid: process.pid,
       ssh: { host: "remote.example", user: "builder", target: "builder@remote.example" },
-      remote: { command: remoteCommand, session: "tmux", installTmux: true },
+      remote: {
+        command: remoteCommand,
+        session: "tmux",
+        installTmux: true,
+        sessionName: `pi-bg-${id}`,
+        bootstrapStatus: "installed",
+        bootstrapMessage: "Installed tmux with apt-get on builder@remote.example; tmux 3.4 is available at /usr/bin/tmux.",
+        tmuxInstalled: true,
+      },
     });
 
     try {
@@ -155,8 +168,12 @@ describe("extension e2e", () => {
       const navigator = renderWidget(harness.lastWidget("background-work-list"));
 
       expect(status).toContain("remote: builder@remote.example");
-      expect(list.split("\n").find((line) => line.startsWith(id))).toContain("builder@remote.example");
+      expect(status).toContain("remote mode: tmux");
+      expect(status).toContain(`remote session: pi-bg-${id}`);
+      expect(status).toContain("remote setup: Installed tmux with apt-get on builder@remote.example");
+      expect(list.split("\n").find((line) => line.startsWith(id))).toContain("builder@remote.example tmux");
       expect(navigator).toContain("builder@remote.example");
+      expect(navigator).toContain("tmux");
       expect(navigator).not.toContain("a-very-long-remote-command");
     } finally {
       rmSync(taskDir(id), { recursive: true, force: true });
