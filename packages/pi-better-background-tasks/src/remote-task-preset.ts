@@ -201,7 +201,7 @@ async function bootstrapTmux(
   let timeoutContext: TmuxBootstrapTimeoutContext = {
     target,
     mutated: false,
-    verifyCommand: sshGuidanceCommand(target, "command -v tmux && tmux -V"),
+    verifyCommand: sshGuidanceCommand(commandSpec, target, "command -v tmux && tmux -V"),
     stage: "probing tmux",
   };
   const run = async (remoteCommand: string): Promise<CommandResult> => {
@@ -213,7 +213,7 @@ async function bootstrapTmux(
   };
 
   try {
-    return await bootstrapTmuxWithinDeadline(run, target, installEnabled, timeoutContext, (context) => {
+    return await bootstrapTmuxWithinDeadline(run, commandSpec, target, installEnabled, timeoutContext, (context) => {
       timeoutContext = context;
     });
   } catch (error) {
@@ -246,6 +246,7 @@ class TmuxBootstrapTimeoutError extends Error {}
 
 async function bootstrapTmuxWithinDeadline(
   run: (remoteCommand: string) => Promise<CommandResult>,
+  commandSpec: CommandSpec,
   target: string,
   installEnabled: boolean,
   initialTimeoutContext: TmuxBootstrapTimeoutContext,
@@ -263,7 +264,7 @@ async function bootstrapTmuxWithinDeadline(
       message: `${capability.tmuxVersion} is available at ${capability.tmuxPath} on ${target}.`,
     };
   }
-  const initialVerifyCommand = sshGuidanceCommand(target, "command -v tmux && tmux -V");
+  const initialVerifyCommand = sshGuidanceCommand(commandSpec, target, "command -v tmux && tmux -V");
   if (probe.exitCode !== 127) {
     const detail = resultDetail(probe);
     return {
@@ -291,7 +292,7 @@ async function bootstrapTmuxWithinDeadline(
   }
   const detected = parseDetection(detection);
   const guidanceTarget = detected && !target.includes("@") ? `${detected.user}@${target}` : target;
-  const verifyCommand = sshGuidanceCommand(guidanceTarget, "command -v tmux && tmux -V");
+  const verifyCommand = sshGuidanceCommand(commandSpec, guidanceTarget, "command -v tmux && tmux -V");
   if (!detected || !isTmuxPackageManager(detected.packageManager)) {
     return {
       status: "unknown_package_manager",
@@ -306,7 +307,7 @@ async function bootstrapTmuxWithinDeadline(
   const baseInstallCommand = TMUX_INSTALL_COMMANDS[packageManager];
   const needsSudo = detected.privilege === "sudo" || detected.privilege === "needs_user";
   const humanInstallCommand = needsSudo ? withInteractiveSudo(baseInstallCommand) : baseInstallCommand;
-  const installCommand = sshGuidanceCommand(guidanceTarget, humanInstallCommand, needsSudo);
+  const installCommand = sshGuidanceCommand(commandSpec, guidanceTarget, humanInstallCommand, needsSudo);
   if (!installEnabled) {
     return {
       status: "needs_user",
@@ -446,8 +447,33 @@ function withInteractiveSudo(command: string): string {
   return command.split(" && ").map((part) => `sudo ${part}`).join(" && ");
 }
 
-function sshGuidanceCommand(target: string, remoteCommand: string, tty = false): string {
-  return `ssh${tty ? " -t" : ""} ${shellQuote(target)} ${shellQuote(remoteCommand)}`;
+function sshGuidanceCommand(
+  spec: CommandSpec,
+  target: string,
+  remoteCommand: string,
+  tty = false,
+): string {
+  const argv = spec.argv ?? [];
+  const separator = argv.lastIndexOf("--");
+  const connectionArgs: string[] = [];
+  for (let index = 1; index >= 0 && index < separator; index += 1) {
+    const option = argv[index];
+    if (option === "-T") continue;
+    const value = argv[index + 1];
+    if ((option === "-p" || option === "-i" || option === "-J") && value) {
+      connectionArgs.push(option, shellQuote(value));
+      index += 1;
+      continue;
+    }
+    if (option === "-o" && value) {
+      index += 1;
+      const key = value.slice(0, value.indexOf("=")).toLowerCase();
+      if (REQUIRED_SSH_OPTIONS.has(key)) continue;
+      connectionArgs.push(option, shellQuote(value));
+    }
+  }
+  const renderedArgs = connectionArgs.length > 0 ? ` ${connectionArgs.join(" ")}` : "";
+  return `ssh${tty ? " -t" : ""}${renderedArgs} ${shellQuote(target)} ${shellQuote(remoteCommand)}`;
 }
 
 function shellQuote(value: string): string {

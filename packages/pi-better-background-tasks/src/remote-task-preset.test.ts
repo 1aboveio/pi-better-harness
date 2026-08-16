@@ -141,7 +141,14 @@ describe("SSH remote-task preset", () => {
     const resolved = expandSshRemoteTaskPreset({
       operation: "spawn",
       command: "make release",
-      ssh: { host: "locked.example", user: "deploy" },
+      ssh: {
+        host: "locked.example",
+        user: "deploy",
+        port: 2222,
+        identity_file: "/tmp/deploy key",
+        jump: "jump@bastion.example",
+        options: { ServerAliveInterval: "15" },
+      },
     }, runner);
 
     await expect(resolved.bootstrapTmux()).resolves.toEqual({
@@ -150,9 +157,9 @@ describe("SSH remote-task preset", () => {
       target: "deploy@locked.example",
       packageManager: "apt-get",
       mutated: false,
-      installCommand: "ssh -t 'deploy@locked.example' 'sudo apt-get update && sudo apt-get install -y tmux'",
-      verifyCommand: "ssh 'deploy@locked.example' 'command -v tmux && tmux -V'",
-      message: "tmux is missing on deploy@locked.example and automatic installation cannot use passwordless sudo. Run: ssh -t 'deploy@locked.example' 'sudo apt-get update && sudo apt-get install -y tmux' Then verify: ssh 'deploy@locked.example' 'command -v tmux && tmux -V'",
+      installCommand: "ssh -t -p '2222' -i '/tmp/deploy key' -J 'jump@bastion.example' -o 'ServerAliveInterval=15' 'deploy@locked.example' 'sudo apt-get update && sudo apt-get install -y tmux'",
+      verifyCommand: "ssh -p '2222' -i '/tmp/deploy key' -J 'jump@bastion.example' -o 'ServerAliveInterval=15' 'deploy@locked.example' 'command -v tmux && tmux -V'",
+      message: "tmux is missing on deploy@locked.example and automatic installation cannot use passwordless sudo. Run: ssh -t -p '2222' -i '/tmp/deploy key' -J 'jump@bastion.example' -o 'ServerAliveInterval=15' 'deploy@locked.example' 'sudo apt-get update && sudo apt-get install -y tmux' Then verify: ssh -p '2222' -i '/tmp/deploy key' -J 'jump@bastion.example' -o 'ServerAliveInterval=15' 'deploy@locked.example' 'command -v tmux && tmux -V'",
     });
     expect(runner.runCalls).toHaveLength(2);
   });
