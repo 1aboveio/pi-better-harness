@@ -7,4 +7,4 @@
 | AC5: task metadata and compact surfaces retain/show SSH target and remote command | runtime metadata and labels | done | runtime at `packages/pi-better-background-tasks/src/runtime.test.ts:67` / `packages/pi-better-background-tasks/src/runtime.test.ts:147`; labels at `packages/pi-better-background-tasks/src/e2e.test.ts:125` |
 | AC7: omitting `ssh` preserves local spawn/watch behavior | local characterization/regression | done | package suite: 11 files / 50 tests pass, including unchanged local runtime/e2e/golden paths |
 | AC8: tool descriptions steer remote work to structured `ssh` | tool contract | done | `packages/pi-better-background-tasks/src/e2e.test.ts:59` |
-| Coverage and close-out gates | generated evidence | todo | pending |
+| Coverage and close-out gates | generated evidence | in-progress | checklist validation/lints/scan pass; root ledger and CI adoption are inherited blockers recorded in `docs/tests/_generated/coverage-checklist-185.md` |

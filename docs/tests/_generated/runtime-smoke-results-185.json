@@ -1,0 +1,30 @@
+{
+  "issue": 185,
+  "head": "d68a0dc3923df53fc0e0935c70390d47746410d5",
+  "results": [
+    {
+      "surface": "background-task.ssh-preset",
+      "status": "pass",
+      "command": "npm test -w packages/pi-better-background-tasks -- --run src/remote-task-preset.test.ts",
+      "observed": "3 preset tests passed: full argv mapping, required safety-option enforcement, and required host/command validation"
+    },
+    {
+      "surface": "background-task.ssh-spawn",
+      "status": "pass",
+      "command": "npm test -w packages/pi-better-background-tasks -- --run src/runtime.test.ts -t \"spawns structured SSH intent\"",
+      "observed": "1 integration test passed through the fake remote runner; shell:false argv and persisted SSH/remote metadata observed"
+    },
+    {
+      "surface": "background-task.ssh-watch",
+      "status": "pass",
+      "command": "npm test -w packages/pi-better-background-tasks -- --run src/runtime.test.ts -t \"polls structured SSH intent\"",
+      "observed": "1 integration test passed through the fake remote runner; real condition evaluation finalized the task successfully"
+    },
+    {
+      "surface": "background-task.ssh-tool-contract",
+      "status": "pass",
+      "command": "npm test -w packages/pi-better-background-tasks -- --run src/e2e.test.ts -t \"registers structured SSH|shows SSH target identity\"",
+      "observed": "2 extension tests passed: all public schemas expose SSH/remote fields and compact status/list/navigator surfaces show target identity"
+    }
+  ]
+}
