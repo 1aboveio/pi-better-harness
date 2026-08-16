@@ -44,4 +44,3 @@ _Every row = a decision (PASS / FAIL / N/A) backed by a checkable evidence locat
 | Check | Method | Decision | Evidence |
 |---|---|---|---|
 | CI wires all required gates and keeps them blocking | gate-lint | FAIL | `ci-audit.mjs --files .github/workflows/ci.yml,.github/workflows/integration-tests.yml,.github/workflows/publish.yml` → inventory:absent, accounting:absent, sweep:absent, e2e:absent, mock-seam:absent, checklist:absent, evidence-block:absent, quarantine-expiry:absent, smoke:absent |
-
