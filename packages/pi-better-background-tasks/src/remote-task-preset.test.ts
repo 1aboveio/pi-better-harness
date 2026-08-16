@@ -100,15 +100,18 @@ describe("SSH remote-task preset", () => {
 
   // @covers background-task.ssh-preset
   // @level unit
-  it("requires a host and remote command for SSH intent", () => {
-    expect(() => expandSshRemoteTaskPreset({
-      operation: "watch",
-      command: "echo ready",
-      ssh: { host: "  " },
-    })).toThrow("ssh.host is required");
-    expect(() => expandSshRemoteTaskPreset({
-      operation: "watch",
-      ssh: { host: "ready.example" },
-    })).toThrow("command is required when ssh is set");
+  it("requires valid structured fields and a remote command for SSH intent", () => {
+    const expand = (ssh: Parameters<typeof expandSshRemoteTaskPreset>[0]["ssh"], command: string | undefined = "echo ready") => (
+      expandSshRemoteTaskPreset({ operation: "watch", command, ssh })
+    );
+
+    expect(() => expand({ host: "  " })).toThrow("ssh.host is required");
+    expect(() => expandSshRemoteTaskPreset({ operation: "watch", ssh: { host: "ready.example" } })).toThrow("command is required when ssh is set");
+    expect(() => expand({ host: "ready.example", port: 0 })).toThrow("ssh.port must be an integer between 1 and 65535");
+    expect(() => expand({ host: "ready.example", port: 65_536 })).toThrow("ssh.port must be an integer between 1 and 65535");
+    expect(() => expand({ host: "ready.example", user: "bad user" })).toThrow("ssh.user must not be empty or contain whitespace");
+    expect(() => expand({ host: "ready.example", identity_file: "" })).toThrow("ssh.identity_file must not be empty");
+    expect(() => expand({ host: "ready.example", jump: "" })).toThrow("ssh.jump must not be empty");
+    expect(() => expand({ host: "ready.example", options: { "Bad Key": "value" } })).toThrow("ssh option names must not be empty or contain whitespace");
   });
 });
