@@ -7,9 +7,10 @@ export class FakeRemoteRunner implements RemoteRunner {
   readonly runCalls: CommandSpec[] = [];
   readonly runTimeouts: Array<number | undefined> = [];
   private readonly children: EventEmitter[] = [];
-  private readonly scriptedResults: CommandResult[];
+  private readonly scriptedResults: Array<CommandResult | Promise<CommandResult>>;
+  private readonly runCallWaiters: Array<{ count: number; resolve: () => void }> = [];
 
-  constructor(results: CommandResult[] = [successfulResult("done\n")]) {
+  constructor(results: Array<CommandResult | Promise<CommandResult>> = [successfulResult("done\n")]) {
     this.scriptedResults = [...results];
   }
 
@@ -26,7 +27,16 @@ export class FakeRemoteRunner implements RemoteRunner {
   async runOnce(spec: CommandSpec, _maxBufferBytes?: number, timeoutMs?: number): Promise<CommandResult> {
     this.runCalls.push(spec);
     this.runTimeouts.push(timeoutMs);
-    return this.scriptedResults.shift() ?? successfulResult("");
+    for (const waiter of this.runCallWaiters.splice(0)) {
+      if (this.runCalls.length >= waiter.count) waiter.resolve();
+      else this.runCallWaiters.push(waiter);
+    }
+    return await (this.scriptedResults.shift() ?? successfulResult(""));
+  }
+
+  waitForRunCalls(count: number): Promise<void> {
+    if (this.runCalls.length >= count) return Promise.resolve();
+    return new Promise((resolve) => this.runCallWaiters.push({ count, resolve }));
   }
 
   closeSpawn(exitCode: number | null, index = this.children.length - 1): void {
