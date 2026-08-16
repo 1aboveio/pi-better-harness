@@ -20,6 +20,7 @@ export interface RemoteRunner {
 export interface SshRemoteTaskIntent {
   operation: "spawn" | "watch";
   taskId?: string;
+  sessionName?: string;
   command?: string;
   cwd?: string;
   env?: Record<string, string>;
@@ -97,10 +98,10 @@ export interface ResolvedSshRemoteTask {
   };
   bootstrapTmux(options?: TmuxBootstrapOptions): Promise<TmuxBootstrapResult>;
   startTmuxSession(tmuxPath: string): Promise<CommandResult>;
-  pollTmuxSession(logOffset: number): Promise<TmuxSessionPollResult>;
+  pollTmuxSession(logOffset: number, timeoutMs?: number): Promise<TmuxSessionPollResult>;
   killTmuxSession(): Promise<CommandResult>;
   spawn(logPath: string, detached: boolean): SpawnedProcess;
-  runOnce(maxBufferBytes?: number): Promise<CommandResult>;
+  runOnce(maxBufferBytes?: number, timeoutMs?: number): Promise<CommandResult>;
 }
 
 const processRemoteRunner: RemoteRunner = {
@@ -187,7 +188,9 @@ export function expandSshRemoteTaskPreset(
   const installTmux = intent.operation === "spawn" && session === "tmux"
     ? intent.remote?.install_tmux !== false
     : false;
-  const sessionName = session === "tmux" && intent.taskId ? sessionNameForTask(intent.taskId) : undefined;
+  const sessionName = session === "tmux"
+    ? intent.sessionName ?? (intent.taskId ? sessionNameForTask(intent.taskId) : undefined)
+    : undefined;
   const remote: ResolvedRemoteTaskMetadata = {
     command,
     session,
@@ -216,16 +219,16 @@ export function expandSshRemoteTaskPreset(
       commandSpec,
       tmuxStartCommand(tmuxPath, requireSessionName(), command, intent.remote?.workdir),
     )),
-    pollTmuxSession: async (logOffset) => parseTmuxPollResult(await runner.runOnce(withRemoteCommand(
+    pollTmuxSession: async (logOffset, timeoutMs) => parseTmuxPollResult(await runner.runOnce(withRemoteCommand(
       commandSpec,
       tmuxPollCommand(requireSessionName(), logOffset),
-    ))),
+    ), undefined, timeoutMs)),
     killTmuxSession: () => runner.runOnce(withRemoteCommand(
       commandSpec,
       `tmux kill-session -t ${shellQuote(requireSessionName())}`,
     )),
     spawn: (logPath, detached) => runner.spawn(commandSpec, logPath, detached),
-    runOnce: (maxBufferBytes) => runner.runOnce(commandSpec, maxBufferBytes),
+    runOnce: (maxBufferBytes, timeoutMs) => runner.runOnce(commandSpec, maxBufferBytes, timeoutMs),
   };
 }
 

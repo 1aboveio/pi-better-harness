@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
 import { evaluateCondition } from "./conditions.js";
 import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
-import { expandSshRemoteTaskPreset } from "./remote-task-preset.js";
+import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.js";
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, writeMeta } from "./registry.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
@@ -21,6 +21,7 @@ import { isTerminalStatus } from "./types.js";
 
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const processTimeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const activeRemoteTasks = new Map<string, ResolvedSshRemoteTask>();
 const activePolls = new Set<string>();
 const logRetentionTimers = new Map<string, ReturnType<typeof setInterval>>();
@@ -56,7 +57,7 @@ export interface TaskRuntimeDependencies {
   remoteRunner?: RemoteRunner;
 }
 
-type WatchPollRunner = () => Promise<CommandResult>;
+type WatchPollRunner = (timeoutMs?: number) => Promise<CommandResult>;
 
 export function spawnTask(
   pi: ExtensionAPI,
@@ -121,6 +122,7 @@ export function spawnTask(
   } else if (spawned) {
     spawned.child.unref();
     spawned.child.on("close", (exitCode, signal) => {
+      clearProcessTimeout(id);
       stopLogRetention(id);
       const latest = readMeta(id);
       if (!latest) return;
@@ -146,7 +148,11 @@ async function launchRemoteTmux(
   getActiveSession?: ActiveSessionProvider,
 ): Promise<void> {
   try {
-    const bootstrap = await remoteTask.bootstrapTmux();
+    const beforeBootstrap = readMeta(id);
+    const remainingMs = remainingDeadlineMs(beforeBootstrap?.deadlineAt);
+    const bootstrap = await remoteTask.bootstrapTmux(remainingMs === undefined
+      ? undefined
+      : { timeoutMs: Math.min(DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, remainingMs) });
     const latest = readMeta(id);
     if (!latest || latest.status !== "running" || latest.stopRequestedAt) return;
     latest.remote = {
@@ -212,7 +218,7 @@ async function pollRemoteSession(
     const meta = readMeta(id);
     const remoteTask = activeRemoteTasks.get(id);
     if (!meta || meta.status !== "running" || meta.remote?.session !== "tmux" || !remoteTask) return;
-    const poll = await remoteTask.pollTmuxSession(meta.remote.logOffset ?? 0);
+    const poll = await remoteTask.pollTmuxSession(meta.remote.logOffset ?? 0, remainingDeadlineMs(meta.deadlineAt));
     appendTaskOutput(meta.logPath, poll.output);
     const latest = readMeta(id);
     if (!latest || latest.status !== "running") return;
@@ -313,7 +319,9 @@ export function startWatchTask(
   ensureTaskDir(id);
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
   writeMeta(meta);
-  scheduleWatch(pi, id, 0, getActiveSession, remoteTask?.runOnce);
+  scheduleWatch(pi, id, 0, getActiveSession, remoteTask
+    ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
+    : undefined);
   return meta;
 }
 
@@ -327,17 +335,29 @@ export function resumeRunningTask(
   pi: ExtensionAPI,
   meta: BackgroundTaskMeta,
   getActiveSession?: ActiveSessionProvider,
+  dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
   if (meta.status !== "running") {
     void notifyTerminal(pi, meta, getActiveSession);
     return meta;
   }
+
+  const remoteTask = resolvePersistedRemoteTask(meta, dependencies.remoteRunner);
   if (meta.kind === "command_watch") {
-    scheduleWatch(pi, meta.id, 0, getActiveSession);
+    scheduleWatch(pi, meta.id, 0, getActiveSession, remoteTask
+      ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
+      : undefined);
     return meta;
   }
-  if (meta.kind === "process") scheduleLogRetention(meta.id);
-  if (meta.kind === "process" && meta.pid && !processExists(meta.pid)) {
+
+  scheduleLogRetention(meta.id);
+  if (meta.remote?.session === "tmux" && meta.remote.sessionStarted !== false && remoteTask) {
+    activeRemoteTasks.set(meta.id, remoteTask);
+    scheduleRemoteSessionPoll(pi, meta.id, 0, getActiveSession);
+    if (meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt, getActiveSession);
+    return meta;
+  }
+  if (meta.pid && !processExists(meta.pid)) {
     meta.status = "failed";
     meta.endedAt = Date.now();
     meta.error = "process is no longer alive; exit result was not captured by this pi session";
@@ -346,8 +366,36 @@ export function resumeRunningTask(
     void notifyTerminal(pi, meta, getActiveSession);
     return meta;
   }
-  if (meta.kind === "process" && meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt, getActiveSession);
+  if (meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt, getActiveSession);
   return meta;
+}
+
+function resolvePersistedRemoteTask(
+  meta: BackgroundTaskMeta,
+  remoteRunner?: RemoteRunner,
+): ResolvedSshRemoteTask | undefined {
+  if (!meta.ssh || !meta.remote?.session) return undefined;
+  return expandSshRemoteTaskPreset({
+    operation: meta.kind === "command_watch" ? "watch" : "spawn",
+    taskId: meta.id,
+    sessionName: meta.remote.sessionName,
+    command: meta.remote.command || meta.command,
+    cwd: meta.cwd,
+    env: meta.env,
+    ssh: {
+      host: meta.ssh.host,
+      user: meta.ssh.user,
+      port: meta.ssh.port,
+      identity_file: meta.ssh.identityFile,
+      jump: meta.ssh.jump,
+      options: meta.ssh.options,
+    },
+    remote: {
+      session: meta.remote.session,
+      install_tmux: meta.remote.installTmux,
+      workdir: meta.remote.workdir,
+    },
+  }, remoteRunner);
 }
 
 export async function stopTask(
@@ -363,6 +411,7 @@ export async function stopTask(
   writeMeta(meta);
   clearWatchTimer(id);
   clearRemoteSessionTimer(id);
+  clearProcessTimeout(id);
 
   if (meta.remote?.session === "tmux" && meta.remote.sessionStarted !== false) {
     const remoteTask = activeRemoteTasks.get(id);
@@ -446,12 +495,13 @@ async function pollWatch(
     if (!meta || meta.status !== "running" || meta.kind !== "command_watch") return;
     const now = Date.now();
     if (meta.deadlineAt && now >= meta.deadlineAt) {
-      finalize(meta, { status: "timed_out", reason: "timeout" }, pi, getActiveSession);
+      finalize(meta, { status: "timed_out", reason: watchTimeoutReason(meta) }, pi, getActiveSession);
       return;
     }
+    const timeoutMs = remainingDeadlineMs(meta.deadlineAt);
     const result = runOnce
-      ? await runOnce()
-      : await runCommandOnce(commandSpecFromMeta(meta));
+      ? await runOnce(timeoutMs)
+      : await runCommandOnce(commandSpecFromMeta(meta), undefined, timeoutMs);
     appendWatchResult(meta.logPath, result);
     const latest = readMeta(id);
     if (!latest || latest.status !== "running") return;
@@ -461,6 +511,11 @@ async function pollWatch(
     latest.lastExitCode = result.exitCode;
     latest.lastSignal = result.signal;
     latest.lastState = extractLastState(result);
+
+    if (result.timedOut) {
+      finalize(latest, { status: "timed_out", reason: watchTimeoutReason(latest), commandResult: result }, pi, getActiveSession);
+      return;
+    }
 
     if (latest.failureWhen) {
       const failure = evaluateCondition(latest.failureWhen, result);
@@ -486,7 +541,7 @@ async function pollWatch(
     }
 
     writeMeta(latest);
-    scheduleWatch(pi, id, latest.intervalMs ?? 30_000, getActiveSession, runOnce);
+    scheduleWatch(pi, id, nextWatchDelayMs(latest), getActiveSession, runOnce);
   } catch (error) {
     const meta = readMeta(id);
     if (meta && meta.status === "running") {
@@ -526,6 +581,7 @@ function finalize(
   writeMeta(meta);
   clearWatchTimer(meta.id);
   clearRemoteSessionTimer(meta.id);
+  clearProcessTimeout(meta.id);
   activeRemoteTasks.delete(meta.id);
   stopLogRetention(meta.id);
   void notifyTerminal(pi, meta, getActiveSession);
@@ -542,26 +598,89 @@ function readableError(error: unknown): string {
   return value.replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
+function watchTimeoutReason(meta: BackgroundTaskMeta): string {
+  return meta.ssh ? `timeout waiting for SSH watch condition on ${meta.ssh.target}` : "timeout";
+}
+
+function nextWatchDelayMs(meta: BackgroundTaskMeta): number {
+  const intervalMs = meta.intervalMs ?? 30_000;
+  if (!meta.deadlineAt) return intervalMs;
+  return Math.max(0, Math.min(intervalMs, meta.deadlineAt - Date.now()));
+}
+
+function remainingDeadlineMs(deadlineAt: number | undefined): number | undefined {
+  if (deadlineAt === undefined) return undefined;
+  return Math.max(1, deadlineAt - Date.now());
+}
+
 function scheduleProcessTimeout(
   pi: ExtensionAPI,
   id: string,
   deadlineAt: number,
   getActiveSession?: ActiveSessionProvider,
 ): void {
+  clearProcessTimeout(id);
   const delay = Math.max(0, deadlineAt - Date.now());
-  const timer = setTimeout(() => {
-    const meta = readMeta(id);
-    if (!meta || meta.status !== "running" || meta.kind !== "process") return;
-    if (meta.pid) {
-      try { stopProcessGroup(meta.pid, meta.pgid); } catch { /* ignore */ }
-    }
-    meta.status = "timed_out";
-    meta.endedAt = Date.now();
-    meta.result = { reason: "timeout" };
-    writeMeta(meta);
-    void notifyTerminal(pi, meta, getActiveSession);
-  }, delay);
+  const timer = setTimeout(() => void timeoutProcess(pi, id, getActiveSession), delay);
   timer.unref();
+  processTimeoutTimers.set(id, timer);
+}
+
+function clearProcessTimeout(id: string): void {
+  const timer = processTimeoutTimers.get(id);
+  if (timer) clearTimeout(timer);
+  processTimeoutTimers.delete(id);
+}
+
+async function timeoutProcess(
+  pi: ExtensionAPI,
+  id: string,
+  getActiveSession?: ActiveSessionProvider,
+): Promise<void> {
+  const meta = readMeta(id);
+  if (!meta || meta.status !== "running" || meta.kind !== "process") return;
+
+  let reason = "timeout";
+  if (meta.remote?.session === "tmux" && meta.remote.sessionStarted !== true) {
+    reason = `timeout before remote tmux session ${meta.remote.sessionName} started on ${meta.ssh?.target}`;
+  } else if (meta.remote?.session === "tmux") {
+    const remoteTask = activeRemoteTasks.get(id);
+    if (!remoteTask) {
+      reason = `timeout; remote tmux session ${meta.remote.sessionName} on ${meta.ssh?.target} could not be killed because its SSH controller is unavailable`;
+      meta.error = reason;
+    } else {
+      try {
+        const stopped = await remoteTask.killTmuxSession();
+        if (stopped.exitCode === 0) {
+          meta.remote.stopMessage = `Killed remote tmux session ${meta.remote.sessionName} on ${meta.ssh?.target} after timeout.`;
+          appendLine(meta.logPath, `--- ${meta.remote.stopMessage} ---`);
+          reason = `timeout; killed remote tmux session ${meta.remote.sessionName} on ${meta.ssh?.target}`;
+        } else {
+          const detail = stopped.stderr.trim() || stopped.stdout.trim() || "remote tmux returned no diagnostic";
+          reason = `timeout; could not kill remote tmux session ${meta.remote.sessionName} on ${meta.ssh?.target} (exit ${stopped.exitCode ?? "unknown"}): ${detail}`;
+          meta.error = reason;
+        }
+      } catch (error) {
+        reason = `timeout; could not kill remote tmux session ${meta.remote.sessionName} on ${meta.ssh?.target}: ${readableError(error)}`;
+        meta.error = reason;
+      }
+    }
+  } else {
+    if (meta.pid) {
+      try { stopProcessGroup(meta.pid, meta.pgid); } catch { /* best effort */ }
+    }
+    if (meta.remote?.session === "direct") {
+      reason = "timeout; terminated local SSH client, but the remote process may still be running";
+    }
+  }
+
+  const latest = readMeta(id);
+  if (!latest || latest.status !== "running") return;
+  latest.remote = latest.remote && meta.remote
+    ? { ...latest.remote, stopMessage: meta.remote.stopMessage }
+    : meta.remote;
+  latest.error = meta.error;
+  finalize(latest, { status: "timed_out", reason }, pi, getActiveSession);
 }
 
 async function notifyTerminal(

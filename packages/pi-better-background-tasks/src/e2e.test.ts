@@ -101,6 +101,29 @@ describe("extension e2e", () => {
     expect(watch?.parameters?.properties?.remote?.properties?.install_tmux?.description).toContain("ignored for watch");
   });
 
+  // @covers background-task.ssh-tool-contract
+  // @level integration
+  // @fails-without-fix background-task.ssh-tool-contract
+  it("steers models through the complete structured SSH operator contract", () => {
+    const harness = createHarness();
+    const spawn = harness.tools.get("bg_task_spawn");
+    const watch = harness.tools.get("bg_task_watch");
+    const wrapper = harness.tools.get("bg_task");
+
+    for (const tool of [spawn, watch, wrapper]) {
+      expect(tool?.description).toContain("structured ssh");
+      expect(tool?.parameters?.properties?.timeout_seconds?.description).toContain("900 seconds");
+    }
+    expect(spawn?.description).toContain("install tmux non-interactively");
+    expect(spawn?.description).toContain("fails closed");
+    expect(spawn?.description).toContain("remote.session=direct");
+    expect(spawn?.description).toContain("weaker stop semantics");
+    expect(watch?.description).toContain("direct one-shot SSH poll");
+    expect(watch?.description).toContain("without tmux installation");
+    expect(wrapper?.description).toContain("SSH spawn defaults to durable tmux");
+    expect(wrapper?.description).toContain("SSH watches use direct one-shot polls");
+  });
+
   it("registers background tasks with pi-better-goal activity", () => {
     const harness = createHarness();
 

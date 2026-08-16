@@ -331,6 +331,188 @@ describe("runtime", () => {
     expect(messages).toHaveLength(0);
   });
 
+  // @covers background-task.ssh-resume
+  // @level integration
+  // @fails-without-fix background-task.ssh-resume
+  it("resumes a persisted tmux session without bootstrapping or creating it again", async () => {
+    const id = `bg_tmux_resume_${Date.now()}`;
+    const sessionName = `pi-bg-${id}`;
+    const runner = new FakeRemoteRunner([
+      successfulResult("__PI_BG_STATUS__=running\n__PI_BG_SIZE__=9\nmore\n"),
+      successfulResult("__PI_BG_STATUS__=0\n__PI_BG_SIZE__=9\n"),
+    ]);
+    writeMeta({
+      id,
+      name: "resumed remote build",
+      kind: "process",
+      status: "running",
+      startedAt: Date.now() - 1_000,
+      lastProgressAt: Date.now() - 1_000,
+      logPath: `${taskDir(id)}/output.log`,
+      callback: false,
+      command: "build release",
+      argv: ["ssh", "-o", "BatchMode=yes", "-T", "--", "builder@resume.example", "build release"],
+      shell: false,
+      cwd: process.cwd(),
+      spawnPid: 999_999,
+      ssh: { host: "resume.example", user: "builder", target: "builder@resume.example" },
+      remote: {
+        command: "build release",
+        session: "tmux",
+        installTmux: true,
+        sessionName,
+        bootstrapStatus: "present",
+        sessionStarted: true,
+        logOffset: 4,
+      },
+    });
+
+    try {
+      resumeWithRemoteRunner(readMeta(id)!, runner);
+      const terminal = await waitForMeta(id, (current) => current?.status === "succeeded", 1_000);
+
+      expect(terminal).toMatchObject({ status: "succeeded", lastExitCode: 0 });
+      expect(runner.runCalls).toHaveLength(2);
+      expect(runner.runCalls[0]?.command).toContain("tail -c +5");
+      expect(runner.runCalls.every((call) => call.argv?.includes("builder@resume.example"))).toBe(true);
+      expect(runner.runCalls.some((call) => call.command?.includes("command -v tmux") || call.command?.includes("new-session"))).toBe(false);
+      expect(readFileSync(`${taskDir(id)}/output.log`, "utf8")).toContain("more");
+    } finally {
+      rmSync(taskDir(id), { recursive: true, force: true });
+    }
+  });
+
+  // @covers background-task.ssh-resume
+  // @level integration
+  // @fails-without-fix background-task.ssh-resume
+  it("resumes a persisted direct SSH watch with its target and conditions", async () => {
+    const id = `bg_watch_resume_${Date.now()}`;
+    const runner = new FakeRemoteRunner([successfulResult("release ready\n")]);
+    const successWhen = { type: "stdout_contains", value: "ready" } as const;
+    writeMeta({
+      id,
+      name: "resumed remote watch",
+      kind: "command_watch",
+      status: "running",
+      startedAt: Date.now() - 1_000,
+      lastProgressAt: Date.now() - 1_000,
+      deadlineAt: Date.now() + 5_000,
+      intervalMs: 60_000,
+      logPath: `${taskDir(id)}/output.log`,
+      callback: false,
+      command: "check release",
+      argv: [process.execPath, "-e", "console.log('release ready')"],
+      shell: false,
+      cwd: process.cwd(),
+      spawnPid: 999_999,
+      successWhen,
+      notifyOn: "terminal",
+      ssh: { host: "watch-resume.example", user: "deploy", target: "deploy@watch-resume.example" },
+      remote: { command: "check release", session: "direct", installTmux: false },
+    });
+
+    try {
+      resumeWithRemoteRunner(readMeta(id)!, runner);
+      const terminal = await waitForMeta(id, (current) => current?.status === "succeeded", 1_000);
+
+      expect(terminal).toMatchObject({
+        status: "succeeded",
+        ssh: { target: "deploy@watch-resume.example" },
+        result: { reason: "success condition matched", matchedCondition: successWhen },
+      });
+      expect(runner.runCalls).toEqual([expect.objectContaining({
+        command: "check release",
+        argv: expect.arrayContaining(["deploy@watch-resume.example", "check release"]),
+        shell: false,
+      })]);
+    } finally {
+      rmSync(taskDir(id), { recursive: true, force: true });
+    }
+  });
+
+  // @covers background-task.ssh-timeout
+  // @level integration
+  // @fails-without-fix background-task.ssh-timeout
+  it("kills a tmux-backed SSH spawn when its deadline expires", async () => {
+    const runner = new FakeRemoteRunner([
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult(""),
+      successfulResult("__PI_BG_STATUS__=running\n__PI_BG_SIZE__=0\n"),
+      successfulResult(""),
+    ]);
+    const meta = spawnTask(fakePi, {
+      name: "remote timeout",
+      command: "sleep 300",
+      timeout_seconds: 0.05,
+      callback: false,
+      ssh: { host: "timeout.example", user: "deploy" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "timed_out", 1_000);
+    const sessionName = `pi-bg-${meta.id}`;
+
+    expect(runner.runCalls.at(-1)?.command).toBe(`tmux kill-session -t '${sessionName}'`);
+    expect(terminal).toMatchObject({
+      status: "timed_out",
+      remote: { stopMessage: `Killed remote tmux session ${sessionName} on deploy@timeout.example after timeout.` },
+      result: { reason: `timeout; killed remote tmux session ${sessionName} on deploy@timeout.example` },
+    });
+  });
+
+  // @covers background-task.ssh-timeout
+  // @level integration
+  // @fails-without-fix background-task.ssh-timeout
+  it("times out a direct SSH watch at its deadline and preserves the default timeout", async () => {
+    const runner = new FakeRemoteRunner([successfulResult("pending\n")]);
+    const explicit = startWatchTask(fakePi, {
+      name: "remote watch timeout",
+      command: "check release",
+      interval_seconds: 60,
+      timeout_seconds: 0.05,
+      callback: false,
+      ssh: { host: "watch-timeout.example" },
+      success_when: { type: "stdout_contains", value: "ready" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+    const defaulted = startWatchTask(fakePi, {
+      name: "remote default watch timeout",
+      command: "check release",
+      interval_seconds: 60,
+      callback: false,
+      ssh: { host: "watch-default.example" },
+      success_when: { type: "stdout_contains", value: "ready" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: new FakeRemoteRunner([successfulResult("ready\n")]) });
+
+    const terminal = await waitForMeta(explicit.id, (current) => current?.status === "timed_out", 1_000);
+
+    expect(terminal).toMatchObject({
+      status: "timed_out",
+      result: { reason: "timeout waiting for SSH watch condition on watch-timeout.example" },
+    });
+    expect(Math.round(((defaulted.deadlineAt ?? 0) - defaulted.startedAt) / 1000)).toBe(DEFAULT_WATCH_TIMEOUT_SECONDS);
+  });
+
+  // @covers background-task.ssh-timeout
+  // @level integration
+  // @fails-without-fix background-task.ssh-timeout
+  it("reports weak remote-stop semantics when a direct SSH spawn times out", async () => {
+    const runner = new FakeRemoteRunner();
+    const meta = spawnTask(fakePi, {
+      name: "direct remote timeout",
+      command: "sleep 300",
+      timeout_seconds: 0.05,
+      callback: false,
+      ssh: { host: "direct-timeout.example" },
+      remote: { session: "direct" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "timed_out", 1_000);
+
+    expect(terminal).toMatchObject({
+      status: "timed_out",
+      result: { reason: "timeout; terminated local SSH client, but the remote process may still be running" },
+    });
+  });
+
   it("finalizes a short spawned process", async () => {
     const meta = spawnTask(fakePi, {
       name: "test process",
@@ -762,6 +944,13 @@ function terminalMeta(
     result: { reason: "fixture" },
     ...overrides,
   };
+}
+
+function resumeWithRemoteRunner(
+  meta: NonNullable<ReturnType<typeof readMeta>>,
+  runner: FakeRemoteRunner,
+) {
+  return resumeRunningTask(fakePi, meta, undefined, { remoteRunner: runner });
 }
 
 async function waitForMeta(

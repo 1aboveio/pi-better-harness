@@ -117,7 +117,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_spawn",
     label: "BG Spawn",
-    description: "Start a long-running background process and return immediately with its task id. structured ssh spawn defaults to a remote tmux session with durable local logs and real remote stop. Explicit remote.session=direct skips tmux, but direct mode has weaker stop semantics and may leave the remote process running. Never wait or poll in the foreground.",
+    description: "Start a long-running background process and return immediately with its task id. For remote work, prefer structured ssh: spawn defaults to a remote tmux session with durable local logs and real remote stop. If tmux is missing, the preset attempts to install tmux non-interactively and fails closed with operator guidance when setup cannot proceed. Explicit remote.session=direct skips tmux, but direct mode has weaker stop semantics and may leave the remote process running. Never wait or poll in the foreground.",
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
