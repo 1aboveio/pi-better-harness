@@ -17,6 +17,21 @@ afterEach(() => {
 });
 
 describe("process shell execution", () => {
+  // @covers background-task.remote-runner-timeout
+  // @level integration
+  it("terminates a command that exceeds its run-once timeout", async () => {
+    const startedAt = Date.now();
+
+    const result = await runCommandOnce({
+      shell: false,
+      argv: [process.execPath, "-e", "setInterval(() => {}, 10_000)"],
+    }, undefined, 25);
+
+    expect(result.timedOut).toBe(true);
+    expect(result.signal).toBe("SIGTERM");
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
   it("uses a deterministic bash-compatible shell instead of the user's login shell", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-bg-shell-"));
     tempDirs.push(dir);

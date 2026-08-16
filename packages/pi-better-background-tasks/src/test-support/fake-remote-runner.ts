@@ -5,6 +5,7 @@ import type { CommandResult, CommandSpec } from "../types.js";
 export class FakeRemoteRunner implements RemoteRunner {
   readonly spawnCalls: Array<{ spec: CommandSpec; logPath: string; detached: boolean }> = [];
   readonly runCalls: CommandSpec[] = [];
+  readonly runTimeouts: Array<number | undefined> = [];
   private readonly children: EventEmitter[] = [];
   private readonly scriptedResults: CommandResult[];
 
@@ -22,8 +23,9 @@ export class FakeRemoteRunner implements RemoteRunner {
     return { child: child as never };
   }
 
-  async runOnce(spec: CommandSpec): Promise<CommandResult> {
+  async runOnce(spec: CommandSpec, _maxBufferBytes?: number, timeoutMs?: number): Promise<CommandResult> {
     this.runCalls.push(spec);
+    this.runTimeouts.push(timeoutMs);
     return this.scriptedResults.shift() ?? successfulResult("");
   }
 
@@ -35,12 +37,20 @@ export class FakeRemoteRunner implements RemoteRunner {
 }
 
 export function successfulResult(stdout: string): CommandResult {
+  return commandResult(0, stdout);
+}
+
+export function failedResult(exitCode: number, stderr = ""): CommandResult {
+  return commandResult(exitCode, "", stderr);
+}
+
+function commandResult(exitCode: number, stdout: string, stderr = ""): CommandResult {
   const now = Date.now();
   return {
-    exitCode: 0,
+    exitCode,
     signal: null,
     stdout,
-    stderr: "",
+    stderr,
     startedAt: now,
     endedAt: now,
   };

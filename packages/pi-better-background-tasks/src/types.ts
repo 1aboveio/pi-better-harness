@@ -29,6 +29,7 @@ export interface CommandResult {
   stderr: string;
   startedAt: number;
   endedAt: number;
+  timedOut?: boolean;
 }
 
 export interface SshConnectionParams {

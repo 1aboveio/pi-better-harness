@@ -10,10 +10,11 @@ import type {
 } from "./types.js";
 
 export const DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS = 10;
+export const DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS = 120_000;
 
 export interface RemoteRunner {
   spawn(spec: CommandSpec, logPath: string, detached: boolean): SpawnedProcess;
-  runOnce(spec: CommandSpec, maxBufferBytes?: number): Promise<CommandResult>;
+  runOnce(spec: CommandSpec, maxBufferBytes?: number, timeoutMs?: number): Promise<CommandResult>;
 }
 
 export interface SshRemoteTaskIntent {
@@ -25,13 +26,59 @@ export interface SshRemoteTaskIntent {
   remote?: RemoteTaskParams;
 }
 
-export interface TmuxBootstrapPresentResult {
-  status: "present";
+export type TmuxPackageManager = "apt-get" | "dnf" | "yum" | "apk" | "pacman" | "zypper" | "brew";
+
+type TmuxBootstrapCapability = {
   target: string;
   tmuxPath: string;
   tmuxVersion: string;
-  mutated: false;
   message: string;
+};
+
+type TmuxBootstrapGuidance = {
+  target: string;
+  mutated: boolean;
+  verifyCommand: string;
+  message: string;
+};
+
+export type TmuxBootstrapResult =
+  | (TmuxBootstrapCapability & {
+    status: "present";
+    mutated: false;
+  })
+  | (TmuxBootstrapCapability & {
+    status: "installed";
+    packageManager: TmuxPackageManager;
+    mutated: true;
+    installCommand: string;
+    verifyCommand: string;
+  })
+  | (TmuxBootstrapGuidance & {
+    status: "needs_user";
+    reason: "passwordless_sudo_unavailable" | "install_disabled";
+    packageManager: TmuxPackageManager;
+    mutated: false;
+    installCommand: string;
+  })
+  | (TmuxBootstrapGuidance & {
+    status: "unknown_package_manager";
+    mutated: false;
+  })
+  | (TmuxBootstrapGuidance & {
+    status: "install_failed";
+    packageManager?: TmuxPackageManager;
+    exitCode: number | null;
+    installCommand?: string;
+  })
+  | (TmuxBootstrapGuidance & {
+    status: "timed_out";
+    packageManager?: TmuxPackageManager;
+    installCommand?: string;
+  });
+
+export interface TmuxBootstrapOptions {
+  timeoutMs?: number;
 }
 
 export interface ResolvedSshRemoteTask {
@@ -40,7 +87,7 @@ export interface ResolvedSshRemoteTask {
     ssh: ResolvedSshIdentity;
     remote: ResolvedRemoteTaskMetadata;
   };
-  bootstrapTmux(): Promise<TmuxBootstrapPresentResult>;
+  bootstrapTmux(options?: TmuxBootstrapOptions): Promise<TmuxBootstrapResult>;
   spawn(logPath: string, detached: boolean): SpawnedProcess;
   runOnce(maxBufferBytes?: number): Promise<CommandResult>;
 }
@@ -51,7 +98,25 @@ const processRemoteRunner: RemoteRunner = {
 };
 
 const REQUIRED_SSH_OPTIONS = new Set(["batchmode", "connecttimeout", "requesttty"]);
-const TMUX_PROBE_COMMAND = "tmux_path=$(command -v tmux) && printf '%s\\n' \"$tmux_path\" && \"$tmux_path\" -V";
+const TMUX_PROBE_COMMAND = "tmux_path=$(command -v tmux) || exit 127; printf '%s\\n' \"$tmux_path\" && \"$tmux_path\" -V";
+const TMUX_PACKAGE_MANAGERS: TmuxPackageManager[] = ["apt-get", "dnf", "yum", "apk", "pacman", "zypper", "brew"];
+const TMUX_INSTALL_COMMANDS: Record<TmuxPackageManager, string> = {
+  "apt-get": "apt-get update && apt-get install -y tmux",
+  dnf: "dnf install -y tmux",
+  yum: "yum install -y tmux",
+  apk: "apk add --no-cache tmux",
+  pacman: "pacman -Sy --noconfirm tmux",
+  zypper: "zypper --non-interactive install tmux",
+  brew: "brew install tmux",
+};
+const TMUX_DETECT_COMMAND = [
+  "remote_user=$(id -un) || exit 1",
+  "remote_uid=$(id -u) || exit 1",
+  "package_manager=''",
+  `for candidate in ${TMUX_PACKAGE_MANAGERS.join(" ")}; do if command -v \"$candidate\" >/dev/null 2>&1; then package_manager=$candidate; break; fi; done`,
+  "if [ \"$package_manager\" = brew ]; then privilege=direct; elif [ \"$remote_uid\" -eq 0 ]; then privilege=root; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then privilege=sudo; else privilege=needs_user; fi",
+  "printf 'user=%s\\nuid=%s\\npm=%s\\nprivilege=%s\\n' \"$remote_user\" \"$remote_uid\" \"$package_manager\" \"$privilege\"",
+].join("; ");
 
 export function expandSshRemoteTaskPreset(
   intent: SshRemoteTaskIntent,
@@ -113,24 +178,280 @@ export function expandSshRemoteTaskPreset(
   return {
     commandSpec,
     metadata: { ssh, remote },
-    bootstrapTmux: async () => {
-      const result = await runner.runOnce(withRemoteCommand(commandSpec, TMUX_PROBE_COMMAND));
-      const [tmuxPath, tmuxVersion] = result.stdout.trim().split("\n");
-      if (result.exitCode !== 0 || !tmuxPath || !tmuxVersion) {
-        throw new Error(`tmux is not available on ${target}`);
-      }
-      return {
-        status: "present",
-        target,
-        tmuxPath,
-        tmuxVersion,
-        mutated: false,
-        message: `${tmuxVersion} is available at ${tmuxPath} on ${target}.`,
-      };
-    },
+    bootstrapTmux: async (options) => bootstrapTmux(
+      commandSpec,
+      target,
+      runner,
+      intent.operation === "spawn" && intent.remote?.install_tmux !== false,
+      resolveBootstrapTimeoutMs(options?.timeoutMs),
+    ),
     spawn: (logPath, detached) => runner.spawn(commandSpec, logPath, detached),
     runOnce: (maxBufferBytes) => runner.runOnce(commandSpec, maxBufferBytes),
   };
+}
+
+async function bootstrapTmux(
+  commandSpec: CommandSpec,
+  target: string,
+  runner: RemoteRunner,
+  installEnabled: boolean,
+  timeoutMs: number,
+): Promise<TmuxBootstrapResult> {
+  const deadlineAt = Date.now() + timeoutMs;
+  let timeoutContext: TmuxBootstrapTimeoutContext = {
+    target,
+    mutated: false,
+    verifyCommand: sshGuidanceCommand(target, "command -v tmux && tmux -V"),
+    stage: "probing tmux",
+  };
+  const run = async (remoteCommand: string): Promise<CommandResult> => {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw new TmuxBootstrapTimeoutError();
+    const result = await runner.runOnce(withRemoteCommand(commandSpec, remoteCommand), undefined, remainingMs);
+    if (result.timedOut) throw new TmuxBootstrapTimeoutError();
+    return result;
+  };
+
+  try {
+    return await bootstrapTmuxWithinDeadline(run, target, installEnabled, timeoutContext, (context) => {
+      timeoutContext = context;
+    });
+  } catch (error) {
+    if (!(error instanceof TmuxBootstrapTimeoutError)) throw error;
+    const remediation = timeoutContext.installCommand
+      ? `Run: ${timeoutContext.installCommand} Then verify: ${timeoutContext.verifyCommand}`
+      : `Install tmux manually if needed, then verify: ${timeoutContext.verifyCommand}`;
+    return {
+      status: "timed_out",
+      target: timeoutContext.target,
+      ...(timeoutContext.packageManager ? { packageManager: timeoutContext.packageManager } : {}),
+      mutated: timeoutContext.mutated,
+      ...(timeoutContext.installCommand ? { installCommand: timeoutContext.installCommand } : {}),
+      verifyCommand: timeoutContext.verifyCommand,
+      message: `tmux bootstrap timed out on ${timeoutContext.target} while ${timeoutContext.stage}. ${remediation}`,
+    };
+  }
+}
+
+interface TmuxBootstrapTimeoutContext {
+  target: string;
+  packageManager?: TmuxPackageManager;
+  mutated: boolean;
+  installCommand?: string;
+  verifyCommand: string;
+  stage: string;
+}
+
+class TmuxBootstrapTimeoutError extends Error {}
+
+async function bootstrapTmuxWithinDeadline(
+  run: (remoteCommand: string) => Promise<CommandResult>,
+  target: string,
+  installEnabled: boolean,
+  initialTimeoutContext: TmuxBootstrapTimeoutContext,
+  setTimeoutContext: (context: TmuxBootstrapTimeoutContext) => void,
+): Promise<TmuxBootstrapResult> {
+  setTimeoutContext(initialTimeoutContext);
+  const probe = await run(TMUX_PROBE_COMMAND);
+  const capability = parseTmuxCapability(probe);
+  if (capability) {
+    return {
+      status: "present",
+      target,
+      ...capability,
+      mutated: false,
+      message: `${capability.tmuxVersion} is available at ${capability.tmuxPath} on ${target}.`,
+    };
+  }
+  const initialVerifyCommand = sshGuidanceCommand(target, "command -v tmux && tmux -V");
+  if (probe.exitCode !== 127) {
+    const detail = resultDetail(probe);
+    return {
+      status: "install_failed",
+      target,
+      exitCode: probe.exitCode,
+      mutated: false,
+      verifyCommand: initialVerifyCommand,
+      message: `tmux bootstrap could not probe ${target} (exit ${probe.exitCode ?? "unknown"})${detail ? `: ${detail}` : "."} Install tmux manually if needed, then verify: ${initialVerifyCommand}`,
+    };
+  }
+
+  setTimeoutContext({ ...initialTimeoutContext, stage: "detecting the package manager" });
+  const detection = await run(TMUX_DETECT_COMMAND);
+  if (detection.exitCode !== 0) {
+    const detail = resultDetail(detection);
+    return {
+      status: "install_failed",
+      target,
+      exitCode: detection.exitCode,
+      mutated: false,
+      verifyCommand: initialVerifyCommand,
+      message: `tmux bootstrap could not inspect ${target} for an installer (exit ${detection.exitCode ?? "unknown"})${detail ? `: ${detail}` : "."} Install tmux manually if needed, then verify: ${initialVerifyCommand}`,
+    };
+  }
+  const detected = parseDetection(detection);
+  const guidanceTarget = detected && !target.includes("@") ? `${detected.user}@${target}` : target;
+  const verifyCommand = sshGuidanceCommand(guidanceTarget, "command -v tmux && tmux -V");
+  if (!detected || !isTmuxPackageManager(detected.packageManager)) {
+    return {
+      status: "unknown_package_manager",
+      target: guidanceTarget,
+      mutated: false,
+      verifyCommand,
+      message: `tmux is missing on ${guidanceTarget}, but none of ${formatPackageManagerList()} was found. Install tmux manually, then verify: ${verifyCommand}`,
+    };
+  }
+
+  const packageManager = detected.packageManager;
+  const baseInstallCommand = TMUX_INSTALL_COMMANDS[packageManager];
+  const needsSudo = detected.privilege === "sudo" || detected.privilege === "needs_user";
+  const humanInstallCommand = needsSudo ? withInteractiveSudo(baseInstallCommand) : baseInstallCommand;
+  const installCommand = sshGuidanceCommand(guidanceTarget, humanInstallCommand, needsSudo);
+  if (!installEnabled) {
+    return {
+      status: "needs_user",
+      reason: "install_disabled",
+      target: guidanceTarget,
+      packageManager,
+      mutated: false,
+      installCommand,
+      verifyCommand,
+      message: `Automatic tmux installation is disabled for ${guidanceTarget}. Run: ${installCommand} Then verify: ${verifyCommand}`,
+    };
+  }
+  if (detected.privilege === "needs_user") {
+    return {
+      status: "needs_user",
+      reason: "passwordless_sudo_unavailable",
+      target: guidanceTarget,
+      packageManager,
+      mutated: false,
+      installCommand,
+      verifyCommand,
+      message: `tmux is missing on ${guidanceTarget} and automatic installation cannot use passwordless sudo. Run: ${installCommand} Then verify: ${verifyCommand}`,
+    };
+  }
+
+  const machineInstallCommand = detected.privilege === "sudo"
+    ? withNonInteractiveSudo(baseInstallCommand)
+    : baseInstallCommand;
+  setTimeoutContext({
+    target: guidanceTarget,
+    packageManager,
+    mutated: false,
+    installCommand,
+    verifyCommand,
+    stage: `running the ${packageManager} install`,
+  });
+  const install = await run(machineInstallCommand);
+  if (install.exitCode !== 0) {
+    const detail = resultDetail(install);
+    return {
+      status: "install_failed",
+      target: guidanceTarget,
+      packageManager,
+      exitCode: install.exitCode,
+      mutated: false,
+      installCommand,
+      verifyCommand,
+      message: `Automatic tmux install with ${packageManager} failed on ${guidanceTarget} (exit ${install.exitCode ?? "unknown"})${detail ? `: ${detail}` : "."} Run: ${installCommand} Then verify: ${verifyCommand}`,
+    };
+  }
+
+  setTimeoutContext({
+    target: guidanceTarget,
+    packageManager,
+    mutated: true,
+    installCommand,
+    verifyCommand,
+    stage: "verifying the installed tmux",
+  });
+  const reprobe = await run(TMUX_PROBE_COMMAND);
+  const installedCapability = parseTmuxCapability(reprobe);
+  if (!installedCapability) {
+    return {
+      status: "install_failed",
+      target: guidanceTarget,
+      packageManager,
+      exitCode: reprobe.exitCode,
+      mutated: true,
+      installCommand,
+      verifyCommand,
+      message: `The ${packageManager} install command completed but tmux did not pass verification on ${guidanceTarget}${resultDetail(reprobe) ? `: ${resultDetail(reprobe)}` : "."} Run: ${installCommand} Then verify: ${verifyCommand}`,
+    };
+  }
+  return {
+    status: "installed",
+    target: guidanceTarget,
+    packageManager,
+    ...installedCapability,
+    mutated: true,
+    installCommand,
+    verifyCommand,
+    message: `Installed tmux with ${packageManager} on ${guidanceTarget}; ${installedCapability.tmuxVersion} is available at ${installedCapability.tmuxPath}.`,
+  };
+}
+
+function resolveBootstrapTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("tmux bootstrap timeoutMs must be a positive finite number");
+  }
+  return Math.floor(timeoutMs);
+}
+
+function parseTmuxCapability(result: CommandResult): { tmuxPath: string; tmuxVersion: string } | undefined {
+  const [tmuxPath, tmuxVersion] = result.stdout.trim().split("\n");
+  if (result.exitCode !== 0 || !tmuxPath || !tmuxVersion) return undefined;
+  return { tmuxPath, tmuxVersion };
+}
+
+interface TmuxDetection {
+  user: string;
+  packageManager: string;
+  privilege: "root" | "sudo" | "direct" | "needs_user";
+}
+
+function parseDetection(result: CommandResult): TmuxDetection | undefined {
+  if (result.exitCode !== 0) return undefined;
+  const values = Object.fromEntries(result.stdout.trim().split("\n").map((line) => {
+    const separator = line.indexOf("=");
+    return separator < 0 ? [line, ""] : [line.slice(0, separator), line.slice(separator + 1)];
+  }));
+  if (!values.user || !/^(root|sudo|direct|needs_user)$/.test(values.privilege ?? "")) return undefined;
+  return {
+    user: values.user,
+    packageManager: values.pm ?? "",
+    privilege: values.privilege as TmuxDetection["privilege"],
+  };
+}
+
+function isTmuxPackageManager(value: string | undefined): value is TmuxPackageManager {
+  return TMUX_PACKAGE_MANAGERS.some((candidate) => candidate === value);
+}
+
+function formatPackageManagerList(): string {
+  return `${TMUX_PACKAGE_MANAGERS.slice(0, -1).join(", ")}, or ${TMUX_PACKAGE_MANAGERS.at(-1)}`;
+}
+
+function resultDetail(result: CommandResult): string {
+  return (result.stderr.trim() || result.stdout.trim()).replaceAll(/\s+/g, " ").slice(0, 500);
+}
+
+function withNonInteractiveSudo(command: string): string {
+  return command.split(" && ").map((part) => `sudo -n ${part}`).join(" && ");
+}
+
+function withInteractiveSudo(command: string): string {
+  return command.split(" && ").map((part) => `sudo ${part}`).join(" && ");
+}
+
+function sshGuidanceCommand(target: string, remoteCommand: string, tty = false): string {
+  return `ssh${tty ? " -t" : ""} ${shellQuote(target)} ${shellQuote(remoteCommand)}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\"'\"'`)}'`;
 }
 
 function withRemoteCommand(spec: CommandSpec, remoteCommand: string): CommandSpec {
