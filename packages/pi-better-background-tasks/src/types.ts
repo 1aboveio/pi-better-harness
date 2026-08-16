@@ -62,6 +62,13 @@ export interface ResolvedRemoteTaskMetadata {
   session?: "tmux" | "direct";
   installTmux?: boolean;
   workdir?: string;
+  sessionName?: string;
+  bootstrapStatus?: "pending" | "present" | "installed" | "needs_user" | "unknown_package_manager" | "install_failed" | "timed_out";
+  bootstrapMessage?: string;
+  tmuxInstalled?: boolean;
+  logOffset?: number;
+  warning?: string;
+  stopMessage?: string;
 }
 
 export interface BackgroundTaskCallbackOrigin {

@@ -1,10 +1,10 @@
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
 import { DEFAULT_WATCH_TIMEOUT_SECONDS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
-import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
+import { FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
 
 const fakePi = {
   sendUserMessage: async () => undefined,
@@ -144,8 +144,13 @@ describe("runtime", () => {
 
   // @covers background-task.ssh-spawn
   // @level integration
-  it("spawns structured SSH intent through the remote preset and persists resolved metadata", async () => {
-    const runner = new FakeRemoteRunner();
+  it("defaults SSH spawn to a durable tmux session and captures remote output", async () => {
+    const output = "remote spawn\n";
+    const runner = new FakeRemoteRunner([
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult(""),
+      successfulResult(`__PI_BG_STATUS__=0\n__PI_BG_SIZE__=${Buffer.byteLength(output)}\n${output}`),
+    ]);
     const meta = spawnTask(fakePi, {
       name: "remote process",
       command: "printf 'remote spawn'",
@@ -153,43 +158,43 @@ describe("runtime", () => {
       shell: true,
       callback: false,
       ssh: { host: "remote.example", user: "builder" },
-      remote: { session: "tmux", install_tmux: true, workdir: "/srv/build" },
+      remote: { workdir: "/srv/build" },
     }, process.cwd(), undefined, undefined, { remoteRunner: runner });
 
-    expect(runner.spawnCalls).toHaveLength(1);
-    expect(runner.spawnCalls[0]).toMatchObject({
-      spec: {
-        command: "printf 'remote spawn'",
-        argv: [
-          "ssh",
-          "-o", "BatchMode=yes",
-          "-o", "ConnectTimeout=10",
-          "-T",
-          "--",
-          "builder@remote.example",
-          "printf 'remote spawn'",
-        ],
-        shell: false,
-      },
-      logPath: meta.logPath,
-      detached: true,
-    });
+    expect(runner.spawnCalls).toHaveLength(0);
     expect(meta).toMatchObject({
       command: "printf 'remote spawn'",
-      argv: runner.spawnCalls[0]?.spec.argv,
       shell: false,
       ssh: { host: "remote.example", user: "builder", target: "builder@remote.example" },
       remote: {
         command: "printf 'remote spawn'",
         session: "tmux",
         installTmux: true,
+        sessionName: `pi-bg-${meta.id}`,
         workdir: "/srv/build",
       },
     });
 
-    runner.closeSpawn(0);
     const terminal = await waitForMeta(meta.id, (current) => current?.status === "succeeded");
-    expect(terminal?.lastExitCode).toBe(0);
+    expect(runner.runCalls).toHaveLength(3);
+    expect(runner.runCalls[0]?.command).toContain("command -v tmux");
+    expect(runner.runCalls[1]?.command).toContain(`new-session -d -s 'pi-bg-${meta.id}'`);
+    expect(runner.runCalls[1]?.command).toContain("cd --");
+    expect(runner.runCalls[1]?.command).toContain("/srv/build");
+    expect(runner.runCalls[1]?.command).toContain("printf");
+    expect(runner.runCalls[1]?.command).toContain("remote spawn");
+    expect(runner.runCalls[2]?.command).toContain("tail -c +1");
+    expect(readFileSync(meta.logPath, "utf8")).toContain(output.trim());
+    expect(terminal).toMatchObject({
+      status: "succeeded",
+      lastExitCode: 0,
+      remote: {
+        session: "tmux",
+        sessionName: `pi-bg-${meta.id}`,
+        logOffset: Buffer.byteLength(output),
+        bootstrapStatus: "present",
+      },
+    });
   });
 
   it("retains bounded output from a noisy spawned process", async () => {
@@ -322,7 +327,7 @@ describe("runtime", () => {
       callback: false,
     }, process.cwd());
 
-    const stopped = stopTask(fakePi, meta.id);
+    const stopped = await stopTask(fakePi, meta.id);
 
     expect(stopped?.status).toBe("cancelled");
     expect(readMeta(meta.id)?.result).toMatchObject({ reason: "cancelled" });
@@ -339,7 +344,7 @@ describe("runtime", () => {
       callback: true,
     }, process.cwd());
 
-    const stopped = stopTask(pi, meta.id);
+    const stopped = await stopTask(pi, meta.id);
     expect(stopped?.status).toBe("cancelled");
 
     // If a callback had been enqueued it would flush within the 100 ms batch window.

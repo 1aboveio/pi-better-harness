@@ -56,8 +56,8 @@ const provider: BackgroundWorkProvider = {
     const meta = readMeta(id);
     if (!meta) return { action: "missing", providerId: "background-tasks", id };
     if (meta.status === "running") {
-      const stopped = stopTask(piRef as ExtensionAPI, id);
-      return { action: "stopped", providerId: "background-tasks", id, status: stopped?.status };
+      void stopTask(piRef as ExtensionAPI, id);
+      return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
     }
     meta.dismissedAt = Date.now();
     writeMeta(meta);

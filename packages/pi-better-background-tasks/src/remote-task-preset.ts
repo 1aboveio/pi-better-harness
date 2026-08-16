@@ -19,6 +19,7 @@ export interface RemoteRunner {
 
 export interface SshRemoteTaskIntent {
   operation: "spawn" | "watch";
+  taskId?: string;
   command?: string;
   cwd?: string;
   env?: Record<string, string>;
@@ -81,6 +82,13 @@ export interface TmuxBootstrapOptions {
   timeoutMs?: number;
 }
 
+export interface TmuxSessionPollResult {
+  status: "running" | "missing" | number;
+  logSize: number;
+  output: string;
+  commandResult: CommandResult;
+}
+
 export interface ResolvedSshRemoteTask {
   commandSpec: CommandSpec;
   metadata: {
@@ -88,6 +96,9 @@ export interface ResolvedSshRemoteTask {
     remote: ResolvedRemoteTaskMetadata;
   };
   bootstrapTmux(options?: TmuxBootstrapOptions): Promise<TmuxBootstrapResult>;
+  startTmuxSession(tmuxPath: string): Promise<CommandResult>;
+  pollTmuxSession(logOffset: number): Promise<TmuxSessionPollResult>;
+  killTmuxSession(): Promise<CommandResult>;
   spawn(logPath: string, detached: boolean): SpawnedProcess;
   runOnce(maxBufferBytes?: number): Promise<CommandResult>;
 }
@@ -98,6 +109,9 @@ const processRemoteRunner: RemoteRunner = {
 };
 
 const REQUIRED_SSH_OPTIONS = new Set(["batchmode", "connecttimeout", "requesttty"]);
+const DIRECT_STOP_WARNING = "Direct SSH mode has weak stop semantics: stopping the local SSH client may leave the remote process running.";
+const TMUX_STATUS_PREFIX = "__PI_BG_STATUS__=";
+const TMUX_SIZE_PREFIX = "__PI_BG_SIZE__=";
 const TMUX_PROBE_COMMAND = "tmux_path=$(command -v tmux) || exit 127; printf '%s\\n' \"$tmux_path\" && \"$tmux_path\" -V";
 const TMUX_PACKAGE_MANAGERS: TmuxPackageManager[] = ["apt-get", "dnf", "yum", "apk", "pacman", "zypper", "brew"];
 const TMUX_INSTALL_COMMANDS: Record<TmuxPackageManager, string> = {
@@ -168,11 +182,23 @@ export function expandSshRemoteTaskPreset(
     ...(intent.ssh.options ? { options: { ...intent.ssh.options } } : {}),
     target,
   };
+  const session = intent.operation === "spawn" ? intent.remote?.session ?? "tmux" : "direct";
+  const installTmux = intent.operation === "spawn" && session === "tmux"
+    ? intent.remote?.install_tmux !== false
+    : false;
+  const sessionName = session === "tmux" && intent.taskId ? sessionNameForTask(intent.taskId) : undefined;
   const remote: ResolvedRemoteTaskMetadata = {
     command,
-    ...(intent.remote?.session ? { session: intent.remote.session } : {}),
-    ...(intent.remote?.install_tmux !== undefined ? { installTmux: intent.remote.install_tmux } : {}),
+    session,
+    installTmux,
     ...(intent.remote?.workdir !== undefined ? { workdir: intent.remote.workdir } : {}),
+    ...(sessionName ? { sessionName, bootstrapStatus: "pending" } : {}),
+    ...(session === "direct" && intent.operation === "spawn" ? { warning: DIRECT_STOP_WARNING } : {}),
+  };
+
+  const requireSessionName = (): string => {
+    if (!sessionName) throw new Error("taskId is required for tmux-backed SSH spawn lifecycle operations");
+    return sessionName;
   };
 
   return {
@@ -182,11 +208,90 @@ export function expandSshRemoteTaskPreset(
       commandSpec,
       target,
       runner,
-      intent.operation === "spawn" && intent.remote?.install_tmux !== false,
+      installTmux,
       resolveBootstrapTimeoutMs(options?.timeoutMs),
     ),
+    startTmuxSession: (tmuxPath) => runner.runOnce(withRemoteCommand(
+      commandSpec,
+      tmuxStartCommand(tmuxPath, requireSessionName(), command, intent.remote?.workdir),
+    )),
+    pollTmuxSession: async (logOffset) => parseTmuxPollResult(await runner.runOnce(withRemoteCommand(
+      commandSpec,
+      tmuxPollCommand(requireSessionName(), logOffset),
+    ))),
+    killTmuxSession: () => runner.runOnce(withRemoteCommand(
+      commandSpec,
+      `tmux kill-session -t ${shellQuote(requireSessionName())}`,
+    )),
     spawn: (logPath, detached) => runner.spawn(commandSpec, logPath, detached),
     runOnce: (maxBufferBytes) => runner.runOnce(commandSpec, maxBufferBytes),
+  };
+}
+
+function sessionNameForTask(taskId: string): string {
+  return `pi-bg-${taskId.replaceAll(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+
+function tmuxLogPath(sessionName: string): string {
+  return `/tmp/${sessionName}.log`;
+}
+
+function tmuxExitPath(sessionName: string): string {
+  return `/tmp/${sessionName}.exit`;
+}
+
+function tmuxStartCommand(tmuxPath: string, sessionName: string, command: string, workdir?: string): string {
+  const logPath = tmuxLogPath(sessionName);
+  const exitPath = tmuxExitPath(sessionName);
+  const script = [
+    ...(workdir ? [`cd -- ${shellQuote(workdir)}`] : []),
+    `{ ${command}; } >${shellQuote(logPath)} 2>&1`,
+    "exit_code=$?",
+    `printf '%s\\n' "$exit_code" >${shellQuote(exitPath)}`,
+    "exit \"$exit_code\"",
+  ].join("; ");
+  return [
+    `rm -f ${shellQuote(logPath)} ${shellQuote(exitPath)}`,
+    `${shellQuote(tmuxPath)} new-session -d -s ${shellQuote(sessionName)} sh -lc ${shellQuote(script)}`,
+  ].join("; ");
+}
+
+function tmuxPollCommand(sessionName: string, logOffset: number): string {
+  const normalizedOffset = Math.max(0, Math.floor(logOffset));
+  const logPath = tmuxLogPath(sessionName);
+  const exitPath = tmuxExitPath(sessionName);
+  return [
+    "status=running",
+    `if test -f ${shellQuote(exitPath)}; then status=$(cat ${shellQuote(exitPath)}); elif ! tmux has-session -t ${shellQuote(sessionName)} 2>/dev/null; then status=missing; fi`,
+    `size=$(wc -c < ${shellQuote(logPath)} 2>/dev/null || printf '0')`,
+    "size=$(printf '%s' \"$size\" | tr -d '[:space:]')",
+    `printf '${TMUX_STATUS_PREFIX}%s\\n${TMUX_SIZE_PREFIX}%s\\n' "$status" "$size"`,
+    `if test "$size" -gt ${normalizedOffset}; then tail -c +${normalizedOffset + 1} ${shellQuote(logPath)}; fi`,
+  ].join("; ");
+}
+
+function parseTmuxPollResult(result: CommandResult): TmuxSessionPollResult {
+  const [statusLine = "", sizeLine = "", ...outputLines] = result.stdout.split("\n");
+  if (!statusLine.startsWith(TMUX_STATUS_PREFIX) || !sizeLine.startsWith(TMUX_SIZE_PREFIX)) {
+    throw new Error(`remote tmux supervision returned an invalid response${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`);
+  }
+  const rawStatus = statusLine.slice(TMUX_STATUS_PREFIX.length);
+  const rawSize = sizeLine.slice(TMUX_SIZE_PREFIX.length);
+  const logSize = Number(rawSize);
+  if (!Number.isSafeInteger(logSize) || logSize < 0) {
+    throw new Error(`remote tmux supervision returned invalid log size ${JSON.stringify(rawSize)}`);
+  }
+  const status = rawStatus === "running" || rawStatus === "missing"
+    ? rawStatus
+    : Number(rawStatus);
+  if (typeof status === "number" && !Number.isInteger(status)) {
+    throw new Error(`remote tmux supervision returned invalid status ${JSON.stringify(rawStatus)}`);
+  }
+  return {
+    status,
+    logSize,
+    output: outputLines.join("\n"),
+    commandResult: result,
   };
 }
 

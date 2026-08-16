@@ -181,7 +181,7 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const result = formatStop(pi, params.id, ctx, getActiveSession);
+      const result = await formatStop(pi, params.id, ctx, getActiveSession);
       refreshBackgroundTasksNavigator(ctx);
       return text(result);
     },
@@ -220,7 +220,7 @@ export function text(textValue: string, details?: unknown) {
   return { content: [{ type: "text" as const, text: textValue }], details };
 }
 
-function actionText(
+async function actionText(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
   ctx: ExtensionContext,
@@ -230,16 +230,16 @@ function actionText(
   if (params.action === "log" && params.id) {
     return logText(String(params.id), params.tail_lines as number | undefined);
   }
-  return text(runAction(pi, params, ctx, callbackOrigin, getActiveSession));
+  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession));
 }
 
-function runAction(
+async function runAction(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
-): string {
+): Promise<string> {
   switch (params.action) {
     case "spawn":
       return withNavigatorRefresh(ctx, formatLaunch(spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
@@ -256,7 +256,7 @@ function runAction(
       return formatLog(String(params.id), params.tail_lines as number | undefined);
     case "stop":
       if (!params.id) return "Invalid parameters: stop requires id.";
-      return withNavigatorRefresh(ctx, formatStop(pi, String(params.id), ctx, getActiveSession));
+      return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession));
     case "clear":
       return withNavigatorRefresh(ctx, formatClear(params.status as string[] | undefined, callbackOrigin));
     default:
@@ -453,15 +453,17 @@ function truncateToVisibleWidth(value: string, width: number): string {
   return String(value ?? "").slice(0, max);
 }
 
-function formatStop(
+async function formatStop(
   pi: ExtensionAPI,
   id: string,
   _ctx: ExtensionContext,
   getActiveSession?: () => BackgroundTaskCallbackOrigin | undefined,
-): string {
-  const meta = stopTask(pi, id, getActiveSession);
+): Promise<string> {
+  const meta = await stopTask(pi, id, getActiveSession);
   if (!meta) return `No background task found for id ${id}.`;
-  return `Background task ${id} is ${meta.status}.`;
+  const remoteStop = meta.remote?.stopMessage ? ` ${meta.remote.stopMessage}` : "";
+  const weakStop = meta.remote?.session === "direct" ? ` Warning: ${meta.remote.warning}` : "";
+  return `Background task ${id} is ${meta.status}.${remoteStop}${weakStop}`;
 }
 
 function formatClear(statuses: string[] | undefined, active: BackgroundTaskCallbackOrigin): string {
