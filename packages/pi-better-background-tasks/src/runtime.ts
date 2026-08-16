@@ -3,9 +3,20 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
 import { evaluateCondition } from "./conditions.js";
 import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
+import { expandSshRemoteTaskPreset } from "./remote-task-preset.js";
+import type { RemoteRunner } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, writeMeta } from "./registry.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
-import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, CommandSpec, Condition, TerminalResult } from "./types.js";
+import type {
+  BackgroundTaskCallbackOrigin,
+  BackgroundTaskMeta,
+  CommandResult,
+  CommandSpec,
+  Condition,
+  RemoteTaskParams,
+  SshConnectionParams,
+  TerminalResult,
+} from "./types.js";
 import { isTerminalStatus } from "./types.js";
 
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -22,6 +33,8 @@ export interface SpawnTaskParams extends CommandSpec {
   callback?: boolean;
   timeout_seconds?: number;
   max_log_bytes?: number;
+  ssh?: SshConnectionParams;
+  remote?: RemoteTaskParams;
 }
 
 export interface WatchTaskParams extends CommandSpec {
@@ -32,7 +45,15 @@ export interface WatchTaskParams extends CommandSpec {
   max_log_bytes?: number;
   success_when: Condition;
   failure_when?: Condition;
+  ssh?: SshConnectionParams;
+  remote?: RemoteTaskParams;
 }
+
+export interface TaskRuntimeDependencies {
+  remoteRunner?: RemoteRunner;
+}
+
+type WatchPollRunner = () => Promise<CommandResult>;
 
 export function spawnTask(
   pi: ExtensionAPI,
@@ -40,12 +61,26 @@ export function spawnTask(
   defaultCwd: string,
   callbackOrigin?: BackgroundTaskCallbackOrigin,
   getActiveSession?: ActiveSessionProvider,
+  dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const logPath = logPathFor(id);
   ensureTaskDir(id);
-  const spawned = spawnCommand({ ...params, cwd, shell: params.shell ?? true }, logPath, true);
+  const remoteTask = params.ssh
+    ? expandSshRemoteTaskPreset({
+      operation: "spawn",
+      command: params.command,
+      cwd,
+      env: params.env,
+      ssh: params.ssh,
+      remote: params.remote,
+    }, dependencies.remoteRunner)
+    : undefined;
+  const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const spawned = remoteTask
+    ? remoteTask.spawn(logPath, true)
+    : spawnCommand(commandSpec, logPath, true);
   const now = Date.now();
   const meta: BackgroundTaskMeta = {
     id,
@@ -59,14 +94,16 @@ export function spawnTask(
     callback: params.callback,
     callbackOrigin,
     command: params.command,
-    argv: params.argv,
-    shell: params.shell ?? true,
+    argv: commandSpec.argv,
+    shell: commandSpec.shell,
     cwd,
     env: params.env,
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     pid: spawned.child.pid,
     pgid: spawned.pgid,
     spawnPid: process.pid,
+    ssh: remoteTask?.metadata.ssh,
+    remote: remoteTask?.metadata.remote,
   };
   writeMeta(meta);
   scheduleLogRetention(id);
@@ -95,11 +132,23 @@ export function startWatchTask(
   defaultCwd: string,
   callbackOrigin?: BackgroundTaskCallbackOrigin,
   getActiveSession?: ActiveSessionProvider,
+  dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const now = Date.now();
   const timeoutSeconds = resolveWatchTimeoutSeconds(params.timeout_seconds);
+  const remoteTask = params.ssh
+    ? expandSshRemoteTaskPreset({
+      operation: "watch",
+      command: params.command,
+      cwd,
+      env: params.env,
+      ssh: params.ssh,
+      remote: params.remote,
+    }, dependencies.remoteRunner)
+    : undefined;
+  const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
   const meta: BackgroundTaskMeta = {
     id,
     name: params.name,
@@ -113,8 +162,8 @@ export function startWatchTask(
     callback: params.callback,
     callbackOrigin,
     command: params.command,
-    argv: params.argv,
-    shell: params.shell ?? true,
+    argv: commandSpec.argv,
+    shell: commandSpec.shell,
     cwd,
     env: params.env,
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
@@ -122,11 +171,13 @@ export function startWatchTask(
     successWhen: params.success_when,
     failureWhen: params.failure_when,
     notifyOn: "terminal",
+    ssh: remoteTask?.metadata.ssh,
+    remote: remoteTask?.metadata.remote,
   };
   ensureTaskDir(id);
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
   writeMeta(meta);
-  scheduleWatch(pi, id, 0, getActiveSession);
+  scheduleWatch(pi, id, 0, getActiveSession, remoteTask?.runOnce);
   return meta;
 }
 
@@ -186,9 +237,15 @@ export function stopTask(pi: ExtensionAPI, id: string, getActiveSession?: Active
   return meta;
 }
 
-function scheduleWatch(pi: ExtensionAPI, id: string, delayMs: number, getActiveSession?: ActiveSessionProvider): void {
+function scheduleWatch(
+  pi: ExtensionAPI,
+  id: string,
+  delayMs: number,
+  getActiveSession?: ActiveSessionProvider,
+  runOnce?: WatchPollRunner,
+): void {
   clearWatchTimer(id);
-  const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession), delayMs);
+  const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession, runOnce), delayMs);
   timer.unref();
   watcherTimers.set(id, timer);
 }
@@ -199,7 +256,12 @@ function clearWatchTimer(id: string): void {
   watcherTimers.delete(id);
 }
 
-async function pollWatch(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): Promise<void> {
+async function pollWatch(
+  pi: ExtensionAPI,
+  id: string,
+  getActiveSession?: ActiveSessionProvider,
+  runOnce?: WatchPollRunner,
+): Promise<void> {
   if (activePolls.has(id)) return;
   activePolls.add(id);
   try {
@@ -210,7 +272,9 @@ async function pollWatch(pi: ExtensionAPI, id: string, getActiveSession?: Active
       finalize(meta, { status: "timed_out", reason: "timeout" }, pi, getActiveSession);
       return;
     }
-    const result = await runCommandOnce(commandSpecFromMeta(meta));
+    const result = runOnce
+      ? await runOnce()
+      : await runCommandOnce(commandSpecFromMeta(meta));
     appendWatchResult(meta.logPath, result);
     const latest = readMeta(id);
     if (!latest || latest.status !== "running") return;
@@ -238,7 +302,7 @@ async function pollWatch(pi: ExtensionAPI, id: string, getActiveSession?: Active
     }
 
     writeMeta(latest);
-    scheduleWatch(pi, id, latest.intervalMs ?? 30_000, getActiveSession);
+    scheduleWatch(pi, id, latest.intervalMs ?? 30_000, getActiveSession, runOnce);
   } catch (error) {
     const meta = readMeta(id);
     if (meta && meta.status === "running") {

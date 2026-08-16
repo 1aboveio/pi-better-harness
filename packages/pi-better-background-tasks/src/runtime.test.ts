@@ -1,9 +1,12 @@
+import { EventEmitter } from "node:events";
 import { rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
 import { DEFAULT_WATCH_TIMEOUT_SECONDS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
+import type { RemoteRunner } from "./remote-task-preset.js";
+import type { CommandResult, CommandSpec } from "./types.js";
 
 const fakePi = {
   sendUserMessage: async () => undefined,
@@ -62,6 +65,44 @@ describe("runtime", () => {
     expect(terminal?.result).toMatchObject({ reason: "success condition matched", exitCode: 0 });
   });
 
+  // @covers background-task.ssh-watch
+  // @level integration
+  it("polls structured SSH intent through the remote preset runner", async () => {
+    const runner = new FakeRemoteRunner();
+    const meta = startWatchTask(fakePi, {
+      name: "remote watcher",
+      command: "printf 'done\\n'",
+      interval_seconds: 60,
+      timeout_seconds: 5,
+      callback: false,
+      ssh: { host: "watch.example" },
+      remote: { session: "direct", install_tmux: false },
+      success_when: { type: "stdout_contains", value: "done" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "succeeded");
+    expect(runner.runCalls).toEqual([expect.objectContaining({
+      command: "printf 'done\\n'",
+      argv: [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-T",
+        "--",
+        "watch.example",
+        "printf 'done\\n'",
+      ],
+      shell: false,
+    })]);
+    expect(terminal).toMatchObject({
+      shell: false,
+      ssh: { host: "watch.example", target: "watch.example" },
+      remote: { command: "printf 'done\\n'", session: "direct", installTmux: false },
+      lastExitCode: 0,
+      result: { reason: "success condition matched" },
+    });
+  });
+
   it("finalizes a command watcher when failure_when matches", async () => {
     const meta = startWatchTask(fakePi, {
       name: "test failing watcher",
@@ -102,6 +143,54 @@ describe("runtime", () => {
     const terminal = await waitForMeta(meta.id, (m) => m?.status === "succeeded", 30_000);
     expect(terminal?.lastExitCode).toBe(0);
   }, 30_000);
+
+  // @covers background-task.ssh-spawn
+  // @level integration
+  it("spawns structured SSH intent through the remote preset and persists resolved metadata", async () => {
+    const runner = new FakeRemoteRunner();
+    const meta = spawnTask(fakePi, {
+      name: "remote process",
+      command: "printf 'remote spawn'",
+      callback: false,
+      ssh: { host: "remote.example", user: "builder" },
+      remote: { session: "tmux", install_tmux: true, workdir: "/srv/build" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    expect(runner.spawnCalls).toHaveLength(1);
+    expect(runner.spawnCalls[0]).toMatchObject({
+      spec: {
+        command: "printf 'remote spawn'",
+        argv: [
+          "ssh",
+          "-o", "BatchMode=yes",
+          "-o", "ConnectTimeout=10",
+          "-T",
+          "--",
+          "builder@remote.example",
+          "printf 'remote spawn'",
+        ],
+        shell: false,
+      },
+      logPath: meta.logPath,
+      detached: true,
+    });
+    expect(meta).toMatchObject({
+      command: "printf 'remote spawn'",
+      argv: runner.spawnCalls[0]?.spec.argv,
+      shell: false,
+      ssh: { host: "remote.example", user: "builder", target: "builder@remote.example" },
+      remote: {
+        command: "printf 'remote spawn'",
+        session: "tmux",
+        installTmux: true,
+        workdir: "/srv/build",
+      },
+    });
+
+    runner.closeSpawn(0);
+    const terminal = await waitForMeta(meta.id, (current) => current?.status === "succeeded");
+    expect(terminal?.lastExitCode).toBe(0);
+  });
 
   it("retains bounded output from a noisy spawned process", async () => {
     const meta = spawnTask(fakePi, {
@@ -263,6 +352,36 @@ describe("runtime", () => {
     expect(terminal?.callbackSuppressedReason).toContain("cancelled");
   });
 });
+
+class FakeRemoteRunner implements RemoteRunner {
+  readonly spawnCalls: Array<{ spec: CommandSpec; logPath: string; detached: boolean }> = [];
+  readonly runCalls: CommandSpec[] = [];
+  private readonly child = Object.assign(new EventEmitter(), {
+    pid: undefined as number | undefined,
+    unref() {},
+  });
+
+  spawn(spec: CommandSpec, logPath: string, detached: boolean) {
+    this.spawnCalls.push({ spec, logPath, detached });
+    return { child: this.child as never };
+  }
+
+  async runOnce(spec: CommandSpec): Promise<CommandResult> {
+    this.runCalls.push(spec);
+    return {
+      exitCode: 0,
+      signal: null,
+      stdout: "done\n",
+      stderr: "",
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+    };
+  }
+
+  closeSpawn(exitCode: number | null): void {
+    this.child.emit("close", exitCode, null);
+  }
+}
 
 function terminalMeta(
   id: string,
