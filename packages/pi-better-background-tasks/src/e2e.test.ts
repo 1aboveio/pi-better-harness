@@ -1,15 +1,22 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
-import { readMeta, writeMeta } from "./registry.js";
+import { readMeta, taskDir, writeMeta } from "./registry.js";
+
+type JsonSchema = {
+  description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+};
 
 type RegisteredTool = {
   name: string;
   description?: string;
+  parameters?: JsonSchema;
   execute: (...args: any[]) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
 };
 
@@ -46,6 +53,33 @@ describe("extension e2e", () => {
     expect(harness.tools.get("bg_task_log")?.description).toContain("tail_lines:0 returns the retained raw log");
     expect(harness.tools.get("bg_task")?.description).toContain("action:status");
     expect(harness.tools.get("bg_status")?.description).toContain("explicit full-data recovery");
+  });
+
+  // @covers background-task.ssh-tool-contract
+  // @level integration
+  it("registers structured SSH and remote fields on every spawn/watch entry point", () => {
+    const harness = createHarness();
+
+    for (const name of ["bg_task_spawn", "bg_task_watch", "bg_task"]) {
+      const tool = harness.tools.get(name);
+      const properties = tool?.parameters?.properties;
+      expect(properties?.ssh).toMatchObject({ required: ["host"] });
+      expect(Object.keys(properties?.ssh?.properties ?? {}).sort()).toEqual([
+        "host",
+        "identity_file",
+        "jump",
+        "options",
+        "port",
+        "user",
+      ]);
+      expect(Object.keys(properties?.remote?.properties ?? {}).sort()).toEqual([
+        "install_tmux",
+        "session",
+        "workdir",
+      ]);
+      expect(properties?.command?.description).toContain("remote command when ssh is set");
+      expect(tool?.description).toContain("structured ssh");
+    }
   });
 
   it("registers background tasks with pi-better-goal activity", () => {
@@ -88,6 +122,45 @@ describe("extension e2e", () => {
 
     const logText = await harness.execute("bg_task_log", { id, tail_lines: 20 });
     expect(logText).toContain('"source":"e2e"');
+  });
+
+  // @covers background-task.ssh-status
+  // @level integration
+  it("shows SSH target identity in compact status, list, and navigator labels", async () => {
+    const harness = createHarness({ sessionId: "remote-label-session", mode: "tui", hasUI: true });
+    const id = `bg_remote_label_${Date.now()}`;
+    const remoteCommand = "node /srv/a-very-long-remote-command.js --opaque model authored payload";
+    writeMeta({
+      id,
+      kind: "process",
+      status: "running",
+      startedAt: Date.now(),
+      lastProgressAt: Date.now(),
+      logPath: `${taskDir(id)}/output.log`,
+      callback: false,
+      callbackOrigin: { cwd: process.cwd(), sessionId: "remote-label-session" },
+      command: remoteCommand,
+      argv: ["ssh", "-o", "BatchMode=yes", "-T", "--", "builder@remote.example", remoteCommand],
+      shell: false,
+      cwd: process.cwd(),
+      spawnPid: process.pid,
+      ssh: { host: "remote.example", user: "builder", target: "builder@remote.example" },
+      remote: { command: remoteCommand, session: "tmux", installTmux: true },
+    });
+
+    try {
+      const status = await harness.execute("bg_task_status", { id });
+      const list = await harness.execute("bg_task_list", { status: ["running"], limit: 100 });
+      await harness.fireSessionStart();
+      const navigator = renderWidget(harness.lastWidget("background-work-list"));
+
+      expect(status).toContain("remote: builder@remote.example");
+      expect(list.split("\n").find((line) => line.startsWith(id))).toContain("builder@remote.example");
+      expect(navigator).toContain("builder@remote.example");
+      expect(navigator).not.toContain("a-very-long-remote-command");
+    } finally {
+      rmSync(taskDir(id), { recursive: true, force: true });
+    }
   });
 
   it("supports the action-wrapper tools for watch, log, and stop", async () => {

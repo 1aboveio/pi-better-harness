@@ -104,7 +104,7 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
   return {
     providerId: "background-tasks",
     id: meta.id,
-    name: meta.name,
+    name: meta.name ?? meta.ssh?.target,
     status: meta.status,
     statusTone: toneForStatus(meta.status),
     kind: meta.kind === "command_watch" ? "watch" : "process",
@@ -134,6 +134,7 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
     { label: "pgid", value: meta.pgid != null ? String(meta.pgid) : "-" },
     { label: "log", value: meta.logPath },
   ];
+  if (meta.ssh) metadata.push({ label: "remote", value: meta.ssh.target });
   if (meta.deadlineAt) metadata.push({ label: "deadline", value: formatDuration(meta.deadlineAt - now) });
   if (meta.lastCheckedAt) metadata.push({ label: "checked", value: `${formatDuration(now - meta.lastCheckedAt)} ago` });
   if (meta.status === "running") {
@@ -187,6 +188,7 @@ function commandLabel(meta: BackgroundTaskMeta): string {
 }
 
 function compactCommandLabel(meta: BackgroundTaskMeta): string {
+  if (meta.ssh) return meta.ssh.target;
   const value = commandLabel(meta).trim();
   const parts = value.split(/\s+/).filter(Boolean);
   if (parts.length <= 3) return value;
