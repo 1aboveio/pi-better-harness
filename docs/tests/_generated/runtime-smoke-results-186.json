@@ -1,0 +1,12 @@
+{
+  "issue": 186,
+  "head": "0db6a0855e2bdc61da9bbc9733d5112ddac224a7",
+  "results": [
+    {
+      "surface": "background-task.ssh-tmux-bootstrap",
+      "status": "pass",
+      "command": "node --import tsx --input-type=module -e '<import preset and fake runner; bootstrap present scenario>'",
+      "observed": "status=present; target=deploy@smoke.example; tmuxPath=/usr/bin/tmux; tmuxVersion=tmux 3.4; calls=1; shell=false; timeoutMs=1000"
+    }
+  ]
+}

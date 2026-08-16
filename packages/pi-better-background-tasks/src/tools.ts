@@ -16,9 +16,24 @@ const ConditionSchema = Type.Union([
   Type.Object({ type: Type.Literal("json_path_exists"), path: Type.String() }),
 ]);
 
+const SshSchema = Type.Object({
+  host: Type.String({ description: "SSH host. Required when ssh is set." }),
+  user: Type.Optional(Type.String({ description: "SSH user." })),
+  port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65_535, description: "SSH port." })),
+  identity_file: Type.Optional(Type.String({ description: "SSH identity file path." })),
+  jump: Type.Optional(Type.String({ description: "SSH jump host passed with -J." })),
+  options: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Additional SSH -o key/value options. Agent-safe defaults remain enforced." })),
+});
+
+const RemoteSchema = Type.Object({
+  session: Type.Optional(Type.Union([Type.Literal("tmux"), Type.Literal("direct")], { description: "Remote session mode. SSH spawn defaults to durable tmux. Watch always uses direct one-shot polls. Explicit direct spawn has weaker stop semantics." })),
+  install_tmux: Type.Optional(Type.Boolean({ description: "Allow SSH spawn to install tmux non-interactively when missing. Defaults true in tmux mode and is ignored for watch and direct spawn." })),
+  workdir: Type.Optional(Type.String({ description: "Remote working directory for the spawned command." })),
+});
+
 const CommandFields = {
   name: Type.Optional(Type.String({ description: "Human-readable task label." })),
-  command: Type.Optional(Type.String({ description: "Shell command to run. Required unless shell:false with argv is used." })),
+  command: Type.Optional(Type.String({ description: "Shell command to run, or the remote command when ssh is set. Required unless shell:false with argv is used." })),
   argv: Type.Optional(Type.Array(Type.String(), { description: "Argument vector. Use with shell:false to avoid shell parsing." })),
   shell: Type.Optional(Type.Boolean({ description: "Run command through the package's bash-compatible shell. Default true." })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current pi cwd." })),
@@ -26,6 +41,8 @@ const CommandFields = {
   max_log_bytes: Type.Optional(Type.Number({ description: "Maximum retained raw-log bytes. Default 4194304 (4 MiB). Older output is compacted while the task runs." })),
   callback: Type.Optional(Type.Boolean({ description: "Queue a follow-up when the task reaches a terminal state. Default true." })),
   timeout_seconds: Type.Optional(Type.Number({ description: "Optional timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to disable. Spawned processes have no default timeout." })),
+  ssh: Type.Optional(SshSchema),
+  remote: Type.Optional(RemoteSchema),
 };
 
 const SpawnParams = Type.Object(CommandFields);
@@ -100,7 +117,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_spawn",
     label: "BG Spawn",
-    description: "Start a long-running background process and return immediately with its task id. Never wait or poll in the foreground.",
+    description: "Start a long-running background process and return immediately with its task id. For remote work, prefer structured ssh: spawn defaults to a remote tmux session with durable local logs and real remote stop. If tmux is missing, the preset attempts to install tmux non-interactively and fails closed with operator guidance when setup cannot proceed. Explicit remote.session=direct skips tmux, but direct mode has weaker stop semantics and may leave the remote process running. Never wait or poll in the foreground.",
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -113,7 +130,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_watch",
     label: "BG Watch",
-    description: "Poll a command in the background until success_when, failure_when, or timeout matches. Returns immediately with its task id. Default timeout 900 seconds; pass timeout_seconds:0 to disable.",
+    description: "Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, pass structured ssh fields and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. Returns immediately with its task id. Default timeout 900 seconds; pass timeout_seconds:0 to disable.",
     parameters: WatchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -160,11 +177,11 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_stop",
     label: "BG Stop",
-    description: "Cancel a watcher or terminate a background process group. Nonblocking.",
+    description: "Cancel a watcher or terminate a background task. For a tmux-backed SSH task, stop kills its remote tmux session before marking it cancelled. Direct SSH stop only tears down the local client and may leave the remote process running.",
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const result = formatStop(pi, params.id, ctx, getActiveSession);
+      const result = await formatStop(pi, params.id, ctx, getActiveSession);
       refreshBackgroundTasksNavigator(ctx);
       return text(result);
     },
@@ -173,7 +190,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, pass structured ssh fields and provide the remote command in command. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -203,7 +220,7 @@ export function text(textValue: string, details?: unknown) {
   return { content: [{ type: "text" as const, text: textValue }], details };
 }
 
-function actionText(
+async function actionText(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
   ctx: ExtensionContext,
@@ -213,16 +230,16 @@ function actionText(
   if (params.action === "log" && params.id) {
     return logText(String(params.id), params.tail_lines as number | undefined);
   }
-  return text(runAction(pi, params, ctx, callbackOrigin, getActiveSession));
+  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession));
 }
 
-function runAction(
+async function runAction(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
-): string {
+): Promise<string> {
   switch (params.action) {
     case "spawn":
       return withNavigatorRefresh(ctx, formatLaunch(spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
@@ -239,7 +256,7 @@ function runAction(
       return formatLog(String(params.id), params.tail_lines as number | undefined);
     case "stop":
       if (!params.id) return "Invalid parameters: stop requires id.";
-      return withNavigatorRefresh(ctx, formatStop(pi, String(params.id), ctx, getActiveSession));
+      return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession));
     case "clear":
       return withNavigatorRefresh(ctx, formatClear(params.status as string[] | undefined, callbackOrigin));
     default:
@@ -271,9 +288,14 @@ function resolveList(statuses?: string[], limit?: number): BackgroundTaskMeta[] 
   return metas.slice(0, Math.max(1, Math.min(limit ?? 20, 100)));
 }
 
-function formatLaunch(meta: BackgroundTaskMeta): string {
+export function formatLaunch(meta: BackgroundTaskMeta): string {
   const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
-  return `Started background ${meta.kind} ${label}. Status: ${meta.status}. Log: ${meta.logPath}`;
+  const remote = meta.ssh
+    ? ` Remote: ${meta.ssh.target}${meta.remote?.session ? ` mode=${meta.remote.session}` : ""}${meta.remote?.sessionName ? ` session=${meta.remote.sessionName}` : ""}.`
+    : "";
+  const setup = meta.remote?.bootstrapMessage ? ` Remote setup: ${meta.remote.bootstrapMessage}` : "";
+  const warning = meta.remote?.warning ? ` Warning: ${meta.remote.warning}` : "";
+  return `Started background ${meta.kind} ${label}. Status: ${meta.status}.${remote}${setup}${warning} Log: ${meta.logPath}`;
 }
 
 function formatList(metas: BackgroundTaskMeta[]): string {
@@ -281,7 +303,8 @@ function formatList(metas: BackgroundTaskMeta[]): string {
   return metas.map((meta) => {
     const age = formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt);
     const label = meta.name ? `${meta.name} ` : "";
-    return `${meta.id} ${label}${meta.kind} ${meta.status} ${age}`;
+    const remote = meta.ssh ? ` ${meta.ssh.target}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : "";
+    return `${meta.id} ${label}${meta.kind} ${meta.status} ${age}${remote}`;
   }).join("\n");
 }
 
@@ -297,6 +320,12 @@ function formatCompactStatus(meta: BackgroundTaskMeta): string {
     `kind: ${meta.kind}`,
     `elapsed: ${formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt)}`,
   ];
+  if (meta.ssh) lines.push(`remote: ${meta.ssh.target}`);
+  if (meta.remote?.session) lines.push(`remote mode: ${meta.remote.session}`);
+  if (meta.remote?.sessionName) lines.push(`remote session: ${meta.remote.sessionName}`);
+  if (meta.remote?.bootstrapMessage) lines.push(`remote setup: ${oneLine(meta.remote.bootstrapMessage, 500)}`);
+  if (meta.remote?.warning) lines.push(`warning: ${oneLine(meta.remote.warning, 500)}`);
+  if (meta.remote?.stopMessage) lines.push(`remote stop: ${oneLine(meta.remote.stopMessage, 500)}`);
   if (meta.deadlineAt && meta.status === "running") lines.push(`deadline: ${formatDuration(meta.deadlineAt - Date.now())} left`);
   if (meta.lastExitCode !== undefined || meta.lastSignal !== undefined) lines.push(`last exit: ${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}`);
   const reason = resultReason(meta.result);
@@ -433,15 +462,17 @@ function truncateToVisibleWidth(value: string, width: number): string {
   return String(value ?? "").slice(0, max);
 }
 
-function formatStop(
+async function formatStop(
   pi: ExtensionAPI,
   id: string,
   _ctx: ExtensionContext,
   getActiveSession?: () => BackgroundTaskCallbackOrigin | undefined,
-): string {
-  const meta = stopTask(pi, id, getActiveSession);
+): Promise<string> {
+  const meta = await stopTask(pi, id, getActiveSession);
   if (!meta) return `No background task found for id ${id}.`;
-  return `Background task ${id} is ${meta.status}.`;
+  const remoteStop = meta.remote?.stopMessage ? ` ${meta.remote.stopMessage}` : "";
+  const weakStop = meta.remote?.session === "direct" ? ` Warning: ${meta.remote.warning}` : "";
+  return `Background task ${id} is ${meta.status}.${remoteStop}${weakStop}`;
 }
 
 function formatClear(statuses: string[] | undefined, active: BackgroundTaskCallbackOrigin): string {

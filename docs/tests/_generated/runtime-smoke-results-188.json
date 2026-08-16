@@ -1,0 +1,12 @@
+{
+  "issue": 188,
+  "head": "88f31186edf0617c6285f127156e77189380d390",
+  "results": [
+    {
+      "surface": "background-task.ssh-spawn",
+      "status": "pass",
+      "command": "node --import tsx --input-type=module -e '<spawn successful SSH tmux task and delayed-start stop task with FakeRemoteRunner; inspect terminal metadata, remote calls, durable log, and callback suppression>'",
+      "observed": "success: status=succeeded; mode=tmux; bootstrap=present; exitCode=0; captured=true; remoteCalls=3; localSpawnCalls=0. stopRace: status=cancelled; killInvoked=true; stopMessage=true; callbackSuppressed=true"
+    }
+  ]
+}

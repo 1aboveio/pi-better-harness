@@ -56,8 +56,8 @@ const provider: BackgroundWorkProvider = {
     const meta = readMeta(id);
     if (!meta) return { action: "missing", providerId: "background-tasks", id };
     if (meta.status === "running") {
-      const stopped = stopTask(piRef as ExtensionAPI, id);
-      return { action: "stopped", providerId: "background-tasks", id, status: stopped?.status };
+      void stopTask(piRef as ExtensionAPI, id);
+      return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
     }
     meta.dismissedAt = Date.now();
     writeMeta(meta);
@@ -104,7 +104,7 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
   return {
     providerId: "background-tasks",
     id: meta.id,
-    name: meta.name,
+    name: meta.name ?? (meta.ssh ? `${meta.ssh.target}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : undefined),
     status: meta.status,
     statusTone: toneForStatus(meta.status),
     kind: meta.kind === "command_watch" ? "watch" : "process",
@@ -134,6 +134,11 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
     { label: "pgid", value: meta.pgid != null ? String(meta.pgid) : "-" },
     { label: "log", value: meta.logPath },
   ];
+  if (meta.ssh) metadata.push({ label: "remote", value: meta.ssh.target });
+  if (meta.remote?.session) metadata.push({ label: "remote mode", value: meta.remote.session });
+  if (meta.remote?.sessionName) metadata.push({ label: "remote session", value: meta.remote.sessionName });
+  if (meta.remote?.bootstrapMessage) metadata.push({ label: "remote setup", value: meta.remote.bootstrapMessage });
+  if (meta.remote?.warning) metadata.push({ label: "warning", value: meta.remote.warning });
   if (meta.deadlineAt) metadata.push({ label: "deadline", value: formatDuration(meta.deadlineAt - now) });
   if (meta.lastCheckedAt) metadata.push({ label: "checked", value: `${formatDuration(now - meta.lastCheckedAt)} ago` });
   if (meta.status === "running") {
@@ -187,6 +192,7 @@ function commandLabel(meta: BackgroundTaskMeta): string {
 }
 
 function compactCommandLabel(meta: BackgroundTaskMeta): string {
+  if (meta.ssh) return `${meta.ssh.target}${meta.remote?.session ? ` ${meta.remote.session}` : ""}`;
   const value = commandLabel(meta).trim();
   const parts = value.split(/\s+/).filter(Boolean);
   if (parts.length <= 3) return value;
@@ -196,6 +202,7 @@ function compactCommandLabel(meta: BackgroundTaskMeta): string {
 function secondaryLabel(meta: BackgroundTaskMeta): string | undefined {
   const parts = [];
   if (meta.cwd) parts.push(meta.cwd);
+  if (meta.remote?.session) parts.push(meta.remote.session);
   if (meta.pid != null) parts.push(`pid ${meta.pid}`);
   if (meta.lastExitCode !== undefined) parts.push(`exit ${meta.lastExitCode}`);
   return parts.length ? parts.join(" · ") : undefined;

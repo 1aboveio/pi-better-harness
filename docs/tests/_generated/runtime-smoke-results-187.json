@@ -1,0 +1,30 @@
+{
+  "issue": 187,
+  "head": "9226166c7d079c7a24fe929cea99777774447e57",
+  "results": [
+    {
+      "surface": "background-task.ssh-watch",
+      "status": "pass",
+      "command": "npm test -w packages/pi-better-background-tasks -- --run src/remote-task-preset.test.ts -t \"normalizes every SSH watch\"",
+      "observed": "1 preset test passed: every SSH watch resolves to direct mode with tmux installation disabled"
+    },
+    {
+      "surface": "background-task.ssh-watch-lifecycle",
+      "status": "pass",
+      "command": "npm test -w packages/pi-better-background-tasks -- --run src/runtime.test.ts -t \"polls structured SSH|evaluates remote poll|retains scripted remote poll|fails SSH transport|persists remote poll|delivers callbacks|keeps remote watch cancellation\"",
+      "observed": "11 integration tests passed through the fake remote runner: all condition families, interval logs, transport errors, succeeded/failed/timed_out callbacks, and cancel silence"
+    },
+    {
+      "surface": "background-task.ssh-tool-contract",
+      "status": "pass",
+      "command": "npm test -w packages/pi-better-background-tasks -- --run src/e2e.test.ts -t \"registers structured SSH|documents SSH watches\"",
+      "observed": "2 extension contract tests passed: both public watch entry points accept structured SSH and document direct one-shot/no-tmux behavior"
+    },
+    {
+      "surface": "background-task.local-watch",
+      "status": "pass",
+      "command": "npm test -w packages/pi-better-background-tasks -- --run src/runtime.test.ts -t \"runs a command watcher to success|finalizes a command watcher when failure_when|times out a command watcher\"",
+      "observed": "3 unchanged local watcher characterization tests passed for success, failure, and timeout"
+    }
+  ]
+}

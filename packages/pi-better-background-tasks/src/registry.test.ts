@@ -1,9 +1,14 @@
 import { writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ensureTaskDir, listMetas, logPathFor, metaPathFor, readMeta, writeMeta } from "./registry.js";
+import { baseDir, ensureTaskDir, listMetas, logPathFor, metaPathFor, readMeta, writeMeta } from "./registry.js";
 import type { BackgroundTaskMeta } from "./types.js";
 
 describe("registry meta sweep cache", () => {
+  it("isolates durable test metadata by Vitest worker pool", () => {
+    expect(process.env.VITEST_POOL_ID).toMatch(/^\d+$/);
+    expect(baseDir()).toContain(`pi-better-background-tasks-vitest-${process.env.VITEST_POOL_ID}`);
+  });
+
   it("does not re-read terminal metadata on repeated broad sweeps", () => {
     const meta = fixtureMeta("succeeded", "terminal cached");
     ensureTaskDir(meta.id);

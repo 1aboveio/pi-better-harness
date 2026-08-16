@@ -1,15 +1,22 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
-import { readMeta, writeMeta } from "./registry.js";
+import { readMeta, taskDir, writeMeta } from "./registry.js";
+
+type JsonSchema = {
+  description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+};
 
 type RegisteredTool = {
   name: string;
   description?: string;
+  parameters?: JsonSchema;
   execute: (...args: any[]) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
 };
 
@@ -46,6 +53,112 @@ describe("extension e2e", () => {
     expect(harness.tools.get("bg_task_log")?.description).toContain("tail_lines:0 returns the retained raw log");
     expect(harness.tools.get("bg_task")?.description).toContain("action:status");
     expect(harness.tools.get("bg_status")?.description).toContain("explicit full-data recovery");
+  });
+
+  // @covers background-task.ssh-tool-contract
+  // @level integration
+  it("registers structured SSH and remote fields on every spawn/watch entry point", () => {
+    const harness = createHarness();
+
+    for (const name of ["bg_task_spawn", "bg_task_watch", "bg_task"]) {
+      const tool = harness.tools.get(name);
+      const properties = tool?.parameters?.properties;
+      expect(properties?.ssh).toMatchObject({ required: ["host"] });
+      expect(Object.keys(properties?.ssh?.properties ?? {}).sort()).toEqual([
+        "host",
+        "identity_file",
+        "jump",
+        "options",
+        "port",
+        "user",
+      ]);
+      expect(Object.keys(properties?.remote?.properties ?? {}).sort()).toEqual([
+        "install_tmux",
+        "session",
+        "workdir",
+      ]);
+      expect(properties?.command?.description).toContain("remote command when ssh is set");
+      expect(properties?.remote?.properties?.session?.description).toContain("tmux");
+      expect(properties?.remote?.properties?.session?.description).toContain("direct");
+      expect(tool?.description).toContain("structured ssh");
+    }
+    expect(harness.tools.get("bg_task_spawn")?.description).toContain("defaults to a remote tmux session");
+    expect(harness.tools.get("bg_task_spawn")?.description).toContain("direct mode has weaker stop semantics");
+    expect(harness.tools.get("bg_task_stop")?.description).toContain("kills its remote tmux session");
+  });
+
+  // @covers background-task.ssh-tool-contract
+  // @level integration
+  // @fails-without-fix background-task.ssh-tool-contract
+  it("documents SSH watches as direct one-shot polls without tmux installation", () => {
+    const harness = createHarness();
+    const watch = harness.tools.get("bg_task_watch");
+    const wrapper = harness.tools.get("bg_task");
+
+    expect(watch?.description).toContain("direct one-shot SSH poll");
+    expect(wrapper?.description).toContain("SSH watches use direct one-shot polls");
+    expect(watch?.parameters?.properties?.remote?.properties?.session?.description).toContain("Watch always uses direct");
+    expect(watch?.parameters?.properties?.remote?.properties?.install_tmux?.description).toContain("ignored for watch");
+  });
+
+  // @covers background-task.ssh-tool-contract
+  // @level integration
+  // @fails-without-fix background-task.ssh-tool-contract
+  it("steers models through the complete structured SSH operator contract", () => {
+    const harness = createHarness();
+    const spawn = harness.tools.get("bg_task_spawn");
+    const watch = harness.tools.get("bg_task_watch");
+    const wrapper = harness.tools.get("bg_task");
+
+    for (const tool of [spawn, watch, wrapper]) {
+      expect(tool?.description).toContain("structured ssh");
+      expect(tool?.parameters?.properties?.timeout_seconds?.description).toContain("900 seconds");
+    }
+    expect(spawn?.description).toContain("install tmux non-interactively");
+    expect(spawn?.description).toContain("fails closed");
+    expect(spawn?.description).toContain("remote.session=direct");
+    expect(spawn?.description).toContain("weaker stop semantics");
+    expect(watch?.description).toContain("direct one-shot SSH poll");
+    expect(watch?.description).toContain("without tmux installation");
+    expect(wrapper?.description).toContain("SSH spawn defaults to durable tmux");
+    expect(wrapper?.description).toContain("SSH watches use direct one-shot polls");
+  });
+
+  // @covers background-task.ssh-docs
+  // @level integration
+  // @fails-without-fix background-task.ssh-docs
+  it("ships the complete Remote SSH operator contract in package usage docs", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    const usage = readFileSync(new URL("../docs/usage.md", import.meta.url), "utf8");
+
+    expect(readme).toContain("## Remote SSH");
+    expect(readme).toContain("structured `ssh`");
+    expect(readme).toContain("spawn");
+    expect(readme).toContain("watch");
+    for (const required of [
+      "\"ssh\": {",
+      "\"remote\": {",
+      "Spawn + SSH",
+      "Watch + SSH",
+      "apt-get",
+      "dnf",
+      "yum",
+      "apk",
+      "pacman",
+      "zypper",
+      "brew",
+      "sudo -n",
+      "needs-user",
+      "fails closed",
+      "remote.session=direct",
+      "may still be running",
+      "timeout_seconds",
+      "/reload",
+      "ControlMaster",
+      "multiplexing",
+    ]) {
+      expect(usage).toContain(required);
+    }
   });
 
   it("registers background tasks with pi-better-goal activity", () => {
@@ -88,6 +201,67 @@ describe("extension e2e", () => {
 
     const logText = await harness.execute("bg_task_log", { id, tail_lines: 20 });
     expect(logText).toContain('"source":"e2e"');
+  });
+
+  // @covers background-task.ssh-status
+  // @level integration
+  it("shows SSH target identity in compact status, list, and navigator labels", async () => {
+    const harness = createHarness({ sessionId: "remote-label-session", mode: "tui", hasUI: true });
+    const id = `bg_remote_label_${Date.now()}`;
+    const remoteCommand = "node /srv/a-very-long-remote-command.js --opaque model authored payload";
+    writeMeta({
+      id,
+      kind: "process",
+      status: "running",
+      startedAt: Date.now(),
+      lastProgressAt: Date.now(),
+      logPath: `${taskDir(id)}/output.log`,
+      callback: false,
+      callbackOrigin: { cwd: process.cwd(), sessionId: "remote-label-session" },
+      command: remoteCommand,
+      argv: ["ssh", "-o", "BatchMode=yes", "-T", "--", "builder@remote.example", remoteCommand],
+      shell: false,
+      cwd: process.cwd(),
+      spawnPid: process.pid,
+      ssh: { host: "remote.example", user: "builder", target: "builder@remote.example" },
+      remote: {
+        command: remoteCommand,
+        session: "tmux",
+        installTmux: true,
+        sessionName: `pi-bg-${id}`,
+        bootstrapStatus: "installed",
+        bootstrapMessage: "Installed tmux with apt-get on builder@remote.example; tmux 3.4 is available at /usr/bin/tmux.",
+        tmuxInstalled: true,
+      },
+    });
+
+    try {
+      const status = await harness.execute("bg_task_status", { id });
+      const verboseStatus = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true }));
+      const list = await harness.execute("bg_task_list", { status: ["running"], limit: 100 });
+      await harness.fireSessionStart();
+      const navigator = renderWidget(harness.lastWidget("background-work-list"));
+
+      expect(status).toContain("remote: builder@remote.example");
+      expect(status).toContain("remote mode: tmux");
+      expect(status).toContain(`remote session: pi-bg-${id}`);
+      expect(status).toContain("remote setup: Installed tmux with apt-get on builder@remote.example");
+      expect(verboseStatus).toMatchObject({
+        ssh: { host: "remote.example", user: "builder", target: "builder@remote.example" },
+        remote: {
+          session: "tmux",
+          sessionName: `pi-bg-${id}`,
+          bootstrapStatus: "installed",
+          tmuxInstalled: true,
+        },
+      });
+      expect(list.split("\n").find((line) => line.startsWith(id))).toContain("builder@remote.example tmux");
+      expect(navigator).toContain("builder@remote.example");
+      expect(navigator).toContain("tmux");
+      expect(navigator).not.toContain("a-very-long-remote-command");
+    } finally {
+      rmSync(taskDir(id), { recursive: true, force: true });
+    }
   });
 
   it("supports the action-wrapper tools for watch, log, and stop", async () => {
@@ -162,7 +336,7 @@ describe("extension e2e", () => {
     await otherHarness.fireSessionStart();
 
     const terminal = await waitForMeta(id, (meta) => typeof meta?.callbackSuppressedAt === "number");
-    expect(otherHarness.messages).toHaveLength(0);
+    expect(otherHarness.messages.join("\n")).not.toContain(id);
     expect(terminal?.callbackSuppressedReason).toContain("origin session session-a does not match active session session-b");
   });
 

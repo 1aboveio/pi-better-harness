@@ -9,7 +9,11 @@ const metaCache = new Map<string, BackgroundTaskMeta>();
 const metaChangedListeners = new Set<() => void>();
 
 export function baseDir(): string {
-  return join(tmpdir(), "pi-better-background-tasks");
+  const vitestPoolId = process.env.VITEST_POOL_ID;
+  const directory = vitestPoolId && /^\d+$/.test(vitestPoolId)
+    ? `pi-better-background-tasks-vitest-${vitestPoolId}`
+    : "pi-better-background-tasks";
+  return join(tmpdir(), directory);
 }
 
 export function tasksDir(): string {
