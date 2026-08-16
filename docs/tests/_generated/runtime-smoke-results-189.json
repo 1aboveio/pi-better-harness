@@ -1,18 +1,18 @@
 {
   "issue": 189,
-  "head": "3b7e47e7c1512c17c2bbe37b56930e4f59cd216b",
+  "head": "0392bc745b210bbf1fde0976cb33d40eb60c4484",
   "results": [
     {
       "surface": "background-task.ssh-resume",
       "status": "pass",
       "command": "npm exec -w packages/pi-better-background-tasks -- vitest run src/runtime.test.ts -t 'resumes a persisted|kills a tmux-backed|times out a direct SSH watch|reports weak remote-stop'",
-      "observed": "exit 0; 5 lifecycle tests passed; persisted tmux and direct-watch supervision resumed through FakeRemoteRunner without duplicate session creation"
+      "observed": "exit 0; 6 lifecycle tests passed; persisted tmux and direct-watch supervision resumed through FakeRemoteRunner without duplicate session creation, and the adjacent tmux poll-timeout cleanup remained green"
     },
     {
       "surface": "background-task.ssh-timeout",
       "status": "pass",
-      "command": "npm exec -w packages/pi-better-background-tasks -- vitest run src/runtime.test.ts -t 'resumes a persisted|kills a tmux-backed|times out a direct SSH watch|reports weak remote-stop'",
-      "observed": "exit 0; tmux kill, direct-watch deadline, and direct-spawn weak-stop timeout paths reached timed_out"
+      "command": "npm exec -w packages/pi-better-background-tasks -- vitest run src/runtime.test.ts -t 'kills a tmux-backed|bounded supervision poll times out|malformed tmux supervision protocol|times out a direct SSH watch|reports weak remote-stop'",
+      "observed": "exit 0; 5 timeout-neighborhood tests passed: timer and poll timeouts reached timed_out with tmux kill, malformed pre-deadline protocol remained failed, and direct watch/spawn timeout behavior remained intact"
     },
     {
       "surface": "background-task.ssh-tool-contract",
