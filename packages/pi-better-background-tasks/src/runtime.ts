@@ -22,6 +22,7 @@ import { isTerminalStatus } from "./types.js";
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const processTimeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const activeProcessTimeouts = new Set<string>();
 const activeRemoteTasks = new Map<string, ResolvedSshRemoteTask>();
 const remoteSessionStarts = new Map<string, Promise<CommandResult>>();
 const activePolls = new Set<string>();
@@ -228,6 +229,11 @@ async function pollRemoteSession(
     if (!meta || meta.status !== "running" || meta.remote?.session !== "tmux" || !remoteTask) return;
     const poll = await remoteTask.pollTmuxSession(meta.remote.logOffset ?? 0, remainingDeadlineMs(meta.deadlineAt));
     appendTaskOutput(meta.logPath, poll.output);
+    if (poll.status === "timed_out") {
+      clearProcessTimeout(id);
+      await timeoutProcess(pi, id, getActiveSession);
+      return;
+    }
     const latest = readMeta(id);
     if (!latest || latest.status !== "running") return;
     latest.remote = { ...latest.remote!, logOffset: poll.logSize };
@@ -257,7 +263,13 @@ async function pollRemoteSession(
       commandResult,
     }, pi, getActiveSession);
   } catch (error) {
-    failRemoteTask(pi, id, error, getActiveSession);
+    const latest = readMeta(id);
+    if (latest?.status === "running" && latest.deadlineAt !== undefined && Date.now() >= latest.deadlineAt) {
+      clearProcessTimeout(id);
+      await timeoutProcess(pi, id, getActiveSession);
+    } else {
+      failRemoteTask(pi, id, error, getActiveSession);
+    }
   } finally {
     activePolls.delete(id);
   }
@@ -649,6 +661,20 @@ function clearProcessTimeout(id: string): void {
 }
 
 async function timeoutProcess(
+  pi: ExtensionAPI,
+  id: string,
+  getActiveSession?: ActiveSessionProvider,
+): Promise<void> {
+  if (activeProcessTimeouts.has(id)) return;
+  activeProcessTimeouts.add(id);
+  try {
+    await finalizeProcessTimeout(pi, id, getActiveSession);
+  } finally {
+    activeProcessTimeouts.delete(id);
+  }
+}
+
+async function finalizeProcessTimeout(
   pi: ExtensionAPI,
   id: string,
   getActiveSession?: ActiveSessionProvider,

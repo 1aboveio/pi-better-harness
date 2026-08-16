@@ -84,7 +84,7 @@ export interface TmuxBootstrapOptions {
 }
 
 export interface TmuxSessionPollResult {
-  status: "running" | "missing" | number;
+  status: "running" | "missing" | "timed_out" | number;
   logSize: number;
   output: string;
   commandResult: CommandResult;
@@ -222,7 +222,7 @@ export function expandSshRemoteTaskPreset(
     pollTmuxSession: async (logOffset, timeoutMs) => parseTmuxPollResult(await runner.runOnce(withRemoteCommand(
       commandSpec,
       tmuxPollCommand(requireSessionName(), logOffset),
-    ), undefined, timeoutMs)),
+    ), undefined, timeoutMs), logOffset),
     killTmuxSession: () => runner.runOnce(withRemoteCommand(
       commandSpec,
       `tmux kill-session -t ${shellQuote(requireSessionName())}`,
@@ -278,7 +278,15 @@ function tmuxPollCommand(sessionName: string, logOffset: number): string {
   ].join("; ");
 }
 
-function parseTmuxPollResult(result: CommandResult): TmuxSessionPollResult {
+function parseTmuxPollResult(result: CommandResult, logOffset: number): TmuxSessionPollResult {
+  if (result.timedOut) {
+    return {
+      status: "timed_out",
+      logSize: Math.max(0, Math.floor(logOffset)),
+      output: result.stdout,
+      commandResult: result,
+    };
+  }
   const [statusLine = "", sizeLine = "", ...outputLines] = result.stdout.split("\n");
   if (!statusLine.startsWith(TMUX_STATUS_PREFIX) || !sizeLine.startsWith(TMUX_SIZE_PREFIX)) {
     throw new Error(`remote tmux supervision returned an invalid response${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`);

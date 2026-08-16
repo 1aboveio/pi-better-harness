@@ -462,6 +462,62 @@ describe("runtime", () => {
   // @covers background-task.ssh-timeout
   // @level integration
   // @fails-without-fix background-task.ssh-timeout
+  it("times out and kills a tmux-backed SSH spawn when its bounded supervision poll times out", async () => {
+    const runner = new FakeRemoteRunner([
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult(""),
+      { ...successfulResult(""), timedOut: true },
+      successfulResult(""),
+    ]);
+    const meta = spawnTask(fakePi, {
+      name: "remote poll timeout",
+      command: "sleep 300",
+      timeout_seconds: 1,
+      callback: false,
+      ssh: { host: "poll-timeout.example", user: "deploy" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status !== "running", 1_000);
+    const sessionName = `pi-bg-${meta.id}`;
+
+    expect(runner.runTimeouts[2]).toBeGreaterThan(0);
+    expect(runner.runCalls.at(-1)?.command).toBe(`tmux kill-session -t '${sessionName}'`);
+    expect(terminal).toMatchObject({
+      status: "timed_out",
+      remote: { stopMessage: `Killed remote tmux session ${sessionName} on deploy@poll-timeout.example after timeout.` },
+      result: { reason: `timeout; killed remote tmux session ${sessionName} on deploy@poll-timeout.example` },
+    });
+  });
+
+  // @covers background-task.ssh-spawn
+  // @level integration
+  it("fails malformed tmux supervision protocol before the task deadline", async () => {
+    const runner = new FakeRemoteRunner([
+      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult(""),
+      successfulResult("not tmux protocol\n"),
+    ]);
+    const meta = spawnTask(fakePi, {
+      name: "malformed remote poll",
+      command: "sleep 300",
+      timeout_seconds: 5,
+      callback: false,
+      ssh: { host: "malformed-poll.example", user: "deploy" },
+    }, process.cwd(), undefined, undefined, { remoteRunner: runner });
+
+    const terminal = await waitForMeta(meta.id, (current) => current?.status !== "running", 1_000);
+
+    expect(terminal).toMatchObject({
+      status: "failed",
+      error: "remote tmux supervision returned an invalid response",
+      result: { reason: "remote tmux supervision returned an invalid response" },
+    });
+    expect(runner.runCalls.some((call) => call.command?.startsWith("tmux kill-session"))).toBe(false);
+  });
+
+  // @covers background-task.ssh-timeout
+  // @level integration
+  // @fails-without-fix background-task.ssh-timeout
   it("times out a direct SSH watch at its deadline and preserves the default timeout", async () => {
     const runner = new FakeRemoteRunner([successfulResult("pending\n")]);
     const explicit = startWatchTask(fakePi, {
