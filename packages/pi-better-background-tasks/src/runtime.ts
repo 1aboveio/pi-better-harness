@@ -197,7 +197,9 @@ export function resumeRunningTask(
     return meta;
   }
   if (meta.kind === "command_watch") {
-    scheduleWatch(pi, meta.id, 0, getActiveSession);
+    if (!watcherTimers.has(meta.id) && !activePolls.has(meta.id)) {
+      scheduleWatch(pi, meta.id, 0, getActiveSession);
+    }
     return meta;
   }
   if (meta.kind === "process") scheduleLogRetention(meta.id);

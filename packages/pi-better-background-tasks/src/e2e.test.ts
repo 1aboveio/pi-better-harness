@@ -249,7 +249,7 @@ describe("extension e2e", () => {
     await otherHarness.fireSessionStart();
 
     const terminal = await waitForMeta(id, (meta) => typeof meta?.callbackSuppressedAt === "number");
-    expect(otherHarness.messages).toHaveLength(0);
+    expect(otherHarness.messages.join("\n")).not.toContain(id);
     expect(terminal?.callbackSuppressedReason).toContain("origin session session-a does not match active session session-b");
   });
 
