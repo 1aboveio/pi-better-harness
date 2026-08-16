@@ -1,0 +1,12 @@
+{
+  "issue": 188,
+  "head": "44bdd88418f0b5283c1c72eda91e05525246a7b7",
+  "results": [
+    {
+      "surface": "background-task.ssh-spawn",
+      "status": "pass",
+      "command": "node --import tsx --input-type=module -e '<spawn SSH task with FakeRemoteRunner; wait for terminal metadata; inspect durable log>'",
+      "observed": "status=succeeded; target=deploy@smoke.example; mode=tmux; sessionName=pi-bg-<task-id>; bootstrap=present; exitCode=0; captured=true; remoteCalls=3; localSpawnCalls=0"
+    }
+  ]
+}
