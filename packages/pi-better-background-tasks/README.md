@@ -18,6 +18,31 @@ Use `pi-better-background-tasks` when a command should keep running while the fo
 - Show active work in Pi's background-work navigator.
 - Flag running tasks with no observable output or completed poll as stalled.
 
+## Remote SSH
+
+Prefer structured `ssh` fields over hand-written `ssh` command lines. A remote
+spawn uses a durable tmux session by default, while a remote watch opens one
+direct SSH poll per interval and does not require tmux. The package keeps the
+same local metadata, logs, terminal statuses, callbacks, and `/reload` recovery
+for both.
+
+```json
+{
+  "name": "remote build",
+  "command": "npm run build",
+  "ssh": { "host": "build.example", "user": "deploy" },
+  "remote": { "workdir": "/srv/app" },
+  "timeout_seconds": 1800
+}
+```
+
+Tmux-backed spawn can install tmux non-interactively when the remote host allows
+it and fails closed with copy-pasteable setup guidance when it cannot. Set
+`remote.session=direct` only as an explicit escape hatch for short jobs: stop or
+timeout can terminate the local SSH client but the remote process may still be
+running. See the detailed usage notes for bootstrap policy, watch conditions,
+timeouts, and v1 non-goals.
+
 ## Install
 
 ```sh

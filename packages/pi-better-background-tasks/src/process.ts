@@ -36,12 +36,17 @@ export function spawnCommand(spec: CommandSpec, logPath: string, detached: boole
   return { child, pgid: detached && child.pid ? child.pid : undefined };
 }
 
-export function runCommandOnce(spec: CommandSpec, maxBufferBytes = 1024 * 1024): Promise<CommandResult> {
+export function runCommandOnce(
+  spec: CommandSpec,
+  maxBufferBytes = 1024 * 1024,
+  timeoutMs?: number,
+): Promise<CommandResult> {
   validateCommandSpec(spec);
   const startedAt = Date.now();
   const child = spawnArgs(spec, false, ["ignore", "pipe", "pipe"]);
   let stdout = "";
   let stderr = "";
+  let timedOut = false;
   child.stdout?.on("data", (chunk: Buffer) => {
     if (Buffer.byteLength(stdout) < maxBufferBytes) stdout += chunk.toString("utf8");
   });
@@ -49,9 +54,26 @@ export function runCommandOnce(spec: CommandSpec, maxBufferBytes = 1024 * 1024):
     if (Buffer.byteLength(stderr) < maxBufferBytes) stderr += chunk.toString("utf8");
   });
   return new Promise((resolve, reject) => {
-    child.on("error", reject);
+    const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, Math.max(1, timeoutMs));
+    timeout?.unref();
+    child.on("error", (error) => {
+      if (timeout) clearTimeout(timeout);
+      reject(error);
+    });
     child.on("close", (exitCode, signal) => {
-      resolve({ exitCode, signal, stdout, stderr, startedAt, endedAt: Date.now() });
+      if (timeout) clearTimeout(timeout);
+      resolve({
+        exitCode,
+        signal,
+        stdout,
+        stderr,
+        startedAt,
+        endedAt: Date.now(),
+        ...(timedOut ? { timedOut: true } : {}),
+      });
     });
   });
 }

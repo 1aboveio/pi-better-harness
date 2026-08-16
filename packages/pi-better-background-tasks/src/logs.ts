@@ -21,6 +21,12 @@ export function appendLine(logPath: string, line: string): void {
   appendFileSync(logPath, `${line}\n`);
 }
 
+export function appendTaskOutput(logPath: string, output: string): void {
+  if (!output) return;
+  mkdirSync(dirname(logPath), { recursive: true });
+  appendFileSync(logPath, output);
+}
+
 export function readLog(logPath: string, tailLines?: number): { text: string; truncated: boolean } {
   const requestedRows = tailLines && tailLines > 0 ? Math.floor(tailLines) : undefined;
   const tail = readBoundedTail(logPath, MAX_LOG_TAIL_READ_BYTES);

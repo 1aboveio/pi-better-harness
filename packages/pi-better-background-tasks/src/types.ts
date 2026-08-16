@@ -29,6 +29,47 @@ export interface CommandResult {
   stderr: string;
   startedAt: number;
   endedAt: number;
+  timedOut?: boolean;
+}
+
+export interface SshConnectionParams {
+  host: string;
+  user?: string;
+  port?: number;
+  identity_file?: string;
+  jump?: string;
+  options?: Record<string, string>;
+}
+
+export interface RemoteTaskParams {
+  session?: "tmux" | "direct";
+  install_tmux?: boolean;
+  workdir?: string;
+}
+
+export interface ResolvedSshIdentity {
+  host: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+  jump?: string;
+  options?: Record<string, string>;
+  target: string;
+}
+
+export interface ResolvedRemoteTaskMetadata {
+  command: string;
+  session?: "tmux" | "direct";
+  installTmux?: boolean;
+  workdir?: string;
+  sessionName?: string;
+  bootstrapStatus?: "pending" | "present" | "installed" | "needs_user" | "unknown_package_manager" | "install_failed" | "timed_out";
+  bootstrapMessage?: string;
+  tmuxInstalled?: boolean;
+  sessionStarted?: boolean;
+  logOffset?: number;
+  warning?: string;
+  stopMessage?: string;
 }
 
 export interface BackgroundTaskCallbackOrigin {
@@ -75,6 +116,8 @@ export interface BackgroundTaskMeta {
   notifyOn?: "terminal";
   stopRequestedAt?: number;
   error?: string;
+  ssh?: ResolvedSshIdentity;
+  remote?: ResolvedRemoteTaskMetadata;
 }
 
 export interface TerminalResult {
