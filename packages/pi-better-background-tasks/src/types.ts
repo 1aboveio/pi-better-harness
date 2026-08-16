@@ -31,6 +31,38 @@ export interface CommandResult {
   endedAt: number;
 }
 
+export interface SshConnectionParams {
+  host: string;
+  user?: string;
+  port?: number;
+  identity_file?: string;
+  jump?: string;
+  options?: Record<string, string>;
+}
+
+export interface RemoteTaskParams {
+  session?: "tmux" | "direct";
+  install_tmux?: boolean;
+  workdir?: string;
+}
+
+export interface ResolvedSshIdentity {
+  host: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+  jump?: string;
+  options?: Record<string, string>;
+  target: string;
+}
+
+export interface ResolvedRemoteTaskMetadata {
+  command: string;
+  session?: "tmux" | "direct";
+  installTmux?: boolean;
+  workdir?: string;
+}
+
 export interface BackgroundTaskCallbackOrigin {
   cwd: string;
   sessionId?: string;
@@ -75,6 +107,8 @@ export interface BackgroundTaskMeta {
   notifyOn?: "terminal";
   stopRequestedAt?: number;
   error?: string;
+  ssh?: ResolvedSshIdentity;
+  remote?: ResolvedRemoteTaskMetadata;
 }
 
 export interface TerminalResult {
