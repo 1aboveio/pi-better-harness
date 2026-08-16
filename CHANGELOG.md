@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-background-tasks@0.2.0] - 2026-08-17
+
+### Added
+
+- **background-tasks**: first-class SSH remote-task preset — structured `ssh` / `remote` fields on spawn/watch, agent-safe argv (`BatchMode`, connect timeout, `-T`, shell:false), injectable fake remote runner for tests
+- **background-tasks**: remote tmux bootstrap (probe / non-interactive package-manager install / fail-closed needs-user with copy-pasteable commands)
+- **background-tasks**: SSH watch as direct one-shot remote polls with existing success/failure conditions
+- **background-tasks**: SSH spawn defaults to durable remote tmux sessions with log capture and real remote stop (`tmux kill-session`); explicit `remote.session=direct` escape hatch with weak-stop warning
+- **background-tasks**: resume after reload for tmux-backed and direct-watch remote tasks; `timeout_seconds` yields `timed_out` (including deadline-bounded supervision polls)
+- **background-tasks**: Remote SSH usage docs and tool descriptions steering models to structured `ssh` fields
+
 ## [pi-better-harness@0.1.17] - 2026-08-14
 
 ### Changed
