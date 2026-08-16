@@ -26,8 +26,8 @@ const SshSchema = Type.Object({
 });
 
 const RemoteSchema = Type.Object({
-  session: Type.Optional(Type.Union([Type.Literal("tmux"), Type.Literal("direct")], { description: "Requested remote session mode for later lifecycle handling." })),
-  install_tmux: Type.Optional(Type.Boolean({ description: "Whether later remote lifecycle handling may install tmux." })),
+  session: Type.Optional(Type.Union([Type.Literal("tmux"), Type.Literal("direct")], { description: "Requested remote session mode. Watch always uses direct one-shot polls." })),
+  install_tmux: Type.Optional(Type.Boolean({ description: "Whether remote spawn lifecycle handling may install tmux. This field is ignored for watch." })),
   workdir: Type.Optional(Type.String({ description: "Remote working directory for later lifecycle handling." })),
 });
 
@@ -130,7 +130,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_watch",
     label: "BG Watch",
-    description: "Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, pass structured ssh fields and provide the remote command in command. Returns immediately with its task id. Default timeout 900 seconds; pass timeout_seconds:0 to disable.",
+    description: "Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, pass structured ssh fields and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. Returns immediately with its task id. Default timeout 900 seconds; pass timeout_seconds:0 to disable.",
     parameters: WatchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -190,7 +190,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote spawn/watch, pass structured ssh fields and provide the remote command in command. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote spawn/watch, pass structured ssh fields and provide the remote command in command. SSH watches use direct one-shot polls without tmux installation. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);

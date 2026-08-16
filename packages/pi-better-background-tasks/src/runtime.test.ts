@@ -49,6 +49,9 @@ describe("runtime", () => {
     expect(disabled.deadlineAt).toBeUndefined();
   });
 
+  // @characterizes background-task.local-watch
+  // @covers background-task.local-watch
+  // @level integration
   it("runs a command watcher to success", async () => {
     const meta = startWatchTask(fakePi, {
       name: "test watcher",
@@ -219,6 +222,9 @@ describe("runtime", () => {
     expect(log).toContain("spawn ssh ENOENT");
   });
 
+  // @characterizes background-task.local-watch
+  // @covers background-task.local-watch
+  // @level integration
   it("finalizes a command watcher when failure_when matches", async () => {
     const meta = startWatchTask(fakePi, {
       name: "test failing watcher",
@@ -234,6 +240,9 @@ describe("runtime", () => {
     expect(terminal?.result).toMatchObject({ reason: "failure condition matched", exitCode: 0 });
   });
 
+  // @characterizes background-task.local-watch
+  // @covers background-task.local-watch
+  // @level integration
   it("times out a command watcher", async () => {
     const meta = startWatchTask(fakePi, {
       name: "test timeout watcher",
@@ -246,6 +255,79 @@ describe("runtime", () => {
 
     const terminal = await waitForMeta(meta.id, (m) => m?.status === "timed_out", 2500);
     expect(terminal?.result).toMatchObject({ reason: "timeout" });
+  });
+
+  // @covers background-task.ssh-watch
+  // @level integration
+  it("delivers callbacks for succeeded, failed, and timed-out remote watches", async () => {
+    const start = (name: string, runner: FakeRemoteRunner, timeoutSeconds = 5) => {
+      const messages: string[] = [];
+      const pi = {
+        sendMessage: (message: { content: string }) => { messages.push(message.content); },
+      } as unknown as ExtensionAPI;
+      const origin = { cwd: process.cwd() };
+      const meta = startWatchTask(pi, {
+        name,
+        command: "check deployment",
+        interval_seconds: 1,
+        timeout_seconds: timeoutSeconds,
+        ssh: { host: `${name}.example` },
+        success_when: { type: "stdout_contains", value: "ready" },
+      }, process.cwd(), origin, () => origin, { remoteRunner: runner });
+      return { messages, pi, origin, meta };
+    };
+
+    const watches = [
+      start("remote-success", new FakeRemoteRunner([remoteResult({ stdout: "ready\n" })])),
+      start("remote-failure", new FakeRemoteRunner([remoteResult({ exitCode: 255, stderr: "Permission denied (publickey).\n" })])),
+      start("remote-timeout", new FakeRemoteRunner([remoteResult({ stdout: "pending\n" })]), 0.1),
+    ];
+    const terminal = await Promise.all([
+      waitForMeta(watches[0]!.meta.id, (meta) => meta?.status === "succeeded" && Boolean(meta.callbackSentAt), 8_000),
+      waitForMeta(watches[1]!.meta.id, (meta) => meta?.status === "failed" && Boolean(meta.callbackSentAt), 8_000),
+      waitForMeta(watches[2]!.meta.id, (meta) => meta?.status === "timed_out" && Boolean(meta.callbackSentAt), 8_000),
+    ]);
+
+    expect(terminal.map((meta) => meta?.status)).toEqual(["succeeded", "failed", "timed_out"]);
+    for (const watch of watches) {
+      const batcher = getCallbackBatcher(watch.pi);
+      const deliveredAt = readMeta(watch.meta.id)?.callbackSentAt;
+      expect(deliveredAt).toBeTypeOf("number");
+
+      const deliveryCount = watch.messages.length;
+      resumeRunningTask(watch.pi, readMeta(watch.meta.id)!, () => watch.origin);
+      await batcher.flush();
+      expect(readMeta(watch.meta.id)?.callbackSentAt).toBe(deliveredAt);
+      expect(watch.messages).toHaveLength(deliveryCount);
+    }
+  }, 10_000);
+
+  // @covers background-task.ssh-watch
+  // @level integration
+  it("keeps remote watch cancellation callback-silent after a completed poll", async () => {
+    const messages: string[] = [];
+    const pi = {
+      sendMessage: (message: { content: string }) => { messages.push(message.content); },
+    } as unknown as ExtensionAPI;
+    const origin = { cwd: process.cwd(), sessionId: `ssh-watch-cancel-${Date.now()}` };
+    const runner = new FakeRemoteRunner([remoteResult({ stdout: "pending\n" })]);
+    const meta = startWatchTask(pi, {
+      name: "remote cancelled watcher",
+      command: "check deployment",
+      interval_seconds: 1,
+      timeout_seconds: 5,
+      ssh: { host: "cancel.example" },
+      success_when: { type: "stdout_contains", value: "ready" },
+    }, process.cwd(), origin, () => origin, { remoteRunner: runner });
+
+    await waitForMeta(meta.id, (current) => Boolean(current?.lastCheckedAt));
+    const stopped = stopTask(pi, meta.id, () => origin);
+    const cancelled = await waitForMeta(meta.id, (current) => Boolean(current?.callbackSuppressedAt));
+
+    expect(runner.runCalls).toHaveLength(1);
+    expect(stopped).toMatchObject({ status: "cancelled" });
+    expect(cancelled?.callbackSuppressedReason).toContain("cancelled");
+    expect(messages).toHaveLength(0);
   });
 
   it("finalizes a short spawned process", async () => {
