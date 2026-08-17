@@ -164,7 +164,7 @@ export default function (pi: ExtensionAPI): void {
   let continuationQueuedFor: string | null = null;
   let idleContinuationTimer: ReturnType<typeof setTimeout> | undefined;
   let idleContinuationSignature = "";
-  let refreshGoalWidget: (() => void) | undefined;
+  let refreshGoalWidget: ((force?: boolean) => void) | undefined;
   let lastAgentEvidence: ContinuationEvidence | null = null;
 
   const getGoal = (ctx: ExtensionContext): GoalSnapshot | null => currentGoalSnapshot(ctx);
@@ -180,21 +180,53 @@ export default function (pi: ExtensionAPI): void {
     appendContinuationState(createContinuationState(goal.goalId));
   };
 
+  const isForegroundBusy = (ctx: ExtensionContext): boolean =>
+    foregroundRunning || !ctx.isIdle();
+
+  /**
+   * Chat `notify` appends lines above the Working/bash status region. While the
+   * agent is streaming, that height change desyncs Pi main-screen differential
+   * rendering and stacks "Working..." / "Elapsed Xs" into scrollback. Keep
+   * mid-stream feedback out of the transcript; use the footer status instead.
+   */
+  const notifyGoal = (
+    ctx: ExtensionContext,
+    message: string,
+    type: "info" | "warning" | "error" = "info",
+  ): void => {
+    if (!ctx.hasUI) {
+      return;
+    }
+    if (isForegroundBusy(ctx) && type !== "error") {
+      try {
+        ctx.ui.setStatus(EXTENSION_NAME, message);
+      } catch {
+        // Footer status is best-effort only.
+      }
+      return;
+    }
+    ctx.ui.notify(message, type);
+  };
+
   const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource): void => {
+    const previous = getGoal(ctx);
+    const wasVisible = previous !== null && isGoalClockVisible(previous);
     pi.appendEntry(EXTENSION_NAME, goalSetEntry(goal, source));
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
-    refreshGoalWidget?.();
+    // Force a full redraw when the dock height changes (absent ↔ visible clock).
+    refreshGoalWidget?.(!wasVisible || !isGoalClockVisible(goal));
   };
 
   const clearGoal = (ctx: ExtensionContext, source: GoalEntrySource): void => {
     const current = getGoal(ctx);
+    const wasVisible = current !== null && isGoalClockVisible(current);
     pi.appendEntry(EXTENSION_NAME, goalClearEntry(current?.goalId ?? null, source));
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
-    refreshGoalWidget?.();
+    refreshGoalWidget?.(wasVisible);
   };
 
   const queueGoalContinuation = (goal: GoalSnapshot): void => {
@@ -395,8 +427,24 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.setWidget(
       EXTENSION_NAME,
       (tui, theme) => {
-        const scheduler = createRenderScheduler(() => tui.requestRender());
-        const refresh = (): void => scheduler.request();
+        const requestRender = (force = false): void => {
+          try {
+            tui.requestRender(force);
+          } catch {
+            // UI paint is best-effort only.
+          }
+        };
+        const scheduler = createRenderScheduler(() => requestRender(false));
+        const refresh = (force = false): void => {
+          if (force) {
+            scheduler.cancel();
+            // Height transitions must reset main-screen differential state so
+            // Working/Elapsed lines keep rewriting in place instead of stacking.
+            requestRender(true);
+            return;
+          }
+          scheduler.request();
+        };
         refreshGoalWidget = refresh;
 
         return {
@@ -444,49 +492,53 @@ export default function (pi: ExtensionAPI): void {
 
       if (!trimmed) {
         const continuation = current ? currentContinuationState(ctx, current.goalId) : null;
+        // Inspection is always explicit user intent; show the full summary even while busy.
         ctx.ui.notify(formatGoal(current, continuation, observeGoalStall(current, continuation, { foregroundRunning })), "info");
         return;
       }
 
       if (trimmed === "pause") {
         if (!current || current.status !== "active") {
-          ctx.ui.notify("Only active goals can be paused.", "warning");
+          notifyGoal(ctx, "Only active goals can be paused.", "warning");
           return;
         }
         setGoal(goalWithStatus(current, "paused"), ctx, "command");
-        ctx.ui.notify("Goal paused.", "info");
+        notifyGoal(ctx, "Goal paused.");
         return;
       }
 
       if (trimmed === "resume") {
         if (!current || current.status !== "paused") {
-          ctx.ui.notify("Only paused goals can be resumed.", "warning");
+          notifyGoal(ctx, "Only paused goals can be resumed.", "warning");
           return;
         }
         const goal = goalWithStatus(current, "active");
         setGoal(goal, ctx, "command");
         queueGoalContinuation(goal);
-        ctx.ui.notify("Goal resumed.", "info");
+        notifyGoal(ctx, "Goal resumed.");
         return;
       }
 
       if (trimmed === "clear") {
         clearGoal(ctx, "command");
-        ctx.ui.notify("Goal cleared.", "info");
+        notifyGoal(ctx, "Goal cleared.");
         return;
       }
 
       if (trimmed === "complete") {
         if (!current) {
-          ctx.ui.notify("No goal is set.", "warning");
+          notifyGoal(ctx, "No goal is set.", "warning");
           return;
         }
         setGoal(goalWithStatus(current, "complete"), ctx, "command");
-        ctx.ui.notify("Goal marked complete.", "info");
+        notifyGoal(ctx, "Goal marked complete.");
         return;
       }
 
-      if (current && current.status !== "complete" && ctx.hasUI) {
+      // Confirm dialogs swap the editor and reflow the dock. While the agent is
+      // streaming that desyncs main-screen differential paints, so replace
+      // silently mid-turn and only confirm when idle.
+      if (current && current.status !== "complete" && ctx.hasUI && !isForegroundBusy(ctx)) {
         const replace = await ctx.ui.confirm(
           "Replace active goal?",
           `Current goal: ${current.objective}`,
@@ -498,9 +550,9 @@ export default function (pi: ExtensionAPI): void {
 
       try {
         const goal = startOrReplaceGoal(trimmed, null, ctx, "command");
-        ctx.ui.notify(`Goal set: ${goal.objective}`, "info");
+        notifyGoal(ctx, `Goal set: ${goal.objective}`);
       } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
       }
     },
   });

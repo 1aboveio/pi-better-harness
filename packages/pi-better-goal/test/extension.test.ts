@@ -82,12 +82,18 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.equal(typeof widget?.content, "function");
 
   let renderRequests = 0;
+  const forcedRenders: boolean[] = [];
   const factory = widget?.content as (
-    tui: { requestRender(): void },
+    tui: { requestRender(force?: boolean): void },
     theme: { fg(color: string, text: string): string },
   ) => { render(width: number): string[]; dispose?(): void };
   const component = factory(
-    { requestRender: () => { renderRequests += 1; } },
+    {
+      requestRender: (force = false) => {
+        renderRequests += 1;
+        forcedRenders.push(force);
+      },
+    },
     { fg: (_color, text) => text },
   );
   assert.deepEqual(component.render(80), []);
@@ -98,6 +104,7 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.ok(goalCommand);
   await goalCommand.handler("Ship slash-only goals", ctx);
   assert.equal(renderRequests, 1, "setting a goal requests one immediate render");
+  assert.equal(forcedRenders.at(-1), true, "absent → visible clock forces a full redraw");
 
   const getGoal = tools.get("get_goal");
   assert.ok(getGoal);
@@ -114,9 +121,11 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.equal(renderRequests, 1, "active clock does not repaint every second");
   t.mock.timers.tick(1);
   assert.equal(renderRequests, 2, "active clock requests one coarse refresh");
+  assert.equal(forcedRenders.at(-1), false, "clock ticks use differential paints");
 
   await goalCommand.handler("clear", ctx);
   assert.equal(renderRequests, 3, "clearing a goal requests one immediate render");
+  assert.equal(forcedRenders.at(-1), true, "visible → absent clock forces a full redraw");
   assert.deepEqual(component.render(80), []);
   t.mock.timers.tick(30_000);
   assert.equal(renderRequests, 3, "cleared goal remains timer-free");
@@ -125,6 +134,79 @@ test("only the slash command creates a goal and installs an observability-safe w
   const shutdown = handlers.get("session_shutdown");
   assert.ok(shutdown);
   await shutdown({}, ctx);
+});
+
+test("setting a goal while the agent is streaming avoids chat notify and confirm", async () => {
+  const entries: SessionEntry[] = [];
+  const commands = new Map<string, CommandDefinition>();
+  const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+  const notifications: Array<{ message: string; type?: string }> = [];
+  const statuses: Array<{ key: string; value: string | undefined }> = [];
+  let confirms = 0;
+  let idle = false;
+
+  const ctx = {
+    hasUI: true,
+    isIdle: () => idle,
+    sessionManager: { getBranch: () => entries },
+    ui: {
+      confirm: async () => {
+        confirms += 1;
+        return true;
+      },
+      notify(message: string, type?: string) {
+        notifications.push({ message, ...(type ? { type } : {}) });
+      },
+      setStatus(key: string, value: string | undefined) {
+        statuses.push({ key, value });
+      },
+      setWidget() {
+        // Not needed for this regression.
+      },
+    },
+  } as unknown as ExtensionContext;
+
+  const pi = {
+    events: new EventEmitter(),
+    appendEntry(customType: string, data: unknown) {
+      entries.push({ type: "custom", customType, data });
+    },
+    sendMessage: () => undefined,
+    registerCommand(name: string, command: CommandDefinition) {
+      commands.set(name, command);
+    },
+    registerTool() {
+      // Not needed for this regression.
+    },
+    registerShortcut() {
+      // Not asserted in this test.
+    },
+    on(event: string, handler: (event: unknown, context: ExtensionContext) => unknown) {
+      handlers.set(event, handler);
+    },
+  } as unknown as ExtensionAPI;
+
+  extension(pi);
+  await handlers.get("session_start")?.({}, ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+
+  // Seed an incomplete goal so a mid-stream replace would normally confirm.
+  idle = true;
+  await commands.get("goal")?.handler("first objective", ctx);
+  notifications.length = 0;
+  statuses.length = 0;
+  confirms = 0;
+
+  idle = false;
+  await commands.get("goal")?.handler("second objective", ctx);
+
+  assert.equal(confirms, 0, "mid-stream goal replace must not open a confirm dialog");
+  assert.equal(notifications.length, 0, "mid-stream goal feedback must not append chat status lines");
+  assert.ok(
+    statuses.some((entry) => entry.key === "pi-better-goal" && entry.value?.includes("second objective")),
+    "mid-stream feedback goes to the footer status instead",
+  );
+  assert.equal(latestGoal(entries)?.objective, "second objective");
 });
 
 test("external active background providers suppress idle goal continuation", async (t) => {
@@ -426,14 +508,14 @@ function createContinuationHarness() {
 }
 
 function latestGoal(entries: SessionEntry[]) {
-  let goal: { status?: string } | undefined;
+  let goal: { status?: string; objective?: string } | undefined;
   for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== "pi-better-goal" || !entry.data || typeof entry.data !== "object") {
       continue;
     }
     const data = entry.data as { kind?: unknown; goal?: unknown };
     if (data.kind === "set" && data.goal && typeof data.goal === "object") {
-      goal = data.goal as { status?: string };
+      goal = data.goal as { status?: string; objective?: string };
     }
   }
   return goal;

@@ -54,6 +54,12 @@ cleared or replaced.
 The widget does not replace Pi's footer, so custom footer extensions such as
 `pi-observability` retain ownership of their layout and lifecycle.
 
+Setting or clearing a goal while the agent is streaming avoids chat `notify`
+lines and confirm dialogs (both reflow the main-screen dock and can stack
+`Working...` / bash `Elapsed` frames into scrollback). Mid-stream feedback goes
+to the footer status instead, and height transitions force a full TUI redraw so
+differential paints stay aligned.
+
 Set `PI_BETTER_GOAL_DISABLE_WAKE=1` to disable hidden background-drain wakeups.
 
 ## Progress-Aware Continuation
