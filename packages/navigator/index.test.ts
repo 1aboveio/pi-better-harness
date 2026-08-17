@@ -157,11 +157,28 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("keeps the main list timer-free and renders provider changes immediately", (t) => {
+  it("keeps the main list timer-free and renders only material provider changes", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     let notifyVisibleChanged: (() => void) | undefined;
+    let elapsed = "1s";
+    let facts = ["14m 30s left"];
+    let status = "running";
+    let statusTone: "running" | "success" = "running";
     const unregister = registerBackgroundWorkProvider({
       ...provider("background-tasks", "Background Tasks", 20, 100, () => undefined),
+      visibleCount: () => status === "running" ? 1 : 0,
+      listRows: () => [{
+        providerId: "background-tasks",
+        id: "background-tasks-1",
+        name: "Background Tasks row",
+        status,
+        statusTone,
+        kind: "background-tasks",
+        elapsed,
+        primary: "Background Tasks primary",
+        facts,
+        sortStartedAt: 100,
+      }],
       onVisibleChanged(notify) {
         notifyVisibleChanged = notify;
         return () => { notifyVisibleChanged = undefined; };
@@ -191,8 +208,16 @@ describe("shared background work navigator", () => {
       t.mock.timers.tick(60_000);
       assert.equal(renders, 0, "running rows do not drive periodic full-screen renders");
 
+      elapsed = "1m 01s";
+      facts = ["13m 29s left"];
       notifyVisibleChanged?.();
-      assert.equal(renders, 1, "provider state changes render immediately");
+      assert.equal(renders, 0, "volatile elapsed/deadline churn does not repaint the terminal");
+
+      status = "succeeded";
+      statusTone = "success";
+      facts = ["result"];
+      notifyVisibleChanged?.();
+      assert.equal(renders, 1, "material provider state changes render immediately");
       component.dispose?.();
     } finally {
       disposeBackgroundWorkNavigator(ctx);
@@ -288,11 +313,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("renders running rows as a solid animated dot", () => {
-    let now = 0;
-    const dateNowDescriptor = Object.getOwnPropertyDescriptor(Date, "now");
-    Object.defineProperty(Date, "now", { configurable: true, value: () => now });
-
+  it("renders running rows as a stable solid dot", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("subagents", "Subagents", 10, 300, () => undefined),
       listRows: () => [{
@@ -328,26 +349,19 @@ describe("shared background work navigator", () => {
         truncate: (value, width) => value.slice(0, width),
       });
 
-      // Animation advances only when another event causes a render; it does not
-      // own a repaint loop.
-      now = 0;
       const first = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 10_000;
       const second = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 20_000;
       const third = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      now = 30_000;
-      const fourth = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
 
-      assert.match(first, /<dim>●<\/>\s+reviewer/);
+      assert.match(first, /<accent>●<\/>\s+reviewer/);
       assert.match(second, /<accent>●<\/>\s+reviewer/);
       assert.match(third, /<accent>●<\/>\s+reviewer/);
-      assert.match(fourth, /<dim>●<\/>\s+reviewer/);
-      assert.doesNotMatch(`${first}\n${second}\n${third}\n${fourth}`, /<[a-z]+>[•·◌]<\/>\s+reviewer|◌/);
+      assert.equal(first, second);
+      assert.equal(second, third);
+      assert.doesNotMatch(`${first}\n${second}\n${third}`, /<[a-z]+>[•·◌]<\/>\s+reviewer|◌/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
-      if (dateNowDescriptor) Object.defineProperty(Date, "now", dateNowDescriptor);
     }
   });
 
