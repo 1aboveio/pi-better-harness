@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.1.20] - 2026-08-17
+
+### Changed
+
+- **harness**: bundle background-tasks 0.2.1 (clearer SSH background-task schema guidance)
+
+## [pi-better-background-tasks@0.2.1] - 2026-08-17
+
+### Fixed
+
+- **background-tasks**: make the structured SSH remote-task path explicit on the `ssh` and `remote` parameter schemas, steering agents away from hand-written outer `ssh` commands and toward tmux-backed remote spawns
+
 ## [pi-better-harness@0.1.19] - 2026-08-17
 
 ### Changed
