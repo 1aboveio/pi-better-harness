@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-goal@0.1.21] - 2026-08-17
+
+### Fixed
+
+- **goal**: stop `Working...` / bash `Elapsed` stacking when setting a goal mid-stream — mid-stream feedback uses footer status (not chat notify), skip replace confirm while busy, and force a full TUI redraw when the goal clock appears or disappears
+
 ## [pi-better-harness@0.1.18] - 2026-08-17
 
 ### Changed
