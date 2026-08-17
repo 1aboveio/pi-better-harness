@@ -78,9 +78,15 @@ describe("extension e2e", () => {
         "workdir",
       ]);
       expect(properties?.command?.description).toContain("remote command when ssh is set");
+      expect(properties?.ssh?.description).toContain("instead of wrapping command in a hand-written ssh command");
+      expect(properties?.ssh?.description).toContain("command is the remote command");
+      expect(properties?.ssh?.description).toContain("remote stop semantics");
+      expect(properties?.remote?.description).toContain("durable tmux default");
+      expect(properties?.remote?.description).toContain("SSH watch runs direct one-shot polls");
       expect(properties?.remote?.properties?.session?.description).toContain("tmux");
       expect(properties?.remote?.properties?.session?.description).toContain("direct");
       expect(tool?.description).toContain("structured ssh");
+      expect(tool?.description).toContain("ssh:{host,user}");
     }
     expect(harness.tools.get("bg_task_spawn")?.description).toContain("defaults to a remote tmux session");
     expect(harness.tools.get("bg_task_spawn")?.description).toContain("direct mode has weaker stop semantics");
