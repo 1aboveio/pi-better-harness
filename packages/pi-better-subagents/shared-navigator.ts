@@ -83,6 +83,7 @@ type NavigatorState = {
   deps?: HostDeps;
   lastHint?: string | null;
   lastMainListLines?: string[];
+  lastMainListSignature?: string;
   mainListWidgetInstalled?: boolean;
   mainListRequestRender?: () => void;
   mainListSelectedId?: string;
@@ -110,7 +111,6 @@ const MAIN_LIST_FALLBACK_WIDTH = 100;
 const DETAIL_OVERLAY_FOOTER_ROWS = 3;
 const EVIDENCE_SECTION_ID = "__evidence__";
 const RUNNING_DOT_GLYPH = "●";
-const RUNNING_DOT_FRAMES = ["dim", "accent", "accent", "dim"] as const;
 
 function state(): NavigatorState {
   const g = globalThis as typeof globalThis & { [GLOBAL_KEY]?: NavigatorState };
@@ -199,6 +199,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   }
   s.lastHint = undefined;
   s.lastMainListLines = undefined;
+  s.lastMainListSignature = undefined;
   s.mainListDeadlineScheduler?.dispose();
   s.mainListDeadlineScheduler = undefined;
   s.mainListWidgetInstalled = false;
@@ -263,6 +264,12 @@ function refreshMainListWidget(): void {
     s.mainListDeadlineScheduler?.schedule(nextExpiry - now);
   }
   syncMainListSelection(rows);
+  const nextSignature = rows.length ? mainListSignature(rows, {
+    selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
+    focused: s.mainListFocused === true,
+  }) : undefined;
+  const changed = nextSignature !== s.lastMainListSignature;
+  s.lastMainListSignature = nextSignature;
   s.lastMainListLines = rows.length ? buildMainListLines(rows, MAIN_LIST_FALLBACK_WIDTH, deps.truncate, themeFg(ctx), {
     selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
     focused: s.mainListFocused === true,
@@ -272,6 +279,7 @@ function refreshMainListWidget(): void {
     try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
     s.mainListWidgetInstalled = false;
     s.mainListRequestRender = undefined;
+    s.lastMainListSignature = undefined;
     return;
   }
   if (!s.mainListWidgetInstalled) {
@@ -280,7 +288,9 @@ function refreshMainListWidget(): void {
       s.mainListWidgetInstalled = true;
     } catch { /* ignore */ }
   }
-  try { s.mainListRequestRender?.(); } catch { /* ignore */ }
+  if (changed) {
+    try { s.mainListRequestRender?.(); } catch { /* ignore */ }
+  }
 }
 
 function themeFg(ctx: ExtensionContext): (color: string, value: string) => string {
@@ -481,9 +491,40 @@ function statusGlyph(row: InternalRow): string {
 }
 
 function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; color: string } {
+  void now;
   if (row.statusTone !== "running") return { glyph: statusGlyph(row), color: toneColor(row.statusTone, row.status) };
-  const frame = Math.floor(now / DETAIL_TICK_MS) % RUNNING_DOT_FRAMES.length;
-  return { glyph: RUNNING_DOT_GLYPH, color: RUNNING_DOT_FRAMES[frame]! };
+  return { glyph: RUNNING_DOT_GLYPH, color: "accent" };
+}
+
+function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean } = {}): string {
+  return JSON.stringify({
+    focused: options.focused === true,
+    selectedId: options.focused === true ? options.selectedId ?? null : null,
+    rows: rows.map((row) => ({
+      navigatorId: row.navigatorId,
+      providerLabel: row.providerLabel,
+      parentRow: row.parentRow === true,
+      providerId: row.providerId,
+      id: row.id,
+      name: row.name ?? null,
+      model: row.model ?? null,
+      effort: row.effort ?? null,
+      tool: row.tool ?? null,
+      tokens: row.tokens ?? null,
+      command: row.command ?? null,
+      status: row.status,
+      statusTone: row.statusTone,
+      kind: row.kind,
+      primary: row.primary,
+      secondary: row.secondary ?? null,
+      facts: stableFacts(row.facts),
+      sortStartedAt: row.sortStartedAt,
+    })),
+  });
+}
+
+function stableFacts(facts: string[] | undefined): string[] {
+  return (facts ?? []).filter((fact) => !/\bleft$/.test(singleLine(fact)));
 }
 
 function rowSummary(row: InternalRow): string {
