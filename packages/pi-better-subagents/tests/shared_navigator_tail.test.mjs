@@ -107,7 +107,7 @@ test("subagent details render a structured Pi-style transcript", async () => {
         editor.handleInput("<enter>");
 
         let rendered = component.render(160).join("\n");
-        assert.match(rendered, /transcript/);
+        assert.match(rendered, /transcript · latest 10 rows/);
         assert.match(rendered, /Thinking\.\.\./);
         assert.match(rendered, /## Finding/);
         assert.match(rendered, /Use \*\*Pi Markdown\*\*\./);
