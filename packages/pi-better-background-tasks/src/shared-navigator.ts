@@ -909,13 +909,13 @@ function createOverlayComponent(
           width,
           deps.truncate,
           fg,
-          { minRows: detailRows },
+          { minRows: detailRows, bottomFooter: false, logTailRows },
         );
       } else {
         transcriptDetail = null;
         transcriptComponent = null;
         contentLines = mode === "detail"
-          ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows })
+          ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, bottomFooter: false })
           : buildListLines(overlayState, width, deps.truncate, fg);
       }
       if (mode !== "detail") return contentLines;
@@ -994,9 +994,11 @@ function buildTranscriptDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { minRows?: number } = {},
+  options: { minRows?: number; bottomFooter?: boolean; logTailRows?: number } = {},
 ): string[] {
   const actions = [...(detail.footerActions ?? ["x close"]), "Esc close"].join(" · ");
+  const tailRows = options.logTailRows ?? DEFAULT_LOG_TAIL_ROWS;
+  const shownTranscriptLines = transcriptLines.length ? transcriptLines.slice(-tailRows) : ["   (no transcript yet)"];
   const lines: string[] = [
     fg("accent", rule(detail.title, width)),
     dim(`   ← main · ${actions}`, fg),
@@ -1005,10 +1007,11 @@ function buildTranscriptDetailLines(
   ];
   if (detail.subtitle) lines.push(`   summary  ${detail.subtitle}`);
   for (const item of detail.metadata) lines.push(`   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`);
-  lines.push("", dim(section("transcript", width), fg));
+  lines.push("", dim(section(`transcript · latest ${tailRows} rows`, width), fg));
   if (detail.transcriptDiagnostic) lines.push(`   ${dim(detail.transcriptDiagnostic, fg)}`);
-  lines.push(...(transcriptLines.length ? transcriptLines : ["   (no transcript yet)"]));
+  lines.push(...shownTranscriptLines);
   lines.push("");
+  if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
   const footerLines = [dim(`   ← main · ${actions}`, fg), dim(rule("", width), fg)];
   padBeforeFooter(lines, footerLines.length, options.minRows);
   lines.push(...footerLines);
@@ -1092,10 +1095,11 @@ function buildDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number } = {},
+  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number; bottomFooter?: boolean } = {},
 ): string[] {
   if (!detail) {
     const lines = [rule("Work unavailable", width), dim("   ← back · Esc close", fg), ""];
+    if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
     const footerLines = [dim(rule("", width), fg)];
     padBeforeFooter(lines, footerLines.length, options.minRows);
     lines.push(...footerLines);
@@ -1149,14 +1153,17 @@ function buildDetailLines(
       for (const raw of shown) lines.push(raw ? `   ${raw}` : "   ");
     }
   } else {
-    const evidenceLabel = /log/i.test(detail.evidence.label) ? `${detail.evidence.label} · latest ${tailRows} rows` : detail.evidence.label;
+    const tailEvidence = isTailEvidence(detail);
+    const evidenceLabel = tailEvidence ? `${detail.evidence.label} · latest ${tailRows} rows` : detail.evidence.label;
     lines.push(dim(section(evidenceLabel, width), fg));
     const wrapped = /log/i.test(detail.evidence.label)
       ? wrapLogText(body, width - 6)
-      : body.split(/\r?\n/);
-    for (const raw of wrapped) lines.push(raw ? `   ${raw}` : "   ");
+      : wrapEvidenceText(body, width - 6);
+    const shown = tailEvidence ? wrapped.slice(-tailRows) : wrapped;
+    for (const raw of shown) lines.push(raw ? `   ${raw}` : "   ");
   }
   lines.push("");
+  if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
   const footerLines = [dim(`   ← back · ${actions}`, fg), dim(rule("", width), fg)];
   padBeforeFooter(lines, footerLines.length, options.minRows);
   lines.push(...footerLines);
@@ -1182,7 +1189,11 @@ function applyDefaultExpandedSections(detail: BackgroundWorkDetail | null, expan
 }
 
 function isFoldableEvidence(detail: BackgroundWorkDetail): boolean {
-  return !/log/i.test(detail.evidence.label);
+  return !isTailEvidence(detail);
+}
+
+function isTailEvidence(detail: BackgroundWorkDetail): boolean {
+  return /log|transcript/i.test(detail.evidence.label);
 }
 
 function sectionHeader(label: string, width: number): string {

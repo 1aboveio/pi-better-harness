@@ -971,7 +971,13 @@ describe("shared background work navigator", () => {
 
       let renderedLines = component.render(72);
       assert.equal(renderedLines.length, 40 - bottomMargin, "detail overlay should own the full terminal height above the native footer");
-      assert.match(renderedLines.slice(-(navigatorRows + 3), -3).join("\n"), /↑↓ switch/, "the persistent navigator remains above the input");
+      const railStart = renderedLines.length - navigatorRows - 3;
+      assert.match(renderedLines.slice(railStart, -3).join("\n"), /↑↓ switch/, "the persistent navigator remains above the input");
+      assert.doesNotMatch(
+        renderedLines.slice(Math.max(0, railStart - 3), railStart).join("\n"),
+        /← back|^─+$/m,
+        "detail overlay must not add a second bottom footer above the persistent navigator",
+      );
       assert.deepEqual(renderedLines.slice(-3), ["─".repeat(72), "", "─".repeat(72)], "the detail screen retains the three-row input box");
       for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
       let rendered = renderedLines.join("\n");
@@ -1095,6 +1101,157 @@ describe("shared background work navigator", () => {
       rendered = component.render(54).join("\n");
       assert.match(rendered, /output · showing \d+\/\d+ rows/);
       assert.match(rendered, /row-11 visible after more/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("renders transcript evidence as a latest-10 tail by default", () => {
+    const transcript = Array.from({ length: 12 }, (_, i) => `line-${String(i + 1).padStart(2, "0")}`).join("\n");
+    const unregister = registerBackgroundWorkProvider({
+      id: "subagents",
+      label: "Subagents",
+      priority: 10,
+      visibleCount: () => 1,
+      listRows: () => [{
+        providerId: "subagents",
+        id: "sa-transcript",
+        name: "tail-reader",
+        status: "running",
+        statusTone: "running",
+        kind: "subagent",
+        elapsed: "10s",
+        primary: "subagent run",
+        sortStartedAt: 300,
+      }],
+      detail: () => ({
+        providerId: "subagents",
+        id: "sa-transcript",
+        title: "tail-reader",
+        status: "running",
+        statusTone: "running",
+        metadata: [{ label: "provider", value: "Subagents" }],
+        evidence: { label: "transcript", text: transcript },
+        footerActions: ["x stop"],
+      }),
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "subagents", id }),
+    });
+
+    let component: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+
+      let rendered = component.render(80).join("\n");
+      assert.doesNotMatch(rendered, /Enter expand|transcript · folded/);
+      assert.match(rendered, /transcript · latest 10 rows/);
+      assert.doesNotMatch(rendered, /line-01|line-02/);
+      assert.match(rendered, /line-03/);
+      assert.match(rendered, /line-12/);
+
+      component.handleInput("l");
+      rendered = component.render(80).join("\n");
+      assert.match(rendered, /transcript · latest 25 rows/);
+      assert.match(rendered, /line-01/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("tails structured transcript component rows with the same 10/25 control", () => {
+    const transcriptRows = Array.from({ length: 12 }, (_, i) => ` transcript-${String(i + 1).padStart(2, "0")}`);
+    const unregister = registerBackgroundWorkProvider({
+      id: "subagents",
+      label: "Subagents",
+      priority: 10,
+      visibleCount: () => 1,
+      listRows: () => [{
+        providerId: "subagents",
+        id: "sa-structured-transcript",
+        name: "structured-tail-reader",
+        status: "running",
+        statusTone: "running",
+        kind: "subagent",
+        elapsed: "10s",
+        primary: "subagent run",
+        sortStartedAt: 300,
+      }],
+      detail: () => ({
+        providerId: "subagents",
+        id: "sa-structured-transcript",
+        title: "structured-tail-reader",
+        status: "running",
+        statusTone: "running",
+        metadata: [{ label: "provider", value: "Subagents" }],
+        evidence: { label: "transcript", text: "fallback should not render" },
+        transcript: [],
+        footerActions: ["x stop"],
+      }),
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "subagents", id }),
+    });
+
+    let component: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+        createTranscriptComponent: () => ({ render: () => transcriptRows, invalidate() {} }),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+
+      let rendered = component.render(80).join("\n");
+      assert.match(rendered, /transcript · latest 10 rows/);
+      assert.doesNotMatch(rendered, /transcript-01|transcript-02|fallback should not render/);
+      assert.match(rendered, /transcript-03/);
+      assert.match(rendered, /transcript-12/);
+
+      component.handleInput("l");
+      rendered = component.render(80).join("\n");
+      assert.match(rendered, /transcript · latest 25 rows/);
+      assert.match(rendered, /transcript-01/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
