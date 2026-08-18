@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.1.22] - 2026-08-18
+
+### Changed
+
+- **harness**: bundle subagents 0.1.21 and background-tasks 0.2.3 (aligned focused background-work detail rendering)
+
+## [pi-better-background-tasks@0.2.3] - 2026-08-18
+
+### Fixed
+
+- **background-tasks**: keep focused background-work detail rendering aligned with the main rail height by removing the duplicate detail footer above the persistent navigator
+
+## [pi-better-subagents@0.1.21] - 2026-08-18
+
+### Fixed
+
+- **subagents**: keep focused background-work detail rendering aligned with the main rail height and show subagent transcripts as a latest-10-row tail by default, with `l` cycling to 25 rows
+
 ## [pi-better-harness@0.1.21] - 2026-08-17
 
 ### Changed
