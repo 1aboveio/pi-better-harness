@@ -113,8 +113,14 @@ const REQUIRED_SSH_OPTIONS = new Set(["batchmode", "connecttimeout", "requesttty
 const DIRECT_STOP_WARNING = "Direct SSH mode has weak stop semantics: stopping the local SSH client may leave the remote process running.";
 const TMUX_STATUS_PREFIX = "__PI_BG_STATUS__=";
 const TMUX_SIZE_PREFIX = "__PI_BG_SIZE__=";
+const TMUX_PATH_PREFIX = "__PI_BG_TMUX_PATH__=";
+const TMUX_VERSION_PREFIX = "__PI_BG_TMUX_VERSION__=";
 const TMUX_CAPTURE_CHUNK_BYTES = 256 * 1024;
-const TMUX_PROBE_COMMAND = "tmux_path=$(command -v tmux) || exit 127; printf '%s\\n' \"$tmux_path\" && \"$tmux_path\" -V";
+const TMUX_PROBE_COMMAND = [
+  "tmux_path=$(command -v tmux) || exit 127",
+  `printf '${TMUX_PATH_PREFIX}%s\\n' "$tmux_path"`,
+  `printf '${TMUX_VERSION_PREFIX}%s\\n' "$("$tmux_path" -V)"`,
+].join("; ");
 const TMUX_PACKAGE_MANAGERS: TmuxPackageManager[] = ["apt-get", "dnf", "yum", "apk", "pacman", "zypper", "brew"];
 const TMUX_INSTALL_COMMANDS: Record<TmuxPackageManager, string> = {
   "apt-get": "apt-get update && apt-get install -y tmux",
@@ -523,8 +529,16 @@ function resolveBootstrapTimeoutMs(timeoutMs: number | undefined): number {
 }
 
 function parseTmuxCapability(result: CommandResult): { tmuxPath: string; tmuxVersion: string } | undefined {
-  const [tmuxPath, tmuxVersion] = result.stdout.trim().split("\n");
-  if (result.exitCode !== 0 || !tmuxPath || !tmuxVersion) return undefined;
+  if (result.exitCode !== 0) return undefined;
+  let tmuxPath: string | undefined;
+  let tmuxVersion: string | undefined;
+  for (const line of result.stdout.split("\n")) {
+    if (line.startsWith(TMUX_PATH_PREFIX)) tmuxPath = line.slice(TMUX_PATH_PREFIX.length);
+    if (line.startsWith(TMUX_VERSION_PREFIX)) tmuxVersion = line.slice(TMUX_VERSION_PREFIX.length);
+  }
+  if (!tmuxPath || !tmuxVersion) return undefined;
+  if (!tmuxPath.startsWith("/") || /\s/.test(tmuxPath)) return undefined;
+  if (!/^tmux\b/i.test(tmuxVersion)) return undefined;
   return { tmuxPath, tmuxVersion };
 }
 
