@@ -435,7 +435,7 @@ describe("runtime", () => {
   // @fails-without-fix background-task.ssh-timeout
   it("kills a tmux-backed SSH spawn when its deadline expires", async () => {
     const runner = new FakeRemoteRunner([
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
       successfulResult(""),
       successfulResult("__PI_BG_STATUS__=running\n__PI_BG_SIZE__=0\n"),
       successfulResult(""),
@@ -464,7 +464,7 @@ describe("runtime", () => {
   // @fails-without-fix background-task.ssh-timeout
   it("times out and kills a tmux-backed SSH spawn when its bounded supervision poll times out", async () => {
     const runner = new FakeRemoteRunner([
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
       successfulResult(""),
       { ...successfulResult(""), timedOut: true },
       successfulResult(""),
@@ -493,7 +493,7 @@ describe("runtime", () => {
   // @level integration
   it("fails malformed tmux supervision protocol before the task deadline", async () => {
     const runner = new FakeRemoteRunner([
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
       successfulResult(""),
       successfulResult("not tmux protocol\n"),
     ]);
@@ -586,7 +586,7 @@ describe("runtime", () => {
   it("defaults SSH spawn to a durable tmux session and captures remote output", async () => {
     const output = "remote spawn\n";
     const runner = new FakeRemoteRunner([
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
       successfulResult(""),
       successfulResult(`__PI_BG_STATUS__=0\n__PI_BG_SIZE__=${Buffer.byteLength(output)}\n${output}`),
     ]);
@@ -678,7 +678,7 @@ describe("runtime", () => {
       failedResult(127, "tmux: not found\n"),
       successfulResult("user=root\nuid=0\npm=apt-get\nprivilege=root\n"),
       successfulResult(""),
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
       successfulResult(""),
       successfulResult("__PI_BG_STATUS__=0\n__PI_BG_SIZE__=0\n"),
     ]);
@@ -738,7 +738,7 @@ describe("runtime", () => {
       sendMessage: (message: { content: string }) => { messages.push(message.content); },
     } as unknown as ExtensionAPI;
     const runner = new FakeRemoteRunner([
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
       successfulResult(""),
       successfulResult("__PI_BG_STATUS__=running\n__PI_BG_SIZE__=0\n"),
       successfulResult(""),
@@ -777,7 +777,7 @@ describe("runtime", () => {
     } as unknown as ExtensionAPI;
     const delayedStart = deferred<ReturnType<typeof successfulResult>>();
     const runner = new FakeRemoteRunner([
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
       delayedStart.promise,
       successfulResult(""),
     ]);
@@ -818,7 +818,7 @@ describe("runtime", () => {
       sendMessage: (message: { content: string }) => { messages.push(message.content); },
     } as unknown as ExtensionAPI;
     const runnerForExit = (exitCode: number) => new FakeRemoteRunner([
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
       successfulResult(""),
       successfulResult(`__PI_BG_STATUS__=${exitCode}\n__PI_BG_SIZE__=0\n`),
     ]);
