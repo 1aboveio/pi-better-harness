@@ -2,7 +2,7 @@
 
 Authority: conversation choices (sync remote bash; `remote_bash` + profiles; `~/.ssh/config`; shared `ssh-core` with tmux helpers; extract-then-build); ADR `docs/adr/0001-pi-better-ssh-sync-remote-bash.md`; ADR `docs/adr/0002-ssh-core-shared-package.md`; epic #184 out-of-scope note that ControlMaster was deferred from background-tasks *as a product dependency*, not forever forbidden in a shared library.
 
-Status: **proposed design — not implemented**.
+Status: **proposed design — tracked as epic #213** (not implemented yet).
 
 ## Problem
 
@@ -156,15 +156,19 @@ Remote shell policy for sync (proposal): prefer `bash -c` + optional preamble ov
 
 ## Delivery order (extract then build)
 
-| Slice | What | Proof |
-| --- | --- | --- |
-| **S0** | Design/ADR accepted (this doc) | review |
-| **S1** | Create `packages/ssh-core`; move identity, argv, runner seam, tmux helpers out of `remote-task-preset.ts`; sync into background-tasks; thin preset wrapper remains for task-specific intent types | existing `remote-task-preset.test.ts` + runtime/e2e SSH tests green with no intentional behavior change |
-| **S2** | Add ControlMaster API to `ssh-core` with unit/fake-runner tests; background-tasks does not have to call it yet | ssh-core mux tests |
-| **S3** | Scaffold `pi-better-ssh` with `remote_bash` (may ship mux from day one once S2 exists) | new package tests |
-| **S4** | `ssh_profile` + footer; `ssh_mux` tool | package tests + light e2e |
-| **S5** | Docs cross-links; bg_task usage points short remote work at `pi-better-ssh`; optional "reuse mux if present" on bg_task control path | docs/contract tests |
-| **S6** | (Later) optional full-session bash override mode | separate ADR |
+Epic: [#213](https://github.com/1aboveio/pi-better-harness/issues/213)
+
+| Slice | Issue | What | Proof |
+| --- | --- | --- | --- |
+| **S0** | (this doc + ADRs) | Design/ADR accepted | review |
+| **S1** | [#214](https://github.com/1aboveio/pi-better-harness/issues/214) | Create `packages/ssh-core`; move identity, argv, runner seam, tmux helpers; sync into background-tasks; thin preset wrapper for task-specific intent | existing preset + runtime/e2e SSH tests green, no intentional behavior change |
+| **S2** | [#215](https://github.com/1aboveio/pi-better-harness/issues/215) | ControlMaster API in `ssh-core`; background-tasks need not call it yet | ssh-core mux tests via FakeRemoteRunner |
+| **S3** | [#216](https://github.com/1aboveio/pi-better-harness/issues/216) | Scaffold `pi-better-ssh` with `remote_bash` | new package tests |
+| **S4** | [#217](https://github.com/1aboveio/pi-better-harness/issues/217) | `ssh_profile` + footer; `ssh_mux` tool | package tests |
+| **S5** | [#218](https://github.com/1aboveio/pi-better-harness/issues/218) | Docs cross-links; optional bg_task mux reuse | docs/contract tests |
+| **S6** | (later) | optional full-session bash override mode | separate ADR |
+
+Approved primary test seam: `ssh-core` injectable `FakeRemoteRunner` (lifted from background-tasks); background-tasks SSH runtime/e2e remain the extract regression gate.
 
 S1 is the highest-risk slice and must be behavior-preserving. Prefer mechanical move + re-export shims over clever redesign in the same PR.
 
