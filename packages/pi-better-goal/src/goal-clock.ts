@@ -62,7 +62,7 @@ export function formatGoalClock(
 ): string {
   const timing = goalTiming(goal, now);
   return (
-    `Goal [${goal.status}]: ${goal.objective}` +
+    `Goal [${goal.status}]: ${flattenObjectiveForRail(goal.objective)}` +
     ` | active ${formatClockDuration(timing.activeSeconds)}` +
     ` | elapsed ${formatClockDuration(timing.elapsedSeconds)}`
   );
@@ -85,8 +85,24 @@ export function renderGoalClockLine(
   if (fixedWidth >= width) {
     return truncateToWidth(`${heading} ${active}`, width);
   }
-  const objective = truncateToWidth(goal.objective, width - fixedWidth);
+  const objective = truncateToWidth(
+    flattenObjectiveForRail(goal.objective),
+    width - fixedWidth,
+  );
   return styleGoalRailLine(heading, `${active} ${objective}`, fg);
+}
+
+/**
+ * Goal rail / clock lines must stay one terminal row. Raw objectives can keep
+ * newlines for prompts and `/goal` inspection, but embedding them here makes
+ * the widget taller than the dock budget and desyncs main-screen differential
+ * paints (Working... / Elapsed stacking into scrollback).
+ */
+export function flattenObjectiveForRail(objective: string): string {
+  return objective
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
 }
 
 function styleGoalRailLine(

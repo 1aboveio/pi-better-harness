@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { formatGoalClock, goalClockRefreshDelayMs, goalTiming, isGoalClockVisible, renderGoalClockLine } from "../src/goal-clock.js";
+import {
+  flattenObjectiveForRail,
+  formatGoalClock,
+  goalClockRefreshDelayMs,
+  goalTiming,
+  isGoalClockVisible,
+  renderGoalClockLine,
+} from "../src/goal-clock.js";
 import { createGoalSnapshot, goalWithStatus } from "../src/goal-state.js";
 
 test("goal timing tracks active and elapsed time across pause and completion", () => {
@@ -70,4 +77,39 @@ test("goal clock line accents the first-level rail heading when themed", () => {
 
   assert.ok(visibleWidth(line) <= 80);
   assert.match(line, /^<warning>goal active<\/> <dim>2:05 Ship footer clock<\/>$/);
+});
+
+test("flattenObjectiveForRail collapses newlines and tabs into spaces", () => {
+  assert.equal(
+    flattenObjectiveForRail("backfill tables\n\n- dwd_transaction_risk_feature_v2\tquarterly"),
+    "backfill tables - dwd_transaction_risk_feature_v2 quarterly",
+  );
+});
+
+test("goal clock line stays one terminal row for multiline objectives", () => {
+  const goal = createGoalSnapshot(
+    "ok can you backfill the tables one by one, on quarterly basis, from 2016-now:\n\n- dwd_transaction_risk_feature_v2",
+    null,
+    100,
+  );
+  const line = renderGoalClockLine(goal, 96, 225);
+
+  assert.equal(line.includes("\n"), false);
+  assert.equal(line.includes("\r"), false);
+  assert.equal(visibleWidth(line), 96);
+  assert.match(line, /^goal active 2:05 ok can you backfill the tables one by one,/);
+  assert.match(line, /from 2016-now/);
+});
+
+test("formatGoalClock flattens multiline objectives", () => {
+  const goal = goalWithStatus(
+    createGoalSnapshot("Ship footer clock\nwith a second line", null, 100),
+    "paused",
+    165,
+  );
+
+  assert.equal(
+    formatGoalClock(goal, 225),
+    "Goal [paused]: Ship footer clock with a second line | active 1:05 | elapsed 2:05",
+  );
 });
