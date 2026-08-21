@@ -1,6 +1,6 @@
 {
   "name": "pi-better-harness",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "Pi extension bundle for subagents, durable background tasks, and goal tracking.",
   "license": "MIT",
   "type": "module",
@@ -43,7 +43,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "pi-better-background-tasks": "0.2.3",
+    "pi-better-background-tasks": "0.2.4",
     "pi-better-goal": "0.1.21",
     "pi-better-subagents": "0.1.21"
   },
