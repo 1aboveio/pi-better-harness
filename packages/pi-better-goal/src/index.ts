@@ -24,6 +24,7 @@ import {
 import { continuationEvidence, type ContinuationEvidence } from "./continuation.js";
 import { observeGoalStall } from "./stall.js";
 import {
+  flattenObjectiveForRail,
   goalClockRefreshDelayMs,
   goalTiming,
   isGoalClockVisible,
@@ -541,7 +542,7 @@ export default function (pi: ExtensionAPI): void {
       if (current && current.status !== "complete" && ctx.hasUI && !isForegroundBusy(ctx)) {
         const replace = await ctx.ui.confirm(
           "Replace active goal?",
-          `Current goal: ${current.objective}`,
+          `Current goal: ${flattenObjectiveForRail(current.objective)}`,
         );
         if (!replace) {
           return;
@@ -550,7 +551,7 @@ export default function (pi: ExtensionAPI): void {
 
       try {
         const goal = startOrReplaceGoal(trimmed, null, ctx, "command");
-        notifyGoal(ctx, `Goal set: ${goal.objective}`);
+        notifyGoal(ctx, `Goal set: ${flattenObjectiveForRail(goal.objective)}`);
       } catch (error) {
         notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
       }

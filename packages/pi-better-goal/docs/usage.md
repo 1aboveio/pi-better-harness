@@ -47,9 +47,11 @@ to reopen the autonomous loop.
 
 Only `/goal <objective>` can create or replace a goal; there is no model-callable
 goal creation tool. The right-aligned widget below the editor shows the objective,
-status, active time, and total elapsed time. Active time stops while paused. Both
-clocks freeze when the goal is completed and remain visible until the goal is
-cleared or replaced.
+status, active time, and total elapsed time. Multiline objectives stay intact in
+stored state and `/goal` inspection, but the rail flattens them to one terminal
+row so dock height stays stable. Active time stops while paused. Both clocks
+freeze when the goal is completed and remain visible until the goal is cleared
+or replaced.
 
 The widget does not replace Pi's footer, so custom footer extensions such as
 `pi-observability` retain ownership of their layout and lifecycle.
