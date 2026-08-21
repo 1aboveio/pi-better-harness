@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.1.23] - 2026-08-21
+
+### Changed
+
+- **harness**: bundle background-tasks 0.2.4 (SSH tmux probe MOTD hardening)
+
+## [pi-better-background-tasks@0.2.4] - 2026-08-21
+
+### Fixed
+
+- **background-tasks**: parse remote tmux probe path/version via protocol markers so SSH login MOTD/banners cannot be mistaken for the tmux binary
+
 ## [pi-better-harness@0.1.22] - 2026-08-18
 
 ### Changed

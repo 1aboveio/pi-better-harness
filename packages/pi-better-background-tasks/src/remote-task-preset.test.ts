@@ -7,7 +7,7 @@ describe("SSH remote-task preset", () => {
   // @level unit
   it("reports a present remote tmux with a usable path and version", async () => {
     const runner = new FakeRemoteRunner([
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
     ]);
     const resolved = expandSshRemoteTaskPreset({
       operation: "spawn",
@@ -38,6 +38,65 @@ describe("SSH remote-task preset", () => {
 
   // @covers background-task.ssh-tmux-bootstrap
   // @level unit
+  it("ignores remote login banners and still reports a usable tmux path", async () => {
+    const banner = [
+      "==========================================",
+      "  Welcome back, jonas.gu!",
+      "  Fri Aug 21 21:28:44 CST 2026",
+      "  HADOOP_HOME: /data/opt/hadoop",
+      "  SPARK_HOME: /opt/spark",
+      "  JAVA_HOME: /etc/alternatives/java_sdk_1.8.0",
+      "==========================================",
+      "",
+    ].join("\n");
+    const runner = new FakeRemoteRunner([
+      successfulResult(`${banner}__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.2a\n`),
+    ]);
+    const resolved = expandSshRemoteTaskPreset({
+      operation: "spawn",
+      command: "make release",
+      ssh: { host: "skyeej" },
+    }, runner);
+
+    await expect(resolved.bootstrapTmux()).resolves.toEqual({
+      status: "present",
+      target: "skyeej",
+      tmuxPath: "/usr/bin/tmux",
+      tmuxVersion: "tmux 3.2a",
+      mutated: false,
+      message: "tmux 3.2a is available at /usr/bin/tmux on skyeej.",
+    });
+    expect(runner.runCalls[0]?.command).toContain("__PI_BG_TMUX_PATH__");
+    expect(runner.runCalls[0]?.command).toContain("__PI_BG_TMUX_VERSION__");
+  });
+
+  // @covers background-task.ssh-tmux-bootstrap
+  // @level unit
+  it("rejects banner-only stdout instead of treating it as a tmux binary", async () => {
+    const runner = new FakeRemoteRunner([
+      successfulResult([
+        "==========================================",
+        "  Welcome back, jonas.gu!",
+        "==========================================",
+        "",
+      ].join("\n")),
+    ]);
+    const resolved = expandSshRemoteTaskPreset({
+      operation: "spawn",
+      command: "make release",
+      ssh: { host: "skyeej" },
+      remote: { install_tmux: false },
+    }, runner);
+
+    const result = await resolved.bootstrapTmux();
+    expect(result.status).toBe("install_failed");
+    expect(result).not.toMatchObject({ tmuxPath: expect.anything() });
+    expect(result.message).not.toMatch(/is available at =+/);
+    expect(result.message).toContain("could not probe skyeej");
+  });
+
+  // @covers background-task.ssh-tmux-bootstrap
+  // @level unit
   it.each([
     ["apt-get", "apt-get update && apt-get install -y tmux", "root", "0", "root"],
     ["dnf", "dnf install -y tmux", "root", "0", "root"],
@@ -52,7 +111,7 @@ describe("SSH remote-task preset", () => {
       failedResult(127),
       successfulResult(`user=${user}\nuid=${uid}\npm=${packageManager}\nprivilege=${privilege}\n`),
       successfulResult("installed\n"),
-      successfulResult("/opt/bin/tmux\ntmux 3.5a\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/opt/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.5a\n"),
     ]);
     const resolved = expandSshRemoteTaskPreset({
       operation: "spawn",
@@ -86,7 +145,7 @@ describe("SSH remote-task preset", () => {
       failedResult(127),
       successfulResult("user=deploy\nuid=1000\npm=dnf\nprivilege=sudo\n"),
       successfulResult("installed\n"),
-      successfulResult("/usr/bin/tmux\ntmux 3.4\n"),
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
     ]);
     const resolved = expandSshRemoteTaskPreset({
       operation: "spawn",
