@@ -156,7 +156,7 @@ retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 Callbacks point to `bg_task_status` first. The aggregate never contains result
 objects or raw logs. The default status response is a compact model-facing
 summary that omits large command bodies; use `verbose:true` only when full
-metadata is required. `bg_task_log` defaults to a 20-line terminal-aware tail.
+metadata is required. `bg_task_log` defaults to a 5-line terminal-aware tail.
 `tail_lines: 0` returns the retained raw log, up to a 512 KiB safe-read cap.
 
 Pi's optional `followUpMode: all` still helps when a later completion arrives

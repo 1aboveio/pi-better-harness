@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.1.24] - 2026-08-21
+
+### Changed
+
+- **harness**: bundle background-tasks 0.2.5 (default `bg_task_log` tail 5 lines)
+
+## [pi-better-background-tasks@0.2.5] - 2026-08-21
+
+### Changed
+
+- **background-tasks**: default `bg_task_log` / compact log tails to 5 lines instead of 20
+
 ## [pi-better-harness@0.1.23] - 2026-08-21
 
 ### Changed

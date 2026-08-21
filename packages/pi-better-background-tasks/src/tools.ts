@@ -68,7 +68,7 @@ const ListParams = Type.Object({
 });
 const LogParams = Type.Object({
   id: Type.String({ description: "Background task id." }),
-  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing lines. Default 20 for compact model ingestion. Set <=0 only when the full log is explicitly required." })),
+  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing lines. Default 5 for compact model ingestion. Set <=0 only when the full log is explicitly required." })),
 });
 
 const ActionParams = Type.Object({
@@ -168,7 +168,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_log",
     label: "BG Log",
-    description: "Read a background task log. Default output is a compact 20-line terminal-aware tail for model ingestion. Pass tail_lines for a bounded tail; tail_lines:0 returns the retained raw log, capped at 512 KiB for safe recovery. Nonblocking.",
+    description: "Read a background task log. Default output is a compact 5-line terminal-aware tail for model ingestion. Pass tail_lines for a bounded tail; tail_lines:0 returns the retained raw log, capped at 512 KiB for safe recovery. Nonblocking.",
     parameters: LogParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -338,7 +338,7 @@ function formatCompactStatus(meta: BackgroundTaskMeta): string {
   if (meta.lastState !== undefined) lines.push(`last state: ${oneLine(meta.lastState, 800)}`);
   if (meta.logDiscardedBytes) lines.push(`log retention: ${meta.logDiscardedBytes} bytes discarded in ${meta.logRetentionEvents ?? 1} compaction(s).`);
   lines.push(`log: ${meta.logPath}`);
-  lines.push(`For full metadata use bg_task_status id=${meta.id} verbose=true. For logs use bg_task_log id=${meta.id} tail_lines=20, or tail_lines=0 for the retained raw log.`);
+  lines.push(`For full metadata use bg_task_status id=${meta.id} verbose=true. For logs use bg_task_log id=${meta.id} tail_lines=5, or tail_lines=0 for the retained raw log.`);
   return lines.join("\n");
 }
 
@@ -360,7 +360,7 @@ function oneLine(value: unknown, maxLength: number): string {
 function formatLog(id: string, tailLines?: number): string {
   const meta = readMeta(id);
   if (!meta) return `No background task found for id ${id}.`;
-  const log = readLog(meta.logPath, tailLines ?? 20);
+  const log = readLog(meta.logPath, tailLines ?? 5);
   const prefix = log.truncated ? `[showing tail of ${meta.logPath}]\n` : `[${meta.logPath}]\n`;
   return prefix + (log.text || "(log is empty)");
 }
