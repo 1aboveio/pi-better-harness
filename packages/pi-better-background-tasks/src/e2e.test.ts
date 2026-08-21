@@ -49,7 +49,7 @@ describe("extension e2e", () => {
 
     expect(harness.tools.get("bg_task_status")?.description).toContain("compact model-facing summary");
     expect(harness.tools.get("bg_task_status")?.description).toContain("verbose:true only");
-    expect(harness.tools.get("bg_task_log")?.description).toContain("compact 20-line terminal-aware tail");
+    expect(harness.tools.get("bg_task_log")?.description).toContain("compact 5-line terminal-aware tail");
     expect(harness.tools.get("bg_task_log")?.description).toContain("tail_lines:0 returns the retained raw log");
     expect(harness.tools.get("bg_task")?.description).toContain("action:status");
     expect(harness.tools.get("bg_status")?.description).toContain("explicit full-data recovery");
