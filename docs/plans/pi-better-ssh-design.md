@@ -1,6 +1,6 @@
 # pi-better-ssh design
 
-Authority: conversation choice (sync remote bash; reuse advice; design-doc-first; `remote_bash` + profiles; reuse `~/.ssh/config`); ADR `docs/adr/0001-pi-better-ssh-sync-remote-bash.md`; epic #184 out-of-scope note that ControlMaster was deferred from background-tasks.
+Authority: conversation choices (sync remote bash; `remote_bash` + profiles; `~/.ssh/config`; shared `ssh-core` with tmux helpers; extract-then-build); ADR `docs/adr/0001-pi-better-ssh-sync-remote-bash.md`; ADR `docs/adr/0002-ssh-core-shared-package.md`; epic #184 out-of-scope note that ControlMaster was deferred from background-tasks *as a product dependency*, not forever forbidden in a shared library.
 
 Status: **proposed design — not implemented**.
 
@@ -12,167 +12,201 @@ Agents doing Airflow / Spark / cluster ops issue many short remote commands (`ai
 ssh user@host 'cd /opt/airflow && airflow dags list'
 ```
 
-inside the local `bash` tool. That is error-prone (quoting, `BatchMode`, jump hosts, cwd) and pays a full SSH handshake on every tool call. Epic #184 already solved *durable remote jobs* via `bg_task` + per-task tmux. It deliberately left connection reuse and interactive/sync remote shells out of scope. Those are the missing pieces for this workload.
+inside the local `bash` tool. That is error-prone (quoting, `BatchMode`, jump hosts, cwd) and pays a full SSH handshake on every tool call. Epic #184 already solved *durable remote jobs* via `bg_task` + per-task tmux. It deliberately left connection reuse and sync remote shells out of scope. Those are the missing pieces for this workload.
+
+Building sync remote bash as a second copy of SSH argv / identity / tmux bootstrap would fork the safety contract. The monorepo already has a pattern for this: private shared packages (`log-utils`, `callback-batcher`, …) synced into publishable extensions.
+
+## Architecture
+
+```
+                    ┌─────────────────────────┐
+                    │   packages/ssh-core     │  private workspace
+                    │  identity, argv, mux,   │
+                    │  runner seam, tmux      │
+                    │  bootstrap/session API  │
+                    └───────────┬─────────────┘
+                                │ synced / imported
+              ┌─────────────────┴─────────────────┐
+              ▼                                   ▼
+┌──────────────────────────┐       ┌──────────────────────────┐
+│ pi-better-background-    │       │ pi-better-ssh            │
+│ tasks                    │       │ (publishable extension)  │
+│                          │       │                          │
+│ spawn/watch/stop policy  │       │ remote_bash              │
+│ task meta, logs,         │       │ ssh_profile / ssh_mux    │
+│ callbacks, navigator     │       │ footer chip              │
+│ uses ssh-core for SSH +  │       │ uses ssh-core for SSH +  │
+│ per-task tmux lifecycle  │       │ ControlMaster sync exec  │
+└──────────────────────────┘       └──────────────────────────┘
+```
+
+## Package responsibilities
+
+### `packages/ssh-core` (private, not a Pi extension, not published)
+
+Owns the **remote SSH protocol**:
+
+| Area | Contents |
+| --- | --- |
+| Identity | Normalize `host` / `user` / `port` / `identity_file` / `jump` / `options`; resolve `target`; reject empty/whitespace tokens |
+| Safe argv | Local `shell:false` ssh argv with required `BatchMode`, connect timeout, `-T`; options that cannot be disabled |
+| Remote script | Workdir / env / optional preamble wrapping with safe encoding |
+| Runner seam | Injectable `RemoteRunner` (`runOnce` / `spawn`) so CI uses fakes |
+| ControlMaster | ControlPath keying, ensure/reuse/reopen/cleanup, status |
+| Tmux helpers | Probe, package-manager install policy, needs-user guidance, session start / poll / kill / name helpers |
+
+Does **not** own: Pi tools, task registry/meta, callbacks, navigator UI, goal activity, profile footer chrome, spawn-vs-watch product policy.
+
+Source of truth today to extract: `packages/pi-better-background-tasks/src/remote-task-preset.ts` (+ related SSH types in `types.ts`, fake runner under `test-support/`).
+
+Distribution: same as other internals — `private: true` workspace package, vendored into consumers via the existing sync script (or a dedicated sync entry), so published npm tarballs stay self-contained.
+
+### `packages/pi-better-ssh` (publishable Pi extension)
+
+Owns the **sync remote shell product**:
+
+- Tools: `remote_bash`, `ssh_profile`, `ssh_mux`
+- Active profile + footer status chip
+- Truncation / bash-like result shaping
+- Prompt guidelines: short remote → `remote_bash`; long remote → `bg_task_*` with `ssh`
+- Not in `pi-better-harness` meta package on first publish
+
+### `packages/pi-better-background-tasks` (existing)
+
+Keeps owning durable **job** semantics:
+
+- `bg_task_spawn` / `watch` / `stop` / logs / callbacks / navigator / reload resume
+- Policy: spawn defaults to per-task tmux; watch is direct one-shot
+- Becomes a *consumer* of `ssh-core` instead of inlining the preset
+
+Optional later optimization (not required for extract correctness): when a ControlMaster for the target already exists (e.g. from `pi-better-ssh` in the same Pi process), bg_task control/poll argv may reuse it. Job correctness must not depend on mux.
 
 ## Non-goals (v1)
 
-- Replacing or rewriting the #184 bg_task SSH preset.
-- Interactive password / keyboard-interactive auth (fail fast with `BatchMode`, same as bg_task).
-- Full remote IDE: overriding `read` / `write` / `edit` / `ls` / `grep` / `find` by default.
-- Persistent interactive shell / PTY attach UX / `send-keys` into a shared shell that preserves cwd/env across calls by scraping prompts.
-- Guaranteeing remote process kill for fire-and-forget direct SSH (bg_task already documents that weakness).
+- Interactive password / keyboard-interactive auth.
+- Full remote IDE (default override of `read` / `write` / `edit` / `ls` / `grep` / `find`).
+- Persistent interactive shell / PTY attach / prompt-scraping sticky shell.
+- Guaranteed remote kill for direct (non-tmux) fire-and-forget SSH.
 - Windows OpenSSH matrix.
-- Auto-installing OpenSSH client locally.
+- Publishing `ssh-core` to npm.
+- Putting `pi-better-ssh` into the harness meta package on first release.
+- Making background-task correctness depend on ControlMaster.
 
 ## Goals (v1)
 
-1. **Sync remote exec** that waits for stdout/stderr/exit and returns a bash-like truncated result.
-2. **Amortize connection cost** across many short calls in one Pi session.
-3. **Keep local `bash` local** — remote work uses an explicit tool.
-4. **Address hosts via `~/.ssh/config` Host aliases** (and ordinary `user@host`), not a parallel connection inventory.
-5. **Compose with bg_task SSH** for long jobs without duplicating tmux lifecycle.
-6. **Agent-safe defaults**: `BatchMode`, connect timeout, no TTY on the exec path, structured argv (`shell:false` locally).
+1. One shared SSH safety/tmux protocol (`ssh-core`).
+2. Behavior-preserving extraction: existing bg_task SSH tests stay green after the move.
+3. Sync `remote_bash` with ControlMaster amortization.
+4. Local `bash` stays local; remote work is explicit.
+5. Hosts addressed via `~/.ssh/config` Host aliases (and `user@host`).
+6. Clear split: short sync vs long durable jobs.
 
 ## Recommended reuse strategy: hybrid
 
-| Workload | Mechanism | Why |
+| Workload | Mechanism | Owner |
 | --- | --- | --- |
-| Frequent short sync commands (`remote_bash`) | **SSH ControlMaster / ControlPath** | Handshake once; each call is a cheap mux slave. No remote daemon required. Correctness does not depend on prompt scraping. |
-| Long-running remote jobs | **Existing `bg_task_*` + per-task tmux** | Already ships durable logs, real remote stop, reload resume. Keep that contract. |
-| Optional later | Shared remote "workspace" tmux | Only if operators need sticky remote cwd/env/conda across sync calls. Not required to fix handshake cost. |
+| Frequent short sync commands | SSH ControlMaster + `remote_bash` | `pi-better-ssh` on `ssh-core` |
+| Long-running remote jobs | Per-task remote tmux | `background-tasks` on `ssh-core` |
+| Remote health polls | Direct one-shot SSH | `background-tasks` on `ssh-core` |
 
-**Why not shared-tmux-first for sync?**
+**Why not shared-tmux-first for sync?** Sync CLI output is correct as one remote command, not `tmux send-keys` + pane capture. Sticky shell state is fragile; use `workdir` / `env` / preamble instead. Per-task tmux remains the long-job lifecycle tool.
 
-- Sync CLI output is easiest and most correct as one SSH remote command (`ssh host -- cmd`), not `tmux send-keys` + pane capture.
-- Sticky shell state (activated venv, `cd`, exported vars) sounds nice for Spark, but prompt detection and interleaved output are fragile and hard to test. Prefer an explicit `workdir` / `env` / optional `preamble` on each call (or a profile default) in v1.
-- Epic #184 already owns per-task tmux. A second "always-on host tmux" for sync would confuse stop/lifecycle semantics.
+**ControlMaster (in `ssh-core`, used first by `pi-better-ssh`):**
 
-**ControlMaster details (proposed):**
+- Ensure master on first sync call to a target; slaves reuse `ControlPath`.
+- Socket under harness-owned `0700` dir, keyed by stable hash of connection identity (+ session scope).
+- `ControlPersist` grace (proposal: 600s); best-effort cleanup on dispose/exit.
+- Stale socket → one reopen, then fail.
+- bg_task may ignore mux initially; optional reuse later.
 
-- On first `remote_bash` to a target in a Pi process, ensure a local master: `ssh -o ControlMaster=auto -o ControlPersist=<N> -o ControlPath=<socket> … -fN` (or equivalent `-M -S` form).
-- Subsequent calls add `-o ControlPath=<same>` (and still enforce `BatchMode`, connect timeout, `-T`).
-- Socket path under a harness-owned directory (e.g. OS temp / `XDG_RUNTIME_DIR`), keyed by a stable hash of `{user,host,port,identity,jump}` plus Pi session id — never a predictable world-writable path.
-- Master lifetime: Pi session / process lifetime with `ControlPersist` grace (proposal: 10 minutes). Clean up sockets on extension dispose / process exit best-effort.
-- If the operator's `~/.ssh/config` already enables multiplexing for that Host, prefer not fighting it: inject only required safety options; document that pre-existing ControlPath configs are compatible when they point at a usable master.
-- Multiplexing failure (socket gone, master dead) → one transparent re-open, then surface the error. Do not hang.
-- **Do not** make bg_task's correctness depend on ControlMaster in v1. Optionally, a later slice can teach the bg_task SSH argv builder to *reuse* an existing master when present; that is an optimization, not a dependency.
-
-## Package shape
-
-New publishable workspace: `packages/pi-better-ssh` → npm `pi-better-ssh`.
-
-- **Not** in the `pi-better-harness` meta package for the first release (same posture as `pi-better-read-aloud`).
-- May later share pure helpers (SSH argv construction, identity normalization) with `pi-better-background-tasks` via a tiny internal module — only after the sync contract stabilizes. No runtime coupling in v1.
-
-## Agent-facing surface
-
-### Tools
+## Agent-facing surface (`pi-better-ssh`)
 
 | Tool | Purpose |
 | --- | --- |
 | `remote_bash` | Run one remote command; block for result (like local bash). |
-| `ssh_profile` | `action: list \| use \| status \| clear` — optional active default host for subsequent `remote_bash` calls that omit `host`. |
-| `ssh_mux` | `action: status \| stop` — inspect/tear down ControlMaster for a target or all. Operator/agent escape hatch; not required on the happy path. |
+| `ssh_profile` | `action: list \| use \| status \| clear` — session default host/workdir. |
+| `ssh_mux` | `action: status \| stop` — inspect/tear down ControlMaster. |
 
-`remote_bash` parameters (draft):
+`remote_bash` parameters (draft): `command` (required); `host` (optional if profile active); `workdir`; `timeout`; `env`; structured overrides `user` / `port` / `identity_file` / `jump` / `options` with required safety options enforced by `ssh-core`.
 
-- `command` (required) — remote command string; executed by remote login/non-login shell policy documented below.
-- `host` (optional if an active profile exists) — SSH config Host alias or `user@host`.
-- `workdir` (optional) — remote cwd for this call; default from active profile or remote `$HOME`/`pwd`.
-- `timeout` (optional, seconds) — default aligned with Pi bash expectations; kill the *local* slave ssh on timeout (mux master stays up).
-- `env` (optional) — extra remote env vars for this call only.
-- Structured overrides only when Host alias is insufficient: `user`, `port`, `identity_file`, `jump`, `options` — same shape spirit as bg_task `ssh`, with the same required safety options that cannot be disabled.
+Active profile sets session defaults and a footer chip `SSH: host:workdir (mux up|down)`. Profiles name SSH config hosts; they are not a parallel host database.
 
-### Active profile
-
-- `ssh_profile use host=airflow-prod workdir=/opt/airflow` sets session-local defaults.
-- Footer/status chip: `SSH: airflow-prod:/opt/airflow (mux up|down)`.
-- `clear` restores "no default host"; `remote_bash` without `host` then errors clearly.
-- Profiles do **not** invent a parallel host database: they name SSH config hosts and attach optional `workdir` / default `env` / label.
-
-### What we deliberately do not do in v1
-
-- Override built-in `bash` when a profile is active (Pi example `ssh.ts` mode). Can be a v2 flag for "entire session is remote" workflows.
-- Route `!` user bash through SSH by default. Optional later via `user_bash` hook when a profile is active.
+v1 does **not** override built-in `bash` or route `!` through SSH by default.
 
 ## Execution model
 
 ```
 remote_bash(command, host?)
   → resolve target (explicit host || active profile)
-  → ensure ControlMaster for target
-  → build local argv:
-      ssh -o BatchMode=yes -o ConnectTimeout=10 -T
-         -o ControlPath=…  [-o ControlMaster=auto … on ensure]
-         [port/user/identity/jump/options]
-         -- target
-         remote_script
-  → remote_script wraps: cd workdir (if set); env assignments; command
-  → stream stdout+stderr to tool updates; truncate like Pi bash (50KB / 2000 lines)
-  → return { output, exitCode, cancelled, truncated, details: { host, target, workdir, mux: up|reopened|direct } }
+  → ssh-core.ensureMux(target)
+  → ssh-core.buildExecArgv({ identity, remoteScript, mux: true })
+  → runner.runOnce / streaming slave ssh
+  → truncate like Pi bash; return bash-shaped result + mux details
 ```
 
-Remote shell policy (proposal): run with `ssh host -- bash -lc <script>` only if we need login-profile semantics; prefer `bash -c` with an optional profile-configured `preamble` (`source ~/.bashrc` fragment) so Airflow/Spark modules can be loaded without always taking a full login tax. Final choice belongs in implementation ACs after probing typical operator hosts.
+Long job path (unchanged product behavior, new implementation home):
 
-## Relationship to `pi-better-background-tasks`
+```
+bg_task_spawn(..., ssh, remote)
+  → ssh-core.expandRemoteTask(...) / bootstrapTmux / startTmuxSession
+  → background-tasks owns meta, local log copy, stop → ssh-core.killTmuxSession
+```
 
-| Concern | Owner |
-| --- | --- |
-| Sync short remote CLI | `pi-better-ssh` `remote_bash` |
-| Connection mux | `pi-better-ssh` |
-| Long remote job + durable log + remote stop | `bg_task_spawn` + SSH tmux (existing) |
-| Remote poll / health watch | `bg_task_watch` + SSH direct (existing) |
-| Prompt guidance | Both: "short remote → `remote_bash`; long remote → `bg_task_*` with `ssh`" |
+Remote shell policy for sync (proposal): prefer `bash -c` + optional preamble over always `bash -lc`. Final AC after probing operator hosts.
 
-Shared later (optional): extract `expandSshArgv` / identity types so both packages emit identical safety options. Not a launch blocker.
+## Delivery order (extract then build)
+
+| Slice | What | Proof |
+| --- | --- | --- |
+| **S0** | Design/ADR accepted (this doc) | review |
+| **S1** | Create `packages/ssh-core`; move identity, argv, runner seam, tmux helpers out of `remote-task-preset.ts`; sync into background-tasks; thin preset wrapper remains for task-specific intent types | existing `remote-task-preset.test.ts` + runtime/e2e SSH tests green with no intentional behavior change |
+| **S2** | Add ControlMaster API to `ssh-core` with unit/fake-runner tests; background-tasks does not have to call it yet | ssh-core mux tests |
+| **S3** | Scaffold `pi-better-ssh` with `remote_bash` (may ship mux from day one once S2 exists) | new package tests |
+| **S4** | `ssh_profile` + footer; `ssh_mux` tool | package tests + light e2e |
+| **S5** | Docs cross-links; bg_task usage points short remote work at `pi-better-ssh`; optional "reuse mux if present" on bg_task control path | docs/contract tests |
+| **S6** | (Later) optional full-session bash override mode | separate ADR |
+
+S1 is the highest-risk slice and must be behavior-preserving. Prefer mechanical move + re-export shims over clever redesign in the same PR.
 
 ## Security & safety
 
 - `BatchMode=yes` always; never wait on password prompts.
-- ControlPath directory mode `0700`; sockets not world-accessible.
-- Do not log private key paths' file contents; identity *path* in verbose status is OK (same as bg_task).
-- Quoting owned by the package (local `shell:false` argv; remote script built with safe encoding, e.g. base64 or carefully JSON-stringified fragments — follow bg_task / Pi ssh example lessons).
-- Respect OpenSSH `ProxyJump` / `jump` without shell interpolation.
+- ControlPath directory mode `0700`.
+- Identity *path* may appear in verbose status; never key material.
+- Quoting owned by `ssh-core` (local `shell:false`; safe remote script encoding).
+- `ProxyJump` / `jump` without shell interpolation.
 
 ## Failure modes (operator-visible)
 
 | Case | Behavior |
 | --- | --- |
 | No `host` and no active profile | Hard error with usage hint |
-| Auth failure / host key | Fail fast; surface ssh stderr; do not retry forever |
+| Auth / host key failure | Fail fast; surface ssh stderr |
 | Mux socket stale | One reopen; then fail |
-| Timeout | Kill slave ssh; report timeout; mux master remains |
-| Remote command non-zero | Return exit code + output (not an exception) — same as local bash |
-| SSH config Host missing | OpenSSH error surfaced verbatim |
+| Timeout on sync | Kill slave ssh; mux master remains |
+| Remote non-zero | Return exit code + output (like local bash) |
+| Tmux missing (bg spawn) | Existing needs-user / install policy via `ssh-core` |
 
 ## Testing strategy
 
-- Unit: argv builder, ControlPath keying, profile resolve, script wrapping, truncation.
-- Fake SSH runner seam (mirror bg_task `RemoteRunner` / `FakeRemoteRunner`) — no live SSH in default CI.
-- Optional opt-in live test behind env flag against a local `sshd` or container.
-- Contract tests: tool schemas, prompt snippets steering agents away from raw `ssh` in local bash, docs mention hybrid with bg_task.
-
-## Rollout slices (suggested issues after approval)
-
-1. **Scaffold + `remote_bash` without mux** — structured host, safe argv, workdir, timeout, truncation; each call is a fresh ssh (behavior ceiling = today's hand-rolled ssh, but safer).
-2. **ControlMaster ensure/reuse/cleanup + `ssh_mux`** — the latency win.
-3. **`ssh_profile` use/list/status/clear + footer chip**.
-4. **Docs, prompt guidelines, gallery; optional helper note in bg_task usage pointing at `pi-better-ssh` for sync**.
-5. **(Later)** Optional share of SSH argv helpers with bg_task; optional "reuse mux if present" on bg_task control path; optional full-session bash override mode.
+- **`ssh-core`**: unit tests for argv, identity, script wrap, mux keying, tmux bootstrap matrix — all on fake runner (port existing preset tests).
+- **`background-tasks`**: keep current SSH runtime/e2e/golden coverage as the extraction acceptance gate.
+- **`pi-better-ssh`**: tool schema/contract tests; fake-runner exec; truncation; profile resolve.
+- Live SSH only behind an explicit opt-in env flag.
 
 ## Open questions for implementation ACs
 
-1. Default remote shell invocation: `bash -c` + preamble vs `bash -lc`?
-2. `ControlPersist` default seconds?
-3. Should `remote_bash` accept `argv: string[]` + `shell:false` remote-side, or only a command string in v1?
-4. Session persistence of active profile across `/reload` (yes/no)? Proposal: yes, store under session-scoped state next to other harness metadata.
-5. Name bikeshed: `remote_bash` vs `ssh_exec` vs `ssh_bash` — current preference `remote_bash` (pairs with local `bash`).
+1. Default remote shell invocation for sync: `bash -c` + preamble vs `bash -lc`?
+2. `ControlPersist` default seconds? (proposal: 600)
+3. `remote_bash`: command string only in v1, or also remote `argv` + `shell:false`?
+4. Persist active profile across `/reload`? (proposal: yes)
+5. Sync script: extend `scripts/sync-shared-log-utils.mjs` vs add `sync-shared-ssh-core.mjs`?
+6. After S1, keep `expandSshRemoteTaskPreset` as a thin bg_task-specific façade over `ssh-core`, or rename call sites to `ssh-core` APIs directly?
 
 ## Decision summary
 
-- Build **`pi-better-ssh`** as a design-first new package.
-- Primary tool: **`remote_bash`** (sync).
-- Hosts: **`~/.ssh/config` aliases**.
-- Reuse: **ControlMaster for sync**; **existing bg_task tmux for long jobs**.
-- Do not override local bash in v1.
-- Do not put this into the harness meta package on first publish.
+- Add private **`ssh-core`** shared by both packages (including tmux helpers).
+- **Extract from background-tasks first**, prove with existing tests, **then** build **`pi-better-ssh`**.
+- Sync product tool: **`remote_bash`**; hosts via **`~/.ssh/config`**.
+- Reuse: **ControlMaster for sync**; **per-task tmux for long jobs**.
+- Do not override local bash in v1; do not publish `ssh-core`; do not meta-bundle `pi-better-ssh` on first release.

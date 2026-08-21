@@ -10,10 +10,10 @@ proposed
 
 1. **Extend `pi-better-background-tasks` with sync `remote_bash`** — smallest ship path, but mixes "never block the turn" with "wait for this command" and invites agents to misuse spawn for short CLI checks.
 2. **Override built-in `bash` when a host is active** (Pi `examples/extensions/ssh.ts`) — excellent for "this whole session is on host X", surprising for mixed local+remote Airflow workflows where local edits and remote `airflow`/`spark-submit` coexist.
-3. **New `pi-better-ssh` with explicit `remote_bash` + SSH-config hosts** — chosen. Clear tool choice, reuses operator SSH config, keeps bg_task focused on durable jobs, and can later share argv/safety helpers with the SSH preset without merging runtimes.
+3. **New `pi-better-ssh` with explicit `remote_bash` + SSH-config hosts** — chosen for the product surface. Clear tool choice, reuses operator SSH config, keeps bg_task focused on durable jobs. Shared SSH protocol extraction is decided separately in ADR 0002 (`ssh-core`).
 
 ## Consequences
 
-- Connection multiplexing (ControlMaster) becomes in-scope for sync exec; epic #184's "no ControlMaster" non-goal remains true for the background-task package itself.
+- Connection multiplexing (ControlMaster) is in-scope for sync exec via `ssh-core`; background-tasks still must not *depend* on mux for job correctness (epic #184).
 - Agents must select `remote_bash` (or an active profile helper) instead of inventing `ssh ...` inside local `bash`.
-- Long-running remote jobs continue to use `bg_task_*` with structured `ssh`; `pi-better-ssh` should not reimplement tmux job supervision in v1.
+- Long-running remote jobs continue to use `bg_task_*` with structured `ssh`; tmux job *policy* stays in background-tasks while tmux *helpers* live in `ssh-core` (ADR 0002).
