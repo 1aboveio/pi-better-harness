@@ -9,6 +9,7 @@ on:
         type: choice
         options:
           - pi-better-background-tasks
+          - pi-better-ssh
           - pi-better-subagents
           - pi-better-goal
           - pi-better-harness
@@ -60,6 +61,7 @@ jobs:
           set -euo pipefail
           case "$PACKAGE" in
             pi-better-background-tasks) WORKSPACE="packages/pi-better-background-tasks" ;;
+            pi-better-ssh) WORKSPACE="packages/pi-better-ssh" ;;
             pi-better-subagents) WORKSPACE="packages/pi-better-subagents" ;;
             pi-better-goal) WORKSPACE="packages/pi-better-goal" ;;
             pi-better-harness) WORKSPACE="packages/pi-better-harness" ;;
@@ -128,6 +130,10 @@ jobs:
           case "$PACKAGE" in
             pi-better-background-tasks)
               check_pack_file /tmp/package-pack.json src/shared-navigator.ts
+              ;;
+            pi-better-ssh)
+              check_pack_file /tmp/package-pack.json src/index.ts
+              check_pack_file /tmp/package-pack.json src/shared-ssh-core/index.ts
               ;;
             pi-better-subagents)
               check_pack_file /tmp/package-pack.json shared-navigator.ts

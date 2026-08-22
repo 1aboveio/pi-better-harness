@@ -12,8 +12,8 @@ three core extensions:
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
 
-`pi-better-read-aloud` lives in this repo but is intentionally not part of the
-meta package yet.
+`pi-better-ssh` and `pi-better-read-aloud` live in this repo but are
+intentionally not part of the meta package.
 
 ## Install
 
@@ -28,6 +28,7 @@ Install only one extension when you do not want the full bundle:
 ```sh
 pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
+pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
 ```
 
@@ -40,18 +41,19 @@ pi -e npm:pi-better-harness
 ## Packages
 
 This repository is a private npm workspace. The root package is not published.
-The publishable packages are:
+The package workspaces are:
 
-| Workspace | npm package | Included in meta package |
-| --------- | ----------- | ------------------------ |
-| `packages/pi-better-harness` | `pi-better-harness` | yes |
-| `packages/pi-better-subagents` | `pi-better-subagents` | yes |
-| `packages/pi-better-background-tasks` | `pi-better-background-tasks` | yes |
-| `packages/pi-better-goal` | `pi-better-goal` | yes |
-| `packages/pi-better-read-aloud` | `pi-better-read-aloud` | not yet |
-| `packages/navigator` | internal workspace | no |
+| Workspace | npm package | Publish workflow | Included in meta package |
+| --------- | ----------- | ---------------- | ------------------------ |
+| `packages/pi-better-harness` | `pi-better-harness` | yes | yes |
+| `packages/pi-better-subagents` | `pi-better-subagents` | yes | yes |
+| `packages/pi-better-background-tasks` | `pi-better-background-tasks` | yes | yes |
+| `packages/pi-better-ssh` | `pi-better-ssh` | yes | no |
+| `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
+| `packages/pi-better-read-aloud` | not configured for publishing | no | no |
+| `packages/navigator` | internal workspace | no | no |
 
-All four publishable packages carry the `pi-package` npm keyword. The bundle is
+All five publishable packages carry the `pi-package` npm keyword. The bundle is
 the recommended install for most users, and the component packages remain
 available for people who want only one extension.
 
@@ -91,6 +93,7 @@ You can also install individual workspace directories while iterating:
 ```sh
 pi install ./packages/pi-better-subagents
 pi install ./packages/pi-better-background-tasks
+pi install ./packages/pi-better-ssh
 pi install ./packages/pi-better-goal
 ```
 
@@ -149,8 +152,8 @@ pi install npm:pi-better-goal
 ```
 
 Pi's package gallery discovers npm packages tagged with the `pi-package` keyword.
-After npm publish, the bundle and the three component packages are all eligible
-to appear there.
+After npm publish, every independently published package carrying that keyword
+is eligible to appear there.
 
 The publish workflow creates the package-scoped Git tag and GitHub release after
 npm verification succeeds.
