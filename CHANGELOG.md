@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.1.25] - 2026-08-22
+
+### Changed
+
+- **harness**: bundle goal 0.1.22 (multiline objective rail flattening)
+
+## [pi-better-goal@0.1.22] - 2026-08-22
+
+### Fixed
+
+- **goal**: flatten multiline objectives on the above-editor rail so dock height stays stable and Working... / Elapsed no longer stack into scrollback
+
 ## [pi-better-harness@0.1.24] - 2026-08-21
 
 ### Changed
