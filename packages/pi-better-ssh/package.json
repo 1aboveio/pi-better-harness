@@ -1,0 +1,57 @@
+{
+  "name": "pi-better-ssh",
+  "version": "0.1.0",
+  "description": "Pi extension for safe synchronous remote bash commands over reusable SSH connections.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "ssh",
+    "remote-bash"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-ssh"
+  },
+  "bugs": {
+    "url": "https://github.com/1aboveio/pi-better-harness/issues"
+  },
+  "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-ssh#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "pretest": "node ../../scripts/sync-shared-ssh-core.mjs",
+    "prepack": "node ../../scripts/sync-shared-ssh-core.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "files": [
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "!src/shared-ssh-core/test-support/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "typebox": "^1.1.39",
+    "typescript": "^6.0.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
