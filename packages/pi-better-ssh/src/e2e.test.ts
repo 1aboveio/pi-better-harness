@@ -278,9 +278,40 @@ describe("pi-better-ssh extension", () => {
     }
   });
 
+  // @covers pi-better-ssh.docs
+  // @level integration
+  // @fails-without-fix pi-better-ssh.docs
+  it("ships the complete install, usage, profile, mux, and safety contract", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+    for (const required of [
+      "pi install npm:pi-better-ssh",
+      "remote_bash",
+      "ssh_profile",
+      "ssh_mux",
+      "Host airflow-prod",
+      "~/.ssh/config",
+      "user@host",
+      "ControlMaster",
+      "ControlPath",
+      "BatchMode=yes",
+      "shell:false",
+      "bg_task_spawn",
+      "structured `ssh`",
+      "built-in `bash` remains local",
+    ]) {
+      expect(readme).toContain(required);
+    }
+  });
+
+  // @covers pi-better-ssh.release-contract
+  // @level integration
+  // @fails-without-fix pi-better-ssh.release-contract
   it("is independently publishable but absent from the root extension bundle", () => {
     const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     const rootPackageJson = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
+    const releaseGuide = readFileSync(new URL("../../../docs/development-and-release.md", import.meta.url), "utf8");
+    const publishWorkflow = readFileSync(new URL("../../../.github/workflows/publish.yml", import.meta.url), "utf8");
 
     expect(packageJson).toMatchObject({
       name: "pi-better-ssh",
@@ -288,6 +319,11 @@ describe("pi-better-ssh extension", () => {
       pi: { extensions: ["./src/index.ts"] },
     });
     expect(packageJson.keywords).toContain("pi-package");
+    expect(releaseGuide).toContain("| `packages/pi-better-ssh` | `pi-better-ssh` | no |");
+    expect(releaseGuide).toContain("pi install npm:pi-better-ssh");
+    expect(publishWorkflow).toContain("- pi-better-ssh");
+    expect(publishWorkflow).toContain('pi-better-ssh) WORKSPACE="packages/pi-better-ssh"');
+    expect(publishWorkflow).toContain("check_pack_file /tmp/package-pack.json src/shared-ssh-core/index.ts");
     expect(rootPackageJson.pi.extensions.join(" ")).not.toContain("pi-better-ssh");
   });
 });
