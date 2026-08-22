@@ -84,6 +84,7 @@ describe("pi-better-ssh extension", () => {
         successfulResult(""),
         successfulResult("Master running\n"),
         successfulResult("profile command\n"),
+        successfulResult("Exit request sent\n"),
       ]);
       const harness = createHarness("profile-session-217", entries);
       registerSshExtension(harness.pi, {
@@ -136,6 +137,14 @@ describe("pi-better-ssh extension", () => {
       });
       expect(runner.runCalls[5]?.command).toContain("APP_ENV");
       expect(runner.runCalls[5]?.command).toContain("staging");
+      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux up)"]);
+
+      const stopped = await harness.execute("ssh_mux", { action: "stop" });
+      expect(stopped.details).toMatchObject({
+        scope: "target",
+        masters: [{ target: "deploy", state: "stopped" }],
+      });
+      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
 
       const reloadRunner = new FakeRemoteRunner([
         failedResult(255, "Control socket missing"),
@@ -154,6 +163,8 @@ describe("pi-better-ssh extension", () => {
         active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } },
       });
       expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+      await reloaded.shutdown();
+      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", undefined]);
 
       const cleared = await reloaded.execute("ssh_profile", { action: "clear" });
       expect(cleared.details).toEqual({ action: "clear", active: null });
