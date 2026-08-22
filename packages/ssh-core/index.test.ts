@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -108,20 +109,26 @@ describe("ssh-core package contract", () => {
   // @covers ssh-core.remote-bash-script
   // @level unit
   it("wraps remote bash workdir and environment without shell interpolation", () => {
-    assert.equal(wrapRemoteBashCommand({
-      command: "printf '%s\\n' \"$RELEASE_LABEL\"",
-      workdir: "/srv/app's releases",
-      env: {
-        RELEASE_LABEL: "candidate 'A'\nsecond line",
-        EMPTY: "",
-      },
-      preamble: "source ~/.profile",
-    }), "bash -c 'cd -- '\"'\"'/srv/app'\"'\"'s releases'\"'\"' || exit $?\\nexport EMPTY='\"'\"''\"'\"'\\nexport RELEASE_LABEL='\"'\"'candidate '\"'\"'\"'\"'\"'\"'A'\"'\"'\"'\"'\"'\"'\\nsecond line'\"'\"'\\nsource ~/.profile\\nprintf '\"'\"'%s\\n'\"'\"' \"$RELEASE_LABEL\"'");
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-remote-bash-");
+    const workdir = join(fixtureRoot, "app's releases");
+    mkdirSync(workdir);
+    try {
+      const payload = "candidate $(printf injected) 'A'\nsecond line";
+      const wrapped = wrapRemoteBashCommand({
+        command: "printf '%s|%s|%s' \"$PREFIX\" \"$RELEASE_LABEL\" \"$PWD\"",
+        workdir,
+        env: { RELEASE_LABEL: payload, EMPTY: "" },
+        preamble: "PREFIX=profile",
+      });
 
-    assert.equal(wrapRemoteBashCommand({ command: "pwd" }), "bash -c 'pwd'");
-    assert.throws(() => wrapRemoteBashCommand({ command: "  " }), /remote bash command is required/);
-    assert.throws(() => wrapRemoteBashCommand({ command: "true", workdir: "" }), /workdir must not be empty/);
-    assert.throws(() => wrapRemoteBashCommand({ command: "true", env: { "BAD-NAME": "x" } }), /invalid remote environment variable name/);
+      assert.equal(execFileSync("sh", ["-c", wrapped], { encoding: "utf8" }), `profile|${payload}|${workdir}`);
+      assert.equal(wrapRemoteBashCommand({ command: "pwd" }), "bash -c 'pwd'");
+      assert.throws(() => wrapRemoteBashCommand({ command: "  " }), /remote bash command is required/);
+      assert.throws(() => wrapRemoteBashCommand({ command: "true", workdir: "" }), /workdir must not be empty/);
+      assert.throws(() => wrapRemoteBashCommand({ command: "true", env: { "BAD-NAME": "x" } }), /invalid remote environment variable name/);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   // @covers ssh-core.control-master

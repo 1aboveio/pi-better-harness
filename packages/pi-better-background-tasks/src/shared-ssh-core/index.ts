@@ -69,6 +69,13 @@ export interface ResolvedSshCommand {
   identity: ResolvedSshIdentity;
 }
 
+export interface RemoteBashCommandInput {
+  command: string;
+  workdir?: string;
+  env?: Record<string, string>;
+  preamble?: string;
+}
+
 export interface SshMuxControllerOptions extends ResolvedSshCommand {
   runner: RemoteRunner;
   sessionScope: string;
@@ -268,6 +275,30 @@ export function resolveSshCommand(input: SshCommandInput): ResolvedSshCommand {
       target,
     },
   };
+}
+
+export function wrapRemoteBashCommand(input: RemoteBashCommandInput): string {
+  const command = requireValue(input.command, "remote bash command is required");
+  const workdir = input.workdir === undefined
+    ? undefined
+    : requireValue(input.workdir, "remote bash workdir must not be empty");
+  const preamble = input.preamble === undefined
+    ? undefined
+    : requireValue(input.preamble, "remote bash preamble must not be empty");
+  const script = [
+    ...(workdir ? [`cd -- ${shellQuote(workdir)} || exit $?`] : []),
+    ...Object.entries(input.env ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+          throw new Error(`invalid remote environment variable name: ${JSON.stringify(name)}`);
+        }
+        return `export ${name}=${shellQuote(String(value))}`;
+      }),
+    ...(preamble ? [preamble] : []),
+    command,
+  ].join("\n");
+  return `bash -c ${shellQuote(script)}`;
 }
 
 export function defaultSshControlPathRoot(): string {
