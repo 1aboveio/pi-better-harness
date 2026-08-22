@@ -73,7 +73,6 @@ export interface SshMuxControllerOptions extends ResolvedSshCommand {
   runner: RemoteRunner;
   sessionScope: string;
   controlPathRoot?: string;
-  controlPersistSeconds?: number;
 }
 
 export interface SshMuxStatus {
@@ -283,7 +282,6 @@ export function defaultSshControlPathRoot(): string {
 export function createSshMuxController(options: SshMuxControllerOptions): SshMuxController {
   const sessionScope = requireValue(options.sessionScope, "ssh mux sessionScope is required").trim();
   const controlPathRoot = resolve(options.controlPathRoot ?? defaultSshControlPathRoot());
-  const controlPersistSeconds = resolveControlPersistSeconds(options.controlPersistSeconds);
   const controlPath = join(controlPathRoot, `cm-${muxIdentityHash(options.identity, sessionScope)}`);
   if (Buffer.byteLength(controlPath) > MAX_SSH_CONTROL_PATH_BYTES) {
     throw new Error(`ssh mux ControlPath exceeds ${MAX_SSH_CONTROL_PATH_BYTES} bytes; configure a shorter controlPathRoot`);
@@ -327,7 +325,7 @@ export function createSshMuxController(options: SshMuxControllerOptions): SshMux
       rmSync(controlPath, { force: true });
       const opened = await options.runner.runOnce(muxCommandSpec(options.commandSpec, target, [
         "-o", "ControlMaster=yes",
-        "-o", `ControlPersist=${controlPersistSeconds}`,
+        "-o", `ControlPersist=${DEFAULT_SSH_CONTROL_PERSIST_SECONDS}`,
         "-o", `ControlPath=${controlPath}`,
         "-N", "-f",
       ], false));
@@ -387,14 +385,6 @@ export function createTmuxSessionController(options: TmuxSessionControllerOption
       `tmux kill-session -t ${shellQuote(options.sessionName)}`,
     )),
   };
-}
-
-function resolveControlPersistSeconds(value: number | undefined): number {
-  if (value === undefined) return DEFAULT_SSH_CONTROL_PERSIST_SECONDS;
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error("ssh mux controlPersistSeconds must be a positive safe integer");
-  }
-  return value;
 }
 
 function muxIdentityHash(identity: ResolvedSshIdentity, sessionScope: string): string {

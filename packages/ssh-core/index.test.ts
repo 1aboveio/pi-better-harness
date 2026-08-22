@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -8,6 +8,7 @@ import {
   createTmuxSessionController,
   DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
   DEFAULT_SSH_CONTROL_PERSIST_SECONDS,
+  defaultSshControlPathRoot,
   resolveSshCommand,
 } from "./index.js";
 import { FakeRemoteRunner, failedResult, successfulResult } from "./test-support/index.js";
@@ -21,6 +22,19 @@ describe("ssh-core package contract", () => {
     assert.equal(packageJson.private, true);
     assert.equal(packageJson.pi, undefined);
     assert.equal(packageJson.publishConfig, undefined);
+  });
+
+  // @covers ssh-core.control-master
+  // @level unit
+  it("places the default ControlPath root under the configured Pi agent directory", () => {
+    const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
+    try {
+      process.env.PI_CODING_AGENT_DIR = "/tmp/pi-agent-home";
+      assert.equal(defaultSshControlPathRoot(), "/tmp/pi-agent-home/ssh-control");
+    } finally {
+      if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
+    }
   });
 
   // @covers ssh-core.identity-argv
@@ -234,6 +248,20 @@ describe("ssh-core package contract", () => {
       await assert.rejects(() => mux.ensure(), /failed to establish.*after one reopen attempt.*master still unavailable/i);
       assert.equal(runner.runCalls.length, 3);
       assert.equal(runner.runCalls.filter((call) => call.argv?.includes("ControlMaster=yes")).length, 1);
+
+      const openFailureRunner = new FakeRemoteRunner([
+        failedResult(255, "missing control socket"),
+        failedResult(255, "authentication failed"),
+      ]);
+      const openFailureMux = createSshMuxController({
+        ...resolveSshCommand({ command: "true", ssh: { host: "open-failure.example" } }),
+        runner: openFailureRunner,
+        sessionScope: "session-open-failure",
+        controlPathRoot: join(fixtureRoot, "open-failure-control"),
+      });
+      await assert.rejects(() => openFailureMux.ensure(), /after one reopen attempt.*authentication failed/i);
+      assert.equal(openFailureRunner.runCalls.length, 2);
+      assert.equal(openFailureRunner.runCalls.filter((call) => call.argv?.includes("ControlMaster=yes")).length, 1);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
@@ -269,6 +297,21 @@ describe("ssh-core package contract", () => {
       const down = await mux.status();
       assert.equal(down.state, "down");
       assert.match(down.detail, /No such file or directory/);
+
+      const staleRunner = new FakeRemoteRunner([
+        failedResult(255, "Control socket connect: Connection refused"),
+      ]);
+      const staleMux = createSshMuxController({
+        ...resolveSshCommand({ command: "true", ssh: { host: "status.example", user: "ops" } }),
+        runner: staleRunner,
+        sessionScope: "session-status-stale",
+        controlPathRoot: join(fixtureRoot, "stale-control"),
+      });
+      staleMux.withMux(resolveSshCommand({ command: "true", ssh: { host: "status.example", user: "ops" } }).commandSpec);
+      writeFileSync(staleMux.controlPath, "stale socket placeholder");
+      const staleCleanup = await staleMux.cleanup();
+      assert.equal(staleCleanup.state, "not_running");
+      assert.equal(existsSync(staleMux.controlPath), false);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
@@ -276,7 +319,7 @@ describe("ssh-core package contract", () => {
 
   // @covers ssh-core.control-master
   // @level unit
-  it("rejects invalid mux scope and overlong ControlPath roots", () => {
+  it("rejects invalid mux scope, unsafe roots, and overlong ControlPaths", async () => {
     const resolved = resolveSshCommand({ command: "true", ssh: { host: "limits.example" } });
     const runner = new FakeRemoteRunner();
 
@@ -293,6 +336,25 @@ describe("ssh-core package contract", () => {
       }),
       /ControlPath exceeds 100 bytes/,
     );
+
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-mux-root-");
+    try {
+      const actualRoot = join(fixtureRoot, "actual");
+      const linkedRoot = join(fixtureRoot, "linked");
+      mkdirSync(actualRoot);
+      symlinkSync(actualRoot, linkedRoot, "dir");
+      const linkedMux = createSshMuxController({
+        ...resolved,
+        runner,
+        sessionScope: "session-linked-root",
+        controlPathRoot: linkedRoot,
+      });
+
+      await assert.rejects(() => linkedMux.status(), /ControlPath root must be a real directory/);
+      assert.equal(runner.runCalls.length, 0);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   // @covers ssh-core.tmux-session
