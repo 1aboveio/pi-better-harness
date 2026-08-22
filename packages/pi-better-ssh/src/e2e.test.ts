@@ -1,14 +1,20 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failedResult, FakeRemoteRunner, successfulResult } from "../../ssh-core/test-support/index.js";
-import sshExtension, { registerRemoteBashTool } from "./index.js";
+import sshExtension, { registerRemoteBashTool, registerSshExtension } from "./index.js";
 
 type JsonSchema = {
   description?: string;
   properties?: Record<string, JsonSchema>;
   required?: string[];
+};
+
+type SessionEntry = {
+  type: "custom";
+  customType: string;
+  data: unknown;
 };
 
 type RegisteredTool = {
@@ -30,9 +36,9 @@ describe("pi-better-ssh extension", () => {
     const harness = createHarness();
     sshExtension(harness.pi);
 
-    expect([...harness.tools.keys()]).toEqual(["remote_bash"]);
+    expect([...harness.tools.keys()]).toEqual(["remote_bash", "ssh_profile", "ssh_mux"]);
     const tool = harness.tools.get("remote_bash")!;
-    expect(tool.parameters?.required?.sort()).toEqual(["command", "host"]);
+    expect(tool.parameters?.required?.sort()).toEqual(["command"]);
     expect(Object.keys(tool.parameters?.properties ?? {}).sort()).toEqual([
       "command",
       "env",
@@ -54,6 +60,88 @@ describe("pi-better-ssh extension", () => {
     expect(tool.promptGuidelines?.join(" ")).toContain("bg_task_spawn");
     expect(tool.parameters?.properties?.host?.description).toContain("Host alias or user@host");
     expect(tool.parameters?.properties?.options?.description).toContain("cannot disable");
+  });
+
+  it("lists SSH config aliases and persists profile use/status/clear across reload", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-profile-");
+    const configPath = join(fixtureRoot, ".ssh", "config");
+    mkdirSync(join(fixtureRoot, ".ssh"), { recursive: true });
+    writeFileSync(configPath, [
+      "Host deploy analytics",
+      "  HostName 10.0.0.10",
+      "Host *.internal !blocked",
+      "Host deploy",
+      "HostName should-not-be-an-alias",
+    ].join("\n"));
+
+    try {
+      const entries: SessionEntry[] = [];
+      const runner = new FakeRemoteRunner([
+        failedResult(255, "Control socket missing"),
+        failedResult(255, "Control socket missing"),
+      ]);
+      const harness = createHarness("profile-session-217", entries);
+      registerSshExtension(harness.pi, {
+        runner,
+        sshConfigPath: configPath,
+        controlPathRoot: join(fixtureRoot, "control"),
+        muxEntries: new Map(),
+      });
+
+      const listed = await harness.execute("ssh_profile", { action: "list" });
+      expect(listed.details).toMatchObject({
+        action: "list",
+        aliases: ["analytics", "deploy"],
+        active: null,
+      });
+
+      const used = await harness.execute("ssh_profile", {
+        action: "use",
+        host: "deploy",
+        workdir: "/srv/app",
+        env: { APP_ENV: "staging" },
+      });
+      expect(used.details).toMatchObject({
+        action: "use",
+        active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } },
+        mux: { state: "down" },
+      });
+      expect(entries.at(-1)).toMatchObject({
+        type: "custom",
+        customType: "pi-better-ssh-profile",
+        data: { version: 1, active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } } },
+      });
+      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+
+      const status = await harness.execute("ssh_profile", { action: "status" });
+      expect(status.details).toMatchObject({
+        action: "status",
+        active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } },
+        mux: { state: "down" },
+      });
+
+      const reloadRunner = new FakeRemoteRunner([failedResult(255, "Control socket missing")]);
+      const reloaded = createHarness("profile-session-217", entries);
+      registerSshExtension(reloaded.pi, {
+        runner: reloadRunner,
+        sshConfigPath: configPath,
+        controlPathRoot: join(fixtureRoot, "control"),
+        muxEntries: new Map(),
+      });
+      await reloaded.startSession("reload");
+      const restored = await reloaded.execute("ssh_profile", { action: "status" });
+      expect(restored.details).toMatchObject({
+        active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } },
+      });
+      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+
+      const cleared = await reloaded.execute("ssh_profile", { action: "clear" });
+      expect(cleared.details).toEqual({ action: "clear", active: null });
+      expect(entries.at(-1)?.data).toEqual({ version: 1, active: null });
+      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", undefined]);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   it("executes through an injected fake and returns a non-zero exit as a normal tool result", async () => {
@@ -102,23 +190,52 @@ describe("pi-better-ssh extension", () => {
   });
 });
 
-function createHarness(sessionId = "session-216") {
+function createHarness(sessionId = "session-216", entries: SessionEntry[] = []) {
   const tools = new Map<string, RegisteredTool>();
+  const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+  const statuses: Array<[string, string | undefined]> = [];
+  const context = {
+    cwd: process.cwd(),
+    hasUI: true,
+    mode: "tui",
+    sessionManager: {
+      getSessionId: () => sessionId,
+      getBranch: () => entries,
+    },
+    ui: {
+      setStatus(key: string, value: string | undefined) {
+        statuses.push([key, value]);
+      },
+    },
+  };
   const pi = {
+    appendEntry(customType: string, data: unknown) {
+      entries.push({ type: "custom", customType, data });
+    },
     registerTool(tool: RegisteredTool) {
       tools.set(tool.name, tool);
+    },
+    on(eventName: string, handler: (event: any, ctx: any) => unknown) {
+      const current = handlers.get(eventName) ?? [];
+      current.push(handler);
+      handlers.set(eventName, current);
     },
   } as unknown as ExtensionAPI;
   return {
     pi,
     tools,
+    entries,
+    statuses,
     async execute(name: string, params: Record<string, unknown>) {
       const tool = tools.get(name);
       if (!tool) throw new Error(`missing tool ${name}`);
-      return tool.execute("call-216", params, undefined, undefined, {
-        cwd: process.cwd(),
-        sessionManager: { getSessionId: () => sessionId },
-      });
+      return tool.execute("call-217", params, undefined, undefined, context);
+    },
+    async startSession(reason = "startup") {
+      for (const handler of handlers.get("session_start") ?? []) await handler({ reason }, context);
+    },
+    async shutdown(reason = "quit") {
+      for (const handler of handlers.get("session_shutdown") ?? []) await handler({ reason }, context);
     },
   };
 }
