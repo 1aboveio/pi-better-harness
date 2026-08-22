@@ -36,7 +36,7 @@ describe("pi-better-ssh extension", () => {
     const harness = createHarness();
     sshExtension(harness.pi);
 
-    expect([...harness.tools.keys()]).toEqual(["remote_bash", "ssh_profile", "ssh_mux"]);
+    expect([...harness.tools.keys()]).toEqual(["remote_bash", "ssh_profile"]);
     const tool = harness.tools.get("remote_bash")!;
     expect(tool.parameters?.required?.sort()).toEqual(["command"]);
     expect(Object.keys(tool.parameters?.properties ?? {}).sort()).toEqual([
@@ -120,7 +120,10 @@ describe("pi-better-ssh extension", () => {
         mux: { state: "down" },
       });
 
-      const reloadRunner = new FakeRemoteRunner([failedResult(255, "Control socket missing")]);
+      const reloadRunner = new FakeRemoteRunner([
+        failedResult(255, "Control socket missing"),
+        failedResult(255, "Control socket missing"),
+      ]);
       const reloaded = createHarness("profile-session-217", entries);
       registerSshExtension(reloaded.pi, {
         runner: reloadRunner,

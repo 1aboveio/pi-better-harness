@@ -57,7 +57,7 @@ export async function executeRemoteBash(
   dependencies: RemoteBashDependencies,
   signal?: AbortSignal,
 ): Promise<RemoteBashResult> {
-  const ssh = resolveConnection(params);
+  const ssh = resolveRemoteBashConnection(params);
   const timeoutMs = resolveTimeoutMs(params.timeout);
   const remoteCommand = wrapRemoteBashCommand({
     command: params.command,
@@ -109,7 +109,7 @@ export async function executeRemoteBash(
   };
 }
 
-function resolveConnection(params: RemoteBashParams): SshConnectionParams {
+export function resolveRemoteBashConnection(params: RemoteBashParams): SshConnectionParams {
   const rawHost = params.host?.trim();
   if (!rawHost) {
     throw new Error("remote_bash requires host (an SSH Host alias or user@host); no active SSH profile is available");
