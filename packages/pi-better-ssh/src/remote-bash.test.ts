@@ -101,6 +101,47 @@ describe("executeRemoteBash", () => {
     }
   });
 
+  it("uses active profile host, workdir, and merged environment when host is omitted", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-profile-exec-");
+    try {
+      const runner = new FakeRemoteRunner([
+        failedResult(255, "missing"),
+        successfulResult(""),
+        successfulResult("Master running\n"),
+        successfulResult("/srv/profile\n"),
+      ]);
+
+      const result = await executeRemoteBash({
+        command: "printf '%s\\n' \"$PROFILE_ENV:$OVERRIDE:$CALL_ENV\"",
+        env: { OVERRIDE: "call", CALL_ENV: "set" },
+      }, {
+        runner,
+        sessionScope: "session-profile-exec",
+        controlPathRoot: join(fixtureRoot, "control"),
+        activeProfile: {
+          host: "deploy@build-alias",
+          workdir: "/srv/profile",
+          env: { PROFILE_ENV: "set", OVERRIDE: "profile" },
+        },
+      });
+
+      expect(result).toMatchObject({
+        target: "deploy@build-alias",
+        workdir: "/srv/profile",
+        output: "/srv/profile\n",
+        mux: { state: "up", reused: false },
+      });
+      const command = runner.runCalls[3]?.command ?? "";
+      expect(command).toContain("cd -- '/srv/profile'");
+      expect(command).toContain("export CALL_ENV='set'");
+      expect(command).toContain("export OVERRIDE='call'");
+      expect(command).toContain("export PROFILE_ENV='set'");
+      expect(command).not.toContain("OVERRIDE='profile'");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
   it("returns timeout cancellation without stopping the mux", async () => {
     const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-timeout-");
     try {
