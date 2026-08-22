@@ -64,6 +64,7 @@ export interface RegisterRemoteBashDependencies {
   controlPathRoot?: string;
   getActiveProfile?: () => SshProfile | undefined;
   muxRegistry?: SshMuxRegistry;
+  onResult?: (result: RemoteBashResult, params: { host?: string }, ctx: ExtensionContext) => void | Promise<void>;
 }
 
 export interface RegisterSshExtensionDependencies extends RegisterRemoteBashDependencies {
@@ -92,6 +93,7 @@ export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterR
         ...(activeProfile ? { activeProfile } : {}),
         ...(dependencies.muxRegistry ? { muxRegistry: dependencies.muxRegistry } : {}),
       }, signal);
+      await dependencies.onResult?.(result, params, ctx);
       return {
         content: [{ type: "text" as const, text: formatToolResult(result, params.timeout) }],
         details: result,
@@ -112,6 +114,11 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
     ...dependencies,
     muxRegistry,
     getActiveProfile: () => activeProfile,
+    onResult: (result, params, ctx) => {
+      if (activeProfile && params.host === undefined) {
+        setFooter(ctx, activeProfile, result.mux.state);
+      }
+    },
   });
 
   const resolveMuxTarget = (params: {
@@ -224,6 +231,12 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
           ? await muxRegistry.statusAll(sessionScope)
           : await muxRegistry.stopAll(sessionScope);
         const masters = results.map(muxResultDetails);
+        if (activeProfile) {
+          const activeTarget = resolveMuxTarget({ host: activeProfile.host }).identity.target;
+          const activeMux = masters.find((master) => master.target === activeTarget);
+          if (params.action === "stop") setFooter(ctx, activeProfile, "down");
+          else if (activeMux) setFooter(ctx, activeProfile, activeMux.state === "up" ? "up" : "down");
+        }
         const details = { action: params.action, scope: "all" as const, masters };
         return { content: [{ type: "text" as const, text: formatMuxResults(masters) }], details };
       }
@@ -233,6 +246,12 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
         ? await muxRegistry.statusTarget(resolved, sessionScope)
         : await muxRegistry.stopTarget(resolved, sessionScope);
       const masters = [muxResultDetails(result)];
+      if (activeProfile) {
+        const activeTarget = resolveMuxTarget({ host: activeProfile.host }).identity.target;
+        if (resolved.identity.target === activeTarget) {
+          setFooter(ctx, activeProfile, result.state === "up" ? "up" : "down");
+        }
+      }
       const details = { action: params.action, scope: "target" as const, masters };
       return { content: [{ type: "text" as const, text: formatMuxResults(masters) }], details };
     },
