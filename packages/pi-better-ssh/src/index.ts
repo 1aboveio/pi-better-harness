@@ -5,6 +5,8 @@ import {
   formatSize,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createSshMuxRegistry } from "./mux-registry.js";
+import type { SshMuxEntryMap, SshMuxRegistry } from "./mux-registry.js";
 import { createProcessRemoteRunner } from "./process-runner.js";
 import {
   createSshProfile,
@@ -17,7 +19,7 @@ import {
 import type { SshProfile } from "./profile.js";
 import { executeRemoteBash, resolveRemoteBashConnection } from "./remote-bash.js";
 import type { RemoteBashDependencies, RemoteBashResult } from "./remote-bash.js";
-import { createSshMuxController, resolveSshCommand } from "./shared-ssh-core/index.js";
+import { resolveSshCommand } from "./shared-ssh-core/index.js";
 
 const STATUS_KEY = "pi-better-ssh";
 
@@ -32,6 +34,17 @@ const RemoteBashParams = Type.Object({
   identity_file: Type.Optional(Type.String({ description: "Structured SSH identity file path." })),
   jump: Type.Optional(Type.String({ description: "Structured SSH jump host passed with -J." })),
   options: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Additional SSH -o key/value options. Callers cannot disable required BatchMode, connect-timeout, no-TTY, or mux safety options." })),
+});
+
+const SshMuxParams = Type.Object({
+  action: Type.Union([Type.Literal("status"), Type.Literal("stop")]),
+  all: Type.Optional(Type.Boolean({ description: "Apply to every ControlMaster known in this Pi process for the current session." })),
+  host: Type.Optional(Type.String({ description: "SSH Host alias or user@host target. Defaults to the active profile." })),
+  user: Type.Optional(Type.String({ description: "Structured SSH user override." })),
+  port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65_535 })),
+  identity_file: Type.Optional(Type.String()),
+  jump: Type.Optional(Type.String()),
+  options: Type.Optional(Type.Record(Type.String(), Type.String())),
 });
 
 const SshProfileParams = Type.Object({
@@ -50,11 +63,12 @@ export interface RegisterRemoteBashDependencies {
   runner: RemoteBashDependencies["runner"];
   controlPathRoot?: string;
   getActiveProfile?: () => SshProfile | undefined;
+  muxRegistry?: SshMuxRegistry;
 }
 
 export interface RegisterSshExtensionDependencies extends RegisterRemoteBashDependencies {
   sshConfigPath?: string;
-  muxEntries?: Map<unknown, unknown>;
+  muxEntries?: SshMuxEntryMap;
 }
 
 export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterRemoteBashDependencies): void {
@@ -76,6 +90,7 @@ export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterR
         sessionScope,
         ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
         ...(activeProfile ? { activeProfile } : {}),
+        ...(dependencies.muxRegistry ? { muxRegistry: dependencies.muxRegistry } : {}),
       }, signal);
       return {
         content: [{ type: "text" as const, text: formatToolResult(result, params.timeout) }],
@@ -87,23 +102,41 @@ export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterR
 
 export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSshExtensionDependencies): void {
   let activeProfile: SshProfile | undefined;
+  const muxRegistry = dependencies.muxRegistry ?? createSshMuxRegistry({
+    runner: dependencies.runner,
+    ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
+    ...(dependencies.muxEntries ? { entries: dependencies.muxEntries } : {}),
+  });
 
   registerRemoteBashTool(pi, {
     ...dependencies,
+    muxRegistry,
     getActiveProfile: () => activeProfile,
   });
 
+  const resolveMuxTarget = (params: {
+    host?: string;
+    user?: string;
+    port?: number;
+    identity_file?: string;
+    jump?: string;
+    options?: Record<string, string>;
+  }) => {
+    const ssh = resolveRemoteBashConnection({
+      command: "true",
+      host: params.host ?? activeProfile?.host,
+      ...(params.user !== undefined ? { user: params.user } : {}),
+      ...(params.port !== undefined ? { port: params.port } : {}),
+      ...(params.identity_file !== undefined ? { identity_file: params.identity_file } : {}),
+      ...(params.jump !== undefined ? { jump: params.jump } : {}),
+      ...(params.options !== undefined ? { options: params.options } : {}),
+    });
+    return resolveSshCommand({ command: "true", ssh });
+  };
+
   const queryMux = async (profile: SshProfile, sessionScope: string) => {
     try {
-      const ssh = resolveRemoteBashConnection({ command: "true", host: profile.host });
-      const resolved = resolveSshCommand({ command: "true", ssh });
-      const mux = createSshMuxController({
-        ...resolved,
-        runner: dependencies.runner,
-        sessionScope,
-        ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
-      });
-      const status = await mux.status();
+      const status = await muxRegistry.statusTarget(resolveMuxTarget({ host: profile.host }), sessionScope);
       return { state: status.state, target: status.target, detail: status.detail };
     } catch (error) {
       return {
@@ -174,6 +207,37 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
     },
   });
 
+  pi.registerTool({
+    name: "ssh_mux",
+    label: "SSH Mux",
+    description: "Inspect or stop the SSH ControlMaster for one target, the active profile, or all masters observed in this Pi process for the current session.",
+    promptSnippet: "Inspect or stop reusable SSH ControlMaster connections",
+    parameters: SshMuxParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const identityFields = [params.host, params.user, params.port, params.identity_file, params.jump, params.options];
+      if (params.all && identityFields.some((value) => value !== undefined)) {
+        throw new Error("ssh_mux all cannot be combined with target identity fields");
+      }
+      const sessionScope = ctx.sessionManager.getSessionId();
+      if (params.all) {
+        const results = params.action === "status"
+          ? await muxRegistry.statusAll(sessionScope)
+          : await muxRegistry.stopAll(sessionScope);
+        const masters = results.map(muxResultDetails);
+        const details = { action: params.action, scope: "all" as const, masters };
+        return { content: [{ type: "text" as const, text: formatMuxResults(masters) }], details };
+      }
+
+      const resolved = resolveMuxTarget(params);
+      const result = params.action === "status"
+        ? await muxRegistry.statusTarget(resolved, sessionScope)
+        : await muxRegistry.stopTarget(resolved, sessionScope);
+      const masters = [muxResultDetails(result)];
+      const details = { action: params.action, scope: "target" as const, masters };
+      return { content: [{ type: "text" as const, text: formatMuxResults(masters) }], details };
+    },
+  });
+
   const restore = async (ctx: ExtensionContext): Promise<void> => {
     activeProfile = restoreSshProfile(ctx.sessionManager.getBranch());
     await refreshFooter(ctx);
@@ -193,6 +257,20 @@ function formatProfileList(aliases: string[], active: SshProfile | undefined): s
     : ["(no literal Host aliases found in ~/.ssh/config)"];
   if (active && !aliases.includes(active.host)) lines.unshift(`* ${active.host} (active user@host profile)`);
   return lines.join("\n");
+}
+
+function muxResultDetails(result: { state: string; target: string; controlPath: string; detail: string }) {
+  return {
+    target: result.target,
+    state: result.state,
+    controlPath: result.controlPath,
+    detail: result.detail,
+  };
+}
+
+function formatMuxResults(results: Array<{ target: string; state: string; detail: string }>): string {
+  if (results.length === 0) return "No SSH ControlMasters are known for this session.";
+  return results.map((result) => `${result.target}: mux ${result.state} - ${result.detail}`).join("\n");
 }
 
 function formatToolResult(result: RemoteBashResult, timeoutSeconds?: number): string {

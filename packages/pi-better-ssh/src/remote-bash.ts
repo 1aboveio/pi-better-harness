@@ -13,6 +13,7 @@ import {
   wrapRemoteBashCommand,
 } from "./shared-ssh-core/index.js";
 import type { RemoteRunner, SshConnectionParams } from "./shared-ssh-core/index.js";
+import type { SshMuxRegistry } from "./mux-registry.js";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const REMOTE_CAPTURE_BYTES = DEFAULT_MAX_BYTES * 2;
@@ -34,6 +35,7 @@ export interface RemoteBashDependencies {
   runner: RemoteRunner;
   sessionScope: string;
   controlPathRoot?: string;
+  muxRegistry?: Pick<SshMuxRegistry, "controllerFor">;
   activeProfile?: {
     host: string;
     workdir?: string;
@@ -71,12 +73,14 @@ export async function executeRemoteBash(
     env: effectiveParams.env,
   });
   const resolved = resolveSshCommand({ command: remoteCommand, ssh });
-  const mux = createSshMuxController({
-    ...resolved,
-    runner: dependencies.runner,
-    sessionScope: dependencies.sessionScope,
-    ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
-  });
+  const mux = dependencies.muxRegistry
+    ? dependencies.muxRegistry.controllerFor(resolved, dependencies.sessionScope)
+    : createSshMuxController({
+      ...resolved,
+      runner: dependencies.runner,
+      sessionScope: dependencies.sessionScope,
+      ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
+    });
   const muxState = await mux.ensure();
   const commandResult = await dependencies.runner.runOnce(
     mux.withMux(resolved.commandSpec),
