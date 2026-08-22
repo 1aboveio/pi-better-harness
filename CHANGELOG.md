@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-ssh@0.1.0] - 2026-08-22
+
+### Added
+
+- **ssh**: add synchronous `remote_bash` execution over safe reusable ControlMaster connections
+- **ssh**: add session-scoped SSH profiles, mux status/stop controls, and an active-profile footer chip
+- **ssh**: document SSH config Host aliases, safety defaults, and the short-sync versus durable-background split
+
+### Changed
+
+- **release**: make `pi-better-ssh` independently publishable while keeping it out of the harness meta bundle
+
 ## [pi-better-harness@0.1.25] - 2026-08-22
 
 ### Changed
