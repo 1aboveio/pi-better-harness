@@ -1,4 +1,8 @@
 import type { ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 export interface CommandSpec {
   command?: string;
@@ -43,6 +47,8 @@ export interface ResolvedSshIdentity {
 }
 
 export const DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS = 10;
+export const DEFAULT_SSH_CONTROL_PERSIST_SECONDS = 600;
+export const MAX_SSH_CONTROL_PATH_BYTES = 100;
 export const DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS = 120_000;
 
 export interface RemoteRunner {
@@ -60,6 +66,49 @@ export interface SshCommandInput {
 export interface ResolvedSshCommand {
   commandSpec: CommandSpec;
   identity: ResolvedSshIdentity;
+}
+
+export interface SshMuxControllerOptions extends ResolvedSshCommand {
+  runner: RemoteRunner;
+  sessionScope: string;
+  controlPathRoot?: string;
+  controlPersistSeconds?: number;
+}
+
+export interface SshMuxStatus {
+  state: "up" | "down";
+  target: string;
+  controlPath: string;
+  detail: string;
+  commandResult: CommandResult;
+}
+
+export interface SshMuxEnsureResult extends SshMuxStatus {
+  state: "up";
+  reused: boolean;
+}
+
+export interface SshMuxCleanupResult {
+  state: "stopped" | "not_running";
+  target: string;
+  controlPath: string;
+  detail: string;
+  commandResult: CommandResult;
+}
+
+export interface SshMuxController {
+  readonly controlPath: string;
+  ensure(): Promise<SshMuxEnsureResult>;
+  status(): Promise<SshMuxStatus>;
+  cleanup(): Promise<SshMuxCleanupResult>;
+  withMux(commandSpec: CommandSpec): CommandSpec;
+}
+
+export class SshMuxError extends Error {
+  constructor(message: string, readonly commandResult: CommandResult) {
+    super(message);
+    this.name = "SshMuxError";
+  }
 }
 
 export type TmuxPackageManager = "apt-get" | "dnf" | "yum" | "apk" | "pacman" | "zypper" | "brew";
@@ -140,6 +189,7 @@ export interface TmuxSessionController {
 }
 
 const REQUIRED_SSH_OPTIONS = new Set(["batchmode", "connecttimeout", "requesttty"]);
+const MUX_CONTROL_OPTIONS = new Set(["controlmaster", "controlpath", "controlpersist"]);
 const TMUX_STATUS_PREFIX = "__PI_BG_STATUS__=";
 const TMUX_SIZE_PREFIX = "__PI_BG_SIZE__=";
 const TMUX_PATH_PREFIX = "__PI_BG_TMUX_PATH__=";
@@ -220,6 +270,100 @@ export function resolveSshCommand(input: SshCommandInput): ResolvedSshCommand {
   };
 }
 
+export function defaultSshControlPathRoot(): string {
+  const agentDirectory = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  return join(agentDirectory, "ssh-control");
+}
+
+/**
+ * Manages connection reuse for short synchronous SSH commands only.
+ * Durable remote jobs must remain correct when no ControlMaster exists.
+ */
+export function createSshMuxController(options: SshMuxControllerOptions): SshMuxController {
+  const sessionScope = requireValue(options.sessionScope, "ssh mux sessionScope is required").trim();
+  const controlPathRoot = resolve(options.controlPathRoot ?? defaultSshControlPathRoot());
+  const controlPersistSeconds = resolveControlPersistSeconds(options.controlPersistSeconds);
+  const controlPath = join(controlPathRoot, `cm-${muxIdentityHash(options.identity, sessionScope)}`);
+  if (Buffer.byteLength(controlPath) > MAX_SSH_CONTROL_PATH_BYTES) {
+    throw new Error(`ssh mux ControlPath exceeds ${MAX_SSH_CONTROL_PATH_BYTES} bytes; configure a shorter controlPathRoot`);
+  }
+  const target = options.identity.target;
+
+  const prepareRoot = (): void => ensureControlPathRoot(controlPathRoot);
+  const buildControlCommand = (operation: "check" | "exit"): CommandSpec => {
+    prepareRoot();
+    return muxCommandSpec(options.commandSpec, target, [
+      "-o", "ControlMaster=no",
+      "-o", `ControlPath=${controlPath}`,
+      "-O", operation,
+    ], false);
+  };
+  const status = async (): Promise<SshMuxStatus> => {
+    const commandResult = await options.runner.runOnce(buildControlCommand("check"));
+    return {
+      state: commandSucceeded(commandResult) ? "up" : "down",
+      target,
+      controlPath,
+      detail: resultDetail(commandResult) || (commandSucceeded(commandResult) ? "ControlMaster is running." : "ControlMaster is not running."),
+      commandResult,
+    };
+  };
+
+  return {
+    controlPath,
+    status,
+    withMux: (commandSpec) => {
+      prepareRoot();
+      return muxCommandSpec(commandSpec, target, [
+        "-o", "ControlMaster=no",
+        "-o", `ControlPath=${controlPath}`,
+      ], true);
+    },
+    ensure: async () => {
+      const existing = await status();
+      if (existing.state === "up") return { ...existing, state: "up", reused: true };
+
+      rmSync(controlPath, { force: true });
+      const opened = await options.runner.runOnce(muxCommandSpec(options.commandSpec, target, [
+        "-o", "ControlMaster=yes",
+        "-o", `ControlPersist=${controlPersistSeconds}`,
+        "-o", `ControlPath=${controlPath}`,
+        "-N", "-f",
+      ], false));
+      if (!commandSucceeded(opened)) {
+        throw new SshMuxError(
+          `SSH ControlMaster for ${target} failed to establish after one reopen attempt${resultDetail(opened) ? `: ${resultDetail(opened)}` : "."}`,
+          opened,
+        );
+      }
+
+      const reopened = await status();
+      if (reopened.state !== "up") {
+        throw new SshMuxError(
+          `SSH ControlMaster for ${target} failed to establish after one reopen attempt${reopened.detail ? `: ${reopened.detail}` : "."}`,
+          reopened.commandResult,
+        );
+      }
+      return { ...reopened, state: "up", reused: false };
+    },
+    cleanup: async () => {
+      let commandResult: CommandResult;
+      try {
+        commandResult = await options.runner.runOnce(buildControlCommand("exit"));
+      } finally {
+        rmSync(controlPath, { force: true });
+      }
+      return {
+        state: commandSucceeded(commandResult) ? "stopped" : "not_running",
+        target,
+        controlPath,
+        detail: resultDetail(commandResult) || (commandSucceeded(commandResult) ? "ControlMaster stopped." : "ControlMaster was not running."),
+        commandResult,
+      };
+    },
+  };
+}
+
 export function createTmuxSessionController(options: TmuxSessionControllerOptions): TmuxSessionController {
   return {
     bootstrapTmux: (bootstrapOptions) => bootstrapTmux(
@@ -242,6 +386,87 @@ export function createTmuxSessionController(options: TmuxSessionControllerOption
       `tmux kill-session -t ${shellQuote(options.sessionName)}`,
     )),
   };
+}
+
+function resolveControlPersistSeconds(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_SSH_CONTROL_PERSIST_SECONDS;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("ssh mux controlPersistSeconds must be a positive safe integer");
+  }
+  return value;
+}
+
+function muxIdentityHash(identity: ResolvedSshIdentity, sessionScope: string): string {
+  const optionValues = new Map<string, string>();
+  for (const [rawKey, rawValue] of Object.entries(identity.options ?? {})) {
+    const key = rawKey.toLowerCase();
+    if (REQUIRED_SSH_OPTIONS.has(key) || MUX_CONTROL_OPTIONS.has(key) || optionValues.has(key)) continue;
+    optionValues.set(key, String(rawValue));
+  }
+  const effectiveOptions = [...optionValues].sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey));
+  const connectionIdentity = JSON.stringify({
+    version: 1,
+    sessionScope,
+    target: identity.target,
+    port: identity.port ?? null,
+    identityFile: identity.identityFile ?? null,
+    jump: identity.jump ?? null,
+    options: effectiveOptions,
+  });
+  return createHash("sha256").update(connectionIdentity).digest("hex").slice(0, 32);
+}
+
+function ensureControlPathRoot(controlPathRoot: string): void {
+  mkdirSync(controlPathRoot, { recursive: true, mode: 0o700 });
+  const stats = lstatSync(controlPathRoot);
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`ssh mux ControlPath root must be a real directory: ${controlPathRoot}`);
+  }
+  chmodSync(controlPathRoot, 0o700);
+}
+
+function muxCommandSpec(
+  commandSpec: CommandSpec,
+  target: string,
+  muxArgv: string[],
+  preserveRemoteCommand: boolean,
+): CommandSpec {
+  const argv = commandSpec.argv ?? [];
+  const separator = argv.lastIndexOf("--");
+  if (argv[0] !== "ssh" || separator < 1 || argv[separator + 1] !== target) {
+    throw new Error("ssh mux requires a command produced by resolveSshCommand");
+  }
+  const connectionArgv = withoutCallerMuxOptions(argv.slice(0, separator));
+  const destinationArgv = preserveRemoteCommand ? argv.slice(separator + 1) : [target];
+  return {
+    ...(preserveRemoteCommand && commandSpec.command !== undefined ? { command: commandSpec.command } : {}),
+    argv: [...connectionArgv, ...muxArgv, "--", ...destinationArgv],
+    shell: false,
+    ...(commandSpec.cwd !== undefined ? { cwd: commandSpec.cwd } : {}),
+    ...(commandSpec.env !== undefined ? { env: commandSpec.env } : {}),
+  };
+}
+
+function withoutCallerMuxOptions(connectionArgv: string[]): string[] {
+  const sanitized: string[] = [];
+  for (let index = 0; index < connectionArgv.length; index += 1) {
+    const argument = connectionArgv[index]!;
+    const value = connectionArgv[index + 1];
+    if (argument === "-o" && value) {
+      const separator = value.indexOf("=");
+      const key = (separator < 0 ? value : value.slice(0, separator)).toLowerCase();
+      if (MUX_CONTROL_OPTIONS.has(key)) {
+        index += 1;
+        continue;
+      }
+    }
+    sanitized.push(argument);
+  }
+  return sanitized;
+}
+
+function commandSucceeded(result: CommandResult): boolean {
+  return result.exitCode === 0 && !result.timedOut;
 }
 
 function tmuxLogPath(sessionName: string): string {

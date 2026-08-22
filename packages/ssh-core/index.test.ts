@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
@@ -94,7 +93,7 @@ describe("ssh-core package contract", () => {
   // @covers ssh-core.control-master
   // @level integration
   it("ensures and reuses one restrictively stored master with safe mux exec argv", async () => {
-    const fixtureRoot = mkdtempSync(join(tmpdir(), "ssh-core-mux-"));
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-mux-");
     const controlPathRoot = join(fixtureRoot, "control");
     try {
       const runner = new FakeRemoteRunner([
@@ -114,6 +113,9 @@ describe("ssh-core package contract", () => {
           options: {
             ServerAliveInterval: "15",
             BatchMode: "no",
+            ControlMaster: "auto",
+            ControlPath: "/tmp/caller-controlled-socket",
+            ControlPersist: "9999",
           },
         },
       });
@@ -215,7 +217,7 @@ describe("ssh-core package contract", () => {
   // @covers ssh-core.control-master
   // @level integration
   it("reopens a stale master exactly once and surfaces a failed post-open check", async () => {
-    const fixtureRoot = mkdtempSync(join(tmpdir(), "ssh-core-mux-stale-"));
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-mux-stale-");
     try {
       const runner = new FakeRemoteRunner([
         failedResult(255, "stale control socket"),
@@ -240,7 +242,7 @@ describe("ssh-core package contract", () => {
   // @covers ssh-core.control-master
   // @level integration
   it("reports and cleans up the resolved target master and stale local path", async () => {
-    const fixtureRoot = mkdtempSync(join(tmpdir(), "ssh-core-mux-status-"));
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-mux-status-");
     try {
       const runner = new FakeRemoteRunner([
         successfulResult("Master running (pid=42)\n"),
@@ -270,6 +272,27 @@ describe("ssh-core package contract", () => {
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
+  });
+
+  // @covers ssh-core.control-master
+  // @level unit
+  it("rejects invalid mux scope and overlong ControlPath roots", () => {
+    const resolved = resolveSshCommand({ command: "true", ssh: { host: "limits.example" } });
+    const runner = new FakeRemoteRunner();
+
+    assert.throws(
+      () => createSshMuxController({ ...resolved, runner, sessionScope: "  ", controlPathRoot: "/tmp/pi-ssh" }),
+      /sessionScope is required/,
+    );
+    assert.throws(
+      () => createSshMuxController({
+        ...resolved,
+        runner,
+        sessionScope: "session-limits",
+        controlPathRoot: `/tmp/${"x".repeat(100)}`,
+      }),
+      /ControlPath exceeds 100 bytes/,
+    );
   });
 
   // @covers ssh-core.tmux-session
