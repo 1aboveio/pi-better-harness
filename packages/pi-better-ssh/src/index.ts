@@ -129,9 +129,13 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
     jump?: string;
     options?: Record<string, string>;
   }) => {
+    const host = params.host ?? activeProfile?.host;
+    if (!host) {
+      throw new Error("ssh_mux requires host (an SSH Host alias or user@host) or an active SSH profile");
+    }
     const ssh = resolveRemoteBashConnection({
       command: "true",
-      host: params.host ?? activeProfile?.host,
+      host,
       ...(params.user !== undefined ? { user: params.user } : {}),
       ...(params.port !== undefined ? { port: params.port } : {}),
       ...(params.identity_file !== undefined ? { identity_file: params.identity_file } : {}),
