@@ -10,6 +10,7 @@ import {
   DEFAULT_SSH_CONTROL_PERSIST_SECONDS,
   defaultSshControlPathRoot,
   resolveSshCommand,
+  wrapRemoteBashCommand,
 } from "./index.js";
 import { FakeRemoteRunner, failedResult, successfulResult } from "./test-support/index.js";
 
@@ -102,6 +103,25 @@ describe("ssh-core package contract", () => {
     assert.throws(() => resolveSshCommand({ command: "true", ssh: { host: "host", user: "bad user" } }), /ssh.user must not be empty or contain whitespace/);
     assert.throws(() => resolveSshCommand({ command: "true", ssh: { host: "host", port: 65_536 } }), /ssh.port must be an integer between 1 and 65535/);
     assert.throws(() => resolveSshCommand({ command: "true", ssh: { host: "host", options: { "Bad Key": "x" } } }), /ssh option names must not be empty or contain whitespace/);
+  });
+
+  // @covers ssh-core.remote-bash-script
+  // @level unit
+  it("wraps remote bash workdir and environment without shell interpolation", () => {
+    assert.equal(wrapRemoteBashCommand({
+      command: "printf '%s\\n' \"$RELEASE_LABEL\"",
+      workdir: "/srv/app's releases",
+      env: {
+        RELEASE_LABEL: "candidate 'A'\nsecond line",
+        EMPTY: "",
+      },
+      preamble: "source ~/.profile",
+    }), "bash -c 'cd -- '\"'\"'/srv/app'\"'\"'s releases'\"'\"' || exit $?\\nexport EMPTY='\"'\"''\"'\"'\\nexport RELEASE_LABEL='\"'\"'candidate '\"'\"'\"'\"'\"'\"'A'\"'\"'\"'\"'\"'\"'\\nsecond line'\"'\"'\\nsource ~/.profile\\nprintf '\"'\"'%s\\n'\"'\"' \"$RELEASE_LABEL\"'");
+
+    assert.equal(wrapRemoteBashCommand({ command: "pwd" }), "bash -c 'pwd'");
+    assert.throws(() => wrapRemoteBashCommand({ command: "  " }), /remote bash command is required/);
+    assert.throws(() => wrapRemoteBashCommand({ command: "true", workdir: "" }), /workdir must not be empty/);
+    assert.throws(() => wrapRemoteBashCommand({ command: "true", env: { "BAD-NAME": "x" } }), /invalid remote environment variable name/);
   });
 
   // @covers ssh-core.control-master
