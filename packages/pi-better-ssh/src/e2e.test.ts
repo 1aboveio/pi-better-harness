@@ -36,7 +36,8 @@ describe("pi-better-ssh extension", () => {
     const harness = createHarness();
     sshExtension(harness.pi);
 
-    expect([...harness.tools.keys()]).toEqual(["remote_bash", "ssh_profile"]);
+    expect([...harness.tools.keys()]).toEqual(["remote_bash", "ssh_profile", "ssh_mux"]);
+    expect(harness.tools.has("bash")).toBe(false);
     const tool = harness.tools.get("remote_bash")!;
     expect(tool.parameters?.required?.sort()).toEqual(["command"]);
     expect(Object.keys(tool.parameters?.properties ?? {}).sort()).toEqual([
@@ -158,6 +159,65 @@ describe("pi-better-ssh extension", () => {
       expect(cleared.details).toEqual({ action: "clear", active: null });
       expect(entries.at(-1)?.data).toEqual({ version: 1, active: null });
       expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", undefined]);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports and stops a target or all current-session mux masters known from remote_bash", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-mux-tool-");
+    try {
+      const runner = new FakeRemoteRunner([
+        failedResult(255, "missing alpha"),
+        successfulResult(""),
+        successfulResult("Master alpha\n"),
+        successfulResult("alpha command\n"),
+        failedResult(255, "missing beta"),
+        successfulResult(""),
+        successfulResult("Master beta\n"),
+        successfulResult("beta command\n"),
+        successfulResult("Master alpha\n"),
+        failedResult(255, "missing beta"),
+        successfulResult("Exit request sent\n"),
+        successfulResult("Exit request sent\n"),
+      ]);
+      const harness = createHarness("mux-session-217");
+      registerSshExtension(harness.pi, {
+        runner,
+        controlPathRoot: join(fixtureRoot, "control"),
+        muxEntries: new Map(),
+      });
+
+      await harness.execute("remote_bash", { command: "hostname", host: "alpha" });
+      await harness.execute("remote_bash", { command: "hostname", host: "ops@beta" });
+
+      const allStatus = await harness.execute("ssh_mux", { action: "status", all: true });
+      expect(allStatus.details).toMatchObject({
+        action: "status",
+        scope: "all",
+        masters: [
+          { target: "alpha", state: "up" },
+          { target: "ops@beta", state: "down" },
+        ],
+      });
+
+      const targetStop = await harness.execute("ssh_mux", { action: "stop", host: "alpha" });
+      expect(targetStop.details).toMatchObject({
+        action: "stop",
+        scope: "target",
+        masters: [{ target: "alpha", state: "stopped" }],
+      });
+
+      const allStop = await harness.execute("ssh_mux", { action: "stop", all: true });
+      expect(allStop.details).toMatchObject({
+        action: "stop",
+        scope: "all",
+        masters: [{ target: "ops@beta", state: "stopped" }],
+      });
+      expect(runner.runCalls.slice(8, 10).every((call) => call.argv?.includes("check"))).toBe(true);
+      expect(runner.runCalls.slice(10, 12).every((call) => call.argv?.includes("exit"))).toBe(true);
+      expect(runner.runCalls[10]?.argv).toContain("alpha");
+      expect(runner.runCalls[11]?.argv).toContain("ops@beta");
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
