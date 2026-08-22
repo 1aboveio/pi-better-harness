@@ -78,13 +78,22 @@ export async function executeRemoteBash(
     timeoutMs,
     signal,
   );
-  const combinedOutput = `${commandResult.stdout}${commandResult.stderr}`;
-  const truncation = truncateTail(combinedOutput, {
+  const combinedOutput = commandResult.outputCapture?.output ?? `${commandResult.stdout}${commandResult.stderr}`;
+  const retainedTruncation = truncateTail(combinedOutput, {
     maxLines: DEFAULT_MAX_LINES,
     maxBytes: DEFAULT_MAX_BYTES,
   });
+  const truncation = commandResult.outputCapture
+    ? {
+      ...retainedTruncation,
+      totalBytes: commandResult.outputCapture.totalBytes,
+      totalLines: commandResult.outputCapture.totalLines,
+    }
+    : retainedTruncation;
   const cancelled = commandResult.timedOut === true || signal?.aborted === true;
-  const fullOutputPath = truncation.truncated ? persistFullOutput(combinedOutput) : undefined;
+  const fullOutputPath = truncation.truncated
+    ? commandResult.outputCapture?.fullOutputPath ?? persistFullOutput(`${commandResult.stdout}${commandResult.stderr}`)
+    : undefined;
 
   return {
     output: truncation.content,

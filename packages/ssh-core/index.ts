@@ -12,6 +12,13 @@ export interface CommandSpec {
   env?: Record<string, string>;
 }
 
+export interface CommandOutputCapture {
+  output: string;
+  totalBytes: number;
+  totalLines: number;
+  fullOutputPath?: string;
+}
+
 export interface CommandResult {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -20,6 +27,7 @@ export interface CommandResult {
   startedAt: number;
   endedAt: number;
   timedOut?: boolean;
+  outputCapture?: CommandOutputCapture;
 }
 
 export interface SpawnedProcess {
