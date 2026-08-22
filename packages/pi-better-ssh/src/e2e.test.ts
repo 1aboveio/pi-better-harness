@@ -32,7 +32,7 @@ type RegisteredTool = {
 // @covers pi-better-ssh.tool-contract
 // @level integration
 describe("pi-better-ssh extension", () => {
-  it("registers only remote_bash with the short-versus-long operator contract", () => {
+  it("registers explicit SSH tools without overriding local bash", () => {
     const harness = createHarness();
     sshExtension(harness.pi);
 
@@ -173,6 +173,18 @@ describe("pi-better-ssh extension", () => {
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
+  });
+
+  it("rejects ambiguous mux scope before runner activity", async () => {
+    const runner = new FakeRemoteRunner();
+    const harness = createHarness("mux-invalid-session-217");
+    registerSshExtension(harness.pi, { runner, muxEntries: new Map() });
+
+    await expect(harness.execute("ssh_mux", { action: "status" }))
+      .rejects.toThrow(/ssh_mux requires host.*active SSH profile/i);
+    await expect(harness.execute("ssh_mux", { action: "stop", all: true, host: "alpha" }))
+      .rejects.toThrow(/all cannot be combined with target identity/i);
+    expect(runner.runCalls).toHaveLength(0);
   });
 
   it("reports and stops a target or all current-session mux masters known from remote_bash", async () => {
