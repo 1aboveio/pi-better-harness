@@ -5,6 +5,7 @@ export class FakeRemoteRunner implements RemoteRunner {
   readonly spawnCalls: Array<{ spec: CommandSpec; logPath: string; detached: boolean }> = [];
   readonly runCalls: CommandSpec[] = [];
   readonly runTimeouts: Array<number | undefined> = [];
+  readonly runSignals: Array<AbortSignal | undefined> = [];
   private readonly children: EventEmitter[] = [];
   private readonly scriptedResults: Array<CommandResult | Promise<CommandResult> | Error>;
   private readonly runCallWaiters: Array<{ count: number; resolve: () => void }> = [];
@@ -23,9 +24,10 @@ export class FakeRemoteRunner implements RemoteRunner {
     return { child: child as never };
   }
 
-  async runOnce(spec: CommandSpec, _maxBufferBytes?: number, timeoutMs?: number): Promise<CommandResult> {
+  async runOnce(spec: CommandSpec, _maxBufferBytes?: number, timeoutMs?: number, signal?: AbortSignal): Promise<CommandResult> {
     this.runCalls.push(spec);
     this.runTimeouts.push(timeoutMs);
+    this.runSignals.push(signal);
     const scripted = this.scriptedResults.shift() ?? successfulResult("");
     for (const waiter of this.runCallWaiters.splice(0)) {
       if (this.runCalls.length >= waiter.count) waiter.resolve();

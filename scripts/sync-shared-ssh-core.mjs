@@ -9,6 +9,7 @@ const sourceFiles = [
 ];
 const consumerDirectories = [
   "packages/pi-better-background-tasks/src/shared-ssh-core",
+  "packages/pi-better-ssh/src/shared-ssh-core",
 ];
 
 export function syncSharedSshCore(root = resolve(import.meta.dirname, "..")) {

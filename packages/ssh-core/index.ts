@@ -53,7 +53,7 @@ export const DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS = 120_000;
 
 export interface RemoteRunner {
   spawn(spec: CommandSpec, logPath: string, detached: boolean): SpawnedProcess;
-  runOnce(spec: CommandSpec, maxBufferBytes?: number, timeoutMs?: number): Promise<CommandResult>;
+  runOnce(spec: CommandSpec, maxBufferBytes?: number, timeoutMs?: number, signal?: AbortSignal): Promise<CommandResult>;
 }
 
 export interface SshCommandInput {

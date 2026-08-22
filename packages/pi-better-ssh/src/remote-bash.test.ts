@@ -1,5 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { failedResult, FakeRemoteRunner, successfulResult } from "../../ssh-core/test-support/index.js";
 import { executeRemoteBash } from "./remote-bash.js";
@@ -69,5 +69,128 @@ describe("executeRemoteBash", () => {
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
+  });
+
+  it("reuses the scoped mux across commands", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-reuse-");
+    try {
+      const runner = new FakeRemoteRunner([
+        failedResult(255, "missing"),
+        successfulResult(""),
+        successfulResult("Master running\n"),
+        successfulResult("first\n"),
+        successfulResult("Master running\n"),
+        successfulResult("second\n"),
+      ]);
+      const dependencies = {
+        runner,
+        sessionScope: "session-reuse",
+        controlPathRoot: join(fixtureRoot, "control"),
+      };
+
+      const first = await executeRemoteBash({ command: "hostname", host: "build-alias" }, dependencies);
+      const second = await executeRemoteBash({ command: "pwd", host: "build-alias" }, dependencies);
+
+      expect(first.mux.reused).toBe(false);
+      expect(second.mux.reused).toBe(true);
+      expect(runner.runCalls.filter((call) => call.argv?.includes("ControlMaster=yes"))).toHaveLength(1);
+      expect(runner.runCalls[3]?.argv?.at(-1)).toBe("bash -c 'hostname'");
+      expect(runner.runCalls[5]?.argv?.at(-1)).toBe("bash -c 'pwd'");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns timeout cancellation without stopping the mux", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-timeout-");
+    try {
+      const now = Date.now();
+      const runner = new FakeRemoteRunner([
+        successfulResult("Master running\n"),
+        {
+          exitCode: null,
+          signal: "SIGTERM",
+          stdout: "partial output\n",
+          stderr: "",
+          startedAt: now,
+          endedAt: now + 1250,
+          timedOut: true,
+        },
+      ]);
+      const signal = new AbortController().signal;
+
+      const result = await executeRemoteBash({
+        command: "sleep 30",
+        host: "ops@cluster-alias",
+        timeout: 1.25,
+      }, {
+        runner,
+        sessionScope: "session-timeout",
+        controlPathRoot: join(fixtureRoot, "control"),
+      }, signal);
+
+      expect(result).toMatchObject({
+        output: "partial output\n",
+        exitCode: undefined,
+        cancelled: true,
+        timedOut: true,
+        mux: { state: "up", reused: true },
+      });
+      expect(runner.runTimeouts).toEqual([undefined, 1250]);
+      expect(runner.runSignals).toEqual([undefined, signal]);
+      expect(runner.runCalls.some((call) => call.argv?.includes("exit"))).toBe(false);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("truncates from the tail at Pi bash limits and persists the complete output", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-truncate-");
+    const fullOutput = Array.from({ length: 2_100 }, (_, index) => `line-${index + 1}`).join("\n");
+    const runner = new FakeRemoteRunner([
+      successfulResult("Master running\n"),
+      successfulResult(fullOutput),
+    ]);
+    let fullOutputPath: string | undefined;
+    try {
+      const result = await executeRemoteBash({ command: "print-many-lines", host: "logs-alias" }, {
+        runner,
+        sessionScope: "session-truncate",
+        controlPathRoot: join(fixtureRoot, "control"),
+      });
+      fullOutputPath = result.fullOutputPath;
+
+      expect(result.truncated).toBe(true);
+      expect(result.truncation).toMatchObject({
+        truncated: true,
+        truncatedBy: "lines",
+        totalLines: 2_100,
+        outputLines: 2_000,
+        maxLines: 2_000,
+        maxBytes: 50 * 1024,
+      });
+      expect(result.output).not.toContain("line-1\n");
+      expect(result.output).toContain("line-2100");
+      expect(fullOutputPath && existsSync(fullOutputPath)).toBe(true);
+      expect(readFileSync(fullOutputPath!, "utf8")).toBe(fullOutput);
+    } finally {
+      if (fullOutputPath) rmSync(dirname(fullOutputPath), { recursive: true, force: true });
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects missing and conflicting host identity before runner activity", async () => {
+    const runner = new FakeRemoteRunner();
+    await expect(executeRemoteBash({ command: "true" }, {
+      runner,
+      sessionScope: "session-missing-host",
+      controlPathRoot: "/tmp/pi-better-ssh-unused",
+    })).rejects.toThrow(/requires host.*Host alias or user@host/i);
+    await expect(executeRemoteBash({ command: "true", host: "alice@host", user: "bob" }, {
+      runner,
+      sessionScope: "session-conflict",
+      controlPathRoot: "/tmp/pi-better-ssh-unused",
+    })).rejects.toThrow(/conflicts with host user/);
+    expect(runner.runCalls).toHaveLength(0);
   });
 });
