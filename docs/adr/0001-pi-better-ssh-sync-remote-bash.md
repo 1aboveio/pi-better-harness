@@ -4,7 +4,7 @@ Epic #184 gave `pi-better-background-tasks` durable remote *jobs* (spawn/watch/s
 
 ## Status
 
-proposed
+accepted and implemented by epic [#213](https://github.com/1aboveio/pi-better-harness/issues/213)
 
 ## Considered Options
 

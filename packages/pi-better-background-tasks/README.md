@@ -20,6 +20,10 @@ Use `pi-better-background-tasks` when a command should keep running while the fo
 
 ## Remote SSH
 
+For short synchronous remote commands that should return output in the current
+turn, install `pi-better-ssh` and use `remote_bash`. Use background tasks for
+long-running or durable remote jobs and asynchronous health watches.
+
 Prefer structured `ssh` fields over hand-written `ssh` command lines. A remote
 spawn uses a durable tmux session by default, while a remote watch opens one
 direct SSH poll per interval and does not require tmux. The package keeps the
@@ -59,7 +63,7 @@ pi -e npm:pi-better-background-tasks
 
 Use this package for shell commands that need logs, status, cancellation, or completion notifications across a Pi turn.
 
-Do not use it for short commands where the foreground session should wait for the result directly.
+Do not use it for short commands where the foreground session should wait for the result directly; use `remote_bash` from `pi-better-ssh` instead.
 
 ## Compatibility
 

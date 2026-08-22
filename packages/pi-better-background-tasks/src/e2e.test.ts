@@ -118,6 +118,8 @@ describe("extension e2e", () => {
 
     for (const tool of [spawn, watch, wrapper]) {
       expect(tool?.description).toContain("structured ssh");
+      expect(tool?.description).toContain("remote_bash");
+      expect(tool?.description).toContain("short synchronous remote");
       expect(tool?.parameters?.properties?.timeout_seconds?.description).toContain("900 seconds");
     }
     expect(spawn?.description).toContain("install tmux non-interactively");
@@ -141,6 +143,8 @@ describe("extension e2e", () => {
     expect(readme).toContain("structured `ssh`");
     expect(readme).toContain("spawn");
     expect(readme).toContain("watch");
+    expect(readme).toContain("pi-better-ssh");
+    expect(readme).toContain("remote_bash");
     for (const required of [
       "\"ssh\": {",
       "\"remote\": {",
@@ -160,8 +164,12 @@ describe("extension e2e", () => {
       "may still be running",
       "timeout_seconds",
       "/reload",
+      "pi install npm:pi-better-ssh",
+      "short synchronous remote",
+      "long-running or durable remote jobs",
       "ControlMaster",
-      "multiplexing",
+      "best-effort",
+      "tmux remains authoritative",
     ]) {
       expect(usage).toContain(required);
     }

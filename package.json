@@ -22,6 +22,7 @@
   },
   "scripts": {
     "sync:shared-log-utils": "node scripts/sync-shared-log-utils.mjs",
+    "sync:shared-ssh-core": "node scripts/sync-shared-ssh-core.mjs",
     "gallery:capture-real": "node scripts/capture-real-pi-session-gallery.mjs",
     "gallery:render": "node --import tsx scripts/render-package-gallery.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",

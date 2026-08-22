@@ -4,7 +4,7 @@ Both durable remote jobs (`pi-better-background-tasks`) and sync remote exec (`p
 
 ## Status
 
-proposed
+accepted and implemented by epic [#213](https://github.com/1aboveio/pi-better-harness/issues/213)
 
 ## Considered Options
 

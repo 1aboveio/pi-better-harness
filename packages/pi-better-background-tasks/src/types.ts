@@ -1,3 +1,7 @@
+import type { ResolvedSshIdentity, SshConnectionParams } from "./shared-ssh-core/index.js";
+
+export type { ResolvedSshIdentity, SshConnectionParams };
+
 export type BackgroundTaskStatus =
   | "running"
   | "succeeded"
@@ -32,29 +36,10 @@ export interface CommandResult {
   timedOut?: boolean;
 }
 
-export interface SshConnectionParams {
-  host: string;
-  user?: string;
-  port?: number;
-  identity_file?: string;
-  jump?: string;
-  options?: Record<string, string>;
-}
-
 export interface RemoteTaskParams {
   session?: "tmux" | "direct";
   install_tmux?: boolean;
   workdir?: string;
-}
-
-export interface ResolvedSshIdentity {
-  host: string;
-  user?: string;
-  port?: number;
-  identityFile?: string;
-  jump?: string;
-  options?: Record<string, string>;
-  target: string;
 }
 
 export interface ResolvedRemoteTaskMetadata {

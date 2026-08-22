@@ -2,7 +2,7 @@
 
 Authority: conversation choices (sync remote bash; `remote_bash` + profiles; `~/.ssh/config`; shared `ssh-core` with tmux helpers; extract-then-build); ADR `docs/adr/0001-pi-better-ssh-sync-remote-bash.md`; ADR `docs/adr/0002-ssh-core-shared-package.md`; epic #184 out-of-scope note that ControlMaster was deferred from background-tasks *as a product dependency*, not forever forbidden in a shared library.
 
-Status: **proposed design — tracked as epic #213** (not implemented yet).
+Status: **implemented by epic [#213](https://github.com/1aboveio/pi-better-harness/issues/213)**. The optional background-task mux reuse described below remains deferred.
 
 ## Problem
 
@@ -115,9 +115,9 @@ Optional later optimization (not required for extract correctness): when a Contr
 
 - Ensure master on first sync call to a target; slaves reuse `ControlPath`.
 - Socket under harness-owned `0700` dir, keyed by stable hash of connection identity (+ session scope).
-- `ControlPersist` grace (proposal: 600s); best-effort cleanup on dispose/exit.
+- `ControlPersist` grace is 600 seconds; `ssh_mux stop` provides explicit target/all cleanup.
 - Stale socket → one reopen, then fail.
-- bg_task may ignore mux initially; optional reuse later.
+- bg_task does not depend on or currently reuse mux; any later control/poll reuse must remain best-effort.
 
 ## Agent-facing surface (`pi-better-ssh`)
 
@@ -152,7 +152,7 @@ bg_task_spawn(..., ssh, remote)
   → background-tasks owns meta, local log copy, stop → ssh-core.killTmuxSession
 ```
 
-Remote shell policy for sync (proposal): prefer `bash -c` + optional preamble over always `bash -lc`. Final AC after probing operator hosts.
+Remote sync commands use `bash -c` with safely quoted workdir and environment setup rather than an implicit login shell.
 
 ## Delivery order (extract then build)
 
@@ -198,14 +198,14 @@ S1 is the highest-risk slice and must be behavior-preserving. Prefer mechanical 
 - **`pi-better-ssh`**: tool schema/contract tests; fake-runner exec; truncation; profile resolve.
 - Live SSH only behind an explicit opt-in env flag.
 
-## Open questions for implementation ACs
+## Implemented choices
 
-1. Default remote shell invocation for sync: `bash -c` + preamble vs `bash -lc`?
-2. `ControlPersist` default seconds? (proposal: 600)
-3. `remote_bash`: command string only in v1, or also remote `argv` + `shell:false`?
-4. Persist active profile across `/reload`? (proposal: yes)
-5. Sync script: extend `scripts/sync-shared-log-utils.mjs` vs add `sync-shared-ssh-core.mjs`?
-6. After S1, keep `expandSshRemoteTaskPreset` as a thin bg_task-specific façade over `ssh-core`, or rename call sites to `ssh-core` APIs directly?
+1. Sync commands use `bash -c` with core-owned quoting.
+2. `ControlPersist` defaults to 600 seconds.
+3. `remote_bash` accepts a command string in v1; local SSH always runs with `shell:false`.
+4. The active profile is stored in the Pi session and restored across `/reload`.
+5. `scripts/sync-shared-ssh-core.mjs` vendors the private core into both publishable consumers.
+6. Background-tasks keeps `expandSshRemoteTaskPreset` as its task-intent facade over `ssh-core`.
 
 ## Decision summary
 
