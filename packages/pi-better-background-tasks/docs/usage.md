@@ -28,11 +28,17 @@ inspection.
 
 ## Remote SSH
 
-For remote work, pass structured `ssh` fields and put the command to execute on
-the host in `command`. Do not wrap it in a hand-written outer `ssh` command. The
-preset constructs a local `shell:false` argv with non-interactive defaults:
-`BatchMode=yes`, a 10 second connect timeout, and no TTY on control and poll
-paths.
+Choose the remote execution path by lifecycle:
+
+- For short synchronous remote commands that should return output and an exit code in the current turn, install `pi-better-ssh` with `pi install npm:pi-better-ssh` and use `remote_bash`.
+- For long-running or durable remote jobs, use `bg_task_spawn` (or `bg_task` with `action:spawn`) with structured `ssh`; tmux remains authoritative for remote lifecycle and stop.
+- For asynchronous readiness or health checks, use `bg_task_watch` with structured `ssh`; each interval is a direct one-shot poll.
+
+For background remote work, pass structured `ssh` fields and put the command to
+execute on the host in `command`. Do not wrap it in a hand-written outer `ssh`
+command. The preset constructs a local `shell:false` argv with non-interactive
+defaults: `BatchMode=yes`, a 10 second connect timeout, and no TTY on control and
+poll paths.
 
 Supported connection fields are:
 
@@ -122,19 +128,24 @@ default, produces `timed_out` with the SSH target in the result text.
 ### Direct Spawn Escape Hatch
 
 Set `remote.session=direct` on spawn to skip tmux and all installation work.
-This is intended for short commands where durable remote lifecycle control is
-not required. Direct mode has weak stop semantics: stop or timeout terminates
+This is an explicit escape hatch for a detached command where durable remote
+lifecycle control is not required. For ordinary short synchronous work, prefer
+`remote_bash`. Direct mode has weak stop semantics: stop or timeout terminates
 the local SSH client, but the remote process may still be running. Status and
 launch text call out this risk and never claim a remote kill.
 
-### V1 Non-Goals
+### ControlMaster Independence And Non-Goals
 
-SSH ControlMaster and connection multiplexing are intentionally out of scope in
-v1. Tmux owns remote job lifecycle; connection reuse can be added separately
-without coupling correctness to control-socket state. V1 also does not provide
-interactive password authentication, interactive remote shells, PTY or tmux
-attach UX, `screen` / `systemd-run` / `nohup` fallback ladders, guaranteed
-remote kill in direct mode, or a first-class Windows OpenSSH matrix.
+`pi-better-ssh` owns ControlMaster setup for synchronous `remote_bash` calls.
+Background-task bootstrap, start, timeout, and stop do not require a mux. A
+future control/poll optimization may reuse an already-running master only as a
+best-effort fast path: a missing, stale, or failed mux must fall back to normal
+one-shot SSH, and tmux remains authoritative for durable job stop.
+
+This package does not provide interactive password authentication, interactive
+remote shells, PTY or tmux attach UX, `screen` / `systemd-run` / `nohup`
+fallback ladders, guaranteed remote kill in direct mode, a remote IDE mode, or
+a first-class Windows OpenSSH matrix.
 
 Callbacks are terminal-only by default. Ordinary callback-enabled terminal
 transitions accumulate for 100 ms and produce one compact follow-up, shared with
