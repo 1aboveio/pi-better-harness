@@ -34,6 +34,11 @@ export interface RemoteBashDependencies {
   runner: RemoteRunner;
   sessionScope: string;
   controlPathRoot?: string;
+  activeProfile?: {
+    host: string;
+    workdir?: string;
+    env?: Record<string, string>;
+  };
 }
 
 export interface RemoteBashResult {
@@ -57,12 +62,13 @@ export async function executeRemoteBash(
   dependencies: RemoteBashDependencies,
   signal?: AbortSignal,
 ): Promise<RemoteBashResult> {
-  const ssh = resolveRemoteBashConnection(params);
-  const timeoutMs = resolveTimeoutMs(params.timeout);
+  const effectiveParams = applyActiveProfile(params, dependencies.activeProfile);
+  const ssh = resolveRemoteBashConnection(effectiveParams);
+  const timeoutMs = resolveTimeoutMs(effectiveParams.timeout);
   const remoteCommand = wrapRemoteBashCommand({
-    command: params.command,
-    workdir: params.workdir,
-    env: params.env,
+    command: effectiveParams.command,
+    workdir: effectiveParams.workdir,
+    env: effectiveParams.env,
   });
   const resolved = resolveSshCommand({ command: remoteCommand, ssh });
   const mux = createSshMuxController({
@@ -102,10 +108,26 @@ export async function executeRemoteBash(
     timedOut: commandResult.timedOut === true,
     truncated: truncation.truncated,
     target: resolved.identity.target,
-    ...(params.workdir !== undefined ? { workdir: params.workdir } : {}),
+    ...(effectiveParams.workdir !== undefined ? { workdir: effectiveParams.workdir } : {}),
     mux: { state: "up", reused: muxState.reused },
     ...(truncation.truncated ? { truncation } : {}),
     ...(fullOutputPath ? { fullOutputPath } : {}),
+  };
+}
+
+function applyActiveProfile(
+  params: RemoteBashParams,
+  profile: RemoteBashDependencies["activeProfile"],
+): RemoteBashParams {
+  if (!profile) return params;
+  const env = profile.env || params.env
+    ? { ...profile.env, ...params.env }
+    : undefined;
+  return {
+    ...params,
+    host: params.host ?? profile.host,
+    workdir: params.workdir ?? profile.workdir,
+    ...(env ? { env } : {}),
   };
 }
 

@@ -70,10 +70,12 @@ export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterR
     parameters: RemoteBashParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const sessionScope = ctx.sessionManager.getSessionId();
+      const activeProfile = dependencies.getActiveProfile?.();
       const result = await executeRemoteBash(params, {
         runner: dependencies.runner,
         sessionScope,
         ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
+        ...(activeProfile ? { activeProfile } : {}),
       }, signal);
       return {
         content: [{ type: "text" as const, text: formatToolResult(result, params.timeout) }],

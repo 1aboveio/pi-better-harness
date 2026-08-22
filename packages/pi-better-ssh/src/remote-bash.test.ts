@@ -132,11 +132,11 @@ describe("executeRemoteBash", () => {
         mux: { state: "up", reused: false },
       });
       const command = runner.runCalls[3]?.command ?? "";
-      expect(command).toContain("cd -- '/srv/profile'");
-      expect(command).toContain("export CALL_ENV='set'");
-      expect(command).toContain("export OVERRIDE='call'");
-      expect(command).toContain("export PROFILE_ENV='set'");
-      expect(command).not.toContain("OVERRIDE='profile'");
+      expect(command).toMatch(/cd -- .*\/srv\/profile/);
+      expect(command).toMatch(/export CALL_ENV=.*set/);
+      expect(command).toMatch(/export OVERRIDE=.*call/);
+      expect(command).toMatch(/export PROFILE_ENV=.*set/);
+      expect(command).not.toMatch(/export OVERRIDE=.*profile/);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }

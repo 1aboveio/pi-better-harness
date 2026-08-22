@@ -79,6 +79,10 @@ describe("pi-better-ssh extension", () => {
       const runner = new FakeRemoteRunner([
         failedResult(255, "Control socket missing"),
         failedResult(255, "Control socket missing"),
+        failedResult(255, "Control socket missing"),
+        successfulResult(""),
+        successfulResult("Master running\n"),
+        successfulResult("profile command\n"),
       ]);
       const harness = createHarness("profile-session-217", entries);
       registerSshExtension(harness.pi, {
@@ -119,6 +123,18 @@ describe("pi-better-ssh extension", () => {
         active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } },
         mux: { state: "down" },
       });
+
+      const hostless = await harness.execute("remote_bash", {
+        command: "printf '%s' \"$APP_ENV\"",
+      });
+      expect(hostless.details).toMatchObject({
+        output: "profile command\n",
+        target: "deploy",
+        workdir: "/srv/app",
+        mux: { state: "up", reused: false },
+      });
+      expect(runner.runCalls[5]?.command).toContain("APP_ENV");
+      expect(runner.runCalls[5]?.command).toContain("staging");
 
       const reloadRunner = new FakeRemoteRunner([
         failedResult(255, "Control socket missing"),
