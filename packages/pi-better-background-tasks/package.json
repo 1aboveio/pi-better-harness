@@ -30,8 +30,8 @@
     "access": "public"
   },
   "scripts": {
-    "pretest": "node ../../scripts/sync-shared-log-utils.mjs",
-    "prepack": "node ../../scripts/sync-shared-log-utils.mjs",
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-ssh-core.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-ssh-core.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run src/conditions.test.ts src/runtime.test.ts",
@@ -44,6 +44,7 @@
     "src/**/*.ts",
     "!src/**/*.test.ts",
     "!src/test-support/**",
+    "!src/shared-ssh-core/test-support/**",
     "README.md"
   ],
   "peerDependencies": {
