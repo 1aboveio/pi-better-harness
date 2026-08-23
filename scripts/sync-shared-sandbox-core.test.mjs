@@ -93,6 +93,33 @@ test("packing pi-better-background-tasks includes the generated sandbox-core cop
 });
 
 // @covers sandbox-core.private-sync
+// @level integration
+test("packing pi-better-sandbox includes the generated sandbox-core copy and no launcher", () => {
+  const stdout = execFileSync(
+    "npm",
+    ["pack", "--dry-run", "--json", "-w", "packages/pi-better-sandbox"],
+    { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  );
+  const [pack] = JSON.parse(stdout.slice(stdout.indexOf("[")));
+  const packed = pack.files.map((file) => file.path);
+  // This package publishes `*.ts` from its root, so its copy is a root-level
+  // file — the placement differs from background-tasks on purpose.
+  assert.ok(
+    packed.includes("shared-sandbox-core.ts"),
+    `published tarball must carry the generated shared module; got:\n${packed.join("\n")}`,
+  );
+  assert.ok(packed.includes("index.ts"), "the extension entry point must stay published");
+  assert.ok(
+    !packed.some((path) => path.startsWith("bin/")),
+    "users invoke ordinary `pi`; this package must ship no launcher executable",
+  );
+  assert.ok(
+    !packed.some((path) => path.startsWith("test/")),
+    "test fixtures must not reach the published tarball",
+  );
+});
+
+// @covers sandbox-core.private-sync
 // @level unit
 test("sandbox-core itself is a private workspace package that is never published", () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, "packages/sandbox-core/package.json"), "utf8"));
