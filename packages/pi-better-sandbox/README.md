@@ -55,6 +55,9 @@ those:
 - Pi's own process.
 - `pi.exec` calls made by extensions.
 - Unrelated third-party extension code.
+- Another first-party surface's control plane. Each surface denies its own —
+  the files naming what it will run next — but not every other surface's, so
+  confinement is per surface rather than global.
 
 This is a tool-execution sandbox. It limits accidental damage from commands the
 model or you run through Pi's shell; it is not a boundary around Pi itself.

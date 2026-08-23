@@ -118,7 +118,8 @@ package ships a launcher.
 In every case reads and network access are **unrestricted** — only writes are
 confined, and only for these first-party execution paths. Pi's own process,
 `pi.exec` calls made by extensions, and unrelated third-party extension code are
-**not** confined by any of it.
+**not** confined by any of it. Confinement is also per surface: each surface
+denies its own control plane, not every other surface's.
 
 ### Git-mutating subagents and linked worktrees
 

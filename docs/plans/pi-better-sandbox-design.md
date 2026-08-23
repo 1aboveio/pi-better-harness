@@ -46,6 +46,12 @@ background tasks retain the policy they had when they started.
 This is a **tool-execution sandbox**. Pi's own process, arbitrary `pi.exec`
 calls, and unrelated third-party extension code are not confined.
 
+Confinement is also **per surface**: each integrated surface denies its own
+control plane, not every other surface's. With more than one first-party
+surface installed, a confined process on one can still write another's control
+plane, so the guarantee is "this surface's writes are confined", not "no
+unconfined execution can be arranged anywhere".
+
 ## User interface
 
 Commands:

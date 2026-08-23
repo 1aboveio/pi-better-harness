@@ -49,7 +49,7 @@ The write sandbox arms itself at every session start — startup, new session, r
 
 While it is on, Pi's built-in `bash`, `write`, and `edit` tools, your own `!` / `!!` commands, local background tasks, and subagents can write only under the directory you launched Pi from, minus the packaged deny paths (`.git/hooks`, `.env`, `.env.local`).
 
-**Reads and network access are unrestricted** — this sandbox limits writes only. Writes are confined for those integrated first-party execution paths; Pi's own process, arbitrary `pi.exec` calls, and unrelated third-party extension code are **not** confined.
+**Reads and network access are unrestricted** — this sandbox limits writes only. Writes are confined for those integrated first-party execution paths; Pi's own process, arbitrary `pi.exec` calls, and unrelated third-party extension code are **not** confined. Confinement is also **per surface**: each integrated surface denies its own control plane, not every other surface's, so with several first-party surfaces installed a confined process on one can still write another's control plane.
 
 Sandbox state is human-only: `/sandbox`, `/sandbox on`, `/sandbox off`, `/sandbox deny ...`, and `/sandbox rules` are slash commands with no tool equivalent, so the model cannot turn off its own confinement. `/sandbox off` needs an interactive confirmation and never persists past the session. Full policy: [pi-better-sandbox](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme).
 

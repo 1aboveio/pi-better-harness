@@ -42,7 +42,8 @@ machine, and remote work keeps its existing remote semantics. Without
 
 Reads and network access are never restricted; only writes are. Pi's own
 process, `pi.exec` calls, and unrelated third-party extension code stay outside
-the guarantee. Installing
+the guarantee, and confinement is per surface: a confined process on another
+first-party surface can still write this one's task registry. Installing
 [`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme)
 brings the sandbox in by default, so an ordinary `pi` session confines its
 foreground tools and its local background tasks under one project policy.

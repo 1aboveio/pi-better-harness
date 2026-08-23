@@ -70,6 +70,12 @@ Pi's own process, arbitrary `pi.exec` calls, and unrelated third-party extension
 code are **not** confined. This is a tool-execution sandbox, not a boundary
 around Pi itself.
 
+Confinement is **per surface**. Each integrated surface denies its own control
+plane — the files naming what it will run next — but not every other surface's.
+With more than one first-party surface installed, a confined process on one can
+still write another's control plane. Read the guarantee as "this surface's
+writes are confined", not "no unconfined execution can be arranged anywhere".
+
 ## Install Individual Packages
 
 Use these when you want only one part of the harness:
