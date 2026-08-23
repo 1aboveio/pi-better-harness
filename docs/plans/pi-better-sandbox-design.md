@@ -223,12 +223,18 @@ they must never present configured intent as active kernel enforcement.
 
 ## Delivery order
 
-1. Extract `sandbox-core`, vendor it into subagents, and preserve behavior.
-2. Add the `pi-better-sandbox` package, state, status, and slash commands.
-3. Override built-in bash and user bash with kernel-enforced execution.
-4. Override write/edit while preserving Pi's tool contracts.
-5. Integrate local background tasks and inherited subagent policy.
-6. Add deny settings UI, docs, harness loading, CI, and release wiring.
+1. [#230](https://github.com/1aboveio/pi-better-harness/issues/230) -
+   extract `sandbox-core`, vendor it into subagents, and preserve behavior.
+2. [#231](https://github.com/1aboveio/pi-better-harness/issues/231) -
+   add the package and confine foreground shell execution with live controls.
+3. [#232](https://github.com/1aboveio/pi-better-harness/issues/232) -
+   confine built-in write/edit while preserving Pi's tool contracts.
+4. [#233](https://github.com/1aboveio/pi-better-harness/issues/233) -
+   add deny-path commands, persistence, and settings UI.
+5. [#234](https://github.com/1aboveio/pi-better-harness/issues/234) -
+   make local background tasks honor the foreground sandbox policy.
+6. [#235](https://github.com/1aboveio/pi-better-harness/issues/235) -
+   load sandbox by default and complete docs, CI, packaging, and release wiring.
 
 The extraction slice is mechanical and behavior-preserving. New security policy
 does not ship until both platform backends have real-kernel proof.
