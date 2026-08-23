@@ -52,7 +52,13 @@ export function maybeBuildSandboxCommand(
     args: SandboxCommandArgs,
     request: SandboxRequest,
 ): SandboxCommand | undefined {
-    return maybeBuildSharedSandboxCommand(sharedArgs(args), request);
+    // `sandbox:false` is this surface's opt-out, and the only one its operator
+    // has: a subagent has no slash commands. A caller that states its own remedy
+    // keeps it.
+    return maybeBuildSharedSandboxCommand(sharedArgs(args), {
+        ...request,
+        remedy: request.remedy ?? "Pass sandbox:false to run this subagent unconfined.",
+    });
 }
 
 /**

@@ -64,7 +64,10 @@ test("the report lists the effective policy and states what is not confined", ()
     assert.match(report, /Network: +unrestricted/);
     assert.match(report, /Backend: +macos-seatbelt/);
     assert.match(report, /\/work\/acme-api\/\.env/);
-    assert.match(report, /Confined: the built-in bash tool and user-entered ! \/ !! commands\./);
+    assert.match(
+        report,
+        /Confined: the built-in bash, write, and edit tools, and user-entered ! \/ !! commands\./,
+    );
     assert.match(report, /Not confined: pi's own process, pi\.exec calls/);
 });
 

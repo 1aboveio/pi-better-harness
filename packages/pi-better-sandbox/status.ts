@@ -65,7 +65,7 @@ export function formatSandboxReport(status: ForegroundSandboxStatus): string {
 
     lines.push(
         "",
-        "Confined: the built-in bash tool and user-entered ! / !! commands.",
+        "Confined: the built-in bash, write, and edit tools, and user-entered ! / !! commands.",
         "Not confined: pi's own process, pi.exec calls, and unrelated extension code.",
     );
     return lines.join("\n");

@@ -51,9 +51,9 @@ const DENY_USAGE = [
 const DISABLE_TITLE = "Disable the foreground write sandbox?";
 
 const DISABLE_MESSAGE = [
-    "Built-in bash and ! / !! commands will run with normal host write access",
-    "for the rest of this session. New, resumed, forked, and reloaded sessions",
-    "start protected again.",
+    "The built-in bash, write, and edit tools and user-entered ! / !! commands",
+    "will run with normal host write access for the rest of this session. New,",
+    "resumed, forked, and reloaded sessions start protected again.",
 ].join("\n");
 
 const NO_UI_REJECTION =

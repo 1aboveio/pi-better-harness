@@ -19,6 +19,7 @@ import {
     type SandboxSeams,
     sandboxUnavailableMessage,
 } from "./shared-sandbox-core.ts";
+import { FOREGROUND_SANDBOX_REMEDY } from "./state.ts";
 import type { ForegroundSandboxController, ForegroundSandboxLaunchPlan } from "./state.ts";
 
 /**
@@ -52,7 +53,7 @@ export function buildSandboxedShellCommand(
     const shellConfig = getShellConfig(seams.shellPath?.());
     if (shellConfig.commandTransport === "stdin") {
         throw new Error(
-            `Foreground sandbox cannot wrap ${shellConfig.shell}: it accepts commands on stdin only, which no supported sandbox backend can wrap. ${sandboxUnavailableMessage(seams)}`,
+            `Foreground sandbox cannot wrap ${shellConfig.shell}: it accepts commands on stdin only, which no supported sandbox backend can wrap. ${sandboxUnavailableMessage(seams)} ${FOREGROUND_SANDBOX_REMEDY}`,
         );
     }
 
@@ -65,10 +66,12 @@ export function buildSandboxedShellCommand(
         },
         // Fail closed: an enabled foreground sandbox with no backend must block
         // the operation, never fall through to an unconfined child.
-        { sandboxEnabled: true, explicitSandbox: true },
+        { sandboxEnabled: true, explicitSandbox: true, remedy: FOREGROUND_SANDBOX_REMEDY },
         seams,
     );
-    if (!sandboxCommand) throw new Error(sandboxUnavailableMessage(seams));
+    if (!sandboxCommand) {
+        throw new Error(`${sandboxUnavailableMessage(seams)} ${FOREGROUND_SANDBOX_REMEDY}`);
+    }
 
     // `exec` stays unquoted so the outer shell replaces itself with the wrapper:
     // the process pi tracks, signals, and kills is the sandboxed one.

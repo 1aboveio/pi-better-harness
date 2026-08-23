@@ -161,6 +161,7 @@ function resolveShellPath(cwd: string): string | undefined {
 
 export { footerTone, formatFooterStatus, formatSandboxReport } from "./status.ts";
 export {
+    FOREGROUND_SANDBOX_REMEDY,
     ForegroundSandboxBlockedError,
     ForegroundSandboxController,
     type ForegroundSandboxLaunchPlan,
