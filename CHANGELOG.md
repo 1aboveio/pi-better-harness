@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-sandbox@0.1.1] - 2026-08-23
+
+### Changed
+
+- **sandbox**: republished through the release workflow so the package carries npm provenance; 0.1.0 was published by hand during a first-publish outage and has no attestation. No code changes from 0.1.0.
+
+## [pi-better-ssh@0.1.1] - 2026-08-23
+
+### Changed
+
+- **ssh**: republished through the release workflow so the package carries npm provenance; 0.1.0 was published by hand during a first-publish outage and has no attestation. No code changes from 0.1.0.
+
+## [pi-better-harness@0.1.27] - 2026-08-23
+
+### Changed
+
+- **harness**: bundle sandbox 0.1.1, the provenance-carrying republish of 0.1.0
+
 ## [pi-better-sandbox@0.1.0] - 2026-08-23
 
 ### Added
