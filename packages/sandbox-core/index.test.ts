@@ -495,7 +495,11 @@ describe("sandbox-core write policy compilation and containment", () => {
     // @covers sandbox.command-wrapper
     // @level unit
     it("creates no placeholder for a denied path the sandbox never makes writable", async () => {
-        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-elsewhere-")));
+        // Not tmpdir(): on Linux that IS /tmp, which the sandbox rebinds
+        // writable, so a fixture there would sit inside the very region this
+        // case exists to stay out of. /var/tmp is outside both backends'
+        // writable allowances on both platforms.
+        const base = realpathSync(mkdtempSync(join(realpathSync("/var/tmp"), "sbxcore-linux-elsewhere-")));
         const root = join(base, "project");
         mkdirSync(root, { recursive: true });
         // Outside the writable root and outside the /tmp rebind, so the
