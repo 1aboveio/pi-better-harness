@@ -21,7 +21,8 @@ Use `pi-better-background-tasks` when a command should keep running while the fo
 
 ## Write Sandbox
 
-When `pi-better-sandbox` is installed and enabled, every **local** task captures
+When [`pi-better-sandbox`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme)
+is installed and enabled, every **local** task captures
 the effective foreground policy at launch and runs under the platform's write
 sandbox: reads and network stay unrestricted, writes are confined to the
 canonical project directory, and denied paths stay denied.
@@ -38,6 +39,13 @@ deliberate way to run local tasks unsandboxed.
 Structured remote SSH tasks are unaffected: the foreground sandbox describes this
 machine, and remote work keeps its existing remote semantics. Without
 `pi-better-sandbox` installed, local tasks behave exactly as they always have.
+
+Reads and network access are never restricted; only writes are. Pi's own
+process, `pi.exec` calls, and unrelated third-party extension code stay outside
+the guarantee. Installing
+[`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme)
+brings the sandbox in by default, so an ordinary `pi` session confines its
+foreground tools and its local background tasks under one project policy.
 
 ## Remote SSH
 

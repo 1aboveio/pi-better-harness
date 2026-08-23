@@ -2,7 +2,13 @@
 
 A default-on write sandbox for Pi's foreground tools.
 
-Install the package and keep starting Pi the way you always have — `pi`. There is
+It is installed by default with [`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme), and can be installed on its own:
+
+```sh
+pi install npm:pi-better-sandbox
+```
+
+Either way you keep starting Pi the way you always have — `pi`. There is
 no launcher, no wrapper command, and nothing to configure. From the first
 session start, Pi's built-in `bash` tool and the `!` / `!!` commands you type
 yourself run inside an OS sandbox that lets them write only under the directory
@@ -29,11 +35,20 @@ nothing behind on disk.
 
 ## What is confined, and what is not
 
-Confined while the sandbox is on:
+**Reads and network access are never restricted.** Every path on the filesystem
+stays readable and network behaviour is exactly what it was. This sandbox limits
+writes, and nothing else.
+
+Writes are confined for the integrated first-party execution paths, and only
+those:
 
 - Pi's built-in `bash` tool.
 - User-entered `!` and `!!` commands.
 - Pi's built-in `write` and `edit` tools.
+- Local [`pi-better-background-tasks`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-background-tasks#readme)
+  spawns and watches, which capture this policy at launch.
+- [`pi-better-subagents`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-subagents#readme)
+  children, through the same shared mechanism.
 
 **Not** confined:
 

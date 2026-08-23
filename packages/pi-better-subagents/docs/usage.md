@@ -94,6 +94,32 @@ it does not depend on any other extension being installed.
   `allow_nested:true` — and not by denying the tools after the fact: without that
   flag this package isn't loaded in the child, so the tools don't exist.
 
+### Write sandbox
+
+The mechanism above — backend discovery, canonical containment, profile and mount
+construction, argv wrapping — is the private `sandbox-core` module, vendored into
+this package. The same module powers
+[`pi-better-sandbox`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme),
+which applies a write sandbox to Pi's **foreground** tools: the built-in `bash`,
+`write`, and `edit` tools and the `!` / `!!` commands you type.
+
+The two policies are separate on purpose. A subagent's writable root is its own
+run directory and is chosen per spawn through `sandbox` / `sandbox_dir`; the
+foreground policy is the directory you launched Pi from and is controlled by the
+human-only `/sandbox` commands. `/sandbox off` does not change subagent
+confinement, and no model-callable tool can change either.
+
+Installing
+[`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme)
+brings both in by default, so ordinary `pi` starts with the foreground and its
+subagents confined at once. Nothing about how you start Pi changes; neither
+package ships a launcher.
+
+In every case reads and network access are **unrestricted** — only writes are
+confined, and only for these first-party execution paths. Pi's own process,
+`pi.exec` calls made by extensions, and unrelated third-party extension code are
+**not** confined by any of it.
+
 ### Git-mutating subagents and linked worktrees
 
 A sandboxed subagent that will mutate Git should set **`git_clone_workspace:true`**
