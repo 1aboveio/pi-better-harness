@@ -8,17 +8,19 @@
  * stand-in is the publishing half of the `pi.events` policy contract, which
  * belongs to `pi-better-sandbox`.
  *
- * Fixtures live under `/private/var/tmp` on purpose. The macOS profile always
- * allows writes under `/private/var/folders`, which is what `os.tmpdir()`
- * returns, so an "outside the project" probe placed there would be created even
- * with the sandbox working — a false pass. Every denial assertion below is
+ * Fixtures live under the canonical `/var/tmp` on purpose — `/private/var/tmp`
+ * on macOS, `/var/tmp` on Linux. The macOS profile always allows writes under
+ * `/private/var/folders`, which is what `os.tmpdir()` returns, so an "outside
+ * the project" probe placed there would be created even with the sandbox
+ * working — a false pass. The Linux backend read-only-binds `/` and rebinds
+ * only `/tmp` and the writable root, so `/var/tmp` is outside there too. Every denial assertion below is
  * paired with a negative control that performs the identical write with the
  * sandbox disabled and requires the file to appear, so a broken fixture cannot
  * masquerade as enforcement.
  */
 
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -33,7 +35,27 @@ import {
 import { describeSandboxSupport } from "./shared-sandbox-core.js";
 
 const support = describeSandboxSupport();
-const fixtureRoot = mkdtempSync("/private/var/tmp/bg-sandbox-kernel-");
+
+// A platform CI lane sets PI_SANDBOX_REQUIRE_BACKEND to the backend it exists to
+// prove. Without it a runner that lost `bwrap` (or `sandbox-exec`) would report
+// every case below as skipped — green, and proving nothing. With it, a missing
+// or unexpected backend throws here, at the exact point the skip would
+// otherwise have been taken.
+const requiredBackend = process.env.PI_SANDBOX_REQUIRE_BACKEND;
+if (requiredBackend !== undefined && requiredBackend !== "") {
+  if (!support.supported) {
+    throw new Error(
+      `PI_SANDBOX_REQUIRE_BACKEND=${requiredBackend} but no sandbox backend is available: ${support.reason}`,
+    );
+  }
+  if (support.backend !== requiredBackend) {
+    throw new Error(
+      `PI_SANDBOX_REQUIRE_BACKEND=${requiredBackend} but this runner selected ${support.backend}.`,
+    );
+  }
+}
+// realpath so macOS resolves /var/tmp to /private/var/tmp and Linux keeps /var/tmp.
+const fixtureRoot = mkdtempSync(join(realpathSync("/var/tmp"), "bg-sandbox-kernel-"));
 afterAll(() => rmSync(fixtureRoot, { recursive: true, force: true }));
 
 let caseIndex = 0;

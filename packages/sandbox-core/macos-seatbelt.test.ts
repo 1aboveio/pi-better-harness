@@ -20,6 +20,14 @@ const unsupported = process.platform !== "darwin" || !existsSync("/usr/bin/sandb
     ? "requires macOS /usr/bin/sandbox-exec"
     : false;
 
+// The macOS confinement lane sets PI_SANDBOX_REQUIRE_BACKEND=macos-seatbelt, so
+// a runner that lost /usr/bin/sandbox-exec fails here instead of reporting a
+// skipped suite as a green lane. Other values leave the skip alone: this file is
+// macOS-only by construction and legitimately skips on a Linux lane.
+if (process.env.PI_SANDBOX_REQUIRE_BACKEND === "macos-seatbelt" && unsupported !== false) {
+    throw new Error(`PI_SANDBOX_REQUIRE_BACKEND=macos-seatbelt but this runner ${unsupported}.`);
+}
+
 describe("macOS seatbelt confinement (real kernel)", { skip: unsupported }, () => {
     function runConfined(base: string, root: string, denyWrite: string[], script: string) {
         const command = buildSandboxCommand({

@@ -14,7 +14,9 @@
  *
  * The same scenarios run on both backends. On Linux they need bubblewrap on
  * PATH; without a backend the whole file skips with a reason rather than
- * pretending to have proved anything.
+ * pretending to have proved anything. The platform CI lanes set
+ * `PI_SANDBOX_REQUIRE_BACKEND` so that on those runners the skip is a hard
+ * failure instead — a skipped confinement lane is the hole this file closes.
  */
 
 import assert from "node:assert/strict";
@@ -43,6 +45,25 @@ const support = describeSandboxSupport();
 const backendAvailable = support.supported;
 const skip = backendAvailable ? false : `requires a real sandbox backend: ${support.reason}`;
 const macOSOnly = support.backend === "macos-seatbelt" ? false : "macOS Seatbelt profiles only";
+
+// A platform CI lane sets PI_SANDBOX_REQUIRE_BACKEND to the backend it exists to
+// prove. Without it a runner that lost `bwrap` (or `sandbox-exec`) would report
+// this whole file as skipped — green, and proving nothing. With it, a missing or
+// unexpected backend is a hard failure here, at the exact point the skip would
+// otherwise have been taken.
+const requiredBackend = process.env.PI_SANDBOX_REQUIRE_BACKEND;
+if (requiredBackend !== undefined && requiredBackend !== "") {
+    if (!support.supported) {
+        throw new Error(
+            `PI_SANDBOX_REQUIRE_BACKEND=${requiredBackend} but no sandbox backend is available: ${support.reason}`,
+        );
+    }
+    if (support.backend !== requiredBackend) {
+        throw new Error(
+            `PI_SANDBOX_REQUIRE_BACKEND=${requiredBackend} but this runner selected ${support.backend}.`,
+        );
+    }
+}
 
 // Not under any always-allowed prefix on either backend, so a denied write here
 // is a real denial and not an artefact of where the fixture happens to live.

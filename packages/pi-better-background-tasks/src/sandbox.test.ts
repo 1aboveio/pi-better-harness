@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -21,11 +21,14 @@ import { describeSandboxSupport } from "./shared-sandbox-core.js";
 import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
 import type { CommandSpec } from "./types.js";
 
-// Disposable fixtures live under /private/var/tmp rather than os.tmpdir(): the
-// macOS profile always allows writes under /private/var/folders, so an "outside
-// the project" probe placed there would pass without the sandbox proving
-// anything.
-const fixtureRoot = mkdtempSync("/private/var/tmp/bg-sandbox-contract-");
+// Disposable fixtures live under the canonical /var/tmp rather than
+// os.tmpdir(): the macOS profile always allows writes under /private/var/folders
+// (which is what os.tmpdir() returns there), so an "outside the project" probe
+// placed there would pass without the sandbox proving anything. realpath keeps
+// the same directory addressable on both platforms — /private/var/tmp on macOS,
+// /var/tmp on Linux.
+const varTmp = realpathSync("/var/tmp");
+const fixtureRoot = mkdtempSync(join(varTmp, "bg-sandbox-contract-"));
 afterAll(() => rmSync(fixtureRoot, { recursive: true, force: true }));
 
 const support = describeSandboxSupport();
@@ -79,11 +82,11 @@ describe("foreground sandbox policy contract", () => {
     observeForegroundSandboxPolicy(pi);
     const publisher = createSandboxPublisher(events);
 
-    publisher.announce(enabledPolicy("/private/var/tmp"));
+    publisher.announce(enabledPolicy(varTmp));
 
     expect(currentForegroundSandboxPolicy(pi)).toMatchObject({
       state: "enabled",
-      writableRoot: "/private/var/tmp",
+      writableRoot: varTmp,
     });
   });
 
@@ -94,13 +97,13 @@ describe("foreground sandbox policy contract", () => {
     // The sandbox extension loaded and published first. The bus has no replay,
     // so that publication is already gone by the time this extension exists.
     const publisher = createSandboxPublisher(events);
-    publisher.announce(enabledPolicy("/private/var/tmp"));
+    publisher.announce(enabledPolicy(varTmp));
 
     observeForegroundSandboxPolicy(pi);
 
     expect(currentForegroundSandboxPolicy(pi)).toMatchObject({
       state: "enabled",
-      writableRoot: "/private/var/tmp",
+      writableRoot: varTmp,
     });
   });
 
@@ -111,7 +114,7 @@ describe("foreground sandbox policy contract", () => {
     observeForegroundSandboxPolicy(pi);
     const publisher = createSandboxPublisher(events);
 
-    publisher.announce(enabledPolicy("/private/var/tmp"));
+    publisher.announce(enabledPolicy(varTmp));
     publisher.announce({ state: "disabled", reason: "a human turned it off" });
 
     expect(currentForegroundSandboxPolicy(pi)?.state).toBe("disabled");
@@ -124,7 +127,7 @@ describe("foreground sandbox policy contract", () => {
     const { pi, events } = createPi();
     observeForegroundSandboxPolicy(pi);
     const publisher = createSandboxPublisher(events);
-    publisher.announce(enabledPolicy("/private/var/tmp"));
+    publisher.announce(enabledPolicy(varTmp));
 
     events.emit(FOREGROUND_SANDBOX_POLICY_CHANNEL, { state: "whatever" });
     events.emit(FOREGROUND_SANDBOX_POLICY_CHANNEL, "off");
