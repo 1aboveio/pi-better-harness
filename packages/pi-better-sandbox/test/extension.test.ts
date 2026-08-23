@@ -40,6 +40,13 @@ import {
     FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
     type ForegroundSandboxPolicyEvent,
 } from "../events.ts";
+import { ensureResolvableBackend } from "./support/resolvable-backend.ts";
+
+// The extension factory builds its own controller, so no seam argument reaches
+// it: it reads the real platform and PATH. These tests are about session state,
+// registration, events and slash-command behaviour, none of which is a property
+// of this host, so a host that resolves no backend is given one to resolve.
+after(ensureResolvableBackend());
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const fixtures = realpathSync(mkdtempSync(join(tmpdir(), "pi-better-sandbox-extension-")));

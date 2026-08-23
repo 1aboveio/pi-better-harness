@@ -47,6 +47,14 @@ import {
     ForegroundSandboxWriteDeniedError,
 } from "../files.ts";
 import { ForegroundSandboxBlockedError, ForegroundSandboxController } from "../state.ts";
+import { ensureResolvableBackend } from "./support/resolvable-backend.ts";
+
+// These tests are about the in-process containment check, not about kernel
+// enforcement, but the check only runs once the controller resolves a backend.
+// The controllers here — and the one pi's own loader builds in the last test —
+// read the real platform and PATH, so a host that resolves nothing is given the
+// one precondition they need. See the helper for why that is honest.
+after(ensureResolvableBackend());
 
 const fixtures = realpathSync(mkdtempSync(join(realpathSync("/var/tmp"), "pi-better-sandbox-files-")));
 after(() => rmSync(fixtures, { recursive: true, force: true }));

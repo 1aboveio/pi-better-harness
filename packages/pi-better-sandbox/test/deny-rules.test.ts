@@ -38,6 +38,7 @@ import {
 } from "../deny-rules.ts";
 import { createSandboxedWriteOperations } from "../files.ts";
 import { PACKAGED_DENY_WRITE_TEMPLATES } from "../policy.ts";
+import type { SandboxSeams } from "../shared-sandbox-core.ts";
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "../state.ts";
 
 const fixtures = realpathSync(
@@ -52,6 +53,15 @@ function directory(name: string): string {
     mkdirSync(path, { recursive: true });
     return path;
 }
+
+/**
+ * A platform that always resolves a backend, without reading this machine's
+ * PATH. These tests are about rule templates, persistence and the plumbing that
+ * carries a change to the controller — none of which is a property of the host —
+ * but the controller still has to reach `enabled` for a mutation to get as far
+ * as the deny check. Real enforcement is proved by the kernel suites.
+ */
+const RESOLVES_A_BACKEND: SandboxSeams = { platform: () => "darwin" };
 
 type Harness = {
     manager: DenyRuleManager;
@@ -72,7 +82,7 @@ function harness(name: string, options: { projectRoot?: string; home?: string } 
     const home = options.home ?? directory(`${name}-home`);
     const agentDir = directory(`${name}-agent`);
     const projectRoot = options.projectRoot ?? directory(`${name}-project`);
-    const seams: DenyRuleSeams = { home: () => home, agentDir: () => agentDir };
+    const seams: DenyRuleSeams = { ...RESOLVES_A_BACKEND, home: () => home, agentDir: () => agentDir };
 
     const controller = new ForegroundSandboxController(seams);
     controller.beginSession(projectRoot);
@@ -137,7 +147,7 @@ test("a relative rule is stored as a template and denies the same relative path 
     // A second project, same global agent directory: same template, different
     // absolute path.
     const secondProject = directory("cross-project-second");
-    const seams: DenyRuleSeams = { home: () => first.home, agentDir: () => first.agentDir };
+    const seams: DenyRuleSeams = { ...RESOLVES_A_BACKEND, home: () => first.home, agentDir: () => first.agentDir };
     const controller = new ForegroundSandboxController(seams);
     controller.beginSession(secondProject);
     const manager = new DenyRuleManager({ controller, onStateChange: () => {}, seams });
