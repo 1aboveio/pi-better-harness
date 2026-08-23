@@ -7,6 +7,9 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { version } = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8"));
 
 export const componentPackages = [
+  // The sandbox is configured first so a fresh install has write protection in
+  // place before the extensions whose work it confines.
+  "pi-better-sandbox",
   "pi-better-subagents",
   "pi-better-background-tasks",
   "pi-better-goal",
