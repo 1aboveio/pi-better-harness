@@ -18,7 +18,17 @@
  */
 
 import { platform as osPlatform } from "node:os";
-import { accessSync, constants, realpathSync, statSync, writeFileSync } from "node:fs";
+import {
+    accessSync,
+    closeSync,
+    constants,
+    existsSync,
+    mkdirSync,
+    openSync,
+    realpathSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
 
 /** Identifies which kernel mechanism a plan will use. */
@@ -34,6 +44,12 @@ export type SandboxWritePolicy = {
     /**
      * Concrete paths that stay non-writable even inside `writableRoot`. A
      * directory entry denies its whole subtree; a file entry denies that file.
+     *
+     * An entry need not exist. The Linux backend needs a mount point, so it
+     * materializes an absent entry as an empty file (see `materializeDenyPath`);
+     * an entry that has to be a *directory* must therefore already exist when the
+     * command is built. Callers denying their own state directory create it
+     * first, which they do anyway to write into it.
      */
     denyWrite?: readonly string[];
     /** Home directory whose `~/.pi` state stays writable on macOS. */
@@ -59,6 +75,13 @@ export type SandboxCommand = { file: string; fileArgs: string[] };
 export type SandboxRequest = {
     sandboxEnabled: boolean;
     explicitSandbox: boolean;
+    /**
+     * What this caller's operator can actually do about a missing backend,
+     * appended when an explicit request has to be refused. Surfaces differ: a
+     * subagent tool takes `sandbox:false`, a foreground session takes
+     * `/sandbox off`, so the remedy cannot be stated here.
+     */
+    remedy?: string;
 };
 
 /** Injectable platform and filesystem dependencies. Defaults hit the real OS. */
@@ -71,6 +94,13 @@ export type SandboxSeams = {
     canonicalize?: (path: string) => string;
     /** Defaults to `fs.writeFileSync`. */
     writeProfile?: (path: string, contents: string) => void;
+    /**
+     * Defaults to creating an empty placeholder file for an absent denied path
+     * (see `materializeDenyPath`). Returns whether the path exists afterwards.
+     * Injected by tests that plan Linux argv for paths that do not exist on the
+     * host running them.
+     */
+    materializeDenyPath?: (path: string) => boolean;
 };
 
 /** A policy with every path canonicalized, deduplicated, and ordered. */
@@ -246,6 +276,64 @@ export function executableFromPath(name: string): string | undefined {
     return undefined;
 }
 
+/**
+ * Give an absent denied path something the kernel can hold out.
+ *
+ * A mount needs a mount point. `--ro-bind-try` skips a source that does not
+ * exist, so before this a denied path that had not been created yet was not
+ * denied at all: inside the sandbox `echo secret > .env.local` simply created
+ * it. `.env` and `.env.local` are absent in most projects, which made the
+ * packaged defaults hold on macOS — SBPL denies by resolved path, existing or
+ * not — and not on Linux.
+ *
+ * Nothing bubblewrap offers closes that without a mount point, and every
+ * bubblewrap operation that would create one (`--dir`, `--file`, `--tmpfs`)
+ * creates it through the read-write bind of the project, which is to say on the
+ * real filesystem anyway. So the placeholder is created here, deliberately and
+ * visibly, rather than as a side effect of a mount operation.
+ *
+ * An empty regular file is the least destructive placeholder: a later
+ * `cp .env.example .env` overwrites it, where an empty *directory* at that path
+ * would fail. Callers whose denied entry has to be a directory create it before
+ * building the command, and an entry that already exists — file or directory —
+ * is bound as it is. The file is created with O_EXCL, so anything that appears
+ * in the meantime is bound rather than clobbered, and it is left in place
+ * afterwards because a resumed task re-runs the launch vector it captured and
+ * its `--ro-bind` sources have to still be there.
+ *
+ * Returns false when the placeholder could not be created. That is not a hole:
+ * the confined process runs as this same user, so a path this process cannot
+ * create is a path that process cannot create either.
+ */
+function materializeDenyPath(path: string): boolean {
+    if (existsSync(path)) return true;
+    try {
+        mkdirSync(dirname(path), { recursive: true });
+        closeSync(openSync(path, "wx"));
+        return true;
+    } catch {
+        // Re-check rather than trust the errno. EEXIST from the O_EXCL create
+        // means the path appeared in between, which is the outcome we wanted and
+        // not ours to overwrite; EEXIST from the mkdir means a parent is a
+        // regular file, and nothing can exist under it. Only the first leaves a
+        // source a bind can use.
+        return existsSync(path);
+    }
+}
+
+/**
+ * Whether a denied path lies in a region this backend binds read-write.
+ *
+ * Everywhere else is already covered by the read-only bind of `/`, so a
+ * placeholder there would deny nothing that is not denied already — and would
+ * scatter empty files across the host for the sake of it. Materializing is
+ * confined to the two regions that are genuinely writable inside the sandbox:
+ * the writable root, and the `/tmp` rebind that pi's own tooling needs.
+ */
+function writableInsideLinuxSandbox(path: string, writableRoot: string): boolean {
+    return contains(writableRoot, path) || contains("/tmp", path);
+}
+
 function buildLinuxSandboxCommand(
     bwrap: string,
     args: SandboxCommandArgs,
@@ -255,6 +343,11 @@ function buildLinuxSandboxCommand(
     // boundary. Canonicalizing it before bind-mounting keeps symlink aliases from
     // widening the writable root.
     const policy = compile(args.policy, seams, true);
+    const materialize = seams.materializeDenyPath ?? materializeDenyPath;
+    const denyBinds = policy.denyWrite.flatMap((path) => {
+        const mountable = writableInsideLinuxSandbox(path, policy.writableRoot) && materialize(path);
+        return [mountable ? "--ro-bind" : "--ro-bind-try", path, path];
+    });
     return {
         file: bwrap,
         fileArgs: [
@@ -263,10 +356,11 @@ function buildLinuxSandboxCommand(
             "--bind", "/tmp", "/tmp",
             "--dev", "/dev",
             // Layered last so a denied path wins over every writable bind above.
-            // `-try` because a denied path need not exist yet; a path that is
-            // absent at launch is instead held out by the caller's own
-            // containment check (see evaluateWriteAccess).
-            ...policy.denyWrite.flatMap((path) => ["--ro-bind-try", path, path]),
+            // A denied path need not exist yet, so one inside a writable region
+            // is materialized first; `-try` remains for the paths that are
+            // read-only regardless and for the ones that could not be created,
+            // which are paths the confined process cannot create either.
+            ...denyBinds,
             "--",
             args.execPath, ...args.execArgs,
         ],
@@ -290,14 +384,19 @@ function selectedSandboxBackend(seams: SandboxSeams): SandboxBackend | undefined
     return undefined;
 }
 
+/**
+ * Why no backend applies here. The requirement only: what a caller can do
+ * instead is a property of that caller's surface, not of the platform, and is
+ * supplied through `SandboxRequest.remedy`.
+ */
 function unavailableMessage(platform: string): string {
     if (platform === "linux") {
-        return "Linux sandbox requires executable bubblewrap (bwrap) on PATH. Install bubblewrap or pass sandbox:false.";
+        return "Linux sandbox requires executable bubblewrap (bwrap) on PATH. Install bubblewrap to enable it.";
     }
     if (platform === "darwin") {
-        return "macOS sandbox requires /usr/bin/sandbox-exec. Pass sandbox:false if it is unavailable.";
+        return "macOS sandbox requires /usr/bin/sandbox-exec, which is missing here.";
     }
-    return `sandbox is unsupported on ${platform}. Pass sandbox:false on this platform.`;
+    return `sandbox is unsupported on ${platform}.`;
 }
 
 /** Report which backend this platform would select, and why it would not. */
@@ -340,7 +439,10 @@ export function maybeBuildSandboxCommand(
 
     const backend = selectedSandboxBackend(seams);
     if (!backend) {
-        if (request.explicitSandbox) throw new Error(sandboxUnavailableMessage(seams));
+        if (request.explicitSandbox) {
+            const reason = sandboxUnavailableMessage(seams);
+            throw new Error(request.remedy ? `${reason} ${request.remedy}` : reason);
+        }
         return undefined;
     }
     return backend.buildCommand(args, seams);

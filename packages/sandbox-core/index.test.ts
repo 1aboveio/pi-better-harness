@@ -18,6 +18,7 @@ import {
     readFileSync,
     realpathSync,
     rmSync,
+    statSync,
     symlinkSync,
     writeFileSync,
 } from "node:fs";
@@ -442,6 +443,110 @@ describe("sandbox-core write policy compilation and containment", () => {
 
     // @covers sandbox.command-wrapper
     // @level unit
+    it("never overwrites a denied path that already exists", async () => {
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-keep-")));
+        const root = join(base, "project");
+        mkdirSync(root, { recursive: true });
+        writeFileSync(join(root, ".env"), "SECRET=original\n");
+        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        try {
+            await withPlatform("linux", () => withPath(base, () => {
+                const cmd = buildSandboxCommand({
+                    profilePath: join(base, "unused.sb"),
+                    policy: { writableRoot: root, home: base, denyWrite: [join(root, ".env")] },
+                    execPath: "/usr/bin/true",
+                    execArgs: [],
+                });
+                assert.ok(cmd.fileArgs.includes("--ro-bind"));
+                assert.equal(cmd.fileArgs.includes("--ro-bind-try"), false);
+            }));
+            assert.equal(readFileSync(join(root, ".env"), "utf8"), "SECRET=original\n");
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers sandbox.command-wrapper
+    // @level unit
+    it("leaves a denied directory alone instead of standing a file in its place", async () => {
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-dir-")));
+        const root = join(base, "project");
+        const denied = join(root, ".git", "hooks");
+        mkdirSync(denied, { recursive: true });
+        writeFileSync(join(denied, "pre-commit"), "#!/bin/sh\nexit 0\n");
+        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        try {
+            await withPlatform("linux", () => withPath(base, () => {
+                const cmd = buildSandboxCommand({
+                    profilePath: join(base, "unused.sb"),
+                    policy: { writableRoot: root, home: base, denyWrite: [denied] },
+                    execPath: "/usr/bin/true",
+                    execArgs: [],
+                });
+                assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind", denied, denied]);
+            }));
+            assert.equal(statSync(denied).isDirectory(), true);
+            assert.equal(readFileSync(join(denied, "pre-commit"), "utf8"), "#!/bin/sh\nexit 0\n");
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers sandbox.command-wrapper
+    // @level unit
+    it("creates no placeholder for a denied path the sandbox never makes writable", async () => {
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-elsewhere-")));
+        const root = join(base, "project");
+        mkdirSync(root, { recursive: true });
+        // Outside the writable root and outside the /tmp rebind, so the
+        // read-only bind of / already covers it: materializing here would
+        // litter the host to deny nothing new.
+        const elsewhere = join(base, "elsewhere", "secret");
+        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        try {
+            await withPlatform("linux", () => withPath(base, () => {
+                const cmd = buildSandboxCommand({
+                    profilePath: join(base, "unused.sb"),
+                    policy: { writableRoot: root, home: base, denyWrite: [elsewhere] },
+                    execPath: "/usr/bin/true",
+                    execArgs: [],
+                });
+                assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind-try", elsewhere, elsewhere]);
+            }));
+            assert.equal(existsSync(join(base, "elsewhere")), false);
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers sandbox.command-wrapper
+    // @level unit
+    it("falls back to a try-bind for a denied path this user cannot create", async () => {
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-uncreatable-")));
+        const root = join(base, "project");
+        mkdirSync(root, { recursive: true });
+        // The parent is a regular file, so nothing can exist beneath it — and a
+        // confined process running as this same user cannot create it either.
+        writeFileSync(join(root, "blocked"), "not a directory\n");
+        const denied = join(root, "blocked", "secret");
+        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        try {
+            await withPlatform("linux", () => withPath(base, () => {
+                const cmd = buildSandboxCommand({
+                    profilePath: join(base, "unused.sb"),
+                    policy: { writableRoot: root, home: base, denyWrite: [denied] },
+                    execPath: "/usr/bin/true",
+                    execArgs: [],
+                });
+                assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind-try", denied, denied]);
+            }));
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers sandbox.command-wrapper
+    // @level unit
     it("compiles denied paths into Linux read-only binds layered over the writable root", async () => {
         const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-deny-")));
         const root = join(base, "project");
@@ -455,14 +560,18 @@ describe("sandbox-core write policy compilation and containment", () => {
                     execPath: "/usr/bin/true",
                     execArgs: [],
                 });
+                // A hard --ro-bind, not --ro-bind-try: the absent .env was
+                // materialized first, because bubblewrap skips a bind whose
+                // source does not exist and would otherwise deny nothing.
                 assert.deepEqual(cmd.fileArgs, [
                     "--ro-bind", "/", "/",
                     "--bind", root, root,
                     "--bind", "/tmp", "/tmp",
                     "--dev", "/dev",
-                    "--ro-bind-try", join(root, ".env"), join(root, ".env"),
+                    "--ro-bind", join(root, ".env"), join(root, ".env"),
                     "--", "/usr/bin/true",
                 ]);
+                assert.equal(readFileSync(join(root, ".env"), "utf8"), "");
             }));
         } finally {
             rmSync(base, { recursive: true, force: true });
