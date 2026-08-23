@@ -17,6 +17,27 @@ Use `pi-better-background-tasks` when a command should keep running while the fo
 - Keep task metadata and logs available across reloads.
 - Show active work in Pi's background-work navigator.
 - Flag running tasks with no observable output or completed poll as stalled.
+- Confine local task writes to the project directory when `pi-better-sandbox` is enabled.
+
+## Write Sandbox
+
+When `pi-better-sandbox` is installed and enabled, every **local** task captures
+the effective foreground policy at launch and runs under the platform's write
+sandbox: reads and network stay unrestricted, writes are confined to the
+canonical project directory, and denied paths stay denied.
+
+The policy is captured once, when the task starts. A later `/sandbox on`,
+`/sandbox off`, or deny-rule change reaches tasks launched after it; a task
+already running — including a watcher resumed in a later Pi session — keeps the
+policy it started with.
+
+If the foreground sandbox reports `unavailable` or `failed`, a local launch is
+refused with an explanation instead of running unconfined. `/sandbox off` is the
+deliberate way to run local tasks unsandboxed.
+
+Structured remote SSH tasks are unaffected: the foreground sandbox describes this
+machine, and remote work keeps its existing remote semantics. Without
+`pi-better-sandbox` installed, local tasks behave exactly as they always have.
 
 ## Remote SSH
 

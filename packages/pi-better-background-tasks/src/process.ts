@@ -97,22 +97,29 @@ export function processExists(pid: number): boolean {
   }
 }
 
+/**
+ * The executable and argument vector a spec runs as.
+ *
+ * Shell specs become an explicit `bash -lc` invocation rather than a shell
+ * string, so every caller — spawning directly, or wrapping the same launch in an
+ * OS sandbox — starts from one definition of what actually executes.
+ */
+export function commandExecution(spec: CommandSpec): { execPath: string; execArgs: string[] } {
+  if (spec.shell === false) {
+    const [command, ...args] = spec.argv!;
+    return { execPath: command!, execArgs: args };
+  }
+  return { execPath: DEFAULT_SHELL, execArgs: ["-lc", spec.command!] };
+}
+
 function spawnArgs(
   spec: CommandSpec,
   detached: boolean,
   stdio: ["ignore", "pipe" | number, "pipe" | number],
 ): ChildProcess {
   const env = { ...process.env, ...spec.env };
-  if (spec.shell === false) {
-    const [command, ...args] = spec.argv!;
-    return spawn(command!, args, {
-      cwd: spec.cwd,
-      env,
-      detached,
-      stdio,
-    });
-  }
-  return spawn(DEFAULT_SHELL, ["-lc", spec.command!], {
+  const { execPath, execArgs } = commandExecution(spec);
+  return spawn(execPath, execArgs, {
     cwd: spec.cwd,
     env,
     detached,

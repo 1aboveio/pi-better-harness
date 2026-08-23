@@ -175,6 +175,34 @@ after an earlier 100 ms aggregate has already flushed: Pi can consume queued
 follow-ups together in one later agent turn. This extension does not change Pi
 core or Pi's default follow-up mode.
 
+## Write Sandbox
+
+`pi-better-sandbox` publishes the effective foreground write policy on
+`pi.events`. This package subscribes to it and, when the policy is `enabled`,
+wraps each **local** spawn and watch launch in the platform's write sandbox
+(macOS Seatbelt or Linux Bubblewrap) around the exact executable and arguments
+the unconfined launch would have run. Streaming, timeouts, cancellation,
+process-group termination, log capture, callbacks, and environment handling are
+unchanged, because only the command vector differs.
+
+Three properties follow:
+
+- **Captured at launch.** The wrapper is resolved once and stored with the task,
+  so an already-running task keeps its launch policy when the foreground policy
+  changes. A watcher resumed in a later Pi session re-runs the wrapper it started
+  with, reading the profile stored in its own task directory.
+- **Fail closed.** An `unavailable` or `failed` foreground state refuses the
+  launch and says why. The local command is never retried unconfined. Only an
+  explicit `disabled` state — a human's `/sandbox off` — launches without a
+  sandbox.
+- **Local only.** Structured remote SSH spawn and watch never consult the
+  foreground policy, and their tmux lifecycle, stop semantics, and remote
+  metadata are untouched.
+
+`bg_task_status` with `verbose: true` shows a `launchArgv` field when a task launched under
+a sandbox. `command` and `argv` stay the operator's own request, so status,
+navigator, and goal surfaces read the same as before.
+
 ## Log Retention
 
 Background processes retain at most 4 MiB of raw output by default. When output

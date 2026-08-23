@@ -8,6 +8,11 @@ const sourceFile = "index.ts";
 const consumerTargets = [
   "packages/pi-better-subagents/shared-sandbox-core.ts",
   "packages/pi-better-sandbox/shared-sandbox-core.ts",
+  // `pi-better-background-tasks` packs `src/**/*.ts` instead, so its copy is a
+  // root-level file inside `src/`. It must never land in `src/shared-ssh-core/`
+  // or overwrite `src/shared-log-utils.ts` — those are other modules' vendored
+  // copies with their own sync scripts.
+  "packages/pi-better-background-tasks/src/shared-sandbox-core.ts",
 ];
 
 export const sharedSandboxCoreBanner =
