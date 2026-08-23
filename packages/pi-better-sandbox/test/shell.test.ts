@@ -8,6 +8,7 @@ import test, { after } from "node:test";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 
+import { PACKAGED_DENY_WRITE_TEMPLATES } from "../policy.ts";
 import {
     buildSandboxedShellCommand,
     createSandboxedBashOperations,
@@ -199,4 +200,61 @@ test("streaming, timeout, cancellation and env options reach pi's backend unchan
     await operations.exec("echo hi", root, { onData, signal, timeout: 12, env: { A: "1" } });
 
     assert.deepEqual(seen, [{ cwd: root, onData, signal, timeout: 12, env: { A: "1" } }]);
+});
+
+test("a new deny rule reaches the next command's profile, and cannot rewrite a running one", () => {
+    const controller = new ForegroundSandboxController(seams());
+    const root = project("deny-rule-reaches-shell");
+    controller.beginSession(root);
+
+    // A command launches under the rules in force right now.
+    const first = controller.requireLaunchPlan();
+    assert.equal(first.confined, true);
+    if (!first.confined) return;
+    buildSandboxedShellCommand("sleep 60", first, seams());
+    const launched = readFileSync(first.profilePath, "utf8");
+
+    // A rule changes while that command is still running.
+    controller.setDenyWriteTemplates([...PACKAGED_DENY_WRITE_TEMPLATES, "build"]);
+    const second = controller.requireLaunchPlan();
+    assert.equal(second.confined, true);
+    if (!second.confined) return;
+    buildSandboxedShellCommand("true", second, seams());
+
+    // The next command is confined by the new rule...
+    assert.ok(
+        readFileSync(second.profilePath, "utf8").includes(
+            `(deny file-write* (subpath "${join(root, "build")}"))`,
+        ),
+    );
+    // ...and the running command's profile is a different file, byte-identical
+    // to what it launched with. A rule change can never rewrite the profile a
+    // live command is being enforced against.
+    assert.notEqual(second.profilePath, first.profilePath);
+    assert.equal(readFileSync(first.profilePath, "utf8"), launched);
+    assert.equal(launched.includes(join(root, "build")), false);
+});
+
+test("the operations pi already holds pick up a rule change on the next command", async () => {
+    const local = recordingLocal();
+    const controller = new ForegroundSandboxController(seams());
+    const root = project("deny-rule-no-reregistration");
+    controller.beginSession(root);
+    // Built once, exactly as the extension builds them at load time.
+    const operations = createSandboxedBashOperations(controller, {
+        ...seams(),
+        localOperations: local,
+    });
+
+    await operations.exec("true", root, { onData: () => {} });
+    controller.setDenyWriteTemplates([...PACKAGED_DENY_WRITE_TEMPLATES, "build"]);
+    await operations.exec("true", root, { onData: () => {} });
+
+    const profileOf = (command: string): string => {
+        const match = /sandbox-exec' '-f' '([^']+)'/.exec(command);
+        assert.ok(match, `expected a wrapped command, got ${command}`);
+        return readFileSync(match[1] as string, "utf8");
+    };
+    assert.equal(profileOf(local.calls[0] as string).includes(join(root, "build")), false);
+    assert.ok(profileOf(local.calls[1] as string).includes(join(root, "build")));
 });

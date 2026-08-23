@@ -52,9 +52,14 @@ operations underneath them are replaced.
 ## Commands
 
 ```text
-/sandbox        show the effective status
-/sandbox on     re-arm protection for operations started from now on
-/sandbox off    turn protection off for this session (interactive confirmation)
+/sandbox                     show the effective status
+/sandbox on                  re-arm protection for operations started from now on
+/sandbox off                 turn protection off for this session (interactive confirmation)
+/sandbox deny list           show the write-denied paths
+/sandbox deny add <path>     stop allowing writes to a path
+/sandbox deny remove <path>  allow writes to a path again
+/sandbox deny reset          drop your changes and restore the packaged defaults
+/sandbox rules               open the write-denied paths editor
 ```
 
 The footer shows `sandbox · on · <project>` while protection is active, and a
@@ -63,8 +68,75 @@ otherwise. Both surfaces report what the runtime actually resolved — which
 backend, which executable — never what was merely configured.
 
 `/sandbox off` needs an interactive confirmation and is refused outright when
-there is no interactive UI. There is no tool for changing sandbox state, so the
-model cannot disable its own confinement.
+there is no interactive UI. There is no tool for changing sandbox state or its
+rules, so the model can neither disable its own confinement nor edit the paths
+it is confined away from.
+
+## Write-denied paths
+
+Three paths are denied out of the box — `.git/hooks`, `.env`, and `.env.local`,
+relative to whichever project you are in. They live in the package's source, so
+installing writes no settings file anywhere.
+
+Rules are paths, not patterns. Write one of three ways:
+
+| You type            | It means                                            |
+| ------------------- | --------------------------------------------------- |
+| `build/artifacts`   | that path inside **every** project you open          |
+| `~/.aws`            | that path under your home directory                  |
+| `/etc/hosts`        | exactly that path                                     |
+
+A relative rule is stored as a template and resolved against each project, which
+is why one global rule set is enough — there is no per-project database. Lists
+and the editor always show the canonical absolute path a rule currently resolves
+to. A directory denies its whole subtree; a file denies that exact file, whether
+or not it exists yet.
+
+`/sandbox rules` opens a compact keyboard-driven editor over the same rules:
+arrow keys to move, enter to remove the highlighted rule, or pick *Add* to type
+a new one and *Restore the packaged defaults* to start over. The slash commands
+and the editor are two front ends over one validation and persistence module, so
+they cannot disagree.
+
+Changes take effect for shell commands and file mutations started after them.
+A command already running keeps the rules it launched with.
+
+### Where your rules live
+
+Your changes are written to `~/.pi/agent/extensions/pi-better-sandbox.json`
+(under `$PI_CODING_AGENT_DIR` when you set one):
+
+```json
+{
+  "version": 1,
+  "denyWrite": [".env", ".env.local", ".git/hooks", "build/artifacts"]
+}
+```
+
+That file appears the first time you add or remove a rule, never at install
+time. `/sandbox deny reset` deletes it and puts the defaults shipped by the
+installed package version back in force — so an upgrade that changes the
+defaults is picked up by a reset rather than being masked by a stale copy.
+
+If the file cannot be read, the packaged defaults stay in force, the problem is
+reported, and rule changes are refused until you fix the file or reset it —
+a typo is never quietly turned into a lost rule set.
+
+### What is refused, and why
+
+- **Empty entries and patterns** (`*.pem`, `src/**/x`) — rules are concrete
+  paths; a pattern would silently match nothing.
+- **Duplicates**, however they are spelled: `.env`, `./.env`, the absolute path,
+  or a symlink pointing at the same file all resolve to one canonical path.
+- **Overlaps**, in both directions. A path already inside a denied directory
+  would change nothing; a directory that would swallow a narrower rule names
+  that rule so you can remove it deliberately instead of losing it silently.
+- **A rule that contains the project root** — `.`, `..`, `/`, or `~` when your
+  project lives under home. Denying it would make every write in the project
+  fail. `/sandbox off` is the thing you actually want there.
+
+A global rule that turns out to contain the root of a *different* project stays
+in your rule set but is held out in that project, with a message saying so.
 
 ## Lifecycle
 

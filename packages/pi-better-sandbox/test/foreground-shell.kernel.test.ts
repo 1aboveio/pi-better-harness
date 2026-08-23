@@ -31,7 +31,7 @@ import type {
     ToolDefinition,
     UserBashEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import { describeSandboxSupport } from "../shared-sandbox-core.ts";
 
@@ -56,6 +56,15 @@ writeFileSync(join(projectRoot, ".env"), "SECRET=original\n");
 writeFileSync(join(projectRoot, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 0\n");
 writeFileSync(join(outside, "readable.txt"), "readable from inside the sandbox\n");
 symlinkSync(outside, join(projectRoot, "escape-hatch"));
+
+// The extension reads its write-deny override out of the pi agent directory.
+// Redirecting that directory into the fixture tree is what keeps this file off
+// the developer's real ~/.pi state. (`PI_CODING_AGENT_DIR` is the name pi's own
+// `getAgentDir()` reads.)
+const agentDir = join(fixtures, "agent");
+mkdirSync(agentDir, { recursive: true });
+process.env.PI_CODING_AGENT_DIR = agentDir;
+assert.equal(getAgentDir(), agentDir, "the pi agent directory must be redirected for these tests");
 
 const originalCwd = process.cwd();
 after(() => {
@@ -412,4 +421,69 @@ test("the bash tool pi would have registered without this package is unconfined"
 
     assert.equal(readFileSync(target, "utf8"), "control\n");
     rmSync(target, { force: true });
+});
+
+test("a deny rule added at runtime is enforced by the kernel on the next command", { skip }, async () => {
+    const denied = join(projectRoot, "runtime-denied");
+    const target = join(denied, "secret.txt");
+
+    // Before the rule: an ordinary write inside the project root.
+    const before = await runBash(`mkdir -p ${JSON.stringify(denied)} && printf 'first\\n' > ${JSON.stringify(target)}`);
+    assert.equal(before.ok, true, before.ok ? "" : before.message);
+    assert.equal(readFileSync(target, "utf8"), "first\n");
+
+    await commands.get("sandbox")?.handler("deny add runtime-denied", ctx);
+
+    // The same registered bash tool, no re-registration: the kernel now refuses.
+    const overwrite = await runBash(`printf 'second\\n' > ${JSON.stringify(target)}`);
+    assert.equal(overwrite.ok, false, "the write must not report success");
+    assert.equal(readFileSync(target, "utf8"), "first\n", "the denied file is unchanged");
+    const created = await runBash(`printf 'new\\n' > ${JSON.stringify(join(denied, "new.txt"))}`);
+    assert.equal(created.ok, false);
+    assert.equal(existsSync(join(denied, "new.txt")), false, "nothing may be created in the subtree");
+    // User-entered ! commands are held to the same new rule.
+    const userBash = handlers.get("user_bash")?.(
+        { type: "user_bash", command: "true", excludeFromContext: false, cwd: projectRoot },
+        ctx,
+    ) as UserBashEventResult;
+    assert.ok(userBash.operations);
+    await userBash.operations.exec(`printf 'bang\\n' > ${JSON.stringify(target)}`, projectRoot, {
+        onData: () => {},
+    });
+    assert.equal(readFileSync(target, "utf8"), "first\n");
+
+    // Removing the rule lets the next command write there again.
+    await commands.get("sandbox")?.handler("deny remove runtime-denied", ctx);
+    const restored = await runBash(`printf 'third\\n' > ${JSON.stringify(target)}`);
+    assert.equal(restored.ok, true, restored.ok ? "" : restored.message);
+    assert.equal(readFileSync(target, "utf8"), "third\n");
+
+    await commands.get("sandbox")?.handler("deny reset", ctx);
+});
+
+test("a command already running keeps the deny rules it launched with", { skip }, async () => {
+    const denied = join(projectRoot, "late-denied");
+    mkdirSync(denied, { recursive: true });
+    const target = join(denied, "in-flight.txt");
+    rmSync(target, { force: true });
+
+    // Launches while the path is writable, then the rule lands mid-flight.
+    const pending = runBash(`sleep 1; printf 'late\\n' > ${JSON.stringify(target)}`);
+    await new Promise((done) => setTimeout(done, 250));
+    await commands.get("sandbox")?.handler("deny add late-denied", ctx);
+
+    const result = await pending;
+
+    assert.equal(result.ok, true, result.ok ? "" : result.message);
+    assert.equal(
+        readFileSync(target, "utf8"),
+        "late\n",
+        "the running command keeps the policy it launched with",
+    );
+    // A command launched after the change is confined by it.
+    const later = await runBash(`printf 'blocked\\n' > ${JSON.stringify(join(denied, "later.txt"))}`);
+    assert.equal(later.ok, false);
+    assert.equal(existsSync(join(denied, "later.txt")), false);
+
+    await commands.get("sandbox")?.handler("deny reset", ctx);
 });

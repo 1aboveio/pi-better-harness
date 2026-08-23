@@ -29,6 +29,7 @@ import {
     SANDBOX_COMMAND_NAME,
     sandboxArgumentCompletions,
 } from "./commands.ts";
+import { DenyRuleManager } from "./deny-rules.ts";
 import {
     FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
     publishForegroundSandboxPolicy,
@@ -94,6 +95,10 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         publishForegroundSandboxPolicy(pi.events, controller.status());
     });
 
+    // The one validation and persistence path for write-deny rules, shared by
+    // `/sandbox deny ...` and the `/sandbox rules` page.
+    const denyRules = new DenyRuleManager({ controller, onStateChange: announce });
+
     pi.on("session_start", (_event, ctx: ExtensionContext) => {
         shellPath = resolveShellPath(ctx.cwd);
         registerFileTools(ctx.cwd);
@@ -107,9 +112,24 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         // Every session start re-captures the project root and re-arms
         // protection, so an earlier /sandbox off never survives into a new,
         // resumed, forked, or reloaded session.
-        const status = controller.beginSession(ctx.cwd);
-        announce(status);
+        controller.beginSession(ctx.cwd);
 
+        // Then the rules are re-read and re-resolved, because the same global
+        // template set means different absolute paths in a different project.
+        // Loading is what announces the session's first policy, so consumers and
+        // the footer never see the pre-rule state.
+        const report = denyRules.load();
+        const status = report.status;
+
+        if (report.overrideProblem !== undefined) {
+            ctx.ui.notify(report.overrideProblem, "warning");
+        }
+        for (const rule of report.inert) {
+            ctx.ui.notify(
+                `Write-deny rule ${rule.template} is not applied in this project: ${rule.reason}`,
+                "warning",
+            );
+        }
         if (status.state !== "enabled") {
             ctx.ui.notify(
                 `Foreground sandbox ${status.state}: ${status.reason}`,
@@ -125,7 +145,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     pi.registerCommand(SANDBOX_COMMAND_NAME, {
         description: SANDBOX_COMMAND_DESCRIPTION,
         getArgumentCompletions: sandboxArgumentCompletions,
-        handler: createSandboxCommandHandler({ controller, onStateChange: announce }),
+        handler: createSandboxCommandHandler({ controller, denyRules, onStateChange: announce }),
     });
 }
 
@@ -157,6 +177,30 @@ export {
     requestForegroundSandboxPolicy,
     subscribeForegroundSandboxPolicy,
 } from "./events.ts";
+export {
+    clearDenyRuleOverride,
+    DENY_RULES_FILE_NAME,
+    DENY_RULES_FORMAT_VERSION,
+    type DenyRule,
+    DenyRuleError,
+    type DenyRuleErrorKind,
+    DenyRuleManager,
+    type DenyRuleManagerDeps,
+    type DenyRuleReport,
+    denyRuleOverridePath,
+    type DenyRuleSeams,
+    type DenyRuleStoreSeams,
+    describeDenyRules,
+    formatDenyRuleReport,
+    type InertDenyRule,
+    normalizeDenyRuleTemplate,
+    partitionDenyRules,
+    planDenyRuleAddition,
+    planDenyRuleRemoval,
+    readDenyRuleOverride,
+    writeDenyRuleOverride,
+} from "./deny-rules.ts";
+export { openSandboxRulesPage, RULES_PAGE_NO_UI_REJECTION } from "./rules-page.ts";
 export {
     describeUnsafeProjectRoot,
     PACKAGED_DENY_WRITE_TEMPLATES,
