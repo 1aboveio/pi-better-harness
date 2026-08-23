@@ -17,7 +17,7 @@ import {
   observeForegroundSandboxPolicy,
   resolveForegroundSandboxPlan,
 } from "./sandbox.js";
-import { describeSandboxSupport } from "./shared-sandbox-core.js";
+import type { SandboxSeams } from "./shared-sandbox-core.js";
 import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
 import type { CommandSpec } from "./types.js";
 
@@ -30,8 +30,6 @@ import type { CommandSpec } from "./types.js";
 const varTmp = realpathSync("/var/tmp");
 const fixtureRoot = mkdtempSync(join(varTmp, "bg-sandbox-contract-"));
 afterAll(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-
-const support = describeSandboxSupport();
 
 /**
  * A stand-in for the publishing half of the wire contract: the exact channels
@@ -63,6 +61,31 @@ function createSandboxPublisher(events: EventEmitter) {
 function createPi(): { pi: ExtensionAPI; events: EventEmitter } {
   const events = new EventEmitter();
   return { pi: { events } as unknown as ExtensionAPI, events };
+}
+
+/**
+ * Backends that resolve on any host, so the argv this package produces is proved
+ * for both of them wherever the suite runs. Which backend a runner actually has
+ * decides nothing here: real kernel enforcement is what `sandbox-kernel.test.ts`
+ * proves, against a real backend, on the platform CI lanes.
+ */
+const MACOS: SandboxSeams = { platform: () => "darwin" };
+const LINUX: SandboxSeams = {
+  platform: () => "linux",
+  lookupExecutable: (name) => (name === "bwrap" ? "/usr/bin/bwrap" : undefined),
+};
+
+/** One project, one shell spec, and a profile path no other test writes to. */
+function wrapFixture(name: string) {
+  const project = join(fixtureRoot, name);
+  mkdirSync(project, { recursive: true });
+  const spec: CommandSpec = { command: "echo hi", cwd: project, env: { PROBE: "1" }, shell: true };
+  return { spec, project, profilePath: join(fixtureRoot, `${name}.sb`) };
+}
+
+/** The launch plan both wrapping tests confine. */
+function wrapPlan(project: string) {
+  return { confined: true, writableRoot: project, denyWrite: [join(project, ".env")] } as const;
 }
 
 function enabledPolicy(writableRoot: string, denyWrite: string[] = []) {
@@ -183,39 +206,48 @@ describe("foreground sandbox launch planning", () => {
 
   // @covers background-task.sandbox-launch-capture
   // @level integration
-  it("wraps the exact executable and argv the unconfined launch would have run", () => {
-    if (!support.supported) return expect(support.reason).toBeTypeOf("string");
+  it("wraps the exact executable and argv the unconfined launch would have run, under Seatbelt", () => {
+    const { spec, project, profilePath } = wrapFixture("wrap-macos");
 
-    const project = join(fixtureRoot, "wrap-project");
-    mkdirSync(project, { recursive: true });
-    const spec: CommandSpec = {
-      command: "echo hi",
-      cwd: project,
-      env: { PROBE: "1" },
-      shell: true,
-    };
-    const profilePath = join(fixtureRoot, "wrap.sb");
-
-    const confined = confineCommandSpec(
-      spec,
-      { confined: true, writableRoot: project, denyWrite: [join(project, ".env")] },
-      profilePath,
-    );
+    const confined = confineCommandSpec(spec, wrapPlan(project), profilePath, MACOS);
 
     const { execPath, execArgs } = commandExecution(spec);
     expect(confined.shell).toBe(false);
     expect(confined.cwd).toBe(project);
     expect(confined.env).toEqual({ PROBE: "1" });
     expect(confined.command).toBe("echo hi");
-    expect(confined.argv![0]).toBe(support.executable);
+    expect(confined.argv![0]).toBe("/usr/bin/sandbox-exec");
     expect(confined.argv!.slice(-1 - execArgs.length)).toEqual([execPath, ...execArgs]);
 
-    if (support.backend === "macos-seatbelt") {
-      const profile = readFileSync(profilePath, "utf8");
-      expect(profile).toContain(`(allow file-write* (subpath "${project}"))`);
-      expect(profile).toContain(`(deny file-write* (subpath "${join(project, ".env")}"))`);
-      expect(profile).toContain(`(allow file-write* (subpath "${homedir()}/.pi"))`);
-    }
+    const profile = readFileSync(profilePath, "utf8");
+    expect(profile).toContain(`(allow file-write* (subpath "${project}"))`);
+    expect(profile).toContain(`(deny file-write* (subpath "${join(project, ".env")}"))`);
+    expect(profile).toContain(`(allow file-write* (subpath "${homedir()}/.pi"))`);
+  });
+
+  // @covers background-task.sandbox-launch-capture
+  // @level integration
+  it("wraps the exact executable and argv the unconfined launch would have run, under Bubblewrap", () => {
+    const { spec, project, profilePath } = wrapFixture("wrap-linux");
+
+    const confined = confineCommandSpec(spec, wrapPlan(project), profilePath, LINUX);
+
+    const { execPath, execArgs } = commandExecution(spec);
+    expect(confined.shell).toBe(false);
+    expect(confined.cwd).toBe(project);
+    expect(confined.env).toEqual({ PROBE: "1" });
+    expect(confined.command).toBe("echo hi");
+    expect(confined.argv![0]).toBe("/usr/bin/bwrap");
+    expect(confined.argv!.slice(-1 - execArgs.length)).toEqual([execPath, ...execArgs]);
+
+    // The writable root is bound read-write, and the denied path is layered back
+    // over it read-only so the deny wins wherever the binds overlap.
+    const argv = confined.argv!;
+    expect(argv.join(" ")).toContain(`--bind ${project} ${project}`);
+    expect(argv.join(" ")).toContain(`--ro-bind-try ${join(project, ".env")} ${join(project, ".env")}`);
+    expect(argv.indexOf("--ro-bind-try")).toBeGreaterThan(argv.indexOf("--bind"));
+    // Bubblewrap carries its policy in argv, so nothing is written to disk.
+    expect(existsSync(profilePath)).toBe(false);
   });
 });
 

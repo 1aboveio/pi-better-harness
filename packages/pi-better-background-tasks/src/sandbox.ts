@@ -28,7 +28,7 @@ import { homedir } from "node:os";
 import { dirname } from "node:path";
 
 import { commandExecution } from "./process.js";
-import { maybeBuildSandboxCommand } from "./shared-sandbox-core.js";
+import { maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
 import type { CommandSpec } from "./types.js";
 
 /** Channel `pi-better-sandbox` publishes every effective-policy change on. */
@@ -198,11 +198,16 @@ export function planFor(policy: ForegroundSandboxPolicy | undefined): Foreground
  * all stay on their existing code paths. The generated macOS profile is written
  * to `profilePath`, which callers put inside the task's own directory so a
  * resumed watch re-reads the policy it launched with.
+ *
+ * `seams` defaults to the real platform and PATH. It exists so a caller — in
+ * practice a test — can prove the argv this produces for a backend other than
+ * the one the host happens to have.
  */
 export function confineCommandSpec(
   spec: CommandSpec,
   plan: ForegroundSandboxPlan,
   profilePath: string,
+  seams: SandboxSeams = {},
 ): CommandSpec {
   if (!plan.confined) return spec;
 
@@ -227,6 +232,7 @@ export function confineCommandSpec(
       // applies: an absent or unusable backend must throw here rather than hand
       // back an unwrapped command.
       { sandboxEnabled: true, explicitSandbox: true },
+      seams,
     );
   } catch (error) {
     throw blocked(plan, error instanceof Error ? error.message : String(error));
