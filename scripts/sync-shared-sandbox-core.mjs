@@ -7,6 +7,7 @@ const sourceFile = "index.ts";
 // its package root, so a vendored subdirectory would be dropped from the tarball.
 const consumerTargets = [
   "packages/pi-better-subagents/shared-sandbox-core.ts",
+  "packages/pi-better-sandbox/shared-sandbox-core.ts",
 ];
 
 export const sharedSandboxCoreBanner =
