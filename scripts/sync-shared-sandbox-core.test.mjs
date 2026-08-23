@@ -70,6 +70,29 @@ test("packing pi-better-subagents includes the generated sandbox-core copy", () 
 });
 
 // @covers sandbox-core.private-sync
+// @level integration
+test("packing pi-better-background-tasks includes the generated sandbox-core copy", () => {
+  const stdout = execFileSync(
+    "npm",
+    ["pack", "--dry-run", "--json", "-w", "packages/pi-better-background-tasks"],
+    { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  );
+  const [pack] = JSON.parse(stdout.slice(stdout.indexOf("[")));
+  const packed = pack.files.map((file) => file.path);
+  // This package publishes `src/**/*.ts`, so its copy is a root-level file
+  // inside `src/` rather than at the package root.
+  assert.ok(
+    packed.includes("src/shared-sandbox-core.ts"),
+    `published tarball must carry the generated shared module; got:\n${packed.join("\n")}`,
+  );
+  assert.ok(packed.includes("src/sandbox.ts"), "the background-task policy consumer must stay published");
+  // The unrelated vendored modules this package already ships must survive the
+  // sandbox-core sync untouched.
+  assert.ok(packed.includes("src/shared-log-utils.ts"), "shared-log-utils must stay published");
+  assert.ok(packed.includes("src/shared-ssh-core/index.ts"), "shared-ssh-core must stay published");
+});
+
+// @covers sandbox-core.private-sync
 // @level unit
 test("sandbox-core itself is a private workspace package that is never published", () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, "packages/sandbox-core/package.json"), "utf8"));

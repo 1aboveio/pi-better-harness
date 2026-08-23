@@ -90,6 +90,15 @@ export interface BackgroundTaskMeta {
   shell?: boolean;
   cwd: string;
   env?: Record<string, string>;
+  /**
+   * The executable and argv this task was actually launched with, when that
+   * differs from `command`/`argv` above — today, an OS write-sandbox wrapper
+   * captured from the foreground policy at launch. Re-running a watch poll uses
+   * it verbatim, which is how a running task keeps the policy it started under
+   * even after the foreground policy changes. `command`/`argv` stay the operator's
+   * own request, so status, navigator, and goal surfaces read unchanged.
+   */
+  launchArgv?: string[];
   maxLogBytes?: number;
   logDiscardedBytes?: number;
   logRetentionEvents?: number;

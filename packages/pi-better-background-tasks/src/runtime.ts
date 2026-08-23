@@ -5,7 +5,8 @@ import { evaluateCondition } from "./conditions.js";
 import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.js";
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
-import { ensureTaskDir, logPathFor, nextTaskId, readMeta, writeMeta } from "./registry.js";
+import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
+import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import type {
   BackgroundTaskCallbackOrigin,
@@ -31,6 +32,9 @@ const LOG_RETENTION_CHECK_MS = 1000;
 const REMOTE_SESSION_POLL_MS = 100;
 
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
+
+/** Remote SSH launches never consult the local foreground sandbox policy. */
+const UNCONFINED_LAUNCH = { confined: false } as const;
 
 export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
 
@@ -69,6 +73,10 @@ export function spawnTask(
   getActiveSession?: ActiveSessionProvider,
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
+  // Resolved before any task directory, log, or metadata exists so a blocked
+  // launch leaves nothing behind. Remote SSH work is not a local execution path
+  // and keeps its existing remote semantics untouched.
+  const sandboxPlan = params.ssh ? UNCONFINED_LAUNCH : resolveForegroundSandboxPlan(pi);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const logPath = logPathFor(id);
@@ -85,12 +93,15 @@ export function spawnTask(
     }, dependencies.remoteRunner)
     : undefined;
   const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const launchSpec = remoteTask
+    ? commandSpec
+    : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id));
   const tmuxBacked = remoteTask?.metadata.remote.session === "tmux";
   const spawned = tmuxBacked
     ? undefined
     : remoteTask
       ? remoteTask.spawn(logPath, true)
-      : spawnCommand(commandSpec, logPath, true);
+      : spawnCommand(launchSpec, logPath, true);
   const now = Date.now();
   const meta: BackgroundTaskMeta = {
     id,
@@ -108,6 +119,7 @@ export function spawnTask(
     shell: commandSpec.shell,
     cwd,
     env: params.env,
+    launchArgv: launchArgvOf(commandSpec, launchSpec),
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     pid: spawned?.child.pid,
     pgid: spawned?.pgid,
@@ -296,6 +308,7 @@ export function startWatchTask(
   getActiveSession?: ActiveSessionProvider,
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
+  const sandboxPlan = params.ssh ? UNCONFINED_LAUNCH : resolveForegroundSandboxPlan(pi);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const now = Date.now();
@@ -311,6 +324,9 @@ export function startWatchTask(
     }, dependencies.remoteRunner)
     : undefined;
   const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const launchSpec = remoteTask
+    ? commandSpec
+    : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id));
   const meta: BackgroundTaskMeta = {
     id,
     name: params.name,
@@ -328,6 +344,7 @@ export function startWatchTask(
     shell: commandSpec.shell,
     cwd,
     env: params.env,
+    launchArgv: launchArgvOf(commandSpec, launchSpec),
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     spawnPid: process.pid,
     successWhen: params.success_when,
@@ -796,6 +813,17 @@ function getCallbackSuppressionReason(
 }
 
 function commandSpecFromMeta(meta: BackgroundTaskMeta): CommandSpec {
+  // A task that launched under a sandbox re-runs the wrapper it captured then,
+  // not whatever the foreground policy says now — including after a resume in a
+  // later Pi session.
+  if (meta.launchArgv?.length) {
+    return {
+      argv: meta.launchArgv,
+      shell: false,
+      cwd: meta.cwd,
+      env: meta.env,
+    };
+  }
   return {
     command: meta.command,
     argv: meta.argv,
@@ -803,6 +831,11 @@ function commandSpecFromMeta(meta: BackgroundTaskMeta): CommandSpec {
     cwd: meta.cwd,
     env: meta.env,
   };
+}
+
+/** Record a launch vector only when confinement actually rewrote the spec. */
+function launchArgvOf(commandSpec: CommandSpec, launchSpec: CommandSpec): string[] | undefined {
+  return launchSpec === commandSpec ? undefined : launchSpec.argv;
 }
 
 function scheduleLogRetention(id: string): void {
