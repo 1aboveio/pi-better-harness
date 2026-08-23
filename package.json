@@ -15,6 +15,7 @@
   ],
   "pi": {
     "extensions": [
+      "./packages/pi-better-sandbox/index.ts",
       "./packages/pi-better-subagents/index.ts",
       "./packages/pi-better-background-tasks/src/index.ts",
       "./packages/pi-better-goal/src/index.ts"
@@ -23,10 +24,11 @@
   "scripts": {
     "sync:shared-log-utils": "node scripts/sync-shared-log-utils.mjs",
     "sync:shared-ssh-core": "node scripts/sync-shared-ssh-core.mjs",
+    "sync:shared-sandbox-core": "node scripts/sync-shared-sandbox-core.mjs",
     "gallery:capture-real": "node scripts/capture-real-pi-session-gallery.mjs",
     "gallery:render": "node --import tsx scripts/render-package-gallery.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "node --test scripts/*.test.mjs && npm run test --workspaces --if-present",
+    "test": "node --import tsx --test scripts/*.test.mjs && npm run test --workspaces --if-present",
     "test:cross-session": "npm run test:cross-session -w packages/pi-better-background-tasks && npm run test:cross-session -w packages/pi-better-subagents",
     "verify": "npm run typecheck && npm test"
   },

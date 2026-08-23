@@ -64,24 +64,17 @@ require_macos_sandbox() {
 }
 
 # _write_sandbox_profile FILE WRITABLE_DIR
-#   Mirrors sandbox.ts: reads/network open, writes confined to WRITABLE_DIR plus
-#   the system paths pi needs. Keep in sync with sandbox.ts.
+#   Generates the profile through the product builder (sandbox.ts -> vendored
+#   shared-sandbox-core.ts), which writes it to FILE as a side effect of building
+#   the wrapper. Going through the product means these kernel checks cannot drift
+#   from the shipped profile the way a hand-mirrored heredoc would.
 _write_sandbox_profile() {
-    local file="$1" raw="$2" dir
+    local file="$1" raw="$2"
     mkdir -p "$raw" "$(dirname "$file")"
-    # Match sandbox.ts realpathSync: sandbox-exec evaluates canonical paths
-    # (/tmp → /private/tmp on macOS).
-    dir="$(cd "$raw" 2>/dev/null && pwd -P || echo "$raw")"
-    cat > "$file" <<EOF
-(version 1)
-(allow default)
-(deny file-write*)
-(allow file-write* (subpath "$dir"))
-(allow file-write* (subpath "$HOME/.pi"))
-(allow file-write* (subpath "/private/var/folders"))
-(allow file-write* (subpath "/private/tmp"))
-(allow file-write* (subpath "/dev"))
-EOF
+    if ! build_sandbox_command "$file" "$raw" /usr/bin/true > /dev/null; then
+        echo "  FAIL: product sandbox profile construction failed" >&2
+        return 1
+    fi
 }
 
 # run_sandboxed_bash SANDBOX_DIR BASH_SCRIPT

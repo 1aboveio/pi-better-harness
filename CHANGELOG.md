@@ -4,6 +4,38 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-sandbox@0.1.0] - 2026-08-23
+
+### Added
+
+- **sandbox**: confine Pi's built-in `bash` tool and user-entered `!` / `!!` commands to the canonical launch directory with macOS Seatbelt or Linux Bubblewrap
+- **sandbox**: confine Pi's built-in `write` and `edit` tools to the same policy while keeping Pi's schemas, renderers, result details, mutation queue, and cancellation
+- **sandbox**: deny writes to `.git/hooks`, `.env`, and `.env.local` by default, and add `/sandbox deny list|add|remove|reset` plus the `/sandbox rules` editor over one validation and persistence path
+- **sandbox**: add `/sandbox`, `/sandbox on`, and `/sandbox off` with a truthful footer for the enabled, disabled, unavailable, and failed states; `/sandbox off` needs interactive confirmation and is never model-callable
+- **sandbox**: fail closed when the backend is missing or cannot be applied, and publish an immutable effective-policy snapshot on `pi.events` for first-party consumers
+
+## [pi-better-harness@0.1.26] - 2026-08-23
+
+### Added
+
+- **harness**: load `pi-better-sandbox` by default and configure/remove it alongside the other components
+
+### Changed
+
+- **harness**: bundle sandbox 0.1.0, subagents 0.1.22, and background-tasks 0.2.6
+
+## [pi-better-subagents@0.1.22] - 2026-08-23
+
+### Changed
+
+- **subagents**: run the OS write sandbox through the shared `sandbox-core` mechanism behind a thin policy adapter; tool parameters, default-on/explicit behaviour, and spawn lifecycle are unchanged
+
+## [pi-better-background-tasks@0.2.6] - 2026-08-23
+
+### Added
+
+- **background-tasks**: confine locally launched tasks and watch polls to the foreground sandbox policy captured at launch, blocking a launch instead of running it unconfined when the backend is unavailable or failed; structured remote SSH tasks keep their existing remote semantics
+
 ## [pi-better-ssh@0.1.0] - 2026-08-22
 
 ### Added

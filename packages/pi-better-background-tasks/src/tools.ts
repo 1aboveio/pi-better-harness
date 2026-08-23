@@ -5,6 +5,7 @@ import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import { cancelCallbackBatch } from "./shared-callback-batcher.js";
 import { listMetas, readMeta, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
+import { ForegroundSandboxBlockedError } from "./sandbox.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 
@@ -125,9 +126,9 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const meta = spawnTask(pi, params, ctx.cwd, activeSession, getActiveSession);
+      const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, activeSession, getActiveSession));
       refreshBackgroundTasksNavigator(ctx);
-      return text(formatLaunch(meta));
+      return text(launched);
     },
   });
 
@@ -138,9 +139,9 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: WatchParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const meta = startWatchTask(pi, params, ctx.cwd, activeSession, getActiveSession);
+      const launched = reportLaunch(() => startWatchTask(pi, params, ctx.cwd, activeSession, getActiveSession));
       refreshBackgroundTasksNavigator(ctx);
-      return text(formatLaunch(meta));
+      return text(launched);
     },
   });
 
@@ -246,10 +247,10 @@ async function runAction(
 ): Promise<string> {
   switch (params.action) {
     case "spawn":
-      return withNavigatorRefresh(ctx, formatLaunch(spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
+      return withNavigatorRefresh(ctx, reportLaunch(() => spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
     case "watch":
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
-      return withNavigatorRefresh(ctx, formatLaunch(startWatchTask(pi, params as never, ctx.cwd, callbackOrigin, getActiveSession)));
+      return withNavigatorRefresh(ctx, reportLaunch(() => startWatchTask(pi, params as never, ctx.cwd, callbackOrigin, getActiveSession)));
     case "list":
       return formatList(resolveList(params.status as string[] | undefined, params.limit as number | undefined));
     case "status":
@@ -265,6 +266,21 @@ async function runAction(
       return withNavigatorRefresh(ctx, formatClear(params.status as string[] | undefined, callbackOrigin));
     default:
       return `Unknown action: ${String(params.action)}`;
+  }
+}
+
+/**
+ * Report a launch, or why the foreground sandbox refused it.
+ *
+ * A blocked launch is an operator-facing answer, not a tool crash: the task was
+ * never started, and nothing about it is retried unconfined.
+ */
+function reportLaunch(launch: () => BackgroundTaskMeta): string {
+  try {
+    return formatLaunch(launch());
+  } catch (error) {
+    if (error instanceof ForegroundSandboxBlockedError) return error.message;
+    throw error;
   }
 }
 

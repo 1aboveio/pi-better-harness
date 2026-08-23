@@ -1,6 +1,6 @@
 {
   "name": "pi-better-background-tasks",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Pi extension for durable background shell tasks, watchers, logs, and status inspection.",
   "license": "MIT",
   "type": "module",
@@ -30,15 +30,17 @@
     "access": "public"
   },
   "scripts": {
-    "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-ssh-core.mjs",
-    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-ssh-core.mjs",
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-ssh-core.mjs && node ../../scripts/sync-shared-sandbox-core.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-ssh-core.mjs && node ../../scripts/sync-shared-sandbox-core.mjs",
+    "pretypecheck": "node ../../scripts/sync-shared-sandbox-core.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run src/conditions.test.ts src/runtime.test.ts",
     "test:e2e": "vitest run src/e2e.test.ts",
     "test:cross-session": "vitest run src/e2e.test.ts -t \"different session\"",
     "test:golden": "vitest run src/golden-path.test.ts",
-    "test:integration": "npm run test:e2e && npm run test:golden"
+    "test:integration": "npm run test:e2e && npm run test:golden",
+    "test:sandbox": "vitest run src/sandbox.test.ts src/sandbox-kernel.test.ts"
   },
   "files": [
     "src/**/*.ts",
