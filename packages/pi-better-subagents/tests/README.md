@@ -13,7 +13,7 @@ cannot drift from what ships.
 | `test_sandbox_applied.sh` | macOS: the same `sandbox-exec` profile subagents use is applied — writes **inside** `sandbox_dir` succeed (deterministic, no model). |
 | `test_sandbox_deny_outside.sh` | macOS: under that profile, writes **outside** `sandbox_dir` are denied and create no file (deterministic, no model). |
 | `test_sandbox_wrapper_argv.sh` | macOS: the real product-selected sandbox wrapper preserves every `pi` argv token, including embedded newlines. |
-| `sandbox_profile.test.mjs` | Unit: `sandbox.ts` retains the macOS profile and proves Linux builder selection, canonical workdir binding, small writable allowlist, and fail-closed policy. |
+| `sandbox_profile.test.mjs` | Unit: the `sandbox.ts` policy adapter over vendored `shared-sandbox-core.ts` retains the macOS profile and proves Linux builder selection, canonical workdir binding, small writable allowlist, and fail-closed policy. |
 | `linux_bubblewrap.integration.mjs` | Linux queue lane: real product-built bubblewrap children prove inside writes, outside and symlink denial, canonical aliases, outside reads, read-only `~/.pi`, host `/tmp`, `/dev/null`, and host-local HTTP. Missing `bwrap` fails this test. |
 | `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch the repo page, report a word count. |
 | `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list` against this repo. |

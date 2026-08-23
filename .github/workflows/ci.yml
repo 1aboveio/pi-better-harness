@@ -57,6 +57,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run sandbox-core macOS seatbelt confinement checks
+        run: npm test -w packages/sandbox-core
 
       - name: Run macOS sandbox-exec confinement checks
         working-directory: packages/pi-better-subagents

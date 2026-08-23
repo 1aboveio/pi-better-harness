@@ -1,20 +1,23 @@
 /**
- * OS-level write sandbox for subagent children.
+ * Subagent policy adapter over the shared OS write-sandbox mechanism.
  *
- * Kernel-enforced confinement: the child may READ anywhere and use the network
- * (so web_fetch and the model API keep working), but may only WRITE under a
- * single directory plus the system paths pi itself needs to function. Unlike the
- * cooperative guardrails layer (which pattern-matches tool inputs), this cannot
- * be evaded by a crafted bash command — the write syscall itself is denied.
- *
- * Backends are selected here so callers retain a platform-neutral support query
- * and command-wrapper contract. Linux support adds a backend without changing
- * detached spawning policy in the extension.
+ * The mechanism itself — backend discovery, canonical containment, profile and
+ * mount construction, ordered argv wrapping — lives in `sandbox-core` and is
+ * vendored here as `shared-sandbox-core.ts`. This file holds only the subagent
+ * shape of that call: the detached child's writable directory is the whole
+ * policy, and the wrapped executable is always the pi binary. Detached spawning
+ * policy (default-on, explicit request, explicit opt-out) stays in index.ts and
+ * is passed through unchanged.
  */
 
-import { platform } from "node:os";
-import { accessSync, constants, realpathSync, statSync, writeFileSync } from "node:fs";
-import { delimiter, resolve } from "node:path";
+import {
+    buildSandboxCommand as buildSharedSandboxCommand,
+    maybeBuildSandboxCommand as maybeBuildSharedSandboxCommand,
+    sandboxSupported as sharedSandboxSupported,
+    type SandboxCommand,
+    type SandboxCommandArgs as SharedSandboxCommandArgs,
+    type SandboxRequest,
+} from "./shared-sandbox-core.ts";
 
 type SandboxCommandArgs = {
     profilePath: string;
@@ -24,115 +27,20 @@ type SandboxCommandArgs = {
     piArgs: string[];
 };
 
-type SandboxCommand = { file: string; fileArgs: string[] };
-
-type SandboxBackend = {
-    buildCommand(args: SandboxCommandArgs): SandboxCommand;
-};
-
-type SandboxRequest = {
-    sandboxEnabled: boolean;
-    explicitSandbox: boolean;
-};
-
-/** Quote a path as an SBPL string literal. */
-function sbpl(path: string): string {
-    return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-/** Build the existing macOS sandbox-exec wrapper and SBPL profile. */
-function buildMacOSSandboxCommand(args: SandboxCommandArgs): SandboxCommand {
-    // Match on the real (symlink-resolved) path — sandbox-exec evaluates the
-    // canonical path, so /tmp/x must be written as /private/tmp/x.
-    let dir = args.writableDir;
-    try { dir = realpathSync(dir); } catch { /* not yet created; use as given */ }
-
-    const profile = [
-        "(version 1)",
-        "(allow default)",          // permissive base: reads, exec, network
-        "(deny file-write*)",       // ...then deny all writes...
-        `(allow file-write* (subpath ${sbpl(dir)}))`,               // ...except here
-        `(allow file-write* (subpath ${sbpl(`${args.home}/.pi`)}))`, // pi state
-        '(allow file-write* (subpath "/private/var/folders"))',      // macOS temp / our runtime
-        '(allow file-write* (subpath "/private/tmp"))',
-        '(allow file-write* (subpath "/dev"))',                      // /dev/null etc.
-        "",
-    ].join("\n");
-    writeFileSync(args.profilePath, profile);
-
+/** Map the subagent's single-writable-directory shape onto the shared policy. */
+function sharedArgs(args: SandboxCommandArgs): SharedSandboxCommandArgs {
     return {
-        file: "/usr/bin/sandbox-exec",
-        fileArgs: ["-f", args.profilePath, args.piBin, ...args.piArgs],
+        profilePath: args.profilePath,
+        // Subagents have no write-deny list: the run directory is the policy.
+        policy: { writableRoot: args.writableDir, home: args.home },
+        execPath: args.piBin,
+        execArgs: args.piArgs,
     };
-}
-
-const macOSSandboxBackend: SandboxBackend = {
-    buildCommand: buildMacOSSandboxCommand,
-};
-
-/** Resolve an executable from PATH without starting it or probing namespaces. */
-function executableFromPath(name: string): string | undefined {
-    const path = process.env.PATH;
-    if (!path) return undefined;
-
-    for (const entry of path.split(delimiter)) {
-        const candidate = resolve(entry || ".", name);
-        try {
-            if (!statSync(candidate).isFile()) continue;
-            accessSync(candidate, constants.X_OK);
-            return candidate;
-        } catch {
-            // A PATH entry may disappear or be inaccessible between lookup and use.
-        }
-    }
-    return undefined;
-}
-
-function buildLinuxSandboxCommand(bwrap: string, args: SandboxCommandArgs): SandboxCommand {
-    // The caller creates the selected work directory before it reaches this
-    // boundary. Canonicalizing it before bind-mounting keeps symlink aliases from
-    // widening the writable root.
-    const dir = realpathSync(args.writableDir);
-    return {
-        file: bwrap,
-        fileArgs: [
-            "--ro-bind", "/", "/",
-            "--bind", dir, dir,
-            "--bind", "/tmp", "/tmp",
-            "--dev", "/dev",
-            "--",
-            args.piBin, ...args.piArgs,
-        ],
-    };
-}
-
-function linuxSandboxBackend(): SandboxBackend | undefined {
-    const bwrap = executableFromPath("bwrap");
-    if (!bwrap) return undefined;
-    return { buildCommand: (args) => buildLinuxSandboxCommand(bwrap, args) };
-}
-
-function selectedSandboxBackend(): SandboxBackend | undefined {
-    const currentPlatform = platform();
-    if (currentPlatform === "darwin") return macOSSandboxBackend;
-    if (currentPlatform === "linux") return linuxSandboxBackend();
-    return undefined;
-}
-
-function sandboxUnavailableMessage(): string {
-    const currentPlatform = platform();
-    if (currentPlatform === "linux") {
-        return "Linux sandbox requires executable bubblewrap (bwrap) on PATH. Install bubblewrap or pass sandbox:false.";
-    }
-    if (currentPlatform === "darwin") {
-        return "macOS sandbox requires /usr/bin/sandbox-exec. Pass sandbox:false if it is unavailable.";
-    }
-    return `sandbox is unsupported on ${currentPlatform}. Pass sandbox:false on this platform.`;
 }
 
 /** True when an OS write-sandbox backend can be applied on this platform. */
 export function sandboxSupported(): boolean {
-    return selectedSandboxBackend() !== undefined;
+    return sharedSandboxSupported();
 }
 
 /**
@@ -144,14 +52,7 @@ export function maybeBuildSandboxCommand(
     args: SandboxCommandArgs,
     request: SandboxRequest,
 ): SandboxCommand | undefined {
-    if (!request.sandboxEnabled) return undefined;
-
-    const backend = selectedSandboxBackend();
-    if (!backend) {
-        if (request.explicitSandbox) throw new Error(sandboxUnavailableMessage());
-        return undefined;
-    }
-    return backend.buildCommand(args);
+    return maybeBuildSharedSandboxCommand(sharedArgs(args), request);
 }
 
 /**
@@ -160,5 +61,5 @@ export function maybeBuildSandboxCommand(
  * bypass the request-policy helper above.
  */
 export function buildSandboxCommand(args: SandboxCommandArgs): SandboxCommand {
-    return (selectedSandboxBackend() ?? macOSSandboxBackend).buildCommand(args);
+    return buildSharedSandboxCommand(sharedArgs(args));
 }
