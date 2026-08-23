@@ -194,3 +194,74 @@ is eligible to appear there.
 
 The publish workflow creates the package-scoped Git tag and GitHub release after
 npm verification succeeds.
+
+### Publishing a package for the first time
+
+`publish.yml` authenticates with npm trusted publishing (OIDC) and holds no npm
+token. npm accepts an OIDC publish only for a package that already has a trusted
+publisher configured, so **the workflow cannot publish a package name that has
+never been published**. Dispatching it for a new package fails with:
+
+```text
+npm error code E404
+npm error 404 Not Found - PUT https://registry.npmjs.org/<package>
+```
+
+That 404 means "no permission", not "npm is down" — and it looks identical
+whether the package is missing or merely unconfigured.
+
+A new package therefore needs two one-time steps, both requiring your npm
+credentials and 2FA:
+
+```sh
+# 1. Publish once by hand, so the package exists.
+npm login --registry=https://registry.npmjs.org/
+npm whoami --registry=https://registry.npmjs.org/     # must print your username
+npm publish -w packages/<package> --registry=https://registry.npmjs.org/
+
+# 2. Hand the package to CI.
+npm trust github <package> \
+  --repo 1aboveio/pi-better-harness \
+  --file publish.yml \
+  --env npm-publish \
+  --allow-publish \
+  --registry=https://registry.npmjs.org/
+```
+
+Pass `--registry` on every one of these. This repository's contributors commonly
+have `registry=https://registry.npmmirror.com/` in `~/.npmrc`, and a bare
+`npm login` then authenticates against the mirror while `npm publish` targets
+npmjs.org — which fails with the same misleading 404.
+
+Check the result with `npm trust list <package>`, comparing against a package
+that already publishes from CI.
+
+After that, dispatch `publish.yml` normally for every subsequent version.
+
+**The hand-published version carries no provenance.** npm generates provenance
+attestations during an OIDC publish, so a manual one has none:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' \
+  https://registry.npmjs.org/-/npm/v1/attestations/<package>@<version>
+# 200 = CI-published, 404 = no attestation
+```
+
+The workflow's `Verify existing package provenance` step refuses to tag or
+release a version whose attestation does not tie back to the CI commit, so a
+hand-published version gets no Git tag and no GitHub release. That guard is
+deliberate. The fix is to release a follow-up patch version through CI and
+deprecate the unattested one — not to relax the check.
+
+### npm version skew between CI and publish
+
+`publish.yml` runs `npm install --global npm@latest` before `npm run verify`,
+while `ci.yml` uses the runner image's bundled npm. The two lanes therefore run
+different npm majors, and a change in npm's own output can pass CI and still
+break the release.
+
+This has happened once: npm 12 changed `npm pack --json` from an array of packed
+results to an object keyed by package name, which broke four pack assertions that
+`ci` never exercised. Read pack output through `selectPackedResult` in
+`scripts/stage-harness-dependencies.mjs`, which accepts every shape npm emits,
+rather than indexing or slicing the JSON.
