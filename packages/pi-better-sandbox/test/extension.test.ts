@@ -5,7 +5,11 @@ import { dirname, join } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
+import {
+    createEditToolDefinition,
+    createWriteToolDefinition,
+    discoverAndLoadExtensions,
+} from "@earendil-works/pi-coding-agent";
 import type {
     EventBus,
     ExtensionAPI,
@@ -126,11 +130,11 @@ async function startSession(
     return started;
 }
 
-test("the extension registers a bash override, user_bash routing, and the sandbox command", () => {
+test("the extension registers the built-in overrides, user_bash routing, and the sandbox command", () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
 
-    assert.deepEqual([...recorded.tools.keys()], ["bash"]);
+    assert.deepEqual([...recorded.tools.keys()], ["bash", "write", "edit"]);
     assert.ok(recorded.handlers.has("user_bash"));
     assert.ok(recorded.handlers.has("session_start"));
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
@@ -140,10 +144,51 @@ test("no tool can read or change sandbox state, so the model cannot disable its 
     const recorded = record();
     piBetterSandbox(recorded.pi);
 
-    // The only registered tool is the bash override; sandbox control lives in a
-    // slash command, which the model cannot call.
-    for (const name of recorded.tools.keys()) assert.equal(name, "bash");
-    assert.equal(recorded.tools.size, 1);
+    // Every registered tool is an override of a pi built-in the model already
+    // had; sandbox control lives in a slash command, which the model cannot call.
+    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "write"]);
+});
+
+test("the write and edit overrides keep pi's own schemas, prompt guidance and renderers", () => {
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+
+    const builtIn = {
+        write: createWriteToolDefinition(process.cwd()),
+        edit: createEditToolDefinition(process.cwd()),
+    };
+    for (const name of ["write", "edit"] as const) {
+        const override = recorded.tools.get(name);
+        assert.ok(override, `${name} must be overridden`);
+        assert.equal(override.description, builtIn[name].description);
+        assert.equal(override.promptSnippet, builtIn[name].promptSnippet);
+        assert.deepEqual(override.promptGuidelines, builtIn[name].promptGuidelines);
+        assert.deepEqual(override.parameters, builtIn[name].parameters);
+        assert.equal(typeof override.renderCall, "function");
+        assert.equal(typeof override.renderResult, "function");
+    }
+});
+
+test("a session with a different cwd re-registers the file tools against that cwd", async () => {
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("file-tool-cwd");
+    const before = recorded.tools.get("write");
+
+    await startSession(recorded, root);
+
+    const after = recorded.tools.get("write");
+    assert.notEqual(after, before, "the write override must resolve paths against the session cwd");
+
+    // A relative path now resolves under the session root, as pi's own write would.
+    await (after as ToolDefinition<never>).execute(
+        "call",
+        { path: "session-cwd.txt", content: "here\n" } as never,
+        undefined,
+        undefined,
+        {} as ExtensionContext,
+    );
+    assert.equal(readFileSync(join(root, "session-cwd.txt"), "utf8"), "here\n");
 });
 
 test("the bash override keeps pi's own schema, description and renderers", () => {
@@ -344,7 +389,7 @@ test("pi loads the published entry point and registers the same surface", async 
     assert.equal(result.extensions.length, 1);
     const extension = result.extensions[0];
     assert.ok(extension);
-    assert.deepEqual([...extension.tools.keys()], ["bash"]);
+    assert.deepEqual([...extension.tools.keys()], ["bash", "write", "edit"]);
     assert.deepEqual([...extension.commands.keys()], ["sandbox"]);
     assert.ok(extension.handlers.has("session_start"));
     assert.ok(extension.handlers.has("user_bash"));

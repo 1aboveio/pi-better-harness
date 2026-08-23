@@ -1,12 +1,13 @@
 # pi-better-sandbox
 
-A default-on write sandbox for Pi's foreground shell.
+A default-on write sandbox for Pi's foreground tools.
 
 Install the package and keep starting Pi the way you always have — `pi`. There is
 no launcher, no wrapper command, and nothing to configure. From the first
 session start, Pi's built-in `bash` tool and the `!` / `!!` commands you type
 yourself run inside an OS sandbox that lets them write only under the directory
-you launched Pi from.
+you launched Pi from, and the built-in `write` and `edit` tools are held to the
+same policy.
 
 ```
 Read:       every filesystem path
@@ -15,9 +16,16 @@ Exceptions: .git/hooks, .env, .env.local
 Network:    unchanged
 ```
 
-The denial is done by the kernel, not by inspecting command text: macOS uses
-Seatbelt (`sandbox-exec`) and Linux uses Bubblewrap (`bwrap`). A crafted command
-cannot talk its way past it, because the write syscall itself is refused.
+For shell commands the denial is done by the kernel, not by inspecting command
+text: macOS uses Seatbelt (`sandbox-exec`) and Linux uses Bubblewrap (`bwrap`).
+A crafted command cannot talk its way past it, because the write syscall itself
+is refused.
+
+`write` and `edit` never start a child process — they change files inside Pi's
+own process — so there is no child to wrap. They are confined by a containment
+check on the canonical target instead, run inside Pi's own file-mutation queue,
+immediately before the filesystem call it guards. A refused mutation leaves
+nothing behind on disk.
 
 ## What is confined, and what is not
 
@@ -25,6 +33,7 @@ Confined while the sandbox is on:
 
 - Pi's built-in `bash` tool.
 - User-entered `!` and `!!` commands.
+- Pi's built-in `write` and `edit` tools.
 
 **Not** confined:
 
@@ -34,6 +43,11 @@ Confined while the sandbox is on:
 
 This is a tool-execution sandbox. It limits accidental damage from commands the
 model or you run through Pi's shell; it is not a boundary around Pi itself.
+
+Overriding `write` and `edit` changes nothing you can see: the parameter
+schemas, prompt guidance, call rendering, write previews, edit diffs, result
+details, mutation queueing, and cancellation are Pi's own. Only the filesystem
+operations underneath them are replaced.
 
 ## Commands
 
@@ -64,7 +78,7 @@ keeps the policy it launched with.
 ## Fail-closed behaviour
 
 While the sandbox is enabled and a backend cannot be applied, protected commands
-are **blocked** rather than run unprotected:
+and file mutations are **blocked** rather than run unprotected:
 
 - No backend on this platform (`unavailable`).
 - A launch directory too broad to confine — `/` or your home directory
