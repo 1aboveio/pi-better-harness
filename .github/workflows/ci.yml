@@ -50,11 +50,11 @@ jobs:
             node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
             node_modules/pi-better-goal/src/index.ts
           do
-            node -e 'const [pack] = require(process.argv[1]); if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
+            node -e 'const d = require(process.argv[1]); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
           done
 
           # The sandbox ships no launcher: users keep running ordinary `pi`.
-          node -e 'const [pack] = require("/tmp/pi-harness-pack.json"); const launcher = pack.files.find((file) => file.path.startsWith("node_modules/pi-better-sandbox/bin/")); if (launcher) throw new Error(`pi-better-sandbox must ship no launcher, found ${launcher.path}`);'
+          node -e 'const d = require("/tmp/pi-harness-pack.json"); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; const launcher = pack.files.find((file) => file.path.startsWith("node_modules/pi-better-sandbox/bin/")); if (launcher) throw new Error(`pi-better-sandbox must ship no launcher, found ${launcher.path}`);'
 
   macos-sandbox:
     name: macos-sandbox

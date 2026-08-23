@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { componentPackages } from "../packages/pi-better-harness/lib/cli.mjs";
+import { selectPackedResult } from "./stage-harness-dependencies.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const harnessDir = join(repoRoot, "packages/pi-better-harness");
@@ -166,7 +167,7 @@ test("the bundled tarball carries the sandbox extension and its synchronized sha
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
   });
-  const [pack] = JSON.parse(stdout.slice(stdout.indexOf("[")));
+  const pack = selectPackedResult(stdout);
   const packed = pack.files.map((file) => file.path);
 
   for (const path of [
