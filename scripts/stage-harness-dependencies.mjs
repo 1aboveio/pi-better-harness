@@ -9,6 +9,7 @@ const harnessDir = join(root, "packages/pi-better-harness");
 const packageNames = [
   "pi-better-background-tasks",
   "pi-better-goal",
+  "pi-better-sandbox",
   "pi-better-subagents",
 ];
 

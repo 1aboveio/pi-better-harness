@@ -39,5 +39,21 @@ jobs:
           trap 'rm -rf "$probe_dir"' EXIT
           bwrap --ro-bind / / --bind "$probe_dir" "$probe_dir" --bind /tmp /tmp --dev /dev -- /bin/true
 
+      - name: Require the Linux Bubblewrap backend
+        # Reads the same backend selection the confinement suites gate on, so a
+        # runner without a usable bwrap fails here instead of running `verify`
+        # with every real-kernel suite quietly skipped.
+        run: node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
+
       - name: Run verification
+        env:
+          PI_SANDBOX_REQUIRE_BACKEND: linux-bubblewrap
         run: npm run verify
+
+      - name: Run Linux bubblewrap confinement checks
+        # `tests/*.test.mjs` is this package's test glob and does not match
+        # `linux_bubblewrap.integration.mjs`, so `npm run verify` never reaches
+        # it. It runs here, by name.
+        env:
+          PI_SANDBOX_REQUIRE_BACKEND: linux-bubblewrap
+        run: npm run test:linux-sandbox -w packages/pi-better-subagents

@@ -29,7 +29,7 @@ Try it for one run:
 pi -e npm:pi-better-subagents
 ```
 
-Linux sandboxing uses `bubblewrap` when available, for example from `sudo apt-get install bubblewrap`.
+Linux sandboxing uses `bubblewrap` when available, for example from `sudo apt-get install bubblewrap`. It is the same shared mechanism [`pi-better-sandbox`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme) applies to Pi's foreground tools: writes only, reads and network untouched. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox).
 
 ## When To Use
 

@@ -1,24 +1,25 @@
 # Pi Better Harness
 
-`pi-better-harness` is a Pi extension bundle for delegated subagents, durable background shell tasks, and goal tracking that stays aware of background work.
+`pi-better-harness` is a Pi extension bundle for a default write sandbox, delegated subagents, durable background shell tasks, and goal tracking that stays aware of background work.
 
 ## Quick Answer
 
-Use Pi Better Harness when a Pi session needs to keep moving while related work runs elsewhere. Install all three extensions as standalone Pi packages with `npx pi-better-harness install`, or install only the individual extension you need.
+Use Pi Better Harness when a Pi session needs to keep moving while related work runs elsewhere. Install every harness extension as a standalone Pi package with `npx pi-better-harness install`, or install only the individual extension you need.
 
-## Install All Three
+## Install The Whole Harness
 
-Install all three extensions with standalone package identities:
+Install every harness extension with a standalone package identity:
 
 ```sh
 npx pi-better-harness install
 ```
 
-Remove all three with `npx pi-better-harness uninstall`. Add `--local` to either command for project-local Pi settings.
+Remove them all with `npx pi-better-harness uninstall`. Add `--local` to either command for project-local Pi settings.
 
 Install only one part:
 
 ```sh
+pi install npm:pi-better-sandbox
 pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-goal
@@ -38,6 +39,7 @@ Do not use the bundle when you only need one extension; install that package dir
 
 ## Packages
 
+- `pi-better-sandbox`: a default-on write sandbox for Pi's foreground tools.
 - `pi-better-subagents`: detached, sandboxed subagent runs.
 - `pi-better-background-tasks`: durable shell tasks, watchers, logs, and status inspection.
 - `pi-better-goal`: objective tracking with background-aware continuation.
@@ -70,6 +72,7 @@ pi -e .
 ## Docs
 
 - [Development and release notes](docs/development-and-release.md)
+- [Write sandbox details](packages/pi-better-sandbox/README.md)
 - [Subagents details](packages/pi-better-subagents/docs/usage.md)
 - [Background tasks details](packages/pi-better-background-tasks/docs/usage.md)
 - [Goal details](packages/pi-better-goal/docs/usage.md)

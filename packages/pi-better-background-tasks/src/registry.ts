@@ -32,6 +32,17 @@ export function logPathFor(id: string): string {
   return join(taskDir(id), "output.log");
 }
 
+/**
+ * Where a task keeps the generated sandbox profile it launched under.
+ *
+ * It lives beside the task's own log and metadata so it survives exactly as long
+ * as the task does: a watch resumed in a later Pi session re-reads the profile it
+ * started with instead of a profile some other session has since rewritten.
+ */
+export function sandboxProfilePathFor(id: string): string {
+  return join(taskDir(id), "sandbox.sb");
+}
+
 export function nextTaskId(): string {
   seq += 1;
   return `bg_${process.pid.toString(36)}_${Date.now().toString(36)}_${seq}`;

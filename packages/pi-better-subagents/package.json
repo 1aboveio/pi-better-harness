@@ -1,6 +1,6 @@
 {
   "name": "pi-better-subagents",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "Pi extension for detached, sandboxed subagent runs that keep the foreground session free.",
   "license": "MIT",
   "type": "module",
@@ -30,11 +30,15 @@
     "access": "public"
   },
   "scripts": {
-    "pretest": "node ../../scripts/sync-shared-log-utils.mjs",
-    "prepack": "node ../../scripts/sync-shared-log-utils.mjs",
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs",
     "typecheck": "node -e \"console.log('pi-better-subagents: typecheck skipped for legacy mixed TS/MJS package')\"",
     "test": "node --import tsx --test tests/*.test.mjs",
     "test:cross-session": "node --import tsx --test --test-name-pattern \"callback session isolation\" tests/extension_health_lifecycle.test.mjs",
+    "pretest:macos-sandbox": "node ../../scripts/sync-shared-sandbox-core.mjs",
+    "test:macos-sandbox": "bash tests/test_sandbox_applied.sh && bash tests/test_sandbox_deny_outside.sh && bash tests/test_sandbox_wrapper_argv.sh && node --import tsx --test tests/sandbox_profile.test.mjs",
+    "pretest:linux-sandbox": "node ../../scripts/sync-shared-sandbox-core.mjs",
+    "test:linux-sandbox": "node --import tsx --test tests/linux_bubblewrap.integration.mjs",
     "verify": "npm run typecheck && npm test"
   },
   "files": [

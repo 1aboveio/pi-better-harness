@@ -2,7 +2,7 @@
 # Scenario: sandboxed subagent children cannot write outside sandbox_dir.
 #
 # Kernel-enforced: under the same sandbox-exec profile as subagent_spawn /
-# run_child (mirrors sandbox.ts), creating a file OUTSIDE the writable root
+# run_child (built by sandbox.ts), creating a file OUTSIDE the writable root
 # must fail, and the file must not appear on disk.
 #
 # Important: the profile also allows $HOME/.pi, /private/var/folders, and

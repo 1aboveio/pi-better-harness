@@ -38,31 +38,121 @@ jobs:
           for path in \
             bin/pi-better-harness.mjs \
             lib/cli.mjs \
+            extensions/sandbox/index.ts \
             extensions/subagents/index.ts \
             extensions/background-tasks/index.ts \
             extensions/goal/index.ts \
+            node_modules/pi-better-sandbox/index.ts \
+            node_modules/pi-better-sandbox/shared-sandbox-core.ts \
             node_modules/pi-better-subagents/index.ts \
+            node_modules/pi-better-subagents/shared-sandbox-core.ts \
             node_modules/pi-better-background-tasks/src/index.ts \
+            node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
             node_modules/pi-better-goal/src/index.ts
           do
             node -e 'const [pack] = require(process.argv[1]); if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
           done
 
+          # The sandbox ships no launcher: users keep running ordinary `pi`.
+          node -e 'const [pack] = require("/tmp/pi-harness-pack.json"); const launcher = pack.files.find((file) => file.path.startsWith("node_modules/pi-better-sandbox/bin/")); if (launcher) throw new Error(`pi-better-sandbox must ship no launcher, found ${launcher.path}`);'
+
   macos-sandbox:
     name: macos-sandbox
     runs-on: macos-latest
+    env:
+      # Turns "no backend, so skip" into a hard failure on the lane whose whole
+      # job is that backend. A silently skipped confinement suite is a green run
+      # that proved nothing.
+      PI_SANDBOX_REQUIRE_BACKEND: macos-seatbelt
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Require the macOS Seatbelt backend
+        run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
+
+      - name: Run sandbox-core macOS seatbelt confinement checks
+        run: npm test -w packages/sandbox-core
+
+      - name: Run foreground sandbox confinement checks
+        run: npm test -w packages/pi-better-sandbox
+
+      - name: Run local background-task confinement checks
+        run: npm run test:sandbox -w packages/pi-better-background-tasks
+
+      # The whole-session demonstration gates itself on a real backend, and the
+      # only job that runs the root suite is `ci`, which has none — so without
+      # this step it skips everywhere and proves nothing. PI_SANDBOX_REQUIRE_BACKEND
+      # is already set for this lane, which turns that skip into a hard failure.
+      - name: Run the whole-session harness demonstration
+        run: node --import tsx --test scripts/harness-session.e2e.test.mjs
 
       - name: Run macOS sandbox-exec confinement checks
-        working-directory: packages/pi-better-subagents
+        run: npm run test:macos-sandbox -w packages/pi-better-subagents
+
+  linux-sandbox:
+    name: linux-sandbox
+    runs-on: ubuntu-latest
+    env:
+      # Same contract as the macOS lane: a runner that has lost bubblewrap must
+      # fail here rather than report a skipped suite.
+      PI_SANDBOX_REQUIRE_BACKEND: linux-bubblewrap
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install bubblewrap
         run: |
           set -euo pipefail
-          bash tests/test_sandbox_applied.sh
-          bash tests/test_sandbox_deny_outside.sh
-          bash tests/test_sandbox_wrapper_argv.sh
-          node --test tests/sandbox_profile.test.mjs
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          command -v bwrap
+          bwrap --version
+
+      - name: Enable and verify bubblewrap user namespaces
+        run: |
+          set -euo pipefail
+          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          probe_dir="$(mktemp -d "$RUNNER_TEMP/pi-bwrap-probe.XXXXXX")"
+          trap 'rm -rf "$probe_dir"' EXIT
+          bwrap --ro-bind / / --bind "$probe_dir" "$probe_dir" --bind /tmp /tmp --dev /dev -- /bin/true
+
+      - name: Require the Linux Bubblewrap backend
+        # Reads the same backend selection the suites below gate on, so the probe
+        # and the suites cannot disagree about whether this lane proved anything.
+        run: node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
+
+      - name: Run sandbox-core backend checks
+        run: npm test -w packages/sandbox-core
+
+      - name: Run foreground sandbox confinement checks
+        run: npm test -w packages/pi-better-sandbox
+
+      - name: Run local background-task confinement checks
+        run: npm run test:sandbox -w packages/pi-better-background-tasks
+
+      # The whole-session demonstration gates itself on a real backend, and the
+      # only job that runs the root suite is `ci`, which has none — so without
+      # this step it skips everywhere and proves nothing. PI_SANDBOX_REQUIRE_BACKEND
+      # is already set for this lane, which turns that skip into a hard failure.
+      - name: Run the whole-session harness demonstration
+        run: node --import tsx --test scripts/harness-session.e2e.test.mjs
+
+      - name: Run Linux bubblewrap confinement checks
+        run: npm run test:linux-sandbox -w packages/pi-better-subagents
