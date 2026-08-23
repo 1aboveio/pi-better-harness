@@ -45,6 +45,7 @@ const support = describeSandboxSupport();
 const backendAvailable = support.supported;
 const skip = backendAvailable ? false : `requires a real sandbox backend: ${support.reason}`;
 const macOSOnly = support.backend === "macos-seatbelt" ? false : "macOS Seatbelt profiles only";
+const linuxOnly = support.backend === "linux-bubblewrap" ? false : "Linux Bubblewrap only";
 
 // A platform CI lane sets PI_SANDBOX_REQUIRE_BACKEND to the backend it exists to
 // prove. Without it a runner that lost `bwrap` (or `sandbox-exec`) would report
@@ -342,6 +343,33 @@ test("a selected backend that cannot initialize blocks the command instead of ru
         // A profile the backend will reject: sandbox-exec exits before it ever
         // reaches the child, and nothing retries the child directly.
         writeProfile: (path) => writeFileSync(path, "(this is not a valid sbpl profile\n"),
+    });
+
+    const result = await operations.exec(
+        `printf 'ran unconfined\\n' > ${JSON.stringify(marker)}`,
+        projectRoot,
+        { onData: () => {} },
+    );
+
+    assert.notEqual(result.exitCode, 0);
+    assert.equal(existsSync(marker), false, "the child must never run after a backend failure");
+});
+
+test("a Linux backend that exits before the child blocks the command too", { skip: skip || linuxOnly }, async () => {
+    // Bubblewrap takes no profile file, so the macOS case above has no Linux
+    // twin. What is provable here is the same claim the AC is about: once a
+    // backend has been selected and its wrapper fails to start, the child is
+    // never run directly. The stub stands in for a bwrap that cannot set up its
+    // namespaces — a real process, exiting non-zero before any exec, discovered
+    // through the same `lookupExecutable` seam the product uses to find bwrap.
+    const failingBwrap = join(fixtures, "bwrap");
+    writeFileSync(failingBwrap, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+    const marker = join(projectRoot, "linux-failed-backend-marker.txt");
+    const controller = new ForegroundSandboxController();
+    controller.beginSession(projectRoot);
+    const operations = createSandboxedBashOperations(controller, {
+        lookupExecutable: (name) => (name === "bwrap" ? failingBwrap : undefined),
     });
 
     const result = await operations.exec(

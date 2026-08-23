@@ -39,7 +39,8 @@
     "test:e2e": "vitest run src/e2e.test.ts",
     "test:cross-session": "vitest run src/e2e.test.ts -t \"different session\"",
     "test:golden": "vitest run src/golden-path.test.ts",
-    "test:integration": "npm run test:e2e && npm run test:golden"
+    "test:integration": "npm run test:e2e && npm run test:golden",
+    "test:sandbox": "vitest run src/sandbox.test.ts src/sandbox-kernel.test.ts"
   },
   "files": [
     "src/**/*.ts",

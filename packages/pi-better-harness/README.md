@@ -63,6 +63,8 @@ Use the installer when you want every core extension with standalone package ide
 |-------------|---------|
 | Pi | Required |
 | Recommended install | `npx pi-better-harness install` |
+| Write sandbox on macOS | Seatbelt (`sandbox-exec`), ships with the OS |
+| Write sandbox on Linux | Bubblewrap — install `bubblewrap` |
 | Development runtime | Node.js 22+ |
 
 ## Update Or Remove

@@ -85,8 +85,7 @@ jobs:
         run: npm test -w packages/pi-better-sandbox
 
       - name: Run local background-task confinement checks
-        working-directory: packages/pi-better-background-tasks
-        run: npx vitest run src/sandbox.test.ts src/sandbox-kernel.test.ts
+        run: npm run test:sandbox -w packages/pi-better-background-tasks
 
       - name: Run macOS sandbox-exec confinement checks
         run: npm run test:macos-sandbox -w packages/pi-better-subagents
@@ -139,8 +138,7 @@ jobs:
         run: npm test -w packages/pi-better-sandbox
 
       - name: Run local background-task confinement checks
-        working-directory: packages/pi-better-background-tasks
-        run: npx vitest run src/sandbox.test.ts src/sandbox-kernel.test.ts
+        run: npm run test:sandbox -w packages/pi-better-background-tasks
 
       - name: Run Linux bubblewrap confinement checks
         run: npm run test:linux-sandbox -w packages/pi-better-subagents
