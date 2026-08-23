@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
+import { selectPackedResult } from "./stage-harness-dependencies.mjs";
 import {
   sharedSandboxCoreContent,
   sharedSandboxCoreTargets,
@@ -60,7 +61,7 @@ test("packing pi-better-subagents includes the generated sandbox-core copy", () 
     ["pack", "--dry-run", "--json", "-w", "packages/pi-better-subagents"],
     { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
   );
-  const [pack] = JSON.parse(stdout.slice(stdout.indexOf("[")));
+  const pack = selectPackedResult(stdout);
   const packed = pack.files.map((file) => file.path);
   assert.ok(
     packed.includes("shared-sandbox-core.ts"),
@@ -77,7 +78,7 @@ test("packing pi-better-background-tasks includes the generated sandbox-core cop
     ["pack", "--dry-run", "--json", "-w", "packages/pi-better-background-tasks"],
     { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
   );
-  const [pack] = JSON.parse(stdout.slice(stdout.indexOf("[")));
+  const pack = selectPackedResult(stdout);
   const packed = pack.files.map((file) => file.path);
   // This package publishes `src/**/*.ts`, so its copy is a root-level file
   // inside `src/` rather than at the package root.
@@ -100,7 +101,7 @@ test("packing pi-better-sandbox includes the generated sandbox-core copy and no 
     ["pack", "--dry-run", "--json", "-w", "packages/pi-better-sandbox"],
     { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
   );
-  const [pack] = JSON.parse(stdout.slice(stdout.indexOf("[")));
+  const pack = selectPackedResult(stdout);
   const packed = pack.files.map((file) => file.path);
   // This package publishes `*.ts` from its root, so its copy is a root-level
   // file — the placement differs from background-tasks on purpose.
