@@ -408,7 +408,20 @@ describe("local background tasks with no usable sandbox backend", () => {
       success_when: { type: "exit_code", equals: 0 },
     });
 
-    for (const result of [spawned, watched]) {
+    // The action wrapper is a second entry point into the same launches.
+    const actionSpawned = await harness.execute("bg_task", {
+      action: "spawn",
+      command: `printf 'escaped\\n' > "${outsideProbe}"`,
+      callback: false,
+    });
+    const actionWatched = await harness.execute("bg_task", {
+      action: "watch",
+      command: `printf 'escaped\\n' > "${outsideProbe}"`,
+      callback: false,
+      success_when: { type: "exit_code", equals: 0 },
+    });
+
+    for (const result of [spawned, watched, actionSpawned, actionWatched]) {
       expect(result).toContain("Foreground sandbox is unavailable");
       expect(result).toContain("bubblewrap");
       expect(result).not.toContain("Started background");
