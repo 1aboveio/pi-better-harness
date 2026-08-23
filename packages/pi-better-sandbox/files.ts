@@ -91,7 +91,7 @@ function explainDenial(
  * writable root or write-denied. Returns silently when a human explicitly
  * disabled the sandbox, which is the only path to an unconfined mutation.
  */
-export type ForegroundWriteGuard = (absolutePath: string, kind?: MutationKind) => void;
+export type ForegroundWriteGuard = (absolutePath: string, kind?: MutationKind) => string;
 
 /** Identity of a compiled policy, so it is recompiled on change and not per mutation. */
 function policyKey(policy: SandboxWritePolicy): string {
@@ -104,6 +104,11 @@ function policyKey(policy: SandboxWritePolicy): string {
  * The launch decision is taken per mutation, so `/sandbox on` and `/sandbox off`
  * take effect for mutations attempted after the toggle. The policy behind it is
  * compiled once and reused until the policy itself changes.
+ *
+ * The canonical path comes back so callers mutate the path that was checked
+ * rather than the one they were handed. A path-based check can otherwise be
+ * raced by a symlink swapped in after the check and before the syscall; writing
+ * the already-resolved path removes that final-component race.
  */
 export function createForegroundWriteGuard(
     controller: ForegroundSandboxController,
@@ -112,11 +117,11 @@ export function createForegroundWriteGuard(
     let compiledKey: string | undefined;
     let compiled: CompiledSandboxWritePolicy | undefined;
 
-    return function assertWritable(absolutePath: string, kind: MutationKind = "write"): void {
+    return function assertWritable(absolutePath: string, kind: MutationKind = "write"): string {
         // Throws when the sandbox is enabled but unusable: an unavailable or
         // failed backend blocks the mutation instead of quietly delegating.
         const plan = controller.requireLaunchPlan();
-        if (!plan.confined) return;
+        if (!plan.confined) return absolutePath;
 
         const key = policyKey(plan.policy);
         if (compiled === undefined || key !== compiledKey) {
@@ -128,6 +133,7 @@ export function createForegroundWriteGuard(
         if (!decision.allowed) {
             throw new ForegroundSandboxWriteDeniedError(decision, compiled, kind);
         }
+        return decision.path;
     };
 }
 
@@ -170,12 +176,10 @@ export function createSandboxedWriteOperations(
 
     return {
         async mkdir(dir) {
-            assertWritable(dir, "directory");
-            return local.mkdir(dir);
+            return local.mkdir(assertWritable(dir, "directory"));
         },
         async writeFile(absolutePath, content) {
-            assertWritable(absolutePath);
-            return local.writeFile(absolutePath, content);
+            return local.writeFile(assertWritable(absolutePath), content);
         },
     };
 }
@@ -198,12 +202,10 @@ export function createSandboxedEditOperations(
     return {
         readFile: (absolutePath) => local.readFile(absolutePath),
         async access(absolutePath) {
-            assertWritable(absolutePath);
-            return local.access(absolutePath);
+            return local.access(assertWritable(absolutePath));
         },
         async writeFile(absolutePath, content) {
-            assertWritable(absolutePath);
-            return local.writeFile(absolutePath, content);
+            return local.writeFile(assertWritable(absolutePath), content);
         },
     };
 }

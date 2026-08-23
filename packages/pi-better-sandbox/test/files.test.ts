@@ -41,6 +41,7 @@ import {
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import {
+    createForegroundWriteGuard,
     createSandboxedEditOperations,
     createSandboxedWriteOperations,
     ForegroundSandboxWriteDeniedError,
@@ -731,4 +732,35 @@ test("the registrations pi actually loads enforce the same policy on real files"
         () => runWrite(tools, { path: join(outside, "loaded-escape.txt"), content: "nope\n" }),
         { message: /Writes are confined to /, absent: join(outside, "loaded-escape.txt") },
     );
+});
+
+test("an allowed mutation lands on the canonical path the guard checked", async () => {
+    const { root } = project("canonical-target");
+    const controller = sessionAt(root);
+    const guard = createForegroundWriteGuard(controller);
+    symlinkSync(join(root, "src", "app.ts"), join(root, "src", "alias.ts"));
+    symlinkSync(join(root, "src"), join(root, "src-link"));
+
+    // The path handed back is the resolved one, so the mutation cannot be
+    // re-pointed by a symlink swapped in between the check and the syscall.
+    assert.equal(guard(join(root, "src", "alias.ts")), join(root, "src", "app.ts"));
+    assert.equal(guard(join(root, "src-link", "fresh.ts")), join(root, "src", "fresh.ts"));
+
+    // And the observable behaviour is still pi's: an aliased write reaches the
+    // same file the built-in write would have reached.
+    const tools = confined(controller, root);
+    await runWrite(tools, { path: "src/alias.ts", content: "export const aliased = 1;\n" });
+    assert.equal(readFileSync(join(root, "src", "app.ts"), "utf8"), "export const aliased = 1;\n");
+
+    await runWrite(tools, { path: "src-link/through-link.ts", content: "linked\n" });
+    assert.equal(readFileSync(join(root, "src", "through-link.ts"), "utf8"), "linked\n");
+});
+
+test("a disabled sandbox hands the caller's own path straight back", () => {
+    const { root, outside } = project("guard-disabled");
+    const controller = sessionAt(root);
+    controller.disable();
+    const guard = createForegroundWriteGuard(controller);
+
+    assert.equal(guard(join(outside, "anywhere.txt")), join(outside, "anywhere.txt"));
 });
