@@ -26,7 +26,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import backgroundTasksExtension from "./index.js";
-import { readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
+import { baseDir, metaPathFor, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
 import { resumeRunningTask, stopTask } from "./runtime.js";
 import {
   FOREGROUND_SANDBOX_POLICY_CHANNEL,
@@ -63,6 +63,7 @@ let project: string;
 let outside: string;
 let outsideProbe: string;
 let deniedProbe: string;
+let absentDeniedProbe: string;
 let readable: string;
 
 beforeEach(() => {
@@ -74,6 +75,9 @@ beforeEach(() => {
   mkdirSync(outside, { recursive: true });
   outsideProbe = join(outside, "escaped.txt");
   deniedProbe = join(project, "secrets", "leaked.txt");
+  // Denied and deliberately never created: the state `.env.local` is in for most
+  // projects, and the one a mount of a non-existent source silently skips.
+  absentDeniedProbe = join(project, ".env.local");
   readable = join(outside, "readable.txt");
   writeFileSync(readable, "readable-outside-content\n");
 });
@@ -85,8 +89,24 @@ function probeCommand(): string {
     `cat "${readable}"`,
     `printf 'escaped\\n' > "${outsideProbe}" 2>&1 || true`,
     `printf 'leaked\\n' > "${deniedProbe}" 2>&1 || true`,
+    `printf 'created\\n' > "${absentDeniedProbe}" 2>&1 || true`,
     `printf 'PROBE-COMPLETE\\n'`,
   ].join("; ");
+}
+
+/**
+ * Both shapes of denial the probe exercises.
+ *
+ * The existing denied file must simply not appear. The absent one may exist
+ * afterwards — the Linux backend needs a mount point and puts an empty
+ * placeholder there — so what is asserted is that none of the probe's bytes
+ * reached it.
+ */
+function expectDenialsHeld() {
+  expect(existsSync(deniedProbe)).toBe(false);
+  if (existsSync(absentDeniedProbe)) {
+    expect(readFileSync(absentDeniedProbe, "utf8")).toBe("");
+  }
 }
 
 function enabledPolicy() {
@@ -94,7 +114,7 @@ function enabledPolicy() {
     state: "enabled",
     projectRoot: project,
     writableRoot: project,
-    denyWrite: [join(project, "secrets")],
+    denyWrite: [join(project, "secrets"), join(project, ".env.local")],
     platform: process.platform,
     backend: support.supported ? support.backend : undefined,
     executable: support.supported ? support.executable : undefined,
@@ -233,7 +253,7 @@ describe.skipIf(!support.supported)(
       expect(log).toContain("readable-outside-content");
       expect(readFileSync(join(project, "allowed.txt"), "utf8")).toBe("inside\n");
       expect(existsSync(outsideProbe)).toBe(false);
-      expect(existsSync(deniedProbe)).toBe(false);
+      expectDenialsHeld();
       expect(meta.launchArgv?.[0]).toBe(support.executable);
     });
 
@@ -251,6 +271,7 @@ describe.skipIf(!support.supported)(
       expect(readFileSync(meta.logPath, "utf8")).toContain("PROBE-COMPLETE");
       expect(readFileSync(outsideProbe, "utf8")).toBe("escaped\n");
       expect(readFileSync(deniedProbe, "utf8")).toBe("leaked\n");
+      expect(readFileSync(absentDeniedProbe, "utf8")).toBe("created\n");
       expect(meta.launchArgv).toBeUndefined();
     });
 
@@ -272,7 +293,7 @@ describe.skipIf(!support.supported)(
 
       expect(readFileSync(join(project, "allowed.txt"), "utf8")).toBe("inside\n");
       expect(existsSync(outsideProbe)).toBe(false);
-      expect(existsSync(deniedProbe)).toBe(false);
+      expectDenialsHeld();
       expect(meta.launchArgv?.[0]).toBe(support.executable);
       // The operator's own command stays the recorded one; only the launch
       // vector carries the wrapper.
@@ -399,6 +420,88 @@ describe.skipIf(!support.supported)(
         await stopTask(laterSession.pi, id);
       }
     }, 15_000);
+
+    // @covers background-task.sandbox-launch-capture
+    // @level integration
+    it("cannot be resumed under a launch vector or profile a confined task rewrote", async () => {
+      const harness = createHarness({ announceBeforeLoad: enabledPolicy() });
+
+      // The victim: a durable watch whose `meta.json` holds the argv a later
+      // session re-runs verbatim and whose `sandbox.sb` is the profile that argv
+      // names. Both live under the system temp directory, which both backends
+      // leave writable on purpose.
+      const victim = taskIdIn(await harness.execute("bg_task_watch", {
+        command: `printf 'escaped\\n' >> "${outsideProbe}" 2>&1 || true; printf 'tick\\n'`,
+        interval_seconds: 1,
+        timeout_seconds: 0,
+        callback: false,
+        success_when: { type: "stdout_contains", value: "never-matches" },
+      }));
+      const launched = await waitForMeta(victim, (current) => current?.lastCheckedAt !== undefined);
+      const launchArgv = launched.launchArgv;
+      expect(launchArgv?.[0]).toBe(support.executable);
+
+      const metaPath = metaPathFor(victim);
+      const profilePath = sandboxProfilePathFor(victim);
+      const profileBefore = existsSync(profilePath) ? readFileSync(profilePath, "utf8") : undefined;
+      const plantedProbe = join(baseDir(), "planted.txt");
+      // JSON carries no single quotes, so it travels through the shell whole.
+      const forgedMeta = JSON.stringify({
+        ...launched,
+        launchArgv: ["/bin/sh", "-c", `printf 'escaped\\n' > "${outsideProbe}"`],
+      });
+
+      // A second confined task attacks that control plane. No race is involved:
+      // if any of these landed, the tampering would simply sit there until the
+      // victim's next poll or its resume in a later session picked it up.
+      const attacker = taskIdIn(await harness.execute("bg_task_spawn", {
+        command: [
+          `printf '%s' '${forgedMeta}' > "${metaPath}" 2>&1 || true`,
+          `printf '(version 1)\\n(allow default)\\n' > "${profilePath}" 2>&1 || true`,
+          `rm -f "${profilePath}" 2>&1 || true`,
+          `printf 'planted\\n' > "${plantedProbe}" 2>&1 || true`,
+          `printf 'ATTACK-COMPLETE\\n'`,
+        ].join("; "),
+        callback: false,
+      }));
+      const attackerMeta = await waitForMeta(attacker, (current) => current?.status === "succeeded");
+      expect(readFileSync(attackerMeta.logPath, "utf8")).toContain("ATTACK-COMPLETE");
+
+      try {
+        // Nothing the attacker aimed at the control plane landed.
+        expect(existsSync(plantedProbe)).toBe(false);
+        expect(existsSync(profilePath)).toBe(support.backend === "macos-seatbelt");
+        if (profileBefore !== undefined) {
+          expect(readFileSync(profilePath, "utf8")).toBe(profileBefore);
+        }
+        expect(readMeta(victim)?.launchArgv).toEqual(launchArgv);
+        // ...and the victim is still polling under its own confinement.
+        await waitForMeta(victim, (current) => (current?.lastCheckedAt ?? 0) > launched.lastCheckedAt!);
+        expect(existsSync(outsideProbe)).toBe(false);
+      } finally {
+        await harness.execute("bg_task_stop", { id: victim });
+      }
+
+      // The resume the attack was aiming at: a later session, whose own
+      // foreground policy says the sandbox is off, re-runs the captured vector.
+      const resumed = readMeta(victim)!;
+      resumed.status = "running";
+      delete resumed.endedAt;
+      delete resumed.stopRequestedAt;
+      delete resumed.result;
+      writeMeta(resumed);
+      const stoppedAt = resumed.lastCheckedAt!;
+
+      const laterSession = createHarness({ announceBeforeLoad: disabledPolicy() });
+      resumeRunningTask(laterSession.pi, resumed);
+      try {
+        await waitForMeta(victim, (current) => (current?.lastCheckedAt ?? 0) > stoppedAt);
+        expect(readMeta(victim)?.launchArgv).toEqual(launchArgv);
+        expect(existsSync(outsideProbe)).toBe(false);
+      } finally {
+        await stopTask(laterSession.pi, victim);
+      }
+    }, 30_000);
   },
 );
 

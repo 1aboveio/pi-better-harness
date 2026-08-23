@@ -20,8 +20,9 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 
@@ -185,6 +186,25 @@ test("a packaged denied file cannot be replaced from inside the project root", {
 
     assert.equal(result.ok, false);
     assert.equal(readFileSync(target, "utf8"), "SECRET=original\n");
+});
+
+test("a packaged denied file that does not exist yet still cannot be created", { skip }, async () => {
+    // The state most projects are actually in: `.env.local` is a packaged deny
+    // rule and is simply absent. Bubblewrap skips a bind whose source does not
+    // exist, so until the wrapper gave this path a mount point the rule denied
+    // nothing at all on Linux and the write below created the file.
+    const target = join(projectRoot, ".env.local");
+    rmSync(target, { force: true });
+    assert.equal(existsSync(target), false, "the fixture must start without the denied file");
+
+    const result = await runBash(`printf 'STOLEN=1\\n' > ${JSON.stringify(target)}`);
+
+    assert.equal(result.ok, false, "creating a denied path must not report success");
+    // The Linux backend needs a mount point, so an empty placeholder may now sit
+    // here. What must never be true is that the command's bytes reached it.
+    if (existsSync(target)) {
+        assert.equal(readFileSync(target, "utf8"), "", "the denied path must hold no written bytes");
+    }
 });
 
 test("a packaged denied subtree cannot be written, renamed into, or deleted", { skip }, async () => {
@@ -535,4 +555,49 @@ test("a command already running keeps the deny rules it launched with", { skip }
     assert.equal(existsSync(join(denied, "later.txt")), false);
 
     await commands.get("sandbox")?.handler("deny reset", ctx);
+});
+
+test("a confined command cannot rewrite the profile the next one is launched under", { skip }, async () => {
+    // Production places generated profiles under `os.tmpdir()`, which both
+    // backends leave writable on purpose — macOS allows /private/var/folders and
+    // /private/tmp, Linux rebinds /tmp. The seam reproduces that placement
+    // exactly; putting the fixture under /var/tmp instead would make this pass
+    // for the wrong reason.
+    const profileDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-better-sandbox-kernel-profiles-")));
+    const controller = new ForegroundSandboxController({ createProfileDir: () => profileDir });
+    controller.beginSession(projectRoot);
+    const operations = createSandboxedBashOperations(controller);
+    const marker = join(projectRoot, "profile-probe.txt");
+    const planted = join(profileDir, "planted.sb");
+
+    try {
+        // One ordinary command first, so whatever the backend generates is on
+        // disk before anything tries to rewrite it.
+        await operations.exec(`printf 'first\\n' > ${JSON.stringify(marker)}`, projectRoot, { onData: () => {} });
+        const before = new Map(
+            readdirSync(profileDir).map((entry) => [entry, readFileSync(join(profileDir, entry), "utf8")]),
+        );
+
+        await operations.exec(
+            [
+                `printf 'second\\n' > ${JSON.stringify(marker)}`,
+                `for existing in ${JSON.stringify(profileDir)}/*; do printf '(version 1)\\n' > "$existing" 2>/dev/null || true; done`,
+                `printf '(version 1)\\n' > ${JSON.stringify(planted)} 2>/dev/null || true`,
+                `rm -f ${JSON.stringify(profileDir)}/* 2>/dev/null || true`,
+            ].join("; "),
+            projectRoot,
+            { onData: () => {} },
+        );
+
+        // The command really ran and really was confined...
+        assert.equal(readFileSync(marker, "utf8"), "second\n");
+        // ...and left the mechanism that confined it exactly as it found it.
+        assert.equal(existsSync(planted), false, "no profile may be planted from inside the sandbox");
+        const after = new Map(
+            readdirSync(profileDir).map((entry) => [entry, readFileSync(join(profileDir, entry), "utf8")]),
+        );
+        assert.deepEqual([...after.entries()].sort(), [...before.entries()].sort());
+    } finally {
+        rmSync(profileDir, { recursive: true, force: true });
+    }
 });

@@ -6,7 +6,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { commandExecution } from "./process.js";
-import { readMeta } from "./registry.js";
+import { baseDir, readMeta } from "./registry.js";
 import { startWatchTask } from "./runtime.js";
 import {
   confineCommandSpec,
@@ -223,6 +223,9 @@ describe("foreground sandbox launch planning", () => {
     expect(profile).toContain(`(allow file-write* (subpath "${project}"))`);
     expect(profile).toContain(`(deny file-write* (subpath "${join(project, ".env")}"))`);
     expect(profile).toContain(`(allow file-write* (subpath "${homedir()}/.pi"))`);
+    // The deny that protects the mechanism itself: the registry holds the launch
+    // vector a resumed watch re-runs and the profile that vector names.
+    expect(profile).toContain(`(deny file-write* (subpath "${realpathSync(baseDir())}"))`);
   });
 
   // @covers background-task.sandbox-launch-capture
@@ -241,11 +244,19 @@ describe("foreground sandbox launch planning", () => {
     expect(confined.argv!.slice(-1 - execArgs.length)).toEqual([execPath, ...execArgs]);
 
     // The writable root is bound read-write, and the denied path is layered back
-    // over it read-only so the deny wins wherever the binds overlap.
+    // over it read-only so the deny wins wherever the binds overlap. A hard
+    // `--ro-bind`, not `--ro-bind-try`: bubblewrap skips a bind whose source is
+    // absent, so the denied path is given a mount point first.
     const argv = confined.argv!;
+    const denied = join(project, ".env");
     expect(argv.join(" ")).toContain(`--bind ${project} ${project}`);
-    expect(argv.join(" ")).toContain(`--ro-bind-try ${join(project, ".env")} ${join(project, ".env")}`);
-    expect(argv.indexOf("--ro-bind-try")).toBeGreaterThan(argv.indexOf("--bind"));
+    expect(argv.join(" ")).toContain(`--ro-bind ${denied} ${denied}`);
+    expect(argv.indexOf("--ro-bind", 2)).toBeGreaterThan(argv.indexOf("--bind"));
+    // The task registry is denied too: it holds the launch vector a resumed
+    // watch re-runs and the profile that vector names, so a confined task must
+    // not be able to choose what its own next run executes.
+    const registry = realpathSync(baseDir());
+    expect(argv.join(" ")).toContain(`${registry} ${registry}`);
     // Bubblewrap carries its policy in argv, so nothing is written to disk.
     expect(existsSync(profilePath)).toBe(false);
   });

@@ -91,6 +91,15 @@ export type ForegroundSandboxSeams = PolicySeams & {
     createProfileDir?: () => string;
 };
 
+/**
+ * What an operator can do about a missing backend on a foreground surface.
+ *
+ * `sandbox:false` is the subagent tool's opt-out and means nothing here; the
+ * only lever on a session is the slash command.
+ */
+export const FOREGROUND_SANDBOX_REMEDY =
+    "Run unconfined on purpose with /sandbox off, or work in a session that has a backend.";
+
 const NO_SESSION_REASON =
     "No session has started yet, so no canonical project root has been captured.";
 
@@ -214,7 +223,7 @@ export class ForegroundSandboxController {
                 writableRoot: undefined,
                 backend: undefined,
                 executable: undefined,
-                reason: support.reason,
+                reason: `${support.reason} ${FOREGROUND_SANDBOX_REMEDY}`,
             });
         }
 
@@ -241,9 +250,17 @@ export class ForegroundSandboxController {
         if (status.state !== "enabled" || status.writableRoot === undefined) {
             throw new ForegroundSandboxBlockedError(status);
         }
+        // The generated profiles live in a temp directory, and both backends
+        // leave temp writable by design (pi's own tooling needs it). A confined
+        // command that could rewrite the profile the next one is launched under
+        // would be choosing its own confinement, so the directory holding them
+        // is denied to everything the sandbox launches. It stays out of the
+        // published status: this is the mechanism protecting itself, not a rule
+        // the operator wrote or can remove.
+        const profileDir = this.#profileDirectory();
         const policy: SandboxWritePolicy = {
             writableRoot: status.writableRoot,
-            denyWrite: status.denyWrite,
+            denyWrite: Object.freeze([...status.denyWrite, profileDir]),
             home: (this.#seams.home ?? homedir)(),
         };
         return { confined: true, policy, profilePath: this.#profilePathFor(policy) };

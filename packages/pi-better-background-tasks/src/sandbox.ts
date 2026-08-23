@@ -28,8 +28,21 @@ import { homedir } from "node:os";
 import { dirname } from "node:path";
 
 import { commandExecution } from "./process.js";
+import { baseDir } from "./registry.js";
 import { maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
 import type { CommandSpec } from "./types.js";
+
+/**
+ * What an operator can do about a missing backend here.
+ *
+ * A background task inherits the session's foreground policy, so its remedy is
+ * the session's: the slash command. `sandbox:false` is the subagent tool's
+ * opt-out and means nothing on this surface. The text is duplicated rather than
+ * imported for the same reason the rest of this contract is — `pi-better-sandbox`
+ * is an optional peer.
+ */
+export const FOREGROUND_SANDBOX_REMEDY =
+  "Run unconfined on purpose with /sandbox off, or work in a session that has a backend.";
 
 /** Channel `pi-better-sandbox` publishes every effective-policy change on. */
 export const FOREGROUND_SANDBOX_POLICY_CHANNEL = "pi-better-sandbox:policy";
@@ -215,6 +228,22 @@ export function confineCommandSpec(
   // The generated profile is written here, so its directory must exist before
   // the backend builds the command.
   mkdirSync(dirname(profilePath), { recursive: true });
+  // Task state is this package's control plane: `meta.json` carries the launch
+  // vector a resumed watch re-runs verbatim, and `sandbox.sb` is the profile the
+  // launch is confined by. It lives under the system temp directory, which both
+  // backends leave writable by design, so a confined task could otherwise
+  // rewrite what its own next poll executes and choose its own confinement.
+  //
+  // Denying the whole registry closes that without moving any state, and without
+  // costing the task anything it actually needs: pi writes the registry from
+  // outside the sandbox, and the task's log reaches it through a descriptor
+  // opened before the launch, which no later mount or profile can revoke.
+  //
+  // Created here rather than assumed, because the Linux backend materializes an
+  // absent denied path as an empty *file* and this one has to be a directory.
+  const controlPlane = baseDir();
+  mkdirSync(controlPlane, { recursive: true });
+  const denyWrite = [...plan.denyWrite, controlPlane];
   let command;
   try {
     command = maybeBuildSandboxCommand(
@@ -222,7 +251,7 @@ export function confineCommandSpec(
         profilePath,
         policy: {
           writableRoot: plan.writableRoot,
-          denyWrite: plan.denyWrite,
+          denyWrite,
           home: homedir(),
         },
         execPath,
@@ -230,8 +259,9 @@ export function confineCommandSpec(
       },
       // `explicitSandbox` because the foreground state already said a sandbox
       // applies: an absent or unusable backend must throw here rather than hand
-      // back an unwrapped command.
-      { sandboxEnabled: true, explicitSandbox: true },
+      // back an unwrapped command. The remedy is the foreground one: this policy
+      // came from the session, and the session is where it is switched off.
+      { sandboxEnabled: true, explicitSandbox: true, remedy: FOREGROUND_SANDBOX_REMEDY },
       seams,
     );
   } catch (error) {
