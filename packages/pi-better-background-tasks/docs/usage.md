@@ -267,6 +267,10 @@ On Windows the default shell resolves at spawn time, in this order: the
 (`C:\Program Files\Git\bin\bash.exe` and common alternates), then a
 `bash.exe` on `PATH` outside `System32` and `WindowsApps` (WSL launchers are
 excluded so commands stay on Windows). If none is found the task fails with a
-logged spawn error instead of crashing the host. `shell:false` argv tasks run
-through a bash trampoline that appends output to the task log and passes argv
-verbatim (MSYS2 path conversion is disabled for the exec'd target).
+logged spawn error instead of crashing the host. The override must be a bash
+that accepts `-lc` and resolves MSYS-style `/c/...` paths (Git for Windows);
+other shells, or Cygwin bash, fail tasks at spawn or redirect time.
+`shell:false` argv tasks run through a bash trampoline that appends output to
+the task log and passes argv verbatim; MSYS2 path conversion stays off for the
+exec'd target unless `MSYS2_ARG_CONV_EXCL` is already set. Stop and timeout
+terminate the whole task tree on Windows via `taskkill /T`.
