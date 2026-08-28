@@ -66,8 +66,21 @@ export function spawnCommand(spec: CommandSpec, logPath: string, detached: boole
   mkdirSync(dirname(logPath), { recursive: true });
   const fd = openSync(logPath, "a");
   const child = spawnArgs(spec, detached, ["ignore", fd, fd]);
-  writeSync(fd, `\n--- spawn ${new Date().toISOString()} pid=${child.pid ?? "unknown"} ---\n`);
+  const marker = `\n--- spawn ${new Date().toISOString()} pid=${child.pid ?? "unknown"} ---\n`;
+  writeSync(fd, marker);
   closeSync(fd);
+  // Spawn failures (ENOENT, bad cwd, permission denied) surface as an 'error'
+  // event. With no listener Node turns it into an uncaughtException that takes
+  // down the whole host process; log it here and let the runtime's 'close'
+  // handler finalize the task as failed.
+  child.on("error", (error) => {
+    try {
+      const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+      appendFileSync(logPath, `\n--- spawn error ${new Date().toISOString()} code=${code} message=${error.message} ---\n`);
+    } catch {
+      // Log unavailable; the runtime close handler still records the failure.
+    }
+  });
   child.on("close", (code, signal) => {
     appendFileSync(logPath, `\n--- exit ${new Date().toISOString()} code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
   });
