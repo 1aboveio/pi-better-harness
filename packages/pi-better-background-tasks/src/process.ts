@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
@@ -100,7 +100,7 @@ export function withWindowsLogRedirect(spec: CommandSpec, logPath: string): Comm
       // so conversion is disabled to keep raw-argv semantics unchanged. The
       // redirect target is unaffected: bash resolves it itself, already in
       // `/c/...` form.
-      command: `${redirectLine}\nexport MSYS2_ARG_CONV_EXCL='*'\nexec ${argvText}`,
+      command: `${redirectLine}\nexport MSYS2_ARG_CONV_EXCL="\${MSYS2_ARG_CONV_EXCL-*}"\nexec ${argvText}`,
     };
   }
   return { ...spec, command: `${redirectLine}\n${spec.command}` };
@@ -121,11 +121,17 @@ export function spawnCommand(spec: CommandSpec, logPath: string, detached: boole
   }
   const child = spawnArgs(launchSpec, detached, stdio);
   const marker = `\n--- spawn ${new Date().toISOString()} pid=${child.pid ?? "unknown"} ---\n`;
-  if (fd !== undefined) {
-    writeSync(fd, marker);
-    closeSync(fd);
-  } else {
-    appendFileSync(logPath, marker);
+  try {
+    if (fd !== undefined) {
+      writeSync(fd, marker);
+      closeSync(fd);
+    } else {
+      // The detached child is already running; a throw here would orphan it
+      // with no task metadata, so the marker write is best effort.
+      appendFileSync(logPath, marker);
+    }
+  } catch {
+    // Log unavailable; the runtime close handler still records the failure.
   }
   // Spawn failures (ENOENT, bad cwd, permission denied) surface as an 'error'
   // event. With no listener Node turns it into an uncaughtException that takes
@@ -229,11 +235,27 @@ export function runCommandOnce(
   });
 }
 
+/**
+ * Stop a task's process tree.
+ *
+ * POSIX signals the process group (`-target`), falling back to the direct pid
+ * when the group is already gone. Windows has no process groups in libuv, and
+ * `process.kill(pid)` would only terminate the spawned `bash.exe` while real
+ * work survives in grandchildren — so the tree is terminated with
+ * `taskkill /T /F` instead. Windows has no graceful signal delivery, so the
+ * requested signal is informational there.
+ */
 export function stopProcessGroup(
   pid: number,
   pgid?: number,
   signal: NodeJS.Signals = "SIGTERM",
 ): void {
+  if (process.platform === "win32") {
+    // Best effort, like the POSIX fallback: a dead pid (already exited, or an
+    // argv task whose bash PID lapsed) must not throw here.
+    spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore" });
+    return;
+  }
   const target = pgid ?? pid;
   try {
     process.kill(-target, signal);
