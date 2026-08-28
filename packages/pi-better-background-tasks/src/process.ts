@@ -22,8 +22,10 @@ const WINDOWS_BASH_CANDIDATES = [
  * Resolved lazily at spawn time, not module load: env-injection extensions
  * (e.g. pi-env) may apply settings.json `env` values after this module is
  * evaluated, and those overrides must still take effect.
+ *
+ * Exposed for tests and reuse.
  */
-function resolveDefaultShell(): string {
+export function resolveDefaultShell(): string {
   const fromEnv = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
   if (fromEnv) return fromEnv;
   if (process.platform !== "win32") return "/bin/bash";
@@ -61,15 +63,15 @@ export function validateCommandSpec(spec: CommandSpec): void {
   }
 }
 
-/** Convert a Windows path to the `/c/...` form MSYS bash resolves in redirections. */
-function toMsysPath(path: string): string {
+/** Convert a Windows path to the `/c/...` form MSYS bash resolves in redirections. Exposed for tests and reuse. */
+export function toMsysPath(path: string): string {
   const forward = path.replace(/\\/g, "/");
   const drive = /^([A-Za-z]):(\/.+)$/.exec(forward);
   return drive ? `/${drive[1].toLowerCase()}${drive[2]}` : forward;
 }
 
-/** Single-quote a value for safe literal use in a bash script line. */
-function bashSingleQuote(value: string): string {
+/** Single-quote a value for safe literal use in a bash script line. Exposed for tests and reuse. */
+export function bashSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
@@ -83,8 +85,10 @@ function bashSingleQuote(value: string): string {
  * logging continues after pi exits — and the child runs with no inherited
  * stdio. Raw argv specs get a bash trampoline (`exec`) that performs the same
  * redirect before replacing itself with the target program.
+ *
+ * Exposed for tests and reuse.
  */
-function withWindowsLogRedirect(spec: CommandSpec, logPath: string): CommandSpec {
+export function withWindowsLogRedirect(spec: CommandSpec, logPath: string): CommandSpec {
   const redirectLine = `exec >> ${bashSingleQuote(toMsysPath(logPath))} 2>&1`;
   if (spec.shell === false) {
     const argvText = spec.argv!.map((arg) => bashSingleQuote(String(arg))).join(" ");
