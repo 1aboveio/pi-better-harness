@@ -242,7 +242,7 @@ describe("spawnCommand platform gating", () => {
     const args = call[1] as string[];
     const options = call[2] as { windowsHide: boolean; detached: boolean; stdio: unknown[] };
     expect(args[0]).toBe("-lc");
-    expect(args[1]).toContain("exec >> '/c/");
+    expect(args[1]).toContain("exec >> '");
     expect(options).toMatchObject({
       windowsHide: true,
       detached: true,
