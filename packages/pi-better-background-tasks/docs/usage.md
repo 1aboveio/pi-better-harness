@@ -261,3 +261,12 @@ PI_BETTER_STALL_MS=600000
 Commands run through `/bin/bash -lc` by default so shell-mode watchers behave
 consistently across sessions. Set `PI_BETTER_BACKGROUND_TASKS_SHELL` to override
 that shell, or pass `argv` and `shell:false` to avoid shell parsing.
+
+On Windows the default shell resolves at spawn time, in this order: the
+`PI_BETTER_BACKGROUND_TASKS_SHELL` override, then Git for Windows
+(`C:\Program Files\Git\bin\bash.exe` and common alternates), then a
+`bash.exe` on `PATH` outside `System32` and `WindowsApps` (WSL launchers are
+excluded so commands stay on Windows). If none is found the task fails with a
+logged spawn error instead of crashing the host. `shell:false` argv tasks run
+through a bash trampoline that appends output to the task log and passes argv
+verbatim (MSYS2 path conversion is disabled for the exec'd target).
