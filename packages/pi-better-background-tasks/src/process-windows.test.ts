@@ -1,13 +1,31 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bashSingleQuote, resolveDefaultShell, toMsysPath, withWindowsLogRedirect } from "./process.js";
+import {
+  bashSingleQuote,
+  resolveDefaultShell,
+  spawnCommand,
+  stopProcessGroup,
+  toMsysPath,
+  withWindowsLogRedirect,
+} from "./process.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return { ...actual, existsSync: vi.fn() };
 });
 
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawn: vi.fn(), spawnSync: vi.fn() };
+});
+
 const mockExists = vi.mocked(existsSync);
+const mockSpawn = vi.mocked(spawn);
+const mockSpawnSync = vi.mocked(spawnSync);
 const realPlatform = process.platform;
 
 /** Normalize for assertions so Windows and POSIX joins compare equal. */
@@ -20,7 +38,7 @@ function fakePlatform(value: NodeJS.Platform): void {
 afterEach(() => {
   fakePlatform(realPlatform);
   vi.unstubAllEnvs();
-  mockExists.mockReset();
+  vi.restoreAllMocks();
 });
 
 describe("toMsysPath", () => {
@@ -37,13 +55,18 @@ describe("toMsysPath", () => {
     expect(toMsysPath("E:/Mixed/Case.log")).toBe("/e/Mixed/Case.log");
   });
 
-  it("passes UNC paths through in forward-slash form, which MSYS resolves as UNC", () => {
+  it("passes UNC paths through in forward-slash form", () => {
     expect(toMsysPath("\\\\server\\share\\log")).toBe("//server/share/log");
   });
 
   it("leaves relative and already-POSIX paths unchanged", () => {
     expect(toMsysPath("relative/log")).toBe("relative/log");
     expect(toMsysPath("/already/posix")).toBe("/already/posix");
+  });
+
+  it("passes drive-only paths through unchanged", () => {
+    expect(toMsysPath("C:")).toBe("C:");
+    expect(toMsysPath("C:\\")).toBe("C:/");
   });
 });
 
@@ -78,12 +101,14 @@ describe("withWindowsLogRedirect", () => {
 
   it("pins the argv trampoline shape: redirect, MSYS2 exclusion, verbatim exec", () => {
     const result = withWindowsLogRedirect(
-      { shell: false, argv: ["cmd.exe", "/c", "echo", "ok"] },
+      { shell: false, argv: ["cmd.exe", "/c", "echo", "ok"], cwd: "C:\\work", env: { A: "1" } },
       "C:\\Temp\\log.log",
     );
     expect(result.shell).toBe(true);
+    expect(result.cwd).toBe("C:\\work");
+    expect(result.env).toEqual({ A: "1" });
     expect(result.command).toBe(
-      "exec >> '/c/Temp/log.log' 2>&1\nexport MSYS2_ARG_CONV_EXCL='*'\nexec 'cmd.exe' '/c' 'echo' 'ok'",
+      'exec >> \'/c/Temp/log.log\' 2>&1\nexport MSYS2_ARG_CONV_EXCL="${MSYS2_ARG_CONV_EXCL-*}"\nexec \'cmd.exe\' \'/c\' \'echo\' \'ok\'',
     );
   });
 
@@ -114,6 +139,8 @@ describe("resolveDefaultShell", () => {
     vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
     fakePlatform("linux");
     expect(resolveDefaultShell()).toBe("/bin/bash");
+    // Pins the spawn-time cost contract: resolution is lazy per spawn, so the
+    // POSIX fast path must not probe the filesystem at all.
     expect(mockExists).not.toHaveBeenCalled();
   });
 
@@ -124,14 +151,36 @@ describe("resolveDefaultShell", () => {
     expect(resolveDefaultShell()).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
   });
 
-  it("falls back to a PATH bash outside System32 and WindowsApps", () => {
+  it("prefers an earlier Git candidate over a later one", () => {
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
+    fakePlatform("win32");
+    mockExists.mockImplementation(
+      (p) => norm(String(p)) === norm("C:\\Program Files (x86)\\Git\\bin\\bash.exe"),
+    );
+    expect(resolveDefaultShell()).toBe("C:\\Program Files (x86)\\Git\\bin\\bash.exe");
+  });
+
+  it("prefers Git for Windows candidates over any PATH bash", () => {
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
+    vi.stubEnv("PATH", "C:\\Other\\bin");
+    fakePlatform("win32");
+    mockExists.mockReturnValue(true);
+    expect(resolveDefaultShell()).toBe("C:\\Program Files\\Git\\bin\\bash.exe");
+  });
+
+  it("skips System32 and WindowsApps launchers even when they exist on PATH", () => {
     vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
     vi.stubEnv(
       "PATH",
       "C:\\Windows\\System32;C:\\Users\\u\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Real\\Tools",
     );
     fakePlatform("win32");
-    mockExists.mockImplementation((p) => norm(String(p)).endsWith("c:/real/tools/bash.exe"));
+    // Git for Windows is absent in this scenario; System32/WindowsApps/Real
+    // Tools all contain a bash.exe, so the System32/WindowsApps skip in
+    // resolveDefaultShell — not absence — is what steers resolution to Real\Tools.
+    mockExists.mockImplementation(
+      (p) => /bash\.exe$/i.test(String(p)) && !norm(String(p)).includes("/git/"),
+    );
     expect(norm(resolveDefaultShell())).toBe(norm("C:\\Real\\Tools\\bash.exe"));
   });
 
@@ -150,5 +199,75 @@ describe("resolveDefaultShell", () => {
     fakePlatform("win32");
     mockExists.mockReturnValue(false);
     expect(resolveDefaultShell()).toBe("/bin/bash");
+  });
+});
+
+describe("stopProcessGroup", () => {
+  it("terminates the whole task tree via taskkill on Windows", () => {
+    fakePlatform("win32");
+    stopProcessGroup(4242);
+    expect(mockSpawnSync).toHaveBeenCalledWith(
+      "taskkill",
+      ["/T", "/F", "/PID", "4242"],
+      expect.objectContaining({ stdio: "ignore" }),
+    );
+  });
+
+  it("signals the process group on POSIX and falls back to the direct pid", () => {
+    fakePlatform("linux");
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((p) => {
+      if (typeof p === "number" && p < 0) throw new Error("group gone");
+      return true;
+    });
+    stopProcessGroup(500, 500, "SIGKILL");
+    expect(killSpy).toHaveBeenNthCalledWith(1, -500, "SIGKILL");
+    stopProcessGroup(500, 500, "SIGKILL");
+    expect(killSpy).toHaveBeenLastCalledWith(500, "SIGKILL");
+  });
+});
+
+describe("spawnCommand platform gating", () => {
+  const fakeChild = { pid: 777, on: () => {}, unref: () => {} } as unknown as ChildProcess;
+
+  it("uses ignore/ignore/ignore stdio, windowsHide, and the redirect on Windows", () => {
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "D:\\shell\\bash.exe");
+    fakePlatform("win32");
+    const log = join(mkdtempSync(join(tmpdir(), "bbt-gate-")), "gate.log");
+    mockSpawn.mockImplementation(() => fakeChild);
+
+    const spawned = spawnCommand({ shell: true, command: "echo hi" }, log, true);
+
+    const call = mockSpawn.mock.calls[0]!;
+    expect(call[0]).toBe("D:\\shell\\bash.exe");
+    const args = call[1] as string[];
+    const options = call[2] as { windowsHide: boolean; detached: boolean; stdio: unknown[] };
+    expect(args[0]).toBe("-lc");
+    expect(args[1]).toContain("exec >> '/c/");
+    expect(options).toMatchObject({
+      windowsHide: true,
+      detached: true,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    expect(readFileSync(log, "utf8")).toContain("--- spawn");
+    expect(spawned.pgid).toBe(777);
+  });
+
+  it("keeps fd stdio, no windowsHide, and a verbatim command on POSIX", () => {
+    vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
+    fakePlatform("linux");
+    const log = join(mkdtempSync(join(tmpdir(), "bbt-gate-")), "gate.log");
+    mockSpawn.mockImplementation(() => fakeChild);
+
+    spawnCommand({ shell: true, command: "echo hi" }, log, true);
+
+    const call = mockSpawn.mock.calls[0]!;
+    expect(call[0]).toBe("/bin/bash");
+    const args = call[1] as string[];
+    const options = call[2] as { windowsHide: boolean; detached: boolean; stdio: unknown[] };
+    expect(args).toEqual(["-lc", "echo hi"]);
+    expect(options).toMatchObject({ windowsHide: false, detached: true });
+    expect(options.stdio[0]).toBe("ignore");
+    expect(typeof options.stdio[1]).toBe("number");
+    expect(typeof options.stdio[2]).toBe("number");
   });
 });
