@@ -32,7 +32,7 @@ function resolveDefaultShell(): string {
   }
   for (const dir of (process.env.PATH ?? "").split(";")) {
     const trimmed = dir.trim();
-    if (!trimmed || /system32|windowsapps/i.test(trimmed)) continue;
+    if (!trimmed || /(^|[\\/])(system32|windowsapps)([\\/]|$)/i.test(trimmed)) continue;
     const candidate = join(trimmed, "bash.exe");
     if (existsSync(candidate)) return candidate;
   }
@@ -88,7 +88,16 @@ function withWindowsLogRedirect(spec: CommandSpec, logPath: string): CommandSpec
   const redirectLine = `exec >> ${bashSingleQuote(toMsysPath(logPath))} 2>&1`;
   if (spec.shell === false) {
     const argvText = spec.argv!.map((arg) => bashSingleQuote(String(arg))).join(" ");
-    return { ...spec, shell: true, command: `${redirectLine}\nexec ${argvText}` };
+    return {
+      ...spec,
+      shell: true,
+      // The MSYS2 runtime rewrites POSIX-looking argv (e.g. `/c`, `/opt/x.sh`)
+      // when exec'ing native Windows binaries. Node spawn passed argv verbatim,
+      // so conversion is disabled to keep raw-argv semantics unchanged. The
+      // redirect target is unaffected: bash resolves it itself, already in
+      // `/c/...` form.
+      command: `${redirectLine}\nexport MSYS2_ARG_CONV_EXCL='*'\nexec ${argvText}`,
+    };
   }
   return { ...spec, command: `${redirectLine}\n${spec.command}` };
 }
@@ -127,7 +136,12 @@ export function spawnCommand(spec: CommandSpec, logPath: string, detached: boole
     }
   });
   child.on("close", (code, signal) => {
-    appendFileSync(logPath, `\n--- exit ${new Date().toISOString()} code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+    try {
+      appendFileSync(logPath, `\n--- exit ${new Date().toISOString()} code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+    } catch {
+      // Log unavailable (swept tmp dir, ACL change): a throw here would crash
+      // the host; the runtime already finalized the task from meta.
+    }
   });
   return { child, pgid: detached && child.pid ? child.pid : undefined };
 }
