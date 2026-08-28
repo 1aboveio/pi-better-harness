@@ -1,10 +1,45 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, closeSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { CommandResult, CommandSpec } from "./types.js";
 
-const DEFAULT_SHELL = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL || "/bin/bash";
+/** Known Git for Windows locations; `bash -lc` needs a real bash, not the WSL shim. */
+const WINDOWS_BASH_CANDIDATES = [
+  "C:\\Program Files\\Git\\bin\\bash.exe",
+  "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+  "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+];
+
+/**
+ * Resolve the shell used for `command` specs.
+ *
+ * POSIX keeps `/bin/bash`. Windows has no `/bin/bash`, and the `bash.exe` found
+ * on PATH is usually the WSL launcher in System32 or the WindowsApps alias,
+ * either of which would run the command inside WSL instead of Windows. Prefer
+ * an explicit override, then Git for Windows, then a non-WSL `bash.exe` on PATH.
+ *
+ * Resolved lazily at spawn time, not module load: env-injection extensions
+ * (e.g. pi-env) may apply settings.json `env` values after this module is
+ * evaluated, and those overrides must still take effect.
+ */
+function resolveDefaultShell(): string {
+  const fromEnv = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
+  if (fromEnv) return fromEnv;
+  if (process.platform !== "win32") return "/bin/bash";
+  for (const candidate of WINDOWS_BASH_CANDIDATES) {
+    if (existsSync(candidate)) return candidate;
+  }
+  for (const dir of (process.env.PATH ?? "").split(";")) {
+    const trimmed = dir.trim();
+    if (!trimmed || /system32|windowsapps/i.test(trimmed)) continue;
+    const candidate = join(trimmed, "bash.exe");
+    if (existsSync(candidate)) return candidate;
+  }
+  // Nothing usable found: keep the POSIX default so the failure surfaces as a
+  // logged spawn error for the task instead of crashing the whole host process.
+  return "/bin/bash";
+}
 
 /** How long a timed-out process group has to exit on SIGTERM before SIGKILL. */
 const TERMINATION_GRACE_MS = 2_000;
@@ -153,7 +188,7 @@ export function commandExecution(spec: CommandSpec): { execPath: string; execArg
     const [command, ...args] = spec.argv!;
     return { execPath: command!, execArgs: args };
   }
-  return { execPath: DEFAULT_SHELL, execArgs: ["-lc", spec.command!] };
+  return { execPath: resolveDefaultShell(), execArgs: ["-lc", spec.command!] };
 }
 
 function spawnArgs(
