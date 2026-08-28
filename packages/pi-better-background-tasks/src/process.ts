@@ -61,14 +61,59 @@ export function validateCommandSpec(spec: CommandSpec): void {
   }
 }
 
+/** Convert a Windows path to the `/c/...` form MSYS bash resolves in redirections. */
+function toMsysPath(path: string): string {
+  const forward = path.replace(/\\/g, "/");
+  const drive = /^([A-Za-z]):(\/.+)$/.exec(forward);
+  return drive ? `/${drive[1].toLowerCase()}${drive[2]}` : forward;
+}
+
+/** Single-quote a value for safe literal use in a bash script line. */
+function bashSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * On Windows, numeric fds above 2 are unusable as child stdio: Node spawns the
+ * process, but its output handles end up broken, every write fails, and shell
+ * tasks exit 1 having produced nothing. (POSIX inherits the fd normally.)
+ *
+ * Instead of handing the child a log fd, the shell opens and redirects into the
+ * log itself. Output stays durable — written by the detached task directly, so
+ * logging continues after pi exits — and the child runs with no inherited
+ * stdio. Raw argv specs get a bash trampoline (`exec`) that performs the same
+ * redirect before replacing itself with the target program.
+ */
+function withWindowsLogRedirect(spec: CommandSpec, logPath: string): CommandSpec {
+  const redirectLine = `exec >> ${bashSingleQuote(toMsysPath(logPath))} 2>&1`;
+  if (spec.shell === false) {
+    const argvText = spec.argv!.map((arg) => bashSingleQuote(String(arg))).join(" ");
+    return { ...spec, shell: true, command: `${redirectLine}\nexec ${argvText}` };
+  }
+  return { ...spec, command: `${redirectLine}\n${spec.command}` };
+}
+
 export function spawnCommand(spec: CommandSpec, logPath: string, detached: boolean): SpawnedProcess {
   validateCommandSpec(spec);
   mkdirSync(dirname(logPath), { recursive: true });
-  const fd = openSync(logPath, "a");
-  const child = spawnArgs(spec, detached, ["ignore", fd, fd]);
+  const windows = process.platform === "win32";
+  const launchSpec = windows ? withWindowsLogRedirect(spec, logPath) : spec;
+  let fd: number | undefined;
+  let stdio: SpawnStdio;
+  if (windows) {
+    stdio = ["ignore", "ignore", "ignore"];
+  } else {
+    fd = openSync(logPath, "a");
+    stdio = ["ignore", fd, fd];
+  }
+  const child = spawnArgs(launchSpec, detached, stdio);
   const marker = `\n--- spawn ${new Date().toISOString()} pid=${child.pid ?? "unknown"} ---\n`;
-  writeSync(fd, marker);
-  closeSync(fd);
+  if (fd !== undefined) {
+    writeSync(fd, marker);
+    closeSync(fd);
+  } else {
+    appendFileSync(logPath, marker);
+  }
   // Spawn failures (ENOENT, bad cwd, permission denied) surface as an 'error'
   // event. With no listener Node turns it into an uncaughtException that takes
   // down the whole host process; log it here and let the runtime's 'close'
@@ -204,10 +249,13 @@ export function commandExecution(spec: CommandSpec): { execPath: string; execArg
   return { execPath: resolveDefaultShell(), execArgs: ["-lc", spec.command!] };
 }
 
+/** Stdio for a spawned task: stdin is always ignored; stdout/stderr are piped (collected) or ignored (redirected into the log by the child itself). */
+type SpawnStdio = ["ignore", "pipe" | "ignore" | number, "pipe" | "ignore" | number];
+
 function spawnArgs(
   spec: CommandSpec,
   detached: boolean,
-  stdio: ["ignore", "pipe" | number, "pipe" | number],
+  stdio: SpawnStdio,
 ): ChildProcess {
   const env = { ...process.env, ...spec.env };
   const { execPath, execArgs } = commandExecution(spec);
@@ -216,5 +264,8 @@ function spawnArgs(
     env,
     detached,
     stdio,
+    // A detached Windows child gets its own console window unless hidden; these
+    // tasks write to log files and must not flash terminals.
+    windowsHide: process.platform === "win32",
   });
 }
