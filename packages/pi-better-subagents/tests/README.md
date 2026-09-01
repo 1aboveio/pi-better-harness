@@ -29,8 +29,7 @@ cannot drift from what ships.
 
 ```bash
 tests/run_all.sh                                      # full local suite
-tests/run_queue.sh                                    # merge-queue suite (sandbox + web_fetch + gh)
-PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 tests/run_queue.sh
+PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 tests/run_all.sh
 PI_SUBAGENT_TEST_TIMEOUT=400 tests/run_all.sh         # slower models
 tests/test_sandbox_applied.sh                         # one test (macOS)
 tests/test_sandbox_deny_outside.sh                    # one test (macOS)
@@ -49,11 +48,10 @@ Needs `MINIMAX_API_KEY` in the environment.
 merged through GitHub's normal pull request flow.
 
 The Ubuntu Linux lane first installs and probes `bwrap`, then runs
-`linux_bubblewrap.integration.mjs` as a real-filesystem boundary test. It runs
-`test_env_inherit.sh`, `test_web_fetch.sh`, `test_gh_issues.sh`, and
-`test_headless_isolation.sh` through the selected Linux sandbox command. The
+`linux_bubblewrap.integration.mjs` as a real-filesystem boundary test. The
 `macos-sandbox` job runs the existing deterministic macOS `sandbox-exec`
-scripts with their unchanged assertions. Linux write-sandbox:
+scripts with their unchanged assertions. The networked real-child scenarios
+remain part of `run_all.sh` for authenticated local runs. Linux write-sandbox:
 [#5](https://github.com/1aboveio/pi-better-subagents/issues/5).
 
 ## What to expect

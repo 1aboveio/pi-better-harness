@@ -11,7 +11,7 @@ real Pi TUI session · pi-better-harness extensions loaded
   ●  test scout                                                                                     gpt-5 · gpt-5 3m 26s
 
 ▸ background tasks
-› ●  merge queue                                                                         every 30s · 11m 58s left 3m 32s
+› ●  CI workflow                                                                         every 30s · 11m 58s left 3m 32s
   ●  dev server                                                                                   process running 6m 14s
 
 ↑↓ select · Enter detail · x stop · Esc unfocus

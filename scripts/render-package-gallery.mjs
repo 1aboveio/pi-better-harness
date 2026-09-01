@@ -253,8 +253,8 @@ function backgroundProvider() {
       },
       {
         providerId: "background-tasks",
-        id: "bg_queue",
-        name: "merge queue",
+        id: "bg_ci",
+        name: "CI workflow",
         status: "running",
         statusTone: "running",
         kind: "watch",
@@ -360,7 +360,7 @@ function activityLines() {
         label: "Background Tasks",
         items: [
           { id: "bg_server", label: "dev server", status: "running", active: true },
-          { id: "bg_queue", label: "merge queue", status: "running", active: true },
+          { id: "bg_ci", label: "CI workflow", status: "running", active: true },
         ],
       },
     ],

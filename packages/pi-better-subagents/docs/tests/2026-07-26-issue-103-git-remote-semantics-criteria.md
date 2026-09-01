@@ -9,7 +9,7 @@ Reusable library module that reads and syncs first-class Git remote
 configuration for disposable clone workspaces under **normal fetch-URL +
 pushurl topologies** (one or more `remote.<name>.url`, zero or more
 `remote.<name>.pushurl`). Out of scope: full disposable clone preparation
-(issue #78), sandboxing, merge queue, and the edge cases deferred to #109
+(issue #78), sandboxing, CI delivery policy, and the edge cases deferred to #109
 (see below).
 
 ## Deferred to #109 (accepted descope from #103)

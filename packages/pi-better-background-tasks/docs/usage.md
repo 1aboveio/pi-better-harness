@@ -5,8 +5,8 @@ agent start long-running commands or command-based watchers without blocking the
 foreground turn. Task metadata and logs are stored under the OS temp directory,
 so status and logs remain available across `/reload` and ordinary session use.
 
-The core is deliberately domain-neutral. GitHub, Mergify, Cloud Build, Vercel,
-and similar integrations should be thin presets on top of the generic watcher,
+The core is deliberately domain-neutral. GitHub, Cloud Build, Vercel, and
+similar integrations should be thin presets on top of the generic watcher,
 not special cases in the runtime.
 
 ## Tools

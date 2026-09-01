@@ -10,7 +10,7 @@ const SESSION = `pi-gallery-${process.pid}`;
 const WIDTH = 1200;
 const HEIGHT = 675;
 const SEEDED_SUBAGENTS = ["sa_gallery_review", "sa_gallery_tests"];
-const SEEDED_TASKS = ["bg_gallery_server", "bg_gallery_queue"];
+const SEEDED_TASKS = ["bg_gallery_server", "bg_gallery_ci"];
 
 mkdirSync(OUT_DIR, { recursive: true });
 
@@ -130,7 +130,7 @@ function seedExtensionState({ piPid, cwd, sessionId }) {
 
   for (const [id, name, kind, offset, command] of [
     ["bg_gallery_server", "dev server", "process", 372_000, "npm run dev"],
-    ["bg_gallery_queue", "merge queue", "command_watch", 210_000, "gh run watch --exit-status"],
+    ["bg_gallery_ci", "CI workflow", "command_watch", 210_000, "gh run watch --exit-status"],
   ]) {
     const dir = join(tmpdir(), "pi-better-background-tasks", "tasks", id);
     mkdirSync(dir, { recursive: true });
