@@ -730,8 +730,8 @@ describe("shared background work navigator", () => {
       listRows: () => [{
         providerId: "background-tasks",
         id: "bg-1",
-        name: "watch-pr-1396",
-        command: "node ~/.agents/skills/mergify/scripts/watch-pr-delivery.mjs --repo 1aboveio/skyee-ai-risk --pr 1396",
+        name: "watch-ci-1396",
+        command: "gh run watch 1396 --exit-status",
         status: "running",
         statusTone: "running",
         kind: "watch",
@@ -765,8 +765,8 @@ describe("shared background work navigator", () => {
       const lines = renderWidget(widgets.at(-1), 118, ui.theme);
       const text = lines.join("\n");
       assert.doesNotMatch(text, /background work/);
-      assert.match(text, /●\s+watch-pr-1396\s+every 1m 00s\s+23s/);
-      assert.doesNotMatch(text, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
+      assert.match(text, /●\s+watch-ci-1396\s+every 1m 00s\s+23s/);
+      assert.doesNotMatch(text, /evidence\s+gh run watch 1396/);
       assert.match(text, /^background tasks$/m, "compact rail should keep the provider lane title visible");
       assert.doesNotMatch(text, /^main$/m, "background work is not grouped under a confusing main lane");
 
@@ -774,7 +774,7 @@ describe("shared background work navigator", () => {
       editor.handleInput("left");
       const focusedText = renderWidget(widgets.at(-1), 118, ui.theme).join("\n");
       assert.match(focusedText, /↑↓ switch · Enter detail · x stop · Esc unfocus/);
-      assert.doesNotMatch(focusedText, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
+      assert.doesNotMatch(focusedText, /evidence\s+gh run watch 1396/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

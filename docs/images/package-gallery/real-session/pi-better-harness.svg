@@ -45,7 +45,7 @@
 <text x="96" y="388" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="550" fill="#dbeafe">  ●  test scout                                                                                     gpt-5 · gpt-5 3m 26s</text>
 <text x="96" y="412" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="550" fill="#cbd5e1"></text>
 <text x="96" y="436" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="800" fill="#7dd3fc">▸ background tasks</text>
-<text x="96" y="460" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="550" fill="#dbeafe">› ●  merge queue                                                                         every 30s · 11m 58s left 3m 32s</text>
+<text x="96" y="460" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="550" fill="#dbeafe">› ●  CI workflow                                                                         every 30s · 11m 58s left 3m 32s</text>
 <text x="96" y="484" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="550" fill="#dbeafe">  ●  dev server                                                                                   process running 6m 14s</text>
 <text x="96" y="508" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="550" fill="#cbd5e1"></text>
 <text x="96" y="532" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="550" fill="#cbd5e1">↑↓ select · Enter detail · x stop · Esc unfocus</text>

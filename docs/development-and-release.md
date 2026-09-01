@@ -167,11 +167,12 @@ same semantic version without colliding:
 - Description of the released Goal change.
 ```
 
-Commit the manifest, lockfile, and changelog changes through the normal PR and
-merge queue. After merge, dispatch `.github/workflows/publish.yml` and select the
-single npm package to release. The workflow reads the version from that package's
-manifest, publishes only its workspace, and creates a package-scoped tag and
-GitHub release such as `pi-better-goal@0.1.15`.
+Commit the manifest, lockfile, and changelog changes through a reviewed pull
+request. After CI passes and the PR is merged, dispatch
+`.github/workflows/publish.yml` and select the single npm package to release.
+The workflow reads the version from that package's manifest, publishes only its
+workspace, and creates a package-scoped tag and GitHub release such as
+`pi-better-goal@0.1.15`.
 
 Confirm that package is visible:
 

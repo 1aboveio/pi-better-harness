@@ -14,7 +14,7 @@ cannot drift from what ships.
 | `test_sandbox_deny_outside.sh` | macOS: under that profile, writes **outside** `sandbox_dir` are denied and create no file (deterministic, no model). |
 | `test_sandbox_wrapper_argv.sh` | macOS: the real product-selected sandbox wrapper preserves every `pi` argv token, including embedded newlines. |
 | `sandbox_profile.test.mjs` | Unit: the `sandbox.ts` policy adapter over vendored `shared-sandbox-core.ts` retains the macOS profile and proves Linux builder selection, canonical workdir binding, small writable allowlist, and fail-closed policy. |
-| `linux_bubblewrap.integration.mjs` | Linux queue lane: real product-built bubblewrap children prove inside writes, outside and symlink denial, canonical aliases, outside reads, read-only `~/.pi`, host `/tmp`, `/dev/null`, and host-local HTTP. Missing `bwrap` fails this test. |
+| `linux_bubblewrap.integration.mjs` | Linux CI lane: real product-built bubblewrap children prove inside writes, outside and symlink denial, canonical aliases, outside reads, read-only `~/.pi`, host `/tmp`, `/dev/null`, and host-local HTTP. Missing `bwrap` fails this test. |
 | `test_web_fetch.sh` | An extension-provided tool (`web_fetch`) works in a scoped child: fetch the repo page, report a word count. |
 | `test_gh_issues.sh` | A `bash`-scoped child can drive an external CLI: `gh issue list` against this repo. |
 | `test_env_inherit.sh` | The foreground environment (e.g. `GH_TOKEN`) reaches the subagent **through the OS sandbox**, and the child returns the exact inherited marker — credential passing. |
@@ -29,8 +29,7 @@ cannot drift from what ships.
 
 ```bash
 tests/run_all.sh                                      # full local suite
-tests/run_queue.sh                                    # merge-queue suite (sandbox + web_fetch + gh)
-PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 tests/run_queue.sh
+PI_SUBAGENT_TEST_MODEL=minimax-cn/MiniMax-M3 tests/run_all.sh
 PI_SUBAGENT_TEST_TIMEOUT=400 tests/run_all.sh         # slower models
 tests/test_sandbox_applied.sh                         # one test (macOS)
 tests/test_sandbox_deny_outside.sh                    # one test (macOS)
@@ -42,21 +41,17 @@ node --test tests/*.test.mjs                          # unit (incl. sandbox prof
 Default model is `minimax-cn/MiniMax-M3` (same as local `~/.pi/agent/models.json`).
 Needs `MINIMAX_API_KEY` in the environment.
 
-## CI / merge queue
+## CI
 
-Two-step gate (see `.mergify.yml`):
+`.github/workflows/ci.yml` runs for every pull request to `main`. Its `ci`,
+`macos-sandbox`, and `linux-sandbox` jobs must pass before a reviewed PR is
+merged through GitHub's normal pull request flow.
 
-| Step | Workflow | When | Check name |
-|------|----------|------|------------|
-| 1. PR gate | `.github/workflows/ci.yml` | every PR | `ci` |
-| 2. Queue gate | `.github/workflows/integration-tests.yml` | `mergify/merge-queue/*` only | `integration` |
-
-The Ubuntu queue lane first installs and probes `bwrap`, then runs
-`linux_bubblewrap.integration.mjs` as a required real-filesystem boundary test.
-It runs `test_env_inherit.sh`, `test_web_fetch.sh`, `test_gh_issues.sh`, and
-`test_headless_isolation.sh` through the selected Linux sandbox command. The
-PR gate's `macos-sandbox` job runs the existing deterministic macOS
-`sandbox-exec` scripts with their unchanged assertions. Linux write-sandbox:
+The Ubuntu Linux lane first installs and probes `bwrap`, then runs
+`linux_bubblewrap.integration.mjs` as a real-filesystem boundary test. The
+`macos-sandbox` job runs the existing deterministic macOS `sandbox-exec`
+scripts with their unchanged assertions. The networked real-child scenarios
+remain part of `run_all.sh` for authenticated local runs. Linux write-sandbox:
 [#5](https://github.com/1aboveio/pi-better-subagents/issues/5).
 
 ## What to expect
