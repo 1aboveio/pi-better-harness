@@ -152,7 +152,16 @@ export function unregisterBackgroundWorkProvider(id: string): void {
 }
 
 export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boolean {
-  return Boolean(ctx && ctx.mode === "tui" && ctx.hasUI === true && ctx.ui);
+  // A ctx captured by a previous session throws on property access once the
+  // session has been replaced or reloaded (pi's stale guard). Treat it as
+  // "no UI" instead of crashing the caller — typically the extension factory,
+  // where this would permanently fail the extension for the whole session.
+  if (!ctx) return false;
+  try {
+    return Boolean(ctx && ctx.mode === "tui" && ctx.hasUI === true && ctx.ui);
+  } catch {
+    return false;
+  }
 }
 
 export function navigatorFooterHint(count: number): string | null {
@@ -207,7 +216,11 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   s.detailOverlayRows = undefined;
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
-  if (ctx && s.uiCtx === ctx) s.uiCtx = undefined;
+  // The session that owned this UI is shutting down: drop the captured ctx
+  // unconditionally. If a factory crashed earlier, no session_shutdown handler
+  // ever ran and the stale ctx would otherwise be served to the next load —
+  // which is how a single failed load poisons every reload that follows.
+  s.uiCtx = undefined;
 }
 
 export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {
