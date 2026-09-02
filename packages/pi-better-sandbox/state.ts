@@ -2,13 +2,13 @@
  * Session-local foreground sandbox state.
  *
  * One controller per Pi session owns three things: the canonical project root
- * captured at session start, whether a human has switched protection off, and
+ * captured at session start, the persisted default plus session override, and
  * the *effective* status derived from live runtime evidence (which backend this
  * platform actually resolves, not what the package intended).
  *
- * The enabled state is deliberately in-memory only. Every session start —
- * startup, new, resume, fork, reload — calls `beginSession` and lands back on
- * enabled, which is what "an off state is never persisted" means in practice.
+ * Session overrides are deliberately in-memory only. Every session start —
+ * startup, new, resume, fork, reload — calls `beginSession` with the persisted
+ * default and clears the previous override.
  */
 
 import { createHash } from "node:crypto";
@@ -32,13 +32,14 @@ import {
 /**
  * What the foreground sandbox is actually doing right now.
  *
+ * - `inactive`  - default-off; protected operations run unconfined.
  * - `enabled`   - a backend is resolved and protected operations are wrapped.
  * - `disabled`  - a human turned it off for this session.
  * - `unavailable` - this platform resolves no backend; protected operations are blocked.
  * - `failed`    - protection cannot be applied here (no session yet, or an
  *                 unsafe launch root); protected operations are blocked.
  */
-export type ForegroundSandboxState = "enabled" | "disabled" | "unavailable" | "failed";
+export type ForegroundSandboxState = "inactive" | "enabled" | "disabled" | "unavailable" | "failed";
 
 /**
  * The immutable effective-policy snapshot published to first-party consumers
@@ -109,7 +110,8 @@ export class ForegroundSandboxController {
     #unsafeRootReason: string | undefined;
     #denyWrite: readonly string[] = [];
     #denyTemplates: readonly string[] = PACKAGED_DENY_WRITE_TEMPLATES;
-    #userEnabled = true;
+    #defaultEnabled = false;
+    #sessionOverride: boolean | undefined;
     #profileDir: string | undefined;
 
     constructor(seams: ForegroundSandboxSeams = {}) {
@@ -117,12 +119,10 @@ export class ForegroundSandboxController {
     }
 
     /**
-     * Capture the canonical launch directory and re-arm protection.
-     *
-     * Called for every session start reason, which is what keeps a previous
-     * `/sandbox off` from surviving a new, resumed, forked, or reloaded session.
+     * Capture the canonical launch directory and apply the persisted default.
+     * A session override never survives a new, resumed, forked, or reloaded session.
      */
-    beginSession(cwd: string): ForegroundSandboxStatus {
+    beginSession(cwd: string, defaultEnabled = false): ForegroundSandboxStatus {
         const projectRoot = canonicalizePath(cwd, this.#seams);
         this.#projectRoot = projectRoot;
         this.#unsafeRootReason = describeUnsafeProjectRoot(projectRoot, this.#seams);
@@ -131,25 +131,33 @@ export class ForegroundSandboxController {
                 ? []
                 : resolveDenyWriteTemplates(this.#denyTemplates, projectRoot, this.#seams),
         );
-        this.#userEnabled = true;
+        this.#defaultEnabled = defaultEnabled;
+        this.#sessionOverride = undefined;
         return this.status();
     }
 
     /** Re-enable protection for operations launched from now on. */
     enable(): ForegroundSandboxStatus {
-        this.#userEnabled = true;
+        this.#sessionOverride = true;
         return this.status();
     }
 
     /** Turn protection off for this session only. Never persisted. */
     disable(): ForegroundSandboxStatus {
-        this.#userEnabled = false;
+        this.#sessionOverride = false;
+        return this.status();
+    }
+
+    /** Apply a newly persisted default immediately and clear the session override. */
+    applyDefault(defaultEnabled: boolean): ForegroundSandboxStatus {
+        this.#defaultEnabled = defaultEnabled;
+        this.#sessionOverride = undefined;
         return this.status();
     }
 
     /** Whether a human has left protection switched on. */
     isUserEnabled(): boolean {
-        return this.#userEnabled;
+        return this.#sessionOverride ?? this.#defaultEnabled;
     }
 
     /** The deny-write templates currently in force (packaged defaults for now). */
@@ -194,14 +202,19 @@ export class ForegroundSandboxController {
             });
         }
 
-        if (!this.#userEnabled) {
+        if (!this.isUserEnabled()) {
+            const explicitlyDisabled = this.#sessionOverride === false;
             return Object.freeze({
                 ...base,
-                state: "disabled",
+                state: explicitlyDisabled ? "disabled" : "inactive",
                 writableRoot: undefined,
                 backend: support.supported ? support.backend : undefined,
                 executable: support.supported ? support.executable : undefined,
-                reason: "A human turned the foreground sandbox off for this session with /sandbox off.",
+                reason: explicitlyDisabled
+                    ? "A human turned the foreground sandbox off for this session with /sandbox off."
+                    : support.supported
+                      ? "The foreground sandbox is available but inactive by default. Use /sandbox on for this session or /sandbox default on to persist opt-in."
+                      : `The foreground sandbox is inactive by default, and no backend is available: ${support.reason}`,
             });
         }
 
@@ -240,13 +253,12 @@ export class ForegroundSandboxController {
     /**
      * Decide how to launch one protected operation.
      *
-     * Returns an unconfined plan only when a human explicitly disabled the
-     * sandbox. Every other non-enabled state throws, so a missing or unusable
-     * backend blocks the operation rather than silently degrading it.
+     * Returns an unconfined plan while the sandbox is inactive or explicitly
+     * disabled. Once enabled, missing or unusable backends fail closed.
      */
     requireLaunchPlan(): ForegroundSandboxLaunchPlan {
         const status = this.status();
-        if (status.state === "disabled") return { confined: false };
+        if (status.state === "inactive" || status.state === "disabled") return { confined: false };
         if (status.state !== "enabled" || status.writableRoot === undefined) {
             throw new ForegroundSandboxBlockedError(status);
         }

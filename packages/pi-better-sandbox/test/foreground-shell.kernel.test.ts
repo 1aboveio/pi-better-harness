@@ -134,6 +134,7 @@ before(async () => {
 
     piBetterSandbox(pi);
     await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+    await commands.get("sandbox")?.handler("on", ctx);
 });
 
 type Outcome = { ok: true; text: string } | { ok: false; message: string };
@@ -358,7 +359,7 @@ test("user-entered ! commands run under the same confinement", { skip }, async (
 test("a selected backend that cannot initialize blocks the command instead of running it", { skip: skip || macOSOnly }, async () => {
     const marker = join(projectRoot, "failed-backend-marker.txt");
     const controller = new ForegroundSandboxController();
-    controller.beginSession(projectRoot);
+    controller.beginSession(projectRoot, true);
     const operations = createSandboxedBashOperations(controller, {
         // A profile the backend will reject: sandbox-exec exits before it ever
         // reaches the child, and nothing retries the child directly.
@@ -387,7 +388,7 @@ test("a Linux backend that exits before the child blocks the command too", { ski
 
     const marker = join(projectRoot, "linux-failed-backend-marker.txt");
     const controller = new ForegroundSandboxController();
-    controller.beginSession(projectRoot);
+    controller.beginSession(projectRoot, true);
     const operations = createSandboxedBashOperations(controller, {
         lookupExecutable: (name) => (name === "bwrap" ? failingBwrap : undefined),
     });
@@ -459,7 +460,7 @@ test("/sandbox off lifts confinement and /sandbox on restores it without a resta
 
 test("an unsafe launch root blocks the shell rather than granting it", { skip }, async () => {
     const unsafe = new ForegroundSandboxController();
-    unsafe.beginSession("/");
+    unsafe.beginSession("/", true);
     const operations = createSandboxedBashOperations(unsafe);
     const marker = join(projectRoot, "unsafe-root-marker.txt");
 
@@ -565,7 +566,7 @@ test("a confined command cannot rewrite the profile the next one is launched und
     // for the wrong reason.
     const profileDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-better-sandbox-kernel-profiles-")));
     const controller = new ForegroundSandboxController({ createProfileDir: () => profileDir });
-    controller.beginSession(projectRoot);
+    controller.beginSession(projectRoot, true);
     const operations = createSandboxedBashOperations(controller);
     const marker = join(projectRoot, "profile-probe.txt");
     const planted = join(profileDir, "planted.sb");

@@ -74,7 +74,7 @@ test("single-quote escaping survives a real shell round trip", () => {
 test("the wrapped command execs the backend around pi's own shell with the command intact", () => {
     const controller = new ForegroundSandboxController(seams());
     const root = project("wrapping");
-    controller.beginSession(root);
+    controller.beginSession(root, true);
     const plan = controller.requireLaunchPlan();
     assert.equal(plan.confined, true);
     if (!plan.confined) return;
@@ -92,7 +92,7 @@ test("the wrapped command execs the backend around pi's own shell with the comma
 test("the generated profile confines writes to the canonical root and carves out the deny paths", () => {
     const controller = new ForegroundSandboxController(seams());
     const root = project("profile-contents");
-    controller.beginSession(root);
+    controller.beginSession(root, true);
     const plan = controller.requireLaunchPlan();
     assert.equal(plan.confined, true);
     if (!plan.confined) return;
@@ -115,7 +115,7 @@ test("an enabled sandbox with no backend blocks the command instead of running i
     const controller = new ForegroundSandboxController(
         seams({ platform: () => "linux", lookupExecutable: () => undefined }),
     );
-    controller.beginSession(project("no-backend"));
+    controller.beginSession(project("no-backend"), true);
     const operations = createSandboxedBashOperations(controller, {
         ...seams({ platform: () => "linux", lookupExecutable: () => undefined }),
         localOperations: local,
@@ -131,7 +131,7 @@ test("an enabled sandbox with no backend blocks the command instead of running i
 test("an unsafe launch root blocks the command instead of running it unconfined", async () => {
     const local = recordingLocal();
     const controller = new ForegroundSandboxController(seams());
-    controller.beginSession(home);
+    controller.beginSession(home, true);
     const operations = createSandboxedBashOperations(controller, {
         ...seams(),
         localOperations: local,
@@ -156,6 +156,23 @@ test("a disabled sandbox hands pi's backend the untouched command", async () => 
 
     await operations.exec("echo hello", process.cwd(), { onData: () => {} });
 
+    assert.deepEqual(local.calls, ["echo hello"]);
+});
+
+test("the default inactive sandbox runs unconfined when no backend exists", async () => {
+    const local = recordingLocal();
+    const controller = new ForegroundSandboxController(
+        seams({ platform: () => "win32", lookupExecutable: () => undefined }),
+    );
+    controller.beginSession(project("inactive-windows"));
+    const operations = createSandboxedBashOperations(controller, {
+        ...seams({ platform: () => "win32", lookupExecutable: () => undefined }),
+        localOperations: local,
+    });
+
+    await operations.exec("echo hello", process.cwd(), { onData: () => {} });
+
+    assert.equal(controller.status().state, "inactive");
     assert.deepEqual(local.calls, ["echo hello"]);
 });
 
@@ -205,7 +222,7 @@ test("streaming, timeout, cancellation and env options reach pi's backend unchan
 test("a new deny rule reaches the next command's profile, and cannot rewrite a running one", () => {
     const controller = new ForegroundSandboxController(seams());
     const root = project("deny-rule-reaches-shell");
-    controller.beginSession(root);
+    controller.beginSession(root, true);
 
     // A command launches under the rules in force right now.
     const first = controller.requireLaunchPlan();
@@ -239,7 +256,7 @@ test("the operations pi already holds pick up a rule change on the next command"
     const local = recordingLocal();
     const controller = new ForegroundSandboxController(seams());
     const root = project("deny-rule-no-reregistration");
-    controller.beginSession(root);
+    controller.beginSession(root, true);
     // Built once, exactly as the extension builds them at load time.
     const operations = createSandboxedBashOperations(controller, {
         ...seams(),

@@ -1,5 +1,5 @@
 /**
- * pi-better-sandbox - a default-on write sandbox for foreground tool execution.
+ * pi-better-sandbox - an opt-in write sandbox for foreground tool execution.
  *
  * Installing this package loads an extension; it ships no launcher, so users
  * keep starting Pi with plain `pi`. While enabled, the built-in `bash` tool and
@@ -38,6 +38,7 @@ import {
     createSandboxedEditOperations,
     createSandboxedWriteOperations,
 } from "./files.ts";
+import { readSandboxDefault, writeSandboxDefault } from "./preferences.ts";
 import { createSandboxedBashOperations } from "./shell.ts";
 import { footerTone, formatFooterStatus } from "./status.ts";
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
@@ -109,10 +110,19 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             );
         };
 
-        // Every session start re-captures the project root and re-arms
-        // protection, so an earlier /sandbox off never survives into a new,
-        // resumed, forked, or reloaded session.
-        controller.beginSession(ctx.cwd);
+        // Every session re-reads the persistent activation preference. Missing
+        // or malformed state resolves to the product default (off), never to an
+        // unexpected fail-closed session.
+        let defaultEnabled = false;
+        try {
+            defaultEnabled = readSandboxDefault() === "on";
+        } catch (error) {
+            ctx.ui.notify(
+                `Foreground sandbox preference ignored; defaulting off: ${error instanceof Error ? error.message : String(error)}`,
+                "warning",
+            );
+        }
+        controller.beginSession(ctx.cwd, defaultEnabled);
 
         // Then the rules are re-read and re-resolved, because the same global
         // template set means different absolute paths in a different project.
@@ -130,7 +140,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
                 "warning",
             );
         }
-        if (status.state !== "enabled") {
+        if (status.state !== "enabled" && status.state !== "inactive") {
             ctx.ui.notify(
                 `Foreground sandbox ${status.state}: ${status.reason}`,
                 status.state === "disabled" ? "info" : "warning",
@@ -145,7 +155,15 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     pi.registerCommand(SANDBOX_COMMAND_NAME, {
         description: SANDBOX_COMMAND_DESCRIPTION,
         getArgumentCompletions: sandboxArgumentCompletions,
-        handler: createSandboxCommandHandler({ controller, denyRules, onStateChange: announce }),
+        handler: createSandboxCommandHandler({
+            controller,
+            denyRules,
+            onStateChange: announce,
+            setDefault: (enabled) => {
+                writeSandboxDefault(enabled ? "on" : "off");
+                return controller.applyDefault(enabled);
+            },
+        }),
     });
 }
 
@@ -201,6 +219,16 @@ export {
     readDenyRuleOverride,
     writeDenyRuleOverride,
 } from "./deny-rules.ts";
+export {
+    readSandboxDefault,
+    SANDBOX_PREFERENCES_FILE_NAME,
+    SANDBOX_PREFERENCES_FORMAT_VERSION,
+    SandboxPreferenceError,
+    sandboxPreferencesPath,
+    type SandboxDefaultMode,
+    type SandboxPreferenceSeams,
+    writeSandboxDefault,
+} from "./preferences.ts";
 export { openSandboxRulesPage, RULES_PAGE_NO_UI_REJECTION } from "./rules-page.ts";
 export {
     describeUnsafeProjectRoot,

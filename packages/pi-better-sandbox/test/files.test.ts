@@ -38,7 +38,11 @@ import {
     discoverAndLoadExtensions,
     withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
-import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+    ExtensionCommandContext,
+    ExtensionContext,
+    ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 
 import {
     createForegroundWriteGuard,
@@ -121,7 +125,7 @@ function unmodified(cwd: string): Tools {
 
 function sessionAt(root: string): ForegroundSandboxController {
     const controller = new ForegroundSandboxController();
-    controller.beginSession(root);
+    controller.beginSession(root, true);
     return controller;
 }
 
@@ -384,6 +388,18 @@ test("a disabled sandbox delegates to normal local behaviour", async () => {
     assert.equal(readFileSync(join(root, ".env"), "utf8"), "SECRET=off\n");
 });
 
+test("the default inactive sandbox delegates without requiring a backend", async () => {
+    const { root, outside } = project("inactive");
+    const controller = new ForegroundSandboxController({ platform: () => "win32" });
+    controller.beginSession(root);
+    const tools = confined(controller, root);
+
+    await runWrite(tools, { path: join(outside, "default-off.txt"), content: "off\n" });
+
+    assert.equal(controller.status().state, "inactive");
+    assert.equal(readFileSync(join(outside, "default-off.txt"), "utf8"), "off\n");
+});
+
 test("re-enabling confines the next mutation without rebuilding the tools", async () => {
     const { root, outside } = project("re-enabled");
     const controller = sessionAt(root);
@@ -404,7 +420,7 @@ test("an unavailable backend blocks mutations instead of silently delegating", a
     // A platform with no supported backend: the sandbox is enabled but cannot
     // be applied, which must block rather than fall through to a plain write.
     const controller = new ForegroundSandboxController({ platform: () => "sunos" });
-    controller.beginSession(root);
+    controller.beginSession(root, true);
     const tools = confined(controller, root);
 
     assert.equal(controller.status().state, "unavailable");
@@ -428,7 +444,7 @@ test("an unavailable backend blocks mutations instead of silently delegating", a
 test("a failed state — an unsafe launch root — blocks mutations", async () => {
     const { root } = project("unsafe-root");
     const controller = new ForegroundSandboxController({ home: () => root });
-    controller.beginSession(root);
+    controller.beginSession(root, true);
     const tools = confined(controller, root);
 
     assert.equal(controller.status().state, "failed");
@@ -715,6 +731,9 @@ test("the registrations pi actually loads enforce the same policy on real files"
     const sessionStart = extension.handlers.get("session_start")?.[0];
     assert.ok(sessionStart, "the extension must handle session_start");
     await sessionStart({ type: "session_start", reason: "startup" }, sessionContext(root));
+    await extension.commands
+        .get("sandbox")
+        ?.handler("on", sessionContext(root) as unknown as ExtensionCommandContext);
 
     const write = extension.tools.get("write")?.definition as unknown as Tools["write"] | undefined;
     const edit = extension.tools.get("edit")?.definition as unknown as Tools["edit"] | undefined;
