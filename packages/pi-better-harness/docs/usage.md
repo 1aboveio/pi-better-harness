@@ -4,7 +4,7 @@ Meta package for the core Pi Better Harness extensions.
 
 Use it to manage the tools used most often in Pi:
 
-- `pi-better-sandbox` for a default-on write sandbox around Pi's foreground tools
+- `pi-better-sandbox` for an opt-in write sandbox around Pi's foreground tools
 - `pi-better-subagents` for detached subagent runs and completion callbacks
 - `pi-better-background-tasks` for durable shell tasks and command watchers
 - `pi-better-goal` for current-goal tracking and background-aware continuation
@@ -35,8 +35,9 @@ Nothing changes about how you start Pi:
 pi
 ```
 
-The sandbox extension arms itself at every session start — startup, new session,
-resume, fork, and reload. It ships no launcher and writes no settings file. See
+The sandbox extension starts inactive. `/sandbox on` enables it for the current
+session; `/sandbox default on` persists opt-in across startup, new session,
+resume, fork, and reload. It ships no launcher. See
 [the sandbox package](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme)
 for the full policy.
 
@@ -54,10 +55,11 @@ After installation, Pi can use these model-callable tools:
 The goal extension also provides the `/goal` and `/better-activity` commands.
 
 Sandbox control is human-only. `/sandbox`, `/sandbox on`, `/sandbox off`,
-`/sandbox deny ...`, and `/sandbox rules` are slash commands with no tool
-equivalent, so the model cannot disable its own confinement or edit the paths it
-is confined away from. `/sandbox off` additionally needs an interactive
-confirmation and is refused where there is no interactive UI.
+`/sandbox default on|off`, `/sandbox deny ...`, and `/sandbox rules` are slash
+commands with no tool equivalent, so the model cannot change its own
+confinement or edit the paths it is confined away from. `/sandbox off` and
+`/sandbox default off` additionally need interactive confirmation and are
+refused where there is no interactive UI.
 
 ### What is and is not confined
 

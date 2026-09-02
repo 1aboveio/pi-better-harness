@@ -191,10 +191,10 @@ Three properties follow:
   so an already-running task keeps its launch policy when the foreground policy
   changes. A watcher resumed in a later Pi session re-runs the wrapper it started
   with, reading the profile stored in its own task directory.
-- **Fail closed.** An `unavailable` or `failed` foreground state refuses the
-  launch and says why. The local command is never retried unconfined. Only an
-  explicit `disabled` state — a human's `/sandbox off` — launches without a
-  sandbox.
+- **Opt-in, then fail closed.** The default `inactive` state and an explicit
+  `disabled` state launch without a sandbox. Once enabled, an `unavailable` or
+  `failed` foreground state refuses the launch and says why; the local command
+  is never retried unconfined.
 - **Local only.** Structured remote SSH spawn and watch never consult the
   foreground policy, and their tmux lifecycle, stop semantics, and remote
   metadata are untouched.

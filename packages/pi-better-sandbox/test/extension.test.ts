@@ -33,6 +33,7 @@ import type {
 import piBetterSandbox from "../index.ts";
 import { sandboxArgumentCompletions } from "../commands.ts";
 import { denyRuleOverridePath } from "../deny-rules.ts";
+import { sandboxPreferencesPath, writeSandboxDefault } from "../preferences.ts";
 import { PACKAGED_DENY_WRITE_TEMPLATES } from "../policy.ts";
 import { RULES_PAGE_NO_UI_REJECTION } from "../rules-page.ts";
 import {
@@ -70,6 +71,10 @@ assert.equal(denyRuleOverridePath().startsWith(agentDir), true);
 /** Drop any override a previous test left behind, so each starts on defaults. */
 function forgetDenyOverride(): void {
     rmSync(denyRuleOverridePath(), { force: true });
+}
+
+function forgetSandboxPreference(): void {
+    rmSync(sandboxPreferencesPath(), { force: true });
 }
 
 function project(name: string): string {
@@ -181,11 +186,15 @@ async function startSession(
     recorded: Recorded,
     cwd: string,
     reason: SessionStartEvent["reason"] = "startup",
+    activate = true,
+    resetPreference = true,
 ) {
+    if (resetPreference) forgetSandboxPreference();
     const started = context(cwd);
     const handler = recorded.handlers.get("session_start");
     assert.ok(handler, "the extension must handle session_start");
     await handler({ type: "session_start", reason }, started.ctx);
+    if (activate) await recorded.commands.get("sandbox")?.handler("on", started.ctx);
     return started;
 }
 
@@ -281,17 +290,18 @@ test("user_bash routes ! and !! through the same confined operations as the bash
     assert.equal(first.operations, second.operations);
 });
 
-test("every session start publishes an enabled policy and paints the footer", async () => {
+test("every session start publishes an inactive policy and an available footer by default", async () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("lifecycle");
 
     for (const reason of ["startup", "new", "resume", "fork", "reload"] as const) {
-        const started = await startSession(recorded, root, reason);
+        const started = await startSession(recorded, root, reason, false);
         const policy = recorded.published.at(-1);
-        assert.equal(policy?.state, "enabled", `state after ${reason}`);
+        assert.equal(policy?.state, "disabled", `consumer state after ${reason}`);
+        assert.match(policy?.reason ?? "", /inactive by default/);
         assert.equal(policy?.projectRoot, root);
-        assert.equal(started.statuses.at(-1), `sandbox · on · ${"lifecycle"}`);
+        assert.equal(started.statuses.at(-1), "sandbox · available");
     }
 });
 
@@ -406,7 +416,67 @@ test("a confirmed /sandbox off disables it, and /sandbox on restores it without 
     assert.equal(started.statuses.at(-1), `sandbox · on · confirmed-off`);
 });
 
-test("an off state never survives the next session start", async () => {
+test("/sandbox default on persists opt-in and applies it to future sessions", async () => {
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("persistent-default-on");
+    await startSession(recorded, root, "startup", false);
+    assert.equal(recorded.published.at(-1)?.state, "disabled");
+
+    const shown = context(root);
+    await recorded.commands.get("sandbox")?.handler("default on", shown.ctx);
+
+    assert.equal(recorded.published.at(-1)?.state, "enabled");
+    assert.equal(JSON.parse(readFileSync(sandboxPreferencesPath(), "utf8")).default, "on");
+
+    const next = context(root);
+    await recorded.handlers.get("session_start")?.(
+        { type: "session_start", reason: "resume" },
+        next.ctx,
+    );
+    assert.equal(recorded.published.at(-1)?.state, "enabled");
+});
+
+test("/sandbox default off requires confirmation, persists opt-out, and applies immediately", async () => {
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("persistent-default-off");
+    await startSession(recorded, root);
+
+    const declining = context(root, { confirm: false });
+    await recorded.commands.get("sandbox")?.handler("default off", declining.ctx);
+    assert.equal(existsSync(sandboxPreferencesPath()), false);
+    assert.equal(recorded.published.at(-1)?.state, "enabled");
+
+    const confirming = context(root, { confirm: true });
+    await recorded.commands.get("sandbox")?.handler("default off", confirming.ctx);
+    assert.equal(JSON.parse(readFileSync(sandboxPreferencesPath(), "utf8")).default, "off");
+    assert.equal(recorded.published.at(-1)?.state, "disabled");
+});
+
+test("a malformed persisted preference warns and defaults the session off", async () => {
+    forgetSandboxPreference();
+    mkdirSync(dirname(sandboxPreferencesPath()), { recursive: true });
+    writeFileSync(sandboxPreferencesPath(), '{"version":1,"default":"invalid"}\n');
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("malformed-preference");
+
+    const started = context(root);
+    await recorded.handlers.get("session_start")?.(
+        { type: "session_start", reason: "startup" },
+        started.ctx,
+    );
+
+    assert.equal(recorded.published.at(-1)?.state, "disabled");
+    assert.ok(
+        started.notifications.some(
+            (note) => note.kind === "warning" && note.text.includes("defaulting off"),
+        ),
+    );
+});
+
+test("a session override never survives the next session start", async () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("no-persist");
@@ -414,9 +484,9 @@ test("an off state never survives the next session start", async () => {
     await recorded.commands.get("sandbox")?.handler("off", context(root, { confirm: true }).ctx);
     assert.equal(recorded.published.at(-1)?.state, "disabled");
 
-    await startSession(recorded, root, "resume");
+    await startSession(recorded, root, "resume", false);
 
-    assert.equal(recorded.published.at(-1)?.state, "enabled");
+    assert.equal(recorded.published.at(-1)?.state, "disabled");
 });
 
 test("an unknown /sandbox subcommand explains the usage instead of changing state", async () => {
@@ -839,22 +909,24 @@ test("rule management is reachable only from the slash command, never from a too
     assert.equal(existsSync(denyRuleOverridePath()), false);
 });
 
-test("every session start re-reads the rules, while the off state never survives", async () => {
+test("every session start re-reads rules and reapplies a persisted opt-in", async () => {
     forgetDenyOverride();
+    forgetSandboxPreference();
+    writeSandboxDefault("on");
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("rules-across-sessions");
-    await startSession(recorded, root);
+    await startSession(recorded, root, "startup", false, false);
     await runSandbox(recorded, "deny add build", context(root).ctx);
 
     for (const reason of ["new", "resume", "fork", "reload"] as const) {
         await runSandbox(recorded, "off", context(root, { confirm: true }).ctx);
         assert.equal(recorded.published.at(-1)?.state, "disabled");
 
-        await startSession(recorded, root, reason);
+        await startSession(recorded, root, reason, false, false);
 
         const policy = recorded.published.at(-1);
-        assert.equal(policy?.state, "enabled", `protection is re-armed after ${reason}`);
+        assert.equal(policy?.state, "enabled", `the persisted opt-in is applied after ${reason}`);
         assert.ok(
             policy?.denyWrite.includes(join(root, "build")),
             `the rules are re-read after ${reason}`,
@@ -910,14 +982,18 @@ test("a stored rule that cannot apply here is shown as such, never as protection
     );
 });
 
-test("completions cover the subcommands and the deny actions", () => {
+test("completions cover activation defaults and deny actions", () => {
     assert.deepEqual(
         sandboxArgumentCompletions("").map((entry) => entry.value),
-        ["on", "off", "deny", "rules"],
+        ["on", "off", "default", "deny", "rules"],
     );
     assert.deepEqual(
         sandboxArgumentCompletions("de").map((entry) => entry.value),
-        ["deny"],
+        ["default", "deny"],
+    );
+    assert.deepEqual(
+        sandboxArgumentCompletions("default ").map((entry) => entry.value),
+        ["default on", "default off"],
     );
     assert.deepEqual(
         sandboxArgumentCompletions("deny ").map((entry) => entry.value),

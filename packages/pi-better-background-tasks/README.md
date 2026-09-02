@@ -27,8 +27,10 @@ the effective foreground policy at launch and runs under the platform's write
 sandbox: reads and network stay unrestricted, writes are confined to the
 canonical project directory, and denied paths stay denied.
 
-The policy is captured once, when the task starts. A later `/sandbox on`,
-`/sandbox off`, or deny-rule change reaches tasks launched after it; a task
+The policy is captured once, when the task starts. The foreground sandbox is
+inactive by default, so local tasks ordinarily launch unconfined. A later
+`/sandbox on`, `/sandbox off`, `/sandbox default on|off`, or a deny-rule change
+reaches tasks launched after it; a task
 already running — including a watcher resumed in a later Pi session — keeps the
 policy it started with.
 
@@ -45,8 +47,8 @@ process, `pi.exec` calls, and unrelated third-party extension code stay outside
 the guarantee, and confinement is per surface: a confined process on another
 first-party surface can still write this one's task registry. Installing
 [`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme)
-brings the sandbox in by default, so an ordinary `pi` session confines its
-foreground tools and its local background tasks under one project policy.
+installs the sandbox extension, but leaves foreground tools and local background
+tasks inactive until a human opts in.
 
 ## Remote SSH
 
