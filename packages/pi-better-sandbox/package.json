@@ -1,6 +1,6 @@
 {
   "name": "pi-better-sandbox",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Pi extension that confines foreground shell execution to the project directory with a kernel-enforced write sandbox.",
   "license": "MIT",
   "type": "module",
