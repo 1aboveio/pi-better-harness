@@ -152,7 +152,12 @@ export function unregisterBackgroundWorkProvider(id: string): void {
 }
 
 export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boolean {
-  return Boolean(ctx && ctx.mode === "tui" && ctx.hasUI === true && ctx.ui);
+  if (!ctx) return false;
+  try {
+    return Boolean(ctx.mode === "tui" && ctx.hasUI === true && ctx.ui);
+  } catch {
+    return false;
+  }
 }
 
 export function navigatorFooterHint(count: number): string | null {
@@ -191,8 +196,10 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   try { s.dispose?.(); } catch { /* ignore */ }
   s.dispose = undefined;
   stopMainListWidget();
-  const ui = (ctx ?? s.uiCtx)?.ui;
-  if (ui && isNavigatorUiAvailable(ctx ?? s.uiCtx)) {
+  const activeCtx = ctx ?? s.uiCtx;
+  s.uiCtx = undefined;
+  if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
+    const ui = activeCtx.ui;
     try { applyNavigatorFooter(ui as any, 0); } catch { /* ignore */ }
     try { applyCloseConfirmFooter(ui as any, null); } catch { /* ignore */ }
     try { (ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
@@ -207,7 +214,6 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   s.detailOverlayRows = undefined;
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
-  if (ctx && s.uiCtx === ctx) s.uiCtx = undefined;
 }
 
 export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {
