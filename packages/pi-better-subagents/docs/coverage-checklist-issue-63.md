@@ -41,4 +41,4 @@ _Every row = a decision (PASS / FAIL / N/A) backed by a checkable evidence locat
 
 | Check | Method | Decision | Evidence |
 |---|---|---|---|
-| CI wires all required gates and keeps them blocking | gate-lint | N/A | repo has not adopted the full ensure-coverage CI contract (pre-existing — `ci-audit.mjs` findings predate this diff); the repo PR gate runs the full unit suite `.github/workflows/ci.yml` (`node --test tests/*.test.mjs`) + macOS sandbox lane, and the queue gate runs integration tests |
+| CI wires all required gates and keeps them blocking | gate-lint | N/A | repo has not adopted the full ensure-coverage CI contract (pre-existing — `ci-audit.mjs` findings predate this diff); the PR workflow runs the full unit suite `.github/workflows/ci.yml` (`node --test tests/*.test.mjs`) plus the macOS and Linux sandbox lanes |

@@ -22,6 +22,7 @@ const plain: StatusPainter = (_tone, text) => text;
 /** The tone the footer uses for a given state. */
 export function footerTone(status: ForegroundSandboxStatus): StatusTone {
     if (status.state === "enabled") return "accent";
+    if (status.state === "inactive") return status.backend === undefined ? "warning" : "accent";
     if (status.state === "unavailable") return "warning";
     return "error";
 }
@@ -39,6 +40,9 @@ export function formatFooterStatus(
     const tone = footerTone(status);
     if (status.state === "enabled" && status.writableRoot !== undefined) {
         return paint(tone, `sandbox · on · ${basename(status.writableRoot)}`);
+    }
+    if (status.state === "inactive") {
+        return paint(tone, status.backend === undefined ? "sandbox · inactive" : "sandbox · available");
     }
     if (status.state === "disabled") return paint(tone, "sandbox · OFF");
     if (status.state === "unavailable") return paint(tone, "sandbox · UNAVAILABLE");

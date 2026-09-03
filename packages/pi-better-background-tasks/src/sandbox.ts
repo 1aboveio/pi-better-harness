@@ -12,10 +12,10 @@
  *    argv are resolved once, when the task starts, and are what the task keeps
  *    running. A later `/sandbox off` or deny-rule change therefore reaches only
  *    tasks launched after it.
- * 2. **Fail closed.** Once the foreground state says a sandbox should apply, a
- *    missing or unusable backend blocks the launch. The local command is never
- *    retried unconfined behind the operator's back. The single exception is an
- *    explicitly `disabled` state, which is a human's deliberate decision.
+ * 2. **Opt-in, then fail closed.** `inactive` and explicitly `disabled` states
+ *    launch unconfined. Once foreground policy says confinement applies, a
+ *    missing or unusable backend blocks the launch and is never retried
+ *    unconfined behind the operator's back.
  *
  * The contract is duplicated here rather than imported: `pi-better-sandbox` is
  * an optional peer that this package must keep working without. Two channel
@@ -53,12 +53,13 @@ export const FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL = "pi-better-sandbox:poli
 /**
  * What the foreground sandbox is doing right now.
  *
+ * - `inactive`    - default-off foreground policy; launch tasks as before.
  * - `enabled`     - confine locally launched tasks.
  * - `disabled`    - a human switched protection off; launch tasks as before.
  * - `unavailable` - no backend on this platform; block protected launches.
  * - `failed`      - protection cannot be applied here; block protected launches.
  */
-export type ForegroundSandboxState = "enabled" | "disabled" | "unavailable" | "failed";
+export type ForegroundSandboxState = "inactive" | "enabled" | "disabled" | "unavailable" | "failed";
 
 /** The published snapshot, narrowed to the fields a task launch needs. */
 export interface ForegroundSandboxPolicy {
@@ -101,7 +102,7 @@ export type ForegroundSandboxPlan =
 
 const UNCONFINED: ForegroundSandboxPlan = { confined: false };
 
-const VALID_STATES = new Set<string>(["enabled", "disabled", "unavailable", "failed"]);
+const VALID_STATES = new Set<string>(["inactive", "enabled", "disabled", "unavailable", "failed"]);
 
 /**
  * The latest snapshot per event bus.
@@ -183,8 +184,8 @@ export function currentForegroundSandboxPolicy(pi: unknown): ForegroundSandboxPo
  * Decide how a local launch must be confined, before the task has an id, a
  * directory, or a log.
  *
- * Throws for every state that is neither confinable nor a human's explicit
- * opt-out, which is what keeps a blocked launch from leaving task state behind.
+ * Throws for every state that is neither confinable nor intentionally
+ * unconfined, which keeps a blocked launch from leaving task state behind.
  */
 export function resolveForegroundSandboxPlan(pi: unknown): ForegroundSandboxPlan {
   return planFor(currentForegroundSandboxPolicy(pi));
@@ -195,7 +196,7 @@ export function planFor(policy: ForegroundSandboxPolicy | undefined): Foreground
   // No sandbox extension is publishing: this package is installed on its own and
   // keeps its historical unsandboxed behaviour.
   if (!policy) return UNCONFINED;
-  if (policy.state === "disabled") return UNCONFINED;
+  if (policy.state === "inactive" || policy.state === "disabled") return UNCONFINED;
   if (policy.state !== "enabled" || !policy.writableRoot) {
     throw new ForegroundSandboxBlockedError(policy);
   }

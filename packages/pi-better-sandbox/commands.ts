@@ -26,13 +26,15 @@ import type { ForegroundSandboxController, ForegroundSandboxStatus } from "./sta
 export const SANDBOX_COMMAND_NAME = "sandbox";
 
 export const SANDBOX_COMMAND_DESCRIPTION =
-    "Show the foreground write sandbox, turn it on or off for this session, or manage write-denied paths";
+    "Show the foreground write sandbox, change session or persistent activation, or manage write-denied paths";
 
 const USAGE = [
     "Usage:",
     "  /sandbox",
     "  /sandbox on",
     "  /sandbox off",
+    "  /sandbox default on",
+    "  /sandbox default off",
     "  /sandbox deny list",
     "  /sandbox deny add <path>",
     "  /sandbox deny remove <path>",
@@ -52,12 +54,20 @@ const DISABLE_TITLE = "Disable the foreground write sandbox?";
 
 const DISABLE_MESSAGE = [
     "The built-in bash, write, and edit tools and user-entered ! / !! commands",
-    "will run with normal host write access for the rest of this session. New,",
-    "resumed, forked, and reloaded sessions start protected again.",
+    "will run with normal host write access for the rest of this session. The",
+    "next session applies your persisted foreground sandbox default.",
 ].join("\n");
 
 const NO_UI_REJECTION =
-    "/sandbox off needs an interactive confirmation and there is no interactive UI here, so the sandbox stays on.";
+    "/sandbox off needs an interactive confirmation and there is no interactive UI here, so the sandbox state is unchanged.";
+
+const DEFAULT_OFF_TITLE = "Keep the foreground write sandbox off by default?";
+
+const DEFAULT_OFF_MESSAGE = [
+    "This session and future sessions will run foreground tools and local background",
+    "tasks with normal host write access until you run /sandbox on or change the",
+    "persistent default.",
+].join("\n");
 
 const RESET_TITLE = "Restore the packaged write-deny defaults?";
 
@@ -67,6 +77,8 @@ export type SandboxCommandDeps = {
     denyRules: DenyRuleManager;
     /** Called after any state change so the footer and consumers stay truthful. */
     onStateChange: (status: ForegroundSandboxStatus) => void;
+    /** Persist a default and apply it to the current session. */
+    setDefault: (enabled: boolean) => ForegroundSandboxStatus;
 };
 
 /** Build the `/sandbox` handler. Exported so its behaviour is directly testable. */
@@ -74,6 +86,7 @@ export function createSandboxCommandHandler({
     controller,
     denyRules,
     onStateChange,
+    setDefault,
 }: SandboxCommandDeps) {
     return async function handleSandboxCommand(
         args: string,
@@ -97,13 +110,20 @@ export function createSandboxCommandHandler({
             ctx.ui.notify(
                 status.state === "enabled"
                     ? `Foreground sandbox on. ${status.reason}`
-                    : `Foreground sandbox re-armed but not active: ${status.reason}`,
+                    : `Foreground sandbox requested but not active: ${status.reason}`,
                 status.state === "enabled" ? "info" : "warning",
             );
             return;
         }
 
         if (subcommand === "off") {
+            if (controller.status().state === "inactive") {
+                ctx.ui.notify(
+                    "Foreground sandbox is already inactive by default. Use /sandbox default on to opt in persistently.",
+                    "info",
+                );
+                return;
+            }
             if (!ctx.hasUI) {
                 ctx.ui.notify(NO_UI_REJECTION, "error");
                 return;
@@ -119,6 +139,44 @@ export function createSandboxCommandHandler({
                 "Foreground sandbox OFF for this session. Shell commands can now write anywhere.",
                 "warning",
             );
+            return;
+        }
+
+        if (subcommand === "default") {
+            const mode = tail[0]?.toLowerCase();
+            if (mode !== "on" && mode !== "off") {
+                ctx.ui.notify("/sandbox default needs on or off.\n\n" + USAGE, "error");
+                return;
+            }
+            if (mode === "off") {
+                if (!ctx.hasUI) {
+                    ctx.ui.notify(
+                        "/sandbox default off needs an interactive confirmation and there is no interactive UI here.",
+                        "error",
+                    );
+                    return;
+                }
+                const confirmed = await ctx.ui.confirm(DEFAULT_OFF_TITLE, DEFAULT_OFF_MESSAGE);
+                if (!confirmed) {
+                    ctx.ui.notify("The sandbox default was left unchanged.", "info");
+                    return;
+                }
+            }
+            try {
+                const status = setDefault(mode === "on");
+                onStateChange(status);
+                ctx.ui.notify(
+                    mode === "on"
+                        ? `Foreground sandbox default is ON. ${status.reason}`
+                        : "Foreground sandbox default is off. Foreground tools and local background tasks are unconfined.",
+                    mode === "on" && status.state !== "enabled" ? "warning" : "info",
+                );
+            } catch (error) {
+                ctx.ui.notify(
+                    `Could not save the sandbox default: ${error instanceof Error ? error.message : String(error)}`,
+                    "error",
+                );
+            }
             return;
         }
 
@@ -195,20 +253,27 @@ function announce(ctx: ExtensionCommandContext, change: () => DenyRuleReport): v
     }
 }
 
-const SUBCOMMANDS = ["on", "off", "deny", "rules"] as const;
+const SUBCOMMANDS = ["on", "off", "default", "deny", "rules"] as const;
 const DENY_ACTIONS = ["list", "add", "remove", "reset"] as const;
 
 /** Argument completions for `/sandbox`, including the `deny` actions. */
 export function sandboxArgumentCompletions(argumentPrefix: string) {
     const prefix = argumentPrefix.trimStart().toLowerCase();
     const denyPrefix = /^deny(\s|$)/.test(prefix) ? prefix.replace(/^deny\s*/, "") : undefined;
+    const defaultPrefix = /^default(\s|$)/.test(prefix)
+        ? prefix.replace(/^default\s*/, "")
+        : undefined;
 
     const values =
-        denyPrefix === undefined
-            ? SUBCOMMANDS.filter((value) => value.startsWith(prefix))
-            : DENY_ACTIONS.filter((value) => value.startsWith(denyPrefix)).map(
+        denyPrefix !== undefined
+            ? DENY_ACTIONS.filter((value) => value.startsWith(denyPrefix)).map(
                   (value) => `deny ${value}`,
-              );
+              )
+            : defaultPrefix !== undefined
+              ? ["on", "off"]
+                    .filter((value) => value.startsWith(defaultPrefix))
+                    .map((value) => `default ${value}`)
+              : SUBCOMMANDS.filter((value) => value.startsWith(prefix));
 
     return values.map((value) => ({ value, label: value }));
 }

@@ -5,8 +5,8 @@ agent start long-running commands or command-based watchers without blocking the
 foreground turn. Task metadata and logs are stored under the OS temp directory,
 so status and logs remain available across `/reload` and ordinary session use.
 
-The core is deliberately domain-neutral. GitHub, Mergify, Cloud Build, Vercel,
-and similar integrations should be thin presets on top of the generic watcher,
+The core is deliberately domain-neutral. GitHub, Cloud Build, Vercel, and
+similar integrations should be thin presets on top of the generic watcher,
 not special cases in the runtime.
 
 ## Tools
@@ -191,10 +191,10 @@ Three properties follow:
   so an already-running task keeps its launch policy when the foreground policy
   changes. A watcher resumed in a later Pi session re-runs the wrapper it started
   with, reading the profile stored in its own task directory.
-- **Fail closed.** An `unavailable` or `failed` foreground state refuses the
-  launch and says why. The local command is never retried unconfined. Only an
-  explicit `disabled` state — a human's `/sandbox off` — launches without a
-  sandbox.
+- **Opt-in, then fail closed.** The default `inactive` state and an explicit
+  `disabled` state launch without a sandbox. Once enabled, an `unavailable` or
+  `failed` foreground state refuses the launch and says why; the local command
+  is never retried unconfined.
 - **Local only.** Structured remote SSH spawn and watch never consult the
   foreground policy, and their tmux lifecycle, stop semantics, and remote
   metadata are untouched.

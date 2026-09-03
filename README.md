@@ -1,6 +1,6 @@
 # Pi Better Harness
 
-`pi-better-harness` is a Pi extension bundle for a default write sandbox, delegated subagents, durable background shell tasks, and goal tracking that stays aware of background work.
+`pi-better-harness` is a Pi extension bundle for an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, and goal tracking that stays aware of background work.
 
 ## Quick Answer
 
@@ -39,7 +39,7 @@ Do not use the bundle when you only need one extension; install that package dir
 
 ## Packages
 
-- `pi-better-sandbox`: a default-on write sandbox for Pi's foreground tools.
+- `pi-better-sandbox`: an opt-in write sandbox for Pi's foreground tools.
 - `pi-better-subagents`: detached, sandboxed subagent runs.
 - `pi-better-background-tasks`: durable shell tasks, watchers, logs, and status inspection.
 - `pi-better-goal`: objective tracking with background-aware continuation.

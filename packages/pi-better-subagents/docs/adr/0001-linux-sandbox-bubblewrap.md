@@ -10,8 +10,8 @@ Subagent children get kernel-enforced write confinement via macOS
 `sandbox-exec` (SBPL); `sandboxSupported()` returns `true` only on `darwin`.
 On Linux the default-on sandbox silently degrades to no confinement and
 explicit `sandbox:true` / `sandbox_dir` requests throw, which blocks running
-the integration queue gate on `ubuntu-latest` runners and leaves Linux hosts
-without parity (#5). We needed a Linux backend that preserves the current
+the integration tests on `ubuntu-latest` runners and leaves Linux hosts without
+parity (#5). We needed a Linux backend that preserves the current
 spawn shape (`file` + `fileArgs` wrapper around the pi argv), needs no root,
 and works on GitHub-hosted runners.
 
@@ -57,7 +57,7 @@ and works on GitHub-hosted runners.
   writable workdir or `/tmp`.
 - The degrade-vs-throw policy is unchanged in shape but gains a third state:
   "backend detected yet failed" fails closed instead of degrading.
-- CI installs bubblewrap and moves the integration runner to `ubuntu-latest`.
+- CI installs bubblewrap in the `linux-sandbox` job on `ubuntu-latest`.
 
 ## Failure matrix
 
@@ -77,8 +77,7 @@ read-only.
 
 ## Verification obligations
 
-- CI installs `bubblewrap` and switches the integration runner to
-  `ubuntu-latest`.
+- CI installs `bubblewrap` in the `linux-sandbox` job on `ubuntu-latest`.
 - Deterministic (no model) tests prove confinement both ways: writes inside
   the workdir succeed, writes outside fail.
 - `tests/test_env_inherit.sh` passes on Linux (environment, e.g. `GH_TOKEN`,

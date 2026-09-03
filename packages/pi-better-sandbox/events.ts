@@ -21,12 +21,24 @@ export const FOREGROUND_SANDBOX_POLICY_CHANNEL = "pi-better-sandbox:policy";
 /** Channel a late-loading consumer emits on to ask for the current policy. */
 export const FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL = "pi-better-sandbox:policy-request";
 
-/** The immutable payload published on the policy channel. */
-export type ForegroundSandboxPolicyEvent = ForegroundSandboxStatus;
+/**
+ * The immutable payload published on the policy channel.
+ *
+ * `inactive` is a foreground presentation state. Consumers only need the
+ * enforcement decision, so it is published as the existing `disabled` state.
+ * This keeps older background-task versions fail-safe during package skew.
+ */
+export type ForegroundSandboxPolicyEvent = Omit<ForegroundSandboxStatus, "state"> & {
+    readonly state: Exclude<ForegroundSandboxStatus["state"], "inactive">;
+};
 
 /** Deep-freeze a status so a consumer cannot mutate another consumer's copy. */
 export function freezePolicy(status: ForegroundSandboxStatus): ForegroundSandboxPolicyEvent {
-    return Object.freeze({ ...status, denyWrite: Object.freeze([...status.denyWrite]) });
+    return Object.freeze({
+        ...status,
+        state: status.state === "inactive" ? "disabled" : status.state,
+        denyWrite: Object.freeze([...status.denyWrite]),
+    });
 }
 
 /** Publish the current effective policy to every subscribed extension. */

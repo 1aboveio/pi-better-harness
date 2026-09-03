@@ -1,7 +1,7 @@
 /**
- * The demonstration this epic is for: an ordinary `pi` session, with the harness
- * installed and nothing configured, is write-confined across every first-party
- * execution path at once.
+ * Whole-session demonstration: the harness starts foreground execution
+ * inactive, then a human opt-in write-confines every first-party foreground
+ * execution path at once. Default-on subagents remain independently confined.
  *
  * Nothing here is a stand-in for the product. The extension set is read out of
  * the published meta package's own manifest and loaded through its own shims, in
@@ -90,6 +90,7 @@ const userBashHandlers = [];
 const events = new EventEmitter();
 const loaded = [];
 const notifications = [];
+let initialForegroundPolicy;
 
 const ctx = {
   cwd: projectRoot,
@@ -149,6 +150,12 @@ before(async () => {
   for (const handler of sessionStartHandlers) {
     await handler({ type: "session_start", reason: "startup" }, ctx);
   }
+
+  const { currentForegroundSandboxPolicy } = await import(
+    "../packages/pi-better-background-tasks/src/sandbox.ts"
+  );
+  initialForegroundPolicy = currentForegroundSandboxPolicy(pi);
+  await commands.get("sandbox").handler("on", ctx);
 });
 
 async function runTool(name, params) {
@@ -180,7 +187,10 @@ test("the harness loads the sandbox alongside every other default extension", { 
 
 // @covers harness.default-capability
 // @level e2e
-test("one canonical project policy governs the whole session", { skip }, async () => {
+test("the harness starts inactive, then one opt-in policy governs the whole session", { skip }, async () => {
+  assert.equal(initialForegroundPolicy.state, "disabled");
+  assert.match(initialForegroundPolicy.reason, /inactive by default/);
+
   notifications.length = 0;
   await commands.get("sandbox").handler("", ctx);
   const text = notifications.join("\n");

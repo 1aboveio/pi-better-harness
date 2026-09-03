@@ -68,7 +68,7 @@ test("every consumer runs the same shared mechanism, byte for byte", () => {
 // @level integration
 test("the foreground consumer blocks rather than running a shell unconfined", () => {
   const controller = new ForegroundSandboxController(noBackend);
-  const status = controller.beginSession(repoRoot);
+  const status = controller.beginSession(repoRoot, true);
 
   assert.equal(status.state, "unavailable");
   assert.equal(status.readPolicy, "unrestricted", "reads are never restricted by this sandbox");
@@ -88,7 +88,7 @@ test("the foreground consumer blocks rather than running a shell unconfined", ()
 // @level integration
 test("the foreground shell wrapper refuses to emit a bare command after backend loss", () => {
   const controller = new ForegroundSandboxController();
-  const status = controller.beginSession(repoRoot);
+  const status = controller.beginSession(repoRoot, true);
   if (status.state !== "enabled") {
     // Enforced as a hard failure on the platform lanes by PI_SANDBOX_REQUIRE_BACKEND.
     assert.equal(status.state, "unavailable", `unexpected state on this host: ${status.reason}`);
@@ -115,7 +115,7 @@ test("the foreground shell wrapper refuses to emit a bare command after backend 
 
 // @covers background-task.sandbox-policy-contract
 // @level integration
-test("the background-task consumer blocks every non-enabled, non-disabled policy", () => {
+test("the background-task consumer blocks every policy that requires unavailable confinement", () => {
   for (const state of ["unavailable", "failed"]) {
     assert.throws(
       () => planFor({ state, denyWrite: [], reason: `backend is ${state}` }),
@@ -131,7 +131,11 @@ test("the background-task consumer blocks every non-enabled, non-disabled policy
     BackgroundTaskBlockedError,
   );
 
-  // Only a human's explicit opt-out is allowed through unconfined.
+  // Both the foreground default-off state and an explicit session opt-out are
+  // intentionally unconfined.
+  assert.deepEqual(planFor({ state: "inactive", denyWrite: [], reason: "default off" }), {
+    confined: false,
+  });
   assert.deepEqual(planFor({ state: "disabled", denyWrite: [], reason: "a human turned it off" }), {
     confined: false,
   });

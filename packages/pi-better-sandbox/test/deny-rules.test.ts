@@ -85,7 +85,7 @@ function harness(name: string, options: { projectRoot?: string; home?: string } 
     const seams: DenyRuleSeams = { ...RESOLVES_A_BACKEND, home: () => home, agentDir: () => agentDir };
 
     const controller = new ForegroundSandboxController(seams);
-    controller.beginSession(projectRoot);
+    controller.beginSession(projectRoot, true);
 
     const announced: ForegroundSandboxStatus[] = [];
     const manager = new DenyRuleManager({
@@ -149,7 +149,7 @@ test("a relative rule is stored as a template and denies the same relative path 
     const secondProject = directory("cross-project-second");
     const seams: DenyRuleSeams = { ...RESOLVES_A_BACKEND, home: () => first.home, agentDir: () => first.agentDir };
     const controller = new ForegroundSandboxController(seams);
-    controller.beginSession(secondProject);
+    controller.beginSession(secondProject, true);
     const manager = new DenyRuleManager({ controller, onStateChange: () => {}, seams });
 
     const report = manager.load();
