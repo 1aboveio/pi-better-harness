@@ -152,13 +152,9 @@ export function unregisterBackgroundWorkProvider(id: string): void {
 }
 
 export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boolean {
-  // A ctx captured by a previous session throws on property access once the
-  // session has been replaced or reloaded (pi's stale guard). Treat it as
-  // "no UI" instead of crashing the caller — typically the extension factory,
-  // where this would permanently fail the extension for the whole session.
   if (!ctx) return false;
   try {
-    return Boolean(ctx && ctx.mode === "tui" && ctx.hasUI === true && ctx.ui);
+    return Boolean(ctx.mode === "tui" && ctx.hasUI === true && ctx.ui);
   } catch {
     return false;
   }
@@ -200,8 +196,10 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   try { s.dispose?.(); } catch { /* ignore */ }
   s.dispose = undefined;
   stopMainListWidget();
-  const ui = (ctx ?? s.uiCtx)?.ui;
-  if (ui && isNavigatorUiAvailable(ctx ?? s.uiCtx)) {
+  const activeCtx = ctx ?? s.uiCtx;
+  s.uiCtx = undefined;
+  if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
+    const ui = activeCtx.ui;
     try { applyNavigatorFooter(ui as any, 0); } catch { /* ignore */ }
     try { applyCloseConfirmFooter(ui as any, null); } catch { /* ignore */ }
     try { (ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
@@ -216,11 +214,6 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   s.detailOverlayRows = undefined;
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
-  // The session that owned this UI is shutting down: drop the captured ctx
-  // unconditionally. If a factory crashed earlier, no session_shutdown handler
-  // ever ran and the stale ctx would otherwise be served to the next load —
-  // which is how a single failed load poisons every reload that follows.
-  s.uiCtx = undefined;
 }
 
 export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {

@@ -6,6 +6,7 @@ import {
   NAVIGATOR_STATUS_KEY,
   disposeBackgroundWorkNavigator,
   ensureBackgroundWorkNavigator,
+  isNavigatorUiAvailable,
   refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
   wrapLogText,
@@ -155,6 +156,45 @@ describe("shared background work navigator", () => {
       disposeBackgroundWorkNavigator(tuiCtx);
       unregister();
     }
+  });
+
+  it("survives a retained stale context and releases it during disposal", () => {
+    const ui = {
+      factory: undefined as any,
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+    };
+    const staleCtx = { mode: "tui", hasUI: true, ui } as any;
+    ensureBackgroundWorkNavigator(staleCtx, {
+      createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+      isOpenTrigger: () => false,
+      matchKey: () => false,
+      truncate: (value) => value,
+    });
+
+    let staleReads = 0;
+    for (const key of ["mode", "ui"] as const) {
+      Object.defineProperty(staleCtx, key, {
+        configurable: true,
+        get() {
+          staleReads += 1;
+          throw new Error(`stale ${key}`);
+        },
+      });
+    }
+
+    assert.equal(isNavigatorUiAvailable(staleCtx), false);
+    let unregister: (() => void) | undefined;
+    assert.doesNotThrow(() => {
+      unregister = registerBackgroundWorkProvider(provider("stale-test", "Stale Test", 30, 300, () => undefined));
+    });
+    assert.doesNotThrow(() => disposeBackgroundWorkNavigator());
+
+    const readsAfterDispose = staleReads;
+    unregister?.();
+    assert.equal(staleReads, readsAfterDispose, "provider refresh must not consult the released stale context");
   });
 
   it("keeps the main list timer-free and renders only material provider changes", (t) => {
