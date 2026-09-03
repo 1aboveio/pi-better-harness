@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-subagents@0.1.23] - 2026-09-03
+
+### Fixed
+
+- **subagents**: stop serving stale background-work navigator contexts after session replacement and detach invalid contexts safely during teardown
+
+## [pi-better-background-tasks@0.2.8] - 2026-09-03
+
+### Fixed
+
+- **background-tasks**: stop serving stale background-work navigator contexts after session replacement and detach invalid contexts safely during teardown
+- **background-tasks**: validate Windows task-tree termination outcomes and preserve running state when termination cannot be confirmed
+- **background-tasks**: preserve raw Windows argv across MSYS2 shells and close log descriptors when spawn marker writes fail
+
+## [pi-better-harness@0.2.1] - 2026-09-03
+
+### Changed
+
+- **harness**: bundle subagents 0.1.23 and background-tasks 0.2.8
+
 ## [pi-better-sandbox@0.2.0] - 2026-09-02
 
 ### Added

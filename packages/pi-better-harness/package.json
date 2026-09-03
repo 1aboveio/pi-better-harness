@@ -1,6 +1,6 @@
 {
   "name": "pi-better-harness",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi extension bundle for an opt-in foreground write sandbox, subagents, durable background tasks, and goal tracking.",
   "license": "MIT",
   "type": "module",
@@ -45,10 +45,10 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "pi-better-background-tasks": "0.2.7",
+    "pi-better-background-tasks": "0.2.8",
     "pi-better-goal": "0.1.22",
     "pi-better-sandbox": "0.2.0",
-    "pi-better-subagents": "0.1.22"
+    "pi-better-subagents": "0.1.23"
   },
   "bundledDependencies": [
     "pi-better-background-tasks",
