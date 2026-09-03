@@ -490,7 +490,13 @@ export async function stopTask(
     try {
       stopProcessGroup(meta.pid, meta.pgid);
     } catch (error) {
+      meta.stopRequestedAt = undefined;
       meta.error = error instanceof Error ? error.message : String(error);
+      writeMeta(meta);
+      if (meta.deadlineAt && meta.deadlineAt > Date.now()) {
+        scheduleProcessTimeout(pi, id, meta.deadlineAt, getActiveSession);
+      }
+      return meta;
     }
   }
 
@@ -726,7 +732,14 @@ async function finalizeProcessTimeout(
     }
   } else {
     if (meta.pid) {
-      try { stopProcessGroup(meta.pid, meta.pgid); } catch { /* best effort */ }
+      try {
+        stopProcessGroup(meta.pid, meta.pgid);
+      } catch (error) {
+        reason = `timeout; could not terminate local process tree: ${readableError(error)}`;
+        meta.error = reason;
+        writeMeta(meta);
+        return;
+      }
     }
     if (meta.remote?.session === "direct") {
       reason = "timeout; terminated local SSH client, but the remote process may still be running";

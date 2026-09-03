@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, readFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -15,7 +15,12 @@ import {
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, existsSync: vi.fn() };
+  return {
+    ...actual,
+    closeSync: vi.fn(actual.closeSync),
+    existsSync: vi.fn(),
+    writeSync: vi.fn(actual.writeSync),
+  };
 });
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -24,8 +29,10 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 const mockExists = vi.mocked(existsSync);
+const mockClose = vi.mocked(closeSync);
 const mockSpawn = vi.mocked(spawn);
 const mockSpawnSync = vi.mocked(spawnSync);
+const mockWrite = vi.mocked(writeSync);
 const realPlatform = process.platform;
 
 /** Normalize for assertions so Windows and POSIX joins compare equal. */
@@ -108,8 +115,18 @@ describe("withWindowsLogRedirect", () => {
     expect(result.cwd).toBe("C:\\work");
     expect(result.env).toEqual({ A: "1" });
     expect(result.command).toBe(
-      'exec >> \'/c/Temp/log.log\' 2>&1\nexport MSYS2_ARG_CONV_EXCL="${MSYS2_ARG_CONV_EXCL-*}"\nexec \'cmd.exe\' \'/c\' \'echo\' \'ok\'',
+      "exec >> '/c/Temp/log.log' 2>&1\nexport MSYS2_ARG_CONV_EXCL='*'\nexec 'cmd.exe' '/c' 'echo' 'ok'",
     );
+  });
+
+  it("overrides inherited MSYS2 conversion settings for raw argv", () => {
+    vi.stubEnv("MSYS2_ARG_CONV_EXCL", "/existing");
+    const result = withWindowsLogRedirect(
+      { shell: false, argv: ["cmd.exe", "/c", "/opt/x.sh"] },
+      "C:\\Temp\\log.log",
+    );
+
+    expect(result.command).toContain("export MSYS2_ARG_CONV_EXCL='*'");
   });
 
   it("single-quotes argv values with spaces and embedded quotes", () => {
@@ -205,12 +222,38 @@ describe("resolveDefaultShell", () => {
 describe("stopProcessGroup", () => {
   it("terminates the whole task tree via taskkill on Windows", () => {
     fakePlatform("win32");
+    mockSpawnSync.mockReturnValue({ status: 0 } as ReturnType<typeof spawnSync>);
     stopProcessGroup(4242);
     expect(mockSpawnSync).toHaveBeenCalledWith(
       "taskkill",
       ["/T", "/F", "/PID", "4242"],
-      expect.objectContaining({ stdio: "ignore" }),
+      expect.objectContaining({ encoding: "utf8", windowsHide: true }),
     );
+  });
+
+  it("throws when taskkill cannot be started", () => {
+    fakePlatform("win32");
+    mockSpawnSync.mockReturnValue({
+      error: Object.assign(new Error("spawn taskkill ENOENT"), { code: "ENOENT" }),
+    } as unknown as ReturnType<typeof spawnSync>);
+
+    expect(() => stopProcessGroup(4242)).toThrow(/taskkill.*ENOENT/i);
+  });
+
+  it("throws when taskkill fails and the process is still alive", () => {
+    fakePlatform("win32");
+    mockSpawnSync.mockReturnValue({ status: 5, stderr: "Access is denied." } as ReturnType<typeof spawnSync>);
+    vi.spyOn(process, "kill").mockReturnValue(true);
+
+    expect(() => stopProcessGroup(4242)).toThrow(/taskkill.*exit 5.*Access is denied/i);
+  });
+
+  it("accepts a taskkill race when the process has already exited", () => {
+    fakePlatform("win32");
+    mockSpawnSync.mockReturnValue({ status: 128, stderr: "not found" } as ReturnType<typeof spawnSync>);
+    vi.spyOn(process, "kill").mockImplementation(() => { throw new Error("process gone"); });
+
+    expect(() => stopProcessGroup(4242)).not.toThrow();
   });
 
   it("signals the process group on POSIX and falls back to the direct pid", () => {
@@ -269,5 +312,17 @@ describe("spawnCommand platform gating", () => {
     expect(options.stdio[0]).toBe("ignore");
     expect(typeof options.stdio[1]).toBe("number");
     expect(typeof options.stdio[2]).toBe("number");
+  });
+
+  it("closes the POSIX log fd when writing the spawn marker fails", () => {
+    fakePlatform("linux");
+    const log = join(mkdtempSync(join(tmpdir(), "bbt-gate-")), "gate.log");
+    mockSpawn.mockImplementation(() => fakeChild);
+    mockWrite.mockImplementationOnce(() => { throw new Error("marker write failed"); });
+
+    spawnCommand({ shell: true, command: "echo hi" }, log, true);
+
+    const fd = (mockSpawn.mock.calls.at(-1)?.[2] as { stdio: unknown[] }).stdio[1];
+    expect(mockClose).toHaveBeenCalledWith(fd);
   });
 });

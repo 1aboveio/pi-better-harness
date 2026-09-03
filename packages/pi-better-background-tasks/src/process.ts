@@ -100,7 +100,7 @@ export function withWindowsLogRedirect(spec: CommandSpec, logPath: string): Comm
       // so conversion is disabled to keep raw-argv semantics unchanged. The
       // redirect target is unaffected: bash resolves it itself, already in
       // `/c/...` form.
-      command: `${redirectLine}\nexport MSYS2_ARG_CONV_EXCL="\${MSYS2_ARG_CONV_EXCL-*}"\nexec ${argvText}`,
+      command: `${redirectLine}\nexport MSYS2_ARG_CONV_EXCL='*'\nexec ${argvText}`,
     };
   }
   return { ...spec, command: `${redirectLine}\n${spec.command}` };
@@ -124,7 +124,6 @@ export function spawnCommand(spec: CommandSpec, logPath: string, detached: boole
   try {
     if (fd !== undefined) {
       writeSync(fd, marker);
-      closeSync(fd);
     } else {
       // The detached child is already running; a throw here would orphan it
       // with no task metadata, so the marker write is best effort.
@@ -132,6 +131,10 @@ export function spawnCommand(spec: CommandSpec, logPath: string, detached: boole
     }
   } catch {
     // Log unavailable; the runtime close handler still records the failure.
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
   }
   // Spawn failures (ENOENT, bad cwd, permission denied) surface as an 'error'
   // event. With no listener Node turns it into an uncaughtException that takes
@@ -197,18 +200,32 @@ export function runCommandOnce(
       if (child.pid === undefined) return;
       try {
         stopProcessGroup(child.pid, undefined, signal);
-      } catch {
+      } catch (error) {
+        if (process.platform === "win32") throw error;
         // Nothing left in the group: the tree is already gone.
       }
     };
     let escalation: NodeJS.Timeout | undefined;
     const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
       timedOut = true;
-      signalGroup("SIGTERM");
+      try {
+        signalGroup("SIGTERM");
+      } catch (error) {
+        settle();
+        reject(error);
+        return;
+      }
       // SIGTERM is a request. Whatever still holds the output pipes after the
       // grace period is exactly what would keep this promise pending, so the
       // group is killed outright rather than waited on.
-      escalation = setTimeout(() => signalGroup("SIGKILL"), TERMINATION_GRACE_MS);
+      escalation = setTimeout(() => {
+        try {
+          signalGroup("SIGKILL");
+        } catch (error) {
+          settle();
+          reject(error);
+        }
+      }, TERMINATION_GRACE_MS);
       escalation.unref();
     }, Math.max(1, timeoutMs));
     timeout?.unref();
@@ -251,10 +268,24 @@ export function stopProcessGroup(
   signal: NodeJS.Signals = "SIGTERM",
 ): void {
   if (process.platform === "win32") {
-    // Best effort, like the POSIX fallback: a dead pid (already exited, or an
-    // argv task whose bash PID lapsed) must not throw here.
-    spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore" });
-    return;
+    const result = spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (result.error) {
+      const code = (result.error as NodeJS.ErrnoException).code;
+      throw new Error(`taskkill could not start for PID ${pid}${code ? ` (${code})` : ""}: ${result.error.message}`, {
+        cause: result.error,
+      });
+    }
+    if (result.status === 0) return;
+    // A child can exit between the caller's liveness check and taskkill. That
+    // race is success; any still-live PID means the tree was not terminated.
+    if (!processExists(pid)) return;
+    const detail = String(result.stderr ?? result.stdout ?? "").replace(/\s+/g, " ").trim();
+    throw new Error(
+      `taskkill failed with exit ${result.status ?? "unknown"} for PID ${pid}${detail ? `: ${detail}` : ""}`,
+    );
   }
   const target = pgid ?? pid;
   try {

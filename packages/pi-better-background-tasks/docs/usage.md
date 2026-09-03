@@ -271,6 +271,9 @@ logged spawn error instead of crashing the host. The override must be a bash
 that accepts `-lc` and resolves MSYS-style `/c/...` paths (Git for Windows);
 other shells, or Cygwin bash, fail tasks at spawn or redirect time.
 `shell:false` argv tasks run through a bash trampoline that appends output to
-the task log and passes argv verbatim; MSYS2 path conversion stays off for the
-exec'd target unless `MSYS2_ARG_CONV_EXCL` is already set. Stop and timeout
-terminate the whole task tree on Windows via `taskkill /T`.
+the task log and passes argv verbatim; MSYS2 path conversion is forced off for
+the exec'd target, including when the parent inherited a narrower exclusion.
+Stop and timeout terminate the whole task tree on Windows via `taskkill /T /F`.
+If `taskkill` is unavailable or denied while the process is still alive, the
+task remains running with the failure recorded instead of reporting a false
+cancellation or timeout.

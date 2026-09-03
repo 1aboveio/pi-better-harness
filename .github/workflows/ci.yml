@@ -29,8 +29,8 @@ jobs:
       - name: Typecheck the background-task package
         run: npm run typecheck -w pi-better-background-tasks
 
-      - name: Windows shell-resolution and log-redirect units
-        run: npx vitest run src/process-windows.test.ts
+      - name: Windows process unit and integration checks
+        run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
         working-directory: packages/pi-better-background-tasks
 
   ci:
