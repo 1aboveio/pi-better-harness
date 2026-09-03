@@ -8,6 +8,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  windows-verify:
+    name: windows-verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Scoped on purpose: the root suite still assumes POSIX shells in places
+      # (e.g. /bin/sh shebangs), so this lane proves what Windows must prove —
+      # strict types plus the Windows shell-resolution and log-redirect units —
+      # instead of failing on pre-existing POSIX-only expectations.
+      - name: Typecheck the background-task package
+        run: npm run typecheck -w pi-better-background-tasks
+
+      - name: Windows process unit and integration checks
+        run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
+        working-directory: packages/pi-better-background-tasks
+
   ci:
     name: ci
     runs-on: ubuntu-latest

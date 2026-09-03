@@ -1,10 +1,47 @@
-import { spawn } from "node:child_process";
-import { appendFileSync, closeSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { dirname } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { CommandResult, CommandSpec } from "./types.js";
 
-const DEFAULT_SHELL = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL || "/bin/bash";
+/** Known Git for Windows locations; `bash -lc` needs a real bash, not the WSL shim. */
+const WINDOWS_BASH_CANDIDATES = [
+  "C:\\Program Files\\Git\\bin\\bash.exe",
+  "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+  "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+];
+
+/**
+ * Resolve the shell used for `command` specs.
+ *
+ * POSIX keeps `/bin/bash`. Windows has no `/bin/bash`, and the `bash.exe` found
+ * on PATH is usually the WSL launcher in System32 or the WindowsApps alias,
+ * either of which would run the command inside WSL instead of Windows. Prefer
+ * an explicit override, then Git for Windows, then a non-WSL `bash.exe` on PATH.
+ *
+ * Resolved lazily at spawn time, not module load: env-injection extensions
+ * (e.g. pi-env) may apply settings.json `env` values after this module is
+ * evaluated, and those overrides must still take effect.
+ *
+ * Exposed for tests and reuse.
+ */
+export function resolveDefaultShell(): string {
+  const fromEnv = process.env.PI_BETTER_BACKGROUND_TASKS_SHELL;
+  if (fromEnv) return fromEnv;
+  if (process.platform !== "win32") return "/bin/bash";
+  for (const candidate of WINDOWS_BASH_CANDIDATES) {
+    if (existsSync(candidate)) return candidate;
+  }
+  for (const dir of (process.env.PATH ?? "").split(";")) {
+    const trimmed = dir.trim();
+    if (!trimmed || /(^|[\\/])(system32|windowsapps)([\\/]|$)/i.test(trimmed)) continue;
+    const candidate = join(trimmed, "bash.exe");
+    if (existsSync(candidate)) return candidate;
+  }
+  // Nothing usable found: keep the POSIX default so the failure surfaces as a
+  // logged spawn error for the task instead of crashing the whole host process.
+  return "/bin/bash";
+}
 
 /** How long a timed-out process group has to exit on SIGTERM before SIGKILL. */
 const TERMINATION_GRACE_MS = 2_000;
@@ -26,15 +63,98 @@ export function validateCommandSpec(spec: CommandSpec): void {
   }
 }
 
+/** Convert a Windows path to the `/c/...` form MSYS bash resolves in redirections. Exposed for tests and reuse. */
+export function toMsysPath(path: string): string {
+  const forward = path.replace(/\\/g, "/");
+  const drive = /^([A-Za-z]):(\/.+)$/.exec(forward);
+  return drive ? `/${drive[1].toLowerCase()}${drive[2]}` : forward;
+}
+
+/** Single-quote a value for safe literal use in a bash script line. Exposed for tests and reuse. */
+export function bashSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * On Windows, numeric fds above 2 are unusable as child stdio: Node spawns the
+ * process, but its output handles end up broken, every write fails, and shell
+ * tasks exit 1 having produced nothing. (POSIX inherits the fd normally.)
+ *
+ * Instead of handing the child a log fd, the shell opens and redirects into the
+ * log itself. Output stays durable — written by the detached task directly, so
+ * logging continues after pi exits — and the child runs with no inherited
+ * stdio. Raw argv specs get a bash trampoline (`exec`) that performs the same
+ * redirect before replacing itself with the target program.
+ *
+ * Exposed for tests and reuse.
+ */
+export function withWindowsLogRedirect(spec: CommandSpec, logPath: string): CommandSpec {
+  const redirectLine = `exec >> ${bashSingleQuote(toMsysPath(logPath))} 2>&1`;
+  if (spec.shell === false) {
+    const argvText = spec.argv!.map((arg) => bashSingleQuote(String(arg))).join(" ");
+    return {
+      ...spec,
+      shell: true,
+      // The MSYS2 runtime rewrites POSIX-looking argv (e.g. `/c`, `/opt/x.sh`)
+      // when exec'ing native Windows binaries. Node spawn passed argv verbatim,
+      // so conversion is disabled to keep raw-argv semantics unchanged. The
+      // redirect target is unaffected: bash resolves it itself, already in
+      // `/c/...` form.
+      command: `${redirectLine}\nexport MSYS2_ARG_CONV_EXCL='*'\nexec ${argvText}`,
+    };
+  }
+  return { ...spec, command: `${redirectLine}\n${spec.command}` };
+}
+
 export function spawnCommand(spec: CommandSpec, logPath: string, detached: boolean): SpawnedProcess {
   validateCommandSpec(spec);
   mkdirSync(dirname(logPath), { recursive: true });
-  const fd = openSync(logPath, "a");
-  const child = spawnArgs(spec, detached, ["ignore", fd, fd]);
-  writeSync(fd, `\n--- spawn ${new Date().toISOString()} pid=${child.pid ?? "unknown"} ---\n`);
-  closeSync(fd);
+  const windows = process.platform === "win32";
+  const launchSpec = windows ? withWindowsLogRedirect(spec, logPath) : spec;
+  let fd: number | undefined;
+  let stdio: SpawnStdio;
+  if (windows) {
+    stdio = ["ignore", "ignore", "ignore"];
+  } else {
+    fd = openSync(logPath, "a");
+    stdio = ["ignore", fd, fd];
+  }
+  const child = spawnArgs(launchSpec, detached, stdio);
+  const marker = `\n--- spawn ${new Date().toISOString()} pid=${child.pid ?? "unknown"} ---\n`;
+  try {
+    if (fd !== undefined) {
+      writeSync(fd, marker);
+    } else {
+      // The detached child is already running; a throw here would orphan it
+      // with no task metadata, so the marker write is best effort.
+      appendFileSync(logPath, marker);
+    }
+  } catch {
+    // Log unavailable; the runtime close handler still records the failure.
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+  // Spawn failures (ENOENT, bad cwd, permission denied) surface as an 'error'
+  // event. With no listener Node turns it into an uncaughtException that takes
+  // down the whole host process; log it here and let the runtime's 'close'
+  // handler finalize the task as failed.
+  child.on("error", (error) => {
+    try {
+      const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+      appendFileSync(logPath, `\n--- spawn error ${new Date().toISOString()} code=${code} message=${error.message} ---\n`);
+    } catch {
+      // Log unavailable; the runtime close handler still records the failure.
+    }
+  });
   child.on("close", (code, signal) => {
-    appendFileSync(logPath, `\n--- exit ${new Date().toISOString()} code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+    try {
+      appendFileSync(logPath, `\n--- exit ${new Date().toISOString()} code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+    } catch {
+      // Log unavailable (swept tmp dir, ACL change): a throw here would crash
+      // the host; the runtime already finalized the task from meta.
+    }
   });
   return { child, pgid: detached && child.pid ? child.pid : undefined };
 }
@@ -80,18 +200,32 @@ export function runCommandOnce(
       if (child.pid === undefined) return;
       try {
         stopProcessGroup(child.pid, undefined, signal);
-      } catch {
+      } catch (error) {
+        if (process.platform === "win32") throw error;
         // Nothing left in the group: the tree is already gone.
       }
     };
     let escalation: NodeJS.Timeout | undefined;
     const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
       timedOut = true;
-      signalGroup("SIGTERM");
+      try {
+        signalGroup("SIGTERM");
+      } catch (error) {
+        settle();
+        reject(error);
+        return;
+      }
       // SIGTERM is a request. Whatever still holds the output pipes after the
       // grace period is exactly what would keep this promise pending, so the
       // group is killed outright rather than waited on.
-      escalation = setTimeout(() => signalGroup("SIGKILL"), TERMINATION_GRACE_MS);
+      escalation = setTimeout(() => {
+        try {
+          signalGroup("SIGKILL");
+        } catch (error) {
+          settle();
+          reject(error);
+        }
+      }, TERMINATION_GRACE_MS);
       escalation.unref();
     }, Math.max(1, timeoutMs));
     timeout?.unref();
@@ -118,11 +252,41 @@ export function runCommandOnce(
   });
 }
 
+/**
+ * Stop a task's process tree.
+ *
+ * POSIX signals the process group (`-target`), falling back to the direct pid
+ * when the group is already gone. Windows has no process groups in libuv, and
+ * `process.kill(pid)` would only terminate the spawned `bash.exe` while real
+ * work survives in grandchildren — so the tree is terminated with
+ * `taskkill /T /F` instead. Windows has no graceful signal delivery, so the
+ * requested signal is informational there.
+ */
 export function stopProcessGroup(
   pid: number,
   pgid?: number,
   signal: NodeJS.Signals = "SIGTERM",
 ): void {
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (result.error) {
+      const code = (result.error as NodeJS.ErrnoException).code;
+      throw new Error(`taskkill could not start for PID ${pid}${code ? ` (${code})` : ""}: ${result.error.message}`, {
+        cause: result.error,
+      });
+    }
+    if (result.status === 0) return;
+    // A child can exit between the caller's liveness check and taskkill. That
+    // race is success; any still-live PID means the tree was not terminated.
+    if (!processExists(pid)) return;
+    const detail = String(result.stderr ?? result.stdout ?? "").replace(/\s+/g, " ").trim();
+    throw new Error(
+      `taskkill failed with exit ${result.status ?? "unknown"} for PID ${pid}${detail ? `: ${detail}` : ""}`,
+    );
+  }
   const target = pgid ?? pid;
   try {
     process.kill(-target, signal);
@@ -153,13 +317,16 @@ export function commandExecution(spec: CommandSpec): { execPath: string; execArg
     const [command, ...args] = spec.argv!;
     return { execPath: command!, execArgs: args };
   }
-  return { execPath: DEFAULT_SHELL, execArgs: ["-lc", spec.command!] };
+  return { execPath: resolveDefaultShell(), execArgs: ["-lc", spec.command!] };
 }
+
+/** Stdio for a spawned task: stdin is always ignored; stdout/stderr are piped (collected) or ignored (redirected into the log by the child itself). */
+type SpawnStdio = ["ignore", "pipe" | "ignore" | number, "pipe" | "ignore" | number];
 
 function spawnArgs(
   spec: CommandSpec,
   detached: boolean,
-  stdio: ["ignore", "pipe" | number, "pipe" | number],
+  stdio: SpawnStdio,
 ): ChildProcess {
   const env = { ...process.env, ...spec.env };
   const { execPath, execArgs } = commandExecution(spec);
@@ -168,5 +335,8 @@ function spawnArgs(
     env,
     detached,
     stdio,
+    // A detached Windows child gets its own console window unless hidden; these
+    // tasks write to log files and must not flash terminals.
+    windowsHide: process.platform === "win32",
   });
 }
