@@ -14,7 +14,7 @@ edge cases are first-class:
    (missing path / unreadable / not a Git repo), `syncGitRemotes` must abort
    **before** mutating the target. A valid Git repo with no remote keys remains `[]`.
 
-Out of scope: sandbox policy, merge queue, disposable clone preparation surface
+Out of scope: sandbox policy, CI delivery policy, disposable clone preparation surface
 beyond consuming the fixed remote helper, redesign of the #103 normal
 fetch-URL + pushurl contract (must remain intact).
 

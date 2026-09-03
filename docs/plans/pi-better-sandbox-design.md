@@ -5,7 +5,11 @@ Authority: product decisions captured in epic
 sandbox ADR `packages/pi-better-subagents/docs/adr/0001-linux-sandbox-bubblewrap.md`;
 shared-package precedent `docs/adr/0002-ssh-core-shared-package.md`.
 
-Status: **proposed design - tracked as epic #229**.
+Status: **implemented by epic #229; foreground default superseded by ADR 0004**.
+
+The default-on foreground statements below are historical. ADR 0004 changes
+foreground execution to opt-in while preserving the shared mechanism and the
+default-on subagent policy.
 
 ## Problem
 

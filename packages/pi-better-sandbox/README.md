@@ -1,6 +1,6 @@
 # pi-better-sandbox
 
-A default-on write sandbox for Pi's foreground tools.
+An opt-in write sandbox for Pi's foreground tools.
 
 It is installed by default with [`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme), and can be installed on its own:
 
@@ -9,11 +9,12 @@ pi install npm:pi-better-sandbox
 ```
 
 Either way you keep starting Pi the way you always have — `pi`. There is
-no launcher, no wrapper command, and nothing to configure. From the first
-session start, Pi's built-in `bash` tool and the `!` / `!!` commands you type
-yourself run inside an OS sandbox that lets them write only under the directory
-you launched Pi from, and the built-in `write` and `edit` tools are held to the
-same policy.
+no launcher or wrapper command. The sandbox starts inactive. Use `/sandbox on`
+for the current session or `/sandbox default on` to persist opt-in. While
+enabled, Pi's built-in `bash` tool and the `!` / `!!` commands you type yourself
+run inside an OS sandbox that lets them write only under the directory you
+launched Pi from, and the built-in `write` and `edit` tools are held to the same
+policy.
 
 ```
 Read:       every filesystem path
@@ -71,8 +72,10 @@ operations underneath them are replaced.
 
 ```text
 /sandbox                     show the effective status
-/sandbox on                  re-arm protection for operations started from now on
+/sandbox on                  enable protection for operations started from now on
 /sandbox off                 turn protection off for this session (interactive confirmation)
+/sandbox default on          persist opt-in and enable it now
+/sandbox default off         persist opt-out (interactive confirmation)
 /sandbox deny list           show the write-denied paths
 /sandbox deny add <path>     stop allowing writes to a path
 /sandbox deny remove <path>  allow writes to a path again
@@ -80,15 +83,17 @@ operations underneath them are replaced.
 /sandbox rules               open the write-denied paths editor
 ```
 
-The footer shows `sandbox · on · <project>` while protection is active, and a
-prominent `sandbox · OFF`, `sandbox · UNAVAILABLE`, or `sandbox · FAILED`
-otherwise. Both surfaces report what the runtime actually resolved — which
-backend, which executable — never what was merely configured.
+The footer shows `sandbox · available` when a backend is available but inactive,
+`sandbox · inactive` when inactive without a backend, and
+`sandbox · on · <project>` while protection is active. Explicitly enabled
+sessions report `UNAVAILABLE` or `FAILED` when protection cannot be applied.
+Both surfaces report what the runtime actually resolved — which backend, which
+executable — never what was merely configured.
 
-`/sandbox off` needs an interactive confirmation and is refused outright when
-there is no interactive UI. There is no tool for changing sandbox state or its
-rules, so the model can neither disable its own confinement nor edit the paths
-it is confined away from.
+`/sandbox off` and `/sandbox default off` need interactive confirmation and are
+refused outright when there is no interactive UI. There is no tool for changing
+sandbox state or its rules, so the model cannot change confinement or edit the
+paths it is confined away from.
 
 ## Write-denied paths
 
@@ -158,17 +163,19 @@ in your rule set but is held out in that project, with a message saying so.
 
 ## Lifecycle
 
-The sandbox is enabled again at every session start: startup, new session,
-resume, fork, and reload. An off state is never written anywhere, so it cannot
-outlive the session you switched it off in.
+The foreground sandbox is inactive by default. Session overrides do not survive
+startup, new session, resume, fork, or reload. `/sandbox default on|off` stores
+the default for those future sessions in
+`~/.pi/agent/extensions/pi-better-sandbox-preferences.json`.
 
 Toggles apply to operations launched after the change. A command already running
 keeps the policy it launched with.
 
 ## Fail-closed behaviour
 
-While the sandbox is enabled and a backend cannot be applied, protected commands
-and file mutations are **blocked** rather than run unprotected:
+While the sandbox is explicitly or persistently enabled and a backend cannot be
+applied, protected commands and file mutations are **blocked** rather than run
+unprotected:
 
 - No backend on this platform (`unavailable`).
 - A launch directory too broad to confine — `/` or your home directory

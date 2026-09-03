@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-sandbox@0.2.0] - 2026-09-02
+
+### Added
+
+- **sandbox**: add `/sandbox default on|off` to persist the foreground activation preference across sessions
+
+### Changed
+
+- **sandbox**: start foreground shell, write, edit, user-bash, and local background-task confinement inactive by default; explicit or persisted opt-in remains fail-closed, while subagent sandboxing remains default-on
+- **sandbox**: distinguish available-but-inactive foreground status without breaking older background-task consumers
+
+## [pi-better-background-tasks@0.2.7] - 2026-09-02
+
+### Changed
+
+- **background-tasks**: inherit the foreground sandbox's opt-in activation state for local tasks while preserving captured launch policy and fail-closed behavior after enablement
+
+## [pi-better-harness@0.2.0] - 2026-09-02
+
+### Changed
+
+- **harness**: bundle sandbox 0.2.0 and background-tasks 0.2.7; foreground confinement is now opt-in while detached subagents remain sandboxed by default
+
 ## [pi-better-sandbox@0.1.1] - 2026-08-23
 
 ### Changed

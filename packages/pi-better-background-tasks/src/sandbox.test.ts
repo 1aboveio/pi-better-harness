@@ -146,6 +146,20 @@ describe("foreground sandbox policy contract", () => {
 
   // @covers background-task.sandbox-policy-contract
   // @level unit
+  it("inherits the foreground default-off policy as an unconfined launch", () => {
+    const { pi, events } = createPi();
+    observeForegroundSandboxPolicy(pi);
+    createSandboxPublisher(events).announce({
+      state: "inactive",
+      reason: "the foreground sandbox is available but inactive by default",
+    });
+
+    expect(currentForegroundSandboxPolicy(pi)?.state).toBe("inactive");
+    expect(resolveForegroundSandboxPlan(pi)).toEqual({ confined: false });
+  });
+
+  // @covers background-task.sandbox-policy-contract
+  // @level unit
   it("ignores payloads that are not an effective-policy snapshot", () => {
     const { pi, events } = createPi();
     observeForegroundSandboxPolicy(pi);

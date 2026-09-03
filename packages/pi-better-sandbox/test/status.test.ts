@@ -22,6 +22,11 @@ function status(overrides: Partial<ForegroundSandboxStatus> = {}): ForegroundSan
 
 test("the footer names the project only while protection is actually active", () => {
     assert.equal(formatFooterStatus(status()), "sandbox · on · acme-api");
+    assert.equal(formatFooterStatus(status({ state: "inactive" })), "sandbox · available");
+    assert.equal(
+        formatFooterStatus(status({ state: "inactive", backend: undefined, executable: undefined })),
+        "sandbox · inactive",
+    );
     assert.equal(formatFooterStatus(status({ state: "disabled" })), "sandbox · OFF");
     assert.equal(formatFooterStatus(status({ state: "unavailable" })), "sandbox · UNAVAILABLE");
     assert.equal(formatFooterStatus(status({ state: "failed" })), "sandbox · FAILED");
@@ -29,6 +34,8 @@ test("the footer names the project only while protection is actually active", ()
 
 test("every state that is not enabled is painted for attention", () => {
     assert.equal(footerTone(status()), "accent");
+    assert.equal(footerTone(status({ state: "inactive" })), "accent");
+    assert.equal(footerTone(status({ state: "inactive", backend: undefined })), "warning");
     assert.equal(footerTone(status({ state: "unavailable" })), "warning");
     assert.equal(footerTone(status({ state: "disabled" })), "error");
     assert.equal(footerTone(status({ state: "failed" })), "error");

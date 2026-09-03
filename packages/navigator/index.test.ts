@@ -6,6 +6,7 @@ import {
   NAVIGATOR_STATUS_KEY,
   disposeBackgroundWorkNavigator,
   ensureBackgroundWorkNavigator,
+  isNavigatorUiAvailable,
   refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
   wrapLogText,
@@ -155,6 +156,45 @@ describe("shared background work navigator", () => {
       disposeBackgroundWorkNavigator(tuiCtx);
       unregister();
     }
+  });
+
+  it("survives a retained stale context and releases it during disposal", () => {
+    const ui = {
+      factory: undefined as any,
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+    };
+    const staleCtx = { mode: "tui", hasUI: true, ui } as any;
+    ensureBackgroundWorkNavigator(staleCtx, {
+      createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+      isOpenTrigger: () => false,
+      matchKey: () => false,
+      truncate: (value) => value,
+    });
+
+    let staleReads = 0;
+    for (const key of ["mode", "ui"] as const) {
+      Object.defineProperty(staleCtx, key, {
+        configurable: true,
+        get() {
+          staleReads += 1;
+          throw new Error(`stale ${key}`);
+        },
+      });
+    }
+
+    assert.equal(isNavigatorUiAvailable(staleCtx), false);
+    let unregister: (() => void) | undefined;
+    assert.doesNotThrow(() => {
+      unregister = registerBackgroundWorkProvider(provider("stale-test", "Stale Test", 30, 300, () => undefined));
+    });
+    assert.doesNotThrow(() => disposeBackgroundWorkNavigator());
+
+    const readsAfterDispose = staleReads;
+    unregister?.();
+    assert.equal(staleReads, readsAfterDispose, "provider refresh must not consult the released stale context");
   });
 
   it("keeps the main list timer-free and renders only material provider changes", (t) => {
@@ -730,8 +770,8 @@ describe("shared background work navigator", () => {
       listRows: () => [{
         providerId: "background-tasks",
         id: "bg-1",
-        name: "watch-pr-1396",
-        command: "node ~/.agents/skills/mergify/scripts/watch-pr-delivery.mjs --repo 1aboveio/skyee-ai-risk --pr 1396",
+        name: "watch-ci-1396",
+        command: "gh run watch 1396 --exit-status",
         status: "running",
         statusTone: "running",
         kind: "watch",
@@ -765,8 +805,8 @@ describe("shared background work navigator", () => {
       const lines = renderWidget(widgets.at(-1), 118, ui.theme);
       const text = lines.join("\n");
       assert.doesNotMatch(text, /background work/);
-      assert.match(text, /●\s+watch-pr-1396\s+every 1m 00s\s+23s/);
-      assert.doesNotMatch(text, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
+      assert.match(text, /●\s+watch-ci-1396\s+every 1m 00s\s+23s/);
+      assert.doesNotMatch(text, /evidence\s+gh run watch 1396/);
       assert.match(text, /^background tasks$/m, "compact rail should keep the provider lane title visible");
       assert.doesNotMatch(text, /^main$/m, "background work is not grouped under a confusing main lane");
 
@@ -774,7 +814,7 @@ describe("shared background work navigator", () => {
       editor.handleInput("left");
       const focusedText = renderWidget(widgets.at(-1), 118, ui.theme).join("\n");
       assert.match(focusedText, /↑↓ switch · Enter detail · x stop · Esc unfocus/);
-      assert.doesNotMatch(focusedText, /evidence\s+node ~\/\.agents\/skills\/mergify\/scripts\/watch-pr-delivery\.mjs/);
+      assert.doesNotMatch(focusedText, /evidence\s+gh run watch 1396/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

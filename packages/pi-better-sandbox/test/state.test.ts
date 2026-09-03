@@ -42,21 +42,32 @@ test("a fresh controller blocks protected operations until a session captures a 
 });
 
 for (const reason of ["startup", "new", "resume", "fork", "reload"] as const) {
-    test(`the sandbox is enabled after a ${reason} session start, even after a prior /sandbox off`, () => {
+    test(`the sandbox returns to its inactive default after a ${reason} session start`, () => {
         const controller = new ForegroundSandboxController(macos());
         const root = project(`lifecycle-${reason}`);
 
         controller.beginSession(root);
+        assert.equal(controller.status().state, "inactive");
+        controller.enable();
+        assert.equal(controller.status().state, "enabled");
         controller.disable();
         assert.equal(controller.status().state, "disabled");
 
-        // The next session start of any kind re-arms protection: nothing about
-        // the off state is carried across, because nothing persists it.
+        // Session overrides do not persist; the product default is off.
         const restarted = controller.beginSession(root);
-        assert.equal(restarted.state, "enabled");
-        assert.equal(controller.isUserEnabled(), true);
+        assert.equal(restarted.state, "inactive");
+        assert.equal(controller.isUserEnabled(), false);
     });
 }
+
+test("a persisted opt-in is applied at each session start", () => {
+    const controller = new ForegroundSandboxController(macos());
+    const root = project("persisted-on");
+
+    assert.equal(controller.beginSession(root, true).state, "enabled");
+    controller.disable();
+    assert.equal(controller.beginSession(root, true).state, "enabled");
+});
 
 test("the canonical launch directory is the sole writable root, even when reached through a symlink", () => {
     const controller = new ForegroundSandboxController(macos());
@@ -65,7 +76,7 @@ test("the canonical launch directory is the sole writable root, even when reache
     rmSync(alias, { force: true });
     symlinkSync(real, alias);
 
-    const status = controller.beginSession(alias);
+    const status = controller.beginSession(alias, true);
 
     assert.equal(status.state, "enabled");
     assert.equal(status.writableRoot, real);
@@ -87,7 +98,7 @@ test("packaged deny defaults land under the captured project root", () => {
 test("an unsafe launch root fails closed with actionable guidance instead of granting it", () => {
     const controller = new ForegroundSandboxController(macos());
 
-    const status = controller.beginSession(home);
+    const status = controller.beginSession(home, true);
 
     assert.equal(status.state, "failed");
     assert.equal(status.writableRoot, undefined);
@@ -97,7 +108,7 @@ test("an unsafe launch root fails closed with actionable guidance instead of gra
 
 test("an unsupported platform reports unavailable and blocks protected operations", () => {
     const controller = new ForegroundSandboxController(macos({ platform: () => "win32" }));
-    controller.beginSession(project("unsupported"));
+    controller.beginSession(project("unsupported"), true);
 
     const status = controller.status();
     assert.equal(status.state, "unavailable");
@@ -110,7 +121,7 @@ test("a Linux host without bubblewrap reports unavailable and blocks protected o
     const controller = new ForegroundSandboxController(
         macos({ platform: () => "linux", lookupExecutable: () => undefined }),
     );
-    controller.beginSession(project("no-bwrap"));
+    controller.beginSession(project("no-bwrap"), true);
 
     const status = controller.status();
     assert.equal(status.state, "unavailable");
@@ -122,7 +133,7 @@ test("status reports the backend that was actually resolved, not a configured in
     const controller = new ForegroundSandboxController(
         macos({ platform: () => "linux", lookupExecutable: () => "/opt/custom/bin/bwrap" }),
     );
-    controller.beginSession(project("resolved-backend"));
+    controller.beginSession(project("resolved-backend"), true);
 
     const status = controller.status();
     assert.equal(status.state, "enabled");
@@ -136,6 +147,8 @@ test("disabling yields an unconfined plan and re-enabling restores the confined 
     const root = project("toggle");
     controller.beginSession(root);
 
+    assert.deepEqual(controller.requireLaunchPlan(), { confined: false });
+    controller.enable();
     assert.equal(controller.requireLaunchPlan().confined, true);
 
     controller.disable();
@@ -191,7 +204,7 @@ test("replacing the deny templates recompiles them against the current project r
 test("the profile path is a pure function of the policy it encodes", () => {
     const controller = new ForegroundSandboxController(macos());
     const root = project("profile-naming");
-    controller.beginSession(root);
+    controller.beginSession(root, true);
 
     const first = controller.requireLaunchPlan();
     const second = controller.requireLaunchPlan();
