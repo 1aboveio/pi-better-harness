@@ -1003,4 +1003,15 @@ test("completions cover activation defaults and deny actions", () => {
         sandboxArgumentCompletions("deny re").map((entry) => entry.value),
         ["deny remove", "deny reset"],
     );
+    assert.deepEqual(sandboxArgumentCompletions("on"), [
+        {
+            value: "on",
+            label: "on",
+            description: "Enable confinement for this session",
+        },
+    ]);
+    assert.equal(
+        sandboxArgumentCompletions("deny add")[0]?.description,
+        "Add a write-denied path",
+    );
 });

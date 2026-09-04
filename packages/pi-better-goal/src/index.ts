@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
@@ -58,6 +59,19 @@ const MAX_NO_PROGRESS_RETRIES = parseRetryLimit(
   process.env.PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES,
   DEFAULT_MAX_NO_PROGRESS_RETRIES,
 );
+
+const GOAL_ACTIONS: readonly AutocompleteItem[] = [
+  { value: "pause", label: "pause", description: "Pause the active goal" },
+  { value: "resume", label: "resume", description: "Resume the paused goal" },
+  { value: "clear", label: "clear", description: "Remove the current goal" },
+  { value: "complete", label: "complete", description: "Mark the current goal complete" },
+];
+
+export function goalArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  const prefix = argumentPrefix.trimStart().toLowerCase();
+  const matches = GOAL_ACTIONS.filter((action) => action.value.startsWith(prefix));
+  return matches.length > 0 ? [...matches] : null;
+}
 
 function parseDurationEnv(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === "") {
@@ -486,6 +500,7 @@ export default function (pi: ExtensionAPI): void {
 
   pi.registerCommand("goal", {
     description: "Create, inspect, pause, resume, clear, or complete the active goal",
+    getArgumentCompletions: goalArgumentCompletions,
     handler: async (args, ctx) => {
       currentCtx = ctx;
       const trimmed = args.trim();

@@ -7,8 +7,9 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
-import extension from "../src/index.js";
+import extension, { goalArgumentCompletions } from "../src/index.js";
 
 interface SessionEntry {
   type: string;
@@ -17,6 +18,7 @@ interface SessionEntry {
 }
 
 interface CommandDefinition {
+  getArgumentCompletions?(prefix: string): AutocompleteItem[] | null;
   handler(args: string, ctx: ExtensionContext): Promise<void> | void;
 }
 
@@ -24,6 +26,20 @@ interface WidgetRecord {
   content: unknown;
   options?: { placement?: string };
 }
+
+test("goal action completions expose selectable actions with context", () => {
+  assert.deepEqual(goalArgumentCompletions(""), [
+    { value: "pause", label: "pause", description: "Pause the active goal" },
+    { value: "resume", label: "resume", description: "Resume the paused goal" },
+    { value: "clear", label: "clear", description: "Remove the current goal" },
+    { value: "complete", label: "complete", description: "Mark the current goal complete" },
+  ]);
+  assert.deepEqual(
+    goalArgumentCompletions("  c")?.map((entry) => entry.value),
+    ["clear", "complete"],
+  );
+  assert.equal(goalArgumentCompletions("ship the release"), null);
+});
 
 test("only the slash command creates a goal and installs an observability-safe widget", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
