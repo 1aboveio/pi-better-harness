@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeFileAtomically } from "./atomic-write.mjs";
 
 const sourceFile = "index.ts";
 // Single-file targets, not directories: `pi-better-subagents` packs `*.ts` from
@@ -32,8 +33,7 @@ export function sharedSandboxCoreTargets(root = resolve(import.meta.dirname, "..
 export function syncSharedSandboxCore(root = resolve(import.meta.dirname, "..")) {
   const content = sharedSandboxCoreContent(root);
   for (const target of sharedSandboxCoreTargets(root)) {
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, content);
+    writeFileAtomically(target, content);
   }
 }
 
