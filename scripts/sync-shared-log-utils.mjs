@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { writeFileAtomically } from "./atomic-write.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const logUtilsSource = resolve(root, "packages/log-utils/index.ts");
@@ -38,21 +39,21 @@ const stallDetectorContent = `// Generated from packages/stall-detector/index.ts
 const callbackBatcherContent = `// Generated from packages/callback-batcher/index.ts. Do not edit directly.\n${readFileSync(callbackBatcherSource, "utf8")}`;
 
 for (const target of logUtilsTargets) {
-  writeFileSync(target, logUtilsContent);
+  writeFileAtomically(target, logUtilsContent);
 }
 
 for (const target of navigatorTargets) {
-  writeFileSync(target, navigatorContent);
+  writeFileAtomically(target, navigatorContent);
 }
 
 for (const target of renderSchedulerTargets) {
-  writeFileSync(target, renderSchedulerContent);
+  writeFileAtomically(target, renderSchedulerContent);
 }
 
 for (const target of stallDetectorTargets) {
-  writeFileSync(target, stallDetectorContent);
+  writeFileAtomically(target, stallDetectorContent);
 }
 
 for (const target of callbackBatcherTargets) {
-  writeFileSync(target, callbackBatcherContent);
+  writeFileAtomically(target, callbackBatcherContent);
 }
