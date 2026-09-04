@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-goal@0.2.0] - 2026-09-04
+
+### Added
+
+- **goal**: add selectable `/goal` action completions for pause, resume, clear, and complete with contextual descriptions while preserving free-form objectives
+
+## [pi-better-sandbox@0.3.0] - 2026-09-04
+
+### Changed
+
+- **sandbox**: add contextual descriptions to the `/sandbox` activation, default, deny-rule, and rules-page completions
+
+## [pi-better-harness@0.3.0] - 2026-09-04
+
+### Changed
+
+- **harness**: bundle goal 0.2.0 and sandbox 0.3.0
+
 ## [pi-better-subagents@0.1.23] - 2026-09-03
 
 ### Fixed
