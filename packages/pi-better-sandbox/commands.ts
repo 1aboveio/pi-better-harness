@@ -12,6 +12,7 @@
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
 import {
     DenyRuleError,
@@ -256,8 +257,22 @@ function announce(ctx: ExtensionCommandContext, change: () => DenyRuleReport): v
 const SUBCOMMANDS = ["on", "off", "default", "deny", "rules"] as const;
 const DENY_ACTIONS = ["list", "add", "remove", "reset"] as const;
 
+const COMPLETION_DESCRIPTIONS: Readonly<Record<string, string>> = {
+    on: "Enable confinement for this session",
+    off: "Disable confinement for this session",
+    default: "Change the persistent activation default",
+    "default on": "Enable confinement by default",
+    "default off": "Disable confinement by default",
+    deny: "Manage write-denied paths",
+    "deny list": "Show configured write-denied paths",
+    "deny add": "Add a write-denied path",
+    "deny remove": "Remove a write-denied path",
+    "deny reset": "Restore packaged write-deny defaults",
+    rules: "Open the write-deny rule manager",
+};
+
 /** Argument completions for `/sandbox`, including the `deny` actions. */
-export function sandboxArgumentCompletions(argumentPrefix: string) {
+export function sandboxArgumentCompletions(argumentPrefix: string): AutocompleteItem[] {
     const prefix = argumentPrefix.trimStart().toLowerCase();
     const denyPrefix = /^deny(\s|$)/.test(prefix) ? prefix.replace(/^deny\s*/, "") : undefined;
     const defaultPrefix = /^default(\s|$)/.test(prefix)
@@ -275,5 +290,12 @@ export function sandboxArgumentCompletions(argumentPrefix: string) {
                     .map((value) => `default ${value}`)
               : SUBCOMMANDS.filter((value) => value.startsWith(prefix));
 
-    return values.map((value) => ({ value, label: value }));
+    return values.map((value) => {
+        const description = COMPLETION_DESCRIPTIONS[value];
+        return {
+            value,
+            label: value,
+            ...(description === undefined ? {} : { description }),
+        };
+    });
 }
