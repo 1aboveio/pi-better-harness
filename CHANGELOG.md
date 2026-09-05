@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-subagents@0.1.24] - 2026-09-05
+
+### Fixed
+
+- **subagents**: render exactly one input bar in background-work detail overlays and cover the real Pi TUI navigation path with a regression test
+
+## [pi-better-background-tasks@0.2.9] - 2026-09-05
+
+### Fixed
+
+- **background-tasks**: render exactly one input bar in background-work detail overlays and cover the real Pi TUI navigation path with a regression test
+
+## [pi-better-harness@0.3.1] - 2026-09-05
+
+### Changed
+
+- **harness**: bundle subagents 0.1.24 and background-tasks 0.2.9 with the single-input detail overlay fix
+
 ## [pi-better-goal@0.2.0] - 2026-09-04
 
 ### Added
