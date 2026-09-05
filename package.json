@@ -27,6 +27,7 @@
     "sync:shared-sandbox-core": "node scripts/sync-shared-sandbox-core.mjs",
     "gallery:capture-real": "node scripts/capture-real-pi-session-gallery.mjs",
     "gallery:render": "node --import tsx scripts/render-package-gallery.mjs",
+    "test:tui-e2e": "node --test scripts/navigator-detail.tui.e2e.test.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "node --import tsx --test scripts/*.test.mjs && npm run test --workspaces --if-present",
     "test:cross-session": "npm run test:cross-session -w packages/pi-better-background-tasks && npm run test:cross-session -w packages/pi-better-subagents",

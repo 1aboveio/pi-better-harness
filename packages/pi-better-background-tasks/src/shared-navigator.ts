@@ -108,7 +108,7 @@ export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
-const DETAIL_OVERLAY_FOOTER_ROWS = 3;
+const DETAIL_OVERLAY_BOTTOM_MARGIN_ROWS = 0;
 const EVIDENCE_SECTION_ID = "__evidence__";
 const RUNNING_DOT_GLYPH = "●";
 
@@ -211,6 +211,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   s.mainListDeadlineScheduler = undefined;
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
+  s.editorComponent = undefined;
   s.detailOverlayRows = undefined;
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
@@ -1025,7 +1026,7 @@ function buildTranscriptDetailLines(
 }
 
 function detailOverlayOptions() {
-  const marginBottom = DETAIL_OVERLAY_FOOTER_ROWS;
+  const marginBottom = DETAIL_OVERLAY_BOTTOM_MARGIN_ROWS;
   return {
     anchor: "top-left" as const,
     width: "100%" as const,
