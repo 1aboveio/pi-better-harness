@@ -91,6 +91,7 @@ type NavigatorState = {
   mainListCloseArm?: { id: string; armedAt: number };
   mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
   mainListDeadlineScheduler?: RenderScheduler;
+  editorComponent?: Component;
   detailOverlayRows?: number;
   dispose?: () => void;
 };
@@ -107,7 +108,7 @@ export const CLOSE_ARM_MS = 3000;
 export const DEFAULT_LOG_TAIL_ROWS = 10;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
-const DETAIL_OVERLAY_FOOTER_ROWS = 3;
+const DETAIL_OVERLAY_BOTTOM_MARGIN_ROWS = 0;
 const EVIDENCE_SECTION_ID = "__evidence__";
 const RUNNING_DOT_GLYPH = "●";
 
@@ -210,6 +211,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   s.mainListDeadlineScheduler = undefined;
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
+  s.editorComponent = undefined;
   s.detailOverlayRows = undefined;
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
@@ -615,6 +617,7 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 }
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
+  if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
   return new Proxy(inner, {
     get(target, prop) {
       if (prop === "handleInput") {
@@ -897,7 +900,8 @@ function createOverlayComponent(
             focused: true,
           })
         : [];
-      const bottomLines = railLines;
+      const editorLines = mode === "detail" ? renderEditorLines(width) : [];
+      const bottomLines = [...railLines, ...editorLines];
       const overlayRows = state().detailOverlayRows;
       const detailRows = overlayRows === undefined ? undefined : Math.max(1, overlayRows - bottomLines.length);
       let contentLines: string[];
@@ -1022,7 +1026,7 @@ function buildTranscriptDetailLines(
 }
 
 function detailOverlayOptions() {
-  const marginBottom = DETAIL_OVERLAY_FOOTER_ROWS;
+  const marginBottom = DETAIL_OVERLAY_BOTTOM_MARGIN_ROWS;
   return {
     anchor: "top-left" as const,
     width: "100%" as const,
@@ -1038,6 +1042,15 @@ function detailOverlayOptions() {
       return true;
     },
   };
+}
+
+function renderEditorLines(width: number): string[] {
+  try {
+    const lines = state().editorComponent?.render(width);
+    if (lines?.length) return lines;
+  } catch { /* use an empty editor-shaped fallback */ }
+  const border = "─".repeat(Math.max(1, width));
+  return [border, "", border];
 }
 
 function fallbackDetail(row: InternalRow): BackgroundWorkDetail {

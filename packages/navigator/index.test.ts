@@ -998,7 +998,7 @@ describe("shared background work navigator", () => {
       const overlayOptions = customOptions?.overlayOptions?.();
       const { visible, ...layoutOptions } = overlayOptions;
       const navigatorRows = renderWidget(widgets.at(-1)?.[1], 72, ui.theme).length;
-      const bottomMargin = 3;
+      const bottomMargin = 0;
       assert.equal(customOptions?.overlay, true);
       assert.equal(typeof visible, "function");
       const topMargin = 0;
@@ -1011,9 +1011,9 @@ describe("shared background work navigator", () => {
       });
 
       let renderedLines = component.render(72);
-      assert.equal(renderedLines.length, 40 - bottomMargin, "detail overlay should own the full terminal height above the native footer");
-      const railStart = renderedLines.length - navigatorRows;
-      assert.match(renderedLines.slice(railStart).join("\n"), /↑↓ switch/, "the persistent navigator remains above the native input");
+      assert.equal(renderedLines.length, 40 - bottomMargin, "detail overlay should own the full terminal height");
+      const railStart = renderedLines.length - navigatorRows - nativeEditorLines.length;
+      assert.match(renderedLines.slice(railStart, -nativeEditorLines.length).join("\n"), /↑↓ switch/, "the persistent navigator remains above the input");
       assert.doesNotMatch(
         renderedLines.slice(Math.max(0, railStart - 3), railStart).join("\n"),
         /← back|^─+$/m,
@@ -1021,14 +1021,10 @@ describe("shared background work navigator", () => {
       );
       assert.equal(
         renderedLines.filter((line: string) => line === "─".repeat(72)).length,
-        0,
-        "the overlay must not paint a duplicate input box into the region above Pi's native editor",
-      );
-      assert.equal(
-        [...renderedLines, ...nativeEditorLines].filter((line: string) => line === "─".repeat(72)).length,
         2,
-        "the composed detail screen contains exactly one input box",
+        "the full-height overlay must paint exactly one input box",
       );
+      assert.deepEqual(renderedLines.slice(-nativeEditorLines.length), nativeEditorLines, "the input box is flush with the bottom of the detail overlay");
       for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
       let rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 10);

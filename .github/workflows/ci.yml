@@ -45,6 +45,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install TUI test dependency
+        run: sudo apt-get update && sudo apt-get install --yes tmux
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -68,8 +71,10 @@ jobs:
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \
             node_modules/pi-better-subagents/index.ts \
+            node_modules/pi-better-subagents/shared-navigator.ts \
             node_modules/pi-better-subagents/shared-sandbox-core.ts \
             node_modules/pi-better-background-tasks/src/index.ts \
+            node_modules/pi-better-background-tasks/src/shared-navigator.ts \
             node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
             node_modules/pi-better-goal/src/index.ts
           do
