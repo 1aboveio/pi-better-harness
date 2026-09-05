@@ -91,7 +91,6 @@ type NavigatorState = {
   mainListCloseArm?: { id: string; armedAt: number };
   mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
   mainListDeadlineScheduler?: RenderScheduler;
-  editorComponent?: Component;
   detailOverlayRows?: number;
   dispose?: () => void;
 };
@@ -616,7 +615,6 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 }
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
-  if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
   return new Proxy(inner, {
     get(target, prop) {
       if (prop === "handleInput") {
@@ -899,8 +897,7 @@ function createOverlayComponent(
             focused: true,
           })
         : [];
-      const editorLines = mode === "detail" ? renderEditorLines(width) : [];
-      const bottomLines = [...railLines, ...editorLines];
+      const bottomLines = railLines;
       const overlayRows = state().detailOverlayRows;
       const detailRows = overlayRows === undefined ? undefined : Math.max(1, overlayRows - bottomLines.length);
       let contentLines: string[];
@@ -1041,15 +1038,6 @@ function detailOverlayOptions() {
       return true;
     },
   };
-}
-
-function renderEditorLines(width: number): string[] {
-  try {
-    const lines = state().editorComponent?.render(width);
-    if (lines?.length) return lines;
-  } catch { /* use an empty editor-shaped fallback */ }
-  const border = "─".repeat(Math.max(1, width));
-  return [border, "", border];
 }
 
 function fallbackDetail(row: InternalRow): BackgroundWorkDetail {

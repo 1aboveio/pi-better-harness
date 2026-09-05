@@ -984,8 +984,9 @@ describe("shared background work navigator", () => {
     const ctx = { mode: "tui", hasUI: true, ui } as any;
 
     try {
+      const nativeEditorLines = ["─".repeat(72), "", "─".repeat(72)];
       ensureBackgroundWorkNavigator(ctx, {
-        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {}, render: () => nativeEditorLines }),
         isOpenTrigger: (data) => data === "left",
         matchKey: (data, key) => data === key,
         truncate: (value, width) => value.slice(0, width),
@@ -1011,14 +1012,23 @@ describe("shared background work navigator", () => {
 
       let renderedLines = component.render(72);
       assert.equal(renderedLines.length, 40 - bottomMargin, "detail overlay should own the full terminal height above the native footer");
-      const railStart = renderedLines.length - navigatorRows - 3;
-      assert.match(renderedLines.slice(railStart, -3).join("\n"), /↑↓ switch/, "the persistent navigator remains above the input");
+      const railStart = renderedLines.length - navigatorRows;
+      assert.match(renderedLines.slice(railStart).join("\n"), /↑↓ switch/, "the persistent navigator remains above the native input");
       assert.doesNotMatch(
         renderedLines.slice(Math.max(0, railStart - 3), railStart).join("\n"),
         /← back|^─+$/m,
         "detail overlay must not add a second bottom footer above the persistent navigator",
       );
-      assert.deepEqual(renderedLines.slice(-3), ["─".repeat(72), "", "─".repeat(72)], "the detail screen retains the three-row input box");
+      assert.equal(
+        renderedLines.filter((line: string) => line === "─".repeat(72)).length,
+        0,
+        "the overlay must not paint a duplicate input box into the region above Pi's native editor",
+      );
+      assert.equal(
+        [...renderedLines, ...nativeEditorLines].filter((line: string) => line === "─".repeat(72)).length,
+        2,
+        "the composed detail screen contains exactly one input box",
+      );
       for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
       let rendered = renderedLines.join("\n");
       assert.equal(detailCalls.at(-1), 10);
