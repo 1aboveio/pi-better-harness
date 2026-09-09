@@ -85,6 +85,19 @@ test("the installer configures and removes the sandbox alongside the other compo
   );
 });
 
+// @covers harness.plan-inactive
+// @level integration
+test("plan stays local-only and absent from the published harness", () => {
+  assert.ok(
+    rootManifest.pi.extensions.includes("./packages/pi-better-plan/src/index.ts"),
+    "the root development manifest should keep plan available locally",
+  );
+  assert.ok(!componentPackages.includes("pi-better-plan"), "the npm installer must not install plan yet");
+  assert.equal(harnessManifest.dependencies["pi-better-plan"], undefined);
+  assert.ok(!harnessManifest.bundledDependencies.includes("pi-better-plan"));
+  assert.ok(!shimmedPackages().some((shim) => shim.packageName === "pi-better-plan"));
+});
+
 // @covers harness.default-capability
 // @level integration
 test("every component is a bundled dependency pinned at its workspace version", () => {

@@ -68,7 +68,6 @@ jobs:
             extensions/subagents/index.ts \
             extensions/background-tasks/index.ts \
             extensions/goal/index.ts \
-            extensions/plan/index.ts \
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \
             node_modules/pi-better-subagents/index.ts \
@@ -77,11 +76,12 @@ jobs:
             node_modules/pi-better-background-tasks/src/index.ts \
             node_modules/pi-better-background-tasks/src/shared-navigator.ts \
             node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
-            node_modules/pi-better-goal/src/index.ts \
-            node_modules/pi-better-plan/src/index.ts
+            node_modules/pi-better-goal/src/index.ts
           do
             node -e 'const d = require(process.argv[1]); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
           done
+
+          node -e 'const d = require("/tmp/pi-harness-pack.json"); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; const plan = pack.files.find((file) => file.path.includes("pi-better-plan") || file.path === "extensions/plan/index.ts"); if (plan) throw new Error(`inactive plan extension leaked into harness: ${plan.path}`);'
 
           # The sandbox ships no launcher: users keep running ordinary `pi`.
           node -e 'const d = require("/tmp/pi-harness-pack.json"); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; const launcher = pack.files.find((file) => file.path.startsWith("node_modules/pi-better-sandbox/bin/")); if (launcher) throw new Error(`pi-better-sandbox must ship no launcher, found ${launcher.path}`);'
