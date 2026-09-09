@@ -1,6 +1,6 @@
 # pi-better-harness
 
-`pi-better-harness` is a Pi meta package that installs the core Pi Better Harness extensions: an opt-in foreground write sandbox, delegated subagents, durable background tasks, goal tracking, and structured execution plans.
+`pi-better-harness` is a Pi meta package that installs the core Pi Better Harness extensions: an opt-in foreground write sandbox, delegated subagents, durable background tasks, and goal tracking.
 
 ## Quick Answer
 
@@ -10,9 +10,8 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 - `pi-better-subagents` for detached, sandboxed subagent runs.
 - `pi-better-background-tasks` for durable shell tasks and watchers.
 - `pi-better-goal` for objective tracking that is aware of background work.
-- `pi-better-plan` for persistent plan progress and `→` keyboard navigation.
 
-`pi-better-read-aloud` is intentionally not included yet.
+`pi-better-plan` and `pi-better-read-aloud` are intentionally not included yet.
 
 ## Screenshots
 
@@ -61,7 +60,7 @@ need interactive confirmation. Full policy: [pi-better-sandbox](https://github.c
 
 ## When To Use
 
-Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, goal tracking, or plan progress.
+Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, or goal tracking.
 
 ## Compatibility
 

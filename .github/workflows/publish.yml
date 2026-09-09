@@ -164,18 +164,17 @@ jobs:
                 extensions/subagents/index.ts \
                 extensions/background-tasks/index.ts \
                 extensions/goal/index.ts \
-                extensions/plan/index.ts \
                 node_modules/pi-better-sandbox/index.ts \
                 node_modules/pi-better-sandbox/shared-sandbox-core.ts \
                 node_modules/pi-better-subagents/index.ts \
                 node_modules/pi-better-subagents/shared-sandbox-core.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
-                node_modules/pi-better-goal/src/index.ts \
-                node_modules/pi-better-plan/src/index.ts
+                node_modules/pi-better-goal/src/index.ts
               do
                 check_pack_file /tmp/package-pack.json "$required"
               done
+              node -e 'const data=require("/tmp/package-pack.json"); const p=Array.isArray(data)?data[0]:Object.values(data)[0]; const plan=p.files.find((f)=>f.path.includes("pi-better-plan") || f.path === "extensions/plan/index.ts"); if (plan) throw new Error(`inactive plan extension leaked into harness: ${plan.path}`);'
               ;;
           esac
 

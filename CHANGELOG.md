@@ -4,6 +4,40 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-background-tasks@0.2.10] - 2026-09-09
+
+### Fixed
+
+- **background-tasks**: scope goal, navigator, resume, and clear paths to session-owned task indexes instead of repeatedly scanning the machine-wide registry
+- **background-tasks**: reconcile abandoned local processes conservatively with process-start identity, daily locked maintenance, and seven-day terminal retention while preserving remote tmux tasks
+
+### Changed
+
+- **background-tasks**: cache owner snapshots behind directory revision checks and use an active-only index for resume, eliminating repeated metadata parsing on warm reads
+
+## [pi-better-goal@0.2.1] - 2026-09-09
+
+### Fixed
+
+- **goal**: sleep the activity poll when no goal or owned work is active, wake from provider metadata events, and stop polling again after work drains
+
+## [pi-better-subagents@0.1.25] - 2026-09-09
+
+### Fixed
+
+- **subagents**: scope navigator, health, capacity, callback recovery, and shutdown paths to parent- or session-owned indexes instead of rereading the global run registry
+
+### Changed
+
+- **subagents**: cache owner snapshots behind directory revision checks and maintain an active-only parent index for capacity checks
+
+## [pi-better-harness@0.3.2] - 2026-09-09
+
+### Changed
+
+- **harness**: bundle background-tasks 0.2.10, goal 0.2.1, and subagents 0.1.25 with owner-scoped registry reads and event-driven idle behavior
+- **harness**: keep the experimental plan workspace available for local development while excluding it from the npm harness bundle and installer until its standalone release is authorized
+
 ## [pi-better-subagents@0.1.24] - 2026-09-05
 
 ### Fixed

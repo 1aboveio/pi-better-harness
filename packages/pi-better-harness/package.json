@@ -1,7 +1,7 @@
 {
   "name": "pi-better-harness",
-  "version": "0.3.1",
-  "description": "Pi extension bundle for a write sandbox, subagents, background tasks, goals, and structured plans.",
+  "version": "0.3.2",
+  "description": "Pi extension bundle for a write sandbox, subagents, background tasks, and goals.",
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -11,16 +11,14 @@
     "sandbox",
     "subagents",
     "background-tasks",
-    "goal-tracking",
-    "plan-tracking"
+    "goal-tracking"
   ],
   "pi": {
     "extensions": [
       "extensions/sandbox/index.ts",
       "extensions/subagents/index.ts",
       "extensions/background-tasks/index.ts",
-      "extensions/goal/index.ts",
-      "extensions/plan/index.ts"
+      "extensions/goal/index.ts"
     ],
     "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-harness.png"
   },
@@ -34,7 +32,7 @@
   },
   "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme",
   "bin": {
-    "pi-better-harness": "./bin/pi-better-harness.mjs"
+    "pi-better-harness": "bin/pi-better-harness.mjs"
   },
   "files": [
     "README.md",
@@ -47,16 +45,14 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "pi-better-background-tasks": "0.2.9",
-    "pi-better-goal": "0.2.0",
-    "pi-better-plan": "0.1.0",
+    "pi-better-background-tasks": "0.2.10",
+    "pi-better-goal": "0.2.1",
     "pi-better-sandbox": "0.3.0",
-    "pi-better-subagents": "0.1.24"
+    "pi-better-subagents": "0.1.25"
   },
   "bundledDependencies": [
     "pi-better-background-tasks",
     "pi-better-goal",
-    "pi-better-plan",
     "pi-better-sandbox",
     "pi-better-subagents"
   ]
