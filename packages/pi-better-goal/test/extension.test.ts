@@ -41,6 +41,73 @@ test("goal action completions expose selectable actions with context", () => {
   assert.equal(goalArgumentCompletions("ship the release"), null);
 });
 
+test("idle sessions sleep until provider activity needs polling", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+  const events = new EventEmitter();
+  let activityChanged: (() => void) | undefined;
+  let active = false;
+  let collections = 0;
+  const ctx = {
+    hasUI: false,
+    isIdle: () => true,
+    cwd: "/tmp/project",
+    sessionManager: { getBranch: () => [], getSessionId: () => "session-idle" },
+    ui: { notify() {}, setStatus() {}, setWidget() {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    events,
+    appendEntry() {},
+    sendMessage() {},
+    registerCommand() {},
+    registerTool() {},
+    registerShortcut() {},
+    on(event: string, handler: (event: unknown, context: ExtensionContext) => unknown) {
+      handlers.set(event, handler);
+    },
+  } as unknown as ExtensionAPI;
+
+  extension(pi);
+  events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => {
+      collections += 1;
+      return {
+        providerId: "fixture",
+        items: active ? [{ id: "work", status: "running", active: true }] : [],
+      };
+    },
+    onActivityChanged(notify: () => void) {
+      activityChanged = notify;
+      return () => { activityChanged = undefined; };
+    },
+  });
+
+  await handlers.get("session_start")?.({}, ctx);
+  const afterStartup = collections;
+  assert.ok(afterStartup >= 1, "startup establishes one activity snapshot");
+  t.mock.timers.tick(10_000);
+  await Promise.resolve();
+  assert.equal(collections, afterStartup, "an idle session performs no periodic provider reads");
+
+  active = true;
+  activityChanged?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const afterWake = collections;
+  assert.ok(afterWake > afterStartup, "provider changes wake one immediate collection");
+  t.mock.timers.tick(2_000);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(collections > afterWake, "owned running work keeps polling active");
+
+  active = false;
+  activityChanged?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const afterDrain = collections;
+  t.mock.timers.tick(10_000);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(collections, afterDrain, "polling stops after owned work drains");
+});
+
 test("only the slash command creates a goal and installs an observability-safe widget", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const entries: SessionEntry[] = [];

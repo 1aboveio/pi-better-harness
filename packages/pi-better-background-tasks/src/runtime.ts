@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
 import { evaluateCondition } from "./conditions.js";
 import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
+import { currentProcessStartToken, readProcessStartToken } from "./process-identity.js";
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.js";
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
@@ -122,8 +123,10 @@ export function spawnTask(
     launchArgv: launchArgvOf(commandSpec, launchSpec),
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     pid: spawned?.child.pid,
+    pidStartTime: spawned?.child.pid ? readProcessStartToken(spawned.child.pid) : undefined,
     pgid: spawned?.pgid,
     spawnPid: process.pid,
+    spawnPidStartTime: currentProcessStartToken(),
     ssh: remoteTask?.metadata.ssh,
     remote: remoteTask?.metadata.remote,
   };
@@ -347,6 +350,7 @@ export function startWatchTask(
     launchArgv: launchArgvOf(commandSpec, launchSpec),
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     spawnPid: process.pid,
+    spawnPidStartTime: currentProcessStartToken(),
     successWhen: params.success_when,
     failureWhen: params.failure_when,
     notifyOn: "terminal",
@@ -377,6 +381,12 @@ export function resumeRunningTask(
   if (meta.status !== "running") {
     void notifyTerminal(pi, meta, getActiveSession);
     return meta;
+  }
+
+  if (meta.spawnPid !== process.pid || meta.spawnPidStartTime !== currentProcessStartToken()) {
+    meta.spawnPid = process.pid;
+    meta.spawnPidStartTime = currentProcessStartToken();
+    writeMeta(meta);
   }
 
   const remoteTask = resolvePersistedRemoteTask(meta, dependencies.remoteRunner);

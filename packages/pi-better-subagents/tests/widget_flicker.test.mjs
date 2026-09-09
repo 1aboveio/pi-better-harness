@@ -474,7 +474,7 @@ describe("index.ts widget wiring (issue #13)", async () => {
 
         // A cache across rebuilds would hide runs created by another pi process.
         const helper = indexSource.match(/function sessionVisibleNavigatorRuns[\s\S]*?\n}/)?.[0] ?? "";
-        assert.match(helper, /listMetas\(\)/);
+        assert.match(helper, /listMetasForOrigin\(origin\)/);
         assert.doesNotMatch(helper, /withinRefreshFloor|Memo/, "no memo across calls");
     });
 

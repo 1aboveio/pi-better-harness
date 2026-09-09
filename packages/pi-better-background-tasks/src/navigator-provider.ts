@@ -10,7 +10,7 @@ import {
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { readLog } from "./logs.js";
-import { listMetas, onMetaChanged, readMeta, writeMeta } from "./registry.js";
+import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
 import { stopTask } from "./runtime.js";
 import { observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
@@ -67,7 +67,9 @@ const provider: BackgroundWorkProvider = {
 };
 
 function visibleMetas(now = Date.now()): BackgroundTaskMeta[] {
-  return listMetas().filter((meta) => meta.dismissedAt === undefined && belongsToActiveNavigatorSession(meta) && !isExpiredTerminalNavigatorRow(meta, now));
+  const active = activeNavigatorOrigin;
+  if (!active) return [];
+  return listMetasForOrigin(active).filter((meta) => meta.dismissedAt === undefined && belongsToActiveNavigatorSession(meta) && !isExpiredTerminalNavigatorRow(meta, now));
 }
 
 function getNavigatorOrigin(ctx: ExtensionContext): BackgroundTaskCallbackOrigin {

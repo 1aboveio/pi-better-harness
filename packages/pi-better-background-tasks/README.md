@@ -15,6 +15,7 @@ Use `pi-better-background-tasks` when a command should keep running while the fo
 - Start long-running commands without blocking the current turn.
 - Watch commands until success, failure, or timeout.
 - Keep task metadata and logs available across reloads.
+- Retain completed task artifacts for seven days, then remove them during rate-limited maintenance.
 - Show active work in Pi's background-work navigator.
 - Flag running tasks with no observable output or completed poll as stalled.
 - Confine local task writes to the project directory when `pi-better-sandbox` is enabled.

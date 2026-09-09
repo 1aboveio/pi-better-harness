@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { listMetas } from "./registry.js";
+import { listMetas, listMetasForOrigin, onMetaChanged } from "./registry.js";
 import type { BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.js";
@@ -46,7 +46,8 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
     pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
       id: "background-tasks",
       label: "Background Tasks",
-      getActivity: (ctx: ExtensionContext) => collectBackgroundTaskGoalActivity(listMetas(), ctx),
+      getActivity: (ctx: ExtensionContext) => collectBackgroundTaskGoalActivity(listMetasForOrigin(getGoalActivityOrigin(ctx)), ctx),
+      onActivityChanged: onMetaChanged,
     });
   };
 

@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
+import { writeMeta as writeTaskMeta } from "../packages/pi-better-background-tasks/src/registry.ts";
+import { writeMeta as writeSubagentMeta } from "../packages/pi-better-subagents/registry.ts";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const extensionRoot = resolve(process.env.PI_HARNESS_E2E_PACKAGE_ROOT ?? repoRoot);
@@ -80,7 +82,7 @@ function seedNavigatorState({ cwd, sessionId, piPid }) {
   mkdirSync(subagentDir, { recursive: true });
   const subagentLog = join(subagentDir, "output.log");
   writeFileSync(subagentLog, `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "subagent output" }] } })}\n`);
-  writeJson(join(subagentDir, "meta.json"), {
+  writeSubagentMeta({
     id: subagentId,
     name: "subagent golden path",
     status: "running",
@@ -101,7 +103,7 @@ function seedNavigatorState({ cwd, sessionId, piPid }) {
   mkdirSync(taskDir, { recursive: true });
   const taskLog = join(taskDir, "output.log");
   writeFileSync(taskLog, "background task output\n");
-  writeJson(join(taskDir, "meta.json"), {
+  writeTaskMeta({
     id: taskId,
     name: "background golden path",
     kind: "command_watch",
@@ -165,10 +167,6 @@ function waitForJson(path, timeoutMs = 10_000) {
     sleep(50);
   }
   throw new Error(`Timed out waiting for Pi session probe. Current screen:\n${captureScreen()}`);
-}
-
-function writeJson(path, value) {
-  writeFileSync(path, JSON.stringify(value, null, 2));
 }
 
 function sleep(ms) {

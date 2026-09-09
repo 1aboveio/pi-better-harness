@@ -167,7 +167,7 @@ describe("adopted records reach a terminal status and then age out", () => {
 });
 
 describe("wiring", () => {
-    it("adopts on the health tick and at session start, and never notifies or calls back", async () => {
+    it("adopts once at session start, outside the periodic owned-work health path", async () => {
         const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
         const sweep = src.match(/function reconcileAbandonedRuns[\s\S]*?\n}/)?.[0] ?? "";
         assert.ok(sweep, "sweep located");
@@ -176,8 +176,8 @@ describe("wiring", () => {
         assert.match(sweep, /reconcileRun\(meta, realProcessProbe, now\)/, "same evidence rules");
         assert.doesNotMatch(sweep, /notify|deliverHealthCallback/, "no notify, no callback for a dead session's run");
 
-        // Called from both the tick and session start.
-        assert.match(src, /const pi = healthPi;\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*reconcileAbandonedRuns\(\)/);
+        const healthTick = src.match(/function reconcileHealth[\s\S]*?\n}/)?.[0] ?? "";
+        assert.doesNotMatch(healthTick, /reconcileAbandonedRuns\(\)/, "periodic health never scans foreign runs");
         assert.match(src, /ensureSubagentProvider\(\);\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*reconcileAbandonedRuns\(\)/);
 
         // Adopted records must not extend this session's ticker lifetime.

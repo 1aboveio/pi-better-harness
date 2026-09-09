@@ -13,6 +13,7 @@ import {
     listMetas,
     ownedByThisParent,
     readMeta,
+    removeMetaArtifacts,
     runDir,
     sessionsDir,
     type RunMeta,
@@ -190,7 +191,8 @@ function cleanRunDirs(cutoff: number, errors: string[]): number {
         if (meta) {
             if (!TERMINAL_CLEANUP_STATUSES.has(meta.status)) continue;
             if (terminalTimestamp(meta) >= cutoff) continue;
-            if (removePath(dir, errors)) removed += 1;
+            if (removeMetaArtifacts(meta)) removed += 1;
+            else errors.push(`${dir}: could not remove run artifacts`);
             continue;
         }
 
@@ -379,7 +381,9 @@ export function enforceRegistrySizeCapOnce(options: SizeCapOptions = {}): SizeCa
     const plan = planRegistrySizeCap(collectSizeCapEntries(), { maxBytes, protectedIds });
     const removed: string[] = [];
     for (const id of plan.remove) {
-        if (removePath(runDir(id), errors)) removed.push(id);
+        const meta = readMeta(id);
+        if (meta ? removeMetaArtifacts(meta) : removePath(runDir(id), errors)) removed.push(id);
+        else if (meta) errors.push(`${runDir(id)}: could not remove run artifacts`);
     }
 
     try {

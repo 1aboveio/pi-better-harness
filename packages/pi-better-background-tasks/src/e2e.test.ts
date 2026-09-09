@@ -331,7 +331,7 @@ describe("extension e2e", () => {
     expect(harness.messages).toHaveLength(1);
   });
 
-  it("suppresses terminal callback replay in a different session", async () => {
+  it("does not inspect or mutate terminal callbacks from a different session", async () => {
     const originHarness = createHarness({ sessionId: "session-a", failUserMessage: true });
 
     const launch = await originHarness.execute("bg_task_watch", {
@@ -349,9 +349,8 @@ describe("extension e2e", () => {
     const otherHarness = createHarness({ sessionId: "session-b" });
     await otherHarness.fireSessionStart();
 
-    const terminal = await waitForMeta(id, (meta) => typeof meta?.callbackSuppressedAt === "number");
     expect(otherHarness.messages.join("\n")).not.toContain(id);
-    expect(terminal?.callbackSuppressedReason).toContain("origin session session-a does not match active session session-b");
+    expect(readMeta(id)?.callbackSuppressedAt).toBeUndefined();
   });
 
   it("keeps navigator rows scoped to the active session", async () => {
