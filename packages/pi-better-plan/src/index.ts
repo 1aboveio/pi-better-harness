@@ -39,6 +39,18 @@ const UpdatePlanSchema = Type.Object({
 const PLAN_NAV_STATUS_KEY = "pi-better-plan-nav";
 const PLAN_EDITOR_FACTORY_MARK = "__piBetterPlanFactory";
 const PLAN_EDITOR_FACTORY_REFRESH = "__piBetterPlanRefresh";
+const PLAN_NAVIGATION_KEY = Symbol.for("pi-better-harness.plan-navigation.state");
+
+interface SharedPlanNavigationState {
+  visible: boolean;
+  releaseWorkFocus?: () => void;
+}
+
+function sharedPlanNavigationState(): SharedPlanNavigationState {
+  const global = globalThis as typeof globalThis & { [PLAN_NAVIGATION_KEY]?: SharedPlanNavigationState };
+  if (!global[PLAN_NAVIGATION_KEY]) global[PLAN_NAVIGATION_KEY] = { visible: false };
+  return global[PLAN_NAVIGATION_KEY]!;
+}
 
 export default function planExtension(pi: ExtensionAPI): void {
   let currentPlan: PlanSnapshot | null = null;
@@ -54,6 +66,7 @@ export default function planExtension(pi: ExtensionAPI): void {
     if (!ctx?.hasUI) return;
     const progress = currentPlan ? planProgress(currentPlan) : null;
     const visible = currentPlan !== null && displayMode !== "hidden";
+    sharedPlanNavigationState().visible = visible;
     const suffix = progress?.blocked ? "blocked" : progress ? `${progress.completed}/${progress.total}` : "";
     ctx.ui.setStatus(PLAN_NAV_STATUS_KEY, visible ? `→ plan · ${suffix}` : undefined);
   };
@@ -135,6 +148,7 @@ export default function planExtension(pi: ExtensionAPI): void {
     if (!currentPlan || displayMode === "hidden") return false;
     if (!focused) {
       if (!matchesKey(data, Key.right)) return false;
+      sharedPlanNavigationState().releaseWorkFocus?.();
       focused = true;
       selectedIndex = preferredIndex(currentPlan);
       refresh();
@@ -310,6 +324,7 @@ export default function planExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     refreshWidget = undefined;
     currentCtx = undefined;
+    sharedPlanNavigationState().visible = false;
     try {
       ctx.ui.setStatus(PLAN_NAV_STATUS_KEY, undefined);
       ctx.ui.setWidget(EXTENSION_NAME, undefined);

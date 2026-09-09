@@ -12,6 +12,7 @@ core extensions:
 | `pi-better-subagents` | Launch detached `pi -p` subagents, inspect their output, and receive completion callbacks. |
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
+| `pi-better-plan` | Keep a structured execution plan visible with explicit checklist progress. |
 
 `pi-better-ssh` and `pi-better-read-aloud` live in this repo but are
 intentionally not part of the meta package.
@@ -32,6 +33,7 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
+pi install npm:pi-better-plan
 ```
 
 For a temporary one-off run without changing Pi settings:
@@ -53,11 +55,12 @@ The package workspaces are:
 | `packages/pi-better-sandbox` | `pi-better-sandbox` | yes | yes |
 | `packages/pi-better-ssh` | `pi-better-ssh` | yes | no |
 | `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
+| `packages/pi-better-plan` | `pi-better-plan` | yes | yes |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
 
-All six publishable packages carry the `pi-package` npm keyword. The bundle is
+All seven publishable packages carry the `pi-package` npm keyword. The bundle is
 the recommended install for most users, and the component packages remain
 available for people who want only one extension.
 
@@ -125,6 +128,7 @@ pi install ./packages/pi-better-subagents
 pi install ./packages/pi-better-background-tasks
 pi install ./packages/pi-better-ssh
 pi install ./packages/pi-better-goal
+pi install ./packages/pi-better-plan
 ```
 
 ## Release Checklist

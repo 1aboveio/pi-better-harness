@@ -97,6 +97,7 @@ type NavigatorState = {
 };
 
 const GLOBAL_KEY = Symbol.for("pi-better-harness.navigator.state");
+const PLAN_NAVIGATION_KEY = Symbol.for("pi-better-harness.plan-navigation.state");
 const FACTORY_MARK = "__piBetterHarnessNavigatorFactory";
 const FACTORY_REFRESH = "__piBetterHarnessNavigatorRefresh";
 
@@ -118,6 +119,14 @@ function state(): NavigatorState {
     g[GLOBAL_KEY] = { providers: new Map(), unsubscribers: new Map() };
   }
   return g[GLOBAL_KEY]!;
+}
+
+type PlanNavigationState = { visible: boolean; releaseWorkFocus?: () => void };
+
+function planNavigationState(): PlanNavigationState {
+  const global = globalThis as typeof globalThis & { [PLAN_NAVIGATION_KEY]?: PlanNavigationState };
+  if (!global[PLAN_NAVIGATION_KEY]) global[PLAN_NAVIGATION_KEY] = { visible: false };
+  return global[PLAN_NAVIGATION_KEY]!;
 }
 
 export function registerBackgroundWorkProvider(provider: BackgroundWorkProvider): () => void {
@@ -185,6 +194,7 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   s.mainListRequestRender = undefined;
   s.mainListDeadlineScheduler?.dispose();
   s.mainListDeadlineScheduler = createRenderScheduler(() => refreshMainListWidget());
+  planNavigationState().releaseWorkFocus = unfocusMainList;
   installNavigatorEditor(ctx.ui as any, deps);
   s.lastHint = undefined;
   refreshBackgroundWorkNavigator(ctx);
@@ -213,6 +223,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   s.mainListRequestRender = undefined;
   s.editorComponent = undefined;
   s.detailOverlayRows = undefined;
+  planNavigationState().releaseWorkFocus = undefined;
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
 }
@@ -460,7 +471,10 @@ function buildMainListLines(
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
-  const keys = focused ? "↑↓ switch · Enter detail · x stop · Esc unfocus" : "← work navigator";
+  const plan = planNavigationState().visible ? " · → plan" : "";
+  const keys = focused
+    ? `↑↓ switch · Enter detail · x stop${plan} · Esc unfocus`
+    : `← work navigator${plan}`;
   return dim(keys, fg);
 }
 

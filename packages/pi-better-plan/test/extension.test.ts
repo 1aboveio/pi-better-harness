@@ -17,6 +17,11 @@ interface CommandDefinition {
 }
 
 test("plan tools persist progress and the empty-editor right arrow focuses the plan", async () => {
+  let releasedWorkFocus = 0;
+  (globalThis as any)[Symbol.for("pi-better-harness.plan-navigation.state")] = {
+    visible: false,
+    releaseWorkFocus: () => { releasedWorkFocus += 1; },
+  };
   const entries: SessionEntry[] = [];
   const tools = new Map<string, ToolDefinition>();
   const commands = new Map<string, CommandDefinition>();
@@ -79,6 +84,7 @@ test("plan tools persist progress and the empty-editor right arrow focuses the p
   const editor = editorFactory?.({}, {}, {});
   editor.handleInput("\u001b[C");
   assert.ok(widget.render(80).some((line: string) => line.startsWith("› ●")), "right focuses the active plan step");
+  assert.equal(releasedWorkFocus, 1, "right transfers focus away from the work navigator");
   assert.deepEqual(delegatedInput, []);
 
   editor.handleInput("\u001b[B");

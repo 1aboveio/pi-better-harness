@@ -18,7 +18,8 @@
       "./packages/pi-better-sandbox/index.ts",
       "./packages/pi-better-subagents/index.ts",
       "./packages/pi-better-background-tasks/src/index.ts",
-      "./packages/pi-better-goal/src/index.ts"
+      "./packages/pi-better-goal/src/index.ts",
+      "./packages/pi-better-plan/src/index.ts"
     ]
   },
   "scripts": {
@@ -29,7 +30,7 @@
     "gallery:render": "node --import tsx scripts/render-package-gallery.mjs",
     "test:tui-e2e": "node --test scripts/navigator-detail.tui.e2e.test.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "node --import tsx --test scripts/*.test.mjs && npm run test --workspaces --if-present",
+    "test": "node --import tsx --test --test-concurrency=1 scripts/*.test.mjs && npm run test --workspaces --if-present",
     "test:cross-session": "npm run test:cross-session -w packages/pi-better-background-tasks && npm run test:cross-session -w packages/pi-better-subagents",
     "verify": "npm run typecheck && npm test"
   },

@@ -13,6 +13,7 @@ on:
           - pi-better-ssh
           - pi-better-subagents
           - pi-better-goal
+          - pi-better-plan
           - pi-better-harness
 
 permissions:
@@ -66,6 +67,7 @@ jobs:
             pi-better-ssh) WORKSPACE="packages/pi-better-ssh" ;;
             pi-better-subagents) WORKSPACE="packages/pi-better-subagents" ;;
             pi-better-goal) WORKSPACE="packages/pi-better-goal" ;;
+            pi-better-plan) WORKSPACE="packages/pi-better-plan" ;;
             pi-better-harness) WORKSPACE="packages/pi-better-harness" ;;
             *) echo "Unsupported package: $PACKAGE" >&2; exit 1 ;;
           esac
@@ -151,6 +153,9 @@ jobs:
             pi-better-goal)
               check_pack_file /tmp/package-pack.json src/index.ts
               ;;
+            pi-better-plan)
+              check_pack_file /tmp/package-pack.json src/index.ts
+              ;;
             pi-better-harness)
               for required in \
                 bin/pi-better-harness.mjs \
@@ -159,13 +164,15 @@ jobs:
                 extensions/subagents/index.ts \
                 extensions/background-tasks/index.ts \
                 extensions/goal/index.ts \
+                extensions/plan/index.ts \
                 node_modules/pi-better-sandbox/index.ts \
                 node_modules/pi-better-sandbox/shared-sandbox-core.ts \
                 node_modules/pi-better-subagents/index.ts \
                 node_modules/pi-better-subagents/shared-sandbox-core.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
-                node_modules/pi-better-goal/src/index.ts
+                node_modules/pi-better-goal/src/index.ts \
+                node_modules/pi-better-plan/src/index.ts
               do
                 check_pack_file /tmp/package-pack.json "$required"
               done

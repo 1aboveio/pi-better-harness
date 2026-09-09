@@ -68,6 +68,7 @@ jobs:
             extensions/subagents/index.ts \
             extensions/background-tasks/index.ts \
             extensions/goal/index.ts \
+            extensions/plan/index.ts \
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \
             node_modules/pi-better-subagents/index.ts \
@@ -76,7 +77,8 @@ jobs:
             node_modules/pi-better-background-tasks/src/index.ts \
             node_modules/pi-better-background-tasks/src/shared-navigator.ts \
             node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
-            node_modules/pi-better-goal/src/index.ts
+            node_modules/pi-better-goal/src/index.ts \
+            node_modules/pi-better-plan/src/index.ts
           do
             node -e 'const d = require(process.argv[1]); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; if (!pack.files.some((file) => file.path === process.argv[2])) throw new Error(`missing bundled extension: ${process.argv[2]}`);' /tmp/pi-harness-pack.json "$path"
           done

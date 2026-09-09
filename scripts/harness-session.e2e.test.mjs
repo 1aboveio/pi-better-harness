@@ -178,8 +178,9 @@ test("the harness loads the sandbox alongside every other default extension", { 
     "pi-better-subagents",
     "pi-better-background-tasks",
     "pi-better-goal",
+    "pi-better-plan",
   ]);
-  for (const name of ["bash", "write", "edit", "subagent_spawn", "bg_task_spawn"]) {
+  for (const name of ["bash", "write", "edit", "subagent_spawn", "bg_task_spawn", "update_plan", "get_plan"]) {
     assert.ok(tools.has(name), `a harness session must have the ${name} tool`);
   }
   assert.ok(commands.has("sandbox"), "the human-only /sandbox command must be registered");

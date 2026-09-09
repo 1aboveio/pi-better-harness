@@ -41,7 +41,7 @@ const packages = [
       { label: "background-work navigator", lines: backgroundWorkLines("harness", TERMINAL_COLUMNS) },
       { label: "activity summary", lines: activityLines() },
     ],
-    footer: "← navigate · 4     /goal active     background activity keeps the turn open",
+    footer: "← work · 4     → plan · 1/3     /goal active",
   },
   {
     id: "pi-better-subagents",
@@ -65,7 +65,7 @@ const packages = [
       { label: "task detail", lines: backgroundTaskDetailLines() },
       { label: "tool result", lines: bgStatusLines() },
     ],
-    footer: "← navigate · 3     ↑↓ select · Enter detail · x stop · Esc unfocus",
+    footer: "← work · 3     → plan · 1/3     ↑↓ select · Enter detail · x stop · Esc unfocus",
   },
   {
     id: "pi-better-goal",
