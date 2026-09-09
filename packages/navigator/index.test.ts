@@ -55,6 +55,7 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 
 describe("shared background work navigator", () => {
   it("uses one footer/editor host for multiple providers and dispatches close by provider", () => {
+    const planNavigation = (globalThis as any)[Symbol.for("pi-better-harness.plan-navigation.state")] = { visible: true };
     const closed: string[] = [];
     const unregisterSubagents = registerBackgroundWorkProvider(provider("subagents", "Subagents", 10, 200, (id) => closed.push(`subagents:${id}`)));
     const unregisterTasks = registerBackgroundWorkProvider(provider("background-tasks", "Background Tasks", 20, 100, (id) => closed.push(`tasks:${id}`)));
@@ -85,14 +86,14 @@ describe("shared background work navigator", () => {
       });
 
       assert.equal(statuses.at(-1)?.[0], NAVIGATOR_STATUS_KEY);
-      assert.equal(statuses.at(-1)?.[1], "← navigate · 2");
+      assert.equal(statuses.at(-1)?.[1], "← work · 2");
       assert.equal(ui.factory.__piBetterHarnessNavigatorFactory, true);
 
       let list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
       assert.doesNotMatch(list, /background work/);
       assert.match(list, /Subagents row/);
       assert.match(list, /Background Tasks row/);
-      assert.match(list, /← to navigate/);
+      assert.match(list, /← work navigator · → plan/);
       assert.doesNotMatch(list, /shortcuts/);
       assert.match(list, /^background tasks$/m);
 
@@ -100,7 +101,7 @@ describe("shared background work navigator", () => {
       editor.handleInput("left");
       assert.equal(widgets.at(-1)?.[0], MAIN_LIST_WIDGET_KEY);
       list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
-      assert.match(list, /↑↓ switch · Enter detail · x stop · Esc unfocus/);
+      assert.match(list, /↑↓ switch · Enter detail · x stop · → plan · Esc unfocus/);
 
       editor.handleInput("enter");
       const detail = component.render(100).join("\n");
@@ -114,6 +115,7 @@ describe("shared background work navigator", () => {
       component.handleInput("x");
       assert.deepEqual(closed, ["subagents:subagents-1"]);
     } finally {
+      planNavigation.visible = false;
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
       unregisterTasks();
@@ -151,7 +153,7 @@ describe("shared background work navigator", () => {
       count = 1;
       refreshBackgroundWorkNavigator(toolCtx);
 
-      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, "← navigate · 1"]);
+      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, "← work · 1"]);
     } finally {
       disposeBackgroundWorkNavigator(tuiCtx);
       unregister();
@@ -470,7 +472,7 @@ describe("shared background work navigator", () => {
       assert.doesNotMatch(text, /background work/);
       assert.match(text, /^subagents$/m);
       assert.match(text, /^background tasks$/m);
-      assert.match(text, /← to navigate/);
+      assert.match(text, /← work navigator/);
       assert.doesNotMatch(text, /shortcuts/);
       assert.match(text, /●\s+reviewer\s+grok-4\.5 high · tool bash · 18\.2k tok/);
 
