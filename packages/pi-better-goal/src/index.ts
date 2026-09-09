@@ -162,6 +162,7 @@ function formatSnapshot(snapshot: ActivitySnapshot): string {
 
 export default function (pi: ExtensionAPI): void {
   const providers = new Map<string, BackgroundActivityProvider>();
+  const providerUnsubscribers = new Map<string, () => void>();
   providers.set("subagents", {
     id: "subagents",
     label: "Subagents",
@@ -172,6 +173,7 @@ export default function (pi: ExtensionAPI): void {
   let foregroundRunning = false;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let collecting = false;
+  let collectionPending = false;
   let latestSnapshot: ActivitySnapshot | null = null;
   let backgroundDrainTracker: BackgroundDrainTracker | null = null;
   let lastWakeSignature = "";
@@ -230,6 +232,7 @@ export default function (pi: ExtensionAPI): void {
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
+    syncPollingState();
     // Force a full redraw when the dock height changes (absent ↔ visible clock).
     refreshGoalWidget?.(!wasVisible || !isGoalClockVisible(goal));
   };
@@ -241,6 +244,7 @@ export default function (pi: ExtensionAPI): void {
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
+    syncPollingState();
     refreshGoalWidget?.(wasVisible);
   };
 
@@ -409,12 +413,22 @@ export default function (pi: ExtensionAPI): void {
 
   const collectIfPossible = (): void => {
     const ctx = currentCtx;
-    if (!ctx || collecting) {
+    if (!ctx) {
+      return;
+    }
+    if (collecting) {
+      collectionPending = true;
       return;
     }
     collecting = true;
     void publishSnapshot(ctx).finally(() => {
       collecting = false;
+      if (collectionPending) {
+        collectionPending = false;
+        collectIfPossible();
+      } else {
+        syncPollingState();
+      }
     });
   };
 
@@ -424,7 +438,6 @@ export default function (pi: ExtensionAPI): void {
     }
     pollTimer = setInterval(collectIfPossible, POLL_INTERVAL_MS);
     pollTimer.unref?.();
-    collectIfPossible();
   };
 
   const stopPolling = (): void => {
@@ -433,6 +446,16 @@ export default function (pi: ExtensionAPI): void {
     }
     clearInterval(pollTimer);
     pollTimer = undefined;
+  };
+
+  const syncPollingState = (): void => {
+    const ctx = currentCtx;
+    const goal = ctx ? currentGoalSnapshot(ctx) : null;
+    if (ctx && (isPokeable(goal) || latestSnapshot?.backgroundRunning === true)) {
+      startPolling();
+    } else {
+      stopPolling();
+    }
   };
 
   const installGoalWidget = (ctx: ExtensionContext): void => {
@@ -494,8 +517,14 @@ export default function (pi: ExtensionAPI): void {
     if (!candidate || typeof candidate.id !== "string" || typeof candidate.getActivity !== "function") {
       return;
     }
-    providers.set(candidate.id, candidate as BackgroundActivityProvider);
-    collectIfPossible();
+    const accepted = candidate as BackgroundActivityProvider;
+    providerUnsubscribers.get(accepted.id)?.();
+    providerUnsubscribers.delete(accepted.id);
+    providers.set(accepted.id, accepted);
+    if (typeof accepted.onActivityChanged === "function") {
+      providerUnsubscribers.set(accepted.id, accepted.onActivityChanged(collectIfPossible));
+    }
+    if (latestSnapshot) collectIfPossible();
   });
 
   pi.registerCommand("goal", {
@@ -661,7 +690,8 @@ export default function (pi: ExtensionAPI): void {
     foregroundRunning = !ctx.isIdle();
     pi.events.emit(EVENT_READY, { version: EXTENSION_VERSION });
     installGoalWidget(ctx);
-    startPolling();
+    latestSnapshot = await publishSnapshot(ctx);
+    syncPollingState();
   });
 
   pi.on("input", async (event, ctx) => {
@@ -762,6 +792,8 @@ export default function (pi: ExtensionAPI): void {
     foregroundRunning = false;
     clearIdleContinuation();
     currentCtx = undefined;
+    latestSnapshot = null;
+    collectionPending = false;
     try {
       ctx.ui.setStatus(EXTENSION_NAME, undefined);
       ctx.ui.setWidget(EXTENSION_NAME, undefined);

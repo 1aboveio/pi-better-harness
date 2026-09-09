@@ -47,6 +47,7 @@ export interface BackgroundActivityProvider {
   id: string;
   label?: string;
   getActivity(ctx: ExtensionContext): BackgroundProviderSnapshot | Promise<BackgroundProviderSnapshot>;
+  onActivityChanged?(notify: () => void): () => void;
 }
 
 export interface ActivitySnapshot {

@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { baseDir, ensureTaskDir, listMetas, logPathFor, metaPathFor, readMeta, writeMeta } from "./registry.js";
+import { baseDir, ensureTaskDir, getRegistryIoMetrics, listActiveMetasForOrigin, listMetas, listMetasForOrigin, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, writeMeta } from "./registry.js";
 import type { BackgroundTaskMeta } from "./types.js";
 
 describe("registry meta sweep cache", () => {
@@ -59,3 +59,58 @@ function fixtureMeta(status: BackgroundTaskMeta["status"], name: string): Backgr
     spawnPid: process.pid,
   };
 }
+
+describe("session-owned registry index", () => {
+  it("lists only metadata owned by the requested session", () => {
+    const sessionId = `session-a-${process.pid}-${Date.now()}`;
+    const ours = fixtureMeta("running", "owned");
+    ours.callbackOrigin = { cwd: "/tmp/project", sessionId };
+    const foreign = fixtureMeta("running", "foreign");
+    foreign.callbackOrigin = { cwd: "/tmp/project", sessionId: "session-b" };
+    writeMeta(ours);
+    writeMeta(foreign);
+
+    expect(listMetasForOrigin({ cwd: "/tmp/project", sessionId }).map((meta) => meta.id)).toEqual([ours.id]);
+  });
+
+  it("refreshes an indexed running record after a normal write", () => {
+    const origin = { cwd: "/tmp/project", sessionId: "session-refresh" };
+    const meta = fixtureMeta("running", "before");
+    meta.callbackOrigin = origin;
+    writeMeta(meta);
+
+    expect(listMetasForOrigin(origin)[0]?.name).toBe("before");
+    writeMeta({ ...meta, name: "after" });
+    expect(listMetasForOrigin(origin)[0]?.name).toBe("after");
+  });
+
+  it("serves repeated owned reads entirely from process memory", () => {
+    const origin = { cwd: "/tmp/project", sessionId: `session-cache-${process.pid}-${Date.now()}` };
+    const meta = fixtureMeta("running", "memory resident");
+    meta.callbackOrigin = origin;
+    writeMeta(meta);
+    expect(listMetasForOrigin(origin)).toHaveLength(1);
+
+    resetRegistryIoMetrics();
+    for (let index = 0; index < 100; index += 1) listMetasForOrigin(origin);
+
+    expect(getRegistryIoMetrics()).toEqual({
+      fullDirectoryReads: 0,
+      indexDirectoryReads: 0,
+      metadataFileReads: 0,
+      indexRevisionChecks: 100,
+    });
+  });
+
+  it("moves terminal transitions out of the active owner index", () => {
+    const origin = { cwd: "/tmp/project", sessionId: `session-active-${process.pid}-${Date.now()}` };
+    const meta = fixtureMeta("running", "active");
+    meta.callbackOrigin = origin;
+    writeMeta(meta);
+    expect(listActiveMetasForOrigin(origin).map((candidate) => candidate.id)).toEqual([meta.id]);
+
+    writeMeta({ ...meta, status: "succeeded", endedAt: Date.now() });
+    expect(listActiveMetasForOrigin(origin)).toEqual([]);
+    expect(listMetasForOrigin(origin).map((candidate) => candidate.id)).toEqual([meta.id]);
+  });
+});

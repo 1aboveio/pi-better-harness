@@ -137,8 +137,8 @@ function assertCheckoutNodeModulesUntouched() {
 }
 
 function clearRuns() {
-    const runsDir = join(RUNTIME, "pi-better-subagents", "runs");
-    rmSync(runsDir, { recursive: true, force: true });
+    const registryDir = join(RUNTIME, "pi-better-subagents");
+    rmSync(registryDir, { recursive: true, force: true });
 }
 
 function writeRunningMeta({ writeMeta, nextRunId }, name) {

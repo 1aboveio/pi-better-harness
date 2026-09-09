@@ -103,8 +103,12 @@ export interface BackgroundTaskMeta {
   logDiscardedBytes?: number;
   logRetentionEvents?: number;
   pid?: number;
+  /** Opaque process-start token used to reject recycled child PIDs. */
+  pidStartTime?: string;
   pgid?: number;
   spawnPid: number;
+  /** Opaque process-start token used to reject recycled supervisor PIDs. */
+  spawnPidStartTime?: string;
   successWhen?: Condition;
   failureWhen?: Condition;
   notifyOn?: "terminal";

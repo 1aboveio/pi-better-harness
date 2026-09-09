@@ -7,7 +7,8 @@
  * for runs this process spawned.
  */
 
-import { mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processExists } from "./spawn.ts";
@@ -151,7 +152,31 @@ function metaPathFor(id: string): string {
 }
 
 let seq = 0;
+const metaCache = new Map<string, RunMeta>();
+// Owned snapshots are process-resident. A cheap directory signature catches
+// cross-process index changes before any cached IDs are reused.
+const indexIdsCache = new Map<string, { ids: Set<string>; signature: string }>();
+const initializedIndexes = new Set<string>();
 const metaChangedListeners = new Set<() => void>();
+const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, indexRevisionChecks: 0 };
+
+export interface RegistryIoMetrics {
+    fullDirectoryReads: number;
+    indexDirectoryReads: number;
+    metadataFileReads: number;
+    indexRevisionChecks: number;
+}
+
+export function getRegistryIoMetrics(): RegistryIoMetrics {
+    return { ...registryIo };
+}
+
+export function resetRegistryIoMetrics(): void {
+    registryIo.fullDirectoryReads = 0;
+    registryIo.indexDirectoryReads = 0;
+    registryIo.metadataFileReads = 0;
+    registryIo.indexRevisionChecks = 0;
+}
 /** Monotonic, readable, collision-free run id: `sa_<base36-time>_<seq>`. */
 export function nextRunId(): string {
     seq += 1;
@@ -161,6 +186,8 @@ export function nextRunId(): string {
 export function writeMeta(meta: RunMeta): void {
     mkdirSync(runDir(meta.id), { recursive: true });
     writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
+    metaCache.set(meta.id, meta);
+    indexMeta(meta);
     for (const listener of metaChangedListeners) {
         try { listener(); } catch { /* best effort */ }
     }
@@ -173,9 +200,29 @@ export function onMetaChanged(listener: () => void): () => void {
 
 export function readMeta(id: string): RunMeta | undefined {
     try {
-        return JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as RunMeta;
+        registryIo.metadataFileReads += 1;
+        const meta = JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as RunMeta;
+        metaCache.set(id, meta);
+        return meta;
     } catch {
+        metaCache.delete(id);
         return undefined;
+    }
+}
+
+export function removeMetaArtifacts(meta: RunMeta): boolean {
+    try {
+        rmSync(runDir(meta.id), { recursive: true, force: true });
+        metaCache.delete(meta.id);
+        removeIndexEntry(join(baseDir(), "by-parent", String(meta.spawnPid)), meta.id);
+        removeIndexEntry(join(baseDir(), "by-parent-active", String(meta.spawnPid)), meta.id);
+        removeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
+        for (const listener of metaChangedListeners) {
+            try { listener(); } catch { /* best effort */ }
+        }
+        return true;
+    } catch {
+        return false;
     }
 }
 
@@ -183,14 +230,171 @@ export function readMeta(id: string): RunMeta | undefined {
 export function listMetas(): RunMeta[] {
     let ids: string[];
     try {
+        registryIo.fullDirectoryReads += 1;
         ids = readdirSync(join(baseDir(), "runs"));
     } catch {
         return [];
     }
     return ids
-        .map(readMeta)
+        .map(readMetaForSweep)
         .filter((m): m is RunMeta => m !== undefined)
         .sort((a, b) => b.startedAt - a.startedAt);
+}
+
+export function listMetasForParent(parentPid: number): RunMeta[] {
+    const directory = join(baseDir(), "by-parent", String(parentPid));
+    ensureIndex(directory, (meta) => meta.spawnPid === parentPid);
+    return readIndexedMetas(directory).filter((meta) => meta.spawnPid === parentPid);
+}
+
+export function listActiveMetasForParent(parentPid: number): RunMeta[] {
+    const directory = join(baseDir(), "by-parent-active", String(parentPid));
+    ensureActiveParentIndex(directory, parentPid);
+    return readIndexedMetas(directory)
+        .filter((meta) => meta.spawnPid === parentPid && isActiveStatus(meta.status));
+}
+
+export function listMetasForOrigin(origin: RunCallbackOrigin): RunMeta[] {
+    const directory = join(baseDir(), "by-origin", originKey(origin));
+    ensureIndex(directory, (meta) => belongsToOrigin(meta, origin));
+    return readIndexedMetas(directory).filter((meta) => belongsToOrigin(meta, origin));
+}
+
+function readMetaForSweep(id: string): RunMeta | undefined {
+    const cached = metaCache.get(id);
+    if (cached && cached.status !== "running" && cached.status !== "orphaned") return cached;
+    return readMeta(id);
+}
+
+function readIndexedMetas(directory: string): RunMeta[] {
+    return readIndexIds(directory)
+        .map((id) => metaCache.get(id) ?? readMeta(id))
+        .filter((meta): meta is RunMeta => meta !== undefined)
+        .sort((a, b) => b.startedAt - a.startedAt);
+}
+
+function indexMeta(meta: RunMeta): void {
+    try {
+        writeIndexEntry(join(baseDir(), "by-parent", String(meta.spawnPid)), meta.id);
+        const activeDirectory = join(baseDir(), "by-parent-active", String(meta.spawnPid));
+        if (isActiveStatus(meta.status)) writeIndexEntry(activeDirectory, meta.id);
+        else removeIndexEntry(activeDirectory, meta.id);
+        writeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
+    } catch {
+        // Indexes are accelerators; meta.json remains authoritative.
+    }
+}
+
+function writeIndexEntry(directory: string, id: string): void {
+    mkdirSync(directory, { recursive: true });
+    const cached = indexIdsCache.get(directory);
+    const cacheWasCurrent = cached ? cached.signature === indexDirectorySignature(directory) : false;
+    try {
+        writeFileSync(join(directory, id), "", { flag: "wx" });
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    if (cached && cacheWasCurrent) {
+        cached.ids.add(id);
+        cached.signature = indexDirectorySignature(directory);
+    } else if (cached) {
+        indexIdsCache.delete(directory);
+    }
+}
+
+function removeIndexEntry(directory: string, id: string): void {
+    const cached = indexIdsCache.get(directory);
+    const cacheWasCurrent = cached ? cached.signature === indexDirectorySignature(directory) : false;
+    try { unlinkSync(join(directory, id)); } catch { /* stale index entries are harmless */ }
+    if (cached && cacheWasCurrent) {
+        cached.ids.delete(id);
+        cached.signature = indexDirectorySignature(directory);
+    } else if (cached) {
+        indexIdsCache.delete(directory);
+    }
+}
+
+function readIndexIds(directory: string): string[] {
+    const signature = indexDirectorySignature(directory);
+    const cached = indexIdsCache.get(directory);
+    if (cached && cached.signature === signature) return [...cached.ids];
+    try {
+        registryIo.indexDirectoryReads += 1;
+        const ids = new Set(readdirSync(directory).filter((id) => id !== ".initialized"));
+        indexIdsCache.set(directory, { ids, signature: indexDirectorySignature(directory) });
+        return [...ids];
+    } catch {
+        indexIdsCache.delete(directory);
+        return [];
+    }
+}
+
+function isActiveStatus(status: RunStatus): boolean {
+    return status === "running" || status === "orphaned";
+}
+
+function indexDirectorySignature(directory: string): string {
+    registryIo.indexRevisionChecks += 1;
+    try {
+        const stat = statSync(directory);
+        return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch {
+        return "missing";
+    }
+}
+
+function ensureIndex(directory: string, matches: (meta: RunMeta) => boolean): void {
+    if (initializedIndexes.has(directory)) return;
+    try {
+        readFileSync(join(directory, ".initialized"));
+        initializedIndexes.add(directory);
+        return;
+    } catch {
+        // Existing registries are backfilled once for each owner.
+    }
+    indexIdsCache.delete(directory);
+    const owned = listMetas().filter(matches);
+    mkdirSync(directory, { recursive: true });
+    for (const meta of owned) writeIndexEntry(directory, meta.id);
+    writeFileSync(join(directory, ".initialized"), "1");
+    initializedIndexes.add(directory);
+}
+
+function ensureActiveParentIndex(directory: string, parentPid: number): void {
+    if (initializedIndexes.has(directory)) return;
+    try {
+        readFileSync(join(directory, ".initialized"));
+        initializedIndexes.add(directory);
+        return;
+    } catch {
+        // Build the active set from the already owner-scoped parent index.
+    }
+    indexIdsCache.delete(directory);
+    const active = listMetasForParent(parentPid).filter((meta) => isActiveStatus(meta.status));
+    mkdirSync(directory, { recursive: true });
+    for (const meta of active) writeIndexEntry(directory, meta.id);
+    writeFileSync(join(directory, ".initialized"), "1");
+    initializedIndexes.add(directory);
+}
+
+function originOf(meta: RunMeta): RunCallbackOrigin {
+    return meta.callbackOrigin ?? { cwd: meta.cwd };
+}
+
+function belongsToOrigin(meta: RunMeta, origin: RunCallbackOrigin): boolean {
+    const candidate = originOf(meta);
+    if (candidate.cwd !== origin.cwd) return false;
+    if (candidate.sessionId || origin.sessionId) return candidate.sessionId === origin.sessionId;
+    return true;
+}
+
+function originKey(origin: RunCallbackOrigin): string {
+    return createHash("sha256")
+        .update(origin.cwd)
+        .update("\0")
+        .update(origin.sessionId ?? "")
+        .digest("hex")
+        .slice(0, 24);
 }
 
 /**

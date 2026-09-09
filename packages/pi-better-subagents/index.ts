@@ -49,6 +49,9 @@ import {
     writeMeta,
     readMeta,
     listMetas,
+    listActiveMetasForParent,
+    listMetasForOrigin,
+    listMetasForParent,
     onMetaChanged,
     effectiveStatus,
     ownedByThisParent,
@@ -123,6 +126,44 @@ const SUBAGENT_TOOLS = [
     "subagent_stop",
     "subagent_result",
 ];
+
+const GOAL_READY_EVENT = "pi-better-goal:ready";
+const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
+const goalReadySubscriptions = new WeakSet<ExtensionAPI>();
+
+function registerSubagentsGoalProvider(pi: ExtensionAPI): void {
+    const emitProvider = (): void => {
+        pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
+            id: "subagents",
+            label: "Subagents",
+            getActivity: () => ({
+                providerId: "subagents",
+                label: "Subagents",
+                items: listMetasForParent(process.pid).map((meta) => {
+                    const status = effectiveStatus(meta);
+                    const active = status === "running" || status === "orphaned";
+                    return {
+                        id: meta.id,
+                        ...(meta.name ? { label: meta.name } : {}),
+                        status,
+                        active,
+                        unhealthy: status === "orphaned",
+                        terminal: !active,
+                        attention: status === "orphaned" || status === "failed" || status === "killed" || status === "lost" || status === "exited",
+                        startedAt: meta.startedAt,
+                        ...(meta.endedAt !== undefined ? { endedAt: meta.endedAt } : {}),
+                    };
+                }),
+            }),
+            onActivityChanged: onMetaChanged,
+        });
+    };
+    if (!goalReadySubscriptions.has(pi)) {
+        pi.events?.on?.(GOAL_READY_EVENT, emitProvider);
+        goalReadySubscriptions.add(pi);
+    }
+    emitProvider();
+}
 
 // ---- retired live status widget ------------------------------------------
 //
@@ -224,7 +265,7 @@ function hasSelfProcessIdentity(meta: RunMeta): boolean {
 
 function stopCurrentSessionSubagents(ctx: ExtensionContext): void {
     const origin = callbackOriginFromContext(ctx);
-    for (const summary of listMetas()) {
+    for (const summary of listMetasForParent(process.pid)) {
         if (!ownedByThisParent(summary)) continue;
         if (summary.status !== "running" && summary.status !== "orphaned") continue;
         if (!belongsToOrigin(summary, origin)) continue;
@@ -286,7 +327,7 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
 
 /** Recover only records explicitly marked pending; legacy terminal runs never replay. */
 function recoverCompletionCallbacks(pi: ExtensionAPI): void {
-    for (const meta of listMetas()) {
+    for (const meta of listMetasForParent(process.pid)) {
         if (!ownedByThisParent(meta)) continue;
         enqueueCompletionCallback(pi, meta.id);
     }
@@ -504,15 +545,12 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
 function reconcileHealth(): void {
     const ctx = uiCtx;
     const pi = healthPi;
-    // Free work while the loop is already running: nothing else will ever
-    // reconcile a record whose parent is gone.
-    reconcileAbandonedRuns();
-    for (const summary of listMetas()) {
+    for (const summary of listMetasForParent(process.pid)) {
         if (!ownedByThisParent(summary)) continue;
         // running/orphaned: process reconcile. lost: durable callback recovery only.
         if (summary.status !== "running" && summary.status !== "orphaned" && summary.status !== "lost") continue;
         // Re-read under the id: finalizeRun / subagent_stop may have written a
-        // terminal status since listMetas() snapshotted.
+        // terminal status since the owned index was read.
         const meta = readMeta(summary.id);
         if (!meta) continue;
         if (meta.status !== "running" && meta.status !== "orphaned" && meta.status !== "lost") continue;
@@ -544,7 +582,7 @@ function reconcileHealth(): void {
         }
     }
     // Stop existing the moment nothing current-parent needs monitoring/recovery.
-    if (!needsMonitoring(listMetas())) stopHealthTicker();
+    if (!needsMonitoring(listMetasForParent(process.pid))) stopHealthTicker();
 }
 
 /**
@@ -691,17 +729,14 @@ function navigatorRunningCount(): number {
 }
 
 /**
- * The visible run set. `listMetas` reads and parses one `meta.json` per run in
- * the registry, so a caller that needs this twice should scan once and pass the
- * snapshot down (see `subagentWorkRows`) rather than ask again.
- *
- * Deliberately NOT cached across calls. A time-based memo here was tried and
- * reverted: it made a run created outside this process — another pi session's
- * spawn, or a test seeding one — invisible until the window expired, and the
- * navigator then acted on a set that no longer matched the registry.
+ * The visible run set. The durable origin index limits reads to this session;
+ * each rebuild still reads owned non-terminal metadata so external status
+ * changes are visible immediately without a time-based memo.
  */
 function sessionVisibleNavigatorRuns(now: number = Date.now()): RunMeta[] {
-    return navigatorVisibleRuns(listMetas())
+    const origin = activeCallbackOrigin;
+    if (!origin) return [];
+    return navigatorVisibleRuns(listMetasForOrigin(origin))
         .filter(belongsToActiveNavigatorSession)
         .filter((m) => !isExpiredTerminalNavigatorRun(m, now));
 }
@@ -1055,6 +1090,7 @@ export default function (pi: ExtensionAPI) {
     // coordinator follow-ups that fire outside a tool-call stack (#65).
     healthPi = pi;
     ensureSubagentProvider();
+    registerSubagentsGoalProvider(pi);
 
     type SpawnParams = {
         prompt: string; name?: string; model?: string; thinking?: ThinkingLevel; tools?: string;
@@ -1260,7 +1296,7 @@ export default function (pi: ExtensionAPI) {
             const cfg = loadConfig();
             const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
             const countRunning = () =>
-                listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
+                listActiveMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
             // Shared with batch-spawn: reserve before any async work so an interleaved
             // batch cannot oversubscribe after this check and before writeMeta.
             const gate = getSharedCapacityGate(countRunning);
@@ -1351,7 +1387,7 @@ export default function (pi: ExtensionAPI) {
             const cfg = loadConfig();
             const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
             const countRunning = () =>
-                listMetas().filter((m) => ownedByThisParent(m) && effectiveStatus(m) === "running").length;
+                listActiveMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
             const launchAvailable = p.onCapacity === "launch-available";
             // Shared with single-spawn. Reservations count against maxConcurrent so a
             // concurrent single spawn cannot take a slot the batch already admitted.
@@ -1530,7 +1566,7 @@ export default function (pi: ExtensionAPI) {
         // Resume supervision reconciliation + durable health-callback recovery
         // across /reload while current-parent work still needs the ticker
         // (running/orphaned, or unmarked lost); it stops itself when idle.
-        if (needsMonitoring(listMetas())) ensureHealthTicker();
+        if (needsMonitoring(listMetasForParent(process.pid))) ensureHealthTicker();
     });
 
     pi.on("session_before_switch", () => {

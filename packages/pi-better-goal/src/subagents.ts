@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -82,6 +82,46 @@ export function readSubagentMetas(baseDir = defaultSubagentBaseDir()): SubagentR
   return metas.sort((left, right) => right.startedAt - left.startedAt);
 }
 
+export function readParentSubagentMetas(
+  baseDir = defaultSubagentBaseDir(),
+  parentPid = process.pid,
+): SubagentRunMeta[] {
+  const directory = join(baseDir, "by-parent", String(parentPid));
+  ensureParentIndex(baseDir, directory, parentPid);
+  let ids: string[];
+  try {
+    ids = readdirSync(directory).filter((id) => id !== ".initialized");
+  } catch {
+    return [];
+  }
+  return ids
+    .map((id) => readSubagentMeta(baseDir, id))
+    .filter((meta): meta is SubagentRunMeta => meta !== undefined && meta.spawnPid === parentPid)
+    .sort((left, right) => right.startedAt - left.startedAt);
+}
+
+function readSubagentMeta(baseDir: string, id: string): SubagentRunMeta | undefined {
+  try {
+    const meta = JSON.parse(readFileSync(join(baseDir, "runs", id, "meta.json"), "utf8")) as SubagentRunMeta;
+    return typeof meta.id === "string" && typeof meta.status === "string" ? meta : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function ensureParentIndex(baseDir: string, directory: string, parentPid: number): void {
+  try {
+    readFileSync(join(directory, ".initialized"));
+    return;
+  } catch {
+    // Existing registries are backfilled once for this parent process.
+  }
+  const owned = readSubagentMetas(baseDir).filter((meta) => meta.spawnPid === parentPid);
+  mkdirSync(directory, { recursive: true });
+  for (const meta of owned) writeFileSync(join(directory, meta.id), "");
+  writeFileSync(join(directory, ".initialized"), "1");
+}
+
 export function subagentStatusToItem(
   meta: SubagentRunMeta,
   status: SubagentEffectiveStatus,
@@ -122,9 +162,7 @@ export function collectSubagentActivity(
 ): BackgroundProviderSnapshot {
   const parentPid = options.parentPid ?? process.pid;
   const processExists = options.processExists ?? defaultProcessExists;
-  const metas = readSubagentMetas(options.baseDir).filter((meta) =>
-    isCurrentParentSubagent(meta, parentPid),
-  );
+  const metas = readParentSubagentMetas(options.baseDir, parentPid);
 
   return {
     providerId: "subagents",
