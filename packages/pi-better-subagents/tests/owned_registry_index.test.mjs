@@ -7,7 +7,15 @@ import { join } from "node:path";
 const ROOT = mkdtempSync(join(tmpdir(), "subagent-owned-index-"));
 process.env.TMPDIR = ROOT;
 
-const { listMetasForOrigin, listMetasForParent, logPathFor, writeMeta } = await import("../registry.ts");
+const {
+  getRegistryIoMetrics,
+  listActiveMetasForParent,
+  listMetasForOrigin,
+  listMetasForParent,
+  logPathFor,
+  resetRegistryIoMetrics,
+  writeMeta,
+} = await import("../registry.ts");
 
 function meta(id, spawnPid, sessionId) {
   return {
@@ -36,6 +44,28 @@ describe("owned subagent registry indexes", () => {
       listMetasForOrigin({ cwd: "/tmp/project", sessionId: "session-b" }).map((run) => run.id),
       ["sa_parent_b"],
     );
+  });
+
+  it("serves repeated owned reads without more filesystem reads", () => {
+    listMetasForParent(1001);
+    resetRegistryIoMetrics();
+    for (let index = 0; index < 100; index += 1) listMetasForParent(1001);
+    assert.deepEqual(getRegistryIoMetrics(), {
+      fullDirectoryReads: 0,
+      indexDirectoryReads: 0,
+      metadataFileReads: 0,
+      indexRevisionChecks: 100,
+    });
+  });
+
+  it("removes terminal transitions from the active parent index", () => {
+    const active = meta("sa_active_transition", 1003, "session-c");
+    writeMeta(active);
+    assert.deepEqual(listActiveMetasForParent(1003).map((run) => run.id), [active.id]);
+
+    writeMeta({ ...active, status: "completed", endedAt: Date.now() });
+    assert.deepEqual(listActiveMetasForParent(1003), []);
+    assert.deepEqual(listMetasForParent(1003).map((run) => run.id), [active.id]);
   });
 });
 

@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readLog } from "./logs.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import { cancelCallbackBatch } from "./shared-callback-batcher.js";
-import { listMetas, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
+import { listActiveMetasForOrigin, listMetas, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
 import { ForegroundSandboxBlockedError } from "./sandbox.js";
@@ -109,7 +109,7 @@ export function registerTools(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     activeSession = getCallbackOrigin(ctx);
-    for (const meta of listMetasForOrigin(activeSession)) resumeRunningTask(pi, meta, getActiveSession);
+    for (const meta of listActiveMetasForOrigin(activeSession)) resumeRunningTask(pi, meta, getActiveSession);
     runTaskMaintenance({ activeOrigin: activeSession });
   });
   pi.on("session_before_switch", () => {

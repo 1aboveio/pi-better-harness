@@ -460,7 +460,7 @@ describe("index.ts widget wiring (issue #13)", async () => {
 
     // @covers subagent.registry-scan
     // @level unit
-    it("scans the registry once per row rebuild, and never caches across rebuilds", () => {
+    it("queries the owned registry snapshot once per row rebuild", () => {
         // listMetas reads and parses one meta.json per run, and a rebuild needs
         // the visible set twice (start times, then rows). Pass one snapshot down.
         const rebuild = indexSource.match(/function subagentWorkRows[\s\S]*?\n}/)?.[0] ?? "";

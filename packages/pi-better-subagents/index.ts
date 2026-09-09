@@ -49,6 +49,7 @@ import {
     writeMeta,
     readMeta,
     listMetas,
+    listActiveMetasForParent,
     listMetasForOrigin,
     listMetasForParent,
     onMetaChanged,
@@ -1295,7 +1296,7 @@ export default function (pi: ExtensionAPI) {
             const cfg = loadConfig();
             const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
             const countRunning = () =>
-                listMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
+                listActiveMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
             // Shared with batch-spawn: reserve before any async work so an interleaved
             // batch cannot oversubscribe after this check and before writeMeta.
             const gate = getSharedCapacityGate(countRunning);
@@ -1386,7 +1387,7 @@ export default function (pi: ExtensionAPI) {
             const cfg = loadConfig();
             const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
             const countRunning = () =>
-                listMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
+                listActiveMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
             const launchAvailable = p.onCapacity === "launch-available";
             // Shared with single-spawn. Reservations count against maxConcurrent so a
             // concurrent single spawn cannot take a slot the batch already admitted.

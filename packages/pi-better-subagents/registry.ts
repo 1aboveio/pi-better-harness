@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processExists } from "./spawn.ts";
@@ -153,7 +153,30 @@ function metaPathFor(id: string): string {
 
 let seq = 0;
 const metaCache = new Map<string, RunMeta>();
+// Owned snapshots are process-resident. A cheap directory signature catches
+// cross-process index changes before any cached IDs are reused.
+const indexIdsCache = new Map<string, { ids: Set<string>; signature: string }>();
+const initializedIndexes = new Set<string>();
 const metaChangedListeners = new Set<() => void>();
+const registryIo = { fullDirectoryReads: 0, indexDirectoryReads: 0, metadataFileReads: 0, indexRevisionChecks: 0 };
+
+export interface RegistryIoMetrics {
+    fullDirectoryReads: number;
+    indexDirectoryReads: number;
+    metadataFileReads: number;
+    indexRevisionChecks: number;
+}
+
+export function getRegistryIoMetrics(): RegistryIoMetrics {
+    return { ...registryIo };
+}
+
+export function resetRegistryIoMetrics(): void {
+    registryIo.fullDirectoryReads = 0;
+    registryIo.indexDirectoryReads = 0;
+    registryIo.metadataFileReads = 0;
+    registryIo.indexRevisionChecks = 0;
+}
 /** Monotonic, readable, collision-free run id: `sa_<base36-time>_<seq>`. */
 export function nextRunId(): string {
     seq += 1;
@@ -177,6 +200,7 @@ export function onMetaChanged(listener: () => void): () => void {
 
 export function readMeta(id: string): RunMeta | undefined {
     try {
+        registryIo.metadataFileReads += 1;
         const meta = JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as RunMeta;
         metaCache.set(id, meta);
         return meta;
@@ -190,8 +214,9 @@ export function removeMetaArtifacts(meta: RunMeta): boolean {
     try {
         rmSync(runDir(meta.id), { recursive: true, force: true });
         metaCache.delete(meta.id);
-        try { unlinkSync(join(baseDir(), "by-parent", String(meta.spawnPid), meta.id)); } catch { /* stale entries are harmless */ }
-        try { unlinkSync(join(baseDir(), "by-origin", originKey(originOf(meta)), meta.id)); } catch { /* stale entries are harmless */ }
+        removeIndexEntry(join(baseDir(), "by-parent", String(meta.spawnPid)), meta.id);
+        removeIndexEntry(join(baseDir(), "by-parent-active", String(meta.spawnPid)), meta.id);
+        removeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
         for (const listener of metaChangedListeners) {
             try { listener(); } catch { /* best effort */ }
         }
@@ -205,6 +230,7 @@ export function removeMetaArtifacts(meta: RunMeta): boolean {
 export function listMetas(): RunMeta[] {
     let ids: string[];
     try {
+        registryIo.fullDirectoryReads += 1;
         ids = readdirSync(join(baseDir(), "runs"));
     } catch {
         return [];
@@ -221,6 +247,13 @@ export function listMetasForParent(parentPid: number): RunMeta[] {
     return readIndexedMetas(directory).filter((meta) => meta.spawnPid === parentPid);
 }
 
+export function listActiveMetasForParent(parentPid: number): RunMeta[] {
+    const directory = join(baseDir(), "by-parent-active", String(parentPid));
+    ensureActiveParentIndex(directory, parentPid);
+    return readIndexedMetas(directory)
+        .filter((meta) => meta.spawnPid === parentPid && isActiveStatus(meta.status));
+}
+
 export function listMetasForOrigin(origin: RunCallbackOrigin): RunMeta[] {
     const directory = join(baseDir(), "by-origin", originKey(origin));
     ensureIndex(directory, (meta) => belongsToOrigin(meta, origin));
@@ -234,14 +267,8 @@ function readMetaForSweep(id: string): RunMeta | undefined {
 }
 
 function readIndexedMetas(directory: string): RunMeta[] {
-    let ids: string[];
-    try {
-        ids = readdirSync(directory).filter((id) => id !== ".initialized");
-    } catch {
-        return [];
-    }
-    return ids
-        .map(readMetaForSweep)
+    return readIndexIds(directory)
+        .map((id) => metaCache.get(id) ?? readMeta(id))
         .filter((meta): meta is RunMeta => meta !== undefined)
         .sort((a, b) => b.startedAt - a.startedAt);
 }
@@ -249,6 +276,9 @@ function readIndexedMetas(directory: string): RunMeta[] {
 function indexMeta(meta: RunMeta): void {
     try {
         writeIndexEntry(join(baseDir(), "by-parent", String(meta.spawnPid)), meta.id);
+        const activeDirectory = join(baseDir(), "by-parent-active", String(meta.spawnPid));
+        if (isActiveStatus(meta.status)) writeIndexEntry(activeDirectory, meta.id);
+        else removeIndexEntry(activeDirectory, meta.id);
         writeIndexEntry(join(baseDir(), "by-origin", originKey(originOf(meta))), meta.id);
     } catch {
         // Indexes are accelerators; meta.json remains authoritative.
@@ -257,24 +287,94 @@ function indexMeta(meta: RunMeta): void {
 
 function writeIndexEntry(directory: string, id: string): void {
     mkdirSync(directory, { recursive: true });
+    const cached = indexIdsCache.get(directory);
+    const cacheWasCurrent = cached ? cached.signature === indexDirectorySignature(directory) : false;
     try {
         writeFileSync(join(directory, id), "", { flag: "wx" });
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
+    if (cached && cacheWasCurrent) {
+        cached.ids.add(id);
+        cached.signature = indexDirectorySignature(directory);
+    } else if (cached) {
+        indexIdsCache.delete(directory);
+    }
+}
+
+function removeIndexEntry(directory: string, id: string): void {
+    const cached = indexIdsCache.get(directory);
+    const cacheWasCurrent = cached ? cached.signature === indexDirectorySignature(directory) : false;
+    try { unlinkSync(join(directory, id)); } catch { /* stale index entries are harmless */ }
+    if (cached && cacheWasCurrent) {
+        cached.ids.delete(id);
+        cached.signature = indexDirectorySignature(directory);
+    } else if (cached) {
+        indexIdsCache.delete(directory);
+    }
+}
+
+function readIndexIds(directory: string): string[] {
+    const signature = indexDirectorySignature(directory);
+    const cached = indexIdsCache.get(directory);
+    if (cached && cached.signature === signature) return [...cached.ids];
+    try {
+        registryIo.indexDirectoryReads += 1;
+        const ids = new Set(readdirSync(directory).filter((id) => id !== ".initialized"));
+        indexIdsCache.set(directory, { ids, signature: indexDirectorySignature(directory) });
+        return [...ids];
+    } catch {
+        indexIdsCache.delete(directory);
+        return [];
+    }
+}
+
+function isActiveStatus(status: RunStatus): boolean {
+    return status === "running" || status === "orphaned";
+}
+
+function indexDirectorySignature(directory: string): string {
+    registryIo.indexRevisionChecks += 1;
+    try {
+        const stat = statSync(directory);
+        return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch {
+        return "missing";
+    }
 }
 
 function ensureIndex(directory: string, matches: (meta: RunMeta) => boolean): void {
+    if (initializedIndexes.has(directory)) return;
     try {
         readFileSync(join(directory, ".initialized"));
+        initializedIndexes.add(directory);
         return;
     } catch {
         // Existing registries are backfilled once for each owner.
     }
+    indexIdsCache.delete(directory);
     const owned = listMetas().filter(matches);
     mkdirSync(directory, { recursive: true });
     for (const meta of owned) writeIndexEntry(directory, meta.id);
     writeFileSync(join(directory, ".initialized"), "1");
+    initializedIndexes.add(directory);
+}
+
+function ensureActiveParentIndex(directory: string, parentPid: number): void {
+    if (initializedIndexes.has(directory)) return;
+    try {
+        readFileSync(join(directory, ".initialized"));
+        initializedIndexes.add(directory);
+        return;
+    } catch {
+        // Build the active set from the already owner-scoped parent index.
+    }
+    indexIdsCache.delete(directory);
+    const active = listMetasForParent(parentPid).filter((meta) => isActiveStatus(meta.status));
+    mkdirSync(directory, { recursive: true });
+    for (const meta of active) writeIndexEntry(directory, meta.id);
+    writeFileSync(join(directory, ".initialized"), "1");
+    initializedIndexes.add(directory);
 }
 
 function originOf(meta: RunMeta): RunCallbackOrigin {
