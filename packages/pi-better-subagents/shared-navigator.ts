@@ -161,7 +161,7 @@ export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boole
 }
 
 export function navigatorFooterHint(count: number): string | null {
-  return count > 0 ? `← navigate · ${count}` : null;
+  return count > 0 ? `← work · ${count}` : null;
 }
 
 export function applyNavigatorFooter(ui: { setStatus(key: string, value: string | undefined): void }, count: number): string | null {
@@ -460,7 +460,7 @@ function buildMainListLines(
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
-  const keys = focused ? "↑↓ switch · Enter detail · x stop · Esc unfocus" : "← to navigate";
+  const keys = focused ? "↑↓ switch · Enter detail · x stop · Esc unfocus" : "← work navigator";
   return dim(keys, fg);
 }
 
