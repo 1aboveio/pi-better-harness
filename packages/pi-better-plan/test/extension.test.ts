@@ -96,6 +96,20 @@ test("plan tools persist progress and the empty-editor right arrow focuses the p
   editor.handleInput("\u001b[C");
   assert.deepEqual(delegatedInput, ["\u001b[C"], "right remains normal cursor input when the editor has text");
 
+  let sharedHintRefreshes = 0;
+  const navigation = (globalThis as any)[Symbol.for("pi-better-harness.plan-navigation.state")];
+  navigation.refreshNavigationHint = () => { sharedHintRefreshes += 1; };
+  await updatePlan.execute("shared-navigation", {
+    plan: [
+      { step: "Inspect", status: "completed" },
+      { step: "Implement", status: "in_progress" },
+      { step: "Verify", status: "pending" },
+    ],
+  }, undefined, undefined, ctx);
+  assert.equal(navigation.progressLabel, "1/3");
+  assert.equal(sharedHintRefreshes, 1);
+  assert.equal(statuses.get("pi-better-plan-nav"), undefined, "shared navigation owns the composed hint");
+
   const getPlan = tools.get("get_plan");
   assert.ok(getPlan);
   const result = await getPlan.execute("get", {}, undefined, undefined, ctx);

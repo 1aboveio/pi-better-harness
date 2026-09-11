@@ -16,7 +16,6 @@ export function renderCompactPlan(
 ): string[] {
   const progress = planProgress(plan);
   const selected = clampIndex(options.selectedIndex ?? progress.activeIndex ?? firstIncompleteIndex(plan), plan.steps.length);
-  const indices = contextIndices(plan.steps.length, selected);
   const stateLabel = progress.blocked > 0
     ? `${progress.blocked} blocked`
     : progress.state === "complete"
@@ -27,7 +26,7 @@ export function renderCompactPlan(
       theme.fg("dim", ` · ${stateLabel}`),
   ];
 
-  for (const index of indices) {
+  for (let index = 0; index < plan.steps.length; index += 1) {
     const item = plan.steps[index]!;
     const selectedPrefix = options.focused && index === selected ? theme.fg("accent", "› ") : "  ";
     lines.push(`${selectedPrefix}${stepGlyph(item, theme)} ${index + 1}  ${stepText(item, theme)}`);
@@ -64,12 +63,6 @@ export function createFullPlanComponent(
     },
     invalidate() {},
   };
-}
-
-function contextIndices(total: number, selected: number): number[] {
-  if (total <= 3) return Array.from({ length: total }, (_, index) => index);
-  const start = Math.min(Math.max(0, selected - 1), total - 3);
-  return [start, start + 1, start + 2];
 }
 
 function firstIncompleteIndex(plan: PlanSnapshot): number {

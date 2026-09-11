@@ -5,7 +5,7 @@
 ## What It Does
 
 - Gives models `update_plan` and `get_plan` tools for atomic, explicit progress updates.
-- Shows completed, active, pending, and blocked steps in a compact context window above the editor.
+- Shows the complete checklist of completed, active, pending, and blocked steps above the editor.
 - Uses `→` from an empty editor to focus the plan; normal cursor movement is preserved when the editor contains text.
 - Persists plan state and display preferences on the active Pi session branch.
 - Opens the complete plan with `/plan`.

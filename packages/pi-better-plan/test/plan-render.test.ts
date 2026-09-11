@@ -7,7 +7,7 @@ import { renderCompactPlan, renderFullPlan } from "../src/plan-render.js";
 
 const theme = { fg: (_color: string, value: string) => value };
 
-test("compact plan keeps a three-step context window around active work", () => {
+test("compact plan keeps the complete checklist visible", () => {
   const plan = replacePlan(null, [
     { step: "One", status: "completed" },
     { step: "Two", status: "completed" },
@@ -18,7 +18,13 @@ test("compact plan keeps a three-step context window around active work", () => 
 
   const lines = renderCompactPlan(plan, 80, theme);
   assert.match(lines[0] ?? "", /plan 2\/5 steps · in progress/);
-  assert.deepEqual(lines.slice(1, 4).map((line) => line.trim()), ["✓ 2  Two", "● 3  Three", "○ 4  Four"]);
+  assert.deepEqual(lines.slice(1, -1).map((line) => line.trim()), [
+    "✓ 1  One",
+    "✓ 2  Two",
+    "● 3  Three",
+    "○ 4  Four",
+    "○ 5  Five",
+  ]);
   assert.equal(lines.at(-1), "");
 });
 
