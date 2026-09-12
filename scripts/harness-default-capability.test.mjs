@@ -107,7 +107,7 @@ test("plan is present in local development and every published harness surface",
     "the root development manifest must load plan",
   );
   assert.ok(componentPackages.includes("pi-better-plan"), "the npm installer must manage plan");
-  assert.equal(harnessManifest.dependencies["pi-better-plan"], "0.1.3");
+  assert.equal(harnessManifest.dependencies["pi-better-plan"], "0.1.4");
   assert.ok(harnessManifest.bundledDependencies.includes("pi-better-plan"));
   assert.ok(shimmedPackages().some((shim) => shim.packageName === "pi-better-plan"));
 });

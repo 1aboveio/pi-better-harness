@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  COMPLETED_PLAN_RETENTION_MS,
+  completedPlanClearDelay,
   planClearEntry,
   planDisplayEntry,
   planProgress,
@@ -65,6 +67,31 @@ test("derives honest checklist progress and blocked state", () => {
     activeIndex: 1,
     state: "blocked",
   });
+});
+
+test("records the completion transition once and derives its remaining clear delay", () => {
+  const active = replacePlan(null, [
+    { step: "Ship", status: "in_progress" },
+  ], undefined, 100, 100_000);
+  const completed = replacePlan(active, [
+    { step: "Ship", status: "completed" },
+  ], undefined, 110, 110_500);
+  const revisedComplete = replacePlan(completed, [
+    { step: "Ship", status: "completed" },
+  ], "Still complete", 120, 120_500);
+
+  assert.equal(completed.completedAtMs, 110_500);
+  assert.equal(revisedComplete.completedAtMs, 110_500, "complete revisions keep the original deadline");
+  assert.equal(completedPlanClearDelay(completed, 120_500), 20_000);
+  assert.equal(completedPlanClearDelay(completed, 110_500 + COMPLETED_PLAN_RETENTION_MS), 0);
+  assert.equal(completedPlanClearDelay(active, 120_500), null);
+});
+
+test("older completed snapshots fall back to updatedAt when scheduling cleanup", () => {
+  const legacy = replacePlan(null, [{ step: "Ship", status: "completed" }], undefined, 100, 100_000);
+  delete legacy.completedAtMs;
+
+  assert.equal(completedPlanClearDelay(legacy, 105_000), 25_000);
 });
 
 test("reconstructs plan and display preference from the active branch", () => {

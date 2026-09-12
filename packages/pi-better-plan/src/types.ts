@@ -20,6 +20,7 @@ export interface PlanSnapshot {
   steps: PlanStep[];
   createdAt: number;
   updatedAt: number;
+  completedAtMs?: number;
 }
 
 export interface PlanProgress {
