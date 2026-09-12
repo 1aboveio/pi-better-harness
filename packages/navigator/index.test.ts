@@ -54,8 +54,37 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 }
 
 describe("shared background work navigator", () => {
+  it("shows plan progress even when no background work is visible", async () => {
+    const navigation = (globalThis as any)[Symbol.for("pi-better-harness.plan-navigation.state")] = {
+      visible: true,
+      progressLabel: "0/4",
+    };
+    const statuses: Array<[string, string | undefined]> = [];
+    const ui = {
+      factory: undefined as any,
+      setStatus(key: string, value: string | undefined) { statuses.push([key, value]); },
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: () => false,
+        matchKey: () => false,
+        truncate: (value) => value,
+      });
+      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, "→ plan · 0/4"]);
+    } finally {
+      navigation.visible = false;
+      disposeBackgroundWorkNavigator(ctx);
+    }
+  });
+
   it("uses one footer/editor host for multiple providers and dispatches close by provider", () => {
-    const planNavigation = (globalThis as any)[Symbol.for("pi-better-harness.plan-navigation.state")] = { visible: true };
+    const planNavigation = (globalThis as any)[Symbol.for("pi-better-harness.plan-navigation.state")] = { visible: true, progressLabel: "0/4" };
     const closed: string[] = [];
     const unregisterSubagents = registerBackgroundWorkProvider(provider("subagents", "Subagents", 10, 200, (id) => closed.push(`subagents:${id}`)));
     const unregisterTasks = registerBackgroundWorkProvider(provider("background-tasks", "Background Tasks", 20, 100, (id) => closed.push(`tasks:${id}`)));
@@ -86,7 +115,7 @@ describe("shared background work navigator", () => {
       });
 
       assert.equal(statuses.at(-1)?.[0], NAVIGATOR_STATUS_KEY);
-      assert.equal(statuses.at(-1)?.[1], "← work · 2");
+      assert.equal(statuses.at(-1)?.[1], "← work · 2    → plan · 0/4");
       assert.equal(ui.factory.__piBetterHarnessNavigatorFactory, true);
 
       let list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");

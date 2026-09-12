@@ -43,7 +43,9 @@ const PLAN_NAVIGATION_KEY = Symbol.for("pi-better-harness.plan-navigation.state"
 
 interface SharedPlanNavigationState {
   visible: boolean;
+  progressLabel?: string;
   releaseWorkFocus?: () => void;
+  refreshNavigationHint?: () => void;
 }
 
 function sharedPlanNavigationState(): SharedPlanNavigationState {
@@ -66,9 +68,17 @@ export default function planExtension(pi: ExtensionAPI): void {
     if (!ctx?.hasUI) return;
     const progress = currentPlan ? planProgress(currentPlan) : null;
     const visible = currentPlan !== null && displayMode !== "hidden";
-    sharedPlanNavigationState().visible = visible;
+    const navigation = sharedPlanNavigationState();
+    navigation.visible = visible;
     const suffix = progress?.blocked ? "blocked" : progress ? `${progress.completed}/${progress.total}` : "";
-    ctx.ui.setStatus(PLAN_NAV_STATUS_KEY, visible ? `→ plan · ${suffix}` : undefined);
+    if (suffix) navigation.progressLabel = suffix;
+    else delete navigation.progressLabel;
+    if (navigation.refreshNavigationHint) {
+      ctx.ui.setStatus(PLAN_NAV_STATUS_KEY, undefined);
+      navigation.refreshNavigationHint();
+    } else {
+      ctx.ui.setStatus(PLAN_NAV_STATUS_KEY, visible ? `→ plan · ${suffix}` : undefined);
+    }
   };
 
   const restore = (ctx: ExtensionContext): void => {
@@ -324,7 +334,10 @@ export default function planExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     refreshWidget = undefined;
     currentCtx = undefined;
-    sharedPlanNavigationState().visible = false;
+    const navigation = sharedPlanNavigationState();
+    navigation.visible = false;
+    delete navigation.progressLabel;
+    navigation.refreshNavigationHint?.();
     try {
       ctx.ui.setStatus(PLAN_NAV_STATUS_KEY, undefined);
       ctx.ui.setWidget(EXTENSION_NAME, undefined);
