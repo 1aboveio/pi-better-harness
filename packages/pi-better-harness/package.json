@@ -52,7 +52,7 @@
   "dependencies": {
     "pi-better-background-tasks": "0.2.10",
     "pi-better-goal": "0.2.1",
-    "pi-better-plan": "0.1.1",
+    "pi-better-plan": "0.1.2",
     "pi-better-sandbox": "0.3.0",
     "pi-better-ssh": "0.1.1",
     "pi-better-subagents": "0.1.25"

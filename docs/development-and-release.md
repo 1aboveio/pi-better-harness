@@ -234,6 +234,8 @@ npm trust github <package> \
   --registry=https://registry.npmjs.org/
 ```
 
+The `npm trust` command and permission flags require npm 11.15.0 or newer.
+
 Pass `--registry` on every one of these. This repository's contributors commonly
 have `registry=https://registry.npmmirror.com/` in `~/.npmrc`, and a bare
 `npm login` then authenticates against the mirror while `npm publish` targets
