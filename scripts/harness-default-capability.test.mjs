@@ -49,6 +49,10 @@ test("the root development manifest loads the sandbox extension", () => {
   for (const extension of rootManifest.pi.extensions) {
     assert.ok(existsSync(join(repoRoot, extension)), `${extension} does not exist`);
   }
+  assert.ok(
+    rootManifest.pi.extensions.includes("./packages/pi-better-ssh/src/index.ts"),
+    "pi install . must load synchronous SSH tools",
+  );
 });
 
 // @covers harness.default-capability
@@ -67,6 +71,16 @@ test("the published meta package loads the sandbox extension by default", () => 
     const workspaceEntry = join(repoRoot, "packages", packageName, entryPath);
     assert.ok(existsSync(workspaceEntry), `${entry} points at a missing entry: ${workspaceEntry}`);
   }
+});
+
+// @covers harness.default-capability
+// @level integration
+test("the published meta package loads synchronous SSH tools by default", () => {
+  const shims = shimmedPackages();
+  assert.ok(
+    shims.some((shim) => shim.packageName === "pi-better-ssh"),
+    `the harness must bundle SSH; got ${JSON.stringify(shims.map((shim) => shim.packageName))}`,
+  );
 });
 
 // @covers harness.default-capability
@@ -163,10 +177,13 @@ test("CI asserts the sandbox and its shared module are in the bundled tarball", 
   const ci = readWorkflow("ci.yml");
   for (const path of [
     "extensions/sandbox/index.ts",
+    "extensions/ssh/index.ts",
     "node_modules/pi-better-sandbox/index.ts",
     "node_modules/pi-better-sandbox/shared-sandbox-core.ts",
     "node_modules/pi-better-subagents/shared-sandbox-core.ts",
     "node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts",
+    "node_modules/pi-better-ssh/src/index.ts",
+    "node_modules/pi-better-ssh/src/shared-ssh-core/index.ts",
   ]) {
     assert.ok(ci.includes(`${path} \\`) || ci.includes(`${path}\n`), `ci.yml must assert ${path}`);
   }
@@ -185,10 +202,13 @@ test("the bundled tarball carries the sandbox extension and its synchronized sha
 
   for (const path of [
     "extensions/sandbox/index.ts",
+    "extensions/ssh/index.ts",
     "node_modules/pi-better-sandbox/index.ts",
     "node_modules/pi-better-sandbox/shared-sandbox-core.ts",
     "node_modules/pi-better-subagents/shared-sandbox-core.ts",
     "node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts",
+    "node_modules/pi-better-ssh/src/index.ts",
+    "node_modules/pi-better-ssh/src/shared-ssh-core/index.ts",
   ]) {
     assert.ok(packed.includes(path), `bundled tarball is missing ${path}:\n${packed.join("\n")}`);
   }

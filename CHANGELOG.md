@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.3.3] - 2026-09-12
+
+### Added
+
+- **harness**: include `pi-better-ssh@0.1.1` in the bundled extension set and standalone installer so short remote commands use `remote_bash`, `ssh_profile`, and `ssh_mux` by default
+
+### Changed
+
+- **harness**: require the SSH entry point and vendored shared SSH core in CI and release tarball checks while continuing to exclude the unpublished plan extension
+
 ## [pi-better-background-tasks@0.2.10] - 2026-09-09
 
 ### Fixed

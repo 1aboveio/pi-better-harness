@@ -1,6 +1,6 @@
 # Pi Better Harness
 
-`pi-better-harness` is a Pi extension bundle for an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, and goal tracking.
+`pi-better-harness` is a Pi extension bundle for an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, and goal tracking.
 
 ## Quick Answer
 
@@ -22,6 +22,7 @@ Install only one part:
 pi install npm:pi-better-sandbox
 pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
+pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
 ```
 
@@ -44,6 +45,7 @@ Do not use the bundle when you only need one extension; install that package dir
 - `pi-better-sandbox`: an opt-in write sandbox for Pi's foreground tools.
 - `pi-better-subagents`: detached, sandboxed subagent runs.
 - `pi-better-background-tasks`: durable shell tasks, watchers, logs, and status inspection.
+- `pi-better-ssh`: safe synchronous remote commands over reusable SSH connections.
 - `pi-better-goal`: objective tracking with background-aware continuation.
 - `pi-better-plan`: experimental local-only execution plans; not yet published or included in the npm harness.
 
@@ -78,6 +80,7 @@ pi -e .
 - [Write sandbox details](packages/pi-better-sandbox/README.md)
 - [Subagents details](packages/pi-better-subagents/docs/usage.md)
 - [Background tasks details](packages/pi-better-background-tasks/docs/usage.md)
+- [SSH details](packages/pi-better-ssh/README.md)
 - [Goal details](packages/pi-better-goal/docs/usage.md)
 - [Plan details](packages/pi-better-plan/README.md)
 - [License](LICENSE)

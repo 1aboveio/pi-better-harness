@@ -163,6 +163,7 @@ jobs:
                 extensions/sandbox/index.ts \
                 extensions/subagents/index.ts \
                 extensions/background-tasks/index.ts \
+                extensions/ssh/index.ts \
                 extensions/goal/index.ts \
                 node_modules/pi-better-sandbox/index.ts \
                 node_modules/pi-better-sandbox/shared-sandbox-core.ts \
@@ -170,6 +171,8 @@ jobs:
                 node_modules/pi-better-subagents/shared-sandbox-core.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
+                node_modules/pi-better-ssh/src/index.ts \
+                node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
                 node_modules/pi-better-goal/src/index.ts
               do
                 check_pack_file /tmp/package-pack.json "$required"

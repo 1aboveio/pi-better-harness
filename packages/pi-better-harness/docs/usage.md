@@ -7,9 +7,10 @@ Use it to manage the tools used most often in Pi:
 - `pi-better-sandbox` for an opt-in write sandbox around Pi's foreground tools
 - `pi-better-subagents` for detached subagent runs and completion callbacks
 - `pi-better-background-tasks` for durable shell tasks and command watchers
+- `pi-better-ssh` for safe synchronous remote commands over reusable SSH connections
 - `pi-better-goal` for current-goal tracking and background-aware continuation
 
-`pi-better-read-aloud` is intentionally not included yet.
+`pi-better-plan` and `pi-better-read-aloud` are intentionally not included yet.
 
 ## Install
 
@@ -50,6 +51,7 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-sandbox` | none — it replaces the built-in `bash`, `write`, and `edit` tools rather than adding any |
 | `pi-better-subagents` | `subagent_spawn`, `subagent_spawn_batch`, `subagent_list`, `subagent_output`, `subagent_result`, `subagent_stop` |
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
+| `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
@@ -86,6 +88,7 @@ Use these when you want only one part of the harness:
 pi install npm:pi-better-sandbox
 pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
+pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
 ```
 

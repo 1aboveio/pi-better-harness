@@ -11,12 +11,13 @@ core extensions:
 | `pi-better-sandbox` | Confine writes from Pi's built-in `bash`, `write`, and `edit` tools, `!` commands, local background tasks, and subagents to the launch directory. |
 | `pi-better-subagents` | Launch detached `pi -p` subagents, inspect their output, and receive completion callbacks. |
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
+| `pi-better-ssh` | Run short synchronous remote commands over reusable SSH connections. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
 
 `pi-better-plan` remains enabled by the root development manifest, but is not yet published or included in the npm meta package.
 
-`pi-better-ssh` and `pi-better-read-aloud` live in this repo but are
-intentionally not part of the meta package.
+`pi-better-read-aloud` lives in this repo but is intentionally not part of the
+meta package.
 
 ## Install
 
@@ -53,7 +54,7 @@ The package workspaces are:
 | `packages/pi-better-subagents` | `pi-better-subagents` | yes | yes |
 | `packages/pi-better-background-tasks` | `pi-better-background-tasks` | yes | yes |
 | `packages/pi-better-sandbox` | `pi-better-sandbox` | yes | yes |
-| `packages/pi-better-ssh` | `pi-better-ssh` | yes | no |
+| `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |
 | `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
 | `packages/pi-better-plan` | `pi-better-plan` | configured, not yet published | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |

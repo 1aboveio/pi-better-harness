@@ -1,7 +1,7 @@
 {
   "name": "pi-better-harness",
-  "version": "0.3.2",
-  "description": "Pi extension bundle for a write sandbox, subagents, background tasks, and goals.",
+  "version": "0.3.3",
+  "description": "Pi extension bundle for a write sandbox, subagents, background tasks, SSH, and goals.",
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -11,6 +11,8 @@
     "sandbox",
     "subagents",
     "background-tasks",
+    "ssh",
+    "remote-bash",
     "goal-tracking"
   ],
   "pi": {
@@ -18,6 +20,7 @@
       "extensions/sandbox/index.ts",
       "extensions/subagents/index.ts",
       "extensions/background-tasks/index.ts",
+      "extensions/ssh/index.ts",
       "extensions/goal/index.ts"
     ],
     "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-harness.png"
@@ -48,12 +51,14 @@
     "pi-better-background-tasks": "0.2.10",
     "pi-better-goal": "0.2.1",
     "pi-better-sandbox": "0.3.0",
+    "pi-better-ssh": "0.1.1",
     "pi-better-subagents": "0.1.25"
   },
   "bundledDependencies": [
     "pi-better-background-tasks",
     "pi-better-goal",
     "pi-better-sandbox",
+    "pi-better-ssh",
     "pi-better-subagents"
   ]
 }
