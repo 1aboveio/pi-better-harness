@@ -4,6 +4,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
+  completedPlanClearDelay,
   planClearEntry,
   planDisplayEntry,
   planProgress,
@@ -42,21 +43,53 @@ export default function planExtension(pi: ExtensionAPI): void {
   let currentPlan: PlanSnapshot | null = null;
   let displayMode: PlanDisplayMode = "auto";
   let refreshWidget: ((force?: boolean) => void) | undefined;
+  let completedPlanClearTimer: ReturnType<typeof setTimeout> | undefined;
 
   const refresh = (force = false): void => refreshWidget?.(force);
 
+  const cancelCompletedPlanClear = (): void => {
+    if (completedPlanClearTimer) clearTimeout(completedPlanClearTimer);
+    completedPlanClearTimer = undefined;
+  };
+
+  const clearPlan = (): void => {
+    cancelCompletedPlanClear();
+    currentPlan = null;
+    pi.appendEntry(EXTENSION_NAME, planClearEntry());
+    refresh(true);
+  };
+
+  const scheduleCompletedPlanClear = (): void => {
+    cancelCompletedPlanClear();
+    if (!currentPlan) return;
+    const delay = completedPlanClearDelay(currentPlan);
+    if (delay === null) return;
+    const completedPlan = currentPlan;
+    const timer = setTimeout(() => {
+      if (completedPlanClearTimer !== timer) return;
+      completedPlanClearTimer = undefined;
+      if (currentPlan?.planId !== completedPlan.planId || currentPlan.revision !== completedPlan.revision) return;
+      clearPlan();
+    }, delay);
+    completedPlanClearTimer = timer;
+    timer.unref?.();
+  };
+
   const restore = (ctx: ExtensionContext): void => {
+    cancelCompletedPlanClear();
     const state = reconstructPlanState(ctx.sessionManager.getBranch());
     currentPlan = state.plan;
     displayMode = state.displayMode;
     if (ctx.hasUI) ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);
     refresh(true);
+    scheduleCompletedPlanClear();
   };
 
   const persistPlan = (plan: PlanSnapshot): void => {
     currentPlan = plan;
     pi.appendEntry(EXTENSION_NAME, planSetEntry(plan));
     refresh(true);
+    scheduleCompletedPlanClear();
   };
 
   const setDisplayMode = (mode: PlanDisplayMode): void => {
@@ -171,9 +204,7 @@ export default function planExtension(pi: ExtensionAPI): void {
       const input = args.trim().toLowerCase();
       if (!input) return showFullPlan(ctx);
       if (input === "clear") {
-        currentPlan = null;
-        pi.appendEntry(EXTENSION_NAME, planClearEntry());
-        refresh(true);
+        clearPlan();
         ctx.ui.notify("Plan cleared.", "info");
         return;
       }
@@ -209,6 +240,7 @@ export default function planExtension(pi: ExtensionAPI): void {
     };
   });
   pi.on("session_shutdown", async (_event, ctx) => {
+    cancelCompletedPlanClear();
     refreshWidget = undefined;
     try {
       ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);

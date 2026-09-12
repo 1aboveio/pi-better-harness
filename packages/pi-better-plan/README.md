@@ -7,6 +7,7 @@
 - Gives models `update_plan` and `get_plan` tools for atomic, explicit progress updates.
 - Shows the complete checklist of completed, active, pending, and blocked steps above the editor.
 - Persists plan state and display preferences on the active Pi session branch.
+- Keeps a completed plan visible for 30 seconds, then clears it automatically.
 - Opens the complete plan with `/plan`.
 
 Plan progress is checklist progress, not an estimate of effort. The extension never infers completion from prose or successful tool calls.

@@ -4,6 +4,7 @@ import { EXTENSION_NAME } from "./types.js";
 const MAX_STEPS = 50;
 const MAX_STEP_CHARS = 500;
 const MAX_EXPLANATION_CHARS = 2_000;
+export const COMPLETED_PLAN_RETENTION_MS = 30_000;
 
 interface SessionEntryLike {
   type: string;
@@ -54,6 +55,7 @@ export function replacePlan(
   steps: readonly PlanStepInput[],
   explanation?: string,
   now = nowSeconds(),
+  completedAtMs = Date.now(),
 ): PlanSnapshot {
   const error = validatePlanInput(steps, explanation);
   if (error) throw new Error(error);
@@ -68,6 +70,8 @@ export function replacePlan(
       status: item.status,
     };
   });
+  const isComplete = normalizedSteps.every((item) => item.status === "completed");
+  const currentIsComplete = current?.steps.every((item) => item.status === "completed") === true;
 
   return {
     version: 1,
@@ -77,7 +81,16 @@ export function replacePlan(
     steps: normalizedSteps,
     createdAt: current?.createdAt ?? now,
     updatedAt: now,
+    ...(isComplete
+      ? { completedAtMs: currentIsComplete ? current.completedAtMs ?? current.updatedAt * 1_000 : completedAtMs }
+      : {}),
   };
+}
+
+export function completedPlanClearDelay(plan: PlanSnapshot, now = Date.now()): number | null {
+  if (planProgress(plan).state !== "complete") return null;
+  const completedAtMs = plan.completedAtMs ?? plan.updatedAt * 1_000;
+  return Math.max(0, completedAtMs + COMPLETED_PLAN_RETENTION_MS - now);
 }
 
 export function planProgress(plan: PlanSnapshot): PlanProgress {
@@ -149,6 +162,7 @@ function isPlanSnapshot(value: unknown): value is PlanSnapshot {
     typeof candidate.revision === "number" &&
     Array.isArray(candidate.steps) &&
     typeof candidate.createdAt === "number" &&
-    typeof candidate.updatedAt === "number"
+    typeof candidate.updatedAt === "number" &&
+    (candidate.completedAtMs === undefined || typeof candidate.completedAtMs === "number")
   );
 }
