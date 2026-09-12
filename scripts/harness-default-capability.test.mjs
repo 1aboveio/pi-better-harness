@@ -99,17 +99,17 @@ test("the installer configures and removes the sandbox alongside the other compo
   );
 });
 
-// @covers harness.plan-inactive
+// @covers harness.default-capability
 // @level integration
-test("plan stays local-only and absent from the published harness", () => {
+test("plan is present in local development and every published harness surface", () => {
   assert.ok(
     rootManifest.pi.extensions.includes("./packages/pi-better-plan/src/index.ts"),
-    "the root development manifest should keep plan available locally",
+    "the root development manifest must load plan",
   );
-  assert.ok(!componentPackages.includes("pi-better-plan"), "the npm installer must not install plan yet");
-  assert.equal(harnessManifest.dependencies["pi-better-plan"], undefined);
-  assert.ok(!harnessManifest.bundledDependencies.includes("pi-better-plan"));
-  assert.ok(!shimmedPackages().some((shim) => shim.packageName === "pi-better-plan"));
+  assert.ok(componentPackages.includes("pi-better-plan"), "the npm installer must manage plan");
+  assert.equal(harnessManifest.dependencies["pi-better-plan"], "0.1.1");
+  assert.ok(harnessManifest.bundledDependencies.includes("pi-better-plan"));
+  assert.ok(shimmedPackages().some((shim) => shim.packageName === "pi-better-plan"));
 });
 
 // @covers harness.default-capability
@@ -178,12 +178,14 @@ test("CI asserts the sandbox and its shared module are in the bundled tarball", 
   for (const path of [
     "extensions/sandbox/index.ts",
     "extensions/ssh/index.ts",
+    "extensions/plan/index.ts",
     "node_modules/pi-better-sandbox/index.ts",
     "node_modules/pi-better-sandbox/shared-sandbox-core.ts",
     "node_modules/pi-better-subagents/shared-sandbox-core.ts",
     "node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts",
     "node_modules/pi-better-ssh/src/index.ts",
     "node_modules/pi-better-ssh/src/shared-ssh-core/index.ts",
+    "node_modules/pi-better-plan/src/index.ts",
   ]) {
     assert.ok(ci.includes(`${path} \\`) || ci.includes(`${path}\n`), `ci.yml must assert ${path}`);
   }
@@ -203,12 +205,14 @@ test("the bundled tarball carries the sandbox extension and its synchronized sha
   for (const path of [
     "extensions/sandbox/index.ts",
     "extensions/ssh/index.ts",
+    "extensions/plan/index.ts",
     "node_modules/pi-better-sandbox/index.ts",
     "node_modules/pi-better-sandbox/shared-sandbox-core.ts",
     "node_modules/pi-better-subagents/shared-sandbox-core.ts",
     "node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts",
     "node_modules/pi-better-ssh/src/index.ts",
     "node_modules/pi-better-ssh/src/shared-ssh-core/index.ts",
+    "node_modules/pi-better-plan/src/index.ts",
   ]) {
     assert.ok(packed.includes(path), `bundled tarball is missing ${path}:\n${packed.join("\n")}`);
   }

@@ -1,6 +1,6 @@
 # Pi Better Harness
 
-`pi-better-harness` is a Pi extension bundle for an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, and goal tracking.
+`pi-better-harness` is a Pi extension bundle for an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, goal tracking, and structured plans.
 
 ## Quick Answer
 
@@ -24,9 +24,8 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
+pi install npm:pi-better-plan
 ```
-
-`pi-better-plan` remains available from this checkout for local development, but is not yet published or included in the npm harness.
 
 The backward-compatible bundled installation remains available:
 
@@ -47,7 +46,7 @@ Do not use the bundle when you only need one extension; install that package dir
 - `pi-better-background-tasks`: durable shell tasks, watchers, logs, and status inspection.
 - `pi-better-ssh`: safe synchronous remote commands over reusable SSH connections.
 - `pi-better-goal`: objective tracking with background-aware continuation.
-- `pi-better-plan`: experimental local-only execution plans; not yet published or included in the npm harness.
+- `pi-better-plan`: persistent structured execution plans with explicit progress.
 
 `pi-better-read-aloud` lives in this repo but is not published or included in the meta package yet.
 

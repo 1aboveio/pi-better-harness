@@ -1,6 +1,6 @@
 {
   "name": "pi-better-plan",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Structured execution plans with persistent progress for Pi.",
   "license": "MIT",
   "type": "module",

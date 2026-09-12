@@ -14,6 +14,7 @@ export const componentPackages = [
   "pi-better-background-tasks",
   "pi-better-ssh",
   "pi-better-goal",
+  "pi-better-plan",
 ];
 
 const usage = `Usage: pi-better-harness <install|uninstall> [--local]
