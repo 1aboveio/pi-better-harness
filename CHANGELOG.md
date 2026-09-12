@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-plan@0.1.2] - 2026-09-12
+
+### Added
+
+- **plan**: publish persistent structured plan state, explicit checklist progress tools, branch-aware restoration, and empty-editor keyboard navigation as a standalone Pi package
+
+### Changed
+
+- **plan**: show the complete checklist and compose `→ plan · n/total` through the shared navigator while retaining a standalone status fallback
+- **plan**: supersede the manually bootstrapped `0.1.1` package with a provenance-backed trusted-publisher release
+
+## [pi-better-harness@0.3.4] - 2026-09-12
+
+### Added
+
+- **harness**: include `pi-better-plan@0.1.2` in the bundled extension set and standalone installer with `update_plan`, `get_plan`, and `/plan`
+
+### Changed
+
+- **harness**: require the plan shim and package entry point in CI, release tarball checks, and whole-session coverage
+
 ## [pi-better-harness@0.3.3] - 2026-09-12
 
 ### Added

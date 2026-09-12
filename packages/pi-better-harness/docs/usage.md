@@ -9,8 +9,9 @@ Use it to manage the tools used most often in Pi:
 - `pi-better-background-tasks` for durable shell tasks and command watchers
 - `pi-better-ssh` for safe synchronous remote commands over reusable SSH connections
 - `pi-better-goal` for current-goal tracking and background-aware continuation
+- `pi-better-plan` for persistent structured plans and explicit checklist progress
 
-`pi-better-plan` and `pi-better-read-aloud` are intentionally not included yet.
+`pi-better-read-aloud` is intentionally not included yet.
 
 ## Install
 
@@ -53,6 +54,7 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
 | `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
+| `pi-better-plan` | `update_plan`, `get_plan` |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 
@@ -90,6 +92,7 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
+pi install npm:pi-better-plan
 ```
 
 ## Update Or Remove

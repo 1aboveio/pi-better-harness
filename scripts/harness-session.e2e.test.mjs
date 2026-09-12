@@ -179,6 +179,7 @@ test("the harness loads the sandbox alongside every other default extension", { 
     "pi-better-background-tasks",
     "pi-better-ssh",
     "pi-better-goal",
+    "pi-better-plan",
   ]);
   for (const name of [
     "bash",
@@ -189,12 +190,13 @@ test("the harness loads the sandbox alongside every other default extension", { 
     "remote_bash",
     "ssh_profile",
     "ssh_mux",
+    "update_plan",
+    "get_plan",
   ]) {
     assert.ok(tools.has(name), `a harness session must have the ${name} tool`);
   }
-  assert.ok(!tools.has("update_plan"), "the published harness must keep plan inactive");
-  assert.ok(!tools.has("get_plan"), "the published harness must keep plan inactive");
   assert.ok(commands.has("sandbox"), "the human-only /sandbox command must be registered");
+  assert.ok(commands.has("plan"), "the human-owned /plan command must be registered");
 });
 
 // @covers harness.default-capability
