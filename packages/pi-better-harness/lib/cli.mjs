@@ -12,6 +12,7 @@ export const componentPackages = [
   "pi-better-sandbox",
   "pi-better-subagents",
   "pi-better-background-tasks",
+  "pi-better-ssh",
   "pi-better-goal",
 ];
 

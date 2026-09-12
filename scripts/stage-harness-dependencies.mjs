@@ -10,6 +10,7 @@ const packageNames = [
   "pi-better-background-tasks",
   "pi-better-goal",
   "pi-better-sandbox",
+  "pi-better-ssh",
   "pi-better-subagents",
 ];
 

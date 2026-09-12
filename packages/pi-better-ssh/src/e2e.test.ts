@@ -307,7 +307,7 @@ describe("pi-better-ssh extension", () => {
   // @covers pi-better-ssh.release-contract
   // @level integration
   // @fails-without-fix pi-better-ssh.release-contract
-  it("is independently publishable but absent from the root extension bundle", () => {
+  it("is independently publishable and included in the root extension bundle", () => {
     const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     const rootPackageJson = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
     const releaseGuide = readFileSync(new URL("../../../docs/development-and-release.md", import.meta.url), "utf8");
@@ -320,13 +320,13 @@ describe("pi-better-ssh extension", () => {
       pi: { extensions: ["./src/index.ts"] },
     });
     expect(packageJson.keywords).toContain("pi-package");
-    expect(releaseGuide).toContain("| `packages/pi-better-ssh` | `pi-better-ssh` | yes | no |");
+    expect(releaseGuide).toContain("| `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |");
     expect(releaseGuide).toContain("pi install npm:pi-better-ssh");
     expect(publishWorkflow).toContain("- pi-better-ssh");
     expect(publishWorkflow).toContain('pi-better-ssh) WORKSPACE="packages/pi-better-ssh"');
     expect(publishWorkflow).toContain("check_pack_file /tmp/package-pack.json src/shared-ssh-core/index.ts");
     expect(changelog).toContain("## [pi-better-ssh@0.1.0]");
-    expect(rootPackageJson.pi.extensions.join(" ")).not.toContain("pi-better-ssh");
+    expect(rootPackageJson.pi.extensions).toContain("./packages/pi-better-ssh/src/index.ts");
   });
 });
 
