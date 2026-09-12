@@ -12,10 +12,8 @@ export function renderCompactPlan(
   plan: PlanSnapshot,
   width: number,
   theme: PlanRenderTheme,
-  options: { focused?: boolean; selectedIndex?: number } = {},
 ): string[] {
   const progress = planProgress(plan);
-  const selected = clampIndex(options.selectedIndex ?? progress.activeIndex ?? firstIncompleteIndex(plan), plan.steps.length);
   const stateLabel = progress.blocked > 0
     ? `${progress.blocked} blocked`
     : progress.state === "complete"
@@ -28,8 +26,7 @@ export function renderCompactPlan(
 
   for (let index = 0; index < plan.steps.length; index += 1) {
     const item = plan.steps[index]!;
-    const selectedPrefix = options.focused && index === selected ? theme.fg("accent", "› ") : "  ";
-    lines.push(`${selectedPrefix}${stepGlyph(item, theme)} ${index + 1}  ${stepText(item, theme)}`);
+    lines.push(`  ${stepGlyph(item, theme)} ${index + 1}  ${stepText(item, theme)}`);
   }
   lines.push("");
   return lines.map((line) => truncateToWidth(line, Math.max(1, width)));

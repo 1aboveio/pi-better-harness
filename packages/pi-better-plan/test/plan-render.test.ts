@@ -35,8 +35,8 @@ test("compact and full plan rendering name blocked state and obey width", () => 
     { step: "Pending step", status: "pending" },
   ], undefined, 100);
 
-  const compact = renderCompactPlan(plan, 28, theme, { focused: true, selectedIndex: 1 });
+  const compact = renderCompactPlan(plan, 28, theme);
   assert.ok(compact.some((line) => line.includes("BLOCKED")));
-  assert.ok(compact.some((line) => line.startsWith("› !")));
+  assert.ok(compact.every((line) => !line.startsWith("›")));
   assert.ok([...compact, ...renderFullPlan(plan, 28, theme, 1)].every((line) => visibleWidth(line) <= 28));
 });

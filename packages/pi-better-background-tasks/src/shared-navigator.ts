@@ -97,7 +97,6 @@ type NavigatorState = {
 };
 
 const GLOBAL_KEY = Symbol.for("pi-better-harness.navigator.state");
-const PLAN_NAVIGATION_KEY = Symbol.for("pi-better-harness.plan-navigation.state");
 const FACTORY_MARK = "__piBetterHarnessNavigatorFactory";
 const FACTORY_REFRESH = "__piBetterHarnessNavigatorRefresh";
 
@@ -119,23 +118,6 @@ function state(): NavigatorState {
     g[GLOBAL_KEY] = { providers: new Map(), unsubscribers: new Map() };
   }
   return g[GLOBAL_KEY]!;
-}
-
-type PlanNavigationState = {
-  visible: boolean;
-  progressLabel?: string;
-  releaseWorkFocus?: () => void;
-  refreshNavigationHint?: () => void;
-};
-
-function planNavigationState(): PlanNavigationState {
-  const global = globalThis as typeof globalThis & { [PLAN_NAVIGATION_KEY]?: PlanNavigationState };
-  if (!global[PLAN_NAVIGATION_KEY]) global[PLAN_NAVIGATION_KEY] = { visible: false };
-  return global[PLAN_NAVIGATION_KEY]!;
-}
-
-function refreshPlanNavigationHint(): void {
-  refreshBackgroundWorkNavigator();
 }
 
 export function registerBackgroundWorkProvider(provider: BackgroundWorkProvider): () => void {
@@ -179,12 +161,7 @@ export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boole
 }
 
 export function navigatorFooterHint(count: number): string | null {
-  const work = count > 0 ? `← work · ${count}` : null;
-  const navigation = planNavigationState();
-  const plan = navigation.visible
-    ? `→ plan${navigation.progressLabel ? ` · ${navigation.progressLabel}` : ""}`
-    : null;
-  return [work, plan].filter((hint): hint is string => hint !== null).join("    ") || null;
+  return count > 0 ? `← work · ${count}` : null;
 }
 
 export function applyNavigatorFooter(ui: { setStatus(key: string, value: string | undefined): void }, count: number): string | null {
@@ -208,10 +185,6 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   s.mainListRequestRender = undefined;
   s.mainListDeadlineScheduler?.dispose();
   s.mainListDeadlineScheduler = createRenderScheduler(() => refreshMainListWidget());
-  const planNavigation = planNavigationState();
-  planNavigation.releaseWorkFocus = unfocusMainList;
-  planNavigation.refreshNavigationHint = refreshPlanNavigationHint;
-  try { (ctx.ui as any).setStatus?.("pi-better-plan-nav", undefined); } catch { /* ignore */ }
   installNavigatorEditor(ctx.ui as any, deps);
   s.lastHint = undefined;
   refreshBackgroundWorkNavigator(ctx);
@@ -240,11 +213,6 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   s.mainListRequestRender = undefined;
   s.editorComponent = undefined;
   s.detailOverlayRows = undefined;
-  const planNavigation = planNavigationState();
-  planNavigation.releaseWorkFocus = undefined;
-  if (planNavigation.refreshNavigationHint === refreshPlanNavigationHint) {
-    planNavigation.refreshNavigationHint = undefined;
-  }
   s.mainListSelectedId = undefined;
   s.mainListFocused = false;
 }
@@ -492,10 +460,9 @@ function buildMainListLines(
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
-  const plan = planNavigationState().visible ? " · → plan" : "";
   const keys = focused
-    ? `↑↓ switch · Enter detail · x stop${plan} · Esc unfocus`
-    : `← work navigator${plan}`;
+    ? "↑↓ switch · Enter detail · x stop · Esc unfocus"
+    : "← work navigator";
   return dim(keys, fg);
 }
 

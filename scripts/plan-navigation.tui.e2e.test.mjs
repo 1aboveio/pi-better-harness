@@ -19,35 +19,26 @@ after(() => {
   rmSync(fixtures, { recursive: true, force: true });
 });
 
-// @covers plan.keyboard-navigation
+// @covers plan.passive-widget
 // @level e2e
-test("golden path: right arrow focuses plan progress only from an empty editor", () => {
-  assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0, "real TUI plan navigation requires tmux");
+test("golden path: the plan stays passive and right arrow remains editor input", () => {
+  assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0, "real TUI plan rendering requires tmux");
   writeFileSync(probePath, seedPlanExtension(readyPath));
   startPiSession();
   waitForFile(readyPath);
 
   sendLiteral("/seed-plan");
   sendKey("Enter");
-  const initial = waitForScreen((screen) => screen.includes("plan 1/3 steps") && screen.includes("→ plan · 1/3"));
+  const initial = waitForScreen((screen) => screen.includes("plan 1/3 steps"));
   assert.doesNotMatch(initial, /^› /m, "the plan starts visible but unfocused");
+  assert.doesNotMatch(initial, /→ plan/, "the footer does not advertise plan navigation");
 
   sendKey("Right");
-  const focused = waitForScreen((screen) => /^› ● 2  Implement plan navigation$/m.test(screen));
-  assert.match(focused, /→ plan · 1\/3/);
-
-  sendKey("Down");
-  const moved = waitForScreen((screen) => /^› ○ 3  Verify the terminal journey$/m.test(screen));
-  assert.match(moved, /plan 1\/3 steps/);
-
-  sendKey("Left");
-  waitForScreen((screen) => !/^› /m.test(screen));
+  const unchanged = assertScreenNeverMatches(/^› /m, 500);
+  assert.doesNotMatch(unchanged, /→ plan/);
   sendLiteral("draft");
   waitForScreen((screen) => screen.includes("draft"));
-  sendKey("Right");
-  const editing = assertScreenNeverMatches(/^› /m, 500);
-  assert.doesNotMatch(editing, /^› /m, "right remains cursor movement while the editor contains text");
-  assert.match(editing, /draft/, "editor content remains intact");
+  assert.doesNotMatch(captureScreen(), /^› /m, "typing does not focus the plan");
 });
 
 function startPiSession() {
