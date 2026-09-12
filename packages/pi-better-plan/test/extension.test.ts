@@ -16,12 +16,7 @@ interface CommandDefinition {
   handler(args: string, ctx: ExtensionContext): Promise<void> | void;
 }
 
-test("plan tools persist progress and the empty-editor right arrow focuses the plan", async () => {
-  let releasedWorkFocus = 0;
-  (globalThis as any)[Symbol.for("pi-better-harness.plan-navigation.state")] = {
-    visible: false,
-    releaseWorkFocus: () => { releasedWorkFocus += 1; },
-  };
+test("plan tools persist progress without taking over editor navigation", async () => {
   const entries: SessionEntry[] = [];
   const tools = new Map<string, ToolDefinition>();
   const commands = new Map<string, CommandDefinition>();
@@ -29,13 +24,13 @@ test("plan tools persist progress and the empty-editor right arrow focuses the p
   const widgets = new Map<string, any>();
   const statuses = new Map<string, string | undefined>();
   const delegatedInput: string[] = [];
-  let editorText = "";
-  let editorFactory: ((tui: unknown, theme: unknown, keybindings: unknown) => any) | undefined = () => ({
-    getText: () => editorText,
+  const editorFactory = () => ({
+    getText: () => "",
     handleInput: (data: string) => delegatedInput.push(data),
     render: () => [],
     invalidate: () => undefined,
   });
+  let editorInstallations = 0;
   let customViews = 0;
 
   const ctx = {
@@ -47,7 +42,7 @@ test("plan tools persist progress and the empty-editor right arrow focuses the p
       setStatus: (key: string, value: string | undefined) => statuses.set(key, value),
       setWidget: (key: string, content: unknown, options?: unknown) => widgets.set(key, { content, options }),
       getEditorComponent: () => editorFactory,
-      setEditorComponent: (factory: typeof editorFactory) => { editorFactory = factory; },
+      setEditorComponent: () => { editorInstallations += 1; },
       custom: async (_factory: unknown) => { customViews += 1; },
     },
   } as unknown as ExtensionContext;
@@ -75,40 +70,19 @@ test("plan tools persist progress and the empty-editor right arrow focuses the p
     ],
   }, undefined, undefined, ctx);
 
-  assert.equal(statuses.get("pi-better-plan-nav"), "→ plan · 1/3");
+  assert.equal(statuses.get("pi-better-plan-nav"), undefined);
+  assert.equal(editorInstallations, 0, "the plan leaves the editor component unchanged");
   const widgetFactory = widgets.get("pi-better-plan")?.content;
   assert.equal(typeof widgetFactory, "function");
   const widget = widgetFactory({ requestRender: () => undefined }, { fg: (_color: string, value: string) => value });
   assert.ok(widget.render(80).every((line: string) => !line.startsWith("›")));
 
-  const editor = editorFactory?.({}, {}, {});
+  const editor = editorFactory();
   editor.handleInput("\u001b[C");
-  assert.ok(widget.render(80).some((line: string) => line.startsWith("› ●")), "right focuses the active plan step");
-  assert.equal(releasedWorkFocus, 1, "right transfers focus away from the work navigator");
-  assert.deepEqual(delegatedInput, []);
+  assert.deepEqual(delegatedInput, ["\u001b[C"], "right remains normal editor input on an empty editor");
 
-  editor.handleInput("\u001b[B");
-  assert.ok(widget.render(80).some((line: string) => line.startsWith("› ○") && line.includes("Verify")));
-  editor.handleInput("\r");
-  assert.equal(customViews, 1, "enter opens the full plan view");
-
-  editorText = "draft";
-  editor.handleInput("\u001b[C");
-  assert.deepEqual(delegatedInput, ["\u001b[C"], "right remains normal cursor input when the editor has text");
-
-  let sharedHintRefreshes = 0;
-  const navigation = (globalThis as any)[Symbol.for("pi-better-harness.plan-navigation.state")];
-  navigation.refreshNavigationHint = () => { sharedHintRefreshes += 1; };
-  await updatePlan.execute("shared-navigation", {
-    plan: [
-      { step: "Inspect", status: "completed" },
-      { step: "Implement", status: "in_progress" },
-      { step: "Verify", status: "pending" },
-    ],
-  }, undefined, undefined, ctx);
-  assert.equal(navigation.progressLabel, "1/3");
-  assert.equal(sharedHintRefreshes, 1);
-  assert.equal(statuses.get("pi-better-plan-nav"), undefined, "shared navigation owns the composed hint");
+  await commands.get("plan")?.handler("", ctx);
+  assert.equal(customViews, 1, "/plan still opens the full plan view");
 
   const getPlan = tools.get("get_plan");
   assert.ok(getPlan);
