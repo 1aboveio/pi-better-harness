@@ -4,11 +4,29 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [pi-better-plan@0.1.3] - 2026-09-12
 
 ### Changed
 
 - **plan**: remove the `→ plan` navigation hint and empty-editor right-arrow shortcut; `/plan` remains available for the full view
+
+## [pi-better-background-tasks@0.2.11] - 2026-09-12
+
+### Changed
+
+- **background-tasks**: remove obsolete plan navigation composition from the shared background-work footer
+
+## [pi-better-subagents@0.1.26] - 2026-09-12
+
+### Changed
+
+- **subagents**: remove obsolete plan navigation composition from the shared background-work footer
+
+## [pi-better-harness@0.3.5] - 2026-09-12
+
+### Changed
+
+- **harness**: bundle the passive plan widget and background-work navigator cleanup from the new component patch releases
 
 ## [pi-better-plan@0.1.2] - 2026-09-12
 
