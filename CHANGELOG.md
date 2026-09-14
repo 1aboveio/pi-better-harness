@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-plan@0.1.5] - 2026-09-14
+
+### Changed
+
+- **plan**: guide the foreground model to use structured plans as coordinator milestones, delegate independent work early, and inspect delegated outcomes before verification or completion
+
+## [pi-better-subagents@0.1.27] - 2026-09-14
+
+### Changed
+
+- **subagents**: coordinate launches with an active parent plan and fetch terminal results from completion or attention callbacks without polling
+
+## [pi-better-background-tasks@0.2.12] - 2026-09-14
+
+### Changed
+
+- **background-tasks**: reserve durable tasks for long-running work and keep active plans synchronized with terminal background outcomes
+
+## [pi-better-goal@0.2.2] - 2026-09-14
+
+### Changed
+
+- **goal**: keep plan verification and completion open until relevant delegated work is terminal, inspected, and integrated
+
+## [pi-better-harness@0.3.7] - 2026-09-14
+
+### Changed
+
+- **harness**: bundle coordinated plan, subagent, background-task, and goal guidance from the new component patch releases
+
 ## [pi-better-plan@0.1.4] - 2026-09-12
 
 ### Fixed
