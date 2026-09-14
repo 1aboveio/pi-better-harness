@@ -248,6 +248,15 @@ export default function (pi: ExtensionAPI): void {
     refreshGoalWidget?.(wasVisible);
   };
 
+  const pauseGoalOnInterrupt = (ctx: ExtensionContext): void => {
+    const goal = getGoal(ctx);
+    if (!isPokeable(goal)) {
+      return;
+    }
+    setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
+    notifyGoal(ctx, "Goal paused (interrupted).");
+  };
+
   const queueGoalContinuation = (goal: GoalSnapshot): void => {
     if (!isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
@@ -728,6 +737,14 @@ export default function (pi: ExtensionAPI): void {
     clearIdleContinuation();
     continuationQueuedFor = null;
     lastAgentEvidence = null;
+    const turnSignal = ctx.signal;
+    if (turnSignal) {
+      if (turnSignal.aborted) {
+        pauseGoalOnInterrupt(ctx);
+      } else {
+        turnSignal.addEventListener("abort", () => pauseGoalOnInterrupt(ctx), { once: true });
+      }
+    }
     await publishSnapshot(ctx);
   });
 
@@ -738,13 +755,7 @@ export default function (pi: ExtensionAPI): void {
     // aborted (escape / ctrl+c while streaming), pause the active goal so it does
     // not auto-continue after the user stopped the agent.
     if (wasTurnAborted(event.messages)) {
-      const goal = getGoal(ctx);
-      if (isPokeable(goal)) {
-        setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
-        if (ctx.hasUI) {
-          ctx.ui.notify("Goal paused (interrupted).", "info");
-        }
-      }
+      pauseGoalOnInterrupt(ctx);
     }
   });
 
