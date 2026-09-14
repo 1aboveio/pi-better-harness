@@ -62,6 +62,8 @@ test("plan tools persist progress without taking over editor navigation", async 
   await handlers.get("session_start")?.({ reason: "startup" }, ctx);
   const updatePlan = tools.get("update_plan");
   assert.ok(updatePlan);
+  assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("coordinator's milestone ledger")));
+  assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("concurrent delegated work")));
   await updatePlan.execute("update", {
     explanation: "Start implementation",
     plan: [
@@ -90,6 +92,11 @@ test("plan tools persist progress without taking over editor navigation", async 
   const result = await getPlan.execute("get", {}, undefined, undefined, ctx);
   assert.equal((result.details as any).progress.completed, 1);
   assert.equal((result.details as any).plan.steps[1].status, "in_progress");
+
+  const promptUpdate = await handlers.get("before_agent_start")?.({ systemPrompt: "base prompt" }, ctx) as { systemPrompt?: string };
+  assert.match(promptUpdate.systemPrompt ?? "", /foreground coordinator's milestone ledger/);
+  assert.match(promptUpdate.systemPrompt ?? "", /keep one coordinator step in_progress across concurrent workers/);
+  assert.match(promptUpdate.systemPrompt ?? "", /results or failures have been inspected and integrated/);
 });
 
 test("invalid plan updates leave the durable plan unchanged", async () => {

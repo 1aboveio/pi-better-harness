@@ -58,6 +58,12 @@ After installation, Pi can use these model-callable tools:
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 
+## Coordinated Execution
+
+For substantial work, use `pi-better-plan` as the foreground coordinator's milestone ledger. Identify independent work early, launch reasoning-heavy work with `subagent_spawn` or `subagent_spawn_batch`, and launch genuinely long-running commands or repeated checks with `bg_task_spawn` or `bg_task_watch`. Continue unblocked foreground work after launch instead of polling.
+
+Keep only one coordinator step `in_progress` even when several workers run concurrently. The subagent and background-task registries own individual worker status; the plan owns milestones, dependencies, integration, and verification. Before completing verification, the plan, or the active goal, ensure every relevant delegated task is terminal and inspect and integrate its result or failure.
+
 Sandbox control is human-only. `/sandbox`, `/sandbox on`, `/sandbox off`,
 `/sandbox default on|off`, `/sandbox deny ...`, and `/sandbox rules` are slash
 commands with no tool equivalent, so the model cannot change its own

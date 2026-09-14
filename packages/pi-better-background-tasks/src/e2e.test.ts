@@ -16,6 +16,7 @@ type JsonSchema = {
 type RegisteredTool = {
   name: string;
   description?: string;
+  promptGuidelines?: string[];
   parameters?: JsonSchema;
   execute: (...args: any[]) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
 };
@@ -53,6 +54,18 @@ describe("extension e2e", () => {
     expect(harness.tools.get("bg_task_log")?.description).toContain("tail_lines:0 returns the retained raw log");
     expect(harness.tools.get("bg_task")?.description).toContain("action:status");
     expect(harness.tools.get("bg_status")?.description).toContain("explicit full-data recovery");
+  });
+
+  it("coordinates long-running work with the parent plan", () => {
+    const harness = createHarness();
+
+    for (const name of ["bg_task_spawn", "bg_task_watch", "bg_task"]) {
+      const guidelines = harness.tools.get(name)?.promptGuidelines ?? [];
+      expect(guidelines.some((line) => line.includes("genuinely long-running"))).toBe(true);
+      expect(guidelines.some((line) => line.includes("coordinator ledger"))).toBe(true);
+      expect(guidelines.some((line) => line.includes("continue unblocked foreground work without polling"))).toBe(true);
+      expect(guidelines.some((line) => line.includes("terminal, inspected, and integrated"))).toBe(true);
+    }
   });
 
   // @covers background-task.ssh-tool-contract

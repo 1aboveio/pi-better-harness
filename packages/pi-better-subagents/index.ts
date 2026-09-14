@@ -127,6 +127,11 @@ const SUBAGENT_TOOLS = [
     "subagent_result",
 ];
 
+const SUBAGENT_ORCHESTRATION_GUIDELINES = [
+    "When a structured plan is active, keep it as the parent-owned coordinator ledger: delegate bounded independent work, continue unblocked foreground work, and update the plan after integrating each result or failure.",
+    "Do not treat launching a subagent as completion of the parent milestone; relevant terminal results must be inspected and integrated before verification or completion.",
+];
+
 const GOAL_READY_EVENT = "pi-better-goal:ready";
 const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
 const goalReadySubscriptions = new WeakSet<ExtensionAPI>();
@@ -1267,7 +1272,8 @@ export default function (pi: ExtensionAPI) {
         promptGuidelines: [
             "Use subagent_spawn for independent work the user should not have to wait on. It returns at once with a run id; that return IS the deliverable — report the id to the user and continue.",
             "After subagent_spawn, do NOT call subagent_output or subagent_result in a loop to wait for the result, and do NOT sleep. The run completes on its own and reports back on the next turn.",
-            "Only call subagent_result / subagent_output when the user explicitly asks how a run is going or for its result.",
+            "Call subagent_result after a completion or attention callback, or when the user explicitly asks for the result. Use subagent_output only when the user explicitly asks how a run is progressing; never use either tool to poll.",
+            ...SUBAGENT_ORCHESTRATION_GUIDELINES,
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
@@ -1336,6 +1342,7 @@ export default function (pi: ExtensionAPI) {
             "Use subagent_spawn_batch when you have several independent tasks to delegate. It returns immediately with a batch id and one run id per launched job.",
             "Each job is a normal subagent run; use subagent_result / subagent_output / subagent_stop with the individual run ids just like subagent_spawn.",
             "Do NOT poll for results. Each job reports back on its own when it finishes.",
+            ...SUBAGENT_ORCHESTRATION_GUIDELINES,
             "By default the whole batch is rejected if there is not enough capacity. Set onCapacity to 'launch-available' to launch as many as fit and report the rest as skipped.",
         ],
         parameters: Type.Object({
