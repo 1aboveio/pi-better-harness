@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-goal@0.2.3] - 2026-09-14
+
+### Fixed
+
+- **goal**: pause an active goal immediately when Escape aborts the current turn, including interrupts during tool execution
+
+## [pi-better-harness@0.3.8] - 2026-09-14
+
+### Changed
+
+- **harness**: bundle `pi-better-goal@0.2.3` with reliable pause-on-Escape behavior
+
 ## [pi-better-plan@0.1.5] - 2026-09-14
 
 ### Changed

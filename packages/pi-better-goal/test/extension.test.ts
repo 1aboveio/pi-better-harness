@@ -562,6 +562,25 @@ test("an aborted run pauses the goal while the agent is running", async (t) => {
   assert.equal(latestGoal(entries)?.status, "paused");
 });
 
+test("aborting the active turn pauses the goal before agent_end", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const controller = new AbortController();
+  const { commands, handlers, ctx, entries, setBusy } = createContinuationHarness(controller.signal);
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+
+  setBusy(true);
+  await handlers.get("agent_start")?.({}, ctx);
+  controller.abort();
+
+  assert.equal(
+    latestGoal(entries)?.status,
+    "paused",
+    "Escape aborts the turn signal even when agent_end has no aborted assistant message yet",
+  );
+});
+
 test("an aborted run without an active goal creates no goal", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const { handlers, ctx, entries } = createContinuationHarness();
@@ -573,7 +592,7 @@ test("an aborted run without an active goal creates no goal", async (t) => {
   assert.equal(latestGoal(entries), undefined, "an abort without a goal creates nothing");
 });
 
-function createContinuationHarness() {
+function createContinuationHarness(signal?: AbortSignal) {
   const entries: SessionEntry[] = [];
   const commands = new Map<string, CommandDefinition>();
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
@@ -586,6 +605,7 @@ function createContinuationHarness() {
   const ctx = {
     hasUI: false,
     isIdle: () => idle,
+    signal,
     abort: () => {
       aborts += 1;
     },
