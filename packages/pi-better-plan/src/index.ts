@@ -152,6 +152,8 @@ export default function planExtension(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use update_plan for work with three or more meaningful steps, and update it immediately when a step completes, becomes blocked, or scope changes.",
       "Keep at most one update_plan step in_progress and do not mark a step completed until its required verification succeeds.",
+      "Use the plan as the foreground coordinator's milestone ledger. Delegate independent, sufficiently substantial work early when subagent or background-task tools are available, and continue unblocked foreground work instead of waiting or polling.",
+      "Represent concurrent delegated work under one in_progress coordinator step. Before completing verification or the plan, ensure every relevant delegated task is terminal, then inspect and integrate its result or failure.",
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params) {
@@ -270,6 +272,8 @@ function planPrompt(plan: PlanSnapshot): string {
   return [
     "Current structured execution plan:",
     ...plan.steps.map((item, index) => `${index + 1}. [${item.status}] ${item.step}`),
-    "Use update_plan immediately when a step completes, becomes blocked, or the scope changes. Completion must be explicit and evidence-backed.",
+    "Use update_plan immediately when a step completes, becomes blocked, or the scope changes.",
+    "Treat the plan as the foreground coordinator's milestone ledger: delegate independent, sufficiently substantial work early, keep one coordinator step in_progress across concurrent workers, and continue unblocked foreground work instead of waiting or polling.",
+    "Do not complete verification or the plan until relevant delegated work is terminal, its results or failures have been inspected and integrated, and the outcome is evidence-backed.",
   ].join("\n");
 }

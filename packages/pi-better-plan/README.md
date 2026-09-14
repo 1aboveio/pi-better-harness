@@ -12,6 +12,12 @@
 
 Plan progress is checklist progress, not an estimate of effort. The extension never infers completion from prose or successful tool calls.
 
+## Coordinating Delegated Work
+
+Use the plan as the foreground coordinator's milestone ledger. Delegate independent, sufficiently substantial work early with subagents, and use background tasks for long-running processes or repeated checks. Keep doing unblocked foreground work after launch; do not poll workers.
+
+Concurrent workers belong under one `in_progress` coordinator step rather than one active plan step per worker. Worker tools and the background-work navigator own individual run status. Complete verification and the plan only after every relevant delegated task is terminal and its result or failure has been inspected and integrated.
+
 ## Install
 
 ```sh

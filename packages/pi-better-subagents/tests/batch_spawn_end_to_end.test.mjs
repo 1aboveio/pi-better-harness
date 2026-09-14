@@ -266,6 +266,16 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.equal(existsSync(join(CHECKOUT_NODE_MODULES, "@earendil-works/pi-coding-agent")), false);
     });
 
+    it("coordinates single and batch delegation with the parent plan", () => {
+        const { tools } = loadExtension(mod);
+        for (const tool of [tools.subagent_spawn, tools.subagent_spawn_batch]) {
+            assert.ok(tool.promptGuidelines.some((line) => line.includes("parent-owned coordinator ledger")));
+            assert.ok(tool.promptGuidelines.some((line) => line.includes("continue unblocked foreground work")));
+            assert.ok(tool.promptGuidelines.some((line) => line.includes("terminal results must be inspected")));
+        }
+        assert.ok(tools.subagent_spawn.promptGuidelines.some((line) => line.includes("after a completion or attention callback")));
+    });
+
     it("launches multiple jobs and records batchId/batchName in each meta", async () => {
         const { tools } = loadExtension(mod);
         const ctx = makeCtx();

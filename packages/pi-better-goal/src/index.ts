@@ -713,7 +713,7 @@ export default function (pi: ExtensionAPI): void {
     }
 
     const backgroundInstruction = snapshot.backgroundRunning
-      ? ` The goal still has delegated background work running (${summarizeActiveBackground(snapshot)}). Foreground idleness alone is not goal completion; do not mark the goal complete until delegated background work reaches a terminal state and its result or failure has been inspected.`
+      ? ` The goal still has delegated background work running (${summarizeActiveBackground(snapshot)}). Foreground idleness alone is not goal completion; keep any structured plan current and do not mark verification, the plan, or the goal complete until every relevant delegated task reaches a terminal state and its result or failure has been inspected and integrated.`
       : "";
     return {
       systemPrompt:

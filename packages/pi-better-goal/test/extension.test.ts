@@ -41,6 +41,52 @@ test("goal action completions expose selectable actions with context", () => {
   assert.equal(goalArgumentCompletions("ship the release"), null);
 });
 
+test("active background work keeps plan verification and completion open", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const entries: SessionEntry[] = [];
+  const commands = new Map<string, CommandDefinition>();
+  const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+  const events = new EventEmitter();
+  const ctx = {
+    hasUI: false,
+    isIdle: () => true,
+    cwd: "/tmp/project",
+    sessionManager: { getBranch: () => entries, getSessionId: () => "session-plan-coordination" },
+    ui: { notify() {}, setStatus() {}, setWidget() {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    events,
+    appendEntry(customType: string, data: unknown) {
+      entries.push({ type: "custom", customType, data });
+    },
+    sendMessage() {},
+    registerCommand(name: string, command: CommandDefinition) {
+      commands.set(name, command);
+    },
+    registerTool() {},
+    on(event: string, handler: (event: any, context: ExtensionContext) => unknown) {
+      handlers.set(event, handler);
+    },
+  } as unknown as ExtensionAPI;
+
+  extension(pi);
+  events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => ({
+      providerId: "fixture",
+      items: [{ id: "worker-1", label: "review", status: "running", active: true }],
+    }),
+  });
+  await commands.get("goal")?.handler("ship coordinated work", ctx);
+
+  const update = await handlers.get("before_agent_start")?.({ systemPrompt: "base prompt" }, ctx) as { systemPrompt?: string };
+  assert.match(update.systemPrompt ?? "", /keep any structured plan current/);
+  assert.match(update.systemPrompt ?? "", /do not mark verification, the plan, or the goal complete/);
+  assert.match(update.systemPrompt ?? "", /inspected and integrated/);
+
+  await handlers.get("session_shutdown")?.({}, ctx);
+});
+
 test("idle sessions sleep until provider activity needs polling", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
