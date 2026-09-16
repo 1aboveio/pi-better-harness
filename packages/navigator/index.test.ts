@@ -1229,8 +1229,8 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("tails structured transcript component rows with the same 10/25 control", () => {
-    const transcriptRows = Array.from({ length: 12 }, (_, i) => ` transcript-${String(i + 1).padStart(2, "0")}`);
+  it("keeps requested structured transcript rows visible in constrained detail viewports", () => {
+    const transcriptRows = Array.from({ length: 30 }, (_, i) => ` transcript-${String(i + 1).padStart(2, "0")}`);
     const unregister = registerBackgroundWorkProvider({
       id: "subagents",
       label: "Subagents",
@@ -1253,7 +1253,15 @@ describe("shared background work navigator", () => {
         title: "structured-tail-reader",
         status: "running",
         statusTone: "running",
-        metadata: [{ label: "provider", value: "Subagents" }],
+        metadata: [
+          { label: "provider", value: "Subagents" },
+          { label: "model", value: "gpt-5.5 · effort high" },
+          { label: "elapsed", value: "10s" },
+          { label: "tools", value: "current read" },
+          { label: "spend", value: "1.2k tok" },
+          { label: "pid", value: "123" },
+          { label: "pgid", value: "123" },
+        ],
         evidence: { label: "transcript", text: "fallback should not render" },
         transcript: [],
         footerActions: ["x stop"],
@@ -1263,6 +1271,7 @@ describe("shared background work navigator", () => {
     });
 
     let component: any;
+    let customOptions: any;
     const ui = {
       factory: undefined as any,
       theme: { fg: (_color: string, value: string) => value },
@@ -1270,7 +1279,8 @@ describe("shared background work navigator", () => {
       setWidget() {},
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
-      custom(factory: any) {
+      custom(factory: any, options: any) {
+        customOptions = options;
         component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
         return Promise.resolve(null);
       },
@@ -1288,17 +1298,25 @@ describe("shared background work navigator", () => {
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       editor.handleInput("enter");
+      const visible = customOptions?.overlayOptions?.().visible;
+      assert.equal(typeof visible, "function");
+      assert.equal(visible(80, 24), true);
 
       let rendered = component.render(80).join("\n");
       assert.match(rendered, /transcript · latest 10 rows/);
-      assert.doesNotMatch(rendered, /transcript-01|transcript-02|fallback should not render/);
-      assert.match(rendered, /transcript-03/);
-      assert.match(rendered, /transcript-12/);
+      assert.doesNotMatch(rendered, /transcript-20|fallback should not render/);
+      for (let row = 21; row <= 30; row += 1) {
+        assert.match(rendered, new RegExp(`transcript-${row}`));
+      }
 
       component.handleInput("l");
+      assert.equal(visible(80, 40), true);
       rendered = component.render(80).join("\n");
       assert.match(rendered, /transcript · latest 25 rows/);
-      assert.match(rendered, /transcript-01/);
+      assert.doesNotMatch(rendered, /transcript-05/);
+      for (let row = 6; row <= 30; row += 1) {
+        assert.match(rendered, new RegExp(`transcript-${String(row).padStart(2, "0")}`));
+      }
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
