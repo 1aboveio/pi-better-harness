@@ -918,7 +918,7 @@ function createOverlayComponent(
           width,
           deps.truncate,
           fg,
-          { minRows: detailRows, bottomFooter: false, logTailRows },
+          { minRows: detailRows, maxRows: detailRows, bottomFooter: false, logTailRows },
         );
       } else {
         transcriptDetail = null;
@@ -1003,21 +1003,33 @@ function buildTranscriptDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { minRows?: number; bottomFooter?: boolean; logTailRows?: number } = {},
+  options: { minRows?: number; maxRows?: number; bottomFooter?: boolean; logTailRows?: number } = {},
 ): string[] {
   const actions = [...(detail.footerActions ?? ["x close"]), "Esc close"].join(" · ");
   const tailRows = options.logTailRows ?? DEFAULT_LOG_TAIL_ROWS;
-  const shownTranscriptLines = transcriptLines.length ? transcriptLines.slice(-tailRows) : ["   (no transcript yet)"];
+  let shownTranscriptLines = transcriptLines.length ? transcriptLines.slice(-tailRows) : ["   (no transcript yet)"];
   const lines: string[] = [
     fg("accent", rule(detail.title, width)),
     dim(`   ← main · ${actions}`, fg),
     "",
     `   status   ${fg(toneColor(detail.statusTone, detail.status), detail.status)}`,
   ];
-  if (detail.subtitle) lines.push(`   summary  ${detail.subtitle}`);
-  for (const item of detail.metadata) lines.push(`   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`);
-  lines.push("", dim(section(`transcript · latest ${tailRows} rows`, width), fg));
-  if (detail.transcriptDiagnostic) lines.push(`   ${dim(detail.transcriptDiagnostic, fg)}`);
+  const optionalMetadata = [
+    ...(detail.subtitle ? [`   summary  ${detail.subtitle}`] : []),
+    ...detail.metadata.map((item) => `   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`),
+  ];
+  const transcriptHeader = ["", dim(section(`transcript · latest ${tailRows} rows`, width), fg)];
+  if (detail.transcriptDiagnostic) transcriptHeader.push(`   ${dim(detail.transcriptDiagnostic, fg)}`);
+  if (options.maxRows !== undefined) {
+    const fixedRows = lines.length + transcriptHeader.length + 1;
+    const transcriptBudget = Math.max(1, options.maxRows - fixedRows);
+    shownTranscriptLines = shownTranscriptLines.slice(-transcriptBudget);
+    const metadataBudget = Math.max(0, options.maxRows - fixedRows - shownTranscriptLines.length);
+    lines.push(...optionalMetadata.slice(0, metadataBudget));
+  } else {
+    lines.push(...optionalMetadata);
+  }
+  lines.push(...transcriptHeader);
   lines.push(...shownTranscriptLines);
   lines.push("");
   if (options.bottomFooter === false) return lines.map((line) => safeTruncate(line, width, truncate));
