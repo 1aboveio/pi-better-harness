@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-subagents@0.1.28] - 2026-09-17
+
+### Fixed
+
+- **subagents**: preserve the requested latest 10 or 25 transcript rows in constrained detail viewports
+
+## [pi-better-background-tasks@0.2.13] - 2026-09-17
+
+### Fixed
+
+- **background-tasks**: reserve detail viewport space for rolling transcript rows before optional metadata
+
+## [pi-better-harness@0.3.9] - 2026-09-17
+
+### Changed
+
+- **harness**: bundle `pi-better-subagents@0.1.28` and `pi-better-background-tasks@0.2.13` with corrected detail transcript tails
+
 ## [pi-better-goal@0.2.3] - 2026-09-14
 
 ### Fixed
