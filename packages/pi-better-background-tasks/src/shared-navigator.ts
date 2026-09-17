@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import { createRenderScheduler, type RenderScheduler } from "./shared-render-scheduler.ts";
 
@@ -1385,43 +1386,16 @@ function safeTruncate(line: string, width: number, truncate: (s: string, width: 
 const ANSI_RE = new RegExp("[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))", "g");
 
 function visibleWidth(value: string): number {
-  return String(value ?? "")
+  const cleaned = String(value ?? "")
     .replace(ANSI_RE, "")
     .replace(/<\/?[a-zA-Z][\w-]*>/g, "")
-    .replace(/<\/>/g, "")
-    .length;
+    .replace(/<\/>/g, "");
+  return piVisibleWidth(cleaned);
 }
 
 function truncateVisible(value: string, width: number): string {
   const str = String(value ?? "");
   const max = Math.max(0, Math.floor(width || 0));
   if (visibleWidth(str) <= max) return str;
-  let out = "";
-  let vis = 0;
-  let i = 0;
-  while (i < str.length && vis < max) {
-    if (str[i] === "\u001b" || str[i] === "\u009b") {
-      const match = str.slice(i).match(ANSI_RE);
-      if (match && match.index === 0) {
-        out += match[0];
-        i += match[0].length;
-        continue;
-      }
-    }
-    if (str[i] === "<") {
-      const close = str.indexOf(">", i);
-      if (close !== -1) {
-        const tag = str.slice(i, close + 1);
-        if (/^<\/?[a-zA-Z][\w-]*>$/.test(tag) || tag === "</>") {
-          out += tag;
-          i = close + 1;
-          continue;
-        }
-      }
-    }
-    out += str[i];
-    vis += 1;
-    i += 1;
-  }
-  return out;
+  return piTruncateToWidth(str, max);
 }
