@@ -4,6 +4,38 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-subagents@0.1.29] - 2026-09-19
+
+### Changed
+
+- **subagents**: align delegated-work guidance with concurrent foreground and delegated plan milestones
+
+## [pi-better-goal@0.3.0] - 2026-09-19
+
+### Added
+
+- **goal**: recognize opt-in skill-owned coordinator workflows, restore their instructions on resumed turns, and release ownership after completion
+
+### Fixed
+
+- **goal**: reject slash-shaped goal objectives that would bypass skill activation and pause legacy slash-shaped goals on resume
+
+## [pi-better-plan@0.2.0] - 2026-09-19
+
+### Added
+
+- **plan**: track independent in-progress milestones and optional dependency edges; defer the generic plan to opted-in skill workflows
+
+### Changed
+
+- **plan**: prompt an early delegation decision for substantial independent work
+
+## [pi-better-harness@0.3.10] - 2026-09-19
+
+### Changed
+
+- **harness**: bundle `pi-better-subagents@0.1.29`, `pi-better-goal@0.3.0`, and `pi-better-plan@0.2.0`
+
 ## [pi-better-subagents@0.1.28] - 2026-09-17
 
 ### Fixed
