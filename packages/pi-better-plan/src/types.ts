@@ -4,8 +4,10 @@ export type PlanStepStatus = "pending" | "in_progress" | "completed" | "blocked"
 export type PlanDisplayMode = "auto" | "on" | "off" | "hidden";
 
 export interface PlanStepInput {
+  id?: string;
   step: string;
   status: PlanStepStatus;
+  dependsOn?: string[];
 }
 
 export interface PlanStep extends PlanStepInput {
@@ -30,6 +32,7 @@ export interface PlanProgress {
   blocked: number;
   inProgress: number;
   activeIndex: number | null;
+  readyIndices: number[];
   state: "draft" | "in_progress" | "blocked" | "complete";
 }
 

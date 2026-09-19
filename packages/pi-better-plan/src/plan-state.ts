@@ -4,6 +4,7 @@ import { EXTENSION_NAME } from "./types.js";
 const MAX_STEPS = 50;
 const MAX_STEP_CHARS = 500;
 const MAX_EXPLANATION_CHARS = 2_000;
+const STEP_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 export const COMPLETED_PLAN_RETENTION_MS = 30_000;
 
 interface SessionEntryLike {
@@ -33,6 +34,7 @@ export function validatePlanInput(steps: readonly PlanStepInput[], explanation?:
   }
 
   const normalized = new Set<string>();
+  const ids = new Map<string, number>();
   for (let index = 0; index < steps.length; index += 1) {
     const item = steps[index]!;
     const text = item.step.trim();
@@ -43,6 +45,42 @@ export function validatePlanInput(steps: readonly PlanStepInput[], explanation?:
     const key = text.toLocaleLowerCase();
     if (normalized.has(key)) return `Plan step ${index + 1} duplicates an earlier step.`;
     normalized.add(key);
+    if (item.id !== undefined) {
+      if (!STEP_ID.test(item.id)) return `Plan step ${index + 1} has an invalid id.`;
+      if (ids.has(item.id)) return `Plan step ${index + 1} duplicates id ${item.id}.`;
+      ids.set(item.id, index);
+    }
+  }
+
+  for (let index = 0; index < steps.length; index += 1) {
+    const item = steps[index]!;
+    const seen = new Set<string>();
+    for (const dependency of item.dependsOn ?? []) {
+      if (seen.has(dependency)) return `Plan step ${index + 1} repeats dependency ${dependency}.`;
+      seen.add(dependency);
+      const prerequisite = ids.get(dependency);
+      if (prerequisite === undefined) return `Plan step ${index + 1} references unknown dependency ${dependency}. Use explicit ids for dependencies.`;
+      if ((item.status === "in_progress" || item.status === "completed") && steps[prerequisite]!.status !== "completed") {
+        return `Plan step ${index + 1} cannot be ${item.status} until dependency ${dependency} is completed.`;
+      }
+    }
+  }
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (visiting.has(id)) return true;
+    if (visited.has(id)) return false;
+    visiting.add(id);
+    const item = steps[ids.get(id)!]!;
+    for (const dependency of item.dependsOn ?? []) {
+      if (visit(dependency)) return true;
+    }
+    visiting.delete(id);
+    visited.add(id);
+    return false;
+  };
+  for (const id of ids.keys()) {
+    if (visit(id)) return `Plan dependencies contain a cycle involving ${id}.`;
   }
   return null;
 }
@@ -62,11 +100,15 @@ export function replacePlan(
   const normalizedSteps: PlanStep[] = steps.map((item, index) => {
     const step = item.step.trim();
     return {
-      id: reusableIds.get(step.toLocaleLowerCase()) ?? `step_${revision}_${index + 1}`,
+      id: item.id ?? reusableIds.get(step.toLocaleLowerCase()) ?? `step_${revision}_${index + 1}`,
       step,
       status: item.status,
+      ...(item.dependsOn?.length ? { dependsOn: [...item.dependsOn] } : {}),
     };
   });
+  if (new Set(normalizedSteps.map((item) => item.id)).size !== normalizedSteps.length) {
+    throw new Error("Plan step ids must be unique, including generated ids.");
+  }
   const isComplete = normalizedSteps.every((item) => item.status === "completed");
   const currentIsComplete = current?.steps.every((item) => item.status === "completed") === true;
 
@@ -97,6 +139,9 @@ export function planProgress(plan: PlanSnapshot): PlanProgress {
   const inProgress = plan.steps.filter((item) => item.status === "in_progress").length;
   const activeIndex = plan.steps.findIndex((item) => item.status === "in_progress");
   const blockedIndex = plan.steps.findIndex((item) => item.status === "blocked");
+  const completedIds = new Set(plan.steps.filter((item) => item.status === "completed").map((item) => item.id));
+  const readyIndices = plan.steps.flatMap((item, index) =>
+    item.status === "pending" && (item.dependsOn ?? []).every((id) => completedIds.has(id)) ? [index] : []);
   return {
     total: plan.steps.length,
     completed,
@@ -104,6 +149,7 @@ export function planProgress(plan: PlanSnapshot): PlanProgress {
     blocked,
     inProgress,
     activeIndex: activeIndex >= 0 ? activeIndex : blockedIndex >= 0 ? blockedIndex : null,
+    readyIndices,
     state:
       completed === plan.steps.length
         ? "complete"

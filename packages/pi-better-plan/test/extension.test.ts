@@ -138,6 +138,78 @@ test("concurrent plan updates persist and invalid updates leave the plan unchang
   assert.equal(entries.length, entryCount);
 });
 
+test("plan tool reports ready DAG steps and rejects premature transitions", async () => {
+  const entries: SessionEntry[] = [];
+  const tools = new Map<string, ToolDefinition>();
+  const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+  const ctx = {
+    mode: "print",
+    hasUI: false,
+    sessionManager: { getBranch: () => entries },
+    ui: { setWidget: () => undefined, setStatus: () => undefined },
+  } as unknown as ExtensionContext;
+  const pi = {
+    events: new EventEmitter(),
+    appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
+    registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
+    registerCommand: () => undefined,
+    on(event: string, handler: (event: any, context: ExtensionContext) => unknown) { handlers.set(event, handler); },
+  } as unknown as ExtensionAPI;
+  extension(pi);
+  await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+  const updatePlan = tools.get("update_plan")!;
+  const getPlan = tools.get("get_plan")!;
+  const steps = [
+    { id: "api", step: "Build API", status: "in_progress" },
+    { id: "worker", step: "Build worker", status: "pending" },
+    { id: "join", step: "Integrate", status: "pending", dependsOn: ["api", "worker"] },
+  ];
+  const updated = await updatePlan.execute("dag", { plan: steps }, undefined, undefined, ctx);
+  assert.deepEqual((updated.details as any).progress.readyIndices, [1]);
+  const result = await getPlan.execute("get", {}, undefined, undefined, ctx);
+  assert.match((result.content[0] as { text: string }).text, /Integrate \(after: api, worker\)/);
+  assert.match((result.content[0] as { text: string }).text, /Ready: Build worker/);
+  const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  assert.match(prompt.systemPrompt, /Ready pending steps: Build worker/);
+  const count = entries.length;
+  await assert.rejects(updatePlan.execute("early", { plan: steps.map((item) =>
+    item.id === "join" ? { ...item, status: "in_progress" } : item,
+  ) }, undefined, undefined, ctx), /dependency api is completed/);
+  assert.equal(entries.length, count);
+});
+
+test("skill-owned workflow suppresses the generic plan and its update tool", async () => {
+  const entries: SessionEntry[] = [];
+  const tools = new Map<string, ToolDefinition>();
+  const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+  const ctx = {
+    mode: "print", hasUI: false,
+    sessionManager: { getBranch: () => entries },
+    ui: { setWidget() {}, setStatus() {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    events: new EventEmitter(),
+    appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
+    registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
+    registerCommand() {},
+    on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { handlers.set(event, handler); },
+  } as unknown as ExtensionAPI;
+  extension(pi);
+  await handlers.get("session_start")?.({}, ctx);
+  const update = tools.get("update_plan")!;
+  await update.execute("ordinary", { plan: [{ step: "Generic", status: "in_progress" }] }, undefined, undefined, ctx);
+  entries.push({ type: "custom", customType: "pi-better-workflow", data: {
+    version: 1, kind: "set", owner: { name: "fixture", planOwner: "workflow" },
+  } });
+  assert.equal(await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx), undefined);
+  await assert.rejects(update.execute("owned", { plan: [{ step: "Wrong plan", status: "in_progress" }] }, undefined, undefined, ctx), /owns the task plan/);
+  const owned = await tools.get("get_plan")!.execute("get", {}, undefined, undefined, ctx);
+  assert.match((owned.content[0] as { text: string }).text, /fixture owns the task plan/);
+  entries.push({ type: "custom", customType: "pi-better-workflow", data: { version: 1, kind: "clear" } });
+  const restored = await tools.get("get_plan")!.execute("get", {}, undefined, undefined, ctx);
+  assert.match((restored.content[0] as { text: string }).text, /Generic/);
+});
+
 test("a completed plan clears durably after 30 seconds and replacement cancels the deadline", async () => {
   const entries: SessionEntry[] = [];
   const tools = new Map<string, ToolDefinition>();
