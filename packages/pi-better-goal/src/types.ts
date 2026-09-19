@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { GoalCommandBinding } from "./command-binding.js";
 
 export const EXTENSION_NAME = "pi-better-goal";
 export const EXTENSION_VERSION = "0.1.0";
@@ -72,6 +73,7 @@ export interface GoalUsage {
 export interface GoalSnapshot {
   goalId: string;
   objective: string;
+  command?: GoalCommandBinding;
   status: GoalStatus;
   tokenBudget: number | null;
   usage: GoalUsage;

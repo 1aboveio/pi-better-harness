@@ -21,6 +21,8 @@ Goal state is stored as `pi-better-goal` custom entries in the Pi session. Exist
 ```text
 /goal
 /goal <objective>
+/goal /skill:name <objective>
+/goal /template <objective>
 /goal pause
 /goal resume
 /goal clear

@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { GoalCommandBinding } from "./command-binding.js";
 
 import { EXTENSION_NAME, type GoalSnapshot, type GoalStatus } from "./types.js";
 
@@ -14,6 +15,7 @@ interface SessionEntryLike {
 interface GoalLike {
   goalId: string;
   objective: string;
+  command?: unknown;
   status: GoalStatus;
   tokenBudget?: number | null;
   usage?: { tokensUsed?: number; activeSeconds?: number };
@@ -96,6 +98,14 @@ function unixSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+function isCommandBinding(value: unknown): value is GoalCommandBinding {
+  if (!value || typeof value !== "object") return false;
+  const binding = value as Partial<GoalCommandBinding>;
+  return typeof binding.name === "string" && binding.name.length > 0 &&
+    (binding.source === "skill" || binding.source === "prompt" || binding.source === "extension") &&
+    typeof binding.path === "string" && binding.path.length > 0 && typeof binding.args === "string";
+}
+
 function nextGoalId(): string {
   return `goal_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -107,6 +117,7 @@ function normalizeGoal(goal: GoalLike): GoalSnapshot {
   return {
     goalId: goal.goalId,
     objective: goal.objective,
+    ...(isCommandBinding(goal.command) ? { command: goal.command } : {}),
     status: goal.status,
     tokenBudget: typeof goal.tokenBudget === "number" ? goal.tokenBudget : null,
     usage: {
@@ -134,10 +145,12 @@ export function createGoalSnapshot(
   objective: string,
   tokenBudget: number | null = null,
   now = unixSeconds(),
+  command?: GoalCommandBinding,
 ): GoalSnapshot {
   return {
     goalId: nextGoalId(),
     objective,
+    ...(command ? { command } : {}),
     status: "active",
     tokenBudget,
     usage: { tokensUsed: 0, activeSeconds: 0 },
