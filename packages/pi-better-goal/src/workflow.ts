@@ -25,14 +25,17 @@ export function workflowOwnerFromSkill(name: string, path: string): WorkflowOwne
   const metadata = (frontmatter as { metadata?: unknown }).metadata;
   if (!metadata || typeof metadata !== "object") return null;
   const fields = metadata as Record<string, unknown>;
-  if (fields["pi-better-plan-workflow"] === undefined) {
+  const role = fields["workflow-role"];
+  const legacyRole = fields["pi-better-plan-workflow"];
+  if (role === undefined && legacyRole === undefined) {
     if (fields["pi-better-workflow-role"] !== undefined || fields["pi-better-plan-owner"] !== undefined) {
-      throw new Error(`Outdated workflow metadata in ${path}. Use pi-better-plan-workflow: coordinator.`);
+      throw new Error(`Outdated workflow metadata in ${path}. Use workflow-role: coordinator.`);
     }
     return null;
   }
-  if (fields["pi-better-plan-workflow"] !== "coordinator") {
-    throw new Error(`Invalid workflow metadata in ${path}. Expected pi-better-plan-workflow: coordinator.`);
+  if ((role !== undefined && role !== "coordinator") ||
+      (legacyRole !== undefined && legacyRole !== "coordinator")) {
+    throw new Error(`Invalid workflow metadata in ${path}. Expected workflow-role: coordinator.`);
   }
   return { name, path, role: "coordinator", planOwner: "workflow" };
 }
