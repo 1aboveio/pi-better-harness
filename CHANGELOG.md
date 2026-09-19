@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-goal@0.3.1] - 2026-09-19
+
+### Changed
+
+- **goal**: accept harness-neutral `workflow-role: coordinator` skill metadata while preserving compatibility with existing workflow declarations
+
+## [pi-better-plan@0.2.1] - 2026-09-19
+
+### Changed
+
+- **plan**: document the harness-neutral coordinator role for skill-owned planning
+
+## [pi-better-harness@0.3.11] - 2026-09-19
+
+### Changed
+
+- **harness**: bundle `pi-better-goal@0.3.1` and `pi-better-plan@0.2.1`
+
 ## [pi-better-subagents@0.1.29] - 2026-09-19
 
 ### Changed
