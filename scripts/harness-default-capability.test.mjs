@@ -107,7 +107,7 @@ test("plan is present in local development and every published harness surface",
     "the root development manifest must load plan",
   );
   assert.ok(componentPackages.includes("pi-better-plan"), "the npm installer must manage plan");
-  assert.equal(harnessManifest.dependencies["pi-better-plan"], "0.1.5");
+  assert.equal(harnessManifest.dependencies["pi-better-plan"], readJson("packages/pi-better-plan/package.json").version);
   assert.ok(harnessManifest.bundledDependencies.includes("pi-better-plan"));
   assert.ok(shimmedPackages().some((shim) => shim.packageName === "pi-better-plan"));
 });
@@ -128,6 +128,15 @@ test("every component is a bundled dependency pinned at its workspace version", 
       workspaceVersion,
       `${packageName} is pinned at ${harnessManifest.dependencies[packageName]} but the workspace is at ${workspaceVersion}`,
     );
+    const component = readJson(`packages/${packageName}/package.json`);
+    for (const [dependency, version] of Object.entries(component.dependencies ?? {})) {
+      if (componentPackages.includes(dependency)) continue;
+      assert.equal(
+        harnessManifest.dependencies[dependency],
+        version,
+        `${packageName} needs ${dependency}@${version} at install time`,
+      );
+    }
   }
 });
 
