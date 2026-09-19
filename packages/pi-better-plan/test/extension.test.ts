@@ -64,6 +64,7 @@ test("plan tools persist progress without taking over editor navigation", async 
   assert.ok(updatePlan);
   assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("coordinator's milestone ledger")));
   assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("concurrent delegated work")));
+  assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("Before starting the first implementation milestone") && line.includes("shared-worktree constraint")));
   await updatePlan.execute("update", {
     explanation: "Start implementation",
     plan: [
@@ -95,6 +96,7 @@ test("plan tools persist progress without taking over editor navigation", async 
 
   const promptUpdate = await handlers.get("before_agent_start")?.({ systemPrompt: "base prompt" }, ctx) as { systemPrompt?: string };
   assert.match(promptUpdate.systemPrompt ?? "", /foreground coordinator's milestone ledger/);
+  assert.match(promptUpdate.systemPrompt ?? "", /Before starting the first implementation milestone.*launch one bounded task early.*shared-worktree constraint/);
   assert.match(promptUpdate.systemPrompt ?? "", /keep one coordinator step in_progress across concurrent workers/);
   assert.match(promptUpdate.systemPrompt ?? "", /results or failures have been inspected and integrated/);
 });
