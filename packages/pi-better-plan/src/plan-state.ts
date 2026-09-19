@@ -32,7 +32,6 @@ export function validatePlanInput(steps: readonly PlanStepInput[], explanation?:
     return `Plan explanation cannot exceed ${MAX_EXPLANATION_CHARS} characters.`;
   }
 
-  let inProgress = 0;
   const normalized = new Set<string>();
   for (let index = 0; index < steps.length; index += 1) {
     const item = steps[index]!;
@@ -44,9 +43,7 @@ export function validatePlanInput(steps: readonly PlanStepInput[], explanation?:
     const key = text.toLocaleLowerCase();
     if (normalized.has(key)) return `Plan step ${index + 1} duplicates an earlier step.`;
     normalized.add(key);
-    if (item.status === "in_progress") inProgress += 1;
   }
-  if (inProgress > 1) return "A plan can have at most one step in progress.";
   return null;
 }
 
@@ -98,14 +95,15 @@ export function planProgress(plan: PlanSnapshot): PlanProgress {
   const pending = plan.steps.filter((item) => item.status === "pending").length;
   const blocked = plan.steps.filter((item) => item.status === "blocked").length;
   const inProgress = plan.steps.filter((item) => item.status === "in_progress").length;
-  const activeIndex = plan.steps.findIndex((item) => item.status === "in_progress" || item.status === "blocked");
+  const activeIndex = plan.steps.findIndex((item) => item.status === "in_progress");
+  const blockedIndex = plan.steps.findIndex((item) => item.status === "blocked");
   return {
     total: plan.steps.length,
     completed,
     pending,
     blocked,
     inProgress,
-    activeIndex: activeIndex >= 0 ? activeIndex : null,
+    activeIndex: activeIndex >= 0 ? activeIndex : blockedIndex >= 0 ? blockedIndex : null,
     state:
       completed === plan.steps.length
         ? "complete"

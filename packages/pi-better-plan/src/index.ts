@@ -151,10 +151,10 @@ export default function planExtension(pi: ExtensionAPI): void {
     promptSnippet: "Create and update a persistent structured execution plan",
     promptGuidelines: [
       "Use update_plan for work with three or more meaningful steps, and update it immediately when a step completes, becomes blocked, or scope changes.",
-      "Keep at most one update_plan step in_progress and do not mark a step completed until its required verification succeeds.",
+      "Mark independent foreground and delegated milestones in_progress concurrently when work is actually underway. Do not mark a delegated step completed until its result or failure has been inspected and integrated.",
       "Before starting the first implementation milestone, identify independent substantial work. If a subagent is available, launch one bounded task early while you continue another; otherwise briefly state the concrete dependency or shared-worktree constraint that makes delegation unsuitable.",
       "Use the plan as the foreground coordinator's milestone ledger. Delegate independent, sufficiently substantial work early when subagent or background-task tools are available, and continue unblocked foreground work instead of waiting or polling.",
-      "Represent concurrent delegated work under one in_progress coordinator step. Before completing verification or the plan, ensure every relevant delegated task is terminal, then inspect and integrate its result or failure.",
+      "Use separate steps for distinct deliverables, not one step per worker process. Before completing verification or the plan, ensure every relevant delegated task is terminal, then inspect and integrate its result or failure.",
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params) {
@@ -257,7 +257,8 @@ function formatProgress(plan: PlanSnapshot): string {
   const current = progress.activeIndex === null ? null : plan.steps[progress.activeIndex];
   const status = [`Plan updated: ${progress.completed}/${progress.total} steps completed`];
   if (progress.blocked > 0) status.push(`${progress.blocked} blocked`);
-  if (current) status.push(`Current step: ${current.step}`);
+  if (progress.inProgress > 1) status.push(`${progress.inProgress} steps in progress`);
+  else if (current) status.push(`Current step: ${current.step}`);
   return status.join(". ") + ".";
 }
 
@@ -275,7 +276,7 @@ function planPrompt(plan: PlanSnapshot): string {
     ...plan.steps.map((item, index) => `${index + 1}. [${item.status}] ${item.step}`),
     "Use update_plan immediately when a step completes, becomes blocked, or the scope changes.",
     "Before starting the first implementation milestone, identify independent substantial work. If a subagent is available, launch one bounded task early while you continue another; otherwise briefly state the concrete dependency or shared-worktree constraint that makes delegation unsuitable.",
-    "Treat the plan as the foreground coordinator's milestone ledger: delegate independent, sufficiently substantial work early, keep one coordinator step in_progress across concurrent workers, and continue unblocked foreground work instead of waiting or polling.",
+    "Treat the plan as the foreground coordinator's milestone ledger: delegate independent, sufficiently substantial work early, mark distinct foreground and delegated milestones in_progress concurrently, and continue unblocked foreground work instead of waiting or polling.",
     "Do not complete verification or the plan until relevant delegated work is terminal, its results or failures have been inspected and integrated, and the outcome is evidence-backed.",
   ].join("\n");
 }

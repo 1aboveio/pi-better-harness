@@ -39,16 +39,42 @@ test("rejects malformed updates without mutating the current snapshot", () => {
   const before = structuredClone(current);
 
   assert.equal(validatePlanInput([], undefined), "A plan must contain at least one step.");
-  assert.equal(validatePlanInput([
-    { step: "One", status: "in_progress" },
-    { step: "Two", status: "in_progress" },
-  ]), "A plan can have at most one step in progress.");
+
   assert.equal(validatePlanInput([
     { step: "Duplicate", status: "pending" },
     { step: " duplicate ", status: "pending" },
   ]), "Plan step 2 duplicates an earlier step.");
   assert.throws(() => replacePlan(current, [], undefined, 110), /at least one step/);
   assert.deepEqual(current, before);
+});
+
+test("tracks independent foreground and delegated steps concurrently", () => {
+  const active = replacePlan(null, [
+    { step: "Wait for provider review", status: "blocked" },
+    { step: "Implement gateway", status: "in_progress" },
+    { step: "Implement rule engine", status: "in_progress" },
+    { step: "Integrate results", status: "pending" },
+  ], undefined, 100);
+
+  assert.deepEqual(planProgress(active), {
+    total: 4,
+    completed: 0,
+    pending: 1,
+    blocked: 1,
+    inProgress: 2,
+    activeIndex: 1,
+    state: "in_progress",
+  });
+  const updated = replacePlan(active, [
+    { step: "Wait for provider review", status: "blocked" },
+    { step: "Implement gateway", status: "in_progress" },
+    { step: "Implement rule engine", status: "completed" },
+    { step: "Integrate results", status: "pending" },
+  ], undefined, 110);
+  assert.equal(updated.steps[1]?.id, active.steps[1]?.id);
+  assert.equal(updated.steps[2]?.id, active.steps[2]?.id);
+  assert.equal(planProgress(updated).inProgress, 1);
+  assert.equal(completedPlanClearDelay(updated), null);
 });
 
 test("derives honest checklist progress and blocked state", () => {

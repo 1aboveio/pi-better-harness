@@ -63,7 +63,7 @@ test("plan tools persist progress without taking over editor navigation", async 
   const updatePlan = tools.get("update_plan");
   assert.ok(updatePlan);
   assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("coordinator's milestone ledger")));
-  assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("concurrent delegated work")));
+  assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("separate steps for distinct deliverables")));
   await updatePlan.execute("update", {
     explanation: "Start implementation",
     plan: [
@@ -95,11 +95,11 @@ test("plan tools persist progress without taking over editor navigation", async 
 
   const promptUpdate = await handlers.get("before_agent_start")?.({ systemPrompt: "base prompt" }, ctx) as { systemPrompt?: string };
   assert.match(promptUpdate.systemPrompt ?? "", /foreground coordinator's milestone ledger/);
-  assert.match(promptUpdate.systemPrompt ?? "", /keep one coordinator step in_progress across concurrent workers/);
+  assert.match(promptUpdate.systemPrompt ?? "", /mark distinct foreground and delegated milestones in_progress concurrently/);
   assert.match(promptUpdate.systemPrompt ?? "", /results or failures have been inspected and integrated/);
 });
 
-test("invalid plan updates leave the durable plan unchanged", async () => {
+test("concurrent plan updates persist and invalid updates leave the plan unchanged", async () => {
   const entries: SessionEntry[] = [];
   const tools = new Map<string, ToolDefinition>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
@@ -121,14 +121,19 @@ test("invalid plan updates leave the durable plan unchanged", async () => {
   await handlers.get("session_start")?.({ reason: "startup" }, ctx);
   const updatePlan = tools.get("update_plan");
   assert.ok(updatePlan);
-  await updatePlan.execute("valid", { plan: [{ step: "Only", status: "in_progress" }] }, undefined, undefined, ctx);
+  const concurrent = await updatePlan.execute("valid", { plan: [
+    { step: "Foreground", status: "in_progress" },
+    { step: "Delegated", status: "in_progress" },
+  ] }, undefined, undefined, ctx);
+  assert.equal((concurrent.details as any).progress.inProgress, 2);
+  assert.match((concurrent.content[0] as { text: string }).text, /2 steps in progress/);
   const entryCount = entries.length;
   await assert.rejects(
     updatePlan.execute("invalid", { plan: [
-      { step: "One", status: "in_progress" },
-      { step: "Two", status: "in_progress" },
+      { step: "Same", status: "in_progress" },
+      { step: " same ", status: "in_progress" },
     ] }, undefined, undefined, ctx),
-    /at most one step/,
+    /duplicates an earlier step/,
   );
   assert.equal(entries.length, entryCount);
 });
