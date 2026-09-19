@@ -23,7 +23,7 @@ Independent foreground and delegated milestones may both be `in_progress`. Use s
 
 For a DAG, assign stable ids to prerequisite steps and list those ids in dependent steps' `dependsOn`. Dependencies must exist in the same plan; cycles and starting or completing a step before its prerequisites are complete are rejected. `get_plan` reports pending steps whose prerequisites are complete as ready. Plans without edges keep their existing behavior.
 
-When an explicitly invoked skill declares `pi-better-plan-workflow: coordinator` in its metadata, that skill's task plan takes precedence. The generic checklist stays persisted but is hidden, and `update_plan` refuses competing updates until workflow ownership is released. Rush-style workflows can use their own dependency graph without copying it into this plan.
+When an explicitly invoked skill declares `workflow-role: coordinator` in its metadata, that skill's task plan takes precedence. The generic checklist stays persisted but is hidden, and `update_plan` refuses competing updates until workflow ownership is released. Rush-style workflows can use their own dependency graph without copying it into this plan.
 
 ## Install
 
