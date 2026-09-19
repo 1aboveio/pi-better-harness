@@ -5,6 +5,7 @@
 ## What It Does
 
 - Gives models `update_plan` and `get_plan` tools for atomic, explicit progress updates.
+- Supports dependency edges (`id` and `dependsOn`) so independent ready steps can run concurrently.
 - Shows the complete checklist of completed, active, pending, and blocked steps above the editor.
 - Persists plan state and display preferences on the active Pi session branch.
 - Keeps a completed plan visible for 30 seconds, then clears it automatically.
@@ -16,7 +17,13 @@ Plan progress is checklist progress, not an estimate of effort. The extension ne
 
 Use the plan as the foreground coordinator's milestone ledger. Delegate independent, sufficiently substantial work early with subagents, and use background tasks for long-running processes or repeated checks. Keep doing unblocked foreground work after launch; do not poll workers.
 
-Concurrent workers belong under one `in_progress` coordinator step rather than one active plan step per worker. Worker tools and the background-work navigator own individual run status. Complete verification and the plan only after every relevant delegated task is terminal and its result or failure has been inspected and integrated.
+Before the first implementation milestone, check for an independent task that can run alongside foreground work. Launch a bounded subagent task when available; otherwise state the specific dependency or shared-worktree constraint that rules delegation out. The plan records milestones, not worker scheduling.
+
+Independent foreground and delegated milestones may both be `in_progress`. Use steps for distinct deliverables, not individual worker processes; worker tools and the background-work navigator own run status. Complete verification and the plan only after every relevant delegated task is terminal and its result or failure has been inspected and integrated.
+
+For a DAG, assign stable ids to prerequisite steps and list those ids in dependent steps' `dependsOn`. Dependencies must exist in the same plan; cycles and starting or completing a step before its prerequisites are complete are rejected. `get_plan` reports pending steps whose prerequisites are complete as ready. Plans without edges keep their existing behavior.
+
+When an explicitly invoked skill declares `pi-better-plan-workflow: coordinator` in its metadata, that skill's task plan takes precedence. The generic checklist stays persisted but is hidden, and `update_plan` refuses competing updates until workflow ownership is released. Rush-style workflows can use their own dependency graph without copying it into this plan.
 
 ## Install
 
