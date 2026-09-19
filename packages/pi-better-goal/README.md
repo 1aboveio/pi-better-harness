@@ -25,8 +25,7 @@ Skills that own execution and their own task plan can opt in through `SKILL.md` 
 
 ```yaml
 metadata:
-  pi-better-workflow-role: coordinator
-  pi-better-plan-owner: workflow
+  pi-better-plan-workflow: coordinator
 ```
 
 Invoke the skill with Pi's `/skill:name` command. The goal extension checks Pi's skill-command provenance, persists the owner on the session branch, and restores its instructions on resumed turns. It does not infer ownership from ordinary text or skill names. A goal such as `/goal /skill:name task` is rejected; invoke `/skill:name task` directly and use `/goal` only for a plain-language objective. Legacy slash-shaped goals pause on resume rather than running without the skill. `/workflow` shows the owner; call `release_workflow` after the workflow's completion audit (or use `/workflow clear` to release it manually). Completing an active goal also releases ownership.

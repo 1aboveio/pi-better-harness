@@ -15,13 +15,16 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const skillPath = join(dir, "SKILL.md");
   let registeredSkillPath = skillPath;
-  writeFileSync(skillPath, "---\nname: fixture\ndescription: Test workflow\nmetadata:\n  pi-better-workflow-role: coordinator\n  pi-better-plan-owner: workflow\n---\n# Fixture\nOnly coordinate work.\n");
+  writeFileSync(skillPath, "---\nname: fixture\ndescription: Test workflow\nmetadata:\n  pi-better-plan-workflow: coordinator\n---\n# Fixture\nOnly coordinate work.\n");
   assert.equal(skillCommandName("/skill:fixture task"), "fixture");
   assert.equal(skillCommandName("task /skill:fixture"), null);
   assert.equal(workflowOwnerFromSkill("fixture", skillPath)?.planOwner, "workflow");
   const ordinarySkill = join(dir, "ordinary.md");
   writeFileSync(ordinarySkill, "---\nname: ordinary\ndescription: Normal skill\n---\n# Ordinary\n");
   assert.equal(workflowOwnerFromSkill("ordinary", ordinarySkill), null);
+  const legacySkill = join(dir, "legacy.md");
+  writeFileSync(legacySkill, "---\nmetadata:\n  pi-better-workflow-role: coordinator\n  pi-better-plan-owner: workflow\n---\n");
+  assert.throws(() => workflowOwnerFromSkill("legacy", legacySkill), /Outdated workflow metadata/);
 
   const entries: Array<{ type: string; customType?: string; data?: unknown }> = [];
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
