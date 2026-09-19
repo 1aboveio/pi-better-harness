@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
+import { commandAvailable, commandInvocation, resolveGoalCommand } from "./command-binding.js";
 
 import {
   collectActivitySnapshot,
@@ -276,22 +277,35 @@ export default function (pi: ExtensionAPI): void {
     notifyGoal(ctx, "Goal paused (interrupted).");
   };
 
-  const queueGoalContinuation = (goal: GoalSnapshot): void => {
+  const boundCommandReady = (goal: GoalSnapshot, ctx: ExtensionContext): boolean => {
+    if (!goal.command || commandAvailable(pi, goal.command)) return true;
+    setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
+    notifyGoal(ctx, `Goal paused: /${goal.command.name} is no longer registered at its original source.`, "error");
+    return false;
+  };
+
+  const sendGoalContinuation = (goal: GoalSnapshot, content: string, kind: string, snapshot?: ActivitySnapshot): void => {
+    if (goal.command?.source === "skill" || goal.command?.source === "prompt") {
+      pi.sendUserMessage(`${commandInvocation(goal.command, true)}\n\n${content}`, {
+        deliverAs: "followUp", expandPromptTemplates: true,
+      });
+    } else {
+      pi.sendMessage({
+        customType: EXTENSION_NAME, content, display: false,
+        details: snapshot ? { kind, snapshot } : { kind, goalId: goal.goalId },
+      }, { triggerTurn: true, deliverAs: "followUp" });
+    }
+  };
+
+  const queueGoalContinuation = (goal: GoalSnapshot, ctx: ExtensionContext): void => {
     if (!isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
     }
+    if (!boundCommandReady(goal, ctx)) return;
     clearIdleContinuation();
     continuationQueuedFor = goal.goalId;
     resetContinuationState(goal);
-    pi.sendMessage(
-      {
-        customType: EXTENSION_NAME,
-        content: continuationPrompt(goal, currentCtx ? getWorkflow(currentCtx) : null),
-        display: false,
-        details: { kind: "continuation", goalId: goal.goalId },
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
+    sendGoalContinuation(goal, continuationPrompt(goal, getWorkflow(ctx)), "continuation");
   };
 
   function clearIdleContinuation(): void {
@@ -338,6 +352,7 @@ export default function (pi: ExtensionAPI): void {
     if (!isPokeable(goal) || goal.goalId !== goalId || continuationQueuedFor === goal.goalId || foregroundRunning) {
       return;
     }
+    if (!boundCommandReady(goal, ctx)) return;
     const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
     latestSnapshot = snapshot;
     pi.events.emit(EVENT_ACTIVITY, snapshot);
@@ -354,17 +369,7 @@ export default function (pi: ExtensionAPI): void {
       ? "Background activity for the active goal is no longer running. Inspect any subagent callbacks or final results, then continue the completion audit before marking the goal complete.\n\n" +
         continuationPrompt(goal, getWorkflow(ctx))
       : continuationPrompt(goal, getWorkflow(ctx));
-    pi.sendMessage(
-      {
-        customType: EXTENSION_NAME,
-        content,
-        display: false,
-        details: kind === "background-drained"
-          ? { kind, snapshot: priorSnapshot ?? snapshot }
-          : { kind, goalId: goal.goalId },
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
+    sendGoalContinuation(goal, content, kind, kind === "background-drained" ? priorSnapshot ?? snapshot : undefined);
   };
 
   const startOrReplaceGoal = (
@@ -373,9 +378,6 @@ export default function (pi: ExtensionAPI): void {
     ctx: ExtensionContext,
     source: "command",
   ): GoalSnapshot => {
-    if (skillCommandName(objective)) {
-      throw new Error("A skill command cannot be a goal objective. Invoke /skill:name directly so Pi loads the skill, then set a plain-language goal if needed.");
-    }
     const objectiveError = validateObjective(objective);
     if (objectiveError) {
       throw new Error(objectiveError);
@@ -384,9 +386,23 @@ export default function (pi: ExtensionAPI): void {
     if (budgetError) {
       throw new Error(budgetError);
     }
-    const goal = createGoalSnapshot(objective.trim(), tokenBudget);
+    const command = resolveGoalCommand(pi, objective);
+    if (command && !commandAvailable(pi, command)) {
+      throw new Error(`Command /${command.name} is unavailable at its registered source.`);
+    }
+    const goal = createGoalSnapshot(objective.trim(), tokenBudget, undefined, command ?? undefined);
+    const owner = command?.source === "skill"
+      ? workflowOwnerFromSkill(command.name.slice("skill:".length), command.path)
+      : null;
+    if (getWorkflow(ctx)) recordWorkflow(null);
     setGoal(goal, ctx, source);
-    queueGoalContinuation(goal);
+    if (command) {
+      if (owner) recordWorkflow(owner);
+      pi.sendUserMessage(commandInvocation(command), { deliverAs: "followUp", expandPromptTemplates: true });
+      if (command.source === "extension") scheduleIdleContinuation(goal, ctx, "continuation");
+    } else {
+      queueGoalContinuation(goal, ctx);
+    }
     return goal;
   };
 
@@ -588,13 +604,17 @@ export default function (pi: ExtensionAPI): void {
           notifyGoal(ctx, "Only paused goals can be resumed.", "warning");
           return;
         }
-        if (skillCommandName(current.objective)) {
+        if (!current.command && skillCommandName(current.objective)) {
           notifyGoal(ctx, "Invoke the skill directly; this legacy slash-command goal cannot resume as plain text.", "error");
+          return;
+        }
+        if (current.command && !commandAvailable(pi, current.command)) {
+          notifyGoal(ctx, `Cannot resume: /${current.command.name} is no longer registered at its original source.`, "error");
           return;
         }
         const goal = goalWithStatus(current, "active");
         setGoal(goal, ctx, "command");
-        queueGoalContinuation(goal);
+        queueGoalContinuation(goal, ctx);
         notifyGoal(ctx, "Goal resumed.");
         return;
       }
@@ -752,7 +772,7 @@ export default function (pi: ExtensionAPI): void {
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
     const restoredGoal = getGoal(ctx);
-    if (restoredGoal?.status === "active" && skillCommandName(restoredGoal.objective)) {
+    if (restoredGoal?.status === "active" && !restoredGoal.command && skillCommandName(restoredGoal.objective)) {
       setGoal(goalWithStatus(restoredGoal, "paused"), ctx, "runtime");
       notifyGoal(ctx, "Goal paused: invoke its skill directly before resuming.", "error");
     }
@@ -760,6 +780,9 @@ export default function (pi: ExtensionAPI): void {
     installGoalWidget(ctx);
     latestSnapshot = await publishSnapshot(ctx);
     syncPollingState();
+    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !latestSnapshot.backgroundRunning) {
+      scheduleIdleContinuation(restoredGoal, ctx, "continuation");
+    }
   });
 
   pi.on("input", async (event, ctx) => {

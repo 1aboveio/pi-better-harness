@@ -8,9 +8,11 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import extension from "../src/index.js";
+import { currentGoalSnapshot } from "../src/goal-state.js";
 import { currentWorkflowOwner, skillCommandName, workflowOwnerFromSkill } from "../src/workflow.js";
 
 test("workflow metadata opts in through Pi's skill command provenance", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const dir = mkdtempSync(join(tmpdir(), "pi-workflow-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const skillPath = join(dir, "SKILL.md");
@@ -40,6 +42,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> | void }>();
   const tools = new Map<string, ToolDefinition>();
   const messages: Array<{ content: string }> = [];
+  const userMessages: Array<{ content: string; options: unknown }> = [];
   const notices: string[] = [];
   const ctx = {
     cwd: dir,
@@ -53,6 +56,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
     appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
     getCommands: () => [{ name: "skill:fixture", source: "skill", sourceInfo: { path: registeredSkillPath } }],
     sendMessage(message: { content: string }) { messages.push(message); },
+    sendUserMessage(content: string, options: unknown) { userMessages.push({ content, options }); },
     registerCommand(name: string, command: { handler(args: string, ctx: ExtensionContext): Promise<void> | void }) { commands.set(name, command); },
     registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
     on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { handlers.set(event, handler); },
@@ -66,9 +70,19 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   assert.doesNotMatch(prompt.systemPrompt, /Keep working through clear low-risk next steps/);
 
   await commands.get("goal")?.handler("/skill:fixture implement task", ctx);
-  assert.ok(notices.some((text) => text.includes("cannot be a goal objective")));
+  assert.equal(currentGoalSnapshot(ctx)?.command?.path, skillPath);
+  assert.equal(userMessages[0]?.content, "/skill:fixture implement task");
+  assert.deepEqual(userMessages[0]?.options, { deliverAs: "followUp", expandPromptTemplates: true });
   assert.equal(messages.length, 0);
   await handlers.get("session_start")?.({ reason: "resume" }, ctx);
+  t.mock.timers.tick(30_000);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.match(userMessages[1]?.content ?? "", /Continue the existing goal/);
+  await commands.get("goal")?.handler("pause", ctx);
+  await handlers.get("session_start")?.({ reason: "resume" }, ctx);
+  await commands.get("goal")?.handler("resume", ctx);
+  assert.match(userMessages[2]?.content ?? "", /^\/skill:fixture implement task/);
+  assert.match(userMessages[2]?.content ?? "", /Continue the existing goal/);
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
   const resumed = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
   assert.match(resumed.systemPrompt, /Only coordinate work/);
@@ -78,6 +92,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
   registeredSkillPath = join(dir, "replaced-skill.md");
   await handlers.get("session_start")?.({ reason: "resume" }, ctx);
+  assert.equal(currentGoalSnapshot(ctx)?.status, "paused");
   const unavailable = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
   assert.match(unavailable.systemPrompt, /no longer a registered, valid skill/);
   assert.equal(currentWorkflowOwner(entries), null, "a stale skill path loses ownership on resume");
