@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-goal@0.4.0] - 2026-09-19
+
+### Added
+
+- **goal**: supervise resolved skill and prompt commands through kickoff and resumed turns, and support one-shot extension commands as goal objectives
+
+### Changed
+
+- **goal**: require Pi 0.84.4 or newer for command expansion and pause goals whose bound command is no longer available
+
+## [pi-better-harness@0.3.12] - 2026-09-19
+
+### Changed
+
+- **harness**: bundle `pi-better-goal@0.4.0` with supervised skill and command objectives
+
 ## [pi-better-goal@0.3.1] - 2026-09-19
 
 ### Changed
