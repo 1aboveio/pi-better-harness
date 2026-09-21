@@ -331,8 +331,15 @@ function materializeDenyPath(path: string): boolean {
  * confined to the two regions that are genuinely writable inside the sandbox:
  * the writable root, and the `/tmp` rebind that pi's own tooling needs.
  */
-function writableInsideLinuxSandbox(path: string, writableRoot: string): boolean {
-    return contains(writableRoot, path) || contains("/tmp", path);
+function writableInsideLinuxSandbox(path: string, writableRoot: string, home?: string): boolean {
+    return (
+        contains(writableRoot, path)
+        || contains("/tmp", path)
+        // Parity with the macOS SBPL profile, which grants `file-write*` on
+        // `${home}/.pi` ("pi state"): a denied path inside that region must be
+        // materializable on Linux too, or the deny is silently a no-op.
+        || (home !== undefined && contains(`${home}/.pi`, path))
+    );
 }
 
 function buildLinuxSandboxCommand(
@@ -346,7 +353,9 @@ function buildLinuxSandboxCommand(
     const policy = compile(args.policy, seams, true);
     const materialize = seams.materializeDenyPath ?? materializeDenyPath;
     const denyBinds = policy.denyWrite.flatMap((path) => {
-        const mountable = writableInsideLinuxSandbox(path, policy.writableRoot) && materialize(path);
+        const mountable =
+            writableInsideLinuxSandbox(path, policy.writableRoot, policy.home)
+            && materialize(path);
         return [mountable ? "--ro-bind" : "--ro-bind-try", path, path];
     });
     return {
@@ -354,6 +363,13 @@ function buildLinuxSandboxCommand(
         fileArgs: [
             "--ro-bind", "/", "/",
             "--bind", policy.writableRoot, policy.writableRoot,
+            // Pi state: the macOS SBPL profile keeps `${home}/.pi` writable
+            // ("pi state"), but without this bind the directory stayed covered
+            // by the `--ro-bind /` above — every confined pi process died at
+            // startup on `EROFS: read-only file system, mkdir
+            // '/home/<user>/.pi/agent/settings.json.lock'`. Bind it read-write
+            // to restore cross-platform parity.
+            "--bind-try", `${policy.home}/.pi`, `${policy.home}/.pi`,
             "--bind", "/tmp", "/tmp",
             "--dev", "/dev",
             // Layered last so a denied path wins over every writable bind above.
