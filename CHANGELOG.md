@@ -10,6 +10,18 @@ All notable changes to this project are documented in this file. The format is b
 
 - **subagents**: keep the structured transcript renderer when another extension registers the shared navigator, preserving the visible tail in the Pi TUI
 
+## [pi-better-background-tasks@0.2.14] - 2026-09-22
+
+### Fixed
+
+- **background-tasks**: retain the subagent transcript renderer when both extensions register the shared navigator
+
+## [pi-better-harness@0.3.13] - 2026-09-22
+
+### Changed
+
+- **harness**: bundle `pi-better-subagents@0.1.30` and `pi-better-background-tasks@0.2.14` with the transcript display fix and blocking TUI smoke check
+
 ## [pi-better-goal@0.4.0] - 2026-09-19
 
 ### Added
