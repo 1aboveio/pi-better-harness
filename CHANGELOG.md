@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-plan@0.3.0] - 2026-09-22
+
+### Added
+
+- **plan**: display persisted `rush-issues` fleet stages and actual units in the widget, `/plan`, and `get_plan` without taking workflow ownership
+
+### Fixed
+
+- **plan**: reject mismatched Rush revisions and prevent a new run from showing a previous run's plan
+
+## [pi-better-harness@0.3.14] - 2026-09-22
+
+### Changed
+
+- **harness**: bundle `pi-better-plan@0.3.0` with the Rush workflow plan view and blocking TUI smoke coverage
+
 ## [pi-better-subagents@0.1.30] - 2026-09-22
 
 ### Fixed
