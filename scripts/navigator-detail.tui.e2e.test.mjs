@@ -18,6 +18,7 @@ const probeStatePath = join(fixtures, "session-state.json");
 const subagentId = `sa_navigator_e2e_${process.pid}`;
 const taskId = `bg_navigator_e2e_${process.pid}`;
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+if (process.env.CI && !hasTmux) throw new Error("CI requires tmux to verify the navigator transcript in a real terminal");
 const skip = hasTmux ? false : "requires tmux for a real terminal session";
 
 after(() => {
@@ -44,6 +45,7 @@ test("golden path: subagent and background-task detail pages retain one input ba
   const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("provider Subagents"));
   assertSingleInputFrame(subagentPage, "subagent detail");
   assert.match(subagentPage, /transcript · latest 10 rows/, "subagent detail must render its transcript section");
+  assert.match(subagentPage, /← main/, "subagent detail must use the structured transcript renderer");
   assert.match(subagentPage, /transcript-row-30/);
   assert.doesNotMatch(subagentPage, /transcript-row-01/);
 
@@ -52,6 +54,7 @@ test("golden path: subagent and background-task detail pages retain one input ba
   const expandedPage = waitForScreen((screen) => screen.includes("transcript · latest 25 rows") && screen.includes("transcript-row-10"));
   assertSingleInputFrame(expandedPage, "expanded subagent detail");
   assert.match(expandedPage, /transcript-row-30/);
+  assert.doesNotMatch(expandedPage, /transcript-row-05/);
   assert.doesNotMatch(expandedPage, /transcript-row-01/);
   sendKey("l");
   waitForScreen((screen) => screen.includes("transcript · latest 10 rows"));
