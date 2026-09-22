@@ -179,7 +179,10 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   if (!isNavigatorUiAvailable(ctx)) return;
   const s = state();
   s.uiCtx = ctx;
-  s.deps = deps;
+  s.deps = {
+    ...deps,
+    createTranscriptComponent: deps.createTranscriptComponent ?? s.deps?.createTranscriptComponent,
+  };
   try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;

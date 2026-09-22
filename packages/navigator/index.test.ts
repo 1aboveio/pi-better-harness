@@ -1295,6 +1295,12 @@ describe("shared background work navigator", () => {
         truncate: (value, width) => value.slice(0, width),
         createTranscriptComponent: () => ({ render: () => transcriptRows, invalidate() {} }),
       });
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       editor.handleInput("enter");
