@@ -14,6 +14,10 @@ import {
 } from "./plan-state.js";
 import { createFullPlanComponent, renderCompactPlan } from "./plan-render.js";
 import {
+  createRushPlanComponent, readRushPlan, renderRushPlan, workflowBinding,
+  WORKFLOW_PLAN_ENTRY, type RushPlan, type WorkflowPlanBinding,
+} from "./workflow-plan.js";
+import {
   EXTENSION_NAME,
   type PlanDisplayMode,
   type PlanProgress,
@@ -59,15 +63,36 @@ export default function planExtension(pi: ExtensionAPI): void {
   let currentPlan: PlanSnapshot | null = null;
   let displayMode: PlanDisplayMode = "auto";
   let displayedWorkflowOwner: string | null = null;
+  let rushBinding: WorkflowPlanBinding | null = null;
+  let rushPlan: RushPlan | null = null;
+  let rushError: string | null = null;
   let refreshWidget: ((force?: boolean) => void) | undefined;
   let completedPlanClearTimer: ReturnType<typeof setTimeout> | undefined;
   const unsubscribeWorkflow = pi.events.on("pi-better-workflow:changed", (owner) => {
     displayedWorkflowOwner = owner && typeof owner === "object" && "name" in owner && typeof owner.name === "string"
       ? owner.name : null;
+    rushBinding = null;
+    rushPlan = null;
+    rushError = null;
     refreshWidget?.(true);
   });
 
   const refresh = (force = false): void => refreshWidget?.(force);
+
+  const loadRushPlan = (ctx: ExtensionContext): RushPlan | null => {
+    if (!rushBinding || workflowPlanOwner(ctx) !== "rush-issues") return null;
+    try {
+      const plan = readRushPlan(rushBinding.path, ctx.cwd);
+      if (plan.runId !== rushBinding.runId) throw new Error("Rush run identity changed.");
+      rushPlan = plan;
+      rushError = null;
+    } catch (error) {
+      rushPlan = null;
+      rushError = error instanceof Error ? error.message : String(error);
+    }
+    refresh(true);
+    return rushPlan;
+  };
 
   const cancelCompletedPlanClear = (): void => {
     if (completedPlanClearTimer) clearTimeout(completedPlanClearTimer);
@@ -102,6 +127,10 @@ export default function planExtension(pi: ExtensionAPI): void {
     const state = reconstructPlanState(ctx.sessionManager.getBranch());
     currentPlan = state.plan;
     displayedWorkflowOwner = workflowPlanOwner(ctx);
+    rushBinding = displayedWorkflowOwner === "rush-issues" ? workflowBinding(ctx.sessionManager.getBranch()) : null;
+    rushPlan = null;
+    rushError = null;
+    if (rushBinding) loadRushPlan(ctx);
     displayMode = state.displayMode;
     if (ctx.hasUI) ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);
     refresh(true);
@@ -130,7 +159,14 @@ export default function planExtension(pi: ExtensionAPI): void {
         refreshWidget = localRefresh;
         return {
           render(width: number): string[] {
-            if (!currentPlan || displayMode === "hidden" || displayedWorkflowOwner) return [];
+            if (displayMode === "hidden") return [];
+            if (displayedWorkflowOwner) {
+              if (displayedWorkflowOwner !== "rush-issues") return [];
+              return rushPlan ? renderRushPlan(rushPlan, width) : [
+                `rush-issues  ${rushError ? `plan unavailable: ${rushError}` : "waiting for task plan"}`,
+              ].map((line) => line.slice(0, width));
+            }
+            if (!currentPlan) return [];
             return renderCompactPlan(currentPlan, width, theme as never);
           },
           invalidate() {},
@@ -144,6 +180,26 @@ export default function planExtension(pi: ExtensionAPI): void {
   };
 
   const showFullPlan = async (ctx: ExtensionContext): Promise<void> => {
+    const owner = workflowPlanOwner(ctx);
+    if (owner) {
+      const plan = owner === "rush-issues" ? loadRushPlan(ctx) : null;
+      if (!plan) {
+        ctx.ui.notify(owner === "rush-issues" ? `Rush plan unavailable: ${rushError ?? "not bound"}` : `${owner} owns the task plan.`, "warning");
+        return;
+      }
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify(renderRushPlan(plan, 160, true).join("\n"), "info");
+        return;
+      }
+      await ctx.ui.custom<void>((tui, _theme, _keys, done) => {
+        const component = createRushPlanComponent(plan, () => done());
+        return { render: (width) => component.render(width), handleInput(data) {
+          component.handleInput?.(data);
+          tui.requestRender();
+        }, invalidate: () => component.invalidate() };
+      });
+      return;
+    }
     if (!currentPlan) {
       if (ctx.hasUI) ctx.ui.notify("No plan is set.", "warning");
       return;
@@ -166,6 +222,35 @@ export default function planExtension(pi: ExtensionAPI): void {
     });
   };
 
+
+  pi.registerTool({
+    name: "sync_workflow_plan",
+    label: "Sync Workflow Plan",
+    description: "Display the persisted rush-issues task plan at its exact checkpoint revision. Read-only; Rush retains plan ownership.",
+    parameters: Type.Object({
+      path: Type.String({ description: "Absolute path to .resolve-issues/rush/<run-id>/task-plan.json" }),
+      revision: Type.Integer({ minimum: 0, description: "Persisted planRevision to display" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (workflowPlanOwner(ctx) !== "rush-issues") throw new Error("Only an active rush-issues workflow can sync its plan.");
+      const plan = readRushPlan(params.path, ctx.cwd);
+      if (plan.planRevision !== params.revision) {
+        rushPlan = null;
+        rushError = `revision mismatch: expected ${params.revision}, found ${plan.planRevision}`;
+        refresh(true);
+        throw new Error(`Rush plan ${rushError}.`);
+      }
+      const binding: WorkflowPlanBinding = { owner: "rush-issues", path: params.path, runId: plan.runId };
+      if (!rushBinding || rushBinding.path !== binding.path || rushBinding.runId !== binding.runId) {
+        pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "set", ...binding });
+      }
+      rushBinding = binding;
+      rushPlan = plan;
+      rushError = null;
+      refresh(true);
+      return { content: [{ type: "text", text: `Showing rush-issues rev ${plan.planRevision}: ${plan.issues.length} units.` }], details: { runId: plan.runId, revision: plan.planRevision } };
+    },
+  });
 
   pi.registerTool({
     name: "update_plan",
@@ -214,10 +299,15 @@ export default function planExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const owner = workflowPlanOwner(ctx);
-      if (owner) return {
-        content: [{ type: "text", text: `${owner} owns the task plan; consult its persisted workflow state.` }],
-        details: { hasPlan: false, plan: null, progress: null, workflowOwner: owner },
-      };
+      if (owner) {
+        const workflowPlan = owner === "rush-issues" ? loadRushPlan(ctx) : null;
+        return {
+          content: [{ type: "text", text: workflowPlan
+            ? renderRushPlan(workflowPlan, 160, true).join("\n")
+            : `${owner} owns the task plan; ${rushError ?? "consult its persisted workflow state"}.` }],
+          details: { hasPlan: !!workflowPlan, plan: workflowPlan, progress: null, workflowOwner: owner },
+        };
+      }
       if (!currentPlan) {
         return {
           content: [{ type: "text", text: "No plan is set." }],
@@ -238,6 +328,10 @@ export default function planExtension(pi: ExtensionAPI): void {
       const input = args.trim().toLowerCase();
       if (!input) return showFullPlan(ctx);
       if (input === "clear") {
+        if (workflowPlanOwner(ctx)) {
+          ctx.ui.notify("The workflow owns its plan; /plan clear cannot change it.", "warning");
+          return;
+        }
         clearPlan();
         ctx.ui.notify("Plan cleared.", "info");
         return;
