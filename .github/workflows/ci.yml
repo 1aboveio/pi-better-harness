@@ -54,6 +54,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Verify transcript in real Pi TUI
+        run: npm run test:tui-e2e
+
       - name: Cross-session leakage regressions
         run: npm run test:cross-session
 
