@@ -39,16 +39,43 @@ test("rejects malformed updates without mutating the current snapshot", () => {
   const before = structuredClone(current);
 
   assert.equal(validatePlanInput([], undefined), "A plan must contain at least one step.");
-  assert.equal(validatePlanInput([
-    { step: "One", status: "in_progress" },
-    { step: "Two", status: "in_progress" },
-  ]), "A plan can have at most one step in progress.");
+
   assert.equal(validatePlanInput([
     { step: "Duplicate", status: "pending" },
     { step: " duplicate ", status: "pending" },
   ]), "Plan step 2 duplicates an earlier step.");
   assert.throws(() => replacePlan(current, [], undefined, 110), /at least one step/);
   assert.deepEqual(current, before);
+});
+
+test("tracks independent foreground and delegated steps concurrently", () => {
+  const active = replacePlan(null, [
+    { step: "Wait for provider review", status: "blocked" },
+    { step: "Implement gateway", status: "in_progress" },
+    { step: "Implement rule engine", status: "in_progress" },
+    { step: "Integrate results", status: "pending" },
+  ], undefined, 100);
+
+  assert.deepEqual(planProgress(active), {
+    total: 4,
+    completed: 0,
+    pending: 1,
+    blocked: 1,
+    inProgress: 2,
+    activeIndex: 1,
+    readyIndices: [3],
+    state: "in_progress",
+  });
+  const updated = replacePlan(active, [
+    { step: "Wait for provider review", status: "blocked" },
+    { step: "Implement gateway", status: "in_progress" },
+    { step: "Implement rule engine", status: "completed" },
+    { step: "Integrate results", status: "pending" },
+  ], undefined, 110);
+  assert.equal(updated.steps[1]?.id, active.steps[1]?.id);
+  assert.equal(updated.steps[2]?.id, active.steps[2]?.id);
+  assert.equal(planProgress(updated).inProgress, 1);
+  assert.equal(completedPlanClearDelay(updated), null);
 });
 
 test("derives honest checklist progress and blocked state", () => {
@@ -65,8 +92,67 @@ test("derives honest checklist progress and blocked state", () => {
     blocked: 1,
     inProgress: 0,
     activeIndex: 1,
+    readyIndices: [2],
     state: "blocked",
   });
+});
+
+test("a DAG exposes parallel roots and unlocks the join only after both finish", () => {
+  const initial = replacePlan(null, [
+    { id: "gateway", step: "Build gateway", status: "in_progress" },
+    { id: "rules", step: "Build rule engine", status: "pending" },
+    { id: "integrate", step: "Integrate", status: "pending", dependsOn: ["gateway", "rules"] },
+  ], undefined, 100);
+  assert.deepEqual(planProgress(initial).readyIndices, [1]);
+  assert.deepEqual(initial.steps[2]?.dependsOn, ["gateway", "rules"]);
+
+  const parallel = replacePlan(initial, [
+    { id: "gateway", step: "Build gateway", status: "in_progress" },
+    { id: "rules", step: "Build rule engine", status: "in_progress" },
+    { id: "integrate", step: "Integrate", status: "pending", dependsOn: ["gateway", "rules"] },
+  ], undefined, 110);
+  assert.equal(planProgress(parallel).inProgress, 2);
+  assert.deepEqual(planProgress(parallel).readyIndices, []);
+  const halfway = replacePlan(parallel, [
+    { id: "gateway", step: "Build gateway", status: "completed" },
+    { id: "rules", step: "Build rule engine", status: "in_progress" },
+    { id: "integrate", step: "Integrate", status: "pending", dependsOn: ["gateway", "rules"] },
+  ], undefined, 120);
+  assert.deepEqual(planProgress(halfway).readyIndices, []);
+  const ready = replacePlan(halfway, [
+    { id: "gateway", step: "Build gateway", status: "completed" },
+    { id: "rules", step: "Build rule engine", status: "completed" },
+    { id: "integrate", step: "Integrate", status: "pending", dependsOn: ["gateway", "rules"] },
+  ], undefined, 130);
+  assert.deepEqual(planProgress(ready).readyIndices, [2]);
+  assert.equal(ready.steps[2]?.id, initial.steps[2]?.id);
+  assert.deepEqual(reconstructPlanState([{ type: "custom", customType: EXTENSION_NAME, data: planSetEntry(ready) }]).plan, ready);
+});
+
+test("rejects missing edges, cycles, and premature dependent work", () => {
+  assert.match(validatePlanInput([
+    { id: "join", step: "Join", status: "pending", dependsOn: ["missing"] },
+  ]) ?? "", /unknown dependency missing/);
+  assert.match(validatePlanInput([
+    { id: "a", step: "A", status: "pending", dependsOn: ["b"] },
+    { id: "b", step: "B", status: "pending", dependsOn: ["a"] },
+  ]) ?? "", /cycle/);
+  assert.match(validatePlanInput([
+    { id: "root", step: "Root", status: "in_progress" },
+    { id: "join", step: "Join", status: "in_progress", dependsOn: ["root"] },
+  ]) ?? "", /dependency root is completed/);
+  assert.match(validatePlanInput([
+    { id: "root", step: "Root", status: "blocked" },
+    { id: "join", step: "Join", status: "completed", dependsOn: ["root"] },
+  ]) ?? "", /dependency root is completed/);
+  assert.match(validatePlanInput([
+    { id: "root", step: "Root", status: "pending" },
+    { id: "root", step: "Another", status: "pending" },
+  ]) ?? "", /duplicates id root/);
+  assert.match(validatePlanInput([
+    { id: "root", step: "Root", status: "pending" },
+    { id: "join", step: "Join", status: "pending", dependsOn: ["root", "root"] },
+  ]) ?? "", /repeats dependency root/);
 });
 
 test("records the completion transition once and derives its remaining clear delay", () => {

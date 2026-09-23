@@ -128,7 +128,7 @@ const SUBAGENT_TOOLS = [
 ];
 
 const SUBAGENT_ORCHESTRATION_GUIDELINES = [
-    "When a structured plan is active, keep it as the parent-owned coordinator ledger: delegate bounded independent work, continue unblocked foreground work, and update the plan after integrating each result or failure.",
+    "When a structured plan is active, keep it as the parent-owned coordinator ledger: mark distinct delegated and foreground deliverables in_progress concurrently, continue unblocked foreground work, and update the plan after integrating each result or failure.",
     "Do not treat launching a subagent as completion of the parent milestone; relevant terminal results must be inspected and integrated before verification or completion.",
 ];
 

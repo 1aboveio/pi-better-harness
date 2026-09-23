@@ -465,6 +465,7 @@ describe("shared background work navigator", () => {
       });
       const lines = renderWidget(widgets.at(-1), 132, ui.theme);
       const text = lines.join("\n");
+      assert.equal(lines[0], "", "background work is separated from the preceding widget");
       for (const line of lines) assert.doesNotMatch(line, /[\r\n]/, "widget rows must not contain embedded newlines");
       assert.ok(text.indexOf("reviewer") < text.indexOf("watch-pr-14-merge"), text);
       assert.doesNotMatch(text, /name\s+model\s+tool\s+tokens\s+status\s+elapsed/, "main list should not render table headers");
@@ -1295,6 +1296,12 @@ describe("shared background work navigator", () => {
         matchKey: (data, key) => data === key,
         truncate: (value, width) => value.slice(0, width),
         createTranscriptComponent: () => ({ render: () => transcriptRows, invalidate() {} }),
+      });
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
       });
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");

@@ -19,6 +19,19 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 - A progress-aware follow-up loop that holds after repeated identical outcomes.
 - An observable-progress stall state for active goals.
 
+## Skill-Owned Workflows
+
+Skills that own execution and their own task plan can opt in through `SKILL.md` frontmatter:
+
+```yaml
+metadata:
+  workflow-role: coordinator
+```
+
+Invoke the skill with Pi's `/skill:name` command, or supervise it with `/goal /skill:name task`. The goal extension resolves the command against Pi's registry, persists its source, and expands the skill on kickoff and continuation (including after session resume). A bound command that disappears or changes source pauses the goal. `/goal /template task` also re-expands prompt templates on continuation; `/goal /extension-command task` dispatches the extension command once, then continues with ordinary goal supervision to avoid repeating side effects. Plain-language goals work as before. This command binding requires Pi 0.84.4 or later. Legacy slash-shaped goals without a binding pause on resume rather than running without the skill. `/workflow` shows a coordinator skill owner; call `release_workflow` after the workflow's completion audit (or use `/workflow clear` to release it manually). Completing an active goal also releases ownership.
+
+When `pi-better-plan` is installed, it defers its prompt, checklist, and `update_plan` tool to a skill-owned task plan. Skills without this metadata retain normal goal and plan behavior. The skill itself owns its planning format and worker policy; the harness does not enumerate skills or impose a shared workflow schema. The former `pi-better-plan-workflow: coordinator` metadata remains supported for installed skills.
+
 ## Install
 
 ```sh

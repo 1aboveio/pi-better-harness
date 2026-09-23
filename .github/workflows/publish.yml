@@ -52,8 +52,14 @@ jobs:
         # during install while publish still targets registry.npmjs.org below.
         run: npm ci --allow-remote=all
 
+      - name: Install TUI test dependency
+        run: sudo apt-get update && sudo apt-get install --yes tmux
+
       - name: Verify workspace
         run: npm run verify
+
+      - name: Verify transcript in real Pi TUI
+        run: npm run test:tui-e2e
 
       - name: Resolve package
         id: package

@@ -1,6 +1,6 @@
 {
   "name": "pi-better-goal",
-  "version": "0.2.3",
+  "version": "0.4.0",
   "description": "Pi extension for goal tracking with background-aware continuation.",
   "license": "MIT",
   "type": "module",
@@ -42,7 +42,7 @@
     "verify": "npm run typecheck && npm test"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=0.84.4",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
@@ -58,8 +58,8 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.82.0",
-    "@earendil-works/pi-tui": "^0.82.0",
+    "@earendil-works/pi-coding-agent": "^0.84.4",
+    "@earendil-works/pi-tui": "^0.84.4",
     "@types/node": "^25.0.0",
     "tsx": "^4.22.3",
     "typebox": "^1.1.39",
@@ -67,5 +67,8 @@
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }

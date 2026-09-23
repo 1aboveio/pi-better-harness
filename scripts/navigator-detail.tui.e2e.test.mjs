@@ -54,13 +54,27 @@ test("golden path: navigate both providers and read complete Unicode logs withou
       && screen.includes("background golden path") && screen.includes("中文")
       && !screen.includes("provider Background Tasks") && !screen.includes("provider Subagents"));
     saveScreen("overview", overview);
+    assertBlankRowBefore(overview, "subagents", "navigator section");
     sendKey("Down");
     const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("provider Subagents"));
     saveScreen("subagent-detail", subagentPage);
     assertSingleInputFrame(subagentPage, "subagent detail");
     assert.match(subagentPage.split("\n")[0], /中文.*\.\.\.\s*$/, "long Unicode subagent title must fit with a visible truncation marker");
     assert.match(subagentPage, /transcript · latest 10 rows/, "subagent detail must render its transcript section");
-    assert.match(subagentPage, /subagent output/, "subagent transcript must contain the actual output");
+    assert.match(subagentPage, /← main/, "subagent detail must use the structured transcript renderer");
+    assert.match(subagentPage, /transcript-row-30/);
+    assert.doesNotMatch(subagentPage, /transcript-row-01/);
+
+    execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-y", "48"]);
+    sendKey("l");
+    const expandedPage = waitForScreen((screen) => screen.includes("transcript · latest 25 rows") && screen.includes("transcript-row-10"));
+    saveScreen("expanded-subagent-detail", expandedPage);
+    assertSingleInputFrame(expandedPage, "expanded subagent detail");
+    assert.match(expandedPage, /transcript-row-30/);
+    assert.doesNotMatch(expandedPage, /transcript-row-05/);
+    assert.doesNotMatch(expandedPage, /transcript-row-01/);
+    sendKey("l");
+    waitForScreen((screen) => screen.includes("transcript · latest 10 rows"));
 
     sendKey("Down");
     for (const width of [100, 80]) {
@@ -128,7 +142,8 @@ function seedNavigatorState({ cwd, sessionId, piPid }) {
   const subagentDir = join(tmpdir(), "pi-better-subagents", "runs", subagentId);
   mkdirSync(subagentDir, { recursive: true });
   const subagentLog = join(subagentDir, "output.log");
-  writeFileSync(subagentLog, `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "subagent output" }] } })}\n`);
+  const transcript = Array.from({ length: 30 }, (_, i) => `transcript-row-${String(i + 1).padStart(2, "0")}`).join("\n");
+  writeFileSync(subagentLog, `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `\`\`\`text\n${transcript}\n\`\`\`` }] } })}\n`);
   writeSubagentMeta({
     id: subagentId,
     name: `subagent golden path ${"中文任务标题".repeat(8)}`,
@@ -185,6 +200,13 @@ function assertSingleInputFrame(screen, pageName) {
     /^─{20,}$/u,
     `${pageName} input frame must be flush with the bottom so no second editor can render below it:\n${screen}`,
   );
+}
+
+function assertBlankRowBefore(screen, heading, sectionName) {
+  const rows = screen.split(/\r?\n/).map((line) => line.trimEnd());
+  const headingIndex = rows.findIndex((line) => line.trim() === heading);
+  assert.ok(headingIndex > 0, `${sectionName} heading must be visible:\n${screen}`);
+  assert.equal(rows[headingIndex - 1]?.trim(), "", `${sectionName} must have one blank row above its heading:\n${screen}`);
 }
 
 function sendKey(key) {

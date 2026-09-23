@@ -4,6 +4,130 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-plan@0.3.2] - 2026-09-23
+
+### Fixed
+
+- **plan**: keep the passive Rush workflow area hidden until a valid persisted task plan has been synced
+
+## [pi-better-harness@0.3.16] - 2026-09-23
+
+### Changed
+
+- **harness**: bundle `pi-better-plan@0.3.2` with hidden unsynced Rush workflow state
+
+## [pi-better-plan@0.3.1] - 2026-09-23
+
+### Fixed
+
+- **plan**: accept live Rush task plans that persist units under `units` and fleet states as strings while retaining compatibility with the original projection schema
+
+## [pi-better-harness@0.3.15] - 2026-09-23
+
+### Changed
+
+- **harness**: bundle `pi-better-plan@0.3.1` with live Rush task-plan schema compatibility
+
+## [pi-better-plan@0.3.0] - 2026-09-22
+
+### Added
+
+- **plan**: display persisted `rush-issues` fleet stages and actual units in the widget, `/plan`, and `get_plan` without taking workflow ownership
+
+### Fixed
+
+- **plan**: reject mismatched Rush revisions and prevent a new run from showing a previous run's plan
+
+## [pi-better-harness@0.3.14] - 2026-09-22
+
+### Changed
+
+- **harness**: bundle `pi-better-plan@0.3.0` with the Rush workflow plan view and blocking TUI smoke coverage
+
+## [pi-better-subagents@0.1.30] - 2026-09-22
+
+### Fixed
+
+- **subagents**: keep the structured transcript renderer when another extension registers the shared navigator, preserving the visible tail in the Pi TUI
+
+## [pi-better-background-tasks@0.2.14] - 2026-09-22
+
+### Fixed
+
+- **background-tasks**: retain the subagent transcript renderer when both extensions register the shared navigator
+
+## [pi-better-harness@0.3.13] - 2026-09-22
+
+### Changed
+
+- **harness**: bundle `pi-better-subagents@0.1.30` and `pi-better-background-tasks@0.2.14` with the transcript display fix and blocking TUI smoke check
+
+## [pi-better-goal@0.4.0] - 2026-09-19
+
+### Added
+
+- **goal**: supervise resolved skill and prompt commands through kickoff and resumed turns, and support one-shot extension commands as goal objectives
+
+### Changed
+
+- **goal**: require Pi 0.84.4 or newer for command expansion and pause goals whose bound command is no longer available
+
+## [pi-better-harness@0.3.12] - 2026-09-19
+
+### Changed
+
+- **harness**: bundle `pi-better-goal@0.4.0` with supervised skill and command objectives
+
+## [pi-better-goal@0.3.1] - 2026-09-19
+
+### Changed
+
+- **goal**: accept harness-neutral `workflow-role: coordinator` skill metadata while preserving compatibility with existing workflow declarations
+
+## [pi-better-plan@0.2.1] - 2026-09-19
+
+### Changed
+
+- **plan**: document the harness-neutral coordinator role for skill-owned planning
+
+## [pi-better-harness@0.3.11] - 2026-09-19
+
+### Changed
+
+- **harness**: bundle `pi-better-goal@0.3.1` and `pi-better-plan@0.2.1`
+
+## [pi-better-subagents@0.1.29] - 2026-09-19
+
+### Changed
+
+- **subagents**: align delegated-work guidance with concurrent foreground and delegated plan milestones
+
+## [pi-better-goal@0.3.0] - 2026-09-19
+
+### Added
+
+- **goal**: recognize opt-in skill-owned coordinator workflows, restore their instructions on resumed turns, and release ownership after completion
+
+### Fixed
+
+- **goal**: reject slash-shaped goal objectives that would bypass skill activation and pause legacy slash-shaped goals on resume
+
+## [pi-better-plan@0.2.0] - 2026-09-19
+
+### Added
+
+- **plan**: track independent in-progress milestones and optional dependency edges; defer the generic plan to opted-in skill workflows
+
+### Changed
+
+- **plan**: prompt an early delegation decision for substantial independent work
+
+## [pi-better-harness@0.3.10] - 2026-09-19
+
+### Changed
+
+- **harness**: bundle `pi-better-subagents@0.1.29`, `pi-better-goal@0.3.0`, and `pi-better-plan@0.2.0`
+
 ## [pi-better-subagents@0.1.28] - 2026-09-17
 
 ### Fixed

@@ -180,7 +180,10 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   if (!isNavigatorUiAvailable(ctx)) return;
   const s = state();
   s.uiCtx = ctx;
-  s.deps = deps;
+  s.deps = {
+    ...deps,
+    createTranscriptComponent: deps.createTranscriptComponent ?? s.deps?.createTranscriptComponent,
+  };
   try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
@@ -278,10 +281,10 @@ function refreshMainListWidget(): void {
   }) : undefined;
   const changed = nextSignature !== s.lastMainListSignature;
   s.lastMainListSignature = nextSignature;
-  s.lastMainListLines = rows.length ? buildMainListLines(rows, MAIN_LIST_FALLBACK_WIDTH, deps.truncate, themeFg(ctx), {
+  s.lastMainListLines = rows.length ? ["", ...buildMainListLines(rows, MAIN_LIST_FALLBACK_WIDTH, deps.truncate, themeFg(ctx), {
     selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
     focused: s.mainListFocused === true,
-  }) : undefined;
+  })] : undefined;
   if (!rows.length) {
     if (!s.mainListWidgetInstalled) return;
     try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
@@ -321,10 +324,10 @@ function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, d
         state().lastMainListLines = undefined;
         return [];
       }
-      const lines = buildMainListLines(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
+      const lines = ["", ...buildMainListLines(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
         selectedId: state().mainListFocused ? state().mainListSelectedId : undefined,
         focused: state().mainListFocused === true,
-      });
+      })];
       state().lastMainListLines = lines;
       return lines;
     },

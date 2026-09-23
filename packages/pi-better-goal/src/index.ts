@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { readFileSync } from "node:fs";
 import { Type } from "typebox";
+import { commandAvailable, commandInvocation, resolveGoalCommand } from "./command-binding.js";
 
 import {
   collectActivitySnapshot,
@@ -33,6 +35,7 @@ import {
 } from "./goal-clock.js";
 import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { collectSubagentActivity } from "./subagents.js";
+import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import {
   EVENT_ACTIVITY,
   EVENT_READY,
@@ -109,13 +112,15 @@ function wasTurnAborted(messages: readonly unknown[]): boolean {
   return false;
 }
 
-function continuationPrompt(goal: GoalSnapshot): string {
+function continuationPrompt(goal: GoalSnapshot, owner: ReturnType<typeof currentWorkflowOwner> = null): string {
   return [
     "Continue working toward the active thread goal.",
     "",
     `Goal: ${goal.objective}`,
     "",
-    "Keep working through clear low-risk next steps. Do not stop at a plan. Mark the goal complete only after an evidence-backed completion audit proves no required work remains.",
+    owner
+      ? `Continue the ${owner.name} workflow as its coordinator. Its own task plan is authoritative; do not implement product code in the parent. Mark the goal complete only after the workflow's completion audit.`
+      : "Keep working through clear low-risk next steps. Do not stop at a plan. Mark the goal complete only after an evidence-backed completion audit proves no required work remains.",
   ].join("\n");
 }
 
@@ -185,6 +190,20 @@ export default function (pi: ExtensionAPI): void {
   let lastAgentEvidence: ContinuationEvidence | null = null;
 
   const getGoal = (ctx: ExtensionContext): GoalSnapshot | null => currentGoalSnapshot(ctx);
+  const getWorkflow = (ctx: ExtensionContext) => currentWorkflowOwner(ctx.sessionManager.getBranch());
+  const workflowAvailable = (owner: NonNullable<ReturnType<typeof currentWorkflowOwner>>): boolean => {
+    const command = pi.getCommands?.().find((item) => item.name === `skill:${owner.name}` && item.source === "skill");
+    if (command?.sourceInfo.path !== owner.path) return false;
+    try {
+      return workflowOwnerFromSkill(owner.name, owner.path)?.planOwner === owner.planOwner;
+    } catch {
+      return false;
+    }
+  };
+  const recordWorkflow = (owner: ReturnType<typeof currentWorkflowOwner>): void => {
+    pi.appendEntry(WORKFLOW_ENTRY_TYPE, workflowEntry(owner));
+    pi.events.emit("pi-better-workflow:changed", owner);
+  };
 
   /** Only active goals receive autonomous pokes; paused, complete, and budget-limited goals never do. */
   const isPokeable = (goal: GoalSnapshot | null): goal is GoalSnapshot => goal?.status === "active";
@@ -241,6 +260,7 @@ export default function (pi: ExtensionAPI): void {
     const current = getGoal(ctx);
     const wasVisible = current !== null && isGoalClockVisible(current);
     pi.appendEntry(EXTENSION_NAME, goalClearEntry(current?.goalId ?? null, source));
+    if (getWorkflow(ctx)) recordWorkflow(null);
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
@@ -257,22 +277,35 @@ export default function (pi: ExtensionAPI): void {
     notifyGoal(ctx, "Goal paused (interrupted).");
   };
 
-  const queueGoalContinuation = (goal: GoalSnapshot): void => {
+  const boundCommandReady = (goal: GoalSnapshot, ctx: ExtensionContext): boolean => {
+    if (!goal.command || commandAvailable(pi, goal.command)) return true;
+    setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
+    notifyGoal(ctx, `Goal paused: /${goal.command.name} is no longer registered at its original source.`, "error");
+    return false;
+  };
+
+  const sendGoalContinuation = (goal: GoalSnapshot, content: string, kind: string, snapshot?: ActivitySnapshot): void => {
+    if (goal.command?.source === "skill" || goal.command?.source === "prompt") {
+      pi.sendUserMessage(`${commandInvocation(goal.command, true)}\n\n${content}`, {
+        deliverAs: "followUp", expandPromptTemplates: true,
+      });
+    } else {
+      pi.sendMessage({
+        customType: EXTENSION_NAME, content, display: false,
+        details: snapshot ? { kind, snapshot } : { kind, goalId: goal.goalId },
+      }, { triggerTurn: true, deliverAs: "followUp" });
+    }
+  };
+
+  const queueGoalContinuation = (goal: GoalSnapshot, ctx: ExtensionContext): void => {
     if (!isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
     }
+    if (!boundCommandReady(goal, ctx)) return;
     clearIdleContinuation();
     continuationQueuedFor = goal.goalId;
     resetContinuationState(goal);
-    pi.sendMessage(
-      {
-        customType: EXTENSION_NAME,
-        content: continuationPrompt(goal),
-        display: false,
-        details: { kind: "continuation", goalId: goal.goalId },
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
+    sendGoalContinuation(goal, continuationPrompt(goal, getWorkflow(ctx)), "continuation");
   };
 
   function clearIdleContinuation(): void {
@@ -319,6 +352,7 @@ export default function (pi: ExtensionAPI): void {
     if (!isPokeable(goal) || goal.goalId !== goalId || continuationQueuedFor === goal.goalId || foregroundRunning) {
       return;
     }
+    if (!boundCommandReady(goal, ctx)) return;
     const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
     latestSnapshot = snapshot;
     pi.events.emit(EVENT_ACTIVITY, snapshot);
@@ -333,19 +367,9 @@ export default function (pi: ExtensionAPI): void {
     continuationQueuedFor = goal.goalId;
     const content = kind === "background-drained"
       ? "Background activity for the active goal is no longer running. Inspect any subagent callbacks or final results, then continue the completion audit before marking the goal complete.\n\n" +
-        continuationPrompt(goal)
-      : continuationPrompt(goal);
-    pi.sendMessage(
-      {
-        customType: EXTENSION_NAME,
-        content,
-        display: false,
-        details: kind === "background-drained"
-          ? { kind, snapshot: priorSnapshot ?? snapshot }
-          : { kind, goalId: goal.goalId },
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
+        continuationPrompt(goal, getWorkflow(ctx))
+      : continuationPrompt(goal, getWorkflow(ctx));
+    sendGoalContinuation(goal, content, kind, kind === "background-drained" ? priorSnapshot ?? snapshot : undefined);
   };
 
   const startOrReplaceGoal = (
@@ -362,9 +386,23 @@ export default function (pi: ExtensionAPI): void {
     if (budgetError) {
       throw new Error(budgetError);
     }
-    const goal = createGoalSnapshot(objective.trim(), tokenBudget);
+    const command = resolveGoalCommand(pi, objective);
+    if (command && !commandAvailable(pi, command)) {
+      throw new Error(`Command /${command.name} is unavailable at its registered source.`);
+    }
+    const goal = createGoalSnapshot(objective.trim(), tokenBudget, undefined, command ?? undefined);
+    const owner = command?.source === "skill"
+      ? workflowOwnerFromSkill(command.name.slice("skill:".length), command.path)
+      : null;
+    if (getWorkflow(ctx)) recordWorkflow(null);
     setGoal(goal, ctx, source);
-    queueGoalContinuation(goal);
+    if (command) {
+      if (owner) recordWorkflow(owner);
+      pi.sendUserMessage(commandInvocation(command), { deliverAs: "followUp", expandPromptTemplates: true });
+      if (command.source === "extension") scheduleIdleContinuation(goal, ctx, "continuation");
+    } else {
+      queueGoalContinuation(goal, ctx);
+    }
     return goal;
   };
 
@@ -566,9 +604,17 @@ export default function (pi: ExtensionAPI): void {
           notifyGoal(ctx, "Only paused goals can be resumed.", "warning");
           return;
         }
+        if (!current.command && skillCommandName(current.objective)) {
+          notifyGoal(ctx, "Invoke the skill directly; this legacy slash-command goal cannot resume as plain text.", "error");
+          return;
+        }
+        if (current.command && !commandAvailable(pi, current.command)) {
+          notifyGoal(ctx, `Cannot resume: /${current.command.name} is no longer registered at its original source.`, "error");
+          return;
+        }
         const goal = goalWithStatus(current, "active");
         setGoal(goal, ctx, "command");
-        queueGoalContinuation(goal);
+        queueGoalContinuation(goal, ctx);
         notifyGoal(ctx, "Goal resumed.");
         return;
       }
@@ -585,6 +631,7 @@ export default function (pi: ExtensionAPI): void {
           return;
         }
         setGoal(goalWithStatus(current, "complete"), ctx, "command");
+        if (getWorkflow(ctx)) recordWorkflow(null);
         notifyGoal(ctx, "Goal marked complete.");
         return;
       }
@@ -662,6 +709,7 @@ export default function (pi: ExtensionAPI): void {
       }
       const goal = goalWithStatus(current, "complete");
       setGoal(goal, ctx, "tool");
+      if (getWorkflow(ctx)) recordWorkflow(null);
       return {
         content: [{ type: "text", text: "Goal marked complete." }],
         details: { ok: true, goal },
@@ -675,6 +723,32 @@ export default function (pi: ExtensionAPI): void {
       currentCtx = ctx;
       const snapshot = await publishSnapshot(ctx);
       ctx.ui.notify(formatSnapshot(snapshot), snapshot.backgroundRunning ? "info" : "info");
+    },
+  });
+
+  pi.registerCommand("workflow", {
+    description: "Inspect or clear the active skill-owned workflow",
+    handler: async (args, ctx) => {
+      if (args.trim() === "clear") {
+        recordWorkflow(null);
+        notifyGoal(ctx, "Workflow ownership cleared.");
+        return;
+      }
+      const owner = getWorkflow(ctx);
+      notifyGoal(ctx, owner ? `Workflow: ${owner.name} (${owner.path}); plan owned by workflow.` : "No workflow owns this session.");
+    },
+  });
+
+  pi.registerTool({
+    name: "release_workflow",
+    label: "Release Workflow",
+    description: "Release the active skill-owned workflow after its final handoff and completion audit.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const owner = getWorkflow(ctx);
+      if (!owner) return { content: [{ type: "text", text: "No workflow owns this session." }], details: { released: false } };
+      recordWorkflow(null);
+      return { content: [{ type: "text", text: `Released ${owner.name} workflow ownership.` }], details: { released: true, owner: owner.name } };
     },
   });
 
@@ -697,15 +771,36 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
+    const restoredGoal = getGoal(ctx);
+    if (restoredGoal?.status === "active" && !restoredGoal.command && skillCommandName(restoredGoal.objective)) {
+      setGoal(goalWithStatus(restoredGoal, "paused"), ctx, "runtime");
+      notifyGoal(ctx, "Goal paused: invoke its skill directly before resuming.", "error");
+    }
     pi.events.emit(EVENT_READY, { version: EXTENSION_VERSION });
     installGoalWidget(ctx);
     latestSnapshot = await publishSnapshot(ctx);
     syncPollingState();
+    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !latestSnapshot.backgroundRunning) {
+      scheduleIdleContinuation(restoredGoal, ctx, "continuation");
+    }
   });
 
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension") {
       return;
+    }
+    const skillName = skillCommandName(event.text ?? "");
+    if (skillName) {
+      const command = pi.getCommands?.().find((item) => item.name === `skill:${skillName}` && item.source === "skill");
+      if (command) {
+        try {
+          const owner = workflowOwnerFromSkill(skillName, command.sourceInfo.path);
+          if (owner) recordWorkflow(owner);
+        } catch (error) {
+          notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
+          return { action: "handled" as const };
+        }
+      }
     }
     const goal = getGoal(ctx);
     if (goal?.status === "active") {
@@ -716,11 +811,32 @@ export default function (pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event, ctx) => {
     currentCtx = ctx;
     const goal = currentGoalSnapshot(ctx);
+    const owner = getWorkflow(ctx);
     const snapshot = await publishSnapshot(ctx);
-    if (!isPokeable(goal)) {
+    if (!isPokeable(goal) && !owner) {
       return;
     }
 
+    if (owner) {
+      if (!workflowAvailable(owner)) {
+        if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
+        recordWorkflow(null);
+        return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is no longer a registered, valid skill. Stop work and ask the user to reinvoke the skill.` };
+      }
+      let instructions: string;
+      try {
+        instructions = readFileSync(owner.path, "utf8");
+      } catch {
+        if (isPokeable(goal)) setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
+        return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.` };
+      }
+      return {
+        systemPrompt: `${event.systemPrompt}\n\nActive workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
+          (isPokeable(goal) ? `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.` : ""),
+      };
+    }
+
+    if (!isPokeable(goal)) return;
     const backgroundInstruction = snapshot.backgroundRunning
       ? ` The goal still has delegated background work running (${summarizeActiveBackground(snapshot)}). Foreground idleness alone is not goal completion; keep any structured plan current and do not mark verification, the plan, or the goal complete until every relevant delegated task reaches a terminal state and its result or failure has been inspected and integrated.`
       : "";
