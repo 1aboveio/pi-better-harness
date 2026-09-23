@@ -1,0 +1,31 @@
+{
+  "profiles": {
+    "pr-local": {
+      "gate": "pull-request",
+      "environment": "local",
+      "endpoint": "local",
+      "prerequisites": ["npm ci", "tmux on PATH"],
+      "evidencePolicy": "Captured terminal panes and smoke-results.json from this checkout",
+      "mutationPolicy": "isolated-writes"
+    }
+  },
+  "setup": {
+    "boot": "npm run test:golden:navigator starts the installed Pi binary with this checkout's extensions in a private tmux server",
+    "env": [],
+    "authBypass": "PI_OFFLINE=1 and a placeholder API key; no model requests are sent",
+    "seed": "The journey seeds session-scoped synthetic task/subagent registry entries and logs, then removes them on exit",
+    "fixtures": "scripts/navigator-detail.tui.e2e.test.mjs owns the session, fixtures, keyboard actions, and terminal captures",
+    "tenants": ["e2e-navigator"]
+  },
+  "paths": [
+    {
+      "id": "navigator-unicode",
+      "surface": "cli",
+      "command": "npm run test:golden:navigator",
+      "observable": "Exit 0 with no skipped tests: real Pi opens subagent and background-task details, renders the actual transcript and complete CJK log at 100 and 80 columns, retains exactly one input frame, and accepts editor input after closing detail. Captured panes and smoke-results.json are saved to PI_NAVIGATOR_EVIDENCE_DIR (a printed temporary directory by default).",
+      "mutates": true,
+      "tenant": "e2e-navigator",
+      "profiles": ["pr-local"]
+    }
+  ]
+}

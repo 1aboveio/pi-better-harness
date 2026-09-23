@@ -52,7 +52,17 @@ jobs:
         run: npm run typecheck
 
       - name: Test
+        env:
+          PI_NAVIGATOR_EVIDENCE_DIR: ${{ runner.temp }}/navigator-golden
         run: npm test
+
+      - name: Upload navigator golden-path evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: navigator-golden
+          path: ${{ runner.temp }}/navigator-golden
+          if-no-files-found: warn
 
       - name: Cross-session leakage regressions
         run: npm run test:cross-session
