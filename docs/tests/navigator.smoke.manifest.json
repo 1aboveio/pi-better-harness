@@ -22,7 +22,7 @@
       "id": "navigator-unicode",
       "surface": "cli",
       "command": "npm run test:golden:navigator",
-      "observable": "Exit 0 with no skipped tests: real Pi opens subagent and background-task details, renders the actual transcript and complete CJK log at 100 and 80 columns, retains exactly one input frame, and accepts editor input after closing detail. Captured panes and smoke-results.json are saved to PI_NAVIGATOR_EVIDENCE_DIR (a printed temporary directory by default).",
+      "observable": "Exit 0 with no skipped tests: real Pi displays the overview and opens subagent and background-task details with long CJK titles, renders the actual transcript and complete CJK log at 100 and 80 columns, retains exactly one input frame, and accepts editor input after closing detail. Captured panes and smoke-results.json are saved to PI_NAVIGATOR_EVIDENCE_DIR (a printed temporary directory by default).",
       "mutates": true,
       "tenant": "e2e-navigator",
       "profiles": ["pr-local"]

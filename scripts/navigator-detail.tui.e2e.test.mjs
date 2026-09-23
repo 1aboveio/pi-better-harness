@@ -50,10 +50,15 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     seedNavigatorState({ cwd: state.cwd, sessionId: state.sessionId, piPid });
 
     sendKey("Left");
+    const overview = waitForScreen((screen) => screen.includes("subagent golden path")
+      && screen.includes("background golden path") && screen.includes("中文")
+      && !screen.includes("provider Background Tasks") && !screen.includes("provider Subagents"));
+    saveScreen("overview", overview);
     sendKey("Down");
     const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("provider Subagents"));
     saveScreen("subagent-detail", subagentPage);
     assertSingleInputFrame(subagentPage, "subagent detail");
+    assert.match(subagentPage.split("\n")[0], /中文.*\.\.\.\s*$/, "long Unicode subagent title must fit with a visible truncation marker");
     assert.match(subagentPage, /transcript · latest 10 rows/, "subagent detail must render its transcript section");
     assert.match(subagentPage, /subagent output/, "subagent transcript must contain the actual output");
 
@@ -126,7 +131,7 @@ function seedNavigatorState({ cwd, sessionId, piPid }) {
   writeFileSync(subagentLog, `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "subagent output" }] } })}\n`);
   writeSubagentMeta({
     id: subagentId,
-    name: "subagent golden path",
+    name: `subagent golden path ${"中文任务标题".repeat(8)}`,
     status: "running",
     pid: piPid,
     pgid: piPid,

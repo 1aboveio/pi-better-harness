@@ -95,8 +95,9 @@ npm run test:golden:navigator
 This strict command fails when tmux is missing. The same journey runs in `npm test`
 and is required in CI; ordinary local `npm test` may skip it without tmux.
 `scripts/navigator-detail.tui.e2e.test.mjs` is the single owner of the end-to-end
-flow: open both providers' details, inspect real transcript/log output, render a
-long CJK task title, preserve every log character across wrapping at 100 and 80
+flow: inspect the overview, open both providers' details, inspect real
+transcript/log output, render long CJK task and subagent titles, preserve every
+log character across wrapping at 100 and 80
 columns, retain one input frame, and return to a working editor. It seeds only
 session-scoped registry/log fixtures; navigation and rendering use the real Pi
 TUI in an isolated tmux server, without a model request.
