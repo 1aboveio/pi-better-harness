@@ -162,9 +162,7 @@ export default function planExtension(pi: ExtensionAPI): void {
             if (displayMode === "hidden") return [];
             if (displayedWorkflowOwner) {
               if (displayedWorkflowOwner !== "rush-issues") return [];
-              return rushPlan ? renderRushPlan(rushPlan, width) : [
-                `rush-issues  ${rushError ? `plan unavailable: ${rushError}` : "waiting for task plan"}`,
-              ].map((line) => line.slice(0, width));
+              return rushPlan ? renderRushPlan(rushPlan, width) : [];
             }
             if (!currentPlan) return [];
             return renderCompactPlan(currentPlan, width, theme as never);
