@@ -58,13 +58,19 @@ test("Rush plan is a read-only workflow projection across revisions and session 
       version: 1, kind: "set", owner: { name: "rush-issues", planOwner: "workflow" },
     } });
     pi.events.emit("pi-better-workflow:changed", { name: "rush-issues" });
-    const renderWidget = () => widget({ requestRender() {} }, { fg: (_color: string, value: string) => value }).render(140).join("\n");
+    const renderWidgetLines = (styled = false): string[] => widget(
+      { requestRender() {} },
+      { fg: (color: string, value: string) => styled ? `<${color}>${value}</${color}>` : value },
+    ).render(140);
+    const renderWidget = () => renderWidgetLines().join("\n");
     assert.equal(renderWidget(), "", "an unsynced Rush plan stays hidden");
     await assert.rejects(update.execute("conflict", { plan: [{ step: "Wrong", status: "pending" }] }, undefined, undefined, ctx), /owns the task plan/);
     const sync = tools.get("sync_workflow_plan")!;
     await assert.rejects(sync.execute("stale", { path, revision: 2 }, undefined, undefined, ctx), /revision mismatch/);
     assert.doesNotMatch(renderWidget(), /Extract shared core/);
     await sync.execute("bind", { path, revision: 1 }, undefined, undefined, ctx);
+    assert.equal(renderWidgetLines()[0], "", "the Rush section is separated from the preceding widget");
+    assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>rush-issues<\/warning>  <dim>rev 1/);
     assert.match(renderWidget(), /Extract shared core.*self-review.*in-flight/);
     assert.match(renderWidget(), /Add mux support/);
     await commands.get("plan")!.handler("", ctx);

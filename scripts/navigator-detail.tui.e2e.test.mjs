@@ -41,6 +41,9 @@ test("golden path: subagent and background-task detail pages retain one input ba
   seedNavigatorState({ cwd: state.cwd, sessionId: state.sessionId, piPid });
 
   sendKey("Left");
+  const rail = waitForScreen((screen) => screen.includes("subagents") && screen.includes("subagent golden path"));
+  assertBlankRowBefore(rail, "subagents", "navigator section");
+
   sendKey("Down");
   const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("provider Subagents"));
   assertSingleInputFrame(subagentPage, "subagent detail");
@@ -153,6 +156,13 @@ function assertSingleInputFrame(screen, pageName) {
     /^─{20,}$/u,
     `${pageName} input frame must be flush with the bottom so no second editor can render below it:\n${screen}`,
   );
+}
+
+function assertBlankRowBefore(screen, heading, sectionName) {
+  const rows = screen.split(/\r?\n/).map((line) => line.trimEnd());
+  const headingIndex = rows.findIndex((line) => line.trim() === heading);
+  assert.ok(headingIndex > 0, `${sectionName} heading must be visible:\n${screen}`);
+  assert.equal(rows[headingIndex - 1]?.trim(), "", `${sectionName} must have one blank row above its heading:\n${screen}`);
 }
 
 function sendKey(key) {

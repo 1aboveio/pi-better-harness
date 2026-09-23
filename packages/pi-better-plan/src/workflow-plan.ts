@@ -98,9 +98,15 @@ export function workflowBinding(entries: Iterable<{ type: string; customType?: s
   return binding;
 }
 
-export function renderRushPlan(plan: RushPlan, width: number, full = false): string[] {
+export function renderRushPlan(
+  plan: RushPlan,
+  width: number,
+  full = false,
+  fg?: (color: string, value: string) => string,
+): string[] {
   const completed = plan.issues.filter((unit) => unit.status === "succeeded").length;
-  const lines = [`rush-issues  rev ${plan.planRevision}  ${completed}/${plan.issues.length} units${plan.spec?.title ? `  ${plan.spec.title}` : ""}`];
+  const summary = `rev ${plan.planRevision}  ${completed}/${plan.issues.length} units${plan.spec?.title ? `  ${plan.spec.title}` : ""}`;
+  const lines = [fg ? `${fg("warning", "rush-issues")}  ${fg("dim", summary)}` : `rush-issues  ${summary}`];
   const fleet = ["explore", "combine", "canary", "review", "cicd"]
     .map((stage) => `${stage}: ${stage === "canary" && !plan.warehouseCanaryRequired ? "n/a" : plan.fleet[stage]?.status ?? "pending"}`);
   lines.push(`fleet  ${fleet.join("  ")}`);
@@ -115,9 +121,13 @@ export function renderRushPlan(plan: RushPlan, width: number, full = false): str
   return lines.map((line) => truncateToWidth(line, Math.max(1, width)));
 }
 
-export function createRushPlanComponent(plan: RushPlan, onClose: () => void): Component {
+export function createRushPlanComponent(
+  plan: RushPlan,
+  onClose: () => void,
+  fg?: (color: string, value: string) => string,
+): Component {
   return {
-    render: (width) => renderRushPlan(plan, width, true),
+    render: (width) => renderRushPlan(plan, width, true, fg),
     handleInput(data) {
       if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "ctrl+c")) onClose();
     },
