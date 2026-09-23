@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-plan@0.3.2] - 2026-09-23
+
+### Fixed
+
+- **plan**: keep the passive Rush workflow area hidden until a valid persisted task plan has been synced
+
+## [pi-better-harness@0.3.16] - 2026-09-23
+
+### Changed
+
+- **harness**: bundle `pi-better-plan@0.3.2` with hidden unsynced Rush workflow state
+
 ## [pi-better-plan@0.3.1] - 2026-09-23
 
 ### Fixed
