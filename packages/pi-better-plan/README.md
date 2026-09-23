@@ -27,6 +27,12 @@ When an explicitly invoked skill declares `workflow-role: coordinator` in its me
 
 For `rush-issues`, call `sync_workflow_plan` with the absolute `.resolve-issues/rush/<run-id>/task-plan.json` path and its persisted `planRevision` after each checkpoint. This binds the active run to the session and displays its fleet stages and actual units in the widget, `/plan`, and `get_plan`. The view reads the file without writing to it; revision mismatches are rejected. The run binding survives Pi session resume, and ownership release restores the prior generic checklist. Other workflow-owned skills retain their own planning and have no generic plan view.
 
+## Plan Display
+
+Native and workflow-synced plans share a `plan` heading, completion counts, aligned identifiers and titles, and status colors. Completed rows use `✓`, active rows `●`, pending rows `○`, and blocked rows `!`. Active and blocked rows also carry text labels; failed workflow rows use `×` and `failed` rather than an active indicator.
+
+Workflow identity, revision, and fleet progress sit on a secondary line that wraps on narrow terminals. `/plan` uses the same styling and shows workflow stage, raw status, worker, dependencies, and notes beneath each issue. Use ↑/↓ to move the selection and Escape or ← to return. The passive widget never captures editor arrow keys.
+
 ## Install
 
 ```sh

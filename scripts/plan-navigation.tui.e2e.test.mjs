@@ -29,8 +29,9 @@ test("golden path: the plan stays passive and right arrow remains editor input",
 
   sendLiteral("/seed-plan");
   sendKey("Enter");
-  const initial = waitForScreen((screen) => screen.includes("plan 1/3 steps"));
-  assertBlankRowBefore(initial, /^plan 1\/3 steps/, "generic plan section");
+  const initial = waitForScreen((screen) => screen.includes("plan  1/3 complete"));
+  assertBlankRowBefore(initial, /^plan  1\/3 complete/, "generic plan section");
+  assert.match(initial, /●\s+2\s+Implement plan navigation\s+active/);
   assert.doesNotMatch(initial, /^› /m, "the plan starts visible but unfocused");
   assert.doesNotMatch(initial, /→ plan/, "the footer does not advertise plan navigation");
 
@@ -40,6 +41,14 @@ test("golden path: the plan stays passive and right arrow remains editor input",
   sendLiteral("draft");
   waitForScreen((screen) => screen.includes("draft"));
   assert.doesNotMatch(captureScreen(), /^› /m, "typing does not focus the plan");
+  sendKey("C-u");
+  sendLiteral("/plan");
+  sendKey("Enter");
+  waitForScreen((screen) => /^› ●\s+2\s+Implement plan navigation/m.test(screen));
+  sendKey("Up");
+  waitForScreen((screen) => /^› ✓\s+1\s+Inspect the navigator/m.test(screen));
+  sendKey("Escape");
+  waitForScreen((screen) => screen.includes("plan  1/3 complete") && !/^› /m.test(screen));
 });
 
 // @covers plan.workflow-projection
@@ -63,10 +72,19 @@ test("golden path: Rush-owned units appear in the real plan widget", () => {
   waitForFile(readyPath);
   sendLiteral("/seed-rush");
   sendKey("Enter");
-  const widget = waitForScreen((screen) => screen.includes("rush-issues  rev 7") && screen.includes("Extract shared core"));
-  assertBlankRowBefore(widget, /^rush-issues  rev 7/, "Rush plan section");
+  const widget = waitForScreen((screen) => screen.includes("Reloaded keybindings") && screen.includes("rush-issues · rev 7") && screen.includes("Extract shared core"));
+  assertBlankRowBefore(widget, /^plan  0\/2 complete/, "Rush plan section");
+  assert.match(widget, /●\s+#214\s+Extract shared core\s+active/);
   assert.match(widget, /Add mux support/);
   assert.doesNotMatch(widget, /Old generic step/);
+  sendLiteral("/plan");
+  sendKey("Enter");
+  const full = waitForScreen((screen) => screen.includes("after: #214") && /^› ●\s+#214/m.test(screen));
+  assert.match(full, /self-review · in-flight/);
+  sendKey("Down");
+  waitForScreen((screen) => /^› ○\s+#215/m.test(screen));
+  sendKey("Left");
+  waitForScreen((screen) => screen.includes("rush-issues · rev 7") && !/^› /m.test(screen));
 });
 
 function startPiSession() {

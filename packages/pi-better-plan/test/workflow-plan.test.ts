@@ -70,10 +70,12 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     assert.doesNotMatch(renderWidget(), /Extract shared core/);
     await sync.execute("bind", { path, revision: 1 }, undefined, undefined, ctx);
     assert.equal(renderWidgetLines()[0], "", "the Rush section is separated from the preceding widget");
-    assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>rush-issues<\/warning>  <dim>rev 1/);
-    assert.match(renderWidget(), /Extract shared core.*self-review.*in-flight/);
+    assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>plan<\/warning><dim>  0\/2 complete/);
+    assert.match(renderWidgetLines(true)[2] ?? "", /rush-issues · rev 1/);
+    assert.match(renderWidget(), /Extract shared core.*active/);
     assert.match(renderWidget(), /Add mux support/);
     await commands.get("plan")!.handler("", ctx);
+    assert.match(fullView, /self-review · in-flight/);
     assert.match(fullView, /after: #214/);
     assert.doesNotMatch(fullView, /Old generic step/);
     const result = await tools.get("get_plan")!.execute("get", {}, undefined, undefined, ctx);
@@ -84,7 +86,7 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     file(2, "succeeded");
     await sync.execute("advance", { path, revision: 2 }, undefined, undefined, ctx);
     assert.match(renderWidget(), /rev 2/);
-    assert.match(renderWidget(), /succeeded/);
+    assert.match(renderWidget(), /✓\s+#214\s+Extract shared core/);
     file(3, "diagnosing");
     await assert.rejects(sync.execute("wrong-revision", { path, revision: 2 }, undefined, undefined, ctx), /revision mismatch/);
     assert.equal(renderWidget(), "", "a plan rejected at sync stays hidden");
