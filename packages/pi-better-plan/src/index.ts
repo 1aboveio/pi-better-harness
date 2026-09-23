@@ -162,10 +162,13 @@ export default function planExtension(pi: ExtensionAPI): void {
             if (displayMode === "hidden") return [];
             if (displayedWorkflowOwner) {
               if (displayedWorkflowOwner !== "rush-issues") return [];
-              return rushPlan ? renderRushPlan(rushPlan, width) : [];
+              const fg = typeof theme?.fg === "function"
+                ? (color: string, value: string) => theme.fg(color as never, value)
+                : undefined;
+              return rushPlan ? ["", ...renderRushPlan(rushPlan, width, false, fg)] : [];
             }
             if (!currentPlan) return [];
-            return renderCompactPlan(currentPlan, width, theme as never);
+            return ["", ...renderCompactPlan(currentPlan, width, theme as never)];
           },
           invalidate() {},
           dispose() {
@@ -189,8 +192,11 @@ export default function planExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(renderRushPlan(plan, 160, true).join("\n"), "info");
         return;
       }
-      await ctx.ui.custom<void>((tui, _theme, _keys, done) => {
-        const component = createRushPlanComponent(plan, () => done());
+      await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+        const fg = typeof theme?.fg === "function"
+          ? (color: string, value: string) => theme.fg(color as never, value)
+          : undefined;
+        const component = createRushPlanComponent(plan, () => done(), fg);
         return { render: (width) => component.render(width), handleInput(data) {
           component.handleInput?.(data);
           tui.requestRender();

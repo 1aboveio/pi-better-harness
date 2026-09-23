@@ -30,6 +30,7 @@ test("golden path: the plan stays passive and right arrow remains editor input",
   sendLiteral("/seed-plan");
   sendKey("Enter");
   const initial = waitForScreen((screen) => screen.includes("plan 1/3 steps"));
+  assertBlankRowBefore(initial, /^plan 1\/3 steps/, "generic plan section");
   assert.doesNotMatch(initial, /^› /m, "the plan starts visible but unfocused");
   assert.doesNotMatch(initial, /→ plan/, "the footer does not advertise plan navigation");
 
@@ -63,6 +64,7 @@ test("golden path: Rush-owned units appear in the real plan widget", () => {
   sendLiteral("/seed-rush");
   sendKey("Enter");
   const widget = waitForScreen((screen) => screen.includes("rush-issues  rev 7") && screen.includes("Extract shared core"));
+  assertBlankRowBefore(widget, /^rush-issues  rev 7/, "Rush plan section");
   assert.match(widget, /Add mux support/);
   assert.doesNotMatch(widget, /Old generic step/);
 });
@@ -179,6 +181,13 @@ function assertScreenNeverMatches(pattern, durationMs) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
   }
   return screen;
+}
+
+function assertBlankRowBefore(screen, headingPattern, sectionName) {
+  const rows = screen.split(/\r?\n/).map((line) => line.trimEnd());
+  const headingIndex = rows.findIndex((line) => headingPattern.test(line.trim()));
+  assert.ok(headingIndex > 0, `${sectionName} heading must be visible:\n${screen}`);
+  assert.equal(rows[headingIndex - 1]?.trim(), "", `${sectionName} must have one blank row above its heading:\n${screen}`);
 }
 
 function shellQuote(value) {
