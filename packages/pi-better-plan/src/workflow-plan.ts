@@ -42,10 +42,12 @@ export function readRushPlan(path: string, cwd: string): RushPlan {
   if (size > 2_000_000) throw new Error("Rush plan exceeds the 2 MB display limit.");
   const data: unknown = JSON.parse(readFileSync(file, "utf8"));
   if (!isRecord(data) || data.runId !== dir || !Number.isSafeInteger(data.planRevision) ||
-      (data.planRevision as number) < 0 || !Array.isArray(data.issues) || !isRecord(data.fleet)) {
+      (data.planRevision as number) < 0 || !isRecord(data.fleet)) {
     throw new Error("Invalid Rush plan identity or revision.");
   }
-  const issues = data.issues.map((unit: unknown) => {
+  const persistedUnits = Array.isArray(data.issues) ? data.issues : data.units;
+  if (!Array.isArray(persistedUnits)) throw new Error("Invalid Rush plan units.");
+  const issues = persistedUnits.map((unit: unknown) => {
     if (!isRecord(unit) || typeof unit.id !== "string" || typeof unit.title !== "string" ||
         typeof unit.stage !== "string" || typeof unit.status !== "string") {
       throw new Error("Invalid Rush plan unit.");
@@ -59,8 +61,9 @@ export function readRushPlan(path: string, cwd: string): RushPlan {
   });
   const fleet: RushPlan["fleet"] = {};
   for (const [stage, value] of Object.entries(data.fleet)) {
-    if (!isRecord(value) || typeof value.status !== "string") throw new Error("Invalid Rush fleet stage.");
-    fleet[stage] = { status: value.status };
+    const status = typeof value === "string" ? value : isRecord(value) ? value.status : undefined;
+    if (typeof status !== "string") throw new Error("Invalid Rush fleet stage.");
+    fleet[stage] = { status };
   }
   return {
     runId: data.runId as string,

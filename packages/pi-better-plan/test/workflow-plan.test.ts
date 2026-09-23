@@ -118,3 +118,32 @@ test("Rush plan reader rejects unrelated paths and invalid run identity", () => 
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("Rush plan reader accepts live units and string fleet states", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "rush-plan-"));
+  try {
+    const runDir = join(cwd, ".resolve-issues", "rush", "issue-1147-20260923T094324Z");
+    mkdirSync(runDir, { recursive: true });
+    const path = join(runDir, "task-plan.json");
+    writeFileSync(path, JSON.stringify({
+      runId: "issue-1147-20260923T094324Z",
+      planRevision: 1,
+      warehouseCanaryRequired: false,
+      fleet: { explore: "pending", combine: "pending", canary: "not-applicable" },
+      units: [
+        { id: "U1", title: "Explore contracts", stage: "explore", status: "in_progress", dependsOn: [] },
+        { id: "U2", title: "Implement authority", stage: "pending", status: "pending", dependsOn: ["U1"] },
+      ],
+    }));
+
+    const plan = readRushPlan(path, cwd);
+    assert.equal(plan.planRevision, 1);
+    assert.deepEqual(plan.fleet.explore, { status: "pending" });
+    assert.deepEqual(plan.issues.map(({ id, dependsOn }) => ({ id, dependsOn })), [
+      { id: "U1", dependsOn: [] },
+      { id: "U2", dependsOn: ["U1"] },
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
