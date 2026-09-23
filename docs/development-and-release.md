@@ -82,6 +82,33 @@ npm test
 npm run test:cross-session
 ```
 
+### Navigator golden path
+
+`docs/tests/navigator.smoke.manifest.json` defines the navigator's release-blocking
+terminal journey and prerequisites. Run it with Node.js 22+, installed workspace
+dependencies, and tmux:
+
+```sh
+npm run test:golden:navigator
+```
+
+This strict command fails when tmux is missing. The same journey runs in `npm test`
+and is required in CI; ordinary local `npm test` may skip it without tmux.
+`scripts/navigator-detail.tui.e2e.test.mjs` is the single owner of the end-to-end
+flow: inspect the overview, open both providers' details, inspect real
+transcript/log output, render long CJK task and subagent titles, preserve every
+log character across wrapping at 100 and 80
+columns, retain one input frame, and return to a working editor. It seeds only
+session-scoped registry/log fixtures; navigation and rendering use the real Pi
+TUI in an isolated tmux server, without a model request.
+
+The test prints its evidence directory and saves terminal panes plus
+`smoke-results.json`. Set `PI_NAVIGATOR_EVIDENCE_DIR` to choose the directory;
+CI uploads it as `navigator-golden`, including failure captures. Width/grapheme
+edge cases remain in `packages/navigator/index.test.ts`; the background process
+lifecycle golden test owns spawning/status/log API behavior. Neither substitutes
+for this terminal journey.
+
 ### Sandbox confinement lanes
 
 The real-kernel sandbox suites skip themselves when the platform backend is

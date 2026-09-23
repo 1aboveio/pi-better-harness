@@ -12,61 +12,105 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const extensionRoot = resolve(process.env.PI_HARNESS_E2E_PACKAGE_ROOT ?? repoRoot);
 const piBin = join(repoRoot, "node_modules", ".bin", "pi");
 const session = `pi-navigator-e2e-${process.pid}`;
+const tmuxArgs = ["-L", session];
+const evidenceDir = resolve(process.env.PI_NAVIGATOR_EVIDENCE_DIR ?? join(tmpdir(), `${session}-evidence`));
+const unicodeLog = `GOLDEN_LOG_BEGIN${"甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳".repeat(4)}GOLDEN_LOG_END`;
+const taskTitle = `background golden path ${"中文任务标题".repeat(8)}`;
 const fixtures = mkdtempSync(join(tmpdir(), "pi-navigator-e2e-"));
 const probePath = join(fixtures, "session-probe.mjs");
 const probeStatePath = join(fixtures, "session-state.json");
 const subagentId = `sa_navigator_e2e_${process.pid}`;
 const taskId = `bg_navigator_e2e_${process.pid}`;
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
-if (process.env.CI && !hasTmux) throw new Error("CI requires tmux to verify the navigator transcript in a real terminal");
-const skip = hasTmux ? false : "requires tmux for a real terminal session";
+const skip = hasTmux || process.env.CI || process.env.PI_NAVIGATOR_REQUIRE_TMUX
+  ? false
+  : "requires tmux for a real terminal session (test:golden requires it)";
 
 after(() => {
-  spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
+  spawnSync("tmux", [...tmuxArgs, "kill-server"], { stdio: "ignore" });
   rmSync(join(tmpdir(), "pi-better-subagents", "runs", subagentId), { recursive: true, force: true });
   rmSync(join(tmpdir(), "pi-better-background-tasks", "tasks", taskId), { recursive: true, force: true });
   rmSync(fixtures, { recursive: true, force: true });
 });
 
-// @covers navigator.detail-overlay
+// @covers navigator.detail-overlay navigator.unicode-rendering
 // @level e2e
-test("golden path: subagent and background-task detail pages retain one input bar", { skip }, () => {
-  assert.ok(existsSync(piBin), `workspace Pi binary is missing: ${piBin}`);
-  assert.ok(existsSync(join(extensionRoot, "package.json")), `extension package is missing: ${extensionRoot}`);
+test("golden path: navigate both providers and read complete Unicode logs without a TUI crash", { skip }, (t) => {
+  mkdirSync(evidenceDir, { recursive: true });
+  t.diagnostic(`terminal evidence: ${evidenceDir}`);
+  try {
+    assert.ok(hasTmux, "navigator golden path requires tmux; skipping cannot satisfy this gate");
+    assert.ok(existsSync(piBin), `workspace Pi binary is missing: ${piBin}`);
+    assert.ok(existsSync(join(extensionRoot, "package.json")), `extension package is missing: ${extensionRoot}`);
 
-  writeFileSync(probePath, probeExtension(probeStatePath));
-  startPiSession();
-  const state = waitForJson(probeStatePath);
-  const piPid = Number(execFileSync("tmux", ["display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8" }).trim());
-  seedNavigatorState({ cwd: state.cwd, sessionId: state.sessionId, piPid });
+    writeFileSync(probePath, probeExtension(probeStatePath));
+    startPiSession();
+    const state = waitForJson(probeStatePath);
+    const piPid = Number(execFileSync("tmux", [...tmuxArgs, "display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8" }).trim());
+    seedNavigatorState({ cwd: state.cwd, sessionId: state.sessionId, piPid });
 
-  sendKey("Left");
-  const rail = waitForScreen((screen) => screen.includes("subagents") && screen.includes("subagent golden path"));
-  assertBlankRowBefore(rail, "subagents", "navigator section");
+    sendKey("Left");
+    const overview = waitForScreen((screen) => screen.includes("subagent golden path")
+      && screen.includes("background golden path") && screen.includes("中文")
+      && !screen.includes("provider Background Tasks") && !screen.includes("provider Subagents"));
+    saveScreen("overview", overview);
+    assertBlankRowBefore(overview, "subagents", "navigator section");
+    sendKey("Down");
+    const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("provider Subagents"));
+    saveScreen("subagent-detail", subagentPage);
+    assertSingleInputFrame(subagentPage, "subagent detail");
+    assert.match(subagentPage.split("\n")[0], /中文.*\.\.\.\s*$/, "long Unicode subagent title must fit with a visible truncation marker");
+    assert.match(subagentPage, /transcript · latest 10 rows/, "subagent detail must render its transcript section");
+    assert.match(subagentPage, /← main/, "subagent detail must use the structured transcript renderer");
+    assert.match(subagentPage, /transcript-row-30/);
+    assert.doesNotMatch(subagentPage, /transcript-row-01/);
 
-  sendKey("Down");
-  const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("provider Subagents"));
-  assertSingleInputFrame(subagentPage, "subagent detail");
-  assert.match(subagentPage, /transcript · latest 10 rows/, "subagent detail must render its transcript section");
-  assert.match(subagentPage, /← main/, "subagent detail must use the structured transcript renderer");
-  assert.match(subagentPage, /transcript-row-30/);
-  assert.doesNotMatch(subagentPage, /transcript-row-01/);
+    execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-y", "48"]);
+    sendKey("l");
+    const expandedPage = waitForScreen((screen) => screen.includes("transcript · latest 25 rows") && screen.includes("transcript-row-10"));
+    saveScreen("expanded-subagent-detail", expandedPage);
+    assertSingleInputFrame(expandedPage, "expanded subagent detail");
+    assert.match(expandedPage, /transcript-row-30/);
+    assert.doesNotMatch(expandedPage, /transcript-row-05/);
+    assert.doesNotMatch(expandedPage, /transcript-row-01/);
+    sendKey("l");
+    waitForScreen((screen) => screen.includes("transcript · latest 10 rows"));
 
-  execFileSync("tmux", ["resize-window", "-t", session, "-y", "48"]);
-  sendKey("l");
-  const expandedPage = waitForScreen((screen) => screen.includes("transcript · latest 25 rows") && screen.includes("transcript-row-10"));
-  assertSingleInputFrame(expandedPage, "expanded subagent detail");
-  assert.match(expandedPage, /transcript-row-30/);
-  assert.doesNotMatch(expandedPage, /transcript-row-05/);
-  assert.doesNotMatch(expandedPage, /transcript-row-01/);
-  sendKey("l");
-  waitForScreen((screen) => screen.includes("transcript · latest 10 rows"));
+    sendKey("Down");
+    for (const width of [100, 80]) {
+      execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-x", String(width), "-y", "40"]);
+      const taskPage = waitForScreen((screen) => screen.includes("provider Background Tasks")
+        && screen.includes("中文") && screen.includes("GOLDEN_LOG_BEGIN")
+        && screen.split(/\r?\n/).some((line) => line.trimEnd() === "─".repeat(width)));
+      saveScreen(`background-detail-${width}`, taskPage);
+      assertSingleInputFrame(taskPage, `background-task detail at ${width} columns`);
+      assert.match(taskPage.split("\n")[0], /\.\.\.\s*$/, "long Unicode title must show truncation rather than overflow the terminal");
+      assert.match(taskPage, /log(?: tail)? · latest 10 rows/, "background-task detail must render its log tail");
+      assert.ok(taskPage.replace(/\s/g, "").includes(unicodeLog), `wrapped log lost content at ${width} columns:\n${taskPage}`);
+    }
 
-  sendKey("Down");
-  const taskPage = waitForScreen((screen) => screen.includes("background golden path") && screen.includes("provider Background Tasks"));
-  assertSingleInputFrame(taskPage, "background-task detail");
-  assert.match(taskPage, /log(?: tail)? · latest 10 rows/, "background-task detail must render its log tail");
+    sendKey("Escape");
+    waitForScreen((screen) => !screen.includes("provider Background Tasks"));
+    execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", "golden-editor-alive"]);
+    const returned = waitForScreen((screen) => screen.includes("golden-editor-alive") && !screen.includes("provider Background Tasks"));
+    saveScreen("returned-to-editor", returned);
+    writeResult("pass");
+  } catch (error) {
+    try { saveScreen("failure", captureScreen()); } catch { /* The TUI may have exited. */ }
+    writeResult("fail", String(error));
+    throw error;
+  }
 });
+
+function saveScreen(name, screen) {
+  writeFileSync(join(evidenceDir, `${name}.txt`), screen);
+}
+
+function writeResult(status, note) {
+  writeFileSync(join(evidenceDir, "smoke-results.json"), JSON.stringify([
+    { id: "navigator-unicode", status, evidence: evidenceDir, note },
+  ], null, 2) + "\n");
+}
 
 function startPiSession() {
   const command = [
@@ -85,7 +129,7 @@ function startPiSession() {
     "--name navigator-tui-e2e",
     "--model openai/gpt-4o-mini",
   ].join(" ");
-  execFileSync("tmux", ["new-session", "-d", "-s", session, "-x", "100", "-y", "32", command]);
+  execFileSync("tmux", [...tmuxArgs, "new-session", "-d", "-s", session, "-x", "100", "-y", "40", command]);
 }
 
 function probeExtension(path) {
@@ -102,7 +146,7 @@ function seedNavigatorState({ cwd, sessionId, piPid }) {
   writeFileSync(subagentLog, `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `\`\`\`text\n${transcript}\n\`\`\`` }] } })}\n`);
   writeSubagentMeta({
     id: subagentId,
-    name: "subagent golden path",
+    name: `subagent golden path ${"中文任务标题".repeat(8)}`,
     status: "running",
     pid: piPid,
     pgid: piPid,
@@ -120,10 +164,10 @@ function seedNavigatorState({ cwd, sessionId, piPid }) {
   const taskDir = join(tmpdir(), "pi-better-background-tasks", "tasks", taskId);
   mkdirSync(taskDir, { recursive: true });
   const taskLog = join(taskDir, "output.log");
-  writeFileSync(taskLog, "background task output\n");
+  writeFileSync(taskLog, `${unicodeLog}\n`);
   writeTaskMeta({
     id: taskId,
-    name: "background golden path",
+    name: taskTitle,
     kind: "command_watch",
     status: "running",
     startedAt: now - 30_000,
@@ -166,11 +210,11 @@ function assertBlankRowBefore(screen, heading, sectionName) {
 }
 
 function sendKey(key) {
-  execFileSync("tmux", ["send-keys", "-t", session, key]);
+  execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, key]);
 }
 
 function captureScreen() {
-  return execFileSync("tmux", ["capture-pane", "-t", session, "-p"], { encoding: "utf8" })
+  return execFileSync("tmux", [...tmuxArgs, "capture-pane", "-t", session, "-p"], { encoding: "utf8" })
     .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 

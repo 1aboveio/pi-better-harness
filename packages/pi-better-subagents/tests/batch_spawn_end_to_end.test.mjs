@@ -76,6 +76,7 @@ export const Type = {
         "index.js": `
 export const Key = { left: "left" };
 export function matchesKey() { return false; }
+export function visibleWidth(s) { return String(s ?? "").length; }
 export function truncateToWidth(s) { return s; }
 `,
     });

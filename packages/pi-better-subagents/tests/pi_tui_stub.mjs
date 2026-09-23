@@ -14,6 +14,7 @@ export function matchesKey(data, key) {
     if (data === `<${key}>`) return true;
     return false;
 }
+export function visibleWidth(s) { return String(s ?? "").length; }
 export function truncateToWidth(s, w) {
     const str = String(s ?? "");
     const width = Number(w) || 0;
