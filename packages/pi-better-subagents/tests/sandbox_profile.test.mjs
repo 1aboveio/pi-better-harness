@@ -207,7 +207,7 @@ describe('sandbox profile (subagent write confinement)', () => {
                 assert.deepEqual(cmd.fileArgs, [
                     '--ro-bind', '/', '/',
                     '--bind', canonicalWorkdir, canonicalWorkdir,
-                    '--bind-try', canonicalPiState, canonicalPiState,
+                    '--bind', canonicalPiState, canonicalPiState,
                     '--bind', '/tmp', '/tmp',
                     '--dev', '/dev',
                     '--', '/usr/bin/true', '-p', '--mode', 'json', 'original prompt',
@@ -215,6 +215,7 @@ describe('sandbox profile (subagent write confinement)', () => {
                 assert.equal(cmd.fileArgs.includes('--unshare-net'), false, 'network must remain shared');
                 assert.equal(cmd.fileArgs.includes('--die-with-parent'), false, 'detached children must remain durable');
                 assert.equal(cmd.fileArgs.includes(canonicalPiState), true, '~/.pi must be writable for Pi state');
+                assert.equal(existsSync(canonicalPiState), true, 'the Pi state bind source must be created');
             }));
         } finally {
             rmSync(base, { recursive: true, force: true });

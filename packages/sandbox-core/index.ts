@@ -365,9 +365,15 @@ function buildLinuxSandboxCommand(
     args: SandboxCommandArgs,
     seams: SandboxSeams,
 ): SandboxCommand {
+    // Bubblewrap cannot make a read-only host path writable unless the bind
+    // source exists. Materialize an explicitly declared state root before
+    // canonicalization so clean hosts get the same policy as initialized ones.
+    if (args.policy.writableStateRoot) {
+        mkdirSync(resolve(args.policy.writableStateRoot), { recursive: true });
+    }
     // The caller creates the selected work directory before it reaches this
-    // boundary. Canonicalizing it before bind-mounting keeps symlink aliases from
-    // widening the writable root.
+    // boundary. Canonicalizing paths before bind-mounting keeps symlink aliases
+    // from widening either writable root.
     const policy = compile(args.policy, seams, true);
     const materialize = seams.materializeDenyPath ?? materializeDenyPath;
     const denyBinds = policy.denyWrite.flatMap((path) => {
@@ -381,7 +387,7 @@ function buildLinuxSandboxCommand(
             "--ro-bind", "/", "/",
             "--bind", policy.writableRoot, policy.writableRoot,
             ...(policy.writableStateRoot
-                ? ["--bind-try", policy.writableStateRoot, policy.writableStateRoot]
+                ? ["--bind", policy.writableStateRoot, policy.writableStateRoot]
                 : []),
             "--bind", "/tmp", "/tmp",
             "--dev", "/dev",

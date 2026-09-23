@@ -276,11 +276,41 @@ describe("sandbox-core backend selection and wrapper construction", () => {
                 assert.deepEqual(cmd.fileArgs, [
                     "--ro-bind", "/", "/",
                     "--bind", writable, writable,
-                    "--bind-try", state, state,
+                    "--bind", state, state,
                     "--bind", "/tmp", "/tmp",
                     "--dev", "/dev",
                     "--ro-bind", deniedCanonical, deniedCanonical,
                     "--", "/usr/bin/true",
+                ]);
+            }));
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @fails-without-fix sandbox.command-wrapper
+    // @covers sandbox.command-wrapper
+    // @level unit
+    it("creates a missing opted-in Linux state root before binding it", async () => {
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-bwrap-new-state-")));
+        const writable = join(base, "work");
+        const state = join(base, "home", ".pi");
+        mkdirSync(writable, { recursive: true });
+        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        try {
+            await withPlatform("linux", () => withPath(base, () => {
+                const cmd = buildSandboxCommand({
+                    profilePath: join(base, "unused.sb"),
+                    policy: { writableRoot: writable, writableStateRoot: state, home: join(base, "home") },
+                    execPath: "/usr/bin/true",
+                    execArgs: [],
+                });
+
+                assert.equal(existsSync(state), true);
+                assert.deepEqual(cmd.fileArgs.slice(0, 9), [
+                    "--ro-bind", "/", "/",
+                    "--bind", writable, writable,
+                    "--bind", state, state,
                 ]);
             }));
         } finally {
