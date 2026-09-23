@@ -2,6 +2,56 @@
 
 ## Glossary
 
+### Role
+
+A reusable specialist template describing a kind of work and its default
+instructions, model, and reasoning effort. A role can be selected directly for a
+task or serve as the base of a named agent.
+
+### Base Role
+
+The single role from which a named agent inherits defaults. This inheritance
+relationship is distinct from Agentier's executable-role memberships, which
+describe eligibility for work.
+
+### Named Agent
+
+A reusable specialist with a stable identity, one base role, and agent-specific
+customizations. Its identity is distinct from its display name and from any
+individual execution.
+
+### Role Inheritance
+
+The continuing relationship through which an agent receives its base role's
+current defaults for settings it has not explicitly overridden.
+
+### Instruction Mode
+
+An agent's choice to add its instructions to the base role's instructions or
+replace that instruction text. Replacement does not sever inheritance of other
+defaults.
+
+### Agent Override
+
+A setting deliberately supplied on a named agent instead of inherited from its
+base role. Removing an override restores inheritance for that setting.
+
+### Run
+
+One execution of a task, with its own identity and the effective configuration
+selected when it started. Repeated executions of the same named agent are separate
+runs.
+
+### Run Alias
+
+A user-supplied label for an individual run, rather than a reusable agent
+identity.
+
+### Catalog Snapshot
+
+The set of role and agent definitions used to resolve a launch or a batch of
+launches. A batch shares one snapshot even if the underlying definitions change.
+
 ### Related Work
 
 Work launched for a subagent run that Pi can still credibly associate with that
