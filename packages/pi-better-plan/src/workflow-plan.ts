@@ -1,7 +1,10 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Component } from "@earendil-works/pi-tui";
-import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  createPlanPresentationComponent, plainPlanTheme, planText, renderPlanPresentation, statusStyle,
+  type DisplayStatus, type PlanPresentation,
+} from "./plan-presentation.js";
 
 export const WORKFLOW_PLAN_ENTRY = "pi-better-workflow-plan";
 
@@ -98,27 +101,51 @@ export function workflowBinding(entries: Iterable<{ type: string; customType?: s
   return binding;
 }
 
+function workflowStatus(status: string): DisplayStatus {
+  switch (status) {
+    case "succeeded": case "completed": return "completed";
+    case "in-flight": case "in_progress": case "running": case "diagnosing": return "in_progress";
+    case "pending": return "pending";
+    case "blocked": return "blocked";
+    case "failed": return "failed";
+    case "skipped": case "not-applicable": case "cancelled": return "skipped";
+    default: return "unknown";
+  }
+}
+
+function presentRushPlan(plan: RushPlan): PlanPresentation {
+  const fleet = ["explore", "combine", "canary", "review", "cicd"].map((stage) => {
+    const status = stage === "canary" && !plan.warehouseCanaryRequired
+      ? "not-applicable" : plan.fleet[stage]?.status ?? "pending";
+    const display = workflowStatus(status);
+    const style = statusStyle(display);
+    return { color: style.color, text: `  ${stage} ${style.glyph}${display === "unknown" ? ` ${planText(status)}` : ""}` };
+  });
+  const metadata = [[{ color: "dim", text: `rush-issues · rev ${plan.planRevision}  ·` }, ...fleet]];
+  if (plan.spec?.title) metadata.push([{ color: "dim", text: plan.spec.title }]);
+  return {
+    metadata,
+    rows: plan.issues.map((unit) => {
+      const status = workflowStatus(unit.status);
+      const details = [`${unit.stage} · ${unit.status}${unit.worker !== undefined ? ` · worker ${unit.worker}` : ""}`];
+      if (unit.dependsOn.length) details.push(`after: ${unit.dependsOn.map((id) => `#${id}`).join(", ")}`);
+      if (unit.note) details.push(unit.note);
+      return {
+        label: `#${unit.id}`, title: unit.title, status, details,
+        ...(status === "unknown" || unit.status === "cancelled" ? { statusLabel: unit.status } : {}),
+      };
+    }),
+  };
+}
+
 export function renderRushPlan(
   plan: RushPlan,
   width: number,
   full = false,
   fg?: (color: string, value: string) => string,
 ): string[] {
-  const completed = plan.issues.filter((unit) => unit.status === "succeeded").length;
-  const summary = `rev ${plan.planRevision}  ${completed}/${plan.issues.length} units${plan.spec?.title ? `  ${plan.spec.title}` : ""}`;
-  const lines = [fg ? `${fg("warning", "rush-issues")}  ${fg("dim", summary)}` : `rush-issues  ${summary}`];
-  const fleet = ["explore", "combine", "canary", "review", "cicd"]
-    .map((stage) => `${stage}: ${stage === "canary" && !plan.warehouseCanaryRequired ? "n/a" : plan.fleet[stage]?.status ?? "pending"}`);
-  lines.push(`fleet  ${fleet.join("  ")}`);
-  for (const unit of plan.issues) {
-    const marker = unit.status === "succeeded" ? "✓" : unit.status === "blocked" ? "!" : unit.status === "pending" ? "○" : "●";
-    lines.push(`${marker} #${unit.id} ${unit.title}  [${unit.stage} · ${unit.status}${unit.worker !== undefined ? ` · worker ${unit.worker}` : ""}]`);
-    if (full) {
-      if (unit.dependsOn.length) lines.push(`    after: ${unit.dependsOn.map((id) => `#${id}`).join(", ")}`);
-      if (unit.note) lines.push(`    ${unit.note}`);
-    }
-  }
-  return lines.map((line) => truncateToWidth(line, Math.max(1, width)));
+  const theme = fg ? { fg } : plainPlanTheme;
+  return renderPlanPresentation(presentRushPlan(plan), width, theme, full);
 }
 
 export function createRushPlanComponent(
@@ -126,11 +153,6 @@ export function createRushPlanComponent(
   onClose: () => void,
   fg?: (color: string, value: string) => string,
 ): Component {
-  return {
-    render: (width) => renderRushPlan(plan, width, true, fg),
-    handleInput(data) {
-      if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "ctrl+c")) onClose();
-    },
-    invalidate() {},
-  };
+  const theme = fg ? { fg } : plainPlanTheme;
+  return createPlanPresentationComponent(presentRushPlan(plan), theme, onClose);
 }

@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-plan@0.3.4] - 2026-09-23
+
+### Changed
+
+- **plan**: unify native and workflow-synced plans with a shared heading, progress summary, aligned rows, semantic status colors, and section spacing
+- **plan**: show workflow revision and fleet progress as secondary metadata, preserving stage, worker, dependencies, and notes in the full view
+- **plan**: use consistent selection and keyboard navigation in both full plan views
+
+### Fixed
+
+- **plan**: distinguish failed, skipped, and unknown workflow states from active work, and count diagnosing work as active
+- **plan**: fit status labels and Unicode titles within narrow terminal widths
+
+## [pi-better-harness@0.3.18] - 2026-09-23
+
+### Changed
+
+- **harness**: bundle `pi-better-plan@0.3.4` with unified native and workflow plan styling
+
 ## [pi-better-subagents@0.1.31] - 2026-09-23
 
 ### Fixed
