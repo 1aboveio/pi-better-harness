@@ -1267,7 +1267,8 @@ export function wrapLogText(text: string, width: number): string[] {
       continue;
     }
     const sourceIndent = source.match(/^[ \t]*/)?.[0] ?? "";
-    const indent = sourceIndent.replace(/\t/g, "  ");
+    // Leave room for a full-width grapheme even on deeply indented log lines.
+    const indent = sourceIndent.replace(/\t/g, "  ").slice(0, max - 2);
     let remaining = source.slice(sourceIndent.length);
     const contentWidth = Math.max(1, max - visibleWidth(indent));
     if (!remaining) {
@@ -1300,33 +1301,25 @@ function lastDelimiterBreak(value: string): number {
   return last;
 }
 
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 function splitVisiblePrefix(value: string, width: number): [string, string] {
   const max = Math.max(0, Math.floor(width));
   let visible = 0;
-  let index = 0;
-  while (index < value.length && visible < max) {
-    if (value[index] === "\u001b" || value[index] === "\u009b") {
-      const match = value.slice(index).match(ANSI_RE);
-      if (match?.index === 0) {
-        index += match[0].length;
-        continue;
-      }
+  let end = 0;
+  for (const { segment, index } of GRAPHEME_SEGMENTER.segment(value)) {
+    if (index < end) continue;
+    const formatting = value.slice(index).match(FORMATTING_PREFIX_RE);
+    if (formatting) {
+      end = index + formatting[0].length;
+      continue;
     }
-    if (value[index] === "<") {
-      const close = value.indexOf(">", index);
-      if (close !== -1) {
-        const tag = value.slice(index, close + 1);
-        if (/^<\/?[a-zA-Z][\w-]*>$/.test(tag) || tag === "</>") {
-          index = close + 1;
-          continue;
-        }
-      }
-    }
-    const codePoint = value.codePointAt(index)!;
-    index += codePoint > 0xFFFF ? 2 : 1;
-    visible += 1;
+    const cells = piVisibleWidth(segment);
+    if (visible + cells > max) break;
+    visible += cells;
+    end = index + segment.length;
   }
-  return [value.slice(0, index), value.slice(index)];
+  return [value.slice(0, end), value.slice(end)];
 }
 
 function cycleLogTailRows(current: number): number {
@@ -1384,6 +1377,8 @@ function safeTruncate(line: string, width: number, truncate: (s: string, width: 
 }
 
 const ANSI_RE = new RegExp("[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))", "g");
+
+const FORMATTING_PREFIX_RE = new RegExp(`^(?:${ANSI_RE.source}|<\\/?[a-zA-Z][\\w-]*>|</>)`);
 
 function visibleWidth(value: string): number {
   const cleaned = String(value ?? "")

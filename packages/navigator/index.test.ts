@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   CLOSE_CONFIRM_STATUS_KEY,
   MAIN_LIST_WIDGET_KEY,
@@ -1142,7 +1143,7 @@ describe("shared background work navigator", () => {
       assert.match(rendered, /output · showing 10\/\d+ rows/);
       assert.match(rendered, /July can only be safely\n\s+evaluated/);
       assert.doesNotMatch(rendered, /row-11 visible after more/);
-      for (const line of renderedLines) assert.ok(line.length <= 54, `line exceeds width: ${line}`);
+      for (const line of renderedLines) assert.ok(visibleWidth(line) <= 54, `line exceeds width: ${line}`);
 
       component.handleInput("l");
       rendered = component.render(54).join("\n");
@@ -1321,6 +1322,72 @@ describe("shared background work navigator", () => {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
     }
+  });
+
+  it("keeps CJK task titles within the terminal column limit", () => {
+    const taskProvider = provider("background-tasks", "Background Tasks", 20, 300, () => undefined);
+    const unregister = registerBackgroundWorkProvider({
+      ...taskProvider,
+      listRows: () => taskProvider.listRows(0).map((row) => ({
+        ...row,
+        name: "检查后台任务的运行状态和日志输出".repeat(3),
+      })),
+    });
+    const widgets: unknown[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom() { return Promise.resolve(null); },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: truncateToWidth,
+      });
+      for (const width of [40, 80, 132]) {
+        const lines = renderWidget(widgets.at(-1), width, ui.theme);
+        assert.match(lines.join("\n"), /检查/);
+        for (const line of lines) {
+          assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} columns exceed ${width}: ${line}`);
+        }
+      }
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("wraps Unicode log rows without losing text or splitting graphemes", () => {
+    for (const source of [
+      "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳",
+      "abc中文👩‍💻e\u0301🇨🇳".repeat(4),
+      "\u001b[31m甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳\u001b[0m",
+    ]) {
+      for (const width of [8, 9, 14, 20]) {
+        const rows = wrapLogText(source, width);
+        assert.equal(rows.join(""), source);
+        for (const row of rows) assert.ok(visibleWidth(row) <= width, JSON.stringify({ row, width }));
+        const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+        assert.deepEqual(
+          rows.flatMap((row) => [...segmenter.segment(row)].map(({ segment }) => segment)),
+          [...segmenter.segment(source)].map(({ segment }) => segment),
+        );
+      }
+    }
+  });
+
+  it("wraps deeply indented CJK logs with room for a full character", () => {
+    const content = "甲乙丙丁戊己庚辛壬癸";
+    const rows = wrapLogText(" ".repeat(12) + content, 8);
+    assert.equal(rows.map((row) => row.trimStart()).join(""), content);
+    assert.ok(rows.every((row) => visibleWidth(row) <= 8), rows.join("\n"));
   });
 
   it("wraps tool-call log rows without truncating long paths", () => {

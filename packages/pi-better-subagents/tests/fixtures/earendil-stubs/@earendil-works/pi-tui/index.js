@@ -14,6 +14,7 @@ export function matchesKey(input, key) {
     return input === key || input?.name === key || input?.key === key;
 }
 
+export function visibleWidth(value) { return String(value ?? "").length; }
 export function truncateToWidth(value, width) {
     const text = String(value ?? '');
     if (!Number.isFinite(width) || width < 0) return text;
