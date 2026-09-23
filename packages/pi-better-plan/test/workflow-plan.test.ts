@@ -59,7 +59,7 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     } });
     pi.events.emit("pi-better-workflow:changed", { name: "rush-issues" });
     const renderWidget = () => widget({ requestRender() {} }, { fg: (_color: string, value: string) => value }).render(140).join("\n");
-    assert.match(renderWidget(), /waiting for task plan/);
+    assert.equal(renderWidget(), "", "an unsynced Rush plan stays hidden");
     await assert.rejects(update.execute("conflict", { plan: [{ step: "Wrong", status: "pending" }] }, undefined, undefined, ctx), /owns the task plan/);
     const sync = tools.get("sync_workflow_plan")!;
     await assert.rejects(sync.execute("stale", { path, revision: 2 }, undefined, undefined, ctx), /revision mismatch/);
@@ -81,7 +81,7 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     assert.match(renderWidget(), /succeeded/);
     file(3, "diagnosing");
     await assert.rejects(sync.execute("wrong-revision", { path, revision: 2 }, undefined, undefined, ctx), /revision mismatch/);
-    assert.match(renderWidget(), /plan unavailable: revision mismatch/);
+    assert.equal(renderWidget(), "", "a plan rejected at sync stays hidden");
     await sync.execute("reconciled", { path, revision: 3 }, undefined, undefined, ctx);
     await handlers.get("session_tree")?.({}, ctx);
     assert.match(renderWidget(), /rev 3/, "session restore reopens the bound run");
@@ -90,12 +90,12 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     } });
     pi.events.emit("pi-better-workflow:changed", { name: "rush-issues" });
     await handlers.get("session_tree")?.({}, ctx);
-    assert.match(renderWidget(), /waiting for task plan/, "a new Rush invocation cannot inherit a previous run");
+    assert.equal(renderWidget(), "", "a new Rush invocation stays hidden and cannot inherit a previous run");
     await sync.execute("new-run", { path, revision: 3 }, undefined, undefined, ctx);
     rmSync(path);
     const missing = await tools.get("get_plan")!.execute("missing", {}, undefined, undefined, ctx);
     assert.equal((missing.details as any).hasPlan, false);
-    assert.match(renderWidget(), /plan unavailable/);
+    assert.equal(renderWidget(), "", "an unavailable persisted plan stays hidden");
 
     entries.push({ type: "custom", customType: "pi-better-workflow", data: { version: 1, kind: "clear" } });
     pi.events.emit("pi-better-workflow:changed", null);
