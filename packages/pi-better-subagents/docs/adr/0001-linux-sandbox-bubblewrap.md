@@ -25,10 +25,13 @@ and works on GitHub-hosted runners.
   policy.
 - **Backend present but init/spawn fails:** fail closed, even for default-on.
   Once `bwrap` was detected we never silently retry unsandboxed.
-- Confinement shape: the Linux root filesystem and `~/.pi` are readable but
-  read-only. Writable paths are the selected writable workdir and host `/tmp`;
-  `/dev` remains usable. Reads and network remain unrestricted/shared — we do
-  **not** unshare the network, so the model API and `web_fetch` keep working.
+- Confinement shape: the Linux root filesystem is readable but read-only.
+  Writable paths are the selected writable workdir, host `/tmp`, and any
+  canonical runtime-state root explicitly requested by the consumer. Subagents
+  opt in to `~/.pi` because Pi acquires settings/auth lock files at startup;
+  foreground and background shell consumers do not. `/dev` remains usable.
+  Reads and network remain unrestricted/shared — we do **not** unshare the
+  network, so the model API and `web_fetch` keep working.
 - macOS `sandbox-exec` behavior is unchanged.
 - Windows remains out of scope.
 
@@ -52,9 +55,10 @@ and works on GitHub-hosted runners.
 
 - Linux gains the same syscall-level write confinement macOS has, with one new
   external dependency (`bubblewrap`) that must be installed on hosts/CI.
-- `~/.pi` being read-only on Linux differs from macOS (where the SBPL profile
-  allows writes there); Linux children must direct pi state/temp to the
-  writable workdir or `/tmp`.
+- Linux subagents can start Pi with the same writable `~/.pi` state available
+  under the macOS profile. The shared Linux backend does not grant that access
+  implicitly: consumers that do not launch Pi retain the narrower workdir and
+  `/tmp` boundary.
 - The degrade-vs-throw policy is unchanged in shape but gains a third state:
   "backend detected yet failed" fails closed instead of degrading.
 - CI installs bubblewrap in the `linux-sandbox` job on `ubuntu-latest`.
@@ -84,6 +88,8 @@ read-only.
   reaches the child through the sandbox).
 - Real-model smoke: a scoped child completes a model call and `web_fetch`
   (network is shared, not unshared).
+- Product integration proves a sandboxed child can write Pi state under
+  `~/.pi` while writes elsewhere outside the workdir remain denied.
 - `gh` smoke: a `bash`-scoped child can drive `gh` against this repo.
 - Existing macOS sandbox tests (`test_sandbox_applied.sh`,
   `test_sandbox_deny_outside.sh`, `sandbox_profile.test.mjs`) keep passing

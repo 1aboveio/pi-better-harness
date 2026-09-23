@@ -3,9 +3,10 @@
  *
  * Kernel-enforced confinement: the sandboxed process may READ anywhere and use
  * the network (so web_fetch and the model API keep working), but may only WRITE
- * under a single canonical root plus the system paths pi itself needs. Unlike a
- * cooperative guardrails layer (which pattern-matches tool inputs), this cannot
- * be evaded by a crafted bash command — the write syscall itself is denied.
+ * under a canonical root, an optional caller-declared runtime-state root, and
+ * the system paths pi itself needs. Unlike a cooperative guardrails layer
+ * (which pattern-matches tool inputs), this cannot be evaded by a crafted bash
+ * command — the write syscall itself is denied.
  *
  * This module owns the mechanism only: backend discovery, canonical path
  * containment, write-deny compilation, macOS SBPL profile construction, Linux
@@ -42,6 +43,12 @@ export type SandboxWritePolicy = {
     /** The single directory subtree the sandboxed process may write under. */
     writableRoot: string;
     /**
+     * Optional runtime state needed by the wrapped executable. Consumers must
+     * opt in explicitly; ordinary foreground/background commands keep it
+     * read-only. The path is canonicalized before backend rules are built.
+     */
+    writableStateRoot?: string;
+    /**
      * Concrete paths that stay non-writable even inside `writableRoot`. A
      * directory entry denies its whole subtree; a file entry denies that file.
      *
@@ -52,7 +59,7 @@ export type SandboxWritePolicy = {
      * first, which they do anyway to write into it.
      */
     denyWrite?: readonly string[];
-    /** Home directory whose `~/.pi` state stays writable on macOS. */
+    /** Home directory used by the macOS backend's legacy Pi-state allowance. */
     home: string;
 };
 
@@ -106,6 +113,7 @@ export type SandboxSeams = {
 /** A policy with every path canonicalized, deduplicated, and ordered. */
 export type CompiledSandboxWritePolicy = {
     readonly writableRoot: string;
+    readonly writableStateRoot?: string;
     readonly denyWrite: readonly string[];
     readonly home: string;
 };
@@ -178,7 +186,16 @@ function compile(
         ...new Set((policy.denyWrite ?? []).map((entry) => canonicalizePath(entry, seams))),
     ].sort();
 
-    return { writableRoot, denyWrite, home: policy.home };
+    const writableStateRoot = policy.writableStateRoot
+        ? canonicalizePath(policy.writableStateRoot, seams)
+        : undefined;
+
+    return {
+        writableRoot,
+        ...(writableStateRoot ? { writableStateRoot } : {}),
+        denyWrite,
+        home: policy.home,
+    };
 }
 
 /**
@@ -208,7 +225,9 @@ export function evaluateWriteAccess(
     seams: SandboxSeams = {},
 ): WriteAccessDecision {
     const path = canonicalizePath(target, seams);
-    if (!contains(policy.writableRoot, path)) {
+    const insideWritableRoot = contains(policy.writableRoot, path)
+        || (policy.writableStateRoot !== undefined && contains(policy.writableStateRoot, path));
+    if (!insideWritableRoot) {
         return { allowed: false, path, reason: "outside-writable-root" };
     }
     for (const denied of policy.denyWrite) {
@@ -230,12 +249,13 @@ function buildMacOSSandboxCommand(args: SandboxCommandArgs, seams: SandboxSeams)
     // canonical path, so /tmp/x must be written as /private/tmp/x.
     const policy = compile(args.policy, seams, false);
 
+    const piStateRoot = policy.writableStateRoot ?? canonicalizePath(join(policy.home, ".pi"), seams);
     const profile = [
         "(version 1)",
         "(allow default)",          // permissive base: reads, exec, network
         "(deny file-write*)",       // ...then deny all writes...
         `(allow file-write* (subpath ${sbpl(policy.writableRoot)}))`,   // ...except here
-        `(allow file-write* (subpath ${sbpl(`${policy.home}/.pi`)}))`,  // pi state
+        `(allow file-write* (subpath ${sbpl(piStateRoot)}))`,           // pi state
         '(allow file-write* (subpath "/private/var/folders"))',         // macOS temp / our runtime
         '(allow file-write* (subpath "/private/tmp"))',
         '(allow file-write* (subpath "/dev"))',                         // /dev/null etc.
@@ -327,11 +347,17 @@ function materializeDenyPath(path: string): boolean {
  * Everywhere else is already covered by the read-only bind of `/`, so a
  * placeholder there would deny nothing that is not denied already — and would
  * scatter empty files across the host for the sake of it. Materializing is
- * confined to the two regions that are genuinely writable inside the sandbox:
- * the writable root, and the `/tmp` rebind that pi's own tooling needs.
+ * confined to regions that are genuinely writable inside the sandbox: the
+ * writable root, the optional runtime-state root, and `/tmp`.
  */
-function writableInsideLinuxSandbox(path: string, writableRoot: string): boolean {
-    return contains(writableRoot, path) || contains("/tmp", path);
+function writableInsideLinuxSandbox(
+    path: string,
+    writableRoot: string,
+    writableStateRoot?: string,
+): boolean {
+    return contains(writableRoot, path)
+        || (writableStateRoot !== undefined && contains(writableStateRoot, path))
+        || contains("/tmp", path);
 }
 
 function buildLinuxSandboxCommand(
@@ -345,7 +371,8 @@ function buildLinuxSandboxCommand(
     const policy = compile(args.policy, seams, true);
     const materialize = seams.materializeDenyPath ?? materializeDenyPath;
     const denyBinds = policy.denyWrite.flatMap((path) => {
-        const mountable = writableInsideLinuxSandbox(path, policy.writableRoot) && materialize(path);
+        const mountable = writableInsideLinuxSandbox(path, policy.writableRoot, policy.writableStateRoot)
+            && materialize(path);
         return [mountable ? "--ro-bind" : "--ro-bind-try", path, path];
     });
     return {
@@ -353,6 +380,9 @@ function buildLinuxSandboxCommand(
         fileArgs: [
             "--ro-bind", "/", "/",
             "--bind", policy.writableRoot, policy.writableRoot,
+            ...(policy.writableStateRoot
+                ? ["--bind-try", policy.writableStateRoot, policy.writableStateRoot]
+                : []),
             "--bind", "/tmp", "/tmp",
             "--dev", "/dev",
             // Layered last so a denied path wins over every writable bind above.

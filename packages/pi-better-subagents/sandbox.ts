@@ -18,6 +18,7 @@ import {
     type SandboxCommandArgs as SharedSandboxCommandArgs,
     type SandboxRequest,
 } from "./shared-sandbox-core.ts";
+import { join } from "node:path";
 
 type SandboxCommandArgs = {
     profilePath: string;
@@ -31,8 +32,13 @@ type SandboxCommandArgs = {
 function sharedArgs(args: SandboxCommandArgs): SharedSandboxCommandArgs {
     return {
         profilePath: args.profilePath,
-        // Subagents have no write-deny list: the run directory is the policy.
-        policy: { writableRoot: args.writableDir, home: args.home },
+        // Subagents have no write-deny list. Their work root stays isolated,
+        // while Pi state is writable so startup can acquire auth/settings locks.
+        policy: {
+            writableRoot: args.writableDir,
+            writableStateRoot: join(args.home, ".pi"),
+            home: args.home,
+        },
         execPath: args.piBin,
         execArgs: args.piArgs,
     };

@@ -26,9 +26,9 @@ launch is the result · completion triggers fetch · the foreground never blocks
   call for a subagent to waste wall-clock on — a child missing a piece of info
   resolves it from what it was given, or records it unavailable and returns.
 - **Safe by default.** Every subagent is OS-sandboxed — writes confined to its
-  working directory, reads and network open — and scoped to an explicit tool
-  allowlist. It can't corrupt the parent, escape its directory, or recurse into
-  more subagents without opt-in.
+  working directory, Pi's runtime state under `~/.pi`, and host `/tmp`, with
+  reads and network open — and scoped to an explicit tool allowlist. It can't
+  write elsewhere or recurse into more subagents without opt-in.
 - **Observable.** A live status widget and on-demand queries show each run's
   elapsed time and token/cost spend.
 
@@ -84,10 +84,11 @@ it does not depend on any other extension being installed.
   cooperative guardrail that matches tool inputs, this denies the write syscall
   itself, so a crafted `bash` command can't escape it. `sandbox:false` lifts it;
   `sandbox_dir` moves the writable root (and becomes the child's cwd). `/dev`
-  remains usable. macOS also permits pi state writes under `~/.pi`; Linux exposes
-  that directory read-only, so Linux children must put writable pi state in their
-  work directory or `/tmp`. Everything else (your home, the repo, `/etc`, …) is
-  read-only to the subagent.
+  remains usable. Pi state under `~/.pi` is writable on both macOS and Linux so
+  startup can acquire settings/auth locks. On Linux that extra state root is an
+  explicit subagent policy; foreground and background shell sandboxes do not
+  inherit it. Everything else (your home, the repo, `/etc`, …) is read-only to
+  the subagent.
 - **Tool allowlist.** The child is scoped to an explicit set of tools, which also
   decides what extension code loads (see below).
 - **No runaway recursion.** A subagent cannot spawn its own subagents unless

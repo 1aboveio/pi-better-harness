@@ -202,17 +202,19 @@ describe('sandbox profile (subagent write confinement)', () => {
                 const args = sandboxArgs(base, writable);
                 const cmd = buildSandboxCommand(args);
                 const canonicalWorkdir = realpathSync(writable);
+                const canonicalPiState = join(realpathSync(base), 'home', '.pi');
                 assert.equal(cmd.file, join(base, 'bwrap'));
                 assert.deepEqual(cmd.fileArgs, [
                     '--ro-bind', '/', '/',
                     '--bind', canonicalWorkdir, canonicalWorkdir,
+                    '--bind-try', canonicalPiState, canonicalPiState,
                     '--bind', '/tmp', '/tmp',
                     '--dev', '/dev',
                     '--', '/usr/bin/true', '-p', '--mode', 'json', 'original prompt',
                 ]);
                 assert.equal(cmd.fileArgs.includes('--unshare-net'), false, 'network must remain shared');
                 assert.equal(cmd.fileArgs.includes('--die-with-parent'), false, 'detached children must remain durable');
-                assert.equal(cmd.fileArgs.some((arg) => arg.includes('.pi')), false, '~/.pi must have no writable binding');
+                assert.equal(cmd.fileArgs.includes(canonicalPiState), true, '~/.pi must be writable for Pi state');
             }));
         } finally {
             rmSync(base, { recursive: true, force: true });

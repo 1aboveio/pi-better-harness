@@ -20,6 +20,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const { maybeBuildSandboxCommand, sandboxSupported } = await import(
     new URL('../sandbox.ts', import.meta.url).href,
@@ -30,12 +31,12 @@ function nodeScript(source, ...args) {
     return ['-e', source, ...args];
 }
 
-async function runSandboxedChild({ base, writableDir, cwd = writableDir, args }) {
+async function runSandboxedChild({ base, writableDir, cwd = writableDir, file = process.execPath, args }) {
     const command = maybeBuildSandboxCommand({
         profilePath: join(base, 'unused.sb'),
         writableDir,
         home: homedir(),
-        piBin: process.execPath,
+        piBin: file,
         piArgs: args,
     }, { sandboxEnabled: true, explicitSandbox: true });
     assert.ok(command, 'the selected Linux backend must return a product wrapper command');
@@ -80,6 +81,8 @@ async function withLocalServer(run) {
 it('enforces the real Linux bubblewrap confinement boundary from the product builder', async () => {
     assert.equal(process.platform, 'linux', 'this Linux confinement lane must not route to another backend');
     assert.equal(sandboxSupported(), true, 'Linux confinement requires executable bubblewrap; missing bwrap is a hard failure');
+    const piBin = fileURLToPath(new URL('../../../node_modules/.bin/pi', import.meta.url));
+    assert.equal(existsSync(piBin), true, `workspace Pi binary must exist at ${piBin}`);
 
     const base = mkdtempSync(join(process.cwd(), '.pi-bwrap-integration-'));
     const canonicalWorkdir = join(base, 'work');
@@ -89,7 +92,7 @@ it('enforces the real Linux bubblewrap confinement boundary from the product bui
     const outsideTarget = join(base, 'outside-target.txt');
     const insideSymlink = join(canonicalWorkdir, 'outside-link');
     const tmpPath = join(tmpdir(), `pi-bwrap-tmp-${process.pid}-${Date.now()}`);
-    const piMarker = join(homedir(), '.pi', `bwrap-write-denied-${process.pid}-${Date.now()}`);
+    const piMarker = join(homedir(), '.pi', `bwrap-write-allowed-${process.pid}-${Date.now()}`);
     mkdirSync(canonicalWorkdir, { recursive: true });
     symlinkSync(canonicalWorkdir, aliasWorkdir);
     writeFileSync(outsidePath, 'readable-outside');
@@ -111,6 +114,15 @@ it('enforces the real Linux bubblewrap confinement boundary from the product bui
             'the product builder must bind the real workdir rather than its symlink alias',
         );
         assert.equal(canonicalCommand.fileArgs.includes(aliasWorkdir), false, 'the alias must not become a second writable root');
+
+        const piStartup = await runSandboxedChild({
+            base,
+            writableDir: aliasWorkdir,
+            cwd: aliasWorkdir,
+            file: piBin,
+            args: ['--version'],
+        });
+        assert.equal(piStartup.exitCode, 0, `sandboxed Pi startup failed:\n${piStartup.log}`);
 
         const inside = await runSandboxedChild({
             base,
@@ -164,10 +176,10 @@ it('enforces the real Linux bubblewrap confinement boundary from the product bui
             base,
             writableDir: aliasWorkdir,
             cwd: aliasWorkdir,
-            args: nodeScript("require('node:fs').writeFileSync(process.argv[1], 'forbidden')", piMarker),
+            args: nodeScript("require('node:fs').writeFileSync(process.argv[1], 'pi-state-ok')", piMarker),
         });
-        assert.notEqual(piWrite.exitCode, 0, '~/.pi must stay read-only on Linux');
-        assert.equal(existsSync(piMarker), false, 'the denied ~/.pi write must create no host file');
+        assert.equal(piWrite.exitCode, 0, piWrite.log);
+        assert.equal(readFileSync(piMarker, 'utf8'), 'pi-state-ok', 'subagent Pi state must be writable on Linux');
 
         const approvedSystemPaths = await runSandboxedChild({
             base,
