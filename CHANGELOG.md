@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-subagents@0.1.31] - 2026-09-23
+
+### Fixed
+
+- **subagents**: separate the passive navigator from the plan with a blank line
+- **subagents**: fit CJK titles and wrap Unicode log text without losing content or exceeding terminal width
+
+## [pi-better-background-tasks@0.2.15] - 2026-09-23
+
+### Fixed
+
+- **background-tasks**: separate the passive navigator from the plan with a blank line
+- **background-tasks**: prevent navigator crashes for CJK titles and preserve Unicode log text when wrapping
+
+## [pi-better-plan@0.3.3] - 2026-09-23
+
+### Fixed
+
+- **plan**: use consistent section spacing and themed headings for passive plans and Rush workflows
+
+## [pi-better-harness@0.3.17] - 2026-09-23
+
+### Changed
+
+- **harness**: bundle `pi-better-subagents@0.1.31`, `pi-better-background-tasks@0.2.15`, and `pi-better-plan@0.3.3` with the widget spacing, heading styling, and Unicode navigator fixes
+
 ## [pi-better-plan@0.3.2] - 2026-09-23
 
 ### Fixed
