@@ -1322,8 +1322,8 @@ export default function (pi: ExtensionAPI) {
         // reconciled via the conservative old-metadata path.
         const identity = captureProcessIdentity(spawned.pid, spawnIdentityProbe);
 
-        const meta = {
-            id, name: p.name, status: "running" as const,
+        const meta: RunMeta = {
+            id, name: p.name, status: "running",
             pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model,
             effort: thinking, cwd,
             ...identity,
@@ -1332,9 +1332,11 @@ export default function (pi: ExtensionAPI) {
             callbackOrigin,
             sandbox: sandboxDir, callback: p.callback !== false,
             ...batchInfo,
-            ...(p.catalog ? { catalog: p.catalog } : {}),
+            // The launch record is JSON. Registry freezes that value; it does not
+            // require the resolver's nominal type to carry an index signature.
+            ...(p.catalog ? { catalog: p.catalog as unknown as RunMeta["catalog"] } : {}),
         };
-        writeMeta(meta as RunMeta);
+        writeMeta(meta);
 
         void spawned.exit.then((code) => finalizeRun(pi, ctx, id, code));
 

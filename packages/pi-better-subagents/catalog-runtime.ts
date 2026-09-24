@@ -62,6 +62,16 @@ export interface CatalogRunRecord {
     roleName?: string;
     alias?: string;
     displayName: string;
+    /** Label the registry allocator adopts. Same string as `RunMeta.name`. */
+    identity: {
+        label: string;
+        kind: "role" | "agent";
+        id: string;
+        name?: string;
+        roleId?: string;
+        roleName?: string;
+        alias?: string;
+    };
     instructionMode: string;
     source?: { scope: string; path: string; contentDigest: string; id: string };
     roleSource?: { scope: string; path: string; contentDigest: string; id: string };
@@ -241,6 +251,9 @@ export async function prepareCatalogJob(snapshot: CatalogSnapshot, job: CatalogJ
     }
     const launch = launchParameters(decision);
     const displayName = await displayNameFor(resolved.effective, job, host);
+    const roleId = resolved.effective.kind === "role" ? resolved.effective.id : resolved.effective.roleId;
+    const roleName = roleId ? roleSlug(roleId) : undefined;
+    const alias = text(job.alias);
     const record = jsonValue({
         snapshotDigest: snapshot.digest,
         revision: snapshot.revision,
@@ -248,10 +261,19 @@ export async function prepareCatalogJob(snapshot: CatalogSnapshot, job: CatalogJ
         kind: resolved.effective.kind,
         id: resolved.effective.id,
         ...(resolved.effective.name ? { name: resolved.effective.name } : {}),
-        ...(resolved.effective.roleId ? { roleId: resolved.effective.roleId } : {}),
-        ...(resolved.effective.kind === "role" ? { roleName: roleSlug(resolved.effective.id) } : resolved.effective.roleId ? { roleName: roleSlug(resolved.effective.roleId) } : {}),
-        ...(text(job.alias) ? { alias: text(job.alias) } : {}),
+        ...(roleId ? { roleId } : {}),
+        ...(roleName ? { roleName } : {}),
+        ...(alias ? { alias } : {}),
         displayName,
+        identity: {
+            label: displayName,
+            kind: resolved.effective.kind,
+            id: resolved.effective.id,
+            ...(resolved.effective.name ? { name: resolved.effective.name } : {}),
+            ...(roleId ? { roleId } : {}),
+            ...(roleName ? { roleName } : {}),
+            ...(alias ? { alias } : {}),
+        },
         instructionMode: resolved.effective.instructionMode,
         ...(origin(resolved.effective.source) ? { source: origin(resolved.effective.source) } : {}),
         ...(origin(resolved.effective.roleSource) ? { roleSource: origin(resolved.effective.roleSource) } : {}),
@@ -369,7 +391,14 @@ async function displayNameFor(effective: EffectiveDefinition, job: CatalogJobFie
 }
 
 async function allocateDirectRoleLabel(input: { roleId: string; roleName: string; alias?: string; registryDir?: string }): Promise<string> {
-    let imported: { allocateCatalogLabel?: (request: { roleId: string; roleName: string; alias?: string; registryDir?: string }) => Promise<string> };
+    let imported: {
+        allocateCatalogLabel?: (request: {
+            roleId: string;
+            roleName: string;
+            alias?: string;
+            registryDir?: string;
+        }) => string | Promise<string>;
+    };
     try {
         imported = await import("./catalog-identity.ts");
     } catch (error) {

@@ -24,7 +24,7 @@ The child prompt is the effective role or agent instructions, then the task. Spa
 
 ## Provenance and names
 
-The first `meta.json` write stores the launched `model` and `effort` plus a JSON `catalog` object: snapshot digest, definition identity, effective field sources, and `modelSelection` / `effortSelection`. Later edits do not rewrite it. Catalog-free runs omit `catalog`.
+The first `meta.json` write stores the launched `model` and `effort` plus a JSON `catalog` object: snapshot digest, definition identity (`catalog.identity.label` is the same display name as `name`), effective field sources, and `modelSelection` / `effortSelection`. That write happens before the exit callback is attached. Later status, result, and stop writes keep that snapshot and that name; they do not fill in a missing catalog or replace it with a stale one. Catalog-free runs omit `catalog`.
 
 A named agent displays its defined name. A direct role asks `allocateCatalogLabel({ roleId, roleName, alias })` when that module is present. `roleName` is the slug (`developer`), not `role.developer`. The label is allocated in the local run registry. An explicit `alias` (or the legacy `name` when `alias` is omitted) is the alias; collisions are the allocator's numeric suffix. Batch-generated `job-N` labels are not aliases.
 
