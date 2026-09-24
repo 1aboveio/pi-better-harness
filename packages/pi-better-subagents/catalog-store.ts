@@ -386,7 +386,18 @@ function collectDirectory(
             }));
             continue;
         }
-        const parse = parseDefinition(raw, path);
+        let parse: ParseResult;
+        try {
+            parse = parseDefinition(raw, path);
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            diagnostics.push(diagnostic(
+                DiagnosticCodes.parserLimit,
+                `Stopped reading ${path}: ${detail.length > 500 ? `${detail.slice(0, 500)}\u2026` : detail}. This file was isolated so valid catalog entries remain usable.`,
+                { scope, path, blocking: false, structural: true },
+            ));
+            continue;
+        }
         const id = parse.definition?.id ?? parse.occupantId;
         if (!id || !kindForId(id)) {
             for (const item of parse.diagnostics) {
