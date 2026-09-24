@@ -9,7 +9,7 @@
  */
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { writeMeta, runDir, logPathFor } from "../registry.ts";
 import { buildSubagentResultText } from "../finalization.ts";
 import { subagentResultTool } from "../tools.ts";
@@ -157,12 +157,74 @@ describe("subagent_result folded TUI display", () => {
 
     // @covers subagent.result-display
     // @level unit
-    it("is wired through the registered extension tool definition", () => {
-        const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-        const toolsSource = readFileSync(new URL("../tools.ts", import.meta.url), "utf8");
+    it("registers the factory tool so folding and the full model result stay on that object", async () => {
+        const { register } = await import("node:module");
+        register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
-        assert.match(indexSource, /pi\.registerTool\(subagentResultTool\(Type\)\)/);
-        assert.match(toolsSource, /renderResult\(result: unknown, options: unknown, theme: unknown\)/);
-        assert.match(toolsSource, /renderSubagentResultDisplay\(result, options, theme\)/);
+        const id = trackDisk(`sa_result_display_registered_${Date.now()}`);
+        writeTerminalRunWithLongResult(id);
+        const hooksKey = Symbol.for("pi-better-subagents.acceptance-hooks");
+        const priorProbe = process.env.PI_CATALOG_ACCEPTANCE_PROBE;
+        delete process.env.PI_CATALOG_ACCEPTANCE_PROBE;
+        delete globalThis[hooksKey];
+
+        const registered = new Map();
+        const extension = await import(`../index.ts?result-display-registration=${Date.now()}`);
+        const pi = {
+            registerTool(def) { registered.set(def.name, def); },
+            registerCommand() {},
+            on() {},
+            sendMessage() {},
+        };
+        extension.default(pi);
+
+        const tool = registered.get("subagent_result");
+        assert.equal(tool?.name, "subagent_result");
+        assert.equal(typeof tool.execute, "function");
+        assert.equal(typeof tool.renderResult, "function");
+        assert.equal(globalThis[hooksKey], undefined, "acceptance probe must not publish unless PI_CATALOG_ACCEPTANCE_PROBE=1");
+
+        const result = await tool.execute("tc", { id });
+        const full = textOf(result);
+        assert.equal(full, buildSubagentResultText(id), "registered tool must keep the full model-facing result");
+        assert.match(full, /result-line-18/);
+        assert.equal(result.details?.kind, "subagent-result-display");
+
+        const compact = plain(tool.renderResult(result, { expanded: false, isPartial: false }, theme, {}).render(80));
+        assert.match(compact, /subagent_result/);
+        assert.match(compact, /Click or expand for full result/);
+        assert.doesNotMatch(compact, /result-line-18/, "registered compact display must fold the result");
+
+        const expanded = plain(tool.renderResult(result, { expanded: true, isPartial: false }, theme, {}).render(80));
+        assert.match(expanded, /result-line-18/, "registered expanded display must show the full result");
+
+        // The acceptance const binding must publish this same object, not a wrapper
+        // that could drop renderResult or replace the model payload.
+        process.env.PI_CATALOG_ACCEPTANCE_PROBE = "1";
+        try {
+            const probed = new Map();
+            const probedExtension = await import(`../index.ts?result-display-probe=${Date.now()}`);
+            probedExtension.default({
+                registerTool(def) { probed.set(def.name, def); },
+                registerCommand() {},
+                on() {},
+                sendMessage() {},
+            });
+            const probedTool = probed.get("subagent_result");
+            const hooks = globalThis[hooksKey];
+            assert.ok(hooks, "enabled acceptance probe must publish hooks");
+            assert.equal(hooks.subagentResult, probedTool, "probe must publish the registered tool object");
+            assert.equal(typeof hooks.subagentResult.renderResult, "function");
+            const probedResult = await hooks.subagentResult.execute("probe", { id });
+            assert.equal(textOf(probedResult), full, "published tool must return the same full model result");
+            const probedCompact = plain(hooks.subagentResult.renderResult(probedResult, { expanded: false }, theme, {}).render(80));
+            assert.doesNotMatch(probedCompact, /result-line-18/, "published tool must keep folded display");
+            const probedExpanded = plain(hooks.subagentResult.renderResult(probedResult, { expanded: true }, theme, {}).render(80));
+            assert.match(probedExpanded, /result-line-18/);
+        } finally {
+            if (priorProbe === undefined) delete process.env.PI_CATALOG_ACCEPTANCE_PROBE;
+            else process.env.PI_CATALOG_ACCEPTANCE_PROBE = priorProbe;
+            delete globalThis[hooksKey];
+        }
     });
 });
