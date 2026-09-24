@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const REGISTRY = fileURLToPath(new URL("../registry.ts", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const TSX_CJS = fileURLToPath(new URL("../../../node_modules/tsx/dist/cjs/index.cjs", import.meta.url));
 
 function tempRoot() {
     return mkdtempSync(join(tmpdir(), "meta-lock-"));
@@ -86,8 +87,9 @@ const sync = new Int32Array(sab);
 const metaPath = join(process.env.TMPDIR, "pi-better-subagents", "runs", id, "meta.json");
 const lockPath = join(process.env.TMPDIR, "pi-better-subagents", "runs", id, ".meta.lock");
 const worker = \`
-import { parentPort, workerData } from "node:worker_threads";
-const { writeMeta, setMetaWriteBarrierForTests } = await import(workerData.registry);
+require(${JSON.stringify(TSX_CJS)});
+const { parentPort, workerData } = require("node:worker_threads");
+const { writeMeta, setMetaWriteBarrierForTests } = require(workerData.registry);
 const sync = new Int32Array(workerData.sab);
 if (workerData.role === "A") {
   setMetaWriteBarrierForTests(() => {
@@ -108,7 +110,7 @@ try {
 \`;
 const inbox = [];
 function start(role, meta) {
-  const child = new Worker(worker, { eval: true, execArgv: ["--import", "tsx"], workerData: { registry, role, sab, meta, id } });
+  const child = new Worker(worker, { eval: true, execArgv: [], workerData: { registry, role, sab, meta, id } });
   child.on("message", (message) => inbox.push(message));
   return child;
 }
@@ -227,8 +229,9 @@ const sab = new SharedArrayBuffer(16);
 const sync = new Int32Array(sab);
 const metaPath = join(process.env.TMPDIR, "pi-better-subagents", "runs", id, "meta.json");
 const worker = \`
-import { parentPort, workerData } from "node:worker_threads";
-const { writeMeta, setMetaWriteBarrierForTests } = await import(workerData.registry);
+require(${JSON.stringify(TSX_CJS)});
+const { parentPort, workerData } = require("node:worker_threads");
+const { writeMeta, setMetaWriteBarrierForTests } = require(workerData.registry);
 const sync = new Int32Array(workerData.sab);
 if (workerData.role === "A") {
   setMetaWriteBarrierForTests(() => {
@@ -247,7 +250,7 @@ try {
 \`;
 const inbox = [];
 function start(role, meta) {
-  const child = new Worker(worker, { eval: true, execArgv: ["--import", "tsx"], workerData: { registry, role, sab, meta } });
+  const child = new Worker(worker, { eval: true, execArgv: [], workerData: { registry, role, sab, meta } });
   child.on("message", (message) => inbox.push(message));
   return child;
 }
@@ -294,8 +297,9 @@ const sync = new Int32Array(sab);
 const lockPath = join(process.env.TMPDIR, "pi-better-subagents", "runs", id, ".meta.lock");
 const metaPath = join(process.env.TMPDIR, "pi-better-subagents", "runs", id, "meta.json");
 const worker = \`
-import { parentPort, workerData } from "node:worker_threads";
-const { writeMeta, setMetaWriteBarrierForTests } = await import(workerData.registry);
+require(${JSON.stringify(TSX_CJS)});
+const { parentPort, workerData } = require("node:worker_threads");
+const { writeMeta, setMetaWriteBarrierForTests } = require(workerData.registry);
 const sync = new Int32Array(workerData.sab);
 let passed = false;
 setMetaWriteBarrierForTests(() => {
@@ -314,7 +318,7 @@ try {
 \`;
 const child = new Worker(worker, {
   eval: true,
-  execArgv: ["--import", "tsx"],
+  execArgv: [],
   workerData: { registry, sab, meta: ${JSON.stringify(baseMeta("sa_release", { name: "old", catalog: { marker: "old" } }))} },
 });
 const message = new Promise((resolve, reject) => child.on("message", resolve).on("error", reject));
@@ -466,23 +470,30 @@ try {
 import { writeMeta, readMeta } from ${JSON.stringify(REGISTRY)};
 const id = "sa_anchor";
 writeMeta(${JSON.stringify(baseMeta("sa_anchor", { name: "kept", catalog: { marker: "first", identity: { label: "kept" } } }))});
-writeMeta(${JSON.stringify(baseMeta("sa_anchor", {
+const replaced = ${JSON.stringify(baseMeta("sa_anchor", {
             name: "replaced",
             status: "completed",
             endedAt: 9,
             exitCode: 0,
             catalog: { marker: "second" },
-        }))});
+        }))};
+writeMeta(replaced);
 const kept = readMeta(id);
 const plainId = "sa_plain";
 writeMeta(${JSON.stringify(baseMeta("sa_plain", { name: "plain" }))});
 writeMeta(${JSON.stringify(baseMeta("sa_plain", { name: "plain-2", status: "completed", endedAt: 4, exitCode: 0 }))});
+const filled = ${JSON.stringify(baseMeta("sa_plain", { name: "incoming", status: "completed", endedAt: 4, exitCode: 0, catalog: { identity: { label: "Incoming" }, marker: "Incoming" } }))};
+writeMeta(filled);
 const plain = readMeta(plainId);
 process.stdout.write(JSON.stringify({
   marker: kept.catalog.marker,
   name: kept.name,
   status: kept.status,
   exitCode: kept.exitCode,
+  replacedName: replaced.name,
+  replacedMarker: replaced.catalog.marker,
+  argumentName: filled.name,
+  argumentCatalog: Object.hasOwn(filled, "catalog"),
   plainCatalog: Object.hasOwn(plain, "catalog"),
   plainStatus: plain.status,
   plainName: plain.name,
@@ -495,6 +506,10 @@ process.stdout.write(JSON.stringify({
             assert.equal(reported.name, "kept");
             assert.equal(reported.status, "completed");
             assert.equal(reported.exitCode, 0);
+            assert.equal(reported.replacedName, "kept");
+            assert.equal(reported.replacedMarker, "first");
+            assert.equal(reported.argumentName, "plain");
+            assert.equal(reported.argumentCatalog, false);
             assert.equal(reported.plainCatalog, false);
             assert.equal(reported.plainStatus, "completed");
             assert.equal(reported.plainName, "plain");
@@ -559,8 +574,7 @@ process.stdout.write(JSON.stringify({
   name: meta.name,
   status: meta.status,
   exitCode: meta.exitCode,
-  nameAnchor: readFileSync(join(dir, ".launch-name"), "utf8"),
-  catalogAnchor: JSON.parse(readFileSync(join(dir, ".launch-catalog.json"), "utf8")),
+  launch: JSON.parse(readFileSync(join(dir, ".launch.json"), "utf8")),
 }));
 `;
         try {
@@ -571,9 +585,9 @@ process.stdout.write(JSON.stringify({
             assert.equal(reported.name, "legacy-name");
             assert.equal(reported.status, "completed");
             assert.equal(reported.exitCode, 0);
-            assert.equal(reported.nameAnchor, "legacy-name");
-            assert.equal(reported.catalogAnchor.marker, "legacy");
-            assert.equal(reported.catalogAnchor.snapshot, "planted");
+            assert.equal(reported.launch.name, "legacy-name");
+            assert.equal(reported.launch.catalog.marker, "legacy");
+            assert.equal(reported.launch.catalog.snapshot, "planted");
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -641,16 +655,17 @@ if (!isMainThread) {
       await new Promise((r) => setTimeout(r, 100)); release(5);
       const outcomes = await Promise.all([a, b]);
       const finalMeta = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
-      const nameAnchor = fs.readFileSync(path.join(run, ".launch-name"), "utf8");
-      const catalogAnchor = JSON.parse(fs.readFileSync(path.join(run, ".launch-catalog.json"), "utf8"));
+      const launch = JSON.parse(fs.readFileSync(path.join(run, ".launch.json"), "utf8"));
       console.log(JSON.stringify({
         sqlite,
         first: first.catalog.marker,
         final: finalMeta.catalog.marker,
         firstName: first.name,
         finalName: finalMeta.name,
-        anchorName: nameAnchor,
-        anchorMarker: catalogAnchor.marker,
+        launchName: launch.name,
+        launchMarker: launch.catalog.marker,
+        splitName: fs.existsSync(path.join(run, ".launch-name")),
+        splitCatalog: fs.existsSync(path.join(run, ".launch-catalog.json")),
         outcomes: [c, ...outcomes],
       }));
     } finally {
@@ -676,10 +691,353 @@ if (!isMainThread) {
             assert.equal(reported.sqlite, false);
             assert.equal(reported.first, reported.final);
             assert.equal(reported.firstName, reported.finalName);
-            assert.equal(reported.anchorName, reported.finalName);
-            assert.equal(reported.anchorMarker, reported.final);
+            assert.equal(reported.firstName, reported.first);
+            assert.equal(reported.launchName, reported.finalName);
+            assert.equal(reported.launchMarker, reported.final);
+            assert.equal(reported.splitName, false);
+            assert.equal(reported.splitCatalog, false);
             assert.ok(reported.first === "A" || reported.first === "B" || reported.first === "C");
             assert.deepEqual(reported.outcomes.map((item) => item.ok), [true, true, true]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("keeps one whole launch when a writer pauses after the launch link", { timeout: 20_000 }, async () => {
+        const root = tempRoot();
+        const scriptPath = join(root, "coherent-launch.cjs");
+        const sqliteArgs = sqliteOffArgs();
+        const source = `
+const { Worker, isMainThread, workerData, parentPort } = require("node:worker_threads");
+const fs = require("node:fs");
+const path = require("node:path");
+const ROOT = ${JSON.stringify(REPO_ROOT)};
+function snapshot(role) {
+  return {
+    id: "race",
+    name: role,
+    catalog: {
+      identity: { label: role, id: "agent." + role.toLowerCase() },
+      effective: { marker: role },
+      provenance: { source: role },
+    },
+    status: role === "C" ? "completed" : "running",
+    ...(role === "C" ? { endedAt: 2, exitCode: 0, completionCallbackSentAt: 3 } : {}),
+    pid: 1,
+    spawnPid: 1,
+    cwd: process.env.TMPDIR,
+    promptPreview: role,
+    startedAt: 1,
+    logPath: "none",
+    sessionId: "test",
+  };
+}
+if (!isMainThread) {
+  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  const sync = new Int32Array(workerData.sab);
+  const signal = (i) => { Atomics.store(sync, i, 1); Atomics.notify(sync, i); };
+  const park = (i) => { if (Atomics.wait(sync, i, 0, 15000) === "timed-out") throw Error("park timeout " + i); };
+  const originalRename = fs.renameSync;
+  const originalLink = fs.linkSync;
+  let held = false;
+  fs.renameSync = function(from, to, ...rest) {
+    if (workerData.role === "A" && path.basename(String(from)) === ".meta.lock" && !held) {
+      held = true;
+      signal(0); park(1);
+      const result = originalRename.call(this, from, to, ...rest);
+      signal(2); park(3);
+      return result;
+    }
+    return originalRename.call(this, from, to, ...rest);
+  };
+  fs.linkSync = function(from, to, ...rest) {
+    const result = originalLink.call(this, from, to, ...rest);
+    if (workerData.role === "B" && path.basename(String(to)) === ".launch.json" && !held) {
+      held = true;
+      signal(4); park(5);
+    }
+    return result;
+  };
+  const { writeMeta } = require(ROOT + "/packages/pi-better-subagents/registry.ts");
+  try {
+    writeMeta(snapshot(workerData.role));
+    parentPort.postMessage({ role: workerData.role, ok: true });
+  } catch (e) {
+    parentPort.postMessage({ role: workerData.role, ok: false, error: e.message });
+  }
+} else {
+  (async () => {
+    const fixture = fs.mkdtempSync(path.join(${JSON.stringify(root)}, "coherent-launch-"));
+    process.env.TMPDIR = fixture; process.env.TMP = fixture; process.env.TEMP = fixture;
+    const run = path.join(fixture, "pi-better-subagents/runs/race");
+    fs.mkdirSync(run, { recursive: true });
+    fs.writeFileSync(path.join(run, ".meta.lock"), JSON.stringify({ pid: 2147483646, token: "dead" }));
+    const sab = new SharedArrayBuffer(32), sync = new Int32Array(sab), workers = [];
+    const start = (role) => {
+      const w = new Worker(__filename, { workerData: { role, sab }, execArgv: ${JSON.stringify(sqliteArgs)} });
+      workers.push(w);
+      return new Promise((resolve, reject) => w.once("message", resolve).once("error", reject));
+    };
+    const wait = (i) => { if (Atomics.wait(sync, i, 0, 10000) === "timed-out") throw Error("wait timeout " + i); };
+    const release = (i) => { Atomics.store(sync, i, 1); Atomics.notify(sync, i); };
+    try {
+      const a = start("A"); wait(0);
+      const b = start("B"); wait(4);
+      release(1); wait(2);
+      const c = await start("C");
+      const first = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
+      const launchAtFirst = fs.readFileSync(path.join(run, ".launch.json"), "utf8");
+      release(3); release(5);
+      const outcomes = [c, ...await Promise.all([a, b])];
+      const finalMeta = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
+      const launch = JSON.parse(fs.readFileSync(path.join(run, ".launch.json"), "utf8"));
+      console.log(JSON.stringify({
+        first, final: finalMeta, launch, launchUnchanged: launchAtFirst === JSON.stringify(launch), outcomes,
+      }));
+    } finally {
+      await Promise.all(workers.map((w) => w.terminate()));
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  })().catch((e) => { console.error(e); process.exitCode = 1; });
+}
+`;
+        writeFileSync(scriptPath, source);
+        try {
+            const { stdout } = await runNode(scriptPath, {
+                TMPDIR: root,
+                TMP: root,
+                TEMP: root,
+                TSX_DISABLE_CACHE: "1",
+            }, { args: sqliteArgs, timeoutMs: 20_000 });
+            const reported = JSON.parse(stdout);
+            const catalog = {
+                identity: { label: "B", id: "agent.b" },
+                effective: { marker: "B" },
+                provenance: { source: "B" },
+            };
+            assert.equal(reported.launch.name, "B");
+            assert.deepEqual(reported.launch.catalog, catalog);
+            assert.equal(reported.launchUnchanged, true);
+            assert.equal(reported.first.name, "B");
+            assert.deepEqual(reported.first.catalog, catalog);
+            assert.equal(reported.first.status, "completed");
+            assert.equal(reported.first.endedAt, 2);
+            assert.equal(reported.first.exitCode, 0);
+            assert.equal(reported.first.completionCallbackSentAt, 3);
+            assert.equal(reported.final.name, "B");
+            assert.deepEqual(reported.final.catalog, catalog);
+            assert.deepEqual(reported.outcomes.map((item) => item.ok), [true, true, true]);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("adopts a whole legacy launch and ignores a partial or mismatched anchor", { timeout: 20_000 }, async () => {
+        const root = tempRoot();
+        const scriptPath = join(root, "launch-record-cases.cjs");
+        const source = `
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const ROOT = ${JSON.stringify(REPO_ROOT)};
+if (process.argv[2] === "child") {
+  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  const original = fs.linkSync;
+  fs.linkSync = function(from, to, ...rest) {
+    const result = original.call(this, from, to, ...rest);
+    if (path.basename(String(to)) === ".launch.json") process.exit(42);
+    return result;
+  };
+  const { writeMeta } = require(ROOT + "/packages/pi-better-subagents/registry.ts");
+  writeMeta(JSON.parse(process.argv[3]));
+  process.exit(0);
+}
+require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+const { writeMeta, readMeta, runDir } = require(ROOT + "/packages/pi-better-subagents/registry.ts");
+function snap(id, role, extra) {
+  return Object.assign({
+    id, name: role,
+    catalog: {
+      identity: { label: role, id: "agent." + role.toLowerCase() },
+      effective: { marker: role },
+      provenance: { source: role },
+    },
+    status: "running", pid: 1, spawnPid: 1, cwd: process.env.TMPDIR,
+    promptPreview: role, startedAt: 1, logPath: "none", sessionId: "test",
+  }, extra || {});
+}
+function plant(id) {
+  fs.mkdirSync(runDir(id), { recursive: true });
+  return runDir(id);
+}
+const out = {};
+{
+  const dir = plant("orphan-name");
+  fs.writeFileSync(path.join(dir, ".launch-name"), "A");
+  const incoming = snap("orphan-name", "B", { status: "completed", endedAt: 4, exitCode: 0 });
+  writeMeta(incoming);
+  out.orphanName = { argument: incoming.name, argumentLabel: incoming.catalog.identity.label, disk: readMeta("orphan-name") };
+}
+{
+  const dir = plant("split");
+  fs.writeFileSync(path.join(dir, ".launch-name"), "A");
+  fs.writeFileSync(path.join(dir, ".launch-catalog.json"), JSON.stringify({ identity: { label: "C", id: "agent.c" }, effective: { marker: "C" }, provenance: { source: "C" } }));
+  writeMeta(snap("split", "B"));
+  out.split = readMeta("split");
+}
+{
+  const dir = plant("legacy-full");
+  const old = snap("legacy-full", "Legacy");
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(old));
+  const incoming = snap("legacy-full", "Incoming", { status: "completed", endedAt: 9, exitCode: 0 });
+  writeMeta(incoming);
+  out.legacyFull = { argument: incoming, disk: readMeta("legacy-full"), launch: JSON.parse(fs.readFileSync(path.join(dir, ".launch.json"), "utf8")) };
+}
+{
+  const dir = plant("legacy-null");
+  const old = snap("legacy-null", "Legacy", { catalog: null });
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(old));
+  const incoming = snap("legacy-null", "Incoming", { status: "completed", endedAt: 9, exitCode: 0 });
+  writeMeta(incoming);
+  out.legacyNull = { catalog: incoming.catalog, disk: readMeta("legacy-null"), launch: JSON.parse(fs.readFileSync(path.join(dir, ".launch.json"), "utf8")) };
+}
+{
+  const dir = plant("legacy-absent");
+  const old = snap("legacy-absent", "Legacy");
+  delete old.catalog;
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(old));
+  const incoming = snap("legacy-absent", "Incoming", { status: "completed", endedAt: 9, exitCode: 0 });
+  writeMeta(incoming);
+  const disk = readMeta("legacy-absent");
+  out.legacyAbsent = {
+    argumentName: incoming.name,
+    argumentCatalog: Object.hasOwn(incoming, "catalog"),
+    diskName: disk.name,
+    diskCatalog: Object.hasOwn(disk, "catalog"),
+    diskStatus: disk.status,
+    launch: JSON.parse(fs.readFileSync(path.join(dir, ".launch.json"), "utf8")),
+  };
+}
+{
+  const dir = plant("mismatch");
+  const old = snap("mismatch", "A");
+  old.catalog = { identity: { label: "C", id: "agent.c" }, effective: { marker: "C" }, provenance: { source: "C" } };
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(old));
+  const incoming = snap("mismatch", "B", { status: "completed", endedAt: 6, exitCode: 0 });
+  writeMeta(incoming);
+  out.mismatch = { disk: readMeta("mismatch"), launch: JSON.parse(fs.readFileSync(path.join(dir, ".launch.json"), "utf8")) };
+}
+{
+  const dir = plant("truncated");
+  fs.writeFileSync(path.join(dir, "meta.json"), "{not-json");
+  writeMeta(snap("truncated", "B"));
+  out.truncated = readMeta("truncated");
+}
+{
+  const crashed = snap("crash", "A");
+  const child = spawnSync(process.execPath, [__filename, "child", JSON.stringify(crashed)], { env: process.env, encoding: "utf8", timeout: 15000 });
+  const dir = runDir("crash");
+  const before = {
+    exit: child.status,
+    launch: JSON.parse(fs.readFileSync(path.join(dir, ".launch.json"), "utf8")),
+    meta: fs.existsSync(path.join(dir, "meta.json")),
+    splitName: fs.existsSync(path.join(dir, ".launch-name")),
+  };
+  const incoming = snap("crash", "B", { status: "completed", endedAt: 7, exitCode: 0, completionCallbackSentAt: 8 });
+  writeMeta(incoming);
+  out.crash = { before, argument: incoming, disk: readMeta("crash"), stderr: child.stderr };
+}
+{
+  const dir = plant("corrupt");
+  fs.writeFileSync(path.join(dir, ".launch.json"), "");
+  let message = null;
+  try { writeMeta(snap("corrupt", "B")); } catch (error) { message = error.message; }
+  out.corrupt = { message, meta: fs.existsSync(path.join(dir, "meta.json")), launch: fs.readFileSync(path.join(dir, ".launch.json"), "utf8") };
+}
+{
+  const first = snap("status", "Same");
+  writeMeta(first);
+  const update = snap("status", "Other", { status: "completed", endedAt: 4, exitCode: 0, completionCallbackSentAt: 8 });
+  writeMeta(update);
+  out.status = { argument: update, disk: readMeta("status") };
+}
+console.log(JSON.stringify(out));
+`;
+        writeFileSync(scriptPath, source);
+        try {
+            const { stdout } = await runNode(scriptPath, {
+                TMPDIR: root,
+                TMP: root,
+                TEMP: root,
+                TSX_DISABLE_CACHE: "1",
+            }, { args: [], timeoutMs: 20_000 });
+            const reported = JSON.parse(stdout);
+            const whole = (role) => ({
+                identity: { label: role, id: "agent." + role.toLowerCase() },
+                effective: { marker: role },
+                provenance: { source: role },
+            });
+            assert.equal(reported.orphanName.argument, "B");
+            assert.equal(reported.orphanName.argumentLabel, "B");
+            assert.equal(reported.orphanName.disk.name, "B");
+            assert.deepEqual(reported.orphanName.disk.catalog, whole("B"));
+            assert.equal(reported.orphanName.disk.status, "completed");
+            assert.equal(reported.split.name, "B");
+            assert.deepEqual(reported.split.catalog, whole("B"));
+            assert.equal(reported.legacyFull.argument.name, "Legacy");
+            assert.deepEqual(reported.legacyFull.argument.catalog, whole("Legacy"));
+            assert.equal(reported.legacyFull.argument.status, "completed");
+            assert.equal(reported.legacyFull.disk.name, "Legacy");
+            assert.deepEqual(reported.legacyFull.disk.catalog, whole("Legacy"));
+            assert.equal(reported.legacyFull.disk.status, "completed");
+            assert.equal(reported.legacyFull.launch.name, "Legacy");
+            assert.deepEqual(reported.legacyFull.launch.catalog, whole("Legacy"));
+            assert.equal(reported.legacyNull.catalog, null);
+            assert.equal(reported.legacyNull.disk.name, "Legacy");
+            assert.equal(reported.legacyNull.disk.catalog, null);
+            assert.equal(reported.legacyNull.disk.status, "completed");
+            assert.equal(reported.legacyNull.launch.name, "Legacy");
+            assert.equal(reported.legacyNull.launch.catalog, null);
+            assert.equal(reported.legacyAbsent.argumentName, "Legacy");
+            assert.equal(reported.legacyAbsent.argumentCatalog, false);
+            assert.equal(reported.legacyAbsent.diskName, "Legacy");
+            assert.equal(reported.legacyAbsent.diskCatalog, false);
+            assert.equal(reported.legacyAbsent.diskStatus, "completed");
+            assert.equal(reported.legacyAbsent.launch.name, "Legacy");
+            assert.equal(Object.hasOwn(reported.legacyAbsent.launch, "catalog"), false);
+            assert.equal(reported.mismatch.disk.name, "A");
+            assert.equal(reported.mismatch.disk.catalog.identity.label, "C");
+            assert.equal(reported.mismatch.disk.status, "completed");
+            assert.equal(reported.mismatch.launch.name, "A");
+            assert.equal(reported.mismatch.launch.catalog.identity.label, "C");
+            assert.notEqual(reported.mismatch.launch.name, reported.mismatch.launch.catalog.identity.label);
+            assert.equal(reported.truncated.name, "B");
+            assert.deepEqual(reported.truncated.catalog, whole("B"));
+            assert.equal(reported.crash.before.exit, 42);
+            assert.equal(reported.crash.before.meta, false);
+            assert.equal(reported.crash.before.splitName, false);
+            assert.equal(reported.crash.before.launch.name, "A");
+            assert.deepEqual(reported.crash.before.launch.catalog, whole("A"));
+            assert.equal(reported.crash.argument.name, "A");
+            assert.deepEqual(reported.crash.argument.catalog, whole("A"));
+            assert.equal(reported.crash.argument.status, "completed");
+            assert.equal(reported.crash.argument.completionCallbackSentAt, 8);
+            assert.equal(reported.crash.disk.name, "A");
+            assert.deepEqual(reported.crash.disk.catalog, whole("A"));
+            assert.equal(reported.crash.disk.status, "completed");
+            assert.equal(reported.crash.disk.endedAt, 7);
+            assert.equal(reported.crash.disk.completionCallbackSentAt, 8);
+            assert.match(reported.corrupt.message, /Unreadable launch record for corrupt/);
+            assert.equal(reported.corrupt.meta, false);
+            assert.equal(reported.corrupt.launch, "");
+            assert.equal(reported.status.argument.name, "Same");
+            assert.deepEqual(reported.status.argument.catalog, whole("Same"));
+            assert.equal(reported.status.argument.status, "completed");
+            assert.equal(reported.status.argument.completionCallbackSentAt, 8);
+            assert.equal(reported.status.disk.name, "Same");
+            assert.deepEqual(reported.status.disk.catalog, whole("Same"));
+            assert.equal(reported.status.disk.status, "completed");
+            assert.equal(reported.status.disk.exitCode, 0);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

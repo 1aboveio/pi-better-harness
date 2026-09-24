@@ -166,9 +166,10 @@ export interface RunMeta {
     dismissedAt?: number;
     /**
      * Optional catalog launch snapshot. Additive: metadata written before the
-     * catalog has no `catalog` key and still parses. `writeMeta` freezes the
-     * first persisted snapshot, so status updates and `/reload` must not
-     * replace identity, effective configuration, or provenance.
+     * catalog has no `catalog` key and still parses. The first launch
+     * publication freezes `name` and `catalog` together, including when
+     * catalog is absent or null. Later status, result, and stop writes keep
+     * that whole snapshot and must not fill a missing catalog.
      */
     catalog?: CatalogLaunchSnapshot;
 }
@@ -194,46 +195,71 @@ function metaPathFor(id: string): string {
 }
 
 /**
- * Launch name and catalog already stored for a run.
- *
- * A missing file, or a file with no `catalog` key, may still receive the
- * launch snapshot. A present catalog value, including null, is never
- * replaced. A present display name is likewise kept: callbacks must not
- * publish a missing or stale label over the one supplied on the first write.
+ * Name and catalog from a single launch publication.
+ * `catalogKnown` is false when the winning snapshot omitted `catalog`.
+ * Explicit null is known and must not be replaced by a later object.
  */
-function readLaunchAnchor(id: string): {
-    catalogFrozen: boolean;
-    catalog?: CatalogLaunchSnapshot;
+interface LaunchRecord {
     name?: string;
-} {
+    catalogKnown: boolean;
+    catalog?: CatalogLaunchSnapshot | null;
+}
+
+function launchRecordPath(id: string): string {
+    return join(runDir(id), ".launch.json");
+}
+
+function launchFromSource(source: { name?: unknown; catalog?: CatalogLaunchSnapshot | null }): LaunchRecord {
+    const name = typeof source.name === "string" && source.name.length > 0 ? source.name : undefined;
+    const catalogKnown = Object.prototype.hasOwnProperty.call(source, "catalog") && source.catalog !== undefined;
+    return { name, catalogKnown, catalog: catalogKnown ? source.catalog : undefined };
+}
+
+function serializeLaunch(record: LaunchRecord): string {
+    const payload: { name?: string; catalog?: CatalogLaunchSnapshot | null } = {};
+    if (record.name !== undefined) payload.name = record.name;
+    if (record.catalogKnown) payload.catalog = record.catalog ?? null;
+    return JSON.stringify(payload);
+}
+
+function parseLaunch(raw: string, id: string): LaunchRecord {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (error) {
+        if (error instanceof SyntaxError) throw new Error(`Unreadable launch record for ${id}`);
+        throw error;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`Unreadable launch record for ${id}`);
+    }
+    return launchFromSource(parsed as { name?: unknown; catalog?: CatalogLaunchSnapshot | null });
+}
+
+/** A committed meta.json is one historical launch. A truncated file is not. */
+function readCommittedMetaLaunch(id: string): LaunchRecord | undefined {
     let raw: string;
     try {
         raw = readFileSync(metaPathFor(id), "utf-8");
     } catch (error) {
-        if (errnoOf(error) === "ENOENT") return { catalogFrozen: false };
+        if (errnoOf(error) === "ENOENT") return undefined;
         throw error;
     }
-    let parsed: { catalog?: CatalogLaunchSnapshot; name?: unknown };
     try {
-        parsed = JSON.parse(raw) as { catalog?: CatalogLaunchSnapshot; name?: unknown };
+        const parsed = JSON.parse(raw) as { name?: unknown; catalog?: CatalogLaunchSnapshot | null };
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+        return launchFromSource(parsed);
     } catch (error) {
-        // A truncated legacy write is not a readable snapshot. Real IO errors
-        // were already raised above; do not hide those.
-        if (error instanceof SyntaxError) return { catalogFrozen: false };
+        if (error instanceof SyntaxError) return undefined;
         throw error;
     }
-    if (!parsed || typeof parsed !== "object") return { catalogFrozen: false };
-    const catalogFrozen = "catalog" in parsed && parsed.catalog !== undefined;
-    const name = typeof parsed.name === "string" && parsed.name.length > 0 ? parsed.name : undefined;
-    return { catalogFrozen, catalog: parsed.catalog, name };
 }
 
-function launchNamePath(id: string): string {
-    return join(runDir(id), ".launch-name");
-}
-
-function launchCatalogPath(id: string): string {
-    return join(runDir(id), ".launch-catalog.json");
+function applyLaunchRecord(meta: RunMeta, record: LaunchRecord): void {
+    if (record.name !== undefined) meta.name = record.name;
+    else delete meta.name;
+    if (record.catalogKnown) meta.catalog = record.catalog as CatalogLaunchSnapshot;
+    else delete meta.catalog;
 }
 
 /**
@@ -300,36 +326,26 @@ function readOptionalUtf8(target: string): string | undefined {
 }
 
 /**
- * Freeze the first launch name and catalog before `meta.json` is replaced.
+ * Freeze one coherent launch snapshot before `meta.json` is replaced.
  *
- * A legacy `meta.json` that already has those fields is copied into the
- * write-once files before this writer's values, so an old snapshot still
- * wins. Absent fields stay absent: a catalog-free record does not gain a
- * catalog here unless this write is what first supplies one and no earlier
- * record had the key. The bytes about to be renamed onto `meta.json` are
- * then rewritten from the winner, including when a stale lock rename let
- * another writer publish while this rename was already in progress.
+ * The exclusive link is the publication. A pause or crash before it leaves
+ * no snapshot; a pause or crash after it leaves the whole snapshot. Orphan
+ * split anchors are not read: pairing those files is the bug this replaces.
+ * A legacy `meta.json` is copied in as one record first, so its name and
+ * catalog (including absence or null) beat this writer without being
+ * reconciled field by field. The caller's object is then rewritten from
+ * whichever record won the link.
  */
 function applyFrozenLaunch(meta: RunMeta): void {
-    const namePath = launchNamePath(meta.id);
-    const catalogPath = launchCatalogPath(meta.id);
-    const prior = readLaunchAnchor(meta.id);
-    if (prior.name) publishImmutable(namePath, prior.name);
-    if (prior.catalogFrozen) publishImmutable(catalogPath, JSON.stringify(prior.catalog));
-    if (typeof meta.name === "string" && meta.name.length > 0) publishImmutable(namePath, meta.name);
-    if ("catalog" in meta && meta.catalog !== undefined) publishImmutable(catalogPath, JSON.stringify(meta.catalog));
-    const frozenName = readOptionalUtf8(namePath);
-    if (frozenName !== undefined && frozenName.length > 0) meta.name = frozenName;
-    const frozenCatalog = readOptionalUtf8(catalogPath);
-    if (frozenCatalog === undefined) return;
-    const current = "catalog" in meta && meta.catalog !== undefined ? JSON.stringify(meta.catalog) : undefined;
-    if (current === frozenCatalog) return;
-    try {
-        meta.catalog = JSON.parse(frozenCatalog) as CatalogLaunchSnapshot;
-    } catch (error) {
-        if (error instanceof SyntaxError) throw new Error(`Unreadable launch catalog anchor for ${meta.id}`);
-        throw error;
+    const path = launchRecordPath(meta.id);
+    let raw = readOptionalUtf8(path);
+    if (raw === undefined) {
+        const committed = readCommittedMetaLaunch(meta.id) ?? launchFromSource(meta);
+        publishImmutable(path, serializeLaunch(committed));
+        raw = readOptionalUtf8(path);
+        if (raw === undefined) throw new Error(`Missing launch record for ${meta.id}`);
     }
+    applyLaunchRecord(meta, parseLaunch(raw, meta.id));
 }
 
 const META_LOCK_WAIT_MS = 5_000;
@@ -781,9 +797,6 @@ export function nextRunId(): string {
 export function writeMeta(meta: RunMeta): void {
     mkdirSync(runDir(meta.id), { recursive: true });
     withRunMetaLock(meta.id, (owns) => {
-        const prior = readLaunchAnchor(meta.id);
-        if (prior.catalogFrozen) meta.catalog = prior.catalog;
-        if (prior.name) meta.name = prior.name;
         metaWriteBarrier?.();
         if (!owns()) throw new MetadataLockLost();
         writeMetaFile(meta);
