@@ -125,6 +125,181 @@ Body.
         assert.ok(bomb.diagnostics.some((item) => item.code === DiagnosticCodes.parserLimit || item.code === DiagnosticCodes.malformedFrontmatter));
     });
 
+    it("recovers one stable id from a malformed document without guessing another", () => {
+        const commented = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+id: role.developer # stable identity
+name: [unterminated
+---
+BROKEN PROJECT
+`);
+        assert.equal(commented.ok, false);
+        assert.equal(commented.definition, undefined);
+        assert.equal(commented.occupantId, "role.developer");
+        assert.ok(commented.diagnostics.some((item) => item.code === DiagnosticCodes.malformedFrontmatter && item.id === "role.developer"));
+
+        const quoted = parseDefinition(`---
+schema: pi-agent/v1
+kind: agent
+id: "agent.payments" # display name is not the id
+name: [unterminated
+---
+Broken agent.
+`);
+        assert.equal(quoted.ok, false);
+        assert.equal(quoted.occupantId, "agent.payments");
+
+        const aliased = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+stable: &stable role.developer
+id: *stable
+name: [unterminated
+---
+Broken alias.
+`);
+        assert.equal(aliased.ok, false);
+        assert.equal(aliased.occupantId, "role.developer");
+
+        const forward = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+id: *later
+name: [unterminated
+later: &later role.developer
+---
+Forward alias is not an id.
+`);
+        assert.equal(forward.occupantId, undefined);
+
+        const conflict = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+id: role.developer # one
+id: role.reviewer
+name: [unterminated
+---
+Two ids.
+`);
+        assert.equal(conflict.ok, false);
+        assert.equal(conflict.occupantId, undefined);
+        assert.ok(conflict.diagnostics.some((item) => item.code === DiagnosticCodes.duplicateKey));
+
+        const repeated = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+id: role.developer # one
+id: role.developer
+name: [unterminated
+---
+Same id twice.
+`);
+        assert.equal(repeated.occupantId, "role.developer");
+
+        const falseFriend = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+# id: role.developer
+name: [unterminated
+defaults:
+  note: "id: role.developer"
+---
+Not an id.
+`);
+        assert.equal(falseFriend.occupantId, undefined);
+
+        const nestedAlias = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+stable: &stable
+  id: role.developer
+id: *stable
+name: [unterminated
+---
+Alias is not a scalar id.
+`);
+        assert.equal(nestedAlias.occupantId, undefined);
+    });
+
+    it("rejects a YAML alias cycle and still accepts a shared anchor", () => {
+        const cyclic = `---
+schema: pi-agent/v1
+kind: role
+id: role.reviewer
+name: Reviewer
+metadata: &loop
+  again: *loop
+---
+Review
+`;
+        assert.doesNotThrow(() => parseDefinition(cyclic, "cycle.md"));
+        const parsed = parseDefinition(cyclic, "cycle.md");
+        assert.equal(parsed.ok, false);
+        assert.equal(parsed.definition, undefined);
+        assert.equal(parsed.occupantId, "role.reviewer");
+        const diagnostic = parsed.diagnostics.find((item) => item.code === DiagnosticCodes.parserLimit);
+        assert.ok(diagnostic);
+        assert.match(diagnostic.message, /cycle/);
+        assert.equal(diagnostic.path, "cycle.md");
+        assert.equal(diagnostic.blocking, true);
+        assert.equal(JSON.stringify(parsed).includes("Maximum call stack"), false);
+
+        const rooted = parseDefinition(`---
+&root
+schema: pi-agent/v1
+kind: role
+id: role.developer
+name: Developer
+self: *root
+defaults:
+  model: openai/gpt-6-sol
+  effort: high
+  tier: balanced
+---
+Root cycle.
+`);
+        assert.equal(rooted.ok, false);
+        assert.equal(rooted.occupantId, "role.developer");
+        assert.match(rooted.diagnostics.map((item) => item.message).join("\n"), /cycle/);
+
+        const listed = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+id: role.explorer
+name: Explorer
+metadata:
+  items: &items
+    - *items
+---
+Explore
+`);
+        assert.equal(listed.ok, false);
+        assert.equal(listed.occupantId, "role.explorer");
+        assert.match(listed.diagnostics.map((item) => item.message).join("\n"), /cycle/);
+
+        const shared = parseDefinition(`---
+schema: pi-agent/v1
+kind: role
+id: role.shared
+name: Shared
+defaults:
+  model: openai/gpt-6-sol
+  effort: medium
+  tier: balanced
+metadata:
+  left: &box
+    note: shared
+  right: *box
+---
+Diamond alias.
+`);
+        assert.equal(shared.ok, true, shared.diagnostics.map((item) => item.message).join("\n"));
+        assert.equal(shared.definition.metadata.left.note, "shared");
+        assert.equal(shared.definition.metadata.right.note, "shared");
+        assert.equal(shared.diagnostics.some((item) => /cycle/.test(item.message)), false);
+    });
+
     it("rejects a second base role and an empty replacement without writing inherited defaults", () => {
         const many = parseDefinition(`---
 schema: pi-agent/v1
@@ -325,6 +500,103 @@ describe("catalog discovery and inheritance", () => {
             assert.ok(resolved.diagnostics.some((item) => item.code === DiagnosticCodes.duplicateId));
             assert.match(resolved.diagnostics.find((item) => item.code === DiagnosticCodes.duplicateId).message, /a\.md/);
             assert.equal(resolveSelection(snapshot, { roleId: "role.sibling" }).launchable, true);
+        } finally {
+            ctx.cleanup();
+        }
+    });
+
+    it("keeps a recovered higher-priority id from falling back to a valid lower source", () => {
+        const ctx = fixture("real");
+        try {
+            const broken = `---
+schema: pi-agent/v1
+kind: role
+id: role.developer # stable identity
+name: [unterminated
+---
+BROKEN PROJECT
+`;
+            writeDefinition(join(ctx.userRoot, "agents", "roles"), "personal-developer.md", roleMarkdown("role.developer", "Personal Developer"));
+            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "renamed.md", broken);
+            writeDefinition(join(ctx.userRoot, "agents", "roles"), "personal-explorer.md", roleMarkdown("role.explorer", "Personal Explorer"));
+            const snapshot = load(ctx);
+            const developer = snapshot.roles.get("role.developer");
+            assert.equal(developer.scope, "project");
+            assert.equal(developer.path.endsWith("renamed.md"), true);
+            assert.equal(developer.schemaLaunchable, false);
+            assert.equal(developer.definition, undefined);
+            assert.equal(developer.unused.some((item) => item.scope === "user" && item.reason === "blocked-by-invalid-higher-priority"), true);
+            assert.equal(developer.unused.some((item) => item.scope === "bundled" && item.reason === "blocked-by-invalid-higher-priority"), true);
+            const resolved = resolveSelection(snapshot, { roleId: "role.developer" });
+            assert.equal(resolved.status, "blocked");
+            assert.equal(resolved.launchable, false);
+            assert.equal(resolved.effective, undefined);
+            assert.equal(resolved.entry.scope, "project");
+            assert.equal(snapshot.roles.get("role.explorer").scope, "user");
+            assert.equal(snapshot.roles.get("role.explorer").schemaLaunchable, true);
+            assert.equal(resolveSelection(snapshot, { roleId: "role.explorer" }).launchable, true);
+            assert.equal(snapshot.roles.get("role.reviewer").scope, "bundled");
+            assert.equal(snapshot.roles.get("role.reviewer").schemaLaunchable, true);
+
+            const falseFriend = `---
+schema: pi-agent/v1
+kind: role
+# id: role.architect
+name: [unterminated
+defaults:
+  note: "id: role.architect"
+---
+no id
+`;
+            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "false-friend.md", falseFriend);
+            const withFriend = load(ctx);
+            assert.equal(withFriend.roles.get("role.architect").scope, "bundled");
+            assert.equal(withFriend.roles.get("role.architect").schemaLaunchable, true);
+            assert.equal(withFriend.roles.get("role.developer").scope, "project");
+            assert.ok(withFriend.diagnostics.some((item) => item.path.endsWith("false-friend.md")));
+        } finally {
+            ctx.cleanup();
+        }
+    });
+
+    it("isolates a cyclic alias file and still blocks that id from lower sources", () => {
+        const ctx = fixture("real");
+        try {
+            const cycle = (id, name) => `---
+schema: pi-agent/v1
+kind: role
+id: ${id}
+name: ${name}
+metadata: &loop
+  again: *loop
+---
+${name}
+`;
+            writeDefinition(join(ctx.userRoot, "agents", "roles"), "personal-developer.md", roleMarkdown("role.developer", "Personal Developer"));
+            writeDefinition(join(ctx.userRoot, "agents", "roles"), "cycle-reviewer.md", cycle("role.reviewer", "Reviewer"));
+            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "cycle-developer.md", cycle("role.developer", "Developer"));
+            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "explorer.md", roleMarkdown("role.explorer", "Project Explorer"));
+            const snapshot = load(ctx);
+            const reviewer = snapshot.roles.get("role.reviewer");
+            assert.equal(reviewer.scope, "user");
+            assert.equal(reviewer.schemaLaunchable, false);
+            assert.equal(reviewer.unused.some((item) => item.scope === "bundled" && item.reason === "blocked-by-invalid-higher-priority"), true);
+            assert.ok(reviewer.diagnostics.some((item) => item.code === DiagnosticCodes.parserLimit && /cycle/.test(item.message) && item.path.endsWith("cycle-reviewer.md")));
+            assert.equal(resolveSelection(snapshot, { roleId: "role.reviewer" }).launchable, false);
+
+            const developer = snapshot.roles.get("role.developer");
+            assert.equal(developer.scope, "project");
+            assert.equal(developer.schemaLaunchable, false);
+            assert.equal(developer.unused.some((item) => item.scope === "user" && item.reason === "blocked-by-invalid-higher-priority"), true);
+            assert.equal(developer.unused.some((item) => item.scope === "bundled" && item.reason === "blocked-by-invalid-higher-priority"), true);
+            assert.equal(resolveSelection(snapshot, { roleId: "role.developer" }).launchable, false);
+
+            assert.equal(snapshot.roles.get("role.explorer").scope, "project");
+            assert.equal(snapshot.roles.get("role.explorer").definition.name, "Project Explorer");
+            assert.equal(resolveSelection(snapshot, { roleId: "role.explorer" }).launchable, true);
+            assert.equal(snapshot.roles.get("role.architect").scope, "bundled");
+            assert.equal(snapshot.roles.get("role.architect").schemaLaunchable, true);
+            assert.equal(snapshot.roles.size, APPROVED_ROLE_DEFAULTS.length);
         } finally {
             ctx.cleanup();
         }

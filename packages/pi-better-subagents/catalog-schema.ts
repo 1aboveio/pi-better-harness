@@ -8,7 +8,7 @@
  * Portable preferences (model, effort, tier) are catalog data. They are not
  * host execution controls and do not grant tools, sandbox modes, or presets.
  */
-import { isAlias, isCollection, isPair, parseDocument, stringify, type Node, type Pair } from "yaml";
+import { isAlias, isCollection, isMap, isPair, isScalar, parseDocument, stringify, type Node, type Pair } from "yaml";
 import { THINKING_LEVELS, type ThinkingLevel } from "./thinking.ts";
 
 export type { ThinkingLevel };
@@ -346,16 +346,18 @@ export function parseDefinition(markdown: string, sourcePath?: string): ParseRes
         strict: true,
         prettyErrors: true,
     });
+    const identity = occupantFromDocument(document);
     if (document.errors.length > 0) {
         for (const error of document.errors) {
             const duplicate = /unique|duplicated mapping key/i.test(error.message);
             diagnostics.push(problem(duplicate ? DiagnosticCodes.duplicateKey : DiagnosticCodes.malformedFrontmatter, clip(error.message), {
                 path: sourcePath,
+                id: identity.occupantId,
                 blocking: true,
                 structural: true,
             }));
         }
-        return { ok: false, diagnostics, ...occupantFromSource(split.yaml) };
+        return { ok: false, diagnostics, ...identity };
     }
 
     const measured = measureNode(document.contents);
@@ -363,9 +365,9 @@ export function parseDefinition(markdown: string, sourcePath?: string): ParseRes
         diagnostics.push(problem(
             DiagnosticCodes.parserLimit,
             `Frontmatter has ${measured.nodes} nodes at depth ${measured.depth}. Limits are ${PARSER_LIMITS.maxNodes} nodes and depth ${PARSER_LIMITS.maxDepth}. Anchors are allowed within these limits.`,
-            { path: sourcePath, blocking: true, structural: true },
+            { path: sourcePath, id: identity.occupantId, blocking: true, structural: true },
         ));
-        return { ok: false, diagnostics, ...occupantFromSource(split.yaml) };
+        return { ok: false, diagnostics, ...identity };
     }
 
     let data: unknown;
@@ -374,23 +376,45 @@ export function parseDefinition(markdown: string, sourcePath?: string): ParseRes
     } catch (error) {
         diagnostics.push(problem(DiagnosticCodes.parserLimit, clip(error instanceof Error ? error.message : String(error)), {
             path: sourcePath,
+            id: identity.occupantId,
             blocking: true,
             structural: true,
         }));
-        return { ok: false, diagnostics, ...occupantFromSource(split.yaml) };
+        return { ok: false, diagnostics, ...identity };
+    }
+
+    const graph = yamlGraphIssue(data);
+    if (graph) {
+        diagnostics.push(problem(
+            DiagnosticCodes.parserLimit,
+            graph === "cycle"
+                ? "YAML alias cycle in frontmatter. Later aliases may repeat an earlier anchor, but a cycle is rejected before recursive traversal so this file cannot exhaust the catalog read. Remove the cyclic alias. Alias expansions stay limited to 50, nodes to 2000, and depth to 32."
+                : `YAML alias graph exceeded the catalog bounds (${PARSER_LIMITS.maxNodes} nodes, depth ${PARSER_LIMITS.maxDepth}) while checking for cycles. Shorten the frontmatter.`,
+            { path: sourcePath, id: identity.occupantId, blocking: true, structural: true },
+        ));
+        return { ok: false, diagnostics, ...identity };
     }
 
     if (!isPlainObject(data)) {
         diagnostics.push(problem(DiagnosticCodes.malformedFrontmatter, "Frontmatter must be a YAML mapping.", {
             path: sourcePath,
+            id: identity.occupantId,
             blocking: true,
             structural: true,
         }));
-        return { ok: false, diagnostics, ...occupantFromSource(split.yaml) };
+        return { ok: false, diagnostics, ...identity };
     }
 
-    const interpreted = interpretMapping(data, split.body, diagnostics, sourcePath);
-    return interpreted;
+    try {
+        return interpretMapping(data, split.body, diagnostics, sourcePath);
+    } catch (error) {
+        diagnostics.push(problem(
+            DiagnosticCodes.parserLimit,
+            `Catalog parser stopped on this file: ${clip(error instanceof Error ? error.message : String(error))}. Other definitions are unaffected. Remove cyclic aliases or shorten the frontmatter.`,
+            { path: sourcePath, id: identity.occupantId, blocking: true, structural: true },
+        ));
+        return { ok: false, diagnostics, ...identity };
+    }
 }
 
 export function validateDefinition(definition: CatalogDefinition): ParseResult {
@@ -1014,25 +1038,43 @@ function rememberRestriction(
     }
 }
 
-function redactSecrets(value: unknown, pathLabel: string, diagnostics: Diagnostic[], sourcePath: string | undefined): unknown {
+function redactSecrets(
+    value: unknown,
+    pathLabel: string,
+    diagnostics: Diagnostic[],
+    sourcePath: string | undefined,
+    stack: Set<object> = new Set(),
+): unknown {
+    if (typeof value !== "object" || value === null) return value;
+    if (stack.has(value)) throw new Error("YAML alias cycle");
     if (Array.isArray(value)) {
-        return value.map((item, index) => redactSecrets(item, `${pathLabel}[${index}]`, diagnostics, sourcePath));
+        stack.add(value);
+        try {
+            return value.map((item, index) => redactSecrets(item, `${pathLabel}[${index}]`, diagnostics, sourcePath, stack));
+        } finally {
+            stack.delete(value);
+        }
     }
     if (!isPlainObject(value)) return value;
-    const output: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value)) {
-        if (SECRET_KEY.test(key)) {
-            diagnostics.push(problem(
-                DiagnosticCodes.credentialMaterial,
-                `Field ${pathLabel}.${key} looks like credential or connection material and was not stored. Remove it from the definition. Launch stays blocked.`,
-                { path: sourcePath, field: key, blocking: true, structural: false },
-            ));
-            output[key] = "[redacted]";
-            continue;
+    stack.add(value);
+    try {
+        const output: Record<string, unknown> = {};
+        for (const [key, child] of Object.entries(value)) {
+            if (SECRET_KEY.test(key)) {
+                diagnostics.push(problem(
+                    DiagnosticCodes.credentialMaterial,
+                    `Field ${pathLabel}.${key} looks like credential or connection material and was not stored. Remove it from the definition. Launch stays blocked.`,
+                    { path: sourcePath, field: key, blocking: true, structural: false },
+                ));
+                output[key] = "[redacted]";
+                continue;
+            }
+            output[key] = redactSecrets(child, `${pathLabel}.${key}`, diagnostics, sourcePath, stack);
         }
-        output[key] = redactSecrets(child, `${pathLabel}.${key}`, diagnostics, sourcePath);
+        return output;
+    } finally {
+        stack.delete(value);
     }
-    return output;
 }
 
 function splitFrontmatter(source: string): { yaml: string; body: string } | { error: string } {
@@ -1060,6 +1102,121 @@ function occupantFromSource(yaml: string): { occupantId?: string } {
     }
     if (ids.size !== 1) return {};
     return { occupantId: [...ids][0] };
+}
+
+/**
+ * Stable id from the top-level `id` key of a parsed document, including when a
+ * later field is malformed. Comments and nested values are not identities.
+ * Aliases count only when they point at an earlier scalar anchor. Distinct
+ * top-level ids are not guessed between.
+ */
+function occupantFromDocument(document: { contents: Node | null }): { occupantId?: string } {
+    if (!isMap(document.contents)) return {};
+    const ordered = nodesInOrder(document.contents);
+    const resolved: string[] = [];
+    for (const item of document.contents.items) {
+        if (!isPair(item) || !isScalar(item.key) || item.key.value !== "id") continue;
+        const value = resolveIdScalar(item.value as Node | null, ordered);
+        if (value === undefined) return {};
+        resolved.push(value);
+    }
+    if (resolved.length === 0) return {};
+    if (new Set(resolved).size !== 1) return {};
+    const id = resolved[0]!;
+    if (!ID_PATTERN.test(id)) return {};
+    return { occupantId: id };
+}
+
+function resolveIdScalar(node: Node | null | undefined, ordered: OrderedNode[] | undefined): string | undefined {
+    if (!node) return undefined;
+    if (isScalar(node)) return typeof node.value === "string" ? node.value : undefined;
+    if (!isAlias(node) || !ordered) return undefined;
+    const seen = new Set<Node>();
+    let current: Node | undefined = node;
+    while (current && isAlias(current)) {
+        if (seen.has(current)) return undefined;
+        seen.add(current);
+        const index = ordered.findIndex((item) => item.node === current);
+        if (index < 0) return undefined;
+        let target: Node | undefined;
+        for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+            if (ordered[cursor]!.anchor === current.source) {
+                target = ordered[cursor]!.node;
+                break;
+            }
+        }
+        current = target;
+    }
+    return current && isScalar(current) && typeof current.value === "string" ? current.value : undefined;
+}
+
+interface OrderedNode {
+    node: Node;
+    anchor?: string;
+}
+
+function nodesInOrder(root: Node | null): OrderedNode[] | undefined {
+    const ordered: OrderedNode[] = [];
+    const stack: Array<Node | Pair | null> = [root];
+    let visited = 0;
+    while (stack.length > 0) {
+        if (++visited > PARSER_LIMITS.maxNodes + 1) return undefined;
+        const current = stack.pop();
+        if (!current) continue;
+        if (isAlias(current)) {
+            ordered.push({ node: current });
+            continue;
+        }
+        if (isScalar(current) || isCollection(current)) {
+            const anchor = typeof current.anchor === "string" && current.anchor.length > 0 ? current.anchor : undefined;
+            ordered.push({ node: current, anchor });
+        }
+        if (isPair(current)) {
+            stack.push(current.value as Node | null, current.key as Node | null);
+            continue;
+        }
+        if (isCollection(current)) {
+            for (let index = current.items.length - 1; index >= 0; index -= 1) {
+                stack.push(current.items[index] as Node | Pair);
+            }
+        }
+    }
+    return ordered;
+}
+
+/** Iterative cycle check. Shared anchors (a diamond) are not cycles. */
+function yamlGraphIssue(value: unknown): "cycle" | "limit" | undefined {
+    const seen = new Set<object>();
+    const inStack = new Set<object>();
+    const frames: { node: object; children: readonly unknown[]; index: number }[] = [];
+    const push = (node: unknown): "cycle" | "limit" | undefined => {
+        if (typeof node !== "object" || node === null) return undefined;
+        if (inStack.has(node)) return "cycle";
+        if (seen.has(node)) return undefined;
+        if (seen.size >= PARSER_LIMITS.maxNodes || frames.length >= PARSER_LIMITS.maxDepth) return "limit";
+        seen.add(node);
+        inStack.add(node);
+        frames.push({
+            node,
+            children: Array.isArray(node) ? node : Object.values(node),
+            index: 0,
+        });
+        return undefined;
+    };
+    const rootIssue = push(value);
+    if (rootIssue) return rootIssue;
+    while (frames.length > 0) {
+        const frame = frames[frames.length - 1]!;
+        if (frame.index >= frame.children.length) {
+            inStack.delete(frame.node);
+            frames.pop();
+            continue;
+        }
+        const issue = push(frame.children[frame.index]);
+        frame.index += 1;
+        if (issue) return issue;
+    }
+    return undefined;
 }
 
 function measureNode(node: Node | null): { nodes: number; depth: number } {
