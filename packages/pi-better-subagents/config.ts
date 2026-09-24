@@ -55,6 +55,16 @@ export interface SubagentConfig {
      * in an afternoon. Default: 2 GiB. See cleanup.ts.
      */
     maxRegistryBytes?: number | null;
+    /**
+     * Catalog tier membership and ordered fallback candidates. Omitted tiers
+     * keep the built-in membership. Candidate lists stay empty until set here;
+     * names are not inferred substitutes. Cross-provider candidates need
+     * `{ model, crossProvider: true }` and must also be tier members.
+     */
+    tierPolicy?: Readonly<Record<string, {
+        members?: readonly string[];
+        candidates?: readonly (string | { model: string; crossProvider?: boolean })[];
+    }>> | null;
 }
 
 /** Concurrency cap when config.json sets none. */
@@ -66,6 +76,11 @@ export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetc
 export const SAFE_CLEAN_TOOLS = "read, bash";
 
 let cached: SubagentConfig | undefined;
+
+/** Test seam. Pass undefined to reload config.json on the next loadConfig call. */
+export function setConfigForTests(next: SubagentConfig | undefined): void {
+    cached = next;
+}
 
 /** Load config.json from the extension directory. Missing/invalid → {}. */
 export function loadConfig(): SubagentConfig {

@@ -10,3 +10,9 @@ export const Type = {
     Optional: (inner) => schema('optional', { inner }),
     Array: (inner, options = {}) => schema('array', { items: inner, ...options }),
 };
+export function getSupportedThinkingLevels(model) {
+    if (!model || model.reasoning === false) return ['off'];
+    const levels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    if (!model.thinkingLevelMap) return levels;
+    return levels.filter((level) => model.thinkingLevelMap[level] !== null);
+}

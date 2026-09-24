@@ -13,3 +13,9 @@ export const Type = {
     Array: (items, o) => schema("array", { items, ...o }),
     Optional: (s) => ({ ...s, optional: true }),
 };
+export function getSupportedThinkingLevels(model) {
+    if (!model || model.reasoning === false) return ["off"];
+    const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+    if (!model.thinkingLevelMap) return levels;
+    return levels.filter((level) => model.thinkingLevelMap[level] !== null);
+}

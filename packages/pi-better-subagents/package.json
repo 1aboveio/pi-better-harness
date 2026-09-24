@@ -48,7 +48,9 @@
     "README.md",
     "roles/**/*.md",
     "docs/agent-catalog.md",
-    "docs/agent-catalog-operations.md"
+    "docs/agent-catalog-operations.md",
+    "docs/agent-model-resolution.md",
+    "docs/agent-catalog-lifecycle.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
