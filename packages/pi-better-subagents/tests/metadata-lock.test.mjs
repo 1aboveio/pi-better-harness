@@ -7,7 +7,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,9 +20,15 @@ function tempRoot() {
     return mkdtempSync(join(tmpdir(), "meta-lock-"));
 }
 
-function runNode(script, env, { timeoutMs = 20_000 } = {}) {
+/** Node 22.0 has no node:sqlite and rejects this flag. Later 22.x and 24 accept it. */
+function sqliteOffArgs() {
+    const probe = spawnSync(process.execPath, ["--no-experimental-sqlite", "-e", "process.exit(0)"], { encoding: "utf8" });
+    return probe.status === 0 ? ["--no-experimental-sqlite"] : [];
+}
+
+function runNode(script, env, { timeoutMs = 20_000, args = ["--import", "tsx", "--input-type=module", "-e"] } = {}) {
     return new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+        const child = spawn(process.execPath, [...args, script], {
             cwd: REPO_ROOT,
             env: { ...process.env, ...env },
         });
@@ -529,6 +535,151 @@ for (let i = 0; i < 15; i += 1) {
             assert.equal(meta.catalog.snapshot, "immutable");
             assert.equal(meta.name, "first-name");
             assert.equal(meta.status, "completed");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("adopts a legacy meta.json snapshot before a later writer can replace it", { timeout: 15_000 }, async () => {
+        const root = tempRoot();
+        const script = `
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { writeMeta, readMeta } from ${JSON.stringify(REGISTRY)};
+const id = "sa_legacy_anchor";
+const dir = join(process.env.TMPDIR, "pi-better-subagents", "runs", id);
+mkdirSync(dir, { recursive: true });
+const planted = ${JSON.stringify(baseMeta("sa_legacy_anchor", { name: "legacy-name", catalog: { marker: "legacy", snapshot: "planted" } }))};
+writeFileSync(join(dir, "meta.json"), JSON.stringify(planted, null, 2));
+writeMeta({ ...planted, name: "incoming", status: "completed", endedAt: 9, exitCode: 0, catalog: { marker: "incoming" } });
+const meta = readMeta(id);
+process.stdout.write(JSON.stringify({
+  marker: meta.catalog.marker,
+  snapshot: meta.catalog.snapshot,
+  name: meta.name,
+  status: meta.status,
+  exitCode: meta.exitCode,
+  nameAnchor: readFileSync(join(dir, ".launch-name"), "utf8"),
+  catalogAnchor: JSON.parse(readFileSync(join(dir, ".launch-catalog.json"), "utf8")),
+}));
+`;
+        try {
+            const { stdout } = await runNode(script, { TMPDIR: root, TMP: root, TEMP: root });
+            const reported = JSON.parse(stdout);
+            assert.equal(reported.marker, "legacy");
+            assert.equal(reported.snapshot, "planted");
+            assert.equal(reported.name, "legacy-name");
+            assert.equal(reported.status, "completed");
+            assert.equal(reported.exitCode, 0);
+            assert.equal(reported.nameAnchor, "legacy-name");
+            assert.equal(reported.catalogAnchor.marker, "legacy");
+            assert.equal(reported.catalogAnchor.snapshot, "planted");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it("keeps the first persisted snapshot when stale recovery renames a live token", { timeout: 20_000 }, async () => {
+        const root = tempRoot();
+        const scriptPath = join(root, "fallback-race.cjs");
+        const sqliteArgs = sqliteOffArgs();
+        const source = `
+const { Worker, isMainThread, workerData, parentPort } = require("node:worker_threads");
+const fs = require("node:fs");
+const path = require("node:path");
+const ROOT = ${JSON.stringify(REPO_ROOT)};
+if (!isMainThread) {
+  require(ROOT + "/node_modules/tsx/dist/cjs/index.cjs");
+  const sync = new Int32Array(workerData.sab);
+  const signal = (i) => { Atomics.store(sync, i, 1); Atomics.notify(sync, i); };
+  const park = (i) => { if (Atomics.wait(sync, i, 0, 15000) === "timed-out") throw Error("park timeout " + i); };
+  const originalRename = fs.renameSync;
+  let intercepted = false;
+  fs.renameSync = function(from, to, ...rest) {
+    if (workerData.role === "A" && path.basename(String(from)) === ".meta.lock" && !intercepted) {
+      intercepted = true;
+      signal(0); park(1);
+      const result = originalRename.call(this, from, to, ...rest);
+      signal(2); park(3);
+      return result;
+    }
+    if (workerData.role === "B" && path.basename(String(to)) === "meta.json" && !intercepted) {
+      intercepted = true;
+      signal(4); park(5);
+    }
+    return originalRename.call(this, from, to, ...rest);
+  };
+  const { writeMeta } = require(ROOT + "/packages/pi-better-subagents/registry.ts");
+  try {
+    writeMeta({id:"race", name:workerData.role, catalog:{marker:workerData.role},status:"running",pid:1,spawnPid:1,cwd:process.env.TMPDIR,promptPreview:"synthetic",startedAt:1,logPath:"none",sessionId:"test"});
+    parentPort.postMessage({role:workerData.role, ok:true});
+  } catch (e) { parentPort.postMessage({role:workerData.role, ok:false, error:e.message}); }
+} else {
+  (async () => {
+    let sqlite = true;
+    try { require("node:sqlite"); } catch { sqlite = false; }
+    const fixture = fs.mkdtempSync(path.join(${JSON.stringify(root)}, "fallback-race-"));
+    process.env.TMPDIR = fixture; process.env.TMP = fixture; process.env.TEMP = fixture;
+    const run = path.join(fixture, "pi-better-subagents/runs/race");
+    fs.mkdirSync(run, { recursive: true });
+    fs.writeFileSync(path.join(run, ".meta.lock"), JSON.stringify({ pid: 2147483646, token: "dead" }));
+    const sab = new SharedArrayBuffer(32), sync = new Int32Array(sab), workers = [];
+    const start = (role) => {
+      const w = new Worker(__filename, { workerData: { role, sab }, execArgv: ${JSON.stringify(sqliteArgs)} });
+      workers.push(w);
+      return new Promise((resolve, reject) => w.once("message", resolve).once("error", reject));
+    };
+    const wait = (i) => { if (Atomics.wait(sync, i, 0, 10000) === "timed-out") throw Error("wait timeout " + i); };
+    const release = (i) => { Atomics.store(sync, i, 1); Atomics.notify(sync, i); };
+    try {
+      const a = start("A"); wait(0);
+      const b = start("B"); wait(4);
+      release(1); wait(2);
+      const c = await start("C");
+      const first = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
+      release(3);
+      await new Promise((r) => setTimeout(r, 100)); release(5);
+      const outcomes = await Promise.all([a, b]);
+      const finalMeta = JSON.parse(fs.readFileSync(path.join(run, "meta.json"), "utf8"));
+      const nameAnchor = fs.readFileSync(path.join(run, ".launch-name"), "utf8");
+      const catalogAnchor = JSON.parse(fs.readFileSync(path.join(run, ".launch-catalog.json"), "utf8"));
+      console.log(JSON.stringify({
+        sqlite,
+        first: first.catalog.marker,
+        final: finalMeta.catalog.marker,
+        firstName: first.name,
+        finalName: finalMeta.name,
+        anchorName: nameAnchor,
+        anchorMarker: catalogAnchor.marker,
+        outcomes: [c, ...outcomes],
+      }));
+    } finally {
+      await Promise.all(workers.map((w) => w.terminate()));
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  })().catch((e) => { console.error(e); process.exitCode = 1; });
+}
+`;
+        writeFileSync(scriptPath, source);
+        try {
+            const { stdout } = await runNode(scriptPath, {
+                TMPDIR: root,
+                TMP: root,
+                TEMP: root,
+                REVIEW_EARLY_NODE: "1",
+                TSX_DISABLE_CACHE: "1",
+            }, {
+                args: sqliteArgs,
+                timeoutMs: 20_000,
+            });
+            const reported = JSON.parse(stdout);
+            assert.equal(reported.sqlite, false);
+            assert.equal(reported.first, reported.final);
+            assert.equal(reported.firstName, reported.finalName);
+            assert.equal(reported.anchorName, reported.finalName);
+            assert.equal(reported.anchorMarker, reported.final);
+            assert.ok(reported.first === "A" || reported.first === "B" || reported.first === "C");
+            assert.deepEqual(reported.outcomes.map((item) => item.ok), [true, true, true]);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

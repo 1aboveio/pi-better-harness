@@ -228,6 +228,110 @@ function readLaunchAnchor(id: string): {
     return { catalogFrozen, catalog: parsed.catalog, name };
 }
 
+function launchNamePath(id: string): string {
+    return join(runDir(id), ".launch-name");
+}
+
+function launchCatalogPath(id: string): string {
+    return join(runDir(id), ".launch-catalog.json");
+}
+
+/**
+ * Publish `contents` at `target` so the first complete file wins.
+ *
+ * `link` of an fsynced temp is atomic: callers either see the winner's
+ * bytes or no file. A later link gets EEXIST and leaves the winner in place.
+ * This is not another lock. Token recovery can still rename `.meta.lock`
+ * after a stale observation (the rename syscall moves whatever inode is at
+ * that path), so the lock pathname is not a safe place to remember the
+ * first snapshot.
+ */
+function publishImmutable(target: string, contents: string): void {
+    try {
+        statSync(target);
+        return;
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") throw error;
+    }
+    const temp = join(dirname(target), `.immutable.${randomBytes(8).toString("hex")}.tmp`);
+    const fd = openSync(temp, "wx");
+    try {
+        writeFileSync(fd, contents);
+        fsyncSync(fd);
+    } catch (error) {
+        try {
+            closeSync(fd);
+        } catch (closeError) {
+            if (errnoOf(closeError) !== "EBADF") throw closeError;
+        }
+        try {
+            unlinkSync(temp);
+        } catch (cleanup) {
+            if (errnoOf(cleanup) !== "ENOENT") throw cleanup;
+        }
+        throw error;
+    }
+    closeSync(fd);
+    try {
+        linkSync(temp, target);
+    } catch (error) {
+        try {
+            unlinkSync(temp);
+        } catch (cleanup) {
+            if (errnoOf(cleanup) !== "ENOENT") throw cleanup;
+        }
+        if (errnoOf(error) !== "EEXIST") throw error;
+        return;
+    }
+    try {
+        unlinkSync(temp);
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") throw error;
+    }
+}
+
+function readOptionalUtf8(target: string): string | undefined {
+    try {
+        return readFileSync(target, "utf-8");
+    } catch (error) {
+        if (errnoOf(error) === "ENOENT") return undefined;
+        throw error;
+    }
+}
+
+/**
+ * Freeze the first launch name and catalog before `meta.json` is replaced.
+ *
+ * A legacy `meta.json` that already has those fields is copied into the
+ * write-once files before this writer's values, so an old snapshot still
+ * wins. Absent fields stay absent: a catalog-free record does not gain a
+ * catalog here unless this write is what first supplies one and no earlier
+ * record had the key. The bytes about to be renamed onto `meta.json` are
+ * then rewritten from the winner, including when a stale lock rename let
+ * another writer publish while this rename was already in progress.
+ */
+function applyFrozenLaunch(meta: RunMeta): void {
+    const namePath = launchNamePath(meta.id);
+    const catalogPath = launchCatalogPath(meta.id);
+    const prior = readLaunchAnchor(meta.id);
+    if (prior.name) publishImmutable(namePath, prior.name);
+    if (prior.catalogFrozen) publishImmutable(catalogPath, JSON.stringify(prior.catalog));
+    if (typeof meta.name === "string" && meta.name.length > 0) publishImmutable(namePath, meta.name);
+    if ("catalog" in meta && meta.catalog !== undefined) publishImmutable(catalogPath, JSON.stringify(meta.catalog));
+    const frozenName = readOptionalUtf8(namePath);
+    if (frozenName !== undefined && frozenName.length > 0) meta.name = frozenName;
+    const frozenCatalog = readOptionalUtf8(catalogPath);
+    if (frozenCatalog === undefined) return;
+    const current = "catalog" in meta && meta.catalog !== undefined ? JSON.stringify(meta.catalog) : undefined;
+    if (current === frozenCatalog) return;
+    try {
+        meta.catalog = JSON.parse(frozenCatalog) as CatalogLaunchSnapshot;
+    } catch (error) {
+        if (error instanceof SyntaxError) throw new Error(`Unreadable launch catalog anchor for ${meta.id}`);
+        throw error;
+    }
+}
+
 const META_LOCK_WAIT_MS = 5_000;
 const UNPARSABLE_LOCK_GRACE_MS = 1_000;
 const nodeRequire = createRequire(import.meta.url);
@@ -598,6 +702,7 @@ function withRunMetaLock(id: string, body: (owns: () => boolean) => void): void 
 }
 
 function writeMetaFile(meta: RunMeta): void {
+    applyFrozenLaunch(meta);
     const target = metaPathFor(meta.id);
     const json = JSON.stringify(meta, null, 2);
     if (process.platform === "win32") {
