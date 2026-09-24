@@ -31,7 +31,7 @@ Without `PI_CATALOG_REAL_PI=1` the test skips and default `npm test` does not ca
 | --- | --- | --- |
 | T01 | `catalog.test.mjs` six bundled defaults | `/agents list` must show all six role ids |
 | T02 | `catalog.test.mjs` two agents, role unchanged | one personal create; not a second independent agent |
-| T03 | `catalog-lifecycle.test.mjs` navigator detail fields | registered TUI detail/row hook for `sa_muff44v8_1`: name, role, model, effort, run id. Live list omits the expired foreign-parent run |
+| T03 | `catalog-lifecycle.test.mjs` navigator detail fields | `catalog-navigator-live-row.acceptance.test.mjs`: same-parent running row for `Live Row Agent` |
 | T04 | `catalog-identity.test.mjs` concurrent numeric labels | one fresh registry numeric label; not a second process |
 | T05 | identity + lifecycle alias collision | one `developer-checkout` label; collision suffix not repeated |
 | T06 | lifecycle repeated runs / rename snapshot | not re-run here |
@@ -53,7 +53,7 @@ Without `PI_CATALOG_REAL_PI=1` the test skips and default `npm test` does not ca
 | T22 | lifecycle capacity, callback, stop | registered `subagent_result` on the preserved completed run returns `DONE`. Capacity, callback, and stop were not re-run |
 | T24 | agent-operations capability note | not a second capability probe |
 | T25 T35 | identity reload and atomic labels | preserved labels were read by the reload renderer. Snapshot immutability and the cross-process label race were not re-run |
-| T26 | no single session covers every leg | preserved coordinator session did discovery, create, inspect, import confirm, named launch, direct role, fallbacks, and legacy. Reload adds navigator detail and `subagent_result`. Live overlay pixels for the expired run are not produced |
+| T26 | no single session covers every leg | preserved coordinator session did discovery, create, inspect, import confirm, named launch, direct role, fallbacks, and legacy. The live-row test adds the same-parent running list and detail overlay. It does not replay the other legs |
 | T34 T36 | operations + lifecycle | not re-run in this process |
 
 `sandbox:false` and `callback:false` are explicit tool arguments in the delegation task so completion is read from the run directory. They are not a runtime change.
@@ -73,4 +73,17 @@ PI_CATALOG_NAVIGATOR_RELOAD=1 node --import tsx --test --test-timeout 120000 \
   packages/pi-better-subagents/tests/catalog-navigator-reload.acceptance.test.mjs
 ```
 
-The registered detail lines show `Acceptance Dev`, `role.developer`, `grok-4.5 · effort low`, run id `sa_muff44v8_1`, status `completed`, and transcript `DONE`. The same process's `subagent_result` returns `[sa_muff44v8_1 · completed · exit 0 …]` and `DONE`. The live list is empty: `navigatorVisibleRuns` keeps `spawnPid === process.pid`, terminal rows expire after 30 seconds, and the section is hidden unless a row is running. The original parent pid is dead, so the on-screen list does not contain this run. The row formatter still renders the detail payload inside that Pi process. That is not a screenshot of an overlay that the list refused to open.
+The registered detail lines show `Acceptance Dev`, `role.developer`, `grok-4.5 · effort low`, run id `sa_muff44v8_1`, status `completed`, and transcript `DONE`. The same process's `subagent_result` returns `[sa_muff44v8_1 · completed · exit 0 …]` and `DONE`. The live list is empty: `navigatorVisibleRuns` keeps `spawnPid === process.pid`, terminal rows expire after 30 seconds, and the section is hidden unless a row is running. The original parent pid is dead, so the on-screen list does not contain this run. That reload is not the live-row proof below.
+
+## Live named-agent row
+
+`tests/catalog-navigator-live-row.acceptance.test.mjs` starts a new Pi TUI and calls the registered `subagent_spawn` tool with that process's context. The child is a real `pi` process. A local OpenAI-compatible fixture holds its stream for about 18 seconds so the run stays `running`; this is not another paid coordinator call. T13/T14 stay on the preserved sandbox above.
+
+The named agent is `agent.live-row` / `Live Row Agent`, role `role.developer`, model override `hold/hold-stream`, effort override `low`. The probe reads `provider.listRows` while that status is still `running`, then the registered detail renderer. The pty driver sends Left then Down. The screen shows the list row and the detail overlay: defined name, `role.developer`, `hold-stream · effort low`, and the run id. The probe then calls the registered stop and result tools.
+
+```bash
+PI_CATALOG_LIVE_ROW=1 node --import tsx --test --test-timeout 120000 \
+  packages/pi-better-subagents/tests/catalog-navigator-live-row.acceptance.test.mjs
+```
+
+The provider method is `listRows`, not `getItems`. The on-screen overlay did open in the run that produced `.rush-results/navigator-live-row.pty`. The fixture model is the model the child actually requested. It does not repeat the xAI proof.

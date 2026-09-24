@@ -714,6 +714,9 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 //      selection change, list↔detail return, and session_shutdown.
 
 let unregisterSubagentProvider: (() => void) | undefined;
+let acceptanceProviderRef: BackgroundWorkProvider | undefined;
+let acceptanceSpawnToolRef: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
+let acceptanceStopToolRef: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 let mainAgentStartedAt: number | undefined;
 const mainAgentTools = new Map<string, string>();
@@ -1002,6 +1005,7 @@ function ensureSubagentProvider(): void {
         },
         onVisibleChanged: onMetaChanged,
     };
+    acceptanceProviderRef = provider;
     unregisterSubagentProvider = registerBackgroundWorkProvider(provider);
 }
 
@@ -1130,6 +1134,9 @@ export default function (pi: ExtensionAPI) {
         if (tool) acceptanceResultToolRef = tool;
         (globalThis as typeof globalThis & Record<symbol, unknown>)[Symbol.for("pi-better-subagents.acceptance-hooks")] = {
             subagentResult: acceptanceResultToolRef,
+            subagentSpawn: acceptanceSpawnToolRef,
+            subagentStop: acceptanceStopToolRef,
+            listRows: () => acceptanceProviderRef?.listRows(Date.now()) ?? [],
             renderDetail: (id: string, width = 100) => renderRegisteredWorkDetail("subagents", id, width),
         };
     }
@@ -1371,7 +1378,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ---- subagent_spawn -------------------------------------------------
-    pi.registerTool({
+    const acceptanceSpawnTool = {
         name: "subagent_spawn",
         label: "Spawn Subagent",
         description:
@@ -1468,7 +1475,9 @@ export default function (pi: ExtensionAPI) {
                 throw err;
             }
         },
-    });
+    };
+    acceptanceSpawnToolRef = acceptanceSpawnTool;
+    pi.registerTool(acceptanceSpawnTool);
 
     // ---- subagent_spawn_batch -------------------------------------------
     pi.registerTool({
@@ -1681,7 +1690,10 @@ export default function (pi: ExtensionAPI) {
     const acceptanceResultTool = subagentResultTool(Type);
     pi.registerTool(acceptanceResultTool);
     publishAcceptanceHooks(acceptanceResultTool);
-    pi.registerTool(subagentStopTool(Type, { onStopped: renderWidget }));
+    const acceptanceStopTool = subagentStopTool(Type, { onStopped: renderWidget });
+    acceptanceStopToolRef = acceptanceStopTool;
+    pi.registerTool(acceptanceStopTool);
+    publishAcceptanceHooks();
 
     const agentOperations = createAgentOperations({
         projectConfigDirName,
