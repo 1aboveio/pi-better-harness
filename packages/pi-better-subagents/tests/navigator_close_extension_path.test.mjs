@@ -65,6 +65,10 @@ export const Type = {
     Array: (schema, opts = {}) => ({ type: "array", items: schema, ...opts }),
     Object: (props, opts = {}) => ({ type: "object", properties: props, ...opts }),
 };
+export function getSupportedThinkingLevels(model) {
+    if (!model || model.reasoning === false) return ["off"];
+    return ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+}
 `,
     });
     writeStubPackage("@earendil-works/pi-coding-agent", {

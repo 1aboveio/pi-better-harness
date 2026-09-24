@@ -399,6 +399,7 @@ export function buildNavigatorDetail(id, deps) {
     return {
         id: meta.id,
         name: meta.name,
+        role: meta.catalog?.roleId || meta.catalog?.roleName || undefined,
         status,
         model: deps.shortModel(meta.model),
         effort: effortRaw ? String(effortRaw) : undefined,
@@ -484,6 +485,8 @@ export function buildDetailLines(detail, opts = {}) {
     lines.push(`   ← back · ${action} · Esc close`);
     lines.push("");
     lines.push(`   status  ${statusText}`);
+    lines.push(`   id      ${detail.id ?? "?"}`);
+    if (detail.role) lines.push(`   role    ${detail.role}`);
 
     const model = detail.model ?? "?";
     lines.push(detail.effort ? `   model   ${model} · effort ${detail.effort}` : `   model   ${model}`);

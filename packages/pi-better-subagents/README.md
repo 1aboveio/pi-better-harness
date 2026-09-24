@@ -12,7 +12,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 
 ## Core Features
 - Non-blocking subagent launches.
-- Optional role and named-agent catalog (`docs/agent-catalog.md`). Launch wiring is separate from the portable definitions.
+- Optional role and named-agent catalog (`docs/agent-catalog.md`). Launches resolve through the existing subagent runtime (`docs/agent-catalog-lifecycle.md`, `docs/agent-model-resolution.md`).
 - Default OS write sandboxing on macOS and Linux.
 - Explicit tool allowlists for child sessions.
 - Durable logs and result retrieval across reloads.
