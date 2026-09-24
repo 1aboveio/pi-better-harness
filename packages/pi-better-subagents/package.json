@@ -45,11 +45,16 @@
     "*.ts",
     "*.mjs",
     "config.json",
-    "README.md"
+    "README.md",
+    "roles/**/*.md",
+    "docs/agent-catalog.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }
