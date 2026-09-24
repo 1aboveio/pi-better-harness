@@ -1,0 +1,3 @@
+name = "Acceptance Import"
+description = "Explicit import confirmation fixture. Not discovered from .codex/agents."
+developer_instructions = "Reply with the single word DONE."

@@ -50,7 +50,8 @@
     "docs/agent-catalog.md",
     "docs/agent-catalog-operations.md",
     "docs/agent-model-resolution.md",
-    "docs/agent-catalog-lifecycle.md"
+    "docs/agent-catalog-lifecycle.md",
+    "docs/agent-catalog-acceptance.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

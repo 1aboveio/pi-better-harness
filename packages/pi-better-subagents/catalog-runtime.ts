@@ -19,6 +19,7 @@ import {
     type ModelResolutionContext,
     type ModelSelection,
 } from "./model-resolution.ts";
+import { allocateCatalogLabel } from "./catalog-identity.ts";
 import { resolveRoleAssignment, type RoleAssignment } from "./role-assignment.ts";
 import { configureTierPolicy, DEFAULT_TIER_POLICY, type TierPolicy, type TierSpec } from "./tier-policy.ts";
 import type { Diagnostic, ThinkingLevel } from "./catalog-schema.ts";
@@ -391,24 +392,9 @@ async function displayNameFor(effective: EffectiveDefinition, job: CatalogJobFie
 }
 
 async function allocateDirectRoleLabel(input: { roleId: string; roleName: string; alias?: string; registryDir?: string }): Promise<string> {
-    let imported: {
-        allocateCatalogLabel?: (request: {
-            roleId: string;
-            roleName: string;
-            alias?: string;
-            registryDir?: string;
-        }) => string | Promise<string>;
-    };
-    try {
-        imported = await import("./catalog-identity.ts");
-    } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`Direct role labels need catalog-identity.ts allocateCatalogLabel (${detail}). No child was started.`);
-    }
-    if (typeof imported.allocateCatalogLabel !== "function") {
-        throw new Error("catalog-identity.ts must export allocateCatalogLabel. No child was started.");
-    }
-    const label = await imported.allocateCatalogLabel({
+    // Static import. A dynamic import raced Pi's parallel tool execution and
+    // could observe an uninitialized registry binding (`baseDir`).
+    const label = allocateCatalogLabel({
         roleId: input.roleId,
         roleName: input.roleName,
         ...(input.alias ? { alias: input.alias } : {}),

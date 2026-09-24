@@ -142,4 +142,4 @@ Limitations, so this schema is not over-claimed:
 - Role inheritance is not a Codex field. Codex model/effort precedence differs from DEV-23; invocation and workflow choices win on Pi.
 - No remote authorization, model policy, or TaskRun behavior is decided by a local fallback.
 - The catalog does not enforce sandbox, tool, MCP, or permission settings and does not add presets.
-- Wiring into `spawnSubagentRun`, navigator labels, and batch admission is a later unit. A snapshot's digest is what that unit should persist with the run.
+- Launch snapshots, navigator labels, and batch admission persist through the existing `spawnSubagentRun` path. Real-Pi instruction proof is recorded in `docs/agent-catalog-acceptance.md`, not by a scripted tool response.
