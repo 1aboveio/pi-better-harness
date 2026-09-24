@@ -27,6 +27,7 @@ import {
     isNavigatorUiAvailable,
     refreshBackgroundWorkNavigator,
     registerBackgroundWorkProvider,
+    renderRegisteredWorkDetail,
     type BackgroundWorkDetail,
     type BackgroundWorkProvider,
     type BackgroundWorkRow,
@@ -1123,6 +1124,15 @@ export default function (pi: ExtensionAPI) {
     healthPi = pi;
     ensureSubagentProvider();
     registerSubagentsGoalProvider(pi);
+    let acceptanceResultToolRef: { execute: (toolCallId: string, params: { id: string }) => Promise<unknown> } | undefined;
+    function publishAcceptanceHooks(tool?: NonNullable<typeof acceptanceResultToolRef>): void {
+        if (process.env.PI_CATALOG_ACCEPTANCE_PROBE !== "1") return;
+        if (tool) acceptanceResultToolRef = tool;
+        (globalThis as typeof globalThis & Record<symbol, unknown>)[Symbol.for("pi-better-subagents.acceptance-hooks")] = {
+            subagentResult: acceptanceResultToolRef,
+            renderDetail: (id: string, width = 100) => renderRegisteredWorkDetail("subagents", id, width),
+        };
+    }
 
     function catalogHostFrom(ctx: ExtensionContext): CatalogHost {
         const cfg = loadConfig();
@@ -1668,7 +1678,9 @@ export default function (pi: ExtensionAPI) {
     // (widget redraw after a kill) is injected as onStopped.
     pi.registerTool(subagentListTool(Type));
     pi.registerTool(subagentOutputTool(Type));
-    pi.registerTool(subagentResultTool(Type));
+    const acceptanceResultTool = subagentResultTool(Type);
+    pi.registerTool(acceptanceResultTool);
+    publishAcceptanceHooks(acceptanceResultTool);
     pi.registerTool(subagentStopTool(Type, { onStopped: renderWidget }));
 
     const agentOperations = createAgentOperations({
@@ -1762,6 +1774,7 @@ export default function (pi: ExtensionAPI) {
             try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
         }
         ensureNavigator(ctx);
+        publishAcceptanceHooks();
         updateNavigatorFooter(ctx);
         // Clear the retired legacy widget so the shared navigator is the only
         // list surface for running/orphaned subagents.
