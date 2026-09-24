@@ -237,6 +237,87 @@ describe("sandbox-core backend selection and wrapper construction", () => {
         }
     });
 
+    // @fails-without-fix sandbox.command-wrapper
+    // @covers sandbox.command-wrapper
+    // @level unit
+    it("canonicalizes an opted-in Linux state root and materializes denies inside it", async () => {
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-bwrap-state-")));
+        const writable = join(base, "work");
+        const home = join(base, "home");
+        const state = join(base, "state", "pi");
+        const deniedAlias = join(home, ".pi", "secrets", "token");
+        const deniedCanonical = join(state, "secrets", "token");
+        mkdirSync(writable, { recursive: true });
+        mkdirSync(home, { recursive: true });
+        mkdirSync(state, { recursive: true });
+        symlinkSync(state, join(home, ".pi"));
+        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        const materialized: string[] = [];
+        try {
+            await withPlatform("linux", () => withPath(base, () => {
+                const cmd = buildSandboxCommand({
+                    profilePath: join(base, "unused.sb"),
+                    policy: {
+                        writableRoot: writable,
+                        writableStateRoot: join(home, ".pi"),
+                        home,
+                        denyWrite: [deniedAlias],
+                    },
+                    execPath: "/usr/bin/true",
+                    execArgs: [],
+                }, {
+                    materializeDenyPath: (path) => {
+                        materialized.push(path);
+                        return true;
+                    },
+                });
+
+                assert.deepEqual(materialized, [deniedCanonical]);
+                assert.deepEqual(cmd.fileArgs, [
+                    "--ro-bind", "/", "/",
+                    "--bind", writable, writable,
+                    "--bind", state, state,
+                    "--bind", "/tmp", "/tmp",
+                    "--dev", "/dev",
+                    "--ro-bind", deniedCanonical, deniedCanonical,
+                    "--", "/usr/bin/true",
+                ]);
+            }));
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @fails-without-fix sandbox.command-wrapper
+    // @covers sandbox.command-wrapper
+    // @level unit
+    it("creates a missing opted-in Linux state root before binding it", async () => {
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-bwrap-new-state-")));
+        const writable = join(base, "work");
+        const state = join(base, "home", ".pi");
+        mkdirSync(writable, { recursive: true });
+        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        try {
+            await withPlatform("linux", () => withPath(base, () => {
+                const cmd = buildSandboxCommand({
+                    profilePath: join(base, "unused.sb"),
+                    policy: { writableRoot: writable, writableStateRoot: state, home: join(base, "home") },
+                    execPath: "/usr/bin/true",
+                    execArgs: [],
+                });
+
+                assert.equal(existsSync(state), true);
+                assert.deepEqual(cmd.fileArgs.slice(0, 9), [
+                    "--ro-bind", "/", "/",
+                    "--bind", writable, writable,
+                    "--bind", state, state,
+                ]);
+            }));
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
     // @fails-without-fix sandbox.spawn-policy
     // @covers sandbox.spawn-policy
     // @level integration

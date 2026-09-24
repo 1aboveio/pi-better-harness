@@ -1275,7 +1275,7 @@ export default function (pi: ExtensionAPI) {
             "Call subagent_result after a completion or attention callback, or when the user explicitly asks for the result. Use subagent_output only when the user explicitly asks how a run is progressing; never use either tool to poll.",
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
-            "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
+            "By default the subagent is sandboxed (writes confined to its working dir, Pi state, and temp; reads and network stay open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
         ],
         parameters: Type.Object({
@@ -1286,8 +1286,8 @@ export default function (pi: ExtensionAPI) {
             tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
             clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO extensions at all (only built-ins: read, bash, edit, write). Default false — the extensions backing the requested tools load, so web_fetch and model auth (e.g. xai) work." })),
-            sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE (macOS): kernel-confine the child's file WRITES to its working dir — reads and network stay open, but it cannot write outside, whatever it runs. Set false to allow writes anywhere." })),
-            sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
+            sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE: kernel-confine writes to the working dir, Pi state, and temp; reads and network stay open. Set false to allow writes anywhere." })),
+            sandbox_dir: Type.Optional(Type.String({ description: "Use this directory as the writable work root and child cwd. Pi state and temp remain writable. Created if missing." })),
             callback: Type.Optional(Type.Boolean({ description: "Default TRUE: on completion, trigger a turn that calls subagent_result and presents the result. Set false to finish quietly — the result is then read on demand via subagent_result." })),
             cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
             git_clone_workspace: Type.Optional(Type.Boolean({ description: "Prepare a disposable Git clone workspace for sandboxed Git-mutating subagents. The clone has a real .git/ directory inside the sandbox writable root and is self-contained after setup." })),
@@ -1318,7 +1318,7 @@ export default function (pi: ExtensionAPI) {
                     (p.callback === false
                         ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
                         : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
-                    (sandboxDir ? `Sandboxed: writes confined to ${sandboxDir}\n` : "") +
+                    (sandboxDir ? `Sandboxed: project writes confined to ${sandboxDir}; Pi state and temp remain writable\n` : "") +
                     runtime + warn +
                     `Log: ${logPathFor(id)}`,
                 );
@@ -1352,8 +1352,8 @@ export default function (pi: ExtensionAPI) {
                 thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
                 tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
                 exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
-                sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE: kernel-confine writes to the working dir." })),
-                sandbox_dir: Type.Optional(Type.String({ description: "Writable root for every job." })),
+                sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE: kernel-confine writes to each job's work root, Pi state, and temp." })),
+                sandbox_dir: Type.Optional(Type.String({ description: "Writable work root for every job; Pi state and temp remain writable." })),
                 callback: Type.Optional(Type.Boolean({ description: "Default TRUE: post result back on completion." })),
                 clean: Type.Optional(Type.Boolean({ description: "Hermetic builtins-only child; no extensions load." })),
                 cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
