@@ -294,58 +294,44 @@ export function updateAgentOverrides(
 
 export function parseDefinition(markdown: string, sourcePath?: string): ParseResult {
     const diagnostics: Diagnostic[] = [];
+    try {
+        return parseDefinitionWithinLimits(markdown, sourcePath, diagnostics);
+    } catch (error) {
+        const occupant = safeEarlyOccupant(markdown);
+        diagnostics.push(problem(
+            DiagnosticCodes.parserLimit,
+            `Catalog parser stopped on this file: ${clip(error instanceof Error ? error.message : String(error))}. Other definitions are unaffected. Remove cyclic aliases or shorten the frontmatter.`,
+            {
+                path: sourcePath,
+                ...(occupant.occupantId ? { id: occupant.occupantId } : {}),
+                blocking: true,
+                structural: true,
+            },
+        ));
+        return { ok: false, diagnostics, ...occupant };
+    }
+}
+
+function parseDefinitionWithinLimits(markdown: string, sourcePath: string | undefined, diagnostics: Diagnostic[]): ParseResult {
     if (Buffer.byteLength(markdown, "utf8") > PARSER_LIMITS.maxFileBytes) {
-        diagnostics.push(problem(DiagnosticCodes.parserLimit, `Definition exceeds ${PARSER_LIMITS.maxFileBytes} bytes. Split or shorten it.`, {
-            path: sourcePath,
-            blocking: true,
-            structural: true,
-        }));
-        return { ok: false, diagnostics, ...occupantFromSource(markdown) };
+        return rejectEarly(diagnostics, DiagnosticCodes.parserLimit, `Definition exceeds ${PARSER_LIMITS.maxFileBytes} bytes. Split or shorten it.`, sourcePath, markdown);
     }
     if (markdown.includes("\0")) {
-        diagnostics.push(problem(DiagnosticCodes.malformedFrontmatter, "Definition contains NUL and was not parsed.", {
-            path: sourcePath,
-            blocking: true,
-            structural: true,
-        }));
-        return { ok: false, diagnostics };
+        return rejectEarly(diagnostics, DiagnosticCodes.malformedFrontmatter, "Definition contains NUL and was not parsed.", sourcePath, markdown);
     }
 
     const split = splitFrontmatter(markdown);
     if ("error" in split) {
-        diagnostics.push(problem(DiagnosticCodes.malformedFrontmatter, split.error, {
-            path: sourcePath,
-            blocking: true,
-            structural: true,
-        }));
-        return { ok: false, diagnostics };
+        return rejectEarly(diagnostics, DiagnosticCodes.malformedFrontmatter, split.error, sourcePath, markdown);
     }
     if (Buffer.byteLength(split.yaml, "utf8") > PARSER_LIMITS.maxFrontmatterBytes) {
-        diagnostics.push(problem(DiagnosticCodes.parserLimit, `Frontmatter exceeds ${PARSER_LIMITS.maxFrontmatterBytes} bytes.`, {
-            path: sourcePath,
-            blocking: true,
-            structural: true,
-        }));
-        return { ok: false, diagnostics, ...occupantFromSource(split.yaml) };
+        return rejectEarly(diagnostics, DiagnosticCodes.parserLimit, `Frontmatter exceeds ${PARSER_LIMITS.maxFrontmatterBytes} bytes.`, sourcePath, markdown);
     }
     if (Buffer.byteLength(split.body, "utf8") > PARSER_LIMITS.maxBodyBytes) {
-        diagnostics.push(problem(DiagnosticCodes.parserLimit, `Instruction body exceeds ${PARSER_LIMITS.maxBodyBytes} bytes.`, {
-            path: sourcePath,
-            blocking: true,
-            structural: true,
-        }));
-        return { ok: false, diagnostics, ...occupantFromSource(split.yaml) };
+        return rejectEarly(diagnostics, DiagnosticCodes.parserLimit, `Instruction body exceeds ${PARSER_LIMITS.maxBodyBytes} bytes.`, sourcePath, markdown);
     }
 
-    const document = parseDocument(split.yaml, {
-        uniqueKeys: true,
-        version: "1.2",
-        schema: "core",
-        merge: true,
-        resolveKnownTags: false,
-        strict: true,
-        prettyErrors: true,
-    });
+    const document = parseCatalogYaml(split.yaml);
     const identity = occupantFromDocument(document);
     if (document.errors.length > 0) {
         for (const error of document.errors) {
@@ -1094,14 +1080,147 @@ function splitFrontmatter(source: string): { yaml: string; body: string } | { er
     };
 }
 
-function occupantFromSource(yaml: string): { occupantId?: string } {
-    const ids = new Set<string>();
-    for (const line of yaml.split(/\r?\n/)) {
-        const match = /^id:[ \t]*(["']?)((?:role|agent)\.[a-z0-9]+(?:[.-][a-z0-9]+)*)\1[ \t]*$/.exec(line);
-        if (match?.[2]) ids.add(match[2]);
+function parseCatalogYaml(yaml: string) {
+    return parseDocument(yaml, {
+        uniqueKeys: true,
+        version: "1.2",
+        schema: "core",
+        merge: true,
+        resolveKnownTags: false,
+        strict: true,
+        prettyErrors: true,
+    });
+}
+
+function rejectEarly(
+    diagnostics: Diagnostic[],
+    code: DiagnosticCode,
+    message: string,
+    sourcePath: string | undefined,
+    markdown: string,
+): ParseResult {
+    const occupant = safeEarlyOccupant(markdown);
+    diagnostics.push(problem(code, message, {
+        path: sourcePath,
+        ...(occupant.occupantId ? { id: occupant.occupantId } : {}),
+        blocking: true,
+        structural: true,
+    }));
+    return { ok: false, diagnostics, ...occupant };
+}
+
+/**
+ * Identity for a rejection that must not run the full parser.
+ * Closed, in-limit frontmatter may be parsed. Anything larger, cut off, or
+ * containing NUL is only scanned for one plain top-level id inside the
+ * frontmatter byte cap. The instruction body is never an identity source.
+ */
+function safeEarlyOccupant(markdown: string): { occupantId?: string } {
+    try {
+        const source = markdown.charCodeAt(0) === 0xfeff ? markdown.slice(1) : markdown;
+        const bounded = boundedUtf8Prefix(source, PARSER_LIMITS.maxFrontmatterBytes);
+        const slice = frontmatterSlice(bounded.text);
+        if (!slice) return {};
+        const yamlWindow = boundedUtf8Prefix(slice.yaml, PARSER_LIMITS.maxFrontmatterBytes);
+        const withinCap = !slice.yaml.includes("\0")
+            && Buffer.byteLength(slice.yaml, "utf8") <= PARSER_LIMITS.maxFrontmatterBytes
+            && !yamlWindow.truncated;
+        const completeEnoughToParse = withinCap && (slice.closed || !bounded.truncated);
+        if (completeEnoughToParse) return identityFromParsedYaml(slice.yaml);
+        return occupantFromLines(dropIncompleteNulLine(yamlWindow.text));
+    } catch {
+        return {};
     }
-    if (ids.size !== 1) return {};
-    return { occupantId: [...ids][0] };
+}
+
+function identityFromParsedYaml(yaml: string): { occupantId?: string } {
+    try {
+        return occupantFromDocument(parseCatalogYaml(yaml));
+    } catch {
+        return occupantFromLines(yaml);
+    }
+}
+
+function boundedUtf8Prefix(text: string, maxBytes: number): { text: string; truncated: boolean } {
+    let bytes = 0;
+    let index = 0;
+    while (index < text.length) {
+        const code = text.charCodeAt(index);
+        let width = 1;
+        let step = 1;
+        if (code >= 0x80 && code < 0x800) width = 2;
+        else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length) {
+            width = 4;
+            step = 2;
+        } else if (code >= 0x800) width = 3;
+        if (bytes + width > maxBytes) {
+            const slice = text.slice(0, index);
+            const newline = Math.max(slice.lastIndexOf("\n"), slice.lastIndexOf("\r"));
+            return newline < 0 ? { text: "", truncated: true } : { text: slice.slice(0, newline), truncated: true };
+        }
+        bytes += width;
+        index += step;
+    }
+    return { text, truncated: false };
+}
+
+function dropIncompleteNulLine(text: string): string {
+    const index = text.indexOf("\0");
+    if (index < 0) return text;
+    const lineBreak = Math.max(text.lastIndexOf("\n", index - 1), text.lastIndexOf("\r", index - 1));
+    return lineBreak >= 0 ? text.slice(0, lineBreak) : "";
+}
+
+function frontmatterSlice(text: string): { yaml: string; closed: boolean } | undefined {
+    const opening = /^---[ \t]*\r?\n/.exec(text);
+    if (!opening) return undefined;
+    const rest = text.slice(opening[0].length);
+    const closing = /\r?\n---[ \t]*(?:\r?\n|$)/.exec(rest);
+    if (!closing || closing.index === undefined) return { yaml: rest, closed: false };
+    return { yaml: rest.slice(0, closing.index), closed: true };
+}
+
+/** One unindented plain or quoted id. A trailing comment is kept; aliases and nested keys are not. */
+function occupantFromLines(yaml: string): { occupantId?: string } {
+    const found: string[] = [];
+    for (const line of yaml.split(/\r?\n/)) {
+        const match = /^id:[ \t]*(.*)$/.exec(line);
+        if (!match) continue;
+        const id = plainScalarId(match[1] ?? "");
+        if (!id) return {};
+        found.push(id);
+    }
+    if (found.length === 0 || new Set(found).size !== 1) return {};
+    return { occupantId: found[0] };
+}
+
+function plainScalarId(raw: string): string | undefined {
+    const text = raw.trim();
+    if (text === "" || text.startsWith("#")) return undefined;
+    if (text.startsWith("\"") || text.startsWith("'")) {
+        const quote = text[0]!;
+        let value = "";
+        for (let index = 1; index < text.length; index += 1) {
+            const char = text[index]!;
+            if (quote === "'" && char === "'" && text[index + 1] === "'") {
+                value += "'";
+                index += 1;
+                continue;
+            }
+            if (quote === '"' && char === "\\") return undefined;
+            if (char === quote) {
+                const after = text.slice(index + 1).trim();
+                if (after !== "" && !after.startsWith("#")) return undefined;
+                return ID_PATTERN.test(value) ? value : undefined;
+            }
+            value += char;
+        }
+        return undefined;
+    }
+    const commentAt = text.search(/[ \t]#/);
+    const plain = (commentAt >= 0 ? text.slice(0, commentAt) : text).trim();
+    if (plain === "" || /^[&*!|>[{%@`]/.test(plain)) return undefined;
+    return ID_PATTERN.test(plain) ? plain : undefined;
 }
 
 /**
