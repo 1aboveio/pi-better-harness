@@ -1,0 +1,9 @@
+# Codex custom agent. The hash in the quoted description must survive the real parser.
+name = "Reviewer"
+description = "Reviews changes. Includes a # hash."
+developer_instructions = """
+Review the change.
+model_reasoning_effort = "max"
+"""
+model = "openai/gpt-6-astra"
+model_reasoning_effort = "medium"

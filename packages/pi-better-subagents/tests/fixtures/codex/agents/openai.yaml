@@ -1,0 +1,5 @@
+interface:
+  display_name: Skill UI
+  short_description: This is skill metadata, not a custom agent.
+dependencies:
+  tools: []
