@@ -5,6 +5,11 @@
  * `list` / `output` / `result` keep working across foreground turns, `/reload`,
  * and even a full pi restart. In-memory state holds only the live exit handlers
  * for runs this process spawned.
+ *
+ * Catalog launches may attach an optional immutable `catalog` snapshot to that
+ * same record. Display-label reservations live under `{baseDir()}/labels`
+ * (see catalog-identity.ts). They are not a second registry, and removing a
+ * run directory does not delete them.
  */
 
 import { createHash } from "node:crypto";
@@ -24,6 +29,34 @@ export type RunStatus = "running" | "completed" | "failed" | "killed" | "orphane
 export interface RunCallbackOrigin {
     cwd: string;
     sessionId?: string;
+}
+
+/**
+ * JSON value inside a catalog launch snapshot. The snapshot is structurally
+ * flexible: known sections are identity, effective configuration, and
+ * provenance, and callers may add further JSON fields without a schema bump.
+ */
+export type CatalogJson =
+    | null
+    | boolean
+    | number
+    | string
+    | CatalogJson[]
+    | { [key: string]: CatalogJson | undefined };
+
+/**
+ * Launch-time catalog record stored on the run. Every section is optional so
+ * a partial snapshot still round-trips; legacy metadata simply omits `catalog`.
+ * Once `writeMeta` has persisted a snapshot, later writes keep that value.
+ */
+export interface CatalogLaunchSnapshot {
+    /** Role/agent identity, display label, and alias captured at launch. */
+    identity?: CatalogJson;
+    /** Effective instructions, model, effort, and related launch configuration. */
+    effective?: CatalogJson;
+    /** Why the definition, model, and effort won. */
+    provenance?: CatalogJson;
+    [key: string]: CatalogJson | undefined;
 }
 
 /**
@@ -129,6 +162,13 @@ export interface RunMeta {
      * `subagent_list` keep working for dismissed runs).
      */
     dismissedAt?: number;
+    /**
+     * Optional catalog launch snapshot. Additive: metadata written before the
+     * catalog has no `catalog` key and still parses. `writeMeta` freezes the
+     * first persisted snapshot, so status updates and `/reload` must not
+     * replace identity, effective configuration, or provenance.
+     */
+    catalog?: CatalogLaunchSnapshot;
 }
 
 /** Root runtime dir, deliberately OUTSIDE any repo. */
@@ -149,6 +189,22 @@ export function promptPathFor(id: string): string {
 }
 function metaPathFor(id: string): string {
     return join(runDir(id), "meta.json");
+}
+
+/**
+ * The first catalog snapshot written for a run. Missing file or missing key
+ * means a later write may still record the launch snapshot; a present value,
+ * including null, is never replaced by reload or status updates.
+ */
+function readFrozenCatalog(id: string): { frozen: true; value: CatalogLaunchSnapshot } | { frozen: false } {
+    try {
+        const parsed = JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as { catalog?: CatalogLaunchSnapshot };
+        if (!parsed || typeof parsed !== "object" || !("catalog" in parsed)) return { frozen: false };
+        if (parsed.catalog === undefined) return { frozen: false };
+        return { frozen: true, value: parsed.catalog };
+    } catch {
+        return { frozen: false };
+    }
 }
 
 let seq = 0;
@@ -185,6 +241,8 @@ export function nextRunId(): string {
 
 export function writeMeta(meta: RunMeta): void {
     mkdirSync(runDir(meta.id), { recursive: true });
+    const frozen = readFrozenCatalog(meta.id);
+    if (frozen.frozen) meta.catalog = frozen.value;
     writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
     metaCache.set(meta.id, meta);
     indexMeta(meta);
@@ -210,6 +268,14 @@ export function readMeta(id: string): RunMeta | undefined {
     }
 }
 
+/**
+ * Delete one run directory and its index entries.
+ *
+ * Catalog label reservations under `{baseDir()}/labels` are intentionally
+ * kept. Age and size sweeps call this and therefore also leave reservations
+ * in place, so a purged run does not free its display label for reuse.
+ * Deleting the whole registry root is what clears them.
+ */
 export function removeMetaArtifacts(meta: RunMeta): boolean {
     try {
         rmSync(runDir(meta.id), { recursive: true, force: true });
