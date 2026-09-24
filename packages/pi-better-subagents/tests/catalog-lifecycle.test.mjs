@@ -29,6 +29,8 @@ const { configureTierPolicy } = await import("../tier-policy.ts");
 const { setConfigForTests } = await import("../config.ts");
 const { buildDetailLines, buildNavigatorDetail } = await import("../navigator.mjs");
 const { mergeJobOptions } = await import("../batch.mjs");
+const { baseDir, readMeta, writeMeta } = await import("../registry.ts");
+const { CATALOG_LABEL_DIRECTORY } = await import("../catalog-identity.ts");
 
 function model(provider, id, extra = {}) {
     return { provider, id, reasoning: true, ...extra };
@@ -109,6 +111,7 @@ describe("catalog runtime", () => {
         assert.equal(prepared.assign.catalog.effortSelection.actual, "high");
         assert.equal(prepared.assign.catalog.capabilities.grantedByCatalog, false);
         assert.equal(prepared.assign.catalog.snapshotDigest, snapshot.digest);
+        assert.equal(prepared.assign.catalog.identity.label, "Payments Developer");
         assert.equal(JSON.parse(JSON.stringify(prepared.assign.catalog)).id, "agent.payments");
     });
 
@@ -305,29 +308,38 @@ Edited instructions.
         assert.equal(roleSlug("role.developer"), "developer");
     });
 
-    it("reports direct-role allocation pending until catalog-identity.ts is present", async () => {
-        let identity;
-        try {
-            identity = await import("../catalog-identity.ts");
-        } catch {
-            identity = undefined;
-        }
-        if (!identity?.allocateCatalogLabel) {
-            const h = fixture().host();
-            await assert.rejects(
-                () => prepareCatalogJob(loadLaunchSnapshot(h), { prompt: "Build.", role: "role.developer", alias: "checkout" }, h),
-                /allocateCatalogLabel/,
-            );
-            return;
-        }
-        const h = fixture().host();
-        const prepared = await prepareCatalogJob(loadLaunchSnapshot(h), { prompt: "Build.", role: "role.developer", alias: "checkout" }, h);
-        assert.equal(prepared.status, "ready", prepared.message);
-        assert.match(prepared.assign.name, /developer/);
+    it("allocates direct-role numeric and alias labels with the real allocator", async () => {
+        const registryDir = mkdtempSync(join(root, "labels-"));
+        const fx = fixture();
+        writeAgent(fx.userRoot, "agent.payments", "role.developer", "Look at payments.");
+        const h = fx.host({ registryDir });
+        const snapshot = loadLaunchSnapshot(h);
+        const plain = await prepareCatalogJob(snapshot, { prompt: "Build plain.", role: "role.developer" }, h);
+        const alias = await prepareCatalogJob(snapshot, { prompt: "Build.", role: "role.developer", alias: "checkout" }, h);
+        const collision = await prepareCatalogJob(snapshot, { prompt: "Build.", role: "role.developer", alias: "checkout" }, h);
+        const explicitName = await prepareCatalogJob(snapshot, { prompt: "Build.", role: "role.developer", name: "job-1" }, h);
+        const named = await prepareCatalogJob(snapshot, { prompt: "Ship.", agent: "agent.payments", name: "ignored" }, h);
+        assert.equal(plain.status, "ready", plain.message);
+        assert.equal(alias.status, "ready", alias.message);
+        assert.equal(collision.status, "ready", collision.message);
+        assert.equal(explicitName.status, "ready", explicitName.message);
+        assert.equal(plain.assign.name, "developer-1");
+        assert.equal(plain.assign.catalog.identity.label, "developer-1");
+        assert.equal(alias.assign.name, "developer-checkout");
+        assert.equal(collision.assign.name, "developer-checkout-2");
+        assert.equal(explicitName.assign.name, "developer-job-1");
+        assert.equal(named.status, "ready", named.message);
+        assert.equal(named.assign.name, "Payments Developer");
+        const reservation = JSON.parse(readFileSync(join(registryDir, CATALOG_LABEL_DIRECTORY, encodeURIComponent("developer-1")), "utf8"));
+        assert.equal(reservation.kind, "numeric");
+        assert.equal(reservation.roleId, "role.developer");
+        const aliasReservation = JSON.parse(readFileSync(join(registryDir, CATALOG_LABEL_DIRECTORY, encodeURIComponent("developer-checkout")), "utf8"));
+        assert.equal(aliasReservation.kind, "alias");
+        assert.equal(existsSync(join(registryDir, CATALOG_LABEL_DIRECTORY, encodeURIComponent("Payments Developer"))), false);
     });
 });
 
-describe("registered catalog spawn", () => {
+describe("registered catalog spawn", { concurrency: false }, () => {
     let tools;
     const fx = fixture();
 
@@ -350,6 +362,9 @@ base=$(dirname "$sess")
 mkdir -p "$base/runs/$id"
 printf '%s\\n' "\${args[@]}" > "$base/runs/$id/argv.txt"
 printf '%s\\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}' > "$base/runs/$id/output.log"
+if [[ -n "\${PI_SUBAGENT_TEST_HOLD:-}" ]]; then
+  sleep 30
+fi
 `);
         chmodSync(piPath, 0o755);
         process.env.PATH = `${binDir}:${process.env.PATH}`;
@@ -498,6 +513,295 @@ printf '%s\\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{
         const after = (existsSync(runsDir) ? readdirSync(runsDir) : []).filter((id) => !before.has(id));
         assert.deepEqual(after, []);
         assert.equal(typeof tools.agents_catalog.execute, "function");
+    });
+
+    function runIdFrom(result) {
+        const match = textOf(result).match(/sa_[a-z0-9_]+/);
+        assert.ok(match, textOf(result));
+        return match[0];
+    }
+
+    function metaOf(id) {
+        return JSON.parse(readFileSync(join(baseDir(), "runs", id, "meta.json"), "utf8"));
+    }
+
+    async function settledMeta(id) {
+        for (let attempt = 0; attempt < 40; attempt++) {
+            const meta = metaOf(id);
+            if (meta.status !== "running") return meta;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return metaOf(id);
+    }
+
+    it("spawns direct-role numeric and alias labels through the registered tool", async () => {
+        const alias = `checkout-${Date.now().toString(36)}`;
+        const first = await tools.subagent_spawn.execute("tc", {
+            prompt: "Build the numeric run.",
+            role: "role.developer",
+            tools: "read,bash",
+            sandbox: false,
+        }, null, null, ctx());
+        const second = await tools.subagent_spawn.execute("tc", {
+            prompt: "Build the alias run.",
+            role: "role.developer",
+            alias,
+            tools: "read,bash",
+            sandbox: false,
+        }, null, null, ctx());
+        const third = await tools.subagent_spawn.execute("tc", {
+            prompt: "Build the alias collision.",
+            role: "role.developer",
+            alias,
+            tools: "read,bash",
+            sandbox: false,
+        }, null, null, ctx());
+        const ids = [runIdFrom(first), runIdFrom(second), runIdFrom(third)];
+        const metas = ids.map(metaOf);
+        assert.match(metas[0].name, /^developer-\d+$/);
+        assert.equal(metas[1].name, `developer-${alias}`);
+        assert.equal(metas[2].name, `developer-${alias}-2`);
+        assert.deepEqual(metas.map((meta) => meta.name), [...new Set(metas.map((meta) => meta.name))]);
+        for (const meta of metas) {
+            assert.equal(meta.catalog.identity.label, meta.name);
+            assert.equal(meta.catalog.roleId, "role.developer");
+            assert.equal(meta.model, "openai/gpt-6-sol");
+            assert.equal(meta.effort, "high");
+            assert.equal(meta.catalog.modelSelection.source, "role-default");
+            assert.equal(meta.catalog.effortSelection.actual, "high");
+            const reservation = JSON.parse(readFileSync(join(baseDir(), CATALOG_LABEL_DIRECTORY, encodeURIComponent(meta.name)), "utf8"));
+            assert.equal(reservation.roleId, "role.developer");
+            assert.notEqual(meta.name, "job-1");
+        }
+        assert.equal(JSON.parse(readFileSync(join(baseDir(), CATALOG_LABEL_DIRECTORY, encodeURIComponent(metas[0].name)), "utf8")).kind, "numeric");
+        assert.equal(JSON.parse(readFileSync(join(baseDir(), CATALOG_LABEL_DIRECTORY, encodeURIComponent(metas[1].name)), "utf8")).kind, "alias");
+        const finished = await settledMeta(ids[0]);
+        assert.notEqual(finished.status, "running");
+        assert.equal(finished.name, metas[0].name);
+        assert.equal(finished.catalog.identity.label, metas[0].name);
+        assert.equal(finished.catalog.modelSelection.actual, "openai/gpt-6-sol");
+        const stale = readMeta(ids[0]);
+        stale.name = "job-1";
+        stale.catalog = { identity: { label: "stale" }, modelSelection: { actual: "stale" } };
+        stale.status = "failed";
+        writeMeta(stale);
+        const kept = readMeta(ids[0]);
+        assert.equal(kept.name, metas[0].name);
+        assert.equal(kept.status, "failed");
+        assert.equal(kept.catalog.identity.label, metas[0].name);
+        assert.equal(kept.catalog.modelSelection.actual, "openai/gpt-6-sol");
+        const dropped = readMeta(ids[0]);
+        delete dropped.name;
+        delete dropped.catalog;
+        writeMeta(dropped);
+        const still = readMeta(ids[0]);
+        assert.equal(still.name, metas[0].name);
+        assert.equal(still.catalog.identity.label, metas[0].name);
+        const detail = buildNavigatorDetail(ids[1], {
+            readMeta: (id) => readMeta(id),
+            effectiveStatus: (meta) => meta.status,
+            parseRun: () => ({ finalText: "", lastActivity: "", toolCalls: [], usage: {} }),
+            shortModel: (modelId) => modelId,
+            fmtElapsed: () => "1s",
+            fmtSpend: () => "",
+            now: 2_000,
+        });
+        assert.equal(detail.id, ids[1]);
+        assert.equal(detail.name, metas[1].name);
+        assert.equal(detail.role, "role.developer");
+        assert.equal(detail.model, "openai/gpt-6-sol");
+        assert.equal(detail.effort, "high");
+        const lines = buildDetailLines(detail, { width: 120, truncate: (line) => line }).join("\n");
+        assert.match(lines, new RegExp(ids[1]));
+        assert.match(lines, /role\.developer/);
+        assert.match(lines, /gpt-6-sol/);
+        assert.match(lines, /high/);
+    });
+
+    it("keeps one batch snapshot and does not leak sibling role model or job labels", async () => {
+        const result = await tools.subagent_spawn_batch.execute("tc", {
+            jobs: [
+                { prompt: "Implement one.", role: "role.developer" },
+                { prompt: "Implement two.", role: "role.developer" },
+                { prompt: "Review the change.", role: "role.reviewer", model: "openai/gpt-6-astra", thinking: "medium" },
+            ],
+            shared: { tools: "read,bash", sandbox: false },
+        }, null, null, ctx());
+        const text = textOf(result);
+        assert.doesNotMatch(text, /job-1|job-2|job-3/);
+        const ids = [...text.matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
+        assert.equal(ids.length, 3);
+        const metas = ids.map(metaOf);
+        assert.equal(metas[0].catalog.snapshotDigest, metas[1].catalog.snapshotDigest);
+        assert.equal(metas[1].catalog.snapshotDigest, metas[2].catalog.snapshotDigest);
+        assert.match(metas[0].name, /^developer-\d+$/);
+        assert.match(metas[1].name, /^developer-\d+$/);
+        assert.notEqual(metas[0].name, metas[1].name);
+        assert.match(metas[2].name, /^reviewer-/);
+        assert.equal(metas[0].model, "openai/gpt-6-sol");
+        assert.equal(metas[1].model, "openai/gpt-6-sol");
+        assert.equal(metas[2].model, "openai/gpt-6-astra");
+        assert.equal(metas[0].effort, "high");
+        assert.equal(metas[2].effort, "medium");
+        assert.equal(metas[2].catalog.modelSelection.source, "invocation");
+        const finished = await settledMeta(ids[2]);
+        const resultText = textOf(await tools.subagent_result.execute("tc", { id: ids[2] }));
+        assert.match(resultText, /done|still running|failed|completed/);
+        const afterResult = metaOf(ids[2]);
+        assert.equal(afterResult.name, finished.name);
+        assert.equal(afterResult.catalog.snapshotDigest, metas[2].catalog.snapshotDigest);
+        assert.equal(afterResult.catalog.modelSelection.actual, "openai/gpt-6-astra");
+        const stopText = textOf(await tools.subagent_stop.execute("tc", { id: ids[2] }));
+        assert.match(stopText, /not running|already|stopped|killed/i);
+        assert.equal(metaOf(ids[2]).catalog.identity.label, metas[2].name);
+    });
+
+    it("does not read a quoted model out of the task", async () => {
+        const result = await tools.subagent_spawn.execute("tc", {
+            prompt: "Compare openai/gpt-6-astra@max with luna. Leave the default.",
+            role: "role.developer",
+            tools: "read,bash",
+            sandbox: false,
+        }, null, null, ctx());
+        const meta = metaOf(runIdFrom(result));
+        assert.equal(meta.model, "openai/gpt-6-sol");
+        assert.equal(meta.effort, "high");
+        assert.equal(meta.catalog.modelSelection.source, "role-default");
+    });
+
+    it("uses config.json tierPolicy on the registered spawn path", async () => {
+        setConfigForTests({
+            defaultModel: null,
+            maxConcurrent: 8,
+            tierPolicy: {
+                balanced: {
+                    members: ["openai/gpt-6-sol", "openai/gpt-6-sol-backup"],
+                    candidates: ["openai/gpt-6-sol-backup"],
+                },
+            },
+        });
+        try {
+            const host = ctx();
+            host.modelRegistry = registryOf(model("openai", "gpt-6-luna"), model("openai", "gpt-6-sol-backup"));
+            const result = await tools.subagent_spawn.execute("tc", {
+                prompt: "Fallback through config.",
+                role: "role.developer",
+                tools: "read,bash",
+                sandbox: false,
+            }, null, null, host);
+            const meta = metaOf(runIdFrom(result));
+            assert.equal(meta.model, "openai/gpt-6-sol-backup");
+            assert.equal(meta.effort, "high");
+            assert.equal(meta.catalog.modelSelection.source, "tier-candidate");
+            assert.equal(meta.catalog.effortSelection.actual, "high");
+        } finally {
+            setConfigForTests(undefined);
+        }
+    });
+
+    it("reports launchability through the registered catalog tool", async () => {
+        const inspected = await tools.agents_catalog.execute("tc", {
+            action: "inspect",
+            id: "role.developer",
+        }, null, null, ctx());
+        assert.equal(inspected.details.view.launchable, true);
+        assert.equal(inspected.details.view.actualModel, "openai/gpt-6-sol");
+        assert.equal(inspected.details.view.actualEffort, "high");
+        assert.equal(inspected.details.view.capabilities.grantedByCatalog, false);
+        assert.equal(inspected.details.wrote, false);
+    });
+
+    it("stops the sibling when one catalog job is blocked and still launches the other when capacity allows", async () => {
+        setConfigForTests({ defaultModel: null, maxConcurrent: 8, tierPolicy: null });
+        try {
+            const runsDir = join(baseDir(), "runs");
+            const before = new Set(existsSync(runsDir) ? readdirSync(runsDir) : []);
+            const result = await tools.subagent_spawn_batch.execute("tc", {
+                onCapacity: "launch-available",
+                jobs: [
+                    { prompt: "Bad model for this job.", role: "role.developer", model: "openai/gpt-6-missing" },
+                    { prompt: "Good reviewer job.", role: "role.reviewer", model: "openai/gpt-6-astra", thinking: "medium" },
+                ],
+                shared: { tools: "read,bash", sandbox: false },
+            }, null, null, ctx());
+            const text = textOf(result);
+            assert.match(text, /No child was started/);
+            assert.match(text, /reviewer-/);
+            const created = (existsSync(runsDir) ? readdirSync(runsDir) : []).filter((id) => !before.has(id));
+            assert.equal(created.length, 1);
+            const meta = metaOf(created[0]);
+            assert.equal(meta.model, "openai/gpt-6-astra");
+            assert.equal(meta.effort, "medium");
+            assert.equal(meta.catalog.roleId, "role.reviewer");
+        } finally {
+            setConfigForTests(undefined);
+        }
+    });
+
+    async function waitForNoRunning() {
+        const dir = join(baseDir(), "runs");
+        for (let attempt = 0; attempt < 40; attempt++) {
+            const ids = existsSync(dir) ? readdirSync(dir) : [];
+            const running = ids.some((id) => {
+                try {
+                    const meta = JSON.parse(readFileSync(join(dir, id, "meta.json"), "utf8"));
+                    if (meta.status !== "running" || meta.spawnPid !== process.pid) return false;
+                    try {
+                        process.kill(meta.pid, 0);
+                        return true;
+                    } catch (error) {
+                        return error?.code === "EPERM";
+                    }
+                } catch {
+                    return false;
+                }
+            });
+            if (!running) return;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+    }
+
+    it("rejects a second catalog launch at the shared capacity gate", async () => {
+        await waitForNoRunning();
+        process.env.PI_SUBAGENT_TEST_HOLD = "1";
+        setConfigForTests({ defaultModel: null, maxConcurrent: 1, tierPolicy: null });
+        let heldId;
+        try {
+            const first = await tools.subagent_spawn.execute("tc", {
+                prompt: "Hold the only slot.",
+                role: "role.explorer",
+                tools: "read,bash",
+                sandbox: false,
+            }, null, null, ctx());
+            heldId = runIdFrom(first);
+            const runsDir = join(baseDir(), "runs");
+            const before = new Set(readdirSync(runsDir));
+            await assert.rejects(
+                () => tools.subagent_spawn.execute("tc", {
+                    prompt: "This must not start.",
+                    role: "role.developer",
+                    tools: "read,bash",
+                    sandbox: false,
+                }, null, null, ctx()),
+                /Max concurrent subagents/,
+            );
+            const created = readdirSync(runsDir).filter((id) => !before.has(id));
+            assert.deepEqual(created, []);
+            const stopped = textOf(await tools.subagent_stop.execute("tc", { id: heldId }));
+            assert.match(stopped, /stopped|killed/i);
+            const meta = metaOf(heldId);
+            assert.equal(meta.status, "killed");
+            assert.match(meta.name, /^explorer-/);
+            assert.equal(meta.catalog.identity.label, meta.name);
+            assert.equal(meta.catalog.modelSelection.actual, "openai/gpt-6-luna");
+            assert.equal(meta.effort, "medium");
+        } finally {
+            delete process.env.PI_SUBAGENT_TEST_HOLD;
+            setConfigForTests(undefined);
+            if (heldId) {
+                try { await tools.subagent_stop.execute("tc", { id: heldId }); } catch { /* already terminal */ }
+            }
+        }
     });
 });
 

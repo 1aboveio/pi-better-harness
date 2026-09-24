@@ -192,18 +192,61 @@ function metaPathFor(id: string): string {
 }
 
 /**
- * The first catalog snapshot written for a run. Missing file or missing key
- * means a later write may still record the launch snapshot; a present value,
- * including null, is never replaced by reload or status updates.
+ * Launch name and catalog already stored for a run.
+ *
+ * A missing file, or a file with no `catalog` key, may still receive the
+ * launch snapshot. A present catalog value, including null, is never
+ * replaced. A present display name is likewise kept: callbacks must not
+ * publish a missing or stale label over the one supplied on the first write.
  */
-function readFrozenCatalog(id: string): { frozen: true; value: CatalogLaunchSnapshot } | { frozen: false } {
+function readLaunchAnchor(id: string): {
+    catalogFrozen: boolean;
+    catalog?: CatalogLaunchSnapshot;
+    name?: string;
+} {
     try {
-        const parsed = JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as { catalog?: CatalogLaunchSnapshot };
-        if (!parsed || typeof parsed !== "object" || !("catalog" in parsed)) return { frozen: false };
-        if (parsed.catalog === undefined) return { frozen: false };
-        return { frozen: true, value: parsed.catalog };
+        const parsed = JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as {
+            catalog?: CatalogLaunchSnapshot;
+            name?: unknown;
+        };
+        if (!parsed || typeof parsed !== "object") return { catalogFrozen: false };
+        const catalogFrozen = "catalog" in parsed && parsed.catalog !== undefined;
+        const name = typeof parsed.name === "string" && parsed.name.length > 0 ? parsed.name : undefined;
+        return { catalogFrozen, catalog: parsed.catalog, name };
     } catch {
-        return { frozen: false };
+        return { catalogFrozen: false };
+    }
+}
+
+/**
+ * Serialize one run's read-modify-write. `writeMeta` keeps the first catalog
+ * and name, but that read and the following write used to be unlocked, so an
+ * overlapping callback could publish a missing snapshot. The lock is per run
+ * and is not a second registry.
+ */
+function withRunMetaLock(id: string, body: () => void): void {
+    const lockPath = join(runDir(id), ".meta.lock");
+    const started = Date.now();
+    for (;;) {
+        try {
+            writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });
+            break;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            try {
+                if (Date.now() - statSync(lockPath).mtimeMs > 2_000) unlinkSync(lockPath);
+            } catch { /* the holder released it, or another waiter did */ }
+            if (Date.now() - started > 5_000) {
+                throw new Error(`Timed out writing metadata for ${id}`);
+            }
+            const until = Date.now() + 5;
+            while (Date.now() < until) { /* rare overlap */ }
+        }
+    }
+    try {
+        body();
+    } finally {
+        try { unlinkSync(lockPath); } catch { /* already released */ }
     }
 }
 
@@ -241,11 +284,14 @@ export function nextRunId(): string {
 
 export function writeMeta(meta: RunMeta): void {
     mkdirSync(runDir(meta.id), { recursive: true });
-    const frozen = readFrozenCatalog(meta.id);
-    if (frozen.frozen) meta.catalog = frozen.value;
-    writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
-    metaCache.set(meta.id, meta);
-    indexMeta(meta);
+    withRunMetaLock(meta.id, () => {
+        const prior = readLaunchAnchor(meta.id);
+        if (prior.catalogFrozen) meta.catalog = prior.catalog;
+        if (prior.name) meta.name = prior.name;
+        writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
+        metaCache.set(meta.id, meta);
+        indexMeta(meta);
+    });
     for (const listener of metaChangedListeners) {
         try { listener(); } catch { /* best effort */ }
     }
