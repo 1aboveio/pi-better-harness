@@ -10,6 +10,9 @@
 import { inspectCatalog, listCatalog, type CatalogInspection } from "./catalog-resolver.ts";
 import { formatDiagnostic, type Diagnostic } from "./catalog-schema.ts";
 import type { CatalogSnapshot } from "./catalog-store.ts";
+import { loadConfig, normalizeTools, SAFE_DEFAULT_TOOLS, type SubagentConfig } from "./config.ts";
+import { resolveExtensions } from "./extensions.ts";
+import { sandboxSupported } from "./sandbox.ts";
 
 export const LEGACY_CAPABILITY_CONTROLS = [
     "tool selection",
@@ -20,6 +23,31 @@ export const LEGACY_CAPABILITY_CONTROLS = [
 ] as const;
 
 export const CAPABILITY_NOTE = "Tool selection, extension loading, skills setup, sandbox and workspace, and nested delegation stay on the existing spawn path. The catalog grants no extra tools or permissions. A role name or instruction that says read-only is not enforcement.";
+
+/** Existing spawn defaults a catalog launch uses when the caller does not override them. Not grants. */
+export interface EffectiveLaunchCapabilities {
+    toolAllowlist: string | "unknown";
+    extensions: {
+        mode: "isolated" | "clean" | "inherit" | "unknown";
+        specs: readonly string[];
+        unmapped: readonly string[];
+        /** "unknown" when no actual model was resolved, so provider packages are not guessed. */
+        providerExtensions: "resolved" | "unknown";
+    };
+    sandbox: {
+        /** Default spawn policy. A caller can still pass sandbox:false. */
+        enabled: true;
+        /** Whether this platform would actually confine writes. Never claimed when the probe fails. */
+        applied: boolean | "unknown";
+        writes: "working-directory" | "unconfined" | "unknown";
+    };
+    workspace: {
+        cwd: string | "unknown";
+        gitClone: false;
+        sandboxRoot: string | null | "unknown";
+    };
+    nesting: { allowNested: false };
+}
 
 export interface LaunchEnrichment {
     availability: "available" | "unavailable" | "unknown";
@@ -36,6 +64,7 @@ export interface LaunchEnrichment {
         note?: string;
         /** Ignored unless every name is already an existing spawn control. */
         enforcedExistingControls?: readonly string[];
+        effective?: EffectiveLaunchCapabilities;
     };
 }
 
@@ -57,6 +86,8 @@ export interface OperationCapabilities {
     extraGrants: readonly [];
     controls: readonly string[];
     note: string;
+    /** Actual default tool, extension, sandbox, workspace, and nesting values. Not role grants. */
+    effective: EffectiveLaunchCapabilities;
 }
 
 export interface OperationView {
@@ -110,13 +141,65 @@ export interface OperationList {
     text: string;
 }
 
-const CAPABILITIES: OperationCapabilities = {
-    grantedByCatalog: false,
-    sameAsLegacySpawn: true,
-    extraGrants: [],
+const STATIC_CAPABILITIES = {
+    grantedByCatalog: false as const,
+    sameAsLegacySpawn: true as const,
+    extraGrants: [] as const,
     controls: LEGACY_CAPABILITY_CONTROLS,
     note: CAPABILITY_NOTE,
 };
+
+/**
+ * Values `spawnSubagentRun` uses when a catalog launch omits tools, sandbox,
+ * workspace, and nesting. A missing model does not invent provider extensions.
+ * A failed sandbox probe stays unknown rather than enforced.
+ */
+export function describeDefaultLaunchCapabilities(input: {
+    config: SubagentConfig;
+    model?: string | null;
+    cwd?: string;
+}): EffectiveLaunchCapabilities {
+    const rawTools = input.config.defaultTools ?? SAFE_DEFAULT_TOOLS;
+    const toolAllowlist = typeof rawTools === "string" ? normalizeTools(rawTools) : "unknown";
+    const model = typeof input.model === "string" && input.model.trim() !== "" ? input.model : undefined;
+    let extensions: EffectiveLaunchCapabilities["extensions"];
+    if (toolAllowlist === "unknown") {
+        extensions = { mode: "unknown", specs: [], unmapped: [], providerExtensions: model ? "resolved" : "unknown" };
+    } else {
+        const resolution = resolveExtensions({
+            tools: toolAllowlist,
+            ...(model ? { model } : {}),
+            clean: false,
+            allowNested: false,
+            config: input.config,
+        });
+        extensions = {
+            mode: resolution.mode,
+            specs: resolution.specs,
+            unmapped: resolution.unmapped,
+            providerExtensions: model ? "resolved" : "unknown",
+        };
+    }
+    let applied: boolean | "unknown" = "unknown";
+    try {
+        applied = sandboxSupported();
+    } catch {
+        applied = "unknown";
+    }
+    const writes = applied === true ? "working-directory" : applied === false ? "unconfined" : "unknown";
+    const cwd = typeof input.cwd === "string" && input.cwd.trim() !== "" ? input.cwd : "unknown";
+    return {
+        toolAllowlist,
+        extensions,
+        sandbox: { enabled: true, applied, writes },
+        workspace: {
+            cwd,
+            gitClone: false,
+            sandboxRoot: applied === true ? cwd : applied === false ? null : "unknown",
+        },
+        nesting: { allowNested: false },
+    };
+}
 
 export function presentCatalog(snapshot: CatalogSnapshot, enrich?: LaunchEnricher): OperationList {
     const entries = listCatalog(snapshot).map((entry) => presentCatalogEntry(snapshot, entry.id, enrich));
@@ -232,7 +315,13 @@ export function presentCatalogEntry(snapshot: CatalogSnapshot, id: string, enric
         availability: enrichment?.availability,
         modelReason: enrichment?.modelReason,
         effortReason: enrichment?.effortReason,
-        capabilities: CAPABILITIES,
+        capabilities: {
+            ...STATIC_CAPABILITIES,
+            effective: enrichment?.capabilities?.effective ?? describeDefaultLaunchCapabilities({
+                config: loadConfig(),
+                model: enrichment?.actualModel ?? null,
+            }),
+        },
         restrictions: inspection.restrictions.map((restriction) => ({
             name: restriction.name,
             value: restriction.value,
@@ -290,6 +379,12 @@ export function renderOperationView(view: OperationView): string {
     lines.push(view.capabilities.note);
     lines.push("capabilities.grantedByCatalog=false");
     lines.push("capabilities.extraGrants=[]");
+    lines.push(`tool allowlist: ${JSON.stringify(view.capabilities.effective.toolAllowlist)}`);
+    lines.push(`extensions: ${JSON.stringify(view.capabilities.effective.extensions)}`);
+    lines.push(`sandbox: ${JSON.stringify(view.capabilities.effective.sandbox)}`);
+    lines.push(`workspace: ${JSON.stringify(view.capabilities.effective.workspace)}`);
+    lines.push(`nesting: ${JSON.stringify(view.capabilities.effective.nesting)}`);
+    lines.push("These values are the existing spawn defaults. The catalog did not grant them.");
     if (view.restrictions.length === 0) lines.push("execution restrictions: none");
     for (const restriction of view.restrictions) {
         lines.push(`execution restriction ${restriction.name}=${JSON.stringify(restriction.value)} required=${yesNo(restriction.required)} honored=${yesNo(restriction.honored)} enforced=false`);

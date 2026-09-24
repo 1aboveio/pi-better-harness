@@ -278,6 +278,67 @@ Edited instructions.
         }), undefined);
     });
 
+    it("re-reads registry availability and tool config on every inspection", () => {
+        const models = [model("openai", "gpt-6-sol")];
+        const h = fixture().host({
+            registry: { getAvailable: () => models, find: () => undefined },
+            foregroundModel: "openai/gpt-6-sol",
+            configuredDefaultModel: null,
+        });
+        noteCatalogHost(h);
+        setConfigForTests({ defaultModel: null, defaultTools: "read", tierPolicy: null, maxConcurrent: 4 });
+        const snapshot = loadLaunchSnapshot(h);
+        const enrich = createLaunchEnricher();
+        const input = { inspection: { id: "role.developer", found: true }, snapshotDigest: snapshot.digest };
+        const first = enrich(input);
+        assert.equal(first.launchable, true);
+        assert.equal(first.capabilities.effective.toolAllowlist, "read");
+        assert.equal(first.capabilities.grantedByCatalog, false);
+        models.length = 0;
+        const emptied = enrich(input);
+        assert.equal(emptied.launchable, false);
+        assert.equal(emptied.actualModel, null);
+        assert.equal(emptied.capabilities.effective.toolAllowlist, "read");
+        setConfigForTests({ defaultModel: null, defaultTools: "read, bash, edit, write", tierPolicy: null, maxConcurrent: 4 });
+        const retiled = enrich(input);
+        assert.equal(retiled.launchable, false);
+        assert.equal(retiled.capabilities.effective.toolAllowlist, "read,bash,edit,write");
+        assert.equal(retiled.capabilities.effective.nesting.allowNested, false);
+        assert.equal(retiled.capabilities.effective.extensions.providerExtensions, "unknown");
+        assert.notDeepEqual(first.capabilities.effective, retiled.capabilities.effective);
+    });
+
+    it("applies each ambiguous job's choice only to that job", async () => {
+        const calls = [];
+        const result = await clarifyCatalogRequest([
+            { prompt: "Review payments", agent: "agent.payments", role: "role.reviewer" },
+            { prompt: "Leave me", role: "role.explorer" },
+            { prompt: "Explore separately", agent: "agent.research", role: "role.explorer" },
+        ], {
+            hasUI: true,
+            select: async (title, options) => {
+                calls.push({ title, options: [...options] });
+                if (options.includes("Choose role.reviewer")) return "Choose role.reviewer";
+                return "Choose role.explorer";
+            },
+        });
+        assert.equal(result.status, "resolved");
+        assert.equal(calls.length, 2);
+        assert.deepEqual(calls[0].options.includes("Choose role.explorer"), false);
+        assert.deepEqual(result.jobs.map((job) => [job.prompt, job.agent ?? null, job.role ?? null]), [
+            ["Review payments", null, "role.reviewer"],
+            ["Leave me", null, "role.explorer"],
+            ["Explore separately", null, "role.explorer"],
+        ]);
+        const broadcast = await clarifyCatalogRequest([
+            { prompt: "Review payments", agent: "agent.payments", role: "role.reviewer" },
+            { prompt: "Explore separately", agent: "agent.research", role: "role.explorer" },
+        ], { hasUI: true, select: async () => "Choose role.reviewer" });
+        assert.equal(broadcast.status, "clarification-needed");
+        assert.equal(broadcast.launched, false);
+        assert.equal(broadcast.jobs, undefined);
+    });
+
     it("shows the run id, role, model, and effort in navigator details", () => {
         const detail = buildNavigatorDetail("sa_catalog", {
             readMeta: () => ({

@@ -149,7 +149,7 @@ const projectConfigDirName = typeof (PiCodingAgent as { CONFIG_DIR_NAME?: unknow
 
 const CATALOG_GUIDELINES = [
     "When a task, workflow, or skill instruction names a model or effort, translate that authoritative choice into the structured model and thinking arguments before spawning. The runtime does not parse prose, quoted model names, or comparisons, and copying a model into the child prompt does not change the launch.",
-    "Optional agent, role, and alias select a catalog definition. Pass one agent id or one role id. Naming two roles, or both an agent and a role, asks the user to choose one or split the work; without UI the call returns clarification-needed and starts no child. A named agent displays its defined name. A direct role displays the label allocated from the local run registry. Calls without agent or role keep the existing name and model chain.",
+    "Optional agent, role, and alias select a catalog definition. Pass one agent id or one role id. Pass an array of role ids when one run was given more than one role: that call asks to choose one or split, and without a UI choice it returns clarification-needed and starts no child. Naming both an agent and a role does the same. One job's choice does not change another job. A named agent displays its defined name. A direct role displays the label allocated from the local run registry. Calls without agent or role keep the existing name and model chain.",
     "Catalog model and effort are resolved before the child starts. An unavailable explicit model or unsupported explicit effort does not launch and does not fall back. The catalog grants no tools, sandbox modes, extensions, or permissions.",
 ];
 
@@ -1122,6 +1122,16 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     });
 }
 
+/** String for one role, or an array when the caller assigns more than one. Arrays reach clarification instead of being rejected. */
+function catalogRoleSchema(purpose: string) {
+    const one = `One role id (role.<slug>) for this ${purpose}. Mutually exclusive with agent.`;
+    const many = `Two or more role ids for this ${purpose}. An array is ambiguous and asks to choose one role or split into separate runs. No child launches until that choice is made.`;
+    return Type.Optional(Type.Union([
+        Type.String({ description: one }),
+        Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: many }),
+    ], { description: `${one} ${many}` }));
+}
+
 export default function (pi: ExtensionAPI) {
     // Capture for the health ticker (module-level); needed for orphaned/lost
     // coordinator follow-ups that fire outside a tool-call stack (#65).
@@ -1400,7 +1410,7 @@ export default function (pi: ExtensionAPI) {
             prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained." }),
             name: Type.Optional(Type.String({ description: "Short label for the run (e.g. 'reviewer'). Ignored when agent or role is set, except as the direct-role alias when alias is omitted." })),
             agent: Type.Optional(Type.String({ description: "Named agent id (agent.<slug>). Mutually exclusive with role. The navigator shows the defined agent name." })),
-            role: Type.Optional(Type.String({ description: "Role id (role.<slug>) for one direct role launch. Mutually exclusive with agent. An array of role ids is ambiguous and asks to choose or split." })),
+            role: catalogRoleSchema("direct role launch"),
             alias: Type.Optional(Type.String({ description: "Per-run display alias for a direct role launch, such as checkout. Not a reusable agent. Colliding aliases gain a numeric suffix." })),
             model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (for example openai/gpt-5.5@high). Providerless patterns are resolved by Pi. Default: inherit foreground model. Put authoritative model choices here; do not rely on prompt text." })),
             thinking: Type.Optional(Type.String({ description: "Reasoning effort for the child: off, minimal, low, medium, high, xhigh, or max (default: Pi/model default)." })),
@@ -1502,7 +1512,7 @@ export default function (pi: ExtensionAPI) {
             shared: Type.Optional(Type.Object({
                 name: Type.Optional(Type.String({ description: "Label applied to jobs that do not set their own. Direct-role alias when alias is omitted." })),
                 agent: Type.Optional(Type.String({ description: "Named agent id applied to jobs that do not select their own agent or role." })),
-                role: Type.Optional(Type.String({ description: "Role id applied to jobs that do not select their own agent or role." })),
+                role: catalogRoleSchema("shared role selector"),
                 alias: Type.Optional(Type.String({ description: "Direct-role alias applied when a job does not set alias." })),
                 model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (default: inherit foreground model). Put authoritative model choices here; prompt text is not parsed." })),
                 thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
@@ -1521,7 +1531,7 @@ export default function (pi: ExtensionAPI) {
                 prompt: Type.String({ description: "The task for this job." }),
                 name: Type.Optional(Type.String({ description: "Short label for this job. Direct-role alias when alias is omitted." })),
                 agent: Type.Optional(Type.String({ description: "Named agent id for this job. Overrides shared agent and role." })),
-                role: Type.Optional(Type.String({ description: "Role id for this job. Overrides shared agent and role. An array asks to choose or split." })),
+                role: catalogRoleSchema("batch job"),
                 alias: Type.Optional(Type.String({ description: "Direct-role alias for this job." })),
                 model: Type.Optional(Type.String()),
                 thinking: Type.Optional(Type.String()),

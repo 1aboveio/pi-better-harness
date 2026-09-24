@@ -4,7 +4,7 @@
  * `spawnSubagentRun`. This module does not grant tools, sandbox modes, or
  * extensions, and it does not read task prose for model choices.
  */
-import { LEGACY_CAPABILITY_CONTROLS, type LaunchEnricher, type LaunchEnrichment } from "./agent-inspection.ts";
+import { describeDefaultLaunchCapabilities, LEGACY_CAPABILITY_CONTROLS, type LaunchEnricher, type LaunchEnrichment } from "./agent-inspection.ts";
 import { resolveSelection, type EffectiveDefinition } from "./catalog-resolver.ts";
 import { defaultUserRoot, loadCatalog, type CatalogSnapshot } from "./catalog-store.ts";
 import { loadConfig, type SubagentConfig } from "./config.ts";
@@ -137,7 +137,7 @@ export function noteCatalogHost(next: CatalogHost): void {
         userRoot: next.userRoot ?? previous?.userRoot,
         registry: next.registry ?? previous?.registry,
         foregroundModel: next.foregroundModel ?? previous?.foregroundModel,
-        configuredDefaultModel: next.configuredDefaultModel ?? previous?.configuredDefaultModel,
+        configuredDefaultModel: "configuredDefaultModel" in next ? next.configuredDefaultModel : previous?.configuredDefaultModel,
         tiers: next.tiers ?? previous?.tiers,
     };
 }
@@ -158,20 +158,49 @@ export function createLaunchEnricher(): LaunchEnricher {
         const host = notedHost.current;
         if (!host?.cwd || !host.registry || typeof host.registry.getAvailable !== "function") return undefined;
         const config = loadConfig();
+        const availability = readAvailability(host.registry);
         const context = resolutionContext(host, config);
-        const key = `${snapshotDigest}\0${context.foregroundModel ?? ""}\0${JSON.stringify(context.tiers ?? null)}`;
+        // Digest alone is not launchability. Availability and the config that
+        // selects the default model or tier are part of the key so a later
+        // registry or config change cannot reuse the previous decision.
+        const key = JSON.stringify({
+            snapshotDigest,
+            foregroundModel: context.foregroundModel ?? null,
+            configuredDefaultModel: context.configuredDefaultModel ?? null,
+            tiers: context.tiers ?? null,
+            configDefaultModel: config.defaultModel ?? null,
+            configTierPolicy: config.tierPolicy ?? null,
+            availability: availability.key,
+        });
         if (!cache || cache.key !== key) {
             const snapshot = loadLaunchSnapshot({ ...host, userRoot: host.userRoot ?? defaultUserRoot() });
             if (snapshot.digest !== snapshotDigest) return undefined;
+            const registry = availability.models === undefined
+                ? host.registry
+                : {
+                    getAvailable: () => availability.models ?? [],
+                    ...(host.registry.find ? { find: host.registry.find.bind(host.registry) } : {}),
+                };
             cache = {
                 key,
-                rows: new Map(assessCatalog(snapshot, context).map((row) => [row.id, row])),
+                rows: new Map(assessCatalog(snapshot, { ...context, registry }).map((row) => [row.id, row])),
             };
         }
         const attachment = cache.rows.get(inspection.id);
         if (!attachment) return undefined;
         if (!attachment.decision && attachment.schemaLaunchable && attachment.availability !== "catalog-blocked") return undefined;
-        return enrichmentFrom(attachment);
+        const enrichment = enrichmentFrom(attachment);
+        return {
+            ...enrichment,
+            capabilities: {
+                ...enrichment.capabilities,
+                effective: describeDefaultLaunchCapabilities({
+                    config,
+                    model: enrichment.actualModel,
+                    cwd: host.cwd,
+                }),
+            },
+        };
     };
 }
 
@@ -303,6 +332,34 @@ export async function prepareCatalogJob(snapshot: CatalogSnapshot, job: CatalogJ
     };
 }
 
+function plainThinkingMap(map: unknown): Record<string, string | null> | null {
+    if (!map || typeof map !== "object") return null;
+    const out: Record<string, string | null> = {};
+    for (const key of Object.keys(map).sort()) {
+        const value = (map as Record<string, unknown>)[key];
+        out[key] = typeof value === "string" || value === null ? value : null;
+    }
+    return out;
+}
+
+function readAvailability(registry: ModelRegistryView): { key: string; models?: ReturnType<ModelRegistryView["getAvailable"]> } {
+    try {
+        const models = registry.getAvailable();
+        if (!Array.isArray(models)) return { key: "not-a-list" };
+        const rows = models.map((model) => ({
+            provider: model?.provider ?? null,
+            id: model?.id ?? null,
+            reasoning: model?.reasoning ?? null,
+            thinkingLevelMap: plainThinkingMap(model?.thinkingLevelMap),
+        }));
+        rows.sort((left, right) => `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`));
+        return { key: JSON.stringify(rows), models };
+    } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { key: `unreadable:${detail}` };
+    }
+}
+
 function resolutionContext(host: CatalogHost, config: SubagentConfig): ModelResolutionContext {
     return {
         registry: host.registry,
@@ -336,40 +393,69 @@ async function clarifyMixed(
     mixed: readonly { job: CatalogJobFields; index: number; agent?: string; roles: string[] }[],
     ui: { hasUI: boolean; select?: CatalogHost["select"] },
 ): Promise<{ status: "resolved"; jobs: CatalogJobFields[] } | ClarificationNeeded> {
-    const described = mixed.map((item) => `run ${item.index + 1} names ${[item.agent, ...item.roles].join(" and ")}`).join("; ");
-    const choices = mixed.flatMap((item) => [
+    const perJob = mixed.map((item) => ({ item, choices: mixedChoices(item) }));
+    const described = perJob.map(({ item }) => `run ${item.index + 1} names ${[item.agent, ...item.roles].filter(Boolean).join(" and ")}`).join("; ");
+    const message = `${described}. A run has one base role, not multiple parents. Choose one role or split the work into separate runs. Nothing was launched or written.`;
+    if (!ui.hasUI || !ui.select) {
+        const choices = perJob.flatMap(({ item, choices: jobChoices }) => mixed.length === 1
+            ? jobChoices
+            : jobChoices.map((choice) => `run ${item.index + 1}: ${choice}`));
+        return clarification(`${message} UI is unavailable, so the choice was not made. Re-run in the TUI or RPC UI and choose one role or split. No launch and no write.`, choices);
+    }
+    const resolved: CatalogJobFields[] = [];
+    for (const { item, choices } of perJob) {
+        const selected = await ui.select(
+            mixed.length === 1 ? "This request assigns more than one role" : `Run ${item.index + 1} assigns more than one role`,
+            choices,
+        );
+        if (!selected) return clarification("The role choice was dismissed. Nothing was launched or written.", choices);
+        const applied = applyMixedChoice(item, selected, choices);
+        if (applied.status !== "resolved") return applied;
+        resolved.push(...applied.jobs);
+    }
+    return { status: "resolved", jobs: resolved };
+}
+
+function mixedChoices(item: { agent?: string; roles: readonly string[] }): string[] {
+    return [
         ...(item.agent ? [`Choose agent ${item.agent}`] : []),
         ...item.roles.map((roleId) => `Choose ${roleId}`),
         `Split into ${item.roles.length + (item.agent ? 1 : 0)} runs`,
-    ]);
-    const message = `${described}. A run has one base role, not multiple parents. Choose one role or split the work into separate runs. Nothing was launched or written.`;
-    if (!ui.hasUI || !ui.select) {
-        return clarification(`${message} UI is unavailable, so the choice was not made. Re-run in the TUI or RPC UI and choose one role or split. No launch and no write.`, choices);
-    }
-    const selected = await ui.select("This request assigns more than one role", [...new Set(choices)]);
-    if (!selected) return clarification("The role choice was dismissed. Nothing was launched or written.", choices);
+    ];
+}
+
+function applyMixedChoice(
+    item: { job: CatalogJobFields; agent?: string; roles: readonly string[] },
+    selected: string,
+    choices: readonly string[],
+): { status: "resolved"; jobs: CatalogJobFields[] } | ClarificationNeeded {
     if (selected.startsWith("Split into ")) {
+        const expected = `Split into ${item.roles.length + (item.agent ? 1 : 0)} runs`;
+        if (selected !== expected) {
+            return clarification(`Unknown choice ${JSON.stringify(selected)}. Nothing was launched or written.`, choices);
+        }
+        const pieces = [
+            ...(item.agent ? [{ agent: item.agent }] : []),
+            ...item.roles.map((roleId) => ({ role: roleId })),
+        ];
         return {
             status: "resolved",
-            jobs: mixed.flatMap((item) => {
-                const pieces = [
-                    ...(item.agent ? [{ agent: item.agent }] : []),
-                    ...item.roles.map((roleId) => ({ role: roleId })),
-                ];
-                return pieces.map((piece, pieceIndex) => withSelector(item.job, { ...piece, splitIndex: pieceIndex }));
-            }),
+            jobs: pieces.map((piece, pieceIndex) => withSelector(item.job, { ...piece, splitIndex: pieceIndex })),
         };
     }
     if (selected.startsWith("Choose agent ")) {
         const agent = selected.slice("Choose agent ".length);
-        return { status: "resolved", jobs: mixed.map((item) => withSelector(item.job, { agent })) };
+        if (!item.agent || agent !== item.agent) {
+            return clarification(`Unknown choice ${JSON.stringify(selected)}. Nothing was launched or written.`, choices);
+        }
+        return { status: "resolved", jobs: [withSelector(item.job, { agent })] };
     }
     if (selected.startsWith("Choose ")) {
         const roleId = selected.slice("Choose ".length);
-        if (!mixed.some((item) => item.roles.includes(roleId))) {
+        if (!item.roles.includes(roleId)) {
             return clarification(`Unknown choice ${JSON.stringify(selected)}. Nothing was launched or written.`, choices);
         }
-        return { status: "resolved", jobs: mixed.map((item) => withSelector(item.job, { role: roleId })) };
+        return { status: "resolved", jobs: [withSelector(item.job, { role: roleId })] };
     }
     return clarification(`Unknown choice ${JSON.stringify(selected)}. Nothing was launched or written.`, choices);
 }
