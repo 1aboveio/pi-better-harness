@@ -65,6 +65,8 @@ export const Type = {
     Optional: (schema) => schema,
     Array: (schema, opts = {}) => ({ type: "array", items: schema, ...opts }),
     Object: (props, opts = {}) => ({ type: "object", properties: props, ...opts }),
+    // Role selectors are Type.Union([string, string[]]). Registration only declares the schema.
+    Union: (variants, opts = {}) => ({ type: "union", anyOf: variants, ...opts }),
 };
 export function getSupportedThinkingLevels(model) {
     if (!model || model.reasoning === false) return ["off"];
