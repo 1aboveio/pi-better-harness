@@ -32,7 +32,14 @@ export const PI_VS_CODEX_PRECEDENCE = {
 } as const;
 
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/;
-const SECRET_KEY = /api[_-]?key|apikey|secret|password|passwd|token|credential|authorization|connectionstring/i;
+const SECRET_KEY = /api[_-]?key|apikey|secret|password|passwd|token|credential|authorization|connectionstring|databaseurl/i;
+const EXACT_SECRET_KEY = /^(?:auth|dsn|access[_-]?token|refresh[_-]?token|credentials)$/i;
+/**
+ * Scalar Codex controls this catalog cannot enforce. Objects and arrays are
+ * already restrictions. Missing one of these and calling it cosmetic would
+ * leave the agent launchable: an unenforced grant of the restricted capability.
+ */
+const EXECUTION_KEY_PATTERN = /(?:^|[._-])(?:sandbox(?:[_-]mode|[_-]workspace[_-]write)?|permissions?|mcp(?:[_-]servers?)?|skills?|hooks?|approvals?|web[_-]search(?:[_-]modes)?|allowed[_-]web[_-]search[_-]modes|web[_-]fetch|filesystem|network(?:[_-]access)?|tools?|tool[_-]presets?|shell(?:[_-]environment[_-]policy)?|environment|browsing|internet(?:[_-]access)?)(?:$|[._-])/i;
 const EXTRA_EXECUTION_KEYS = new Set([
     "skills",
     "skill",
@@ -334,7 +341,7 @@ export function parseCodexSource(source: string, sourcePath?: string): CodexPars
 
     for (const [key, raw] of Object.entries(parsed)) {
         if (SUPPORTED_KEYS.has(key)) continue;
-        if (SECRET_KEY.test(key)) {
+        if (isSecretKey(key)) {
             restrictions.push(restriction(key, "[redacted]", `Field ${key} looks like credential material. The value was not stored. Launch stays blocked until the field is removed.`));
             diagnostics.push(problem(DiagnosticCodes.credentialMaterial, `Codex field ${key} looks like a secret and was redacted. Remove it from the source. The imported copy is not launchable while the restriction remains.`, sourcePath, key));
             continue;
@@ -344,14 +351,24 @@ export function parseCodexSource(source: string, sourcePath?: string): CodexPars
             diagnostics.push(problem("invalid-codex-value", `Codex field ${key} is not JSON-compatible and was not imported. Nothing was written.`, sourcePath, key));
             return { ok: false, diagnostics };
         }
-        if (isExecutionKey(key) || isPlainObject(safe.value) || Array.isArray(safe.value)) {
-            const reason = restrictionReason(key, safe.value);
-            restrictions.push(restriction(key, safe.value, reason));
-            if ((HOST_EXECUTION_CONTROL_KEYS as readonly string[]).includes(key)) preserved[key] = safe.value;
+        const redaction = { redacted: false };
+        const stored = redactNestedSecrets(safe.value, redaction);
+        if (redaction.redacted) {
+            diagnostics.push(problem(
+                DiagnosticCodes.credentialMaterial,
+                `Codex field ${key} contains nested credential material. Those values were redacted before any reason, diagnostic, preview, or provenance text was built. Remove the field from the source. The imported copy is not launchable while the restriction remains.`,
+                sourcePath,
+                key,
+            ));
+        }
+        if (isExecutionSetting(key, stored) || redaction.redacted) {
+            const reason = restrictionReason(key, stored);
+            restrictions.push(restriction(key, stored, reason));
+            if ((HOST_EXECUTION_CONTROL_KEYS as readonly string[]).includes(key)) preserved[key] = stored;
             diagnostics.push(problem(DiagnosticCodes.unsupportedExecutionRestriction, reason, sourcePath, key, false));
             continue;
         }
-        cosmetic[key] = safe.value;
+        cosmetic[key] = stored;
         diagnostics.push(warning(
             DiagnosticCodes.cosmeticMetadata,
             `Codex field ${key} is cosmetic metadata. It was preserved and is not a tool, sandbox, or permission grant.`,
@@ -394,15 +411,15 @@ export function buildImportedAgent(document: CodexDocument, choices: ImportChoic
             ));
         }
     }
-    const metadata: Record<string, unknown> = {
+    const metadata: Record<string, unknown> = redactNestedSecrets({
         codex: {
             model: document.model ?? null,
             modelReasoningEffort: document.modelReasoningEffort ?? null,
             precedence: "pi-invocation-and-workflow-override-definition-defaults",
             codexPrecedence: "agent-file-model-and-effort-win",
         },
-    };
-    if (Object.keys(document.cosmetic).length > 0) metadata.codexCosmetic = document.cosmetic;
+    }) as Record<string, unknown>;
+    if (Object.keys(document.cosmetic).length > 0) metadata.codexCosmetic = redactNestedSecrets(document.cosmetic);
     const draft: AgentDefinition = {
         schema: CATALOG_SCHEMA_VERSION,
         kind: "agent",
@@ -415,7 +432,7 @@ export function buildImportedAgent(document: CodexDocument, choices: ImportChoic
         provenance: {
             origin: "imported",
             format: CODEX_FORMAT,
-            sourceRef: choices.sourceRef,
+            sourceRef: scrubEmbeddedSecrets(choices.sourceRef),
             importedAt: choices.importedAt,
             note: "Independent copy. Source edits do not update this file. Pi invocation and workflow choices override Codex model and effort precedence.",
         },
@@ -436,51 +453,143 @@ export function buildImportedAgent(document: CodexDocument, choices: ImportChoic
 }
 
 export function renderReimportPreview(existing: AgentDefinition, next: AgentDefinition): ReimportPreview {
-    const changes: ReimportChange[] = [
-        change("id", existing.id, next.id),
-        change("name", existing.name, next.name),
-        change("description", existing.description ?? "", next.description ?? ""),
-        change("roleId", existing.roleId, next.roleId),
-        change("instructionMode", existing.instructionMode, next.instructionMode),
-        change("instructions", existing.body, next.body),
-        change("overrides", JSON.stringify(explicitPreferences(existing.overrides)), JSON.stringify(explicitPreferences(next.overrides))),
-        change("executionRestrictions", JSON.stringify(existing.executionRestrictions), JSON.stringify(next.executionRestrictions)),
-    ];
-    const lostLocalInstructionLines = lostLines(existing.body, next.body);
-    const lostOverrideKeys = Object.keys(explicitPreferences(existing.overrides)).filter((key) => !Object.prototype.hasOwnProperty.call(explicitPreferences(next.overrides), key));
+    const before = semanticView(existing);
+    const after = semanticView(next);
+    const changes = diffSemantic(before, after, "");
+    const lostLocalInstructionLines = lostLines(textOf(before.body), textOf(after.body)).map((line) => scrubEmbeddedSecrets(line));
+    const detail = changes
+        .filter((item) => item.field !== "roleId" && item.field !== "instructionMode" && item.field !== "body")
+        .map(formatChange)
+        .filter((line): line is string => line !== undefined);
     const lines = [
         `Re-import replaces agent ${next.id}. It does not merge.`,
         `stable id retained: ${next.id}`,
         `role: ${existing.roleId} → ${next.roleId}`,
         `instruction mode: ${existing.instructionMode} → ${next.instructionMode}`,
-        `name: ${JSON.stringify(existing.name)} → ${JSON.stringify(next.name)}`,
-        `description: ${JSON.stringify(existing.description ?? "")} → ${JSON.stringify(next.description ?? "")}`,
-        `instructions before: ${JSON.stringify(existing.body)}`,
-        `instructions after: ${JSON.stringify(next.body)}`,
+        `instructions before: ${displayValue(before.body)}`,
+        `instructions after: ${displayValue(after.body)}`,
         ...lostLocalInstructionLines.map((line) => `lost local instruction line: ${JSON.stringify(line)}`),
-        `overrides before: ${JSON.stringify(explicitPreferences(existing.overrides))}`,
-        `overrides after: ${JSON.stringify(explicitPreferences(next.overrides))}`,
-        ...lostOverrideKeys.map((key) => `lost local override ${key}: ${JSON.stringify(explicitPreferences(existing.overrides)[key])}`),
-        `restrictions before: ${JSON.stringify(existing.executionRestrictions)}`,
-        `restrictions after: ${JSON.stringify(next.executionRestrictions)}`,
+        `changed fields: ${changes.length === 0 ? "(none)" : changes.map((item) => item.field).join(", ")}`,
+        ...detail,
         "Local instruction text is not appended to the imported developer_instructions.",
         `${PI_VS_CODEX_PRECEDENCE.codex} ${PI_VS_CODEX_PRECEDENCE.pi}`,
     ];
     return {
         id: next.id,
-        text: lines.join("\n"),
+        text: scrubEmbeddedSecrets(lines.join("\n")),
         changes,
         lostLocalInstructionLines,
         replacedNotMerged: true,
     };
 }
 
-function explicitPreferences(preferences: PortablePreferences): Record<string, unknown> {
-    const record: Record<string, unknown> = {};
-    for (const key of ["model", "effort", "tier"] as const) {
-        if (Object.prototype.hasOwnProperty.call(preferences, key) && preferences[key] !== undefined) record[key] = preferences[key];
+function semanticView(definition: AgentDefinition): Record<string, unknown> {
+    try {
+        return redactNestedSecrets(JSON.parse(JSON.stringify(definition)) as unknown) as Record<string, unknown>;
+    } catch {
+        return redactNestedSecrets(definition) as Record<string, unknown>;
     }
-    return record;
+}
+
+function diffSemantic(before: unknown, after: unknown, path: string): ReimportChange[] {
+    if (sameJson(before, after)) return [];
+    if (isPlainObject(before) && isPlainObject(after)) {
+        const changes: ReimportChange[] = [];
+        const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+        for (const key of keys) {
+            const child = path ? `${path}.${key}` : key;
+            const hasBefore = Object.prototype.hasOwnProperty.call(before, key);
+            const hasAfter = Object.prototype.hasOwnProperty.call(after, key);
+            if (!hasBefore) changes.push(...addedSemantic(after[key], child));
+            else if (!hasAfter) changes.push(...removedSemantic(before[key], child));
+            else changes.push(...diffSemantic(before[key], after[key], child));
+        }
+        return changes;
+    }
+    if (Array.isArray(before) && Array.isArray(after) && namedItems(before) && namedItems(after)) {
+        return diffNamed(before, after, path);
+    }
+    if (Array.isArray(before) && Array.isArray(after)) {
+        const changes: ReimportChange[] = [];
+        const length = Math.max(before.length, after.length);
+        for (let index = 0; index < length; index += 1) {
+            const child = `${path}[${index}]`;
+            if (index >= before.length) changes.push(change(child, "", displayValue(after[index])));
+            else if (index >= after.length) changes.push(change(child, displayValue(before[index]), ""));
+            else changes.push(...diffSemantic(before[index], after[index], child));
+        }
+        return changes;
+    }
+    return [change(path || "(definition)", displayValue(before), displayValue(after))];
+}
+
+function diffNamed(before: Record<string, unknown>[], after: Record<string, unknown>[], path: string): ReimportChange[] {
+    const left = groupByName(before);
+    const right = groupByName(after);
+    const changes: ReimportChange[] = [];
+    for (const name of [...new Set([...left.keys(), ...right.keys()])].sort()) {
+        const beforeItems = left.get(name) ?? [];
+        const afterItems = right.get(name) ?? [];
+        const count = Math.max(beforeItems.length, afterItems.length);
+        for (let index = 0; index < count; index += 1) {
+            const child = count === 1 ? `${path}[name=${JSON.stringify(name)}]` : `${path}[name=${JSON.stringify(name)}][${index}]`;
+            const beforeItem = beforeItems[index];
+            const afterItem = afterItems[index];
+            if (beforeItem === undefined) changes.push(...addedSemantic(afterItem, child));
+            else if (afterItem === undefined) changes.push(...removedSemantic(beforeItem, child));
+            else changes.push(...diffSemantic(beforeItem, afterItem, child));
+        }
+    }
+    return changes;
+}
+
+function groupByName(items: Record<string, unknown>[]): Map<string, Record<string, unknown>[]> {
+    const groups = new Map<string, Record<string, unknown>[]>();
+    for (const item of items) {
+        const name = typeof item.name === "string" ? item.name : "";
+        const group = groups.get(name) ?? [];
+        group.push(item);
+        groups.set(name, group);
+    }
+    return groups;
+}
+
+function namedItems(items: unknown[]): items is Record<string, unknown>[] {
+    return items.every((item) => isPlainObject(item) && typeof item.name === "string");
+}
+
+function removedSemantic(value: unknown, path: string): ReimportChange[] {
+    if (isPlainObject(value)) return diffSemantic(value, {}, path);
+    if (Array.isArray(value)) return diffSemantic(value, [], path);
+    return [change(path, displayValue(value), "")];
+}
+
+function addedSemantic(value: unknown, path: string): ReimportChange[] {
+    if (isPlainObject(value)) return diffSemantic({}, value, path);
+    if (Array.isArray(value)) return diffSemantic([], value, path);
+    return [change(path, "", displayValue(value))];
+}
+
+function formatChange(item: ReimportChange): string | undefined {
+    if (item.after === "") {
+        if (item.field.startsWith("overrides.")) return `lost local override ${item.field.slice("overrides.".length)}: ${item.before}`;
+        return `lost local ${item.field}: ${item.before}`;
+    }
+    if (item.before === "") return `added ${item.field}: ${item.after}`;
+    return `${item.field}: ${item.before} → ${item.after}`;
+}
+
+function displayValue(value: unknown): string {
+    const encoded = JSON.stringify(value);
+    return encoded === undefined ? "" : scrubEmbeddedSecrets(encoded);
+}
+
+function textOf(value: unknown): string {
+    return typeof value === "string" ? value : "";
+}
+
+function sameJson(left: unknown, right: unknown): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function change(field: string, before: string, after: string): ReimportChange {
@@ -512,15 +621,57 @@ function includesWord(text: string, word: string): boolean {
 function isExecutionKey(key: string): boolean {
     return (HOST_EXECUTION_CONTROL_KEYS as readonly string[]).includes(key)
         || EXTRA_EXECUTION_KEYS.has(key)
-        || /sandbox|permission|mcp|skill/i.test(key);
+        || EXECUTION_KEY_PATTERN.test(key);
+}
+
+function isExecutionSetting(key: string, value: unknown): boolean {
+    return isExecutionKey(key) || isPlainObject(value) || Array.isArray(value);
+}
+
+function isSecretKey(key: string): boolean {
+    return SECRET_KEY.test(key) || EXACT_SECRET_KEY.test(key);
 }
 
 function restrictionReason(key: string, value: unknown): string {
-    const shown = JSON.stringify(value);
+    const shown = displayValue(redactNestedSecrets(value));
     if (key === "sandbox_mode" || /sandbox/i.test(key)) {
         return `Codex ${key}=${shown} is preserved and blocks launch. It is not enforced. A read-only sandbox mode is not applied by the catalog or by the existing subagent sandbox. Remove the restriction from the native definition before launch.`;
     }
-    return `Codex ${key}=${shown} is an execution setting the catalog cannot enforce. It was preserved and blocks launch. No permission, tool preset, or sandbox behavior was granted. Remove it once a real host control covers it.`;
+    if (/web[_-]search|web[_-]fetch/i.test(key)) {
+        return `Codex ${key}=${shown} is preserved and blocks launch. It is not enforced. The catalog cannot honor this search restriction, so it is not cosmetic metadata and it does not grant or disable search. Remove it once a real host control covers it.`;
+    }
+    return `Codex ${key}=${shown} is an execution setting the catalog cannot enforce. It was preserved and blocks launch. No permission, tool preset, sandbox behavior, or other capability was granted. Remove it once a real host control covers it.`;
+}
+
+function redactNestedSecrets(value: unknown, state: { redacted: boolean } = { redacted: false }, seen = new WeakSet<object>()): unknown {
+    if (Array.isArray(value)) {
+        if (seen.has(value)) return "[redacted]";
+        seen.add(value);
+        return value.map((item) => redactNestedSecrets(item, state, seen));
+    }
+    if (!isPlainObject(value)) return value;
+    if (seen.has(value)) return "[redacted]";
+    seen.add(value);
+    const output: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+        if (isSecretKey(key)) {
+            state.redacted = true;
+            output[key] = "[redacted]";
+            continue;
+        }
+        output[key] = redactNestedSecrets(child, state, seen);
+    }
+    return output;
+}
+
+const EMBEDDED_SECRET_KEY = "api[_-]?key|apikey|secret|password|passwd|token|credential|authorization|connectionstring|databaseurl|access[_-]?token|refresh[_-]?token|credentials|dsn|auth";
+
+function scrubEmbeddedSecrets(text: string): string {
+    const pattern = new RegExp(
+        String.raw`((?:\\*")?(?:${EMBEDDED_SECRET_KEY})(?:\\*")?\s*[:=]\s*(?:\\*")?)(?:"(?:[^"\\]|\\.)*"|[^\\"',}\s]+)`,
+        "gi",
+    );
+    return text.replace(pattern, "$1[redacted]");
 }
 
 function restriction(name: string, value: unknown, reason: string): ExecutionRestriction {
@@ -550,11 +701,11 @@ function toJsonSafe(value: unknown): { ok: true; value: unknown } | { ok: false 
 }
 
 function problem(code: string, message: string, path?: string, field?: string, structural = true): Diagnostic {
-    return { severity: "error", code, message, path, field, blocking: true, structural };
+    return { severity: "error", code, message: scrubEmbeddedSecrets(message), path, field, blocking: true, structural };
 }
 
 function warning(code: string, message: string, path?: string, field?: string): Diagnostic {
-    return { severity: "warning", code, message, path, field, blocking: false, structural: false };
+    return { severity: "warning", code, message: scrubEmbeddedSecrets(message), path, field, blocking: false, structural: false };
 }
 
 function skillDiagnostic(path: string): Diagnostic {
