@@ -10,7 +10,8 @@ import { executeAgentsCommand, registerAgentCommands } from "../agent-commands.t
 import { agentsCatalogTool } from "../agents-catalog-tool.ts";
 import { CAPABILITY_NOTE, LEGACY_CAPABILITY_CONTROLS } from "../agent-inspection.ts";
 import { parseDefinition } from "../catalog-schema.ts";
-import { saveDefinition } from "../catalog-store.ts";
+import { prepareCatalogJob } from "../catalog-runtime.ts";
+import { loadCatalog, saveDefinition } from "../catalog-store.ts";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "codex");
 const packageDir = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -480,6 +481,109 @@ You only have read-only access.
             assert.doesNotMatch(readFileSync(leaked.path, "utf8"), /super-secret-value/);
             assert.doesNotMatch(leaked.message, /super-secret-value/);
             assert.equal(leaked.data.view.launchable, false);
+        } finally {
+            ctx.cleanup();
+        }
+    });
+
+    it("blocks imported web_search restrictions and previews every lost local field through the command", async () => {
+        const ctx = fixture();
+        try {
+            const source = join(ctx.cwd, "reader.toml");
+            writeFileSync(source, [
+                'name = "Web Reader"',
+                'description = "Review without search"',
+                'developer_instructions = "Review"',
+                'web_search = "disabled"',
+                'nickname = "reader"',
+            ].join("\n"));
+            const ui = scripted([
+                { type: "confirm", value: true },
+            ]);
+            const imported = await executeAgentsCommand(`import-codex ${source} --role role.developer`, host(ctx, ui), deps(ctx));
+            assert.equal(imported.wrote, true, imported.message);
+            assert.equal(imported.data.view.catalogLaunchable, false);
+            assert.equal(imported.data.view.launchable, false);
+            const def = parseDefinition(readFileSync(imported.path, "utf8")).definition;
+            const restriction = def.executionRestrictions.find((item) => item.name === "web_search");
+            assert.equal(restriction.value, "disabled");
+            assert.equal(restriction.required, true);
+            assert.equal(restriction.honored, false);
+            assert.equal(def.metadata?.codexCosmetic?.web_search, undefined);
+            assert.equal(def.metadata?.codexCosmetic?.nickname, "reader");
+            const registry = { getAvailable: () => [{ provider: "openai", id: "gpt-6-sol", reasoning: true }] };
+            const prepared = await prepareCatalogJob(
+                loadCatalog({ cwd: ctx.cwd, userRoot: ctx.userRoot, projectTrusted: true }),
+                { prompt: "Check", agent: "agent.web-reader" },
+                { cwd: ctx.cwd, userRoot: ctx.userRoot, projectTrusted: true, registry, foregroundModel: "openai/gpt-6-sol" },
+            );
+            assert.equal(prepared.status, "blocked");
+            const sibling = await executeAgentsCommand("show role.developer", host(ctx, scripted([]), { hasUI: false }), deps(ctx));
+            assert.equal(sibling.data.catalogLaunchable, true);
+            def.metadata.owner = "UNPREVIEWED_LOCAL_OWNER";
+            def.metadata.team = "LOCAL_TEAM";
+            def.provenance.note = "UNPREVIEWED_LOCAL_NOTE";
+            def.extensions = { ...(def.extensions ?? {}), reviewLabel: "LOCAL_LABEL" };
+            assert.equal(saveDefinition({
+                definition: def,
+                scope: "user",
+                cwd: ctx.cwd,
+                userRoot: ctx.userRoot,
+                projectTrusted: true,
+                replace: true,
+            }).ok, true);
+            const reimportUi = scripted([
+                { type: "confirm", value: true },
+                { type: "confirm", value: false },
+            ]);
+            const declined = await executeAgentsCommand(`import-codex ${source} --role role.developer`, host(ctx, reimportUi), deps(ctx));
+            assert.equal(declined.wrote, false);
+            const preview = reimportUi.calls.filter((call) => call.type === "confirm").at(-1);
+            assert.match(preview.title, /^Replace /);
+            for (const marker of ["UNPREVIEWED_LOCAL_OWNER", "LOCAL_TEAM", "UNPREVIEWED_LOCAL_NOTE", "LOCAL_LABEL"]) {
+                assert.match(preview.message, new RegExp(marker), preview.message);
+            }
+            assert.match(preview.message, /role: role\.developer → role\.developer/);
+            assert.match(preview.message, /instruction mode: replace → replace/);
+            const acceptedUi = scripted([
+                { type: "confirm", value: true },
+                { type: "confirm", value: true },
+            ]);
+            const accepted = await executeAgentsCommand(`import-codex ${source} --role role.developer`, host(ctx, acceptedUi), deps(ctx));
+            assert.equal(accepted.wrote, true, accepted.message);
+            const replaced = parseDefinition(readFileSync(accepted.path, "utf8")).definition;
+            assert.equal(replaced.id, "agent.web-reader");
+            assert.equal(replaced.metadata.owner, undefined);
+            assert.equal(replaced.extensions?.reviewLabel, undefined);
+            assert.doesNotMatch(replaced.provenance.note, /UNPREVIEWED_LOCAL_NOTE/);
+            assert.equal(replaced.executionRestrictions.some((item) => item.name === "web_search"), true);
+
+            const sentinel = "SYNTHETIC_REVIEW_SENTINEL";
+            const secret = join(ctx.cwd, "nested-secret.toml");
+            writeFileSync(secret, [
+                'name = "Nested Secret"',
+                'description = "Holds a nested key."',
+                'developer_instructions = "Do not keep secrets."',
+                "",
+                "[env]",
+                `API_KEY = "${sentinel}"`,
+                "",
+                "[profile]",
+                `password = "${sentinel}"`,
+            ].join("\n"));
+            const leaked = await executeAgentsCommand(
+                `import-codex ${secret} --role role.developer`,
+                host(ctx, scripted([
+                    { type: "confirm", value: true },
+                ])),
+                deps(ctx),
+            );
+            assert.equal(leaked.wrote, true, leaked.message);
+            assert.equal(JSON.stringify(leaked).includes(sentinel), false);
+            assert.equal(readFileSync(leaked.path, "utf8").includes(sentinel), false);
+            assert.equal(leaked.data.view.catalogLaunchable, false);
+            const stored = parseDefinition(readFileSync(leaked.path, "utf8"));
+            assert.equal(JSON.stringify(stored).includes(sentinel), false);
         } finally {
             ctx.cleanup();
         }

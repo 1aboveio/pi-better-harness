@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { serializeDefinition } from "../catalog-schema.ts";
 import {
     PI_VS_CODEX_PRECEDENCE,
     agentIdFromDisplayName,
@@ -124,5 +125,127 @@ describe("codex adapter", () => {
         ]);
         assert.equal(tie.unique, undefined);
         assert.deepEqual(tie.ambiguous.sort(), ["role.researcher", "role.reviewer"]);
+    });
+
+    it("redacts nested credentials before reasons, diagnostics, provenance, preview, and serialized output", () => {
+        const sentinel = "SYNTHETIC_REVIEW_SENTINEL";
+        const source = [
+            'name = "Nested Secret"',
+            'description = "Holds a nested key."',
+            'developer_instructions = "Do not keep secrets."',
+            "",
+            "[env]",
+            `API_KEY = "${sentinel}"`,
+            "",
+            "[profile]",
+            `password = "${sentinel}"`,
+            `nested = { token = "${sentinel}" }`,
+        ].join("\n");
+        const parsed = parseCodexSource(source, "/tmp/nested.toml");
+        assert.equal(parsed.ok, true);
+        assert.equal(JSON.stringify({ document: parsed.document, diagnostics: parsed.diagnostics }).includes(sentinel), false);
+        assert.equal(parsed.diagnostics.some((item) => item.code === "credential-material"), true);
+        const env = parsed.document.restrictions.find((item) => item.name === "env");
+        assert.equal(env.required, true);
+        assert.equal(env.honored, false);
+        assert.equal(env.value.API_KEY, "[redacted]");
+        assert.match(env.reason, /blocks launch/);
+        assert.doesNotMatch(env.reason, new RegExp(sentinel));
+        const built = buildImportedAgent(parsed.document, {
+            id: "agent.nested-secret",
+            roleId: "role.developer",
+            saveOverrides: false,
+            importedAt: "2026-09-24T00:00:00.000Z",
+            sourceRef: "codex-file:/tmp/nested.toml",
+        });
+        assert.equal(built.ok, true);
+        const serialized = serializeDefinition(built.definition);
+        assert.equal(serialized.ok, true);
+        const packed = JSON.stringify({
+            built,
+            markdown: serialized.markdown,
+            diagnostics: [...parsed.diagnostics, ...built.diagnostics, ...serialized.diagnostics],
+            provenance: built.definition.provenance,
+        });
+        assert.equal(packed.includes(sentinel), false);
+        const poisoned = {
+            ...built.definition,
+            metadata: { ...(built.definition.metadata ?? {}), owner: "local-owner", apiKey: sentinel },
+            provenance: { ...built.definition.provenance, note: "local note" },
+            executionRestrictions: [
+                ...built.definition.executionRestrictions,
+                {
+                    name: "env",
+                    value: { API_KEY: sentinel },
+                    required: true,
+                    honored: false,
+                    reason: `Codex env={"API_KEY":"${sentinel}"} leaked into a reason`,
+                },
+            ],
+        };
+        const preview = renderReimportPreview(poisoned, built.definition);
+        assert.equal(JSON.stringify(preview).includes(sentinel), false);
+        assert.match(preview.text, /local note/);
+        assert.match(preview.text, /local-owner/);
+        assert.match(preview.text, /\[redacted\]/);
+    });
+
+    it("preserves web_search as an unsupported restriction and does not grant launch", () => {
+        const source = [
+            'name = "Web Reader"',
+            'description = "Review without search"',
+            'developer_instructions = "Review"',
+            'web_search = "disabled"',
+            'nickname = "reader"',
+        ].join("\n");
+        const parsed = parseCodexSource(source, "/tmp/web-reader.toml");
+        assert.equal(parsed.ok, true);
+        assert.equal(parsed.document.cosmetic.web_search, undefined);
+        assert.equal(parsed.document.cosmetic.nickname, "reader");
+        const restriction = parsed.document.restrictions.find((item) => item.name === "web_search");
+        assert.equal(restriction.value, "disabled");
+        assert.equal(restriction.required, true);
+        assert.equal(restriction.honored, false);
+        assert.match(restriction.reason, /blocks launch/);
+        assert.match(restriction.reason, /not enforced/);
+        assert.match(restriction.reason, /does not grant or disable search/);
+        const live = parseCodexSource(source.replace('web_search = "disabled"', 'web_search = "live"'), "/tmp/web-live.toml");
+        assert.equal(live.document.cosmetic.web_search, undefined);
+        assert.equal(live.document.restrictions.find((item) => item.name === "web_search").value, "live");
+        assert.equal(live.document.restrictions.find((item) => item.name === "web_search").honored, false);
+    });
+
+    it("previews every replaced or lost local field, not a fixed field list", () => {
+        const parsed = parseCodexSource(readFileSync(join(fixtureDir, "reviewer.toml"), "utf8"), "/tmp/reviewer.toml");
+        const built = buildImportedAgent(parsed.document, {
+            id: "agent.reviewer",
+            roleId: "role.reviewer",
+            saveOverrides: false,
+            importedAt: "2026-09-24T00:00:00.000Z",
+            sourceRef: "codex-file:/tmp/reviewer.toml",
+        });
+        const local = {
+            ...built.definition,
+            roleId: "role.developer",
+            instructionMode: "add",
+            overrides: { effort: "low" },
+            metadata: { ...(built.definition.metadata ?? {}), owner: "UNPREVIEWED_LOCAL_OWNER", team: "LOCAL_TEAM" },
+            provenance: { ...built.definition.provenance, note: "UNPREVIEWED_LOCAL_NOTE" },
+            extensions: { ...(built.definition.extensions ?? {}), reviewLabel: "LOCAL_LABEL" },
+            body: `${built.definition.body.replace(/\n$/, "")}\nLOCAL ONLY EDIT\n`,
+        };
+        const preview = renderReimportPreview(local, built.definition);
+        for (const marker of ["UNPREVIEWED_LOCAL_OWNER", "LOCAL_TEAM", "UNPREVIEWED_LOCAL_NOTE", "LOCAL_LABEL", "LOCAL ONLY EDIT"]) {
+            assert.match(preview.text, new RegExp(marker));
+        }
+        assert.match(preview.text, /role: role\.developer → role\.reviewer/);
+        assert.match(preview.text, /instruction mode: add → replace/);
+        assert.match(preview.text, /lost local metadata\.owner: "UNPREVIEWED_LOCAL_OWNER"/);
+        assert.match(preview.text, /lost local override effort: "low"/);
+        const fields = new Set(preview.changes.map((item) => item.field));
+        for (const field of ["roleId", "instructionMode", "body", "overrides.effort", "metadata.owner", "metadata.team", "provenance.note", "extensions.reviewLabel"]) {
+            assert.equal(fields.has(field), true, field);
+        }
+        assert.match(preview.text, /changed fields:/);
     });
 });
