@@ -65,6 +65,12 @@ export interface AgentCommandDeps {
     now?: () => string;
     /** Resolution unit injects availability, actual model/effort, and launchability. */
     enrich?: LaunchEnricher;
+    /**
+     * Live slash-command context, before list/inspect/create/reload/import.
+     * Lifecycle refreshes the foreground model and settings here. Direct
+     * `executeAgentsCommand` callers do not have that context.
+     */
+    propagateCommandContext?: (ctx: ExtensionCommandContext) => void;
 }
 
 export interface AgentCommandUi {
@@ -122,7 +128,11 @@ export function registerAgentCommands(pi: Pick<ExtensionAPI, "registerCommand">,
             return items.length > 0 ? items : null;
         },
         async handler(args: string, ctx: ExtensionCommandContext) {
-            await executeAgentsCommand(args, {
+            // Every invocation, including help and a dismissed picker. The
+            // context argument is the current session, not the one captured
+            // when the command was registered.
+            deps.propagateCommandContext?.(ctx);
+            return executeAgentsCommand(args, {
                 cwd: ctx.cwd,
                 hasUI: ctx.hasUI,
                 mode: ctx.mode,

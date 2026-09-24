@@ -1707,6 +1707,9 @@ export default function (pi: ExtensionAPI) {
 
     const agentOperations = createAgentOperations({
         projectConfigDirName,
+        propagateCommandContext(commandCtx) {
+            noteCatalogHost(catalogHostFrom(commandCtx));
+        },
         resolveHost(toolCtx) {
             const full = toolCtx as Partial<ExtensionContext> & { cwd: string; isProjectTrusted(): boolean };
             noteCatalogHost(catalogHostFrom({
@@ -1753,6 +1756,9 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("model_select", async (_event, ctx) => {
+        // The selected model is already on ctx. Inspection between this event
+        // and the next /agents call must not keep the previous foreground.
+        try { noteCatalogHost(catalogHostFrom(ctx)); } catch { /* navigator still redraws */ }
         refreshBackgroundWorkNavigator(ctx);
     });
 

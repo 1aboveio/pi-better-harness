@@ -135,10 +135,13 @@ export function noteCatalogHost(next: CatalogHost): void {
         ...previous,
         ...next,
         userRoot: next.userRoot ?? previous?.userRoot,
-        registry: next.registry ?? previous?.registry,
-        foregroundModel: next.foregroundModel ?? previous?.foregroundModel,
+        // A key that is present wins, even when the value is missing. Falling
+        // through to the previous session kept a foreground, registry, or tier
+        // policy the current context had already cleared.
+        registry: "registry" in next ? next.registry : previous?.registry,
+        foregroundModel: "foregroundModel" in next ? next.foregroundModel : previous?.foregroundModel,
         configuredDefaultModel: "configuredDefaultModel" in next ? next.configuredDefaultModel : previous?.configuredDefaultModel,
-        tiers: next.tiers ?? previous?.tiers,
+        tiers: "tiers" in next ? next.tiers : previous?.tiers,
     };
 }
 
