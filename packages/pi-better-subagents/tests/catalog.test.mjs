@@ -1,12 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
     APPROVED_ROLE_DEFAULTS,
     DiagnosticCodes,
+    PARSER_LIMITS,
     parseDefinition,
     removeAgentOverride,
     serializeDefinition,
@@ -20,6 +21,7 @@ import {
     saveDefinition,
 } from "../catalog-store.ts";
 import { inspectCatalog, listCatalog, resolveSelection } from "../catalog-resolver.ts";
+import { prepareCatalogJob } from "../catalog-runtime.ts";
 
 function fixture(bundled = "empty") {
     const root = mkdtempSync(join(tmpdir(), "pi-catalog-"));
@@ -57,6 +59,28 @@ function writeDefinition(directory, filename, markdown) {
 
 function roleMarkdown(id, name, extra = "") {
     return `---\nschema: pi-agent/v1\nkind: role\nid: ${id}\nname: ${name}\ndefaults:\n  model: openai/gpt-6-sol\n  effort: medium\n  tier: balanced\n${extra}---\nRole ${name} instructions.\n`;
+}
+
+function launchHost(ctx, extra = {}) {
+    return {
+        cwd: ctx.cwd,
+        projectTrusted: true,
+        userRoot: ctx.userRoot,
+        bundledRoot: ctx.bundledRoot,
+        hasUI: false,
+        foregroundModel: "openai/gpt-6-sol",
+        configuredDefaultModel: null,
+        registryDir: join(ctx.root, "registry"),
+        registry: {
+            getAvailable: () => [
+                { provider: "openai", id: "gpt-6-sol", reasoning: true },
+                { provider: "openai", id: "gpt-6-luna", reasoning: true },
+                { provider: "openai", id: "gpt-6-astra", reasoning: true },
+            ],
+            find: () => undefined,
+        },
+        ...extra,
+    };
 }
 
 function agentMarkdown(id, roleId, body, frontmatter = "") {
@@ -298,6 +322,56 @@ Diamond alias.
         assert.equal(shared.definition.metadata.left.note, "shared");
         assert.equal(shared.definition.metadata.right.note, "shared");
         assert.equal(shared.diagnostics.some((item) => /cycle/.test(item.message)), false);
+    });
+
+    it("keeps a commented or aliased id when an early limit rejects the file", () => {
+        const commented = "id: role.developer # stable identity";
+        const prefix = `---\nschema: pi-agent/v1\nkind: role\n${commented}\nname: Developer\n`;
+        const oversizedBody = `${prefix}---\nid: role.reviewer\n${"x".repeat(PARSER_LIMITS.maxBodyBytes)}`;
+        const bodyLimit = parseDefinition(oversizedBody);
+        assert.equal(bodyLimit.ok, false);
+        assert.equal(bodyLimit.occupantId, "role.developer");
+        assert.equal(bodyLimit.diagnostics.some((item) => item.code === DiagnosticCodes.parserLimit && item.id === "role.developer"), true);
+
+        const nulBody = parseDefinition(`${prefix}---\nRestricted\0`);
+        assert.equal(nulBody.ok, false);
+        assert.equal(nulBody.occupantId, "role.developer");
+        assert.equal(nulBody.diagnostics[0].code, DiagnosticCodes.malformedFrontmatter);
+
+        const missingClose = parseDefinition(`${prefix}defaults:\n  model: openai/custom\n`);
+        assert.equal(missingClose.ok, false);
+        assert.equal(missingClose.occupantId, "role.developer");
+        assert.match(missingClose.diagnostics[0].message, /closing/);
+
+        const quoted = parseDefinition(`${prefix.replace(commented, 'id: "role.developer" # stable identity')}---\n${"y".repeat(PARSER_LIMITS.maxBodyBytes + 1)}`);
+        assert.equal(quoted.occupantId, "role.developer");
+
+        const aliased = parseDefinition(`---\nschema: pi-agent/v1\nkind: role\nstable: &stable role.developer\nid: *stable\nname: Developer\n---\n${"z".repeat(PARSER_LIMITS.maxBodyBytes + 1)}`);
+        assert.equal(aliased.ok, false);
+        assert.equal(aliased.occupantId, "role.developer");
+
+        const conflict = parseDefinition(`${prefix}id: role.reviewer\n---\n${"q".repeat(PARSER_LIMITS.maxBodyBytes + 1)}`);
+        assert.equal(conflict.occupantId, undefined);
+
+        const nulOnId = parseDefinition(`---\nschema: pi-agent/v1\nkind: role\nid: role.developer\0\nname: Developer\n---\nbody\n`);
+        assert.equal(nulOnId.ok, false);
+        assert.equal(nulOnId.occupantId, undefined);
+
+        const earlyOnly = `---\n${commented}\nname: Developer\nnote: ${"n".repeat(PARSER_LIMITS.maxFrontmatterBytes)}\n---\nshort\n`;
+        const wideFrontmatter = parseDefinition(earlyOnly);
+        assert.equal(wideFrontmatter.ok, false);
+        assert.equal(wideFrontmatter.occupantId, "role.developer");
+
+        const lateOnly = `---\nschema: pi-agent/v1\nkind: role\nname: Developer\nnote: ${"n".repeat(PARSER_LIMITS.maxFrontmatterBytes)}\n${commented}\n---\nshort\n`;
+        const lateId = parseDefinition(lateOnly);
+        assert.equal(lateId.ok, false);
+        assert.equal(lateId.occupantId, undefined);
+
+        const hugeFile = `---\n${commented}\nname: Developer\n---\n${"f".repeat(PARSER_LIMITS.maxFileBytes)}`;
+        const fileLimit = parseDefinition(hugeFile);
+        assert.equal(fileLimit.ok, false);
+        assert.equal(fileLimit.occupantId, "role.developer");
+        assert.equal(fileLimit.diagnostics.some((item) => item.code === DiagnosticCodes.parserLimit), true);
     });
 
     it("rejects a second base role and an empty replacement without writing inherited defaults", () => {
@@ -989,6 +1063,87 @@ You are read-only in prose only.
             });
             assert.equal(second.roles.get("role.developer").definition.name, "Developer");
         } finally {
+            ctx.cleanup();
+        }
+    });
+
+    it("does not prepare a lower-priority role when an early rejection still names the id", async () => {
+        const ctx = fixture("real");
+        const host = launchHost(ctx);
+        const prefix = "---\nschema: pi-agent/v1\nkind: role\nid: role.developer # stable identity\nname: Developer\n";
+        const cases = {
+            oversizedBody: `${prefix}---\n${"x".repeat(PARSER_LIMITS.maxBodyBytes + 1)}`,
+            nulBody: `${prefix}---\nRestricted\0`,
+            missingClose: `${prefix}defaults:\n  model: openai/custom\n`,
+        };
+        try {
+            for (const [name, source] of Object.entries(cases)) {
+                writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "renamed.md", source);
+                const snapshot = load(ctx);
+                const developer = snapshot.roles.get("role.developer");
+                assert.equal(developer.scope, "project", name);
+                assert.equal(developer.schemaLaunchable, false, name);
+                assert.equal(developer.definition, undefined, name);
+                assert.equal(developer.unused.some((item) => item.scope === "bundled" && item.reason === "blocked-by-invalid-higher-priority"), true, name);
+                const resolved = resolveSelection(snapshot, { roleId: "role.developer" });
+                assert.equal(resolved.status, "blocked", name);
+                assert.equal(resolved.launchable, false, name);
+                const prepared = await prepareCatalogJob(snapshot, { role: "role.developer", prompt: "Review" }, host);
+                assert.equal(prepared.status, "blocked", name);
+                assert.equal(snapshot.roles.get("role.explorer").scope, "bundled", name);
+                assert.equal(snapshot.roles.get("role.explorer").schemaLaunchable, true, name);
+            }
+            const sibling = await prepareCatalogJob(load(ctx), { role: "role.explorer", prompt: "Look" }, host);
+            assert.equal(sibling.status, "ready");
+
+            const hidden = `---\nschema: pi-agent/v1\nkind: role\nname: Developer\nnote: ${"n".repeat(PARSER_LIMITS.maxFrontmatterBytes)}\nid: role.developer # stable identity\n---\nshort\n`;
+            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "renamed.md", hidden);
+            const fallback = load(ctx);
+            assert.equal(fallback.roles.get("role.developer").scope, "bundled");
+            const preparedFallback = await prepareCatalogJob(fallback, { role: "role.developer", prompt: "Review" }, host);
+            assert.equal(preparedFallback.status, "ready");
+        } finally {
+            ctx.cleanup();
+        }
+    });
+
+    it("keeps bundled roles launchable when a catalog directory cannot be listed", async () => {
+        const ctx = fixture("real");
+        const directory = join(ctx.userRoot, "agents", "roles");
+        mkdirSync(directory, { recursive: true });
+        const input = {
+            cwd: ctx.cwd,
+            userRoot: ctx.userRoot,
+            bundledRoot: ctx.bundledRoot,
+            projectTrusted: false,
+        };
+        try {
+            const before = loadCatalog(input);
+            assert.equal(before.roles.size, APPROVED_ROLE_DEFAULTS.length);
+            chmodSync(directory, 0);
+            let during;
+            assert.doesNotThrow(() => {
+                during = loadCatalog(input);
+            });
+            assert.equal(during.roles.size, APPROVED_ROLE_DEFAULTS.length);
+            for (const role of APPROVED_ROLE_DEFAULTS) {
+                assert.equal(during.roles.get(role.id).scope, "bundled", role.id);
+                assert.equal(during.roles.get(role.id).schemaLaunchable, true, role.id);
+            }
+            const listed = during.diagnostics.find((item) => item.code === DiagnosticCodes.ioError && item.path === directory);
+            assert.ok(listed, during.diagnostics.map((item) => `${item.code} ${item.path} ${item.message}`).join("\n"));
+            assert.match(listed.message, /EACCES|permission denied/);
+            assert.equal(listed.blocking, false);
+            const prepared = await prepareCatalogJob(during, { role: "role.developer", prompt: "Review" }, launchHost(ctx, { projectTrusted: false }));
+            assert.equal(prepared.status, "ready");
+            assert.equal(prepared.assign.catalog.id, "role.developer");
+            assert.equal(prepared.assign.catalog.source.scope, "bundled");
+        } finally {
+            try {
+                chmodSync(directory, 0o700);
+            } catch {
+                // The directory may already be gone; cleanup still removes the fixture root.
+            }
             ctx.cleanup();
         }
     });

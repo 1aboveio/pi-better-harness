@@ -347,7 +347,21 @@ function collectDirectory(
         return;
     }
 
-    const names = readdirSync(directory).sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+    let names: string[];
+    try {
+        names = readdirSync(directory);
+    } catch (error) {
+        // lstat can succeed and readdir still fail: mode 000, or the directory
+        // disappearing between the two calls. Keep the failure on this path.
+        diagnostics.push(diagnostic(DiagnosticCodes.ioError, `Could not read ${directory}: ${(error as Error).message}`, {
+            scope,
+            path: directory,
+            blocking: false,
+            structural: false,
+        }));
+        return;
+    }
+    names.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
     for (const name of names) {
         if (name.startsWith(".") || !name.endsWith(".md")) continue;
         const path = join(directory, name);
