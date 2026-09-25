@@ -19,7 +19,7 @@ test("compact plan keeps the complete checklist visible", () => {
 
   const lines = renderCompactPlan(plan, 80, theme);
   assert.equal(lines[0], "plan  2/5 complete · 1 in progress");
-  assert.deepEqual(lines.slice(2).map((line) => line.trim().replace(/ +/g, " ")), [
+  assert.deepEqual(lines.slice(1).map((line) => line.trim().replace(/ +/g, " ")), [
     "✓ 1 One",
     "✓ 2 Two",
     "● 3 Three active",
