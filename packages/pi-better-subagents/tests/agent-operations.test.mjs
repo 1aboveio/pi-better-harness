@@ -1,3 +1,4 @@
+import { selectPackedResult } from "../../../scripts/stage-harness-dependencies.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -650,8 +651,7 @@ You only have read-only access.
             stdio: ["ignore", "pipe", "pipe"],
             env: { ...process.env, npm_config_cache: join(repoRoot, ".npm-cache") },
         });
-        const packed = JSON.parse(stdout);
-        const record = Array.isArray(packed) ? packed[0] : packed;
+        const record = selectPackedResult(stdout);
         const names = record.files.map((file) => file.path);
         for (const fileName of ["codex-import.ts", "agent-commands.ts", "agents-catalog-tool.ts", "agent-operations.ts", "docs/agent-catalog-operations.md"]) {
             assert.ok(names.includes(fileName), `pack is missing ${fileName}`);
