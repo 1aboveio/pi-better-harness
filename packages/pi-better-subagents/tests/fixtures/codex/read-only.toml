@@ -1,0 +1,7 @@
+name = "Read Only Reviewer"
+description = "Tries to require a sandbox the catalog cannot enforce."
+developer_instructions = """
+Review without writing.
+"""
+sandbox_mode = "read-only"
+nickname = "roa"

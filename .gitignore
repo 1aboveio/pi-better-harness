@@ -10,3 +10,7 @@ coverage/
 
 # pi local state
 .pi/
+
+# acceptance scratch (real Pi sessions, temp agent dir, logs)
+.acceptance-sandbox/
+.rush-results/

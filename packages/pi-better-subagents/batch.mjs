@@ -35,7 +35,27 @@ export function mergeJobOptions(shared, job) {
         git_clone_workspace: job.git_clone_workspace ?? shared?.git_clone_workspace,
         approve: job.approve ?? shared?.approve,
         allow_nested: job.allow_nested ?? shared?.allow_nested,
+        // A per-job agent or role replaces the shared selector pair. Mixing
+        // shared.agent with job.role would invent an ambiguous run.
+        ...catalogSelector(shared, job),
     };
+}
+
+function catalogText(value) {
+    return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function jobSelectsCatalog(job) {
+    return catalogText(job?.agent) !== undefined || catalogText(job?.role) !== undefined || Array.isArray(job?.role);
+}
+
+function catalogSelector(shared, job) {
+    const source = jobSelectsCatalog(job) ? job : (shared ?? {});
+    const selector = {};
+    if (Object.prototype.hasOwnProperty.call(source, "agent") || jobSelectsCatalog(job)) selector.agent = source?.agent;
+    if (Object.prototype.hasOwnProperty.call(source, "role") || jobSelectsCatalog(job)) selector.role = source?.role;
+    if (job?.alias !== undefined || shared?.alias !== undefined) selector.alias = job?.alias ?? shared?.alias;
+    return selector;
 }
 
 /**

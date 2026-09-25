@@ -5,12 +5,19 @@
  * `list` / `output` / `result` keep working across foreground turns, `/reload`,
  * and even a full pi restart. In-memory state holds only the live exit handlers
  * for runs this process spawned.
+ *
+ * Catalog launches may attach an optional immutable `catalog` snapshot to that
+ * same record. Display-label reservations live under `{baseDir()}/labels`
+ * (see catalog-identity.ts). They are not a second registry, and removing a
+ * run directory does not delete them.
  */
 
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { processExists } from "./spawn.ts";
 import type { LifecycleClassification } from "./lifecycle.ts";
 
@@ -24,6 +31,34 @@ export type RunStatus = "running" | "completed" | "failed" | "killed" | "orphane
 export interface RunCallbackOrigin {
     cwd: string;
     sessionId?: string;
+}
+
+/**
+ * JSON value inside a catalog launch snapshot. The snapshot is structurally
+ * flexible: known sections are identity, effective configuration, and
+ * provenance, and callers may add further JSON fields without a schema bump.
+ */
+export type CatalogJson =
+    | null
+    | boolean
+    | number
+    | string
+    | CatalogJson[]
+    | { [key: string]: CatalogJson | undefined };
+
+/**
+ * Launch-time catalog record stored on the run. Every section is optional so
+ * a partial snapshot still round-trips; legacy metadata simply omits `catalog`.
+ * Once `writeMeta` has persisted a snapshot, later writes keep that value.
+ */
+export interface CatalogLaunchSnapshot {
+    /** Role/agent identity, display label, and alias captured at launch. */
+    identity?: CatalogJson;
+    /** Effective instructions, model, effort, and related launch configuration. */
+    effective?: CatalogJson;
+    /** Why the definition, model, and effort won. */
+    provenance?: CatalogJson;
+    [key: string]: CatalogJson | undefined;
 }
 
 /**
@@ -129,6 +164,14 @@ export interface RunMeta {
      * `subagent_list` keep working for dismissed runs).
      */
     dismissedAt?: number;
+    /**
+     * Optional catalog launch snapshot. Additive: metadata written before the
+     * catalog has no `catalog` key and still parses. The first launch
+     * publication freezes `name` and `catalog` together, including when
+     * catalog is absent or null. Later status, result, and stop writes keep
+     * that whole snapshot and must not fill a missing catalog.
+     */
+    catalog?: CatalogLaunchSnapshot;
 }
 
 /** Root runtime dir, deliberately OUTSIDE any repo. */
@@ -151,8 +194,576 @@ function metaPathFor(id: string): string {
     return join(runDir(id), "meta.json");
 }
 
+/**
+ * Name and catalog from a single launch publication.
+ * `catalogKnown` is false when the winning snapshot omitted `catalog`.
+ * Explicit null is known and must not be replaced by a later object.
+ */
+interface LaunchRecord {
+    name?: string;
+    catalogKnown: boolean;
+    catalog?: CatalogLaunchSnapshot | null;
+}
+
+function launchRecordPath(id: string): string {
+    return join(runDir(id), ".launch.json");
+}
+
+function launchFromSource(source: { name?: unknown; catalog?: CatalogLaunchSnapshot | null }): LaunchRecord {
+    const name = typeof source.name === "string" && source.name.length > 0 ? source.name : undefined;
+    const catalogKnown = Object.prototype.hasOwnProperty.call(source, "catalog") && source.catalog !== undefined;
+    return { name, catalogKnown, catalog: catalogKnown ? source.catalog : undefined };
+}
+
+function serializeLaunch(record: LaunchRecord): string {
+    const payload: { name?: string; catalog?: CatalogLaunchSnapshot | null } = {};
+    if (record.name !== undefined) payload.name = record.name;
+    if (record.catalogKnown) payload.catalog = record.catalog ?? null;
+    return JSON.stringify(payload);
+}
+
+function parseLaunch(raw: string, id: string): LaunchRecord {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (error) {
+        if (error instanceof SyntaxError) throw new Error(`Unreadable launch record for ${id}`);
+        throw error;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`Unreadable launch record for ${id}`);
+    }
+    return launchFromSource(parsed as { name?: unknown; catalog?: CatalogLaunchSnapshot | null });
+}
+
+/** A committed meta.json is one historical launch. A truncated file is not. */
+function readCommittedMetaLaunch(id: string): LaunchRecord | undefined {
+    let raw: string;
+    try {
+        raw = readFileSync(metaPathFor(id), "utf-8");
+    } catch (error) {
+        if (errnoOf(error) === "ENOENT") return undefined;
+        throw error;
+    }
+    try {
+        const parsed = JSON.parse(raw) as { name?: unknown; catalog?: CatalogLaunchSnapshot | null };
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+        return launchFromSource(parsed);
+    } catch (error) {
+        if (error instanceof SyntaxError) return undefined;
+        throw error;
+    }
+}
+
+function applyLaunchRecord(meta: RunMeta, record: LaunchRecord): void {
+    if (record.name !== undefined) meta.name = record.name;
+    else delete meta.name;
+    if (record.catalogKnown) meta.catalog = record.catalog as CatalogLaunchSnapshot;
+    else delete meta.catalog;
+}
+
+/**
+ * Publish `contents` at `target` so the first complete file wins.
+ *
+ * `link` of an fsynced temp is atomic: callers either see the winner's
+ * bytes or no file. A later link gets EEXIST and leaves the winner in place.
+ * This is not another lock. Token recovery can still rename `.meta.lock`
+ * after a stale observation (the rename syscall moves whatever inode is at
+ * that path), so the lock pathname is not a safe place to remember the
+ * first snapshot.
+ */
+function publishImmutable(target: string, contents: string): void {
+    try {
+        statSync(target);
+        return;
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") throw error;
+    }
+    const temp = join(dirname(target), `.immutable.${randomBytes(8).toString("hex")}.tmp`);
+    const fd = openSync(temp, "wx");
+    try {
+        writeFileSync(fd, contents);
+        fsyncSync(fd);
+    } catch (error) {
+        try {
+            closeSync(fd);
+        } catch (closeError) {
+            if (errnoOf(closeError) !== "EBADF") throw closeError;
+        }
+        try {
+            unlinkSync(temp);
+        } catch (cleanup) {
+            if (errnoOf(cleanup) !== "ENOENT") throw cleanup;
+        }
+        throw error;
+    }
+    closeSync(fd);
+    try {
+        linkSync(temp, target);
+    } catch (error) {
+        try {
+            unlinkSync(temp);
+        } catch (cleanup) {
+            if (errnoOf(cleanup) !== "ENOENT") throw cleanup;
+        }
+        if (errnoOf(error) !== "EEXIST") throw error;
+        return;
+    }
+    try {
+        unlinkSync(temp);
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") throw error;
+    }
+}
+
+function readOptionalUtf8(target: string): string | undefined {
+    try {
+        return readFileSync(target, "utf-8");
+    } catch (error) {
+        if (errnoOf(error) === "ENOENT") return undefined;
+        throw error;
+    }
+}
+
+/**
+ * Freeze one coherent launch snapshot before `meta.json` is replaced.
+ *
+ * The exclusive link is the publication. A pause or crash before it leaves
+ * no snapshot; a pause or crash after it leaves the whole snapshot. Orphan
+ * split anchors are not read: pairing those files is the bug this replaces.
+ * A legacy `meta.json` is copied in as one record first, so its name and
+ * catalog (including absence or null) beat this writer without being
+ * reconciled field by field. The caller's object is then rewritten from
+ * whichever record won the link.
+ */
+function applyFrozenLaunch(meta: RunMeta): void {
+    const path = launchRecordPath(meta.id);
+    let raw = readOptionalUtf8(path);
+    if (raw === undefined) {
+        const committed = readCommittedMetaLaunch(meta.id) ?? launchFromSource(meta);
+        publishImmutable(path, serializeLaunch(committed));
+        raw = readOptionalUtf8(path);
+        if (raw === undefined) throw new Error(`Missing launch record for ${meta.id}`);
+    }
+    applyLaunchRecord(meta, parseLaunch(raw, meta.id));
+}
+
+const META_LOCK_WAIT_MS = 5_000;
+const UNPARSABLE_LOCK_GRACE_MS = 1_000;
+const nodeRequire = createRequire(import.meta.url);
+const lockPause = new Int32Array(new SharedArrayBuffer(4));
+const sqliteWarningFilter = Symbol.for("pi-better-subagents.sqlite-warning-filter");
+
+class MetadataLockLost extends Error {
+    constructor() {
+        super("metadata lock lost");
+        this.name = "MetadataLockLost";
+    }
+}
+
+interface LockOwner {
+    pid: number;
+    token: string;
+    start?: string;
+}
+
+interface LockDb {
+    exec(sql: string): void;
+    close(): void;
+}
+
+function errnoOf(error: unknown): string | undefined {
+    return (error as NodeJS.ErrnoException).code;
+}
+
+function sleepMs(ms: number): void {
+    Atomics.wait(lockPause, 0, 0, ms);
+}
+
+function lockTimeout(id: string): Error {
+    return new Error(`Timed out writing metadata for ${id}`);
+}
+
+let ownStartKnown = false;
+let ownStartCache: string | undefined;
+const foreignStartCache = new Map<number, { token: string | undefined; at: number }>();
+
+/** Best-effort process start identity. Unavailable does not prove the pid is dead. */
+function readStartToken(pid: number): string | undefined {
+    if (process.platform === "linux") {
+        try {
+            const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+            const close = stat.lastIndexOf(") ");
+            if (close >= 0) {
+                const starttime = stat.slice(close + 2).split(" ")[19];
+                if (starttime && /^\d+$/.test(starttime)) return starttime;
+            }
+        } catch (error) {
+            if (errnoOf(error) !== "ENOENT" && errnoOf(error) !== "EACCES") return undefined;
+        }
+    }
+    try {
+        const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+            encoding: "utf-8",
+            timeout: 1_000,
+            env: { ...process.env, LC_ALL: "C" },
+            stdio: ["ignore", "pipe", "ignore"],
+        }).trim().replace(/\s+/g, " ");
+        return out === "" ? undefined : out;
+    } catch {
+        return undefined;
+    }
+}
+
+function ownStartToken(): string | undefined {
+    if (ownStartKnown) return ownStartCache;
+    ownStartCache = readStartToken(process.pid);
+    ownStartKnown = true;
+    return ownStartCache;
+}
+
+function cachedStartToken(pid: number): string | undefined {
+    const now = Date.now();
+    const hit = foreignStartCache.get(pid);
+    if (hit && now - hit.at < 200) return hit.token;
+    const token = readStartToken(pid);
+    foreignStartCache.set(pid, { token, at: now });
+    return token;
+}
+
+function makeOwner(): LockOwner {
+    return { pid: process.pid, token: randomBytes(16).toString("hex"), start: ownStartToken() };
+}
+
+function serializeOwner(owner: LockOwner): string {
+    return JSON.stringify({ pid: owner.pid, token: owner.token, start: owner.start ?? null });
+}
+
+function parseOwner(raw: string): LockOwner | undefined {
+    const trimmed = raw.trim();
+    if (/^[1-9]\d*$/.test(trimmed)) {
+        const pid = Number(trimmed);
+        return Number.isSafeInteger(pid) ? { pid, token: "" } : undefined;
+    }
+    try {
+        const parsed = JSON.parse(raw) as { pid?: unknown; token?: unknown; start?: unknown };
+        if (!parsed || typeof parsed !== "object") return undefined;
+        if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return undefined;
+        if (typeof parsed.token !== "string") return undefined;
+        const start = typeof parsed.start === "string" && parsed.start.length > 0 ? parsed.start : undefined;
+        return { pid: parsed.pid, token: parsed.token, start };
+    } catch {
+        return undefined;
+    }
+}
+
+/** A live pid is never stale, including when that process is stopped or paused. */
+function ownerIsLive(owner: LockOwner): boolean {
+    if (owner.pid === process.pid) return true;
+    if (!processExists(owner.pid)) return false;
+    if (!owner.start) return true;
+    const current = cachedStartToken(owner.pid);
+    if (!current) return true;
+    return current === owner.start;
+}
+
+function isStaleLock(lockPath: string, raw: string): boolean {
+    const owner = parseOwner(raw);
+    if (!owner) {
+        try {
+            return Date.now() - statSync(lockPath).mtimeMs > UNPARSABLE_LOCK_GRACE_MS;
+        } catch (error) {
+            if (errnoOf(error) === "ENOENT") return false;
+            throw error;
+        }
+    }
+    return !ownerIsLive(owner);
+}
+
+function restoreDisplacedLock(grave: string, lockPath: string): void {
+    try {
+        linkSync(grave, lockPath);
+    } catch (error) {
+        if (errnoOf(error) !== "EEXIST") throw error;
+        let displaced: string;
+        try {
+            displaced = readFileSync(grave, "utf-8");
+        } catch (readError) {
+            if (errnoOf(readError) === "ENOENT") return;
+            throw readError;
+        }
+        if (!isStaleLock(grave, displaced)) return;
+        try {
+            unlinkSync(grave);
+        } catch (cleanup) {
+            if (errnoOf(cleanup) !== "ENOENT") throw cleanup;
+        }
+        return;
+    }
+    try {
+        unlinkSync(grave);
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") throw error;
+    }
+}
+
+/** Drop the lock file only when `predicate` still matches the inode we moved aside. */
+function removeLockIf(lockPath: string, predicate: (raw: string, path: string) => boolean): void {
+    let observed: string;
+    try {
+        observed = readFileSync(lockPath, "utf-8");
+    } catch (error) {
+        if (errnoOf(error) === "ENOENT") return;
+        throw error;
+    }
+    if (!predicate(observed, lockPath)) return;
+    const grave = join(dirname(lockPath), `.meta.lock.${randomBytes(8).toString("hex")}.displaced`);
+    try {
+        renameSync(lockPath, grave);
+    } catch (error) {
+        if (errnoOf(error) === "ENOENT") return;
+        throw error;
+    }
+    let moved: string;
+    try {
+        moved = readFileSync(grave, "utf-8");
+    } catch (error) {
+        let restoreError: unknown;
+        try {
+            restoreDisplacedLock(grave, lockPath);
+        } catch (restore) {
+            restoreError = restore;
+        }
+        if (restoreError) throw restoreError;
+        throw error;
+    }
+    if (moved === observed && predicate(moved, grave)) {
+        try {
+            unlinkSync(grave);
+        } catch (error) {
+            if (errnoOf(error) !== "ENOENT") throw error;
+        }
+        return;
+    }
+    restoreDisplacedLock(grave, lockPath);
+}
+
+function lockPayloadMatches(lockPath: string, payload: string): boolean {
+    try {
+        return readFileSync(lockPath, "utf-8") === payload;
+    } catch (error) {
+        if (errnoOf(error) === "ENOENT") return false;
+        throw error;
+    }
+}
+
+let databaseSyncCtor: (new (path: string) => LockDb) | null | undefined;
+
+function databaseSync(): (new (path: string) => LockDb) | null {
+    if (databaseSyncCtor !== undefined) return databaseSyncCtor;
+    installSqliteWarningFilter();
+    try {
+        const loaded = nodeRequire("node:sqlite") as { DatabaseSync?: new (path: string) => LockDb };
+        databaseSyncCtor = loaded.DatabaseSync ?? null;
+    } catch (error) {
+        const code = errnoOf(error);
+        const message = error instanceof Error ? error.message : String(error);
+        const missing = code === "ERR_UNKNOWN_BUILTIN_MODULE"
+            || message.includes("Cannot find package")
+            || message.includes("Cannot find module")
+            || message.includes("No such built-in module");
+        if (!missing) throw error;
+        databaseSyncCtor = null;
+    }
+    return databaseSyncCtor;
+}
+
+function installSqliteWarningFilter(): void {
+    const marked = process as typeof process & { [sqliteWarningFilter]?: boolean };
+    if (marked[sqliteWarningFilter]) return;
+    marked[sqliteWarningFilter] = true;
+    const emit = process.emitWarning.bind(process);
+    process.emitWarning = ((warning: unknown, ...args: unknown[]) => {
+        const message = typeof warning === "string"
+            ? warning
+            : (warning as { message?: unknown } | undefined)?.message;
+        if (typeof message === "string" && message.includes("SQLite is an experimental feature")) return;
+        return (emit as (warning: unknown, ...args: unknown[]) => void)(warning, ...args);
+    }) as typeof process.emitWarning;
+}
+
+function isSqliteBusy(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /database is locked|SQLITE_BUSY/i.test(message);
+}
+
+/**
+ * Cross-process critical section. Node's built-in SQLite reserved lock is
+ * held for the whole section, including while this process is stopped, and
+ * the kernel drops it if the process dies. Waiters give up at 5s instead of
+ * blocking forever or stealing a live holder.
+ */
+function acquireProcessLock(directory: string): () => void {
+    const Ctor = databaseSync();
+    if (!Ctor) return () => {};
+    const db = new Ctor(join(directory, ".meta.lock.sqlite"));
+    try {
+        db.exec("PRAGMA busy_timeout = 5000");
+        db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+        try {
+            db.close();
+        } catch (closeError) {
+            if (!isSqliteBusy(error)) throw closeError;
+        }
+        if (isSqliteBusy(error)) throw lockTimeout(directory);
+        throw error;
+    }
+    return () => {
+        let rollbackError: unknown;
+        try {
+            db.exec("ROLLBACK");
+        } catch (error) {
+            rollbackError = error;
+        }
+        try {
+            db.close();
+        } catch (error) {
+            if (!rollbackError) throw error;
+        }
+        if (rollbackError) throw rollbackError;
+    };
+}
+
+function takeToken(lockPath: string, payload: string, deadline: number, id: string): void {
+    for (;;) {
+        const creating = join(dirname(lockPath), `.meta.lock.${randomBytes(8).toString("hex")}.creating`);
+        writeFileSync(creating, payload, { flag: "wx" });
+        try {
+            linkSync(creating, lockPath);
+        } catch (error) {
+            const code = errnoOf(error);
+            try {
+                unlinkSync(creating);
+            } catch (cleanup) {
+                if (errnoOf(cleanup) !== "ENOENT") throw cleanup;
+            }
+            if (code !== "EEXIST") throw error;
+            removeLockIf(lockPath, (raw, path) => isStaleLock(path, raw));
+            if (Date.now() > deadline) throw lockTimeout(id);
+            sleepMs(5);
+            continue;
+        }
+        try {
+            unlinkSync(creating);
+        } catch (error) {
+            if (errnoOf(error) !== "ENOENT") throw error;
+        }
+        return;
+    }
+}
+
+/**
+ * Serialize one run's read-modify-write. The owner token, not the lock's age,
+ * decides who may recover or release it. A live pid — even one paused well
+ * past two seconds — is not stolen. Release renames the lock aside and deletes
+ * it only when the moved bytes are still ours, so a newer owner's lock stays.
+ * The lock is per run and is not a second registry.
+ */
+function withRunMetaLock(id: string, body: (owns: () => boolean) => void): void {
+    const directory = runDir(id);
+    let releaseProcessLock: () => void;
+    try {
+        releaseProcessLock = acquireProcessLock(directory);
+    } catch (error) {
+        if (isSqliteBusy(error) || (error instanceof Error && error.message === `Timed out writing metadata for ${directory}`)) {
+            throw lockTimeout(id);
+        }
+        throw error;
+    }
+    try {
+        const lockPath = join(directory, ".meta.lock");
+        const payload = serializeOwner(makeOwner());
+        const deadline = Date.now() + META_LOCK_WAIT_MS;
+        for (;;) {
+            let ownsLock = false;
+            try {
+                takeToken(lockPath, payload, deadline, id);
+                ownsLock = true;
+                const owns = (): boolean => {
+                    if (!ownsLock) return false;
+                    if (!lockPayloadMatches(lockPath, payload)) {
+                        ownsLock = false;
+                        return false;
+                    }
+                    return true;
+                };
+                if (!owns()) continue;
+                body(owns);
+                return;
+            } catch (error) {
+                if (error instanceof MetadataLockLost) {
+                    ownsLock = false;
+                    if (Date.now() > deadline) throw lockTimeout(id);
+                    continue;
+                }
+                throw error;
+            } finally {
+                if (ownsLock) removeLockIf(lockPath, (raw) => raw === payload);
+            }
+        }
+    } finally {
+        releaseProcessLock();
+    }
+}
+
+function writeMetaFile(meta: RunMeta): void {
+    applyFrozenLaunch(meta);
+    const target = metaPathFor(meta.id);
+    const json = JSON.stringify(meta, null, 2);
+    if (process.platform === "win32") {
+        writeFileSync(target, json);
+        return;
+    }
+    const temp = join(runDir(meta.id), `.meta.${randomBytes(8).toString("hex")}.tmp`);
+    const fd = openSync(temp, "wx");
+    try {
+        writeFileSync(fd, json);
+        fsyncSync(fd);
+    } catch (error) {
+        try {
+            closeSync(fd);
+        } catch (closeError) {
+            if (errnoOf(closeError) !== "EBADF") throw closeError;
+        }
+        try {
+            unlinkSync(temp);
+        } catch (cleanup) {
+            if (errnoOf(cleanup) !== "ENOENT") throw cleanup;
+        }
+        throw error;
+    }
+    closeSync(fd);
+    try {
+        renameSync(temp, target);
+    } catch (error) {
+        try {
+            unlinkSync(temp);
+        } catch (cleanup) {
+            if (errnoOf(cleanup) !== "ENOENT") throw cleanup;
+        }
+        throw error;
+    }
+}
+
 let seq = 0;
 const metaCache = new Map<string, RunMeta>();
+/** Test-only pause/check after the run lock is held and before `meta.json` is replaced. */
+let metaWriteBarrier: (() => void) | undefined;
+
+export function setMetaWriteBarrierForTests(barrier: (() => void) | undefined): void {
+    metaWriteBarrier = barrier;
+}
 // Owned snapshots are process-resident. A cheap directory signature catches
 // cross-process index changes before any cached IDs are reused.
 const indexIdsCache = new Map<string, { ids: Set<string>; signature: string }>();
@@ -185,9 +796,14 @@ export function nextRunId(): string {
 
 export function writeMeta(meta: RunMeta): void {
     mkdirSync(runDir(meta.id), { recursive: true });
-    writeFileSync(metaPathFor(meta.id), JSON.stringify(meta, null, 2));
-    metaCache.set(meta.id, meta);
-    indexMeta(meta);
+    withRunMetaLock(meta.id, (owns) => {
+        metaWriteBarrier?.();
+        if (!owns()) throw new MetadataLockLost();
+        writeMetaFile(meta);
+        metaCache.set(meta.id, meta);
+        indexMeta(meta);
+        owns();
+    });
     for (const listener of metaChangedListeners) {
         try { listener(); } catch { /* best effort */ }
     }
@@ -210,6 +826,14 @@ export function readMeta(id: string): RunMeta | undefined {
     }
 }
 
+/**
+ * Delete one run directory and its index entries.
+ *
+ * Catalog label reservations under `{baseDir()}/labels` are intentionally
+ * kept. Age and size sweeps call this and therefore also leave reservations
+ * in place, so a purged run does not free its display label for reuse.
+ * Deleting the whole registry root is what clears them.
+ */
 export function removeMetaArtifacts(meta: RunMeta): boolean {
     try {
         rmSync(runDir(meta.id), { recursive: true, force: true });

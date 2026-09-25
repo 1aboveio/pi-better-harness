@@ -12,4 +12,12 @@ export const Type = {
     Boolean: (o) => schema("boolean", o),
     Array: (items, o) => schema("array", { items, ...o }),
     Optional: (s) => ({ ...s, optional: true }),
+    // Role selectors are Type.Union([string, string[]]). Registration only declares the schema.
+    Union: (variants, o) => schema("union", { anyOf: variants, ...o }),
 };
+export function getSupportedThinkingLevels(model) {
+    if (!model || model.reasoning === false) return ["off"];
+    const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+    if (!model.thinkingLevelMap) return levels;
+    return levels.filter((level) => model.thinkingLevelMap[level] !== null);
+}

@@ -45,11 +45,21 @@
     "*.ts",
     "*.mjs",
     "config.json",
-    "README.md"
+    "README.md",
+    "roles/**/*.md",
+    "docs/agent-catalog.md",
+    "docs/agent-catalog-operations.md",
+    "docs/agent-model-resolution.md",
+    "docs/agent-catalog-lifecycle.md",
+    "docs/agent-catalog-acceptance.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
+  },
+  "dependencies": {
+    "smol-toml": "1.9.0",
+    "yaml": "^2.9.1"
   }
 }

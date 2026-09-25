@@ -11,7 +11,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 <p><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-subagents.png" alt="pi-better-subagents rendered in Pi" width="49%" /><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/overview/pi-better-subagents.png" alt="pi-better-subagents package overview" width="49%" /></p>
 
 ## Core Features
-- Non-blocking subagent launches.
+- Non-blocking subagent launches, with an optional role and named-agent catalog (`docs/agent-catalog.md`, `docs/agent-catalog-lifecycle.md`).
 - Default OS write sandboxing on macOS and Linux.
 - Explicit tool allowlists for child sessions.
 - Durable logs and result retrieval across reloads.

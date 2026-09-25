@@ -1397,3 +1397,70 @@ function truncateVisible(value: string, width: number): string {
   if (visibleWidth(str) <= max) return str;
   return piTruncateToWidth(str, max);
 }
+
+/**
+ * Render one provider detail with the overlay line builder and the main-list
+ * row formatter. Callers must already be inside the process that registered
+ * the provider. `listedIds` is the live list; `rowLine` uses the same
+ * formatter on the detail payload when the live list has filtered the run.
+ */
+export function renderRegisteredWorkDetail(providerId: string, id: string, width = 100): {
+  detail: BackgroundWorkDetail | null;
+  lines: string[];
+  rowLine: string | null;
+  listLines: string[] | null;
+  listedIds: string[];
+} {
+  const s = state();
+  const deps = s.deps;
+  const ctx = s.uiCtx;
+  const truncate = deps?.truncate ?? ((value: string, limit: number) => {
+    const text = String(value ?? "");
+    return text.length > limit ? text.slice(0, Math.max(0, limit)) : text;
+  });
+  const fg = ctx ? themeFg(ctx) : (_color: string, value: string) => value;
+  const provider = s.providers.get(providerId);
+  let listed: BackgroundWorkRow[] = [];
+  try { listed = provider?.listRows(Date.now()) ?? []; } catch { listed = []; }
+  const detail = detailFor(rowKey(providerId, id), Date.now(), { logTailLines: 40 });
+  const listLines = s.lastMainListLines ?? null;
+  const listedIds = listed.map((row) => row.id);
+  if (!detail) return { detail: null, lines: [], rowLine: null, listLines, listedIds };
+  const theme = (ctx?.ui as { theme?: unknown } | undefined)?.theme;
+  let lines: string[];
+  try {
+    if (detail.transcript && deps?.createTranscriptComponent) {
+      const transcriptLines = deps.createTranscriptComponent(detail, theme).render(width) ?? [];
+      lines = buildTranscriptDetailLines(detail, transcriptLines, width, truncate, fg, { logTailRows: 12 });
+    } else {
+      lines = buildDetailLines(detail, width, truncate, fg, { logTailRows: 12 });
+    }
+  } catch {
+    lines = buildDetailLines(detail, width, truncate, fg, { logTailRows: 12 });
+  }
+  const modelLine = detail.metadata.find((item) => item.label === "model")?.value ?? "";
+  const effortMatch = modelLine.match(/ · effort (.+)$/);
+  const elapsed = detail.metadata.find((item) => item.label === "elapsed")?.value ?? "-";
+  const row: InternalRow = {
+    providerId,
+    id: detail.id,
+    name: detail.title,
+    model: effortMatch ? modelLine.slice(0, effortMatch.index) : modelLine,
+    ...(effortMatch ? { effort: effortMatch[1] } : {}),
+    status: detail.status,
+    statusTone: detail.statusTone,
+    kind: "subagent",
+    elapsed,
+    primary: "",
+    sortStartedAt: 0,
+    navigatorId: rowKey(providerId, detail.id),
+    providerLabel: provider?.label ?? providerId,
+  };
+  return {
+    detail,
+    lines,
+    rowLine: formatMainListRow(row, true, fg, width),
+    listLines,
+    listedIds,
+  };
+}

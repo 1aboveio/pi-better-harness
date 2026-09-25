@@ -27,6 +27,7 @@ import {
     isNavigatorUiAvailable,
     refreshBackgroundWorkNavigator,
     registerBackgroundWorkProvider,
+    renderRegisteredWorkDetail,
     type BackgroundWorkDetail,
     type BackgroundWorkProvider,
     type BackgroundWorkRow,
@@ -115,6 +116,20 @@ import {
 } from "./navigator.ts";
 import { enforceRegistrySizeCapOnce, runDailyCleanupOnce } from "./cleanup.ts";
 import { assertThinkingLevel, parseModelThinking, type ThinkingLevel } from "./thinking.ts";
+import { createAgentOperations } from "./agent-operations.ts";
+import {
+    clarifyCatalogRequest,
+    createLaunchEnricher,
+    hasCatalogSelector,
+    loadLaunchSnapshot,
+    noteCatalogHost,
+    prepareCatalogJob,
+    tiersForLaunch,
+    type CatalogHost,
+    type CatalogJobFields,
+    type CatalogRunRecord,
+} from "./catalog-runtime.ts";
+import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -125,6 +140,17 @@ const SUBAGENT_TOOLS = [
     "subagent_output",
     "subagent_stop",
     "subagent_result",
+    "agents_catalog",
+];
+
+const projectConfigDirName = typeof (PiCodingAgent as { CONFIG_DIR_NAME?: unknown }).CONFIG_DIR_NAME === "string"
+    ? (PiCodingAgent as { CONFIG_DIR_NAME: string }).CONFIG_DIR_NAME
+    : ".pi";
+
+const CATALOG_GUIDELINES = [
+    "When a task, workflow, or skill instruction names a model or effort, translate that authoritative choice into the structured model and thinking arguments before spawning. The runtime does not parse prose, quoted model names, or comparisons, and copying a model into the child prompt does not change the launch.",
+    "Optional agent, role, and alias select a catalog definition. Pass one agent id or one role id. Pass an array of role ids when one run was given more than one role: that call asks to choose one or split, and without a UI choice it returns clarification-needed and starts no child. Naming both an agent and a role does the same. One job's choice does not change another job. A named agent displays its defined name. A direct role displays the label allocated from the local run registry. Calls without agent or role keep the existing name and model chain.",
+    "Catalog model and effort are resolved before the child starts. An unavailable explicit model or unsupported explicit effort does not launch and does not fall back. The catalog grants no tools, sandbox modes, extensions, or permissions.",
 ];
 
 const SUBAGENT_ORCHESTRATION_GUIDELINES = [
@@ -688,6 +714,9 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 //      selection change, list↔detail return, and session_shutdown.
 
 let unregisterSubagentProvider: (() => void) | undefined;
+let acceptanceProviderRef: BackgroundWorkProvider | undefined;
+let acceptanceSpawnToolRef: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
+let acceptanceStopToolRef: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 let mainAgentStartedAt: number | undefined;
 const mainAgentTools = new Map<string, string>();
@@ -882,6 +911,8 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
     const transcript = readRunTranscript(id);
     const metadata = [
         { label: "provider", value: "Subagents" },
+        { label: "id", value: detail.id },
+        ...(detail.role ? [{ label: "role", value: String(detail.role) }] : []),
         { label: "model", value: detail.effort ? `${detail.model} · effort ${detail.effort}` : detail.model },
         { label: "elapsed", value: detail.elapsed },
         { label: "tools", value: detail.currentTool ? `current ${detail.currentTool}` : (detail.tools || "(none)") },
@@ -974,6 +1005,7 @@ function ensureSubagentProvider(): void {
         },
         onVisibleChanged: onMetaChanged,
     };
+    acceptanceProviderRef = provider;
     unregisterSubagentProvider = registerBackgroundWorkProvider(provider);
 }
 
@@ -1090,18 +1122,101 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     });
 }
 
+/** String for one role, or an array when the caller assigns more than one. Arrays reach clarification instead of being rejected. */
+function catalogRoleSchema(purpose: string) {
+    const one = `One role id (role.<slug>) for this ${purpose}. Mutually exclusive with agent.`;
+    const many = `Two or more role ids for this ${purpose}. An array is ambiguous and asks to choose one role or split into separate runs. No child launches until that choice is made.`;
+    return Type.Optional(Type.Union([
+        Type.String({ description: one }),
+        Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: many }),
+    ], { description: `${one} ${many}` }));
+}
+
 export default function (pi: ExtensionAPI) {
     // Capture for the health ticker (module-level); needed for orphaned/lost
     // coordinator follow-ups that fire outside a tool-call stack (#65).
     healthPi = pi;
     ensureSubagentProvider();
     registerSubagentsGoalProvider(pi);
+    let acceptanceResultToolRef: { execute: (toolCallId: string, params: { id: string }) => Promise<unknown> } | undefined;
+    function publishAcceptanceHooks(tool?: NonNullable<typeof acceptanceResultToolRef>): void {
+        if (process.env.PI_CATALOG_ACCEPTANCE_PROBE !== "1") return;
+        if (tool) acceptanceResultToolRef = tool;
+        (globalThis as typeof globalThis & Record<symbol, unknown>)[Symbol.for("pi-better-subagents.acceptance-hooks")] = {
+            subagentResult: acceptanceResultToolRef,
+            subagentSpawn: acceptanceSpawnToolRef,
+            subagentStop: acceptanceStopToolRef,
+            listRows: () => acceptanceProviderRef?.listRows(Date.now()) ?? [],
+            renderDetail: (id: string, width = 100) => renderRegisteredWorkDetail("subagents", id, width),
+        };
+    }
+
+    function catalogHostFrom(ctx: ExtensionContext): CatalogHost {
+        const cfg = loadConfig();
+        return {
+            cwd: ctx.cwd,
+            projectTrusted: typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : false,
+            userRoot: defaultUserRoot(),
+            projectConfigDirName,
+            registry: ctx.modelRegistry,
+            foregroundModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+            configuredDefaultModel: cfg.defaultModel,
+            tiers: tiersForLaunch(cfg),
+            hasUI: ctx.hasUI === true,
+            select: typeof ctx.ui?.select === "function"
+                ? (title, options) => ctx.ui.select(title, options)
+                : undefined,
+        };
+    }
+
+    function catalogResult(clarification: { message: string; choices: readonly string[] }) {
+        return {
+            content: [{ type: "text" as const, text: clarification.message }],
+            details: {
+                status: "clarification-needed" as const,
+                launched: false,
+                wrote: false,
+                choices: [...clarification.choices],
+            },
+        };
+    }
+
+    async function admitCatalog(ctx: ExtensionContext, jobs: CatalogJobFields[]): Promise<
+        | { status: "clarification-needed"; message: string; choices: readonly string[] }
+        | { status: "ready"; jobs: SpawnParams[]; snapshot?: CatalogSnapshot }
+    > {
+        const host = catalogHostFrom(ctx);
+        noteCatalogHost(host);
+        if (!jobs.some((job) => hasCatalogSelector(job))) {
+            return { status: "ready", jobs: jobs as SpawnParams[] };
+        }
+        const snapshot = loadLaunchSnapshot(host);
+        const clarified = await clarifyCatalogRequest(jobs, { hasUI: host.hasUI === true, select: host.select });
+        if (clarified.status === "clarification-needed") return clarified;
+        const prepared: SpawnParams[] = [];
+        for (const job of clarified.jobs) {
+            if (!hasCatalogSelector(job)) {
+                prepared.push(job as SpawnParams);
+                continue;
+            }
+            const result = await prepareCatalogJob(snapshot, job, host);
+            if (result.status === "blocked") throw new Error(result.message);
+            if (result.status !== "ready") {
+                prepared.push(job as SpawnParams);
+                continue;
+            }
+            prepared.push({ ...(job as SpawnParams), ...result.assign });
+        }
+        return { status: "ready", jobs: prepared, snapshot };
+    }
 
     type SpawnParams = {
         prompt: string; name?: string; model?: string; thinking?: ThinkingLevel; tools?: string;
         exclude_tools?: string; clean?: boolean; sandbox?: boolean;
         sandbox_dir?: string; callback?: boolean; cwd?: string;
         git_clone_workspace?: boolean; approve?: boolean; allow_nested?: boolean;
+        agent?: string; role?: string | readonly string[]; alias?: string;
+        catalog?: CatalogRunRecord; catalogResolved?: boolean;
     };
 
     /**
@@ -1124,8 +1239,17 @@ export default function (pi: ExtensionAPI) {
     }> {
         assertThinkingLevel(p.thinking);
         const cfg = loadConfig();
-        const requestedModel = p.model ?? cfg.defaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
-        const { model, thinking } = parseModelThinking(requestedModel, p.thinking);
+        let model: string | undefined;
+        let thinking: ThinkingLevel | undefined;
+        if (p.catalogResolved === true) {
+            model = p.model;
+            thinking = p.thinking;
+        } else {
+            const requestedModel = p.model ?? cfg.defaultModel ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+            const parsed = parseModelThinking(requestedModel, p.thinking);
+            model = parsed.model;
+            thinking = parsed.thinking;
+        }
         // Best-effort daily hygiene for durable tmp state. The marker makes
         // this effectively free after the first subagent launch each day.
         runDailyCleanupOnce({ config: cfg });
@@ -1235,6 +1359,9 @@ export default function (pi: ExtensionAPI) {
             callbackOrigin,
             sandbox: sandboxDir, callback: p.callback !== false,
             ...batchInfo,
+            // The launch record is JSON. Registry freezes that value; it does not
+            // require the resolver's nominal type to carry an index signature.
+            ...(p.catalog ? { catalog: p.catalog as unknown as RunMeta["catalog"] } : {}),
         };
         writeMeta(meta);
 
@@ -1261,7 +1388,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ---- subagent_spawn -------------------------------------------------
-    pi.registerTool({
+    const acceptanceSpawnTool = {
         name: "subagent_spawn",
         label: "Spawn Subagent",
         description:
@@ -1275,13 +1402,17 @@ export default function (pi: ExtensionAPI) {
             "Call subagent_result after a completion or attention callback, or when the user explicitly asks for the result. Use subagent_output only when the user explicitly asks how a run is progressing; never use either tool to poll.",
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
+            ...CATALOG_GUIDELINES,
             "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
         ],
         parameters: Type.Object({
             prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained." }),
-            name: Type.Optional(Type.String({ description: "Short label for the run (e.g. 'reviewer')." })),
-            model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (for example openai/gpt-5.5@high). Providerless patterns are resolved by Pi. Default: inherit foreground model." })),
+            name: Type.Optional(Type.String({ description: "Short label for the run (e.g. 'reviewer'). Ignored when agent or role is set, except as the direct-role alias when alias is omitted." })),
+            agent: Type.Optional(Type.String({ description: "Named agent id (agent.<slug>). Mutually exclusive with role. The navigator shows the defined agent name." })),
+            role: catalogRoleSchema("direct role launch"),
+            alias: Type.Optional(Type.String({ description: "Per-run display alias for a direct role launch, such as checkout. Not a reusable agent. Colliding aliases gain a numeric suffix." })),
+            model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (for example openai/gpt-5.5@high). Providerless patterns are resolved by Pi. Default: inherit foreground model. Put authoritative model choices here; do not rely on prompt text." })),
             thinking: Type.Optional(Type.String({ description: "Reasoning effort for the child: off, minimal, low, medium, high, xhigh, or max (default: Pi/model default)." })),
             tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
@@ -1310,9 +1441,35 @@ export default function (pi: ExtensionAPI) {
                 throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
             }
 
+            let reserved = 1;
             try {
+                const catalog = await admitCatalog(ctx, [p]);
+                if (catalog.status === "clarification-needed") {
+                    gate.release(1);
+                    reserved = 0;
+                    return catalogResult(catalog) as ReturnType<typeof text>;
+                }
+                if (catalog.jobs.length > 1) {
+                    const extra = catalog.jobs.length - 1;
+                    if (extra > 0 && !gate.tryReserve(extra, maxConcurrent)) {
+                        gate.release(1);
+                        reserved = 0;
+                        throw new Error(`Choosing split needs ${catalog.jobs.length} subagent slots, but only one was free. Nothing was launched.`);
+                    }
+                    reserved += extra;
+                    const launched: { name?: string; id: string }[] = [];
+                    for (const job of catalog.jobs) {
+                        const { id } = await spawnSubagentRun(ctx, job);
+                        gate.commit(1);
+                        reserved -= 1;
+                        launched.push({ name: job.name, id });
+                    }
+                    return text(launched.map((item) => `Subagent launched: ${item.name ? `${item.name} ` : ""}id=${item.id}.`).join("\n"));
+                }
+                Object.assign(p, catalog.jobs[0]);
                 const { id, spawned, runtime, warn, sandboxDir } = await spawnSubagentRun(ctx, p);
                 gate.commit(1);
+                reserved = 0;
                 return text(
                     `Subagent launched: ${p.name ? `${p.name} ` : ""}id=${id} (pid ${spawned.pid}).\n` +
                     (p.callback === false
@@ -1323,11 +1480,14 @@ export default function (pi: ExtensionAPI) {
                     `Log: ${logPathFor(id)}`,
                 );
             } catch (err) {
-                gate.release(1);
+                if (reserved === 1) gate.release(1);
+                else if (reserved > 0) gate.release(reserved);
                 throw err;
             }
         },
-    });
+    };
+    acceptanceSpawnToolRef = acceptanceSpawnTool;
+    pi.registerTool(acceptanceSpawnTool);
 
     // ---- subagent_spawn_batch -------------------------------------------
     pi.registerTool({
@@ -1344,11 +1504,17 @@ export default function (pi: ExtensionAPI) {
             "Do NOT poll for results. Each job reports back on its own when it finishes.",
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
             "By default the whole batch is rejected if there is not enough capacity. Set onCapacity to 'launch-available' to launch as many as fit and report the rest as skipped.",
+            ...CATALOG_GUIDELINES,
+            "Per-job agent, role, alias, model, and thinking override shared. One batch refreshes the catalog once and every job uses that snapshot. Jobs are resolved independently.",
         ],
         parameters: Type.Object({
             batchName: Type.Optional(Type.String({ description: "Optional display label for the batch." })),
             shared: Type.Optional(Type.Object({
-                model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (default: inherit foreground model)." })),
+                name: Type.Optional(Type.String({ description: "Label applied to jobs that do not set their own. Direct-role alias when alias is omitted." })),
+                agent: Type.Optional(Type.String({ description: "Named agent id applied to jobs that do not select their own agent or role." })),
+                role: catalogRoleSchema("shared role selector"),
+                alias: Type.Optional(Type.String({ description: "Direct-role alias applied when a job does not set alias." })),
+                model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (default: inherit foreground model). Put authoritative model choices here; prompt text is not parsed." })),
                 thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
                 tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
                 exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
@@ -1363,7 +1529,10 @@ export default function (pi: ExtensionAPI) {
             }, { description: "Options applied to every job; per-job values override these." })),
             jobs: Type.Array(Type.Object({
                 prompt: Type.String({ description: "The task for this job." }),
-                name: Type.Optional(Type.String({ description: "Short label for this job." })),
+                name: Type.Optional(Type.String({ description: "Short label for this job. Direct-role alias when alias is omitted." })),
+                agent: Type.Optional(Type.String({ description: "Named agent id for this job. Overrides shared agent and role." })),
+                role: catalogRoleSchema("batch job"),
+                alias: Type.Optional(Type.String({ description: "Direct-role alias for this job." })),
                 model: Type.Optional(Type.String()),
                 thinking: Type.Optional(Type.String()),
                 tools: Type.Optional(Type.String()),
@@ -1402,6 +1571,21 @@ export default function (pi: ExtensionAPI) {
 
             validateBatchPlan({ shared: p.shared, jobs: p.jobs, onCapacity: p.onCapacity, config: cfg });
 
+            let catalogSnapshot: CatalogSnapshot | undefined;
+            let catalogHost: CatalogHost | undefined;
+            if (hasCatalogSelector(p.shared) || p.jobs.some((job) => hasCatalogSelector(job))) {
+                catalogHost = catalogHostFrom(ctx);
+                noteCatalogHost(catalogHost);
+                catalogSnapshot = loadLaunchSnapshot(catalogHost);
+                const clarified = await clarifyCatalogRequest(
+                    p.jobs.map((job) => mergeJobOptions(p.shared, job) as CatalogJobFields),
+                    { hasUI: catalogHost.hasUI === true, select: catalogHost.select },
+                );
+                if (clarified.status === "clarification-needed") return catalogResult(clarified) as ReturnType<typeof text>;
+                p.jobs = clarified.jobs as typeof p.jobs;
+                validateBatchPlan({ shared: undefined, jobs: p.jobs, onCapacity: p.onCapacity, config: cfg });
+            }
+
             // reject mode: whole-batch reservation is all-or-nothing. Holding the slots
             // until each job commits (or the unused remainder is released) closes the
             // interleaving oversubscribe class — a stale plan alone is not enough.
@@ -1437,7 +1621,7 @@ export default function (pi: ExtensionAPI) {
             // backfills when a job fails before a normal run is launched (slot released).
             for (let i = 0; i < p.jobs.length; i++) {
                 const job = p.jobs[i];
-                const name = names[i];
+                let name = names[i];
                 const merged = mergeJobOptions(p.shared, job);
 
                 if (launchAvailable) {
@@ -1450,6 +1634,21 @@ export default function (pi: ExtensionAPI) {
                 }
 
                 try {
+                    if (catalogSnapshot && catalogHost && hasCatalogSelector(merged)) {
+                        const explicitName = typeof job.name === "string" && job.name.trim() !== "" ? job.name : undefined;
+                        const prepared = await prepareCatalogJob(catalogSnapshot, {
+                            ...merged,
+                            name: explicitName,
+                            alias: typeof merged.alias === "string" && merged.alias.trim() !== "" ? merged.alias : explicitName,
+                        }, catalogHost);
+                        if (prepared.status === "blocked") throw new Error(prepared.message);
+                        if (prepared.status === "ready") {
+                            Object.assign(merged, prepared.assign);
+                            if (prepared.assign.model === undefined) delete merged.model;
+                            if (prepared.assign.thinking === undefined) delete merged.thinking;
+                            name = prepared.assign.name;
+                        }
+                    }
                     const { id } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
                     gate.commit(1);
                     if (!launchAvailable) reservedRemaining -= 1;
@@ -1498,8 +1697,41 @@ export default function (pi: ExtensionAPI) {
     // (widget redraw after a kill) is injected as onStopped.
     pi.registerTool(subagentListTool(Type));
     pi.registerTool(subagentOutputTool(Type));
-    pi.registerTool(subagentResultTool(Type));
-    pi.registerTool(subagentStopTool(Type, { onStopped: renderWidget }));
+    const acceptanceResultTool = subagentResultTool(Type);
+    pi.registerTool(acceptanceResultTool);
+    publishAcceptanceHooks(acceptanceResultTool);
+    const acceptanceStopTool = subagentStopTool(Type, { onStopped: renderWidget });
+    acceptanceStopToolRef = acceptanceStopTool;
+    pi.registerTool(acceptanceStopTool);
+    publishAcceptanceHooks();
+
+    const agentOperations = createAgentOperations({
+        projectConfigDirName,
+        propagateCommandContext(commandCtx) {
+            noteCatalogHost(catalogHostFrom(commandCtx));
+        },
+        resolveHost(toolCtx) {
+            const full = toolCtx as Partial<ExtensionContext> & { cwd: string; isProjectTrusted(): boolean };
+            noteCatalogHost(catalogHostFrom({
+                cwd: full.cwd,
+                hasUI: full.hasUI === true,
+                model: full.model,
+                modelRegistry: full.modelRegistry,
+                ui: full.ui ?? { select: async () => undefined },
+                isProjectTrusted: () => full.isProjectTrusted(),
+            } as ExtensionContext));
+            return {
+                cwd: full.cwd,
+                projectTrusted: full.isProjectTrusted(),
+                userRoot: defaultUserRoot(),
+                projectConfigDirName,
+            };
+        },
+        enrich: createLaunchEnricher(),
+    });
+    if (typeof pi.registerCommand === "function") agentOperations.registerCommands(pi);
+    const discoveryTool = agentOperations.createDiscoveryTool(Type as never);
+    pi.registerTool(discoveryTool as Parameters<ExtensionAPI["registerTool"]>[0]);
 
     // ---- live-status lifecycle -----------------------------------------
     pi.on("agent_start", async (_event, ctx) => {
@@ -1524,6 +1756,9 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("model_select", async (_event, ctx) => {
+        // The selected model is already on ctx. Inspection between this event
+        // and the next /agents call must not keep the previous foreground.
+        try { noteCatalogHost(catalogHostFrom(ctx)); } catch { /* navigator still redraws */ }
         refreshBackgroundWorkNavigator(ctx);
     });
 
@@ -1542,6 +1777,7 @@ export default function (pi: ExtensionAPI) {
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
         uiCtx = ctx;
+        try { noteCatalogHost(catalogHostFrom(ctx)); } catch { /* catalog inspection stays undecided */ }
         try { mainAgentStartedAt = ctx.isIdle() ? undefined : Date.now(); }
         catch { mainAgentStartedAt = undefined; }
         mainAgentTools.clear();
@@ -1566,6 +1802,7 @@ export default function (pi: ExtensionAPI) {
             try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
         }
         ensureNavigator(ctx);
+        publishAcceptanceHooks();
         updateNavigatorFooter(ctx);
         // Clear the retired legacy widget so the shared navigator is the only
         // list surface for running/orphaned subagents.
