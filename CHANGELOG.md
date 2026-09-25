@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-subagents@0.2.0] - 2026-09-25
+
+### Added
+
+- **subagents**: discover six bundled specialist roles, create named agents with live role inheritance, and inspect current model, effort, capabilities, and launchability through `/agents` and `agents_catalog`
+- **subagents**: import Codex agent definitions explicitly with secret redaction, restriction checks, and replacement previews
+- **subagents**: preserve coherent launch identity and configuration snapshots across concurrent writers, process crashes, and reloads
+
+## [pi-better-background-tasks@0.2.16] - 2026-09-25
+
+### Changed
+
+- **background-tasks**: include the shared navigator detail-inspection helper used by agent catalog acceptance checks
+
+## [pi-better-harness@0.3.19] - 2026-09-25
+
+### Changed
+
+- **harness**: bundle `pi-better-subagents@0.2.0` and `pi-better-background-tasks@0.2.16`, including the catalog's TOML runtime dependency
+
 ## [pi-better-plan@0.3.4] - 2026-09-23
 
 ### Changed
