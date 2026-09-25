@@ -486,10 +486,11 @@ fi
         for (let attempt = 0; attempt < 40; attempt++) {
             try {
                 argv = readFileSync(join(run, "argv.txt"), "utf8");
-                break;
+                if (argv.includes("--model\nopenai/gpt-6-astra") && argv.includes("--thinking\nhigh")) break;
             } catch {
-                await new Promise((resolve) => setTimeout(resolve, 25));
+                // The child may not have created its argument capture yet.
             }
+            await new Promise((resolve) => setTimeout(resolve, 25));
         }
         assert.match(argv, /--model\nopenai\/gpt-6-astra/);
         assert.match(argv, /--thinking\nhigh/);
