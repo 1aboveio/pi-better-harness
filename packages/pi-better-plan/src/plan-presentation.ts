@@ -56,7 +56,6 @@ export function renderPlanPresentation(
     const content = metadata.map((part) => theme.fg(part.color, planText(part.text))).join("");
     for (const line of wrapTextWithAnsi(content, Math.max(1, size - 2))) lines.push(`  ${line}`);
   }
-  lines.push("");
 
   const labelWidth = Math.min(12, Math.max(4, ...plan.rows.map((row) => visibleWidth(planText(row.label)))));
   const statusWidth = Math.min(24, Math.max(0, ...plan.rows.map((row) =>

@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-plan@0.3.5] - 2026-09-25
+
+### Fixed
+
+- **plan**: remove the empty row between the heading or workflow metadata and the steps, preserving spacing between widgets
+
+## [pi-better-harness@0.3.20] - 2026-09-25
+
+### Changed
+
+- **harness**: bundle `pi-better-plan@0.3.5` with compact heading-to-step spacing
+
 ## [pi-better-subagents@0.2.0] - 2026-09-25
 
 ### Added
