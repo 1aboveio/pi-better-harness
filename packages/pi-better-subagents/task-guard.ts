@@ -12,7 +12,7 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
     const plan = Object.freeze({
         confined: true as const, profilePath: policy.profilePath,
         policy: Object.freeze({ writableRoot: policy.root, home: policy.home, permissions: policy.permissions, denyWrite: policy.denyWrite,
-            runtimeWrite: Object.freeze([policy.scratch]) }),
+            runtimeCompatibility: true, runtimeWrite: Object.freeze([policy.scratch]) }),
     });
     const controller = Object.freeze({ requireLaunchPlan: () => plan });
     let shellPath: string | undefined;

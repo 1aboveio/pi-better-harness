@@ -273,26 +273,29 @@ export class ForegroundSandboxController {
             });
         }
 
+        if (this.#unsafeRootReason !== undefined) {
+            return Object.freeze({ ...base, state: "failed", writableRoot: undefined,
+                backend: support.supported ? support.backend : undefined,
+                executable: support.supported ? support.executable : undefined,
+                reason: this.#unsafeRootReason });
+        }
         const projectRoot = this.#projectRoot;
         const permissions = this.#permissions?.main;
-        const runtimeAlias = permissions && [getAgentDir(), tmpdir(), getPackageDir()]
-            .map((path) => writableRuntimeAlias(path, projectRoot, permissions)).find(Boolean);
+        let runtimeAlias: string | undefined;
+        try {
+            runtimeAlias = permissions && [getAgentDir(), tmpdir(), getPackageDir()]
+                .map((path) => writableRuntimeAlias(path, projectRoot, permissions, true)).find(Boolean);
+        } catch (error) {
+            return Object.freeze({ ...base, state: "failed", writableRoot: undefined,
+                backend: support.supported ? support.backend : undefined,
+                executable: support.supported ? support.executable : undefined,
+                reason: `Runtime compatibility discovery failed: ${error instanceof Error ? error.message : String(error)}` });
+        }
         if (runtimeAlias) {
             return Object.freeze({ ...base, state: "failed", writableRoot: undefined,
                 backend: support.supported ? support.backend : undefined,
                 executable: support.supported ? support.executable : undefined,
                 reason: `A Pi runtime directory uses a task-writable symlink (${runtimeAlias}). Restart Pi with canonical runtime, PI_CODING_AGENT_DIR, and TMPDIR paths before enabling confinement.` });
-        }
-
-        if (this.#unsafeRootReason !== undefined) {
-            return Object.freeze({
-                ...base,
-                state: "failed",
-                writableRoot: undefined,
-                backend: support.supported ? support.backend : undefined,
-                executable: support.supported ? support.executable : undefined,
-                reason: this.#unsafeRootReason,
-            });
         }
 
         if (!support.supported) {
@@ -343,6 +346,7 @@ export class ForegroundSandboxController {
         const policy: SandboxWritePolicy = {
             writableRoot: status.writableRoot,
             denyWrite: Object.freeze([...status.denyWrite, profileDir, this.#taskScratch.anchor]),
+            runtimeCompatibility: true,
             runtimeWrite: Object.freeze([this.#taskScratch.path]),
             home: (this.#seams.home ?? homedir)(),
             ...(status.permissions ? { permissions: status.permissions } : {}),

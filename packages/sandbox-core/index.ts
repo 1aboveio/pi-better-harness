@@ -17,6 +17,7 @@
  * `SandboxSeams` argument so callers can plan deterministically in tests.
  */
 
+import { spawnSync } from "node:child_process";
 import { platform as osPlatform } from "node:os";
 import {
     accessSync,
@@ -66,6 +67,8 @@ export type SandboxWritePolicy = {
     permissions?: SandboxPermissions;
     /** Trusted per-launch runtime state, never supplied by model tool arguments. */
     runtimeWrite?: readonly string[];
+    /** Bounded historical default runtime directories; inactive without a capability profile. */
+    runtimeCompatibility?: boolean;
 };
 
 /** The executable and argv to run inside the sandbox, preserved verbatim. */
@@ -115,6 +118,8 @@ export type SandboxSeams = {
      * host running them.
      */
     materializeDenyPath?: (path: string) => boolean;
+    /** Defaults to /usr/bin/getconf with a minimal environment (macOS only). */
+    getconf?: (name: "DARWIN_USER_TEMP_DIR" | "DARWIN_USER_CACHE_DIR") => string | undefined;
 };
 
 /** A policy with every path canonicalized, deduplicated, and ordered. */
@@ -125,6 +130,7 @@ export type CompiledSandboxWritePolicy = {
     readonly permissions?: SandboxPermissions;
     readonly credentialPaths?: readonly string[];
     readonly runtimeWrite?: readonly string[];
+    readonly compatibilityWrite?: readonly string[];
 };
 
 /** Why a write target is or is not permitted by a compiled policy. */
@@ -174,6 +180,46 @@ const CREDENTIAL_LOCATIONS = [
 const RUNTIME_ROOTS = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/System/Library", "/System/Cryptexes", "/Library/Apple", "/Library/Developer", "/opt/homebrew"];
 const TEMP_ROOTS = ["/private/var/folders", "/private/tmp", "/tmp", "/dev"];
 const READ_RUNTIME_ROOTS = [...RUNTIME_ROOTS, "/dev"];
+
+function systemGetconf(name: "DARWIN_USER_TEMP_DIR" | "DARWIN_USER_CACHE_DIR"): string | undefined {
+    const result = spawnSync("/usr/bin/getconf", [name], {
+        encoding: "utf8", env: { PATH: "/usr/bin:/bin", LANG: "C" }, timeout: 3000, maxBuffer: 4096,
+    });
+    return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+function compatibilityPaths(policy: SandboxWritePolicy, seams: SandboxSeams): string[] {
+    if (!policy.permissions || !policy.runtimeCompatibility || policy.permissions.outsideProject === "off") return [];
+    const platform = currentPlatform(seams);
+    if (platform === "linux") return [canonicalizePath("/tmp", seams)];
+    if (platform !== "darwin") return [];
+    const home = canonicalizePath(policy.home, seams);
+    const project = canonicalizePath(policy.writableRoot, seams);
+    const paths = [canonicalizePath("/tmp", seams)];
+    for (const [key, leaf] of [["DARWIN_USER_TEMP_DIR", ""], ["DARWIN_USER_CACHE_DIR", "mds"]] as const) {
+        const raw = (seams.getconf ?? systemGetconf)(key);
+        if (!raw || !raw.startsWith("/") || raw.includes("\0") ||
+            raw.split("/").some((part) => part === "." || part === "..")) {
+            throw new Error(`Invalid ${key} runtime directory`);
+        }
+        // getconf returns /var/folders on macOS; /var is a system alias for /private/var.
+        const normalized = resolve(raw.replace(/^\/var\/folders\//, "/private/var/folders/"));
+        const expected = /^\/private\/var\/folders\/[^/]+\/[^/]+\/[TC]$/.test(normalized) &&
+            normalized.endsWith(key === "DARWIN_USER_TEMP_DIR" ? "/T" : "/C");
+        const canonical = canonicalizePath(normalized, seams);
+        if (!expected || canonical !== normalized ||
+            (contains(home, canonical) || contains(canonical, home) || contains(project, canonical))) {
+            throw new Error(`Unsafe ${key} runtime directory`);
+        }
+        paths.push(leaf ? join(canonical, leaf) : canonical);
+    }
+    // An existing MDS symlink must not redirect the narrow write allowance.
+    const mds = paths[2];
+    if (!mds || canonicalizePath(mds, seams) !== mds || contains(mds, project) || contains(project, mds)) {
+        throw new Error("Unsafe MDS runtime directory");
+    }
+    return [...new Set(paths)];
+}
 
 /** Only known on-disk credentials: keychains, services and inherited env tokens are out of scope. */
 export function credentialFilePaths(home: string, seams: SandboxSeams = {}): string[] {
@@ -234,12 +280,17 @@ function compile(
         ...new Set((policy.denyWrite ?? []).map((entry) => canonicalizePath(entry, seams))),
     ].sort();
 
+    const compatibilityWrite = compatibilityPaths(policy, seams);
     return {
         writableRoot, denyWrite, home: policy.home,
         ...(policy.permissions && {
             permissions: { ...policy.permissions },
             credentialPaths: credentialFilePaths(policy.home, seams),
-            runtimeWrite: (policy.runtimeWrite ?? []).map((path) => canonicalizePath(path, seams)),
+            compatibilityWrite,
+            runtimeWrite: [...new Set([
+                ...(policy.runtimeWrite ?? []).map((path) => canonicalizePath(path, seams)),
+                ...compatibilityWrite,
+            ])],
         }),
     };
 }
@@ -278,8 +329,9 @@ export function evaluateReadAccess(
     const permissions = policy.permissions;
     if (!permissions) return { allowed: true, path };
     const mode = isCredential(path, policy) ? permissions.storedCredentials
-        : policy.runtimeWrite?.some((root) => contains(root, path)) ? "read-write"
+        : policy.runtimeWrite?.some((root) => !policy.compatibilityWrite?.includes(root) && contains(root, path)) ? "read-write"
         : contains(policy.writableRoot, path) ? permissions.projectFiles
+        : policy.compatibilityWrite?.some((root) => contains(root, path)) ? "read-write"
         : path === sep || runtimeRoots(seams).some((root) => contains(root, path)) ? "read"
         : permissions.outsideProject;
     return mode === "off" ? { allowed: false, path, reason: "read-denied" } : { allowed: true, path };
@@ -306,8 +358,9 @@ export function evaluateWriteAccess(
     }
     if (policy.permissions) {
         const mode = isCredential(path, policy) ? policy.permissions.storedCredentials
-            : policy.runtimeWrite?.some((root) => contains(root, path)) ? "read-write"
+            : policy.runtimeWrite?.some((root) => !policy.compatibilityWrite?.includes(root) && contains(root, path)) ? "read-write"
             : contains(policy.writableRoot, path) ? policy.permissions.projectFiles
+            : policy.compatibilityWrite?.some((root) => contains(root, path)) ? "read-write"
             : contains(canonicalizePath("/dev", seams), path) ? "read-write"
             : policy.permissions.outsideProject;
         if (mode !== "read-write") return { allowed: false, path, reason: "permission-denied" };
@@ -343,6 +396,7 @@ function buildPermissionProfile(policy: CompiledSandboxWritePolicy, seams: Sandb
         ...policy.denyWrite,
         ...(permissions.projectFiles !== "read-write" ? [policy.writableRoot] : []),
         ...(permissions.storedCredentials !== "read-write" ? policy.credentialPaths ?? [] : []),
+        ...(policy.compatibilityWrite ?? []),
     ];
     const rules = ["(version 1)", "(allow default)", "(deny file-write*)"];
     if (permissions.outsideProject === "off") {
@@ -366,13 +420,15 @@ function buildPermissionProfile(policy: CompiledSandboxWritePolicy, seams: Sandb
     };
     // Last matching SBPL rule wins. Credential rules override project and outside;
     // explicit denyWrite entries always override every write allowance.
+    for (const path of policy.compatibilityWrite ?? []) scoped(path, "read-write");
     scoped(policy.writableRoot, permissions.projectFiles);
-    for (const path of policy.runtimeWrite ?? []) scoped(path, "read-write");
+    for (const path of (policy.runtimeWrite ?? []).filter((path) => !policy.compatibilityWrite?.includes(path))) scoped(path, "read-write");
     for (const path of policy.credentialPaths ?? []) scoped(path, permissions.storedCredentials);
     for (const path of policy.denyWrite) rules.push(`(deny file-write* (subpath ${sbpl(path)}))`);
     // Protect the directory entries, not their contents: unrelated children can
     // still be created, while renaming a parent cannot move a denied subtree.
     for (const path of protectedAncestors(protectedPaths)) rules.push(`(deny file-write-unlink (literal ${sbpl(path)}))`);
+    for (const path of policy.compatibilityWrite ?? []) rules.push(`(deny file-write-unlink (literal ${sbpl(path)}))`);
     if (!permissions.network) rules.push("(deny network*)");
     return [...rules, ""].join("\n");
 }
@@ -614,33 +670,96 @@ function buildLinuxPermissionCommand(
             }
         }
     } else {
-        mounts.push(permissions.outsideProject === "read" ? "--ro-bind" : "--bind", "/tmp", "/tmp");
+        mounts.push(permissions.outsideProject === "read" && !policy.compatibilityWrite?.includes(canonicalizePath("/tmp", seams)) ? "--ro-bind" : "--bind", "/tmp", "/tmp");
     }
     mounts.push("--dev", "/dev");
-    if (permissions.projectFiles !== "off") {
-        mounts.push(writableProject ? "--bind" : "--ro-bind", project, project);
-    }
+    const scopedMounts: { option: "--bind" | "--ro-bind"; path: string }[] = [];
+    const writableAncestors = new Set<string>();
+    const readOnlyGuards = new Set<string>();
     if (permissions.outsideProject === "off" && permissions.storedCredentials === "read") {
         for (const path of credentials) {
-            if (existsSync(path) && !contains(project, path)) mounts.push("--ro-bind", path, path);
+            if (existsSync(path) && !contains(project, path)) readOnlyGuards.add(path);
         }
     }
+    // A broad /tmp bind is already present for visible outside roots. Cover
+    // existing leaves and absent leaves via a read-only existing ancestor; do
+    // not create credential or control files in host runtime directories.
+    const compatibility = policy.compatibilityWrite ?? [];
+    if (compatibility.length) {
+        const tmp = canonicalizePath("/tmp", seams);
+        const protectedInTmp = [...policy.denyWrite, ...(permissions.storedCredentials !== "read-write" ? credentials : [])]
+            .filter((path) => contains(tmp, path) && !contains(project, path));
+        if (permissions.storedCredentials === "off" && protectedInTmp.some((path) =>
+            credentials.some((credential) => credential === path))) {
+            throw new Error("Linux bubblewrap cannot hide credentials under a writable runtime directory.");
+        }
+        if (policy.denyWrite.some((path) => contains(path, tmp))) {
+            throw new Error("Runtime directory overlaps a write-denied control path.");
+        }
+        const guards = new Set<string>();
+        for (const path of protectedInTmp) {
+            let guard = path;
+            while (!existsSync(guard) && contains(tmp, guard) && guard !== tmp) guard = dirname(guard);
+            if (guard === tmp || !contains(tmp, guard)) {
+                throw new Error("Cannot protect an absent path directly under writable runtime directory.");
+            }
+            guards.add(guard);
+        }
+        for (const guard of [...guards].sort((a, b) => a.length - b.length)) {
+            if ([...guards].some((parent) => parent !== guard && contains(parent, guard))) continue;
+            for (const parent of protectedAncestors([guard]).filter((parent) => contains(tmp, parent) && parent !== tmp)) {
+                writableAncestors.add(parent);
+            }
+            readOnlyGuards.add(guard);
+        }
+        // A writable /tmp can rename any directory above the captured project
+        // root, then substitute a symlink before the next launch. Anchor each
+        // ancestor even when there are no explicit control or credential guards.
+        if (permissions.projectFiles !== "off" && contains(tmp, project)) {
+            for (const parent of protectedAncestors([project]).filter((path) => contains(tmp, path) && path !== tmp)) {
+                writableAncestors.add(parent);
+            }
+        }
+    }
+    if (permissions.projectFiles !== "off") {
+        scopedMounts.push({ option: writableProject ? "--bind" : "--ro-bind", path: project });
+    }
     for (const path of policy.runtimeWrite ?? []) {
+        if (compatibility.includes(path)) continue;
         if (credentials.some((protectedPath) => contains(path, protectedPath) || contains(protectedPath, path)) ||
             policy.denyWrite.some((protectedPath) => contains(protectedPath, path))) {
             throw new Error("Runtime directory overlaps protected credentials or control paths.");
         }
-        mounts.push("--bind", path, path);
+        scopedMounts.push({ option: "--bind", path });
     }
     const protectedPaths = [...policy.denyWrite,
         ...(permissions.storedCredentials !== "read-write" ? overlappingCredentials : [])];
-    for (const writableRoot of [...(writableProject ? [project] : []), ...(policy.runtimeWrite ?? [])]) {
+    for (const writableRoot of [...(writableProject ? [project] : []),
+        ...(policy.runtimeWrite ?? []).filter((path) => !compatibility.includes(path))]) {
         const materialize = seams.materializeDenyPath ?? materializeDenyPath;
         const leaves = protectedPaths.filter((path) => contains(writableRoot, path) && materialize(path));
         for (const parent of protectedAncestors(leaves).filter((path) => contains(writableRoot, path) && path !== writableRoot)) {
-            mounts.push("--bind", parent, parent);
+            writableAncestors.add(parent);
         }
-        for (const path of leaves) mounts.push("--ro-bind", path, path);
+        for (const path of leaves) readOnlyGuards.add(path);
+    }
+    // A nearest-existing guard can be an ancestor of an unrelated writable
+    // project (e.g. absent ~/.npmrc with a project under ~/work). Mount that
+    // broad guard in path order, keeping its intervening anchors read-only;
+    // only the disjoint project subtree may be rebound writable afterwards.
+    const ancestorGuards = [...readOnlyGuards].filter((guard) =>
+        scopedMounts.some(({ option, path }) => option === "--bind" && guard !== path && contains(guard, path)));
+    for (const guard of ancestorGuards) {
+        scopedMounts.push({ option: "--ro-bind", path: guard });
+        readOnlyGuards.delete(guard);
+    }
+    for (const path of writableAncestors) scopedMounts.push({
+        option: ancestorGuards.some((guard) => contains(guard, path)) ? "--ro-bind" : "--bind", path,
+    });
+    scopedMounts.sort((a, b) => a.path.length - b.path.length);
+    for (const { option, path } of scopedMounts) mounts.push(option, path, path);
+    for (const path of [...readOnlyGuards].sort((a, b) => a.length - b.length)) {
+        mounts.push("--ro-bind", path, path);
     }
     return {
         file: bwrap,

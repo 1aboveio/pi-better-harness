@@ -57,10 +57,14 @@ apply to task operations. Subagents can start with task Network access or Run
 commands & applications Off. The fixed file worker remains available according
 to the file permissions even when task commands are Off.
 
-The task executor provides a private scratch directory through `TMPDIR`, `TMP`,
-and `TEMP`. Only that directory is writable in addition to the selected project
-and explicit file grants; a protected anchor prevents replacing its root with a
-symlink. It is separate from Pi's runtime control files.
+The task executor provides private scratch through `TMPDIR`, `TMP`, and `TEMP`.
+Outside Read and Read/write also retain explicit runtime write exceptions for
+`/tmp` (canonical `/private/tmp` on macOS), the current user's macOS temporary
+directory, and that user's Security.framework MDS cache. MDS access lets CLI
+Keychain retrieval initialize and refresh its cache; it does not restrict the
+Keychain API to reads. Other users' caches and arbitrary outside `*.lock` files
+are not writable. Credential-file and Pi control-path protections still win.
+Outside Off does not expose these host runtime directories.
 
 The currently admitted model-tool implementations are `read`, `write`, `edit`,
 and `bash`. User-entered `!` and `!!` commands use the same shell policy. Other

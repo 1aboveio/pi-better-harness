@@ -7,6 +7,30 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writableRuntimeAlias } from './index.ts';
 
+test('runtime aliases inside compatibility temp are unsafe under Outside Read', { skip: process.platform === 'win32' }, (t) => {
+    const temporary = realpathSync(mkdtempSync('/tmp/task-runtime-alias-'));
+    const outside = realpathSync(mkdtempSync('/var/tmp/task-runtime-target-'));
+    t.after(() => { rmSync(temporary, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
+    const project = join(outside, 'project'), runtime = join(outside, 'agent');
+    mkdirSync(project); mkdirSync(runtime);
+    const alias = join(temporary, 'agent');
+    symlinkSync(runtime, alias);
+    const profile = { projectFiles: 'read-write', outsideProject: 'read', storedCredentials: 'read' };
+    assert.equal(writableRuntimeAlias(alias, project, profile, true), alias);
+    assert.equal(writableRuntimeAlias(runtime, project, profile, true), undefined);
+    // The outside-read entry itself is stable, but its target chain is not.
+    const stable = join(outside, 'stable-agent');
+    symlinkSync(alias, stable);
+    assert.equal(writableRuntimeAlias(stable, project, profile, true), alias);
+    assert.equal(writableRuntimeAlias(join(stable, 'settings.json'), project, profile, true), alias);
+    const relative = join(outside, 'relative-agent');
+    symlinkSync('stable-agent', relative);
+    assert.equal(writableRuntimeAlias(relative, project, profile, true), alias);
+    const cycle = join(outside, 'cycle');
+    symlinkSync('cycle', cycle);
+    assert.throws(() => writableRuntimeAlias(cycle, project, profile, true), /Too many symlinks/);
+});
+
 test('runtime aliases inside a writable project are unsafe even when outside writes are disabled', { skip: process.platform === 'win32' }, (t) => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'task-runtime-alias-')));
     t.after(() => rmSync(base, { recursive: true, force: true }));

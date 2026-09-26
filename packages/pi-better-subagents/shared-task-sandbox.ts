@@ -6,10 +6,10 @@ const { createBashToolDefinition, createReadToolDefinition, createWriteToolDefin
     createEditToolDefinition, createLocalBashOperations, getShellConfig } = PiCodingAgent;
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
-import { canonicalizePath, maybeBuildSandboxCommand } from "./shared-sandbox-core.ts";
+import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
+import { canonicalizePath, compileWritePolicy, maybeBuildSandboxCommand, type SandboxPermissions } from "./shared-sandbox-core.ts";
 import { createTaskFileOperations, type TaskFileController } from "./shared-task-files.ts";
 
 export const TASK_BUILTINS = Object.freeze(["read", "write", "edit", "bash"] as const);
@@ -27,16 +27,43 @@ export function runtimeCodeRoot(path: string): string {
 
 export function writableRuntimeAlias(path: string, root: string, permissions: {
     projectFiles: string; outsideProject: string; storedCredentials: string;
-}): string | undefined {
-    for (let current = resolve(path); dirname(current) !== current; current = dirname(current)) {
-        try {
-            if (!lstatSync(current).isSymbolicLink()) continue;
-            const entry = join(canonicalizePath(dirname(current)), basename(current));
-            accessSync(dirname(entry), constants.W_OK);
-            const inProject = entry === root || entry.startsWith(root + sep);
-            const access = inProject ? permissions.projectFiles : permissions.outsideProject;
-            if (access === "read-write" || permissions.storedCredentials === "read-write") return entry;
-        } catch { /* Nonexistent or OS-protected entries cannot be replaced by the task. */ }
+}, runtimeCompatibility = false): string | undefined {
+    const compatibility = runtimeCompatibility ? compileWritePolicy({ writableRoot: root, home: homedir(),
+        permissions: { ...permissions, commands: true, network: true } as SandboxPermissions,
+        runtimeCompatibility: true,
+    }).compatibilityWrite ?? [] : [];
+    const absolute = resolve(path);
+    let current = parse(absolute).root;
+    let pending = absolute.slice(current.length).split(sep);
+    let links = 0;
+    while (pending.length) {
+        const component = pending.shift()!;
+        if (!component || component === ".") continue;
+        if (component === "..") { current = dirname(current); continue; }
+        const entry = join(current, component);
+        let stat;
+        try { stat = lstatSync(entry); }
+        catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+            throw error;
+        }
+        if (!stat.isSymbolicLink()) { current = entry; continue; }
+        if (++links > 40) throw new Error("Too many symlinks in Pi runtime path");
+        let replaceable = false;
+        try { accessSync(current, constants.W_OK); replaceable = true; }
+        catch { /* An OS-protected entry is immutable; its target still needs inspection. */ }
+        const inProject = entry === root || entry.startsWith(root + sep);
+        const access = inProject ? permissions.projectFiles
+            : compatibility.some((directory) => entry === directory || entry.startsWith(directory + sep)) ? "read-write"
+            : permissions.outsideProject;
+        if (replaceable && (access === "read-write" || permissions.storedCredentials === "read-write")) return entry;
+        // Resolve targets component-by-component: realpath would erase the
+        // intermediate links whose directory entries need protection.
+        const target = readlinkSync(entry);
+        if (isAbsolute(target)) {
+            current = parse(target).root;
+            pending = [...target.slice(current.length).split(sep), ...pending];
+        } else pending = [...target.split(sep), ...pending];
     }
     return undefined;
 }

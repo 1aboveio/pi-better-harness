@@ -31,6 +31,7 @@ function macos(overrides: ForegroundSandboxSeams = {}): ForegroundSandboxSeams {
         platform: () => "darwin",
         home: () => home,
         createProfileDir: () => profiles,
+        getconf: (name) => `/private/var/folders/zz/pi-sandbox-state-fixture/${name === "DARWIN_USER_TEMP_DIR" ? "T" : "C"}`,
         ...overrides,
     };
 }
