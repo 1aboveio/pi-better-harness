@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { compileWritePolicy, evaluateWriteAccess } from "../shared-sandbox-core.ts";
+import { defaultSandboxPermissions } from "../permissions.ts";
 import {
     ForegroundSandboxBlockedError,
     ForegroundSandboxController,
@@ -199,6 +202,33 @@ test("replacing the deny templates recompiles them against the current project r
 
     assert.deepEqual([...status.denyWrite].sort(), [join(home, "vault"), join(root, "secrets")].sort());
     assert.deepEqual([...controller.denyWriteTemplates()], ["secrets", "~/vault"]);
+});
+
+test("runtime control and discovered code paths override broad project writes", () => {
+    const controller = new ForegroundSandboxController(macos());
+    const root = project("runtime-control");
+    const extensionCode = join(root, "vendor", "extension");
+    controller.beginSession(root, true);
+    controller.protectRuntimePaths([extensionCode]);
+    const settings = defaultSandboxPermissions();
+    settings.main.enabled = true;
+    settings.main.outsideProject = "read-write";
+    controller.setPermissionSettings(settings);
+
+    const plan = controller.requireLaunchPlan();
+    assert.equal(plan.confined, true);
+    if (!plan.confined) return;
+    const policy = compileWritePolicy(plan.policy, macos());
+    for (const target of [
+        join(root, ".pi", "settings.json"),
+        join(getAgentDir(), "auth.json"),
+        join(extensionCode, "index.ts"),
+    ]) {
+        const decision = evaluateWriteAccess(target, policy, macos());
+        assert.equal(decision.allowed, false, target);
+        assert.equal(decision.reason, "write-denied", target);
+    }
+    assert.equal(evaluateWriteAccess(join(root, "src", "work.txt"), policy, macos()).allowed, true);
 });
 
 test("the profile path is a pure function of the policy it encodes", () => {

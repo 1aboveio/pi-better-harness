@@ -198,6 +198,22 @@ describe("backend permission construction", () => {
         assert.equal(command.fileArgs.includes("--unshare-net"), false);
     }));
 
+    it("keeps protected anchors read-only inside writable runtime directories", () => fixture((base, project, home) => {
+        const scratch = join(base, "scratch");
+        mkdirSync(scratch);
+        const anchor = join(scratch, ".sandbox-anchor");
+        writeFileSync(anchor, "");
+        const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read" });
+        request.policy.runtimeWrite = [scratch];
+        request.policy.denyWrite = [anchor];
+        const command = buildSandboxCommand(request, linux);
+        const writable = command.fileArgs.indexOf("--bind", command.fileArgs.indexOf(scratch) - 1);
+        assert.ok(writable >= 0);
+        assert.ok(command.fileArgs.join(" ").includes(`--ro-bind ${anchor} ${anchor}`));
+        request.policy.denyWrite = [base];
+        assert.throws(() => buildSandboxCommand(request, linux), /write-denied|overlaps protected/);
+    }));
+
     it("rejects Linux projects nested under stricter credential or write-denied ancestors", () => fixture((base, project, home) => {
         const nested = join(home, ".aws", "project");
         mkdirSync(nested, { recursive: true });

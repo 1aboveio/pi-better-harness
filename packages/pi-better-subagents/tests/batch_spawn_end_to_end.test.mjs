@@ -614,32 +614,20 @@ describe("subagent_spawn_batch end-to-end", () => {
         }
     });
 
-    it("launches single and batch runs with the published default Subagents profile", {
-        skip: process.platform === "darwin"
-            ? spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]).status !== 0
-            : spawnSync("bwrap", ["--ro-bind", "/", "/", "--", "/bin/true"]).status !== 0,
-    }, async () => {
+    it("single and batch defaults reject an unsupported runtime instead of spawning unguarded", async () => {
         const profile = { enabled: true, projectFiles: "read-write", outsideProject: "read",
             storedCredentials: "read", commands: true, network: true };
         const { tools } = loadExtension(mod, { state: "disabled",
             permissions: { ...profile, enabled: false }, subagentPermissions: profile });
         const ctx = makeCtx();
-        const single = await tools.subagent_spawn.execute("profile-single", { prompt: "probe", model: "test/model" }, null, null, ctx);
+        // This suite uses a deliberately minimal SDK and fake pi executable.
+        // Real guarded SDK startup is covered by task_runtime.test.mjs.
+        await assert.rejects(tools.subagent_spawn.execute("profile-single", { prompt: "probe", model: "test/model" }, null, null, ctx), /Task sandbox requires a supported active Pi SDK/);
         const batch = await tools.subagent_spawn_batch.execute("profile-batch", {
             shared: { model: "test/model" }, jobs: [{ prompt: "probe" }],
         }, null, null, ctx);
-        const singleId = single.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
-        const batchId = batch.content[0].text.match(/→ (sa_[a-z0-9_]+)/)?.[1];
-        assert.ok(singleId, single.content[0].text);
-        assert.ok(batchId, batch.content[0].text);
-        for (const id of [singleId, batchId]) {
-            const probe = join(registry.sessionsDir(), id, "probe");
-            for (let attempt = 0; attempt < 100 && !existsSync(probe); attempt++) {
-                await new Promise((resolve) => setTimeout(resolve, 20));
-            }
-            assert.equal(readFileSync(probe, "utf8"), "runtime-ok");
-            assert.ok(registry.readMeta(id));
-        }
+        assert.match(JSON.stringify(batch), /Task sandbox requires a supported active Pi SDK/);
+        assert.doesNotMatch(batch.content[0].text, /→ sa_[a-z0-9_]+/);
     });
 
     it("single subagent_spawn still works and leaves batch fields empty", async () => {

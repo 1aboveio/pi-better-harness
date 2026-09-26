@@ -41,52 +41,47 @@ OS vault services such as Keychain and Secret Service, and tokens inherited in
 environment variables, are excluded. Read / write may be needed by a CLI that
 refreshes a token or updates its credential database.
 
-For shell commands the denial is done by the kernel, not by inspecting command
-text: macOS uses Seatbelt (`sandbox-exec`) and Linux uses Bubblewrap (`bwrap`).
-A crafted command cannot talk its way past it, because the write syscall itself
-is refused.
-
-`write` and `edit` never start a child process — they change files inside Pi's
-own process — so there is no child to wrap. They are confined by a containment
-check on the canonical target instead, run inside Pi's own file-mutation queue,
-immediately before the filesystem call it guards. A refused mutation leaves
-nothing behind on disk.
+File and shell operations use the kernel: macOS uses Seatbelt (`sandbox-exec`)
+and Linux uses Bubblewrap (`bwrap`). `read`, `write`, and `edit` keep Pi's normal
+tool behavior and mutation queues, while a fixed worker performs filesystem
+syscalls under the selected policy. Canonical checks explain denials; kernel
+enforcement also protects against a symlink changing between checking and use.
+The confined file worker rejects files over 8 MiB instead of silently truncating
+them; larger-file processing can use a confined command when commands are On.
 
 ## What is confined, and what is not
 
-Selected file and network rules apply to confined commands. Main's model
-connection remains outside the tool sandbox. A detached subagent's OS sandbox
-surrounds its whole runtime: until provider networking is isolated, launching a
-subagent with Network access Off is refused with an explanation. Run commands &
-applications Off prevents new shell, application, background-task, and subagent
-launches; in-process file tools can still operate according to their file rules.
+Pi is the trusted runtime. It can lock configuration/authentication files,
+connect to its provider, and persist sessions. Main and Subagents permissions
+apply to task operations. Subagents can start with task Network access or Run
+commands & applications Off. The fixed file worker remains available according
+to the file permissions even when task commands are Off.
 
-Permissions cover the integrated first-party execution paths:
+The task executor provides a private scratch directory through `TMPDIR`, `TMP`,
+and `TEMP`. Only that directory is writable in addition to the selected project
+and explicit file grants; a protected anchor prevents replacing its root with a
+symlink. It is separate from Pi's runtime control files.
 
-- Pi's built-in `bash` tool.
-- User-entered `!` and `!!` commands.
-- Pi's built-in `read`, `write`, and `edit` tools.
-- Local [`pi-better-background-tasks`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-background-tasks#readme)
-  spawns and watches, which capture this policy at launch.
-- [`pi-better-subagents`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-subagents#readme)
-  children, through the same shared mechanism.
+The currently admitted model-tool implementations are `read`, `write`, `edit`,
+and `bash`. User-entered `!` and `!!` commands use the same shell policy. Other
+model-callable tools require a verified execution adapter and are refused while
+that actor's sandbox is enabled; enabling network alone does not admit them.
+Subagent launch output identifies requested tools that are unavailable. Main
+remains Off by default, so its ordinary orchestration tools remain available
+unless the user enables Main confinement.
 
-**Not** confined:
+Pi and installed runtime extensions remain trusted code, including their
+initialization, provider hooks, and internal `pi.exec` calls. The tool gate is
+not a sandbox around malicious runtime extensions. Loaded runtime code,
+configuration, and policy/control files are protected from task writes, even
+under broader file grants. Task access to `~/.pi` does not receive a blanket
+write allowance or lock-file exception.
 
-- Pi's own process.
-- `pi.exec` calls made by extensions.
-- Unrelated third-party extension code.
-- Remote filesystem operations: local permissions cannot constrain the remote
-  host. With Main sandbox enabled, the dedicated `remote_bash` and structured
-  SSH background launchers are blocked because their local SSH client does not
-  yet use the confinement wrapper. Run `ssh` through confined `bash` to apply
-  local file, credential, and network permissions to the SSH client.
-- Another first-party surface's control plane. Each surface denies its own —
-  the files naming what it will run next — but not every other surface's, so
-  confinement is per surface rather than global.
-
-This is a tool-execution sandbox. It limits accidental damage from commands the
-model or you run through Pi's shell; it is not a boundary around Pi itself.
+Local confinement cannot govern a remote host's filesystem. Dedicated SSH,
+MCP, scripting, background, and nested-agent tools currently lack admission
+adapters and fail closed under an enabled actor profile. SSH through confined
+`bash` receives local file, credential, and network restrictions; remote effects
+remain outside the local filesystem policy.
 
 Overriding `write` and `edit` changes nothing you can see: the parameter
 schemas, prompt guidance, call rendering, write previews, edit diffs, result

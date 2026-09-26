@@ -97,10 +97,8 @@ export function resolveSubagentPermissions(pi: unknown, requestedSandbox: boolea
     }
     const sandboxEnabled = child.enabled || requestedSandbox === true;
     if (!sandboxEnabled) return { sandboxEnabled: false, enforced: false };
-    if (!child.commands) throw new Error("Subagents profile disables commands. Enable commands in the sandbox UI before launching a subagent.");
-    if (!child.network) {
-        throw new Error("Subagents profile disables network, including model requests. Child provider isolation is not available; enable network in the sandbox UI before launching a subagent.");
-    }
+    // Starting Pi is runtime work. These capabilities constrain task tools;
+    // they do not disable provider transport or the fixed file-operation worker.
     const { enabled: _enabled, ...permissions } = child;
     return { sandboxEnabled: true, enforced: true, permissions };
 }

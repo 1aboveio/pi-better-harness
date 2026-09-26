@@ -410,7 +410,21 @@ const macOSSandboxBackend: SandboxBackend = {
     buildCommand: buildMacOSSandboxCommand,
 };
 
-/** Resolve an executable from PATH without starting it or probing namespaces. */
+/** Resolve only a root-owned system executable; never inspect task PATH. */
+function systemSandboxExecutable(name: string): string | undefined {
+    // Never resolve the host-side confinement launcher through task-influenced PATH.
+    for (const directory of ["/usr/bin", "/bin"]) {
+        const candidate = join(directory, name);
+        try {
+            const info = statSync(candidate);
+            if (!info.isFile() || info.uid !== 0 || (info.mode & 0o022) !== 0) continue;
+            accessSync(candidate, constants.X_OK);
+            return candidate;
+        } catch { /* Try the next system location. */ }
+    }
+    return undefined;
+}
+
 export function executableFromPath(name: string): string | undefined {
     const path = process.env.PATH;
     if (!path) return undefined;
@@ -605,17 +619,18 @@ function buildLinuxPermissionCommand(
         }
     }
     for (const path of policy.runtimeWrite ?? []) {
-        if ([...credentials, ...policy.denyWrite].some((protectedPath) => contains(path, protectedPath) || contains(protectedPath, path))) {
+        if (credentials.some((protectedPath) => contains(path, protectedPath) || contains(protectedPath, path)) ||
+            policy.denyWrite.some((protectedPath) => contains(protectedPath, path))) {
             throw new Error("Runtime directory overlaps protected credentials or control paths.");
         }
         mounts.push("--bind", path, path);
     }
     const protectedPaths = [...policy.denyWrite,
         ...(permissions.storedCredentials !== "read-write" ? overlappingCredentials : [])];
-    if (writableProject) {
+    for (const writableRoot of [...(writableProject ? [project] : []), ...(policy.runtimeWrite ?? [])]) {
         const materialize = seams.materializeDenyPath ?? materializeDenyPath;
-        const leaves = protectedPaths.filter((path) => contains(project, path) && materialize(path));
-        for (const parent of protectedAncestors(leaves).filter((path) => contains(project, path) && path !== project)) {
+        const leaves = protectedPaths.filter((path) => contains(writableRoot, path) && materialize(path));
+        for (const parent of protectedAncestors(leaves).filter((path) => contains(writableRoot, path) && path !== writableRoot)) {
             mounts.push("--bind", parent, parent);
         }
         for (const path of leaves) mounts.push("--ro-bind", path, path);
@@ -628,7 +643,7 @@ function buildLinuxPermissionCommand(
 }
 
 function linuxSandboxBackend(seams: SandboxSeams): SandboxBackend | undefined {
-    const bwrap = (seams.lookupExecutable ?? executableFromPath)("bwrap");
+    const bwrap = (seams.lookupExecutable ?? systemSandboxExecutable)("bwrap");
     if (!bwrap) return undefined;
     return {
         id: "linux-bubblewrap",
@@ -651,7 +666,7 @@ function selectedSandboxBackend(seams: SandboxSeams): SandboxBackend | undefined
  */
 function unavailableMessage(platform: string): string {
     if (platform === "linux") {
-        return "Linux sandbox requires executable bubblewrap (bwrap) on PATH. Install bubblewrap to enable it.";
+        return "Linux sandbox requires executable bubblewrap (bwrap) in /usr/bin or /bin. Install bubblewrap to enable it.";
     }
     if (platform === "darwin") {
         return "macOS sandbox requires /usr/bin/sandbox-exec, which is missing here.";

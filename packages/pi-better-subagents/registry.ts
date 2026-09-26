@@ -14,10 +14,10 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { processExists } from "./spawn.ts";
 import type { LifecycleClassification } from "./lifecycle.ts";
 
@@ -149,6 +149,9 @@ export interface RunMeta {
     lostCallbackSuppressedReason?: string;
     /** Writable dir the child is OS-sandboxed to, if any. */
     sandbox?: string;
+    /** Pi is trusted; model task operations use an immutable kernel policy. */
+    taskRuntime?: boolean;
+    taskScratch?: string;
     /** Whether completion posts the result back to the main session (default true). */
     callback?: boolean;
     /** Batch ID for runs launched via subagent_spawn_batch. */
@@ -176,11 +179,16 @@ export interface RunMeta {
 
 /** Root runtime dir, deliberately OUTSIDE any repo. */
 export function baseDir(): string {
-    return join(tmpdir(), "pi-better-subagents");
+    return join(realpathSync(tmpdir()), "pi-better-subagents");
 }
 export function sessionsDir(): string {
     return join(baseDir(), "sessions");
 }
+export function taskWorkspaceDir(id: string): string {
+    if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) throw new Error("Invalid task workspace run ID.");
+    return join(realpathSync(tmpdir()), "pi-better-subagent-workspaces", id);
+}
+
 export function runDir(id: string): string {
     return join(baseDir(), "runs", id);
 }
@@ -837,6 +845,12 @@ export function readMeta(id: string): RunMeta | undefined {
 export function removeMetaArtifacts(meta: RunMeta): boolean {
     try {
         rmSync(runDir(meta.id), { recursive: true, force: true });
+        if (meta.taskRuntime && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(meta.id) && meta.cwd === taskWorkspaceDir(meta.id)) {
+            rmSync(taskWorkspaceDir(meta.id), { recursive: true, force: true });
+        }
+        if (meta.taskRuntime && meta.taskScratch && dirname(meta.taskScratch) === realpathSync(tmpdir()) && /^pi-task-scratch-[a-z0-9]{6}$/i.test(basename(meta.taskScratch))) {
+            rmSync(meta.taskScratch, { recursive: true, force: true });
+        }
         metaCache.delete(meta.id);
         removeIndexEntry(join(baseDir(), "by-parent", String(meta.spawnPid)), meta.id);
         removeIndexEntry(join(baseDir(), "by-parent-active", String(meta.spawnPid)), meta.id);

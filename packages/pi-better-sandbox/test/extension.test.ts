@@ -59,7 +59,7 @@ after(() => rmSync(fixtures, { recursive: true, force: true }));
 // Redirecting that directory into a disposable fixture is what keeps every test
 // below off the developer's real ~/.pi state, including the ones that drive pi's
 // own extension loader.
-const agentDir = realpathSync(mkdtempSync(join(realpathSync("/var/tmp"), "pi-better-sandbox-agent-")));
+const agentDir = realpathSync(mkdtempSync(join(realpathSync(process.env.PI_SANDBOX_TEST_TMPDIR ?? "/var/tmp"), "pi-better-sandbox-agent-")));
 // The name pi's own `getAgentDir()` reads (`ENV_AGENT_DIR` in its config module,
 // which is not re-exported from the package entry point).
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -91,6 +91,7 @@ type Recorded = {
     tools: Map<string, ToolDefinition>;
     commands: Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>;
     handlers: Map<string, (event: unknown, ctx: ExtensionContext) => unknown>;
+    toolCallHandlers: Array<(event: unknown, ctx: ExtensionContext) => unknown>;
     published: ForegroundSandboxPolicyEvent[];
     events: EventBus;
 };
@@ -100,6 +101,7 @@ function record(): Recorded {
     const tools = new Map<string, ToolDefinition>();
     const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
     const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
+    const toolCallHandlers: Array<(event: unknown, ctx: ExtensionContext) => unknown> = [];
     const published: ForegroundSandboxPolicyEvent[] = [];
     const subscribers = new Map<string, Array<(data: unknown) => void>>();
 
@@ -133,10 +135,34 @@ function record(): Recorded {
         },
         on(event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) {
             handlers.set(event, handler);
+            if (event === "tool_call") toolCallHandlers.push(handler);
+        },
+        getAllTools() {
+            return [...tools.values()].map((tool) => ({
+                name: tool.name, description: tool.description, parameters: tool.parameters,
+                promptGuidelines: tool.promptGuidelines,
+                sourceInfo: { path: join(packageRoot, "index.ts") },
+            }));
         },
     } as unknown as ExtensionAPI;
 
-    return { pi, tools, commands, handlers, published, events };
+    return { pi, tools, commands, handlers, toolCallHandlers, published, events };
+}
+
+function assertProtectedPolicy(recorded: Recorded, root: string, rules: string[] = [...PACKAGED_DENY_WRITE_TEMPLATES]): void {
+    const paths = [...(recorded.published.at(-1)?.denyWrite ?? [])];
+    const expected = [
+        ...rules.map((rule) => join(root, rule)).sort(),
+        getAgentDir(),
+        join(realpathSync(tmpdir()), "pi-better-subagents"),
+        join(realpathSync(tmpdir()), "pi-better-background-tasks"),
+        realpathSync(join(packageRoot, "../../node_modules")),
+        packageRoot,
+        join(root, ".pi"),
+    ];
+    assert.deepEqual(paths.slice(0, expected.length), expected);
+    // getAllTools can report several registered tools from the same code root.
+    for (const path of paths.slice(expected.length)) assert.equal(path, packageRoot);
 }
 
 type UiCall = { kind: string; text: string };
@@ -205,7 +231,7 @@ test("the extension registers the built-in overrides, user_bash routing, and the
     const recorded = record();
     piBetterSandbox(recorded.pi);
 
-    assert.deepEqual([...recorded.tools.keys()], ["bash", "write", "edit", "read"]);
+    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
     assert.ok(recorded.handlers.has("user_bash"));
     assert.ok(recorded.handlers.has("session_start"));
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
@@ -218,6 +244,32 @@ test("no tool can read or change sandbox state, so the model cannot disable its 
     // Every registered tool is an override of a pi built-in the model already
     // had; sandbox control lives in a slash command, which the model cannot call.
     assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
+});
+
+test("the task gate rejects unknown and replaced tools while admitting installed definitions", async () => {
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("task-tool-gate");
+    const started = await startSession(recorded, root);
+    const gate = recorded.toolCallHandlers[0];
+    assert.ok(gate, "the shared task gate must be registered");
+
+    const call = (name: string) => gate({ toolName: name, input: {} }, started.ctx) as
+        | { block: boolean; reason: string }
+        | undefined;
+    assert.equal(call("read"), undefined);
+    assert.match(call("unverified_tool")?.reason ?? "", /no verified task execution adapter/);
+    assert.equal(call("unverified_tool")?.block, true);
+
+    const installed = recorded.tools.get("write");
+    assert.ok(installed);
+    recorded.tools.set("write", { ...installed, parameters: { ...installed.parameters } });
+    assert.deepEqual(call("write"), {
+        block: true,
+        reason: "Sandbox: write was replaced by an unverified implementation.",
+    });
+    recorded.tools.set("write", installed);
+    assert.equal(call("write"), undefined);
 });
 
 test("the write and edit overrides keep pi's own schemas, prompt guidance and renderers", () => {
@@ -528,7 +580,7 @@ test("pi loads the published entry point and registers the same surface", async 
     assert.equal(result.extensions.length, 1);
     const extension = result.extensions[0];
     assert.ok(extension);
-    assert.deepEqual([...extension.tools.keys()], ["bash", "write", "edit", "read"]);
+    assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
     assert.deepEqual([...extension.commands.keys()], ["sandbox"]);
     assert.ok(extension.handlers.has("session_start"));
     assert.ok(extension.handlers.has("user_bash"));
@@ -596,10 +648,7 @@ test("installing the extension materializes no settings file", async () => {
         "a fresh install plus a session start must not write a settings file",
     );
     const root = recorded.published.at(-1)?.projectRoot ?? "";
-    assert.deepEqual(
-        [...(recorded.published.at(-1)?.denyWrite ?? [])],
-        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks"), join(getAgentDir(), "extensions")],
-    );
+    assertProtectedPolicy(recorded, root);
 });
 
 test("/sandbox deny list shows the packaged defaults as canonical absolute paths", async () => {
@@ -644,12 +693,12 @@ test("a new deny rule reaches the write and edit tools pi already holds", async 
 
     await assert.rejects(
         () => writeThrough(write, "build/second.txt", "two\n"),
-        /is a write-denied path/,
+        /write-denied/,
     );
     assert.equal(existsSync(join(root, "build", "second.txt")), false);
     await assert.rejects(
         () => editThrough(edit, "build/first.txt", "one", "two"),
-        /is a write-denied path/,
+        /write-denied/,
     );
     assert.equal(readFileSync(join(root, "build", "first.txt"), "utf8"), "one\n");
 
@@ -718,10 +767,7 @@ test("deny reset drops the override and restores the packaged defaults", async (
     await runSandbox(recorded, "deny reset", confirming.ctx);
 
     assert.equal(existsSync(denyRuleOverridePath()), false);
-    assert.deepEqual(
-        [...(recorded.published.at(-1)?.denyWrite ?? [])],
-        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks"), join(getAgentDir(), "extensions")],
-    );
+    assertProtectedPolicy(recorded, root);
 });
 
 test("deny reset is confirmed first, and declining keeps the rules", async () => {
@@ -844,10 +890,7 @@ test("/sandbox rules adds, removes, and restores through the same module", async
     await runSandbox(recorded, "rules", restoring.ctx);
 
     assert.equal(existsSync(denyRuleOverridePath()), false);
-    assert.deepEqual(
-        [...(recorded.published.at(-1)?.denyWrite ?? [])],
-        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks"), join(getAgentDir(), "extensions")],
-    );
+    assertProtectedPolicy(recorded, root);
 });
 
 test("/sandbox rules keeps the page open and the policy intact when a change is refused", async () => {
@@ -954,7 +997,7 @@ test("a stored rule that cannot apply here is shown as such, never as protection
     const started = await startSession(recorded, root);
 
     // Held out of the effective policy, and said out loud at session start.
-    assert.deepEqual([...(recorded.published.at(-1)?.denyWrite ?? [])], [join(root, ".env"), join(getAgentDir(), "extensions")]);
+    assertProtectedPolicy(recorded, root, [".env"]);
     assert.ok(
         started.notifications.some(
             (note) => note.kind === "warning" && note.text.includes("is not applied in this project"),
@@ -1005,7 +1048,8 @@ test("saved permissions reach file tools, command gates, and consumer snapshots"
     assert.equal(policy?.permissions?.projectFiles, "off");
     assert.equal(policy?.subagentPermissions?.outsideProject, "off");
     await assert.rejects(async () => recorded.tools.get("read")!.execute("read", { path: file }, undefined, undefined, started.ctx), /refused to read/);
-    await assert.rejects(() => writeThrough(recorded.tools.get("write")!, file, "changed"), /selected file permissions do not allow this write/);
+    await assert.rejects(() => writeThrough(recorded.tools.get("write")!, file, "changed"), /permission-denied/);
+    assert.equal(readFileSync(file, "utf8"), "must not be read");
     const call = recorded.handlers.get("tool_call")!;
     assert.deepEqual(call({ toolName: "bash", input: { command: "true" } }, started.ctx), {
         block: true, reason: "Sandbox: Run commands & applications is Off. Change it in /sandbox to launch work.",

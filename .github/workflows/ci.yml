@@ -82,9 +82,16 @@ jobs:
             extensions/plan/index.ts \
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \
+            node_modules/pi-better-sandbox/shared-task-sandbox.ts \
+            node_modules/pi-better-sandbox/shared-task-files.ts \
             node_modules/pi-better-subagents/index.ts \
             node_modules/pi-better-subagents/shared-navigator.ts \
             node_modules/pi-better-subagents/shared-sandbox-core.ts \
+            node_modules/pi-better-subagents/shared-task-sandbox.ts \
+            node_modules/pi-better-subagents/shared-task-files.ts \
+            node_modules/pi-better-subagents/task-runtime.mjs \
+            node_modules/pi-better-subagents/task-guard.ts \
+            node_modules/pi-better-subagents/task-policy.ts \
             node_modules/pi-better-subagents/shared-failure-observations.ts \
             node_modules/pi-better-background-tasks/src/index.ts \
             node_modules/pi-better-background-tasks/src/shared-navigator.ts \
@@ -125,6 +132,9 @@ jobs:
 
       - name: Run sandbox-core macOS seatbelt confinement checks
         run: npm test -w packages/sandbox-core
+
+      - name: Run shared task file workers and trusted Pi startup
+        run: npm test -w packages/task-sandbox && npm run sync:task-sandbox && node --import tsx --test packages/pi-better-subagents/tests/task_runtime.test.mjs
 
       - name: Run foreground sandbox confinement checks
         run: npm test -w packages/pi-better-sandbox
@@ -185,6 +195,9 @@ jobs:
 
       - name: Run sandbox-core backend checks
         run: npm test -w packages/sandbox-core
+
+      - name: Run shared task file workers and trusted Pi startup
+        run: npm test -w packages/task-sandbox && npm run sync:task-sandbox && node --import tsx --test packages/pi-better-subagents/tests/task_runtime.test.mjs
 
       - name: Run foreground sandbox confinement checks
         run: npm test -w packages/pi-better-sandbox

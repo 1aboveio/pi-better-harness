@@ -16,16 +16,13 @@
  * So when — and only when — this host resolves no backend, put an executable
  * named `bwrap` on PATH. That is exactly the precondition the Linux backend
  * looks for, and supplying it is the same move the seam-injecting suites make,
- * through the lookup the product actually performs. It is never executed here:
- * `write` and `edit` mutate files inside pi's own process, and no suite that
- * calls this spawns a command. The stub exits non-zero with a message rather
- * than pretending to confine anything, so a suite that ever did spawn it would
- * fail loudly instead of passing for the wrong reason.
+ * through the lookup the product actually performs. The stub exits non-zero
+ * with a message rather than pretending to confine anything, so suites that
+ * exercise the kernel worker still fail loudly without a real backend.
  *
- * Kernel enforcement is not proved by any of this. It is proved in
- * `foreground-shell.kernel.test.ts`, which resolves a real backend or skips with
- * a reason, and which the platform CI lanes hold to a real backend with
- * `PI_SANDBOX_REQUIRE_BACKEND`.
+ * Kernel enforcement is proved by `foreground-shell.kernel.test.ts` and the
+ * loaded-registration case in `files.test.ts`; platform CI lanes require a
+ * real backend with `PI_SANDBOX_REQUIRE_BACKEND`.
  */
 
 import assert from "node:assert/strict";
@@ -50,7 +47,7 @@ const STUB = [
 export function ensureResolvableBackend(): () => void {
     if (describeSandboxSupport().supported) return () => {};
 
-    const dir = realpathSync(mkdtempSync(join(realpathSync("/var/tmp"), "pi-better-sandbox-bwrap-")));
+    const dir = realpathSync(mkdtempSync(join(realpathSync(process.env.PI_SANDBOX_TEST_TMPDIR ?? "/var/tmp"), "pi-better-sandbox-bwrap-")));
     const stub = join(dir, "bwrap");
     writeFileSync(stub, STUB);
     chmodSync(stub, 0o755);
