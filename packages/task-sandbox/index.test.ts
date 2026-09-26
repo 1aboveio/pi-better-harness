@@ -18,6 +18,17 @@ test('runtime aliases inside compatibility temp are unsafe under Outside Read', 
     const profile = { projectFiles: 'read-write', outsideProject: 'read', storedCredentials: 'read' };
     assert.equal(writableRuntimeAlias(alias, project, profile, true), alias);
     assert.equal(writableRuntimeAlias(runtime, project, profile, true), undefined);
+    // The outside-read entry itself is stable, but its target chain is not.
+    const stable = join(outside, 'stable-agent');
+    symlinkSync(alias, stable);
+    assert.equal(writableRuntimeAlias(stable, project, profile, true), alias);
+    assert.equal(writableRuntimeAlias(join(stable, 'settings.json'), project, profile, true), alias);
+    const relative = join(outside, 'relative-agent');
+    symlinkSync('stable-agent', relative);
+    assert.equal(writableRuntimeAlias(relative, project, profile, true), alias);
+    const cycle = join(outside, 'cycle');
+    symlinkSync('cycle', cycle);
+    assert.throws(() => writableRuntimeAlias(cycle, project, profile, true), /Too many symlinks/);
 });
 
 test('runtime aliases inside a writable project are unsafe even when outside writes are disabled', { skip: process.platform === 'win32' }, (t) => {
