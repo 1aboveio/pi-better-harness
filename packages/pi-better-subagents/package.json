@@ -1,6 +1,6 @@
 {
   "name": "pi-better-subagents",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Pi extension for detached, sandboxed subagent runs that keep the foreground session free.",
   "license": "MIT",
   "type": "module",
@@ -51,7 +51,8 @@
     "docs/agent-catalog-operations.md",
     "docs/agent-model-resolution.md",
     "docs/agent-catalog-lifecycle.md",
-    "docs/agent-catalog-acceptance.md"
+    "docs/agent-catalog-acceptance.md",
+    "docs/failure-observations.md"
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

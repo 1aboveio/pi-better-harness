@@ -104,6 +104,7 @@ export function createCallbackBatcher(
   const pending = new Map<string, PendingEvent>();
   const inFlight = new Set<string>();
   const urgentInFlight = new Set<string>();
+  const handedOff = new Map<string, number>();
   let sequence = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let flushPromise: Promise<boolean> | undefined;
@@ -139,9 +140,25 @@ export function createCallbackBatcher(
     for (const [key] of snapshot) inFlight.add(key);
 
     const deliverable: Array<[string, PendingEvent]> = [];
+    let deferred = false;
     for (const item of snapshot) {
       const [key, pendingEvent] = item;
+      const priorHandoff = handedOff.get(key);
+      if (priorHandoff !== undefined) {
+        if (!invokeDelivered(pendingEvent.event, priorHandoff)) {
+          deferred = true;
+          pending.set(key, pendingEvent);
+        }
+        inFlight.delete(key);
+        continue;
+      }
       const disposition = eventDisposition(pendingEvent.event);
+      if (disposition.kind === "deferred") {
+        deferred = true;
+        pending.set(key, pendingEvent);
+        inFlight.delete(key);
+        continue;
+      }
       if (disposition.kind === "delivered") {
         inFlight.delete(key);
         continue;
@@ -155,8 +172,8 @@ export function createCallbackBatcher(
     }
 
     if (deliverable.length === 0) {
-      if (pending.size > 0) schedule(windowMs);
-      return true;
+      if (pending.size > 0) schedule(deferred ? retryMs : windowMs);
+      return !deferred;
     }
 
     try {
@@ -182,11 +199,15 @@ export function createCallbackBatcher(
 
     const deliveredAt = Date.now();
     for (const [key, item] of deliverable) {
-      invokeDelivered(item.event, deliveredAt);
+      handedOff.set(key, deliveredAt);
+      if (!invokeDelivered(item.event, deliveredAt)) {
+        deferred = true;
+        pending.set(key, item);
+      }
       inFlight.delete(key);
     }
-    if (pending.size > 0) schedule(windowMs);
-    return true;
+    if (pending.size > 0) schedule(deferred ? retryMs : windowMs);
+    return !deferred;
   };
 
   const flush = (): Promise<boolean> => {
@@ -200,7 +221,15 @@ export function createCallbackBatcher(
   const deliverUrgent = (event: UrgentCallbackEvent): boolean | Promise<boolean> => {
     const key = eventKey(event);
     if (urgentInFlight.has(key)) return false;
+    const priorHandoff = handedOff.get(key);
+    if (priorHandoff !== undefined) return invokeDelivered(event, priorHandoff);
+    const acknowledge = (): boolean => {
+      const at = Date.now();
+      handedOff.set(key, at);
+      return invokeDelivered(event, at);
+    };
     const disposition = eventDisposition(event);
+    if (disposition.kind === "deferred") return false;
     if (disposition.kind === "delivered") return true;
     if (disposition.kind === "suppressed") {
       invokeSuppressed(event, disposition.reason, Date.now());
@@ -215,16 +244,13 @@ export function createCallbackBatcher(
       );
       if (isPromiseLike(handoff)) {
         return Promise.resolve(handoff).then(
-          () => {
-            invokeDelivered(event, Date.now());
-            return true;
-          },
+          () => acknowledge(),
           () => false,
         ).finally(() => urgentInFlight.delete(key));
       }
-      invokeDelivered(event, Date.now());
+      const acknowledged = acknowledge();
       urgentInFlight.delete(key);
-      return true;
+      return acknowledged;
     } catch {
       urgentInFlight.delete(key);
       return false;
@@ -277,25 +303,25 @@ function eventKey(event: Pick<CallbackBatchEvent, "source" | "id" | "status">): 
 
 function eventDisposition(
   event: Pick<CallbackBatchEvent, "isDelivered" | "getSuppressionReason">,
-): { kind: "deliver" } | { kind: "delivered" } | { kind: "suppressed"; reason: string } {
+):   | { kind: "deliver" } | { kind: "delivered" } | { kind: "deferred" } | { kind: "suppressed"; reason: string } {
   try {
     if (event.isDelivered?.()) return { kind: "delivered" };
   } catch {
-    return { kind: "suppressed", reason: "durable delivery state could not be verified" };
+    return { kind: "deferred" };
   }
   try {
     const reason = event.getSuppressionReason?.();
     return reason ? { kind: "suppressed", reason } : { kind: "deliver" };
   } catch {
-    return { kind: "suppressed", reason: "callback ownership could not be verified" };
+    return { kind: "deferred" };
   }
 }
 
 function invokeDelivered(
   event: Pick<CallbackBatchEvent, "onDelivered">,
   at: number,
-): void {
-  try { event.onDelivered?.(at); } catch { /* handoff already succeeded */ }
+): boolean {
+  try { event.onDelivered?.(at); return true; } catch { return false; }
 }
 
 function invokeSuppressed(

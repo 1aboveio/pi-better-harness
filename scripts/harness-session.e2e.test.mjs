@@ -206,7 +206,7 @@ test("the harness starts inactive, then one opt-in policy governs the whole sess
   assert.match(initialForegroundPolicy.reason, /inactive by default/);
 
   notifications.length = 0;
-  await commands.get("sandbox").handler("", ctx);
+  await commands.get("sandbox").handler("", { ...ctx, mode: "rpc" });
   const text = notifications.join("\n");
 
   assert.match(text, /enabled|on/i, `/sandbox must report protection as active: ${text}`);

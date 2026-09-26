@@ -31,6 +31,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import piBetterSandbox from "../index.ts";
+import { permissionSettingsPath, writePermissionSettings } from "../permission-settings.ts";
+import { defaultSandboxPermissions } from "../permissions.ts";
 import { sandboxArgumentCompletions } from "../commands.ts";
 import { denyRuleOverridePath } from "../deny-rules.ts";
 import { sandboxPreferencesPath, writeSandboxDefault } from "../preferences.ts";
@@ -75,6 +77,7 @@ function forgetDenyOverride(): void {
 
 function forgetSandboxPreference(): void {
     rmSync(sandboxPreferencesPath(), { force: true });
+    rmSync(permissionSettingsPath(), { force: true });
 }
 
 function project(name: string): string {
@@ -202,7 +205,7 @@ test("the extension registers the built-in overrides, user_bash routing, and the
     const recorded = record();
     piBetterSandbox(recorded.pi);
 
-    assert.deepEqual([...recorded.tools.keys()], ["bash", "write", "edit"]);
+    assert.deepEqual([...recorded.tools.keys()], ["bash", "write", "edit", "read"]);
     assert.ok(recorded.handlers.has("user_bash"));
     assert.ok(recorded.handlers.has("session_start"));
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
@@ -214,7 +217,7 @@ test("no tool can read or change sandbox state, so the model cannot disable its 
 
     // Every registered tool is an override of a pi built-in the model already
     // had; sandbox control lives in a slash command, which the model cannot call.
-    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "write"]);
+    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
 });
 
 test("the write and edit overrides keep pi's own schemas, prompt guidance and renderers", () => {
@@ -358,6 +361,7 @@ test("/sandbox reports the effective status without changing it", async () => {
     const publishedBefore = recorded.published.length;
 
     const shown = context(root);
+    (shown.ctx as { mode: string }).mode = "rpc";
     await recorded.commands.get("sandbox")?.handler("", shown.ctx);
 
     const report = shown.notifications.at(-1)?.text ?? "";
@@ -454,7 +458,7 @@ test("/sandbox default off requires confirmation, persists opt-out, and applies 
     assert.equal(recorded.published.at(-1)?.state, "disabled");
 });
 
-test("a malformed persisted preference warns and defaults the session off", async () => {
+test("a malformed persisted preference blocks the session instead of broadening access", async () => {
     forgetSandboxPreference();
     mkdirSync(dirname(sandboxPreferencesPath()), { recursive: true });
     writeFileSync(sandboxPreferencesPath(), '{"version":1,"default":"invalid"}\n');
@@ -468,10 +472,10 @@ test("a malformed persisted preference warns and defaults the session off", asyn
         started.ctx,
     );
 
-    assert.equal(recorded.published.at(-1)?.state, "disabled");
+    assert.equal(recorded.published.at(-1)?.state, "failed");
     assert.ok(
         started.notifications.some(
-            (note) => note.kind === "warning" && note.text.includes("defaulting off"),
+            (note) => note.kind === "error" && note.text.includes("could not be loaded"),
         ),
     );
 });
@@ -524,7 +528,7 @@ test("pi loads the published entry point and registers the same surface", async 
     assert.equal(result.extensions.length, 1);
     const extension = result.extensions[0];
     assert.ok(extension);
-    assert.deepEqual([...extension.tools.keys()], ["bash", "write", "edit"]);
+    assert.deepEqual([...extension.tools.keys()], ["bash", "write", "edit", "read"]);
     assert.deepEqual([...extension.commands.keys()], ["sandbox"]);
     assert.ok(extension.handlers.has("session_start"));
     assert.ok(extension.handlers.has("user_bash"));
@@ -594,7 +598,7 @@ test("installing the extension materializes no settings file", async () => {
     const root = recorded.published.at(-1)?.projectRoot ?? "";
     assert.deepEqual(
         [...(recorded.published.at(-1)?.denyWrite ?? [])],
-        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks")],
+        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks"), join(getAgentDir(), "extensions")],
     );
 });
 
@@ -716,7 +720,7 @@ test("deny reset drops the override and restores the packaged defaults", async (
     assert.equal(existsSync(denyRuleOverridePath()), false);
     assert.deepEqual(
         [...(recorded.published.at(-1)?.denyWrite ?? [])],
-        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks")],
+        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks"), join(getAgentDir(), "extensions")],
     );
 });
 
@@ -842,7 +846,7 @@ test("/sandbox rules adds, removes, and restores through the same module", async
     assert.equal(existsSync(denyRuleOverridePath()), false);
     assert.deepEqual(
         [...(recorded.published.at(-1)?.denyWrite ?? [])],
-        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks")],
+        [join(root, ".env"), join(root, ".env.local"), join(root, ".git/hooks"), join(getAgentDir(), "extensions")],
     );
 });
 
@@ -893,7 +897,7 @@ test("rule management is reachable only from the slash command, never from a too
 
     // The whole registered tool surface is pi's own built-ins, overridden. There
     // is nothing here the model could call to read or change a rule.
-    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "write"]);
+    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
 
     // Nor can the events contract be used to push a rule set in: publishing a
@@ -950,7 +954,7 @@ test("a stored rule that cannot apply here is shown as such, never as protection
     const started = await startSession(recorded, root);
 
     // Held out of the effective policy, and said out loud at session start.
-    assert.deepEqual([...(recorded.published.at(-1)?.denyWrite ?? [])], [join(root, ".env")]);
+    assert.deepEqual([...(recorded.published.at(-1)?.denyWrite ?? [])], [join(root, ".env"), join(getAgentDir(), "extensions")]);
     assert.ok(
         started.notifications.some(
             (note) => note.kind === "warning" && note.text.includes("is not applied in this project"),
@@ -980,6 +984,36 @@ test("a stored rule that cannot apply here is shown as such, never as protection
         JSON.parse(readFileSync(denyRuleOverridePath(), "utf8")).denyWrite,
         [".env"],
     );
+});
+
+test("saved permissions reach file tools, command gates, and consumer snapshots", async () => {
+    forgetSandboxPreference();
+    const settings = defaultSandboxPermissions();
+    settings.main.enabled = true;
+    settings.main.projectFiles = "off";
+    settings.main.commands = false;
+    settings.main.network = false;
+    settings.subagents.outsideProject = "off";
+    writePermissionSettings(settings);
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("permission-gates");
+    const file = join(root, "private.txt");
+    writeFileSync(file, "must not be read");
+    const started = await startSession(recorded, root, "startup", false, false);
+    const policy = recorded.published.at(-1);
+    assert.equal(policy?.permissions?.projectFiles, "off");
+    assert.equal(policy?.subagentPermissions?.outsideProject, "off");
+    await assert.rejects(async () => recorded.tools.get("read")!.execute("read", { path: file }, undefined, undefined, started.ctx), /refused to read/);
+    await assert.rejects(() => writeThrough(recorded.tools.get("write")!, file, "changed"), /selected file permissions do not allow this write/);
+    const call = recorded.handlers.get("tool_call")!;
+    assert.deepEqual(call({ toolName: "bash", input: { command: "true" } }, started.ctx), {
+        block: true, reason: "Sandbox: Run commands & applications is Off. Change it in /sandbox to launch work.",
+    });
+    assert.deepEqual(call({ toolName: "web_fetch", input: {} }, started.ctx), { block: true, reason: "Sandbox: Network access is Off." });
+    await recorded.commands.get("sandbox")!.handler("off", context(root, { confirm: true }).ctx);
+    assert.equal(call({ toolName: "bash", input: { command: "true" } }, started.ctx), undefined);
+    forgetSandboxPreference();
 });
 
 test("completions cover activation defaults and deny actions", () => {

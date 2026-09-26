@@ -14,7 +14,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 - Non-blocking subagent launches, with an optional role and named-agent catalog (`docs/agent-catalog.md`, `docs/agent-catalog-lifecycle.md`).
 - Default OS write sandboxing on macOS and Linux.
 - Explicit tool allowlists for child sessions.
-- Durable logs and result retrieval across reloads.
+- Durable logs, result retrieval, and [failure observations](docs/failure-observations.md) independent of lifecycle status.
 - Live background-work navigator for active runs.
 
 ## Install
@@ -29,7 +29,7 @@ Try it for one run:
 pi -e npm:pi-better-subagents
 ```
 
-Linux sandboxing uses `bubblewrap` when available, for example from `sudo apt-get install bubblewrap`. It is the same shared mechanism [`pi-better-sandbox`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme) applies to Pi's foreground tools: writes only, reads and network untouched. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox).
+Linux sandboxing uses `bubblewrap` when available, for example from `sudo apt-get install bubblewrap`. With [`pi-better-sandbox`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme) installed, `/sandbox` controls the independent Subagents profile. Each launch snapshots that profile; `sandbox:false` cannot bypass a human-enabled sandbox. Commands Off or Network access Off prevents a detached Pi launch, because the child runtime still needs its provider connection. Session/temp writes use a private directory for that run. Without published permission settings, the legacy default remains write confinement with unrestricted reads and network. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox).
 
 ## When To Use
 

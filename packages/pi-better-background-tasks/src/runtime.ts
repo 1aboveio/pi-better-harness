@@ -8,6 +8,8 @@ import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
 import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
+import { failurePath, recordFailure, recoverFailure, scheduleFailureAttention, stopFailureAttention, terminalFailureAttention } from "./failures.js";
+import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import type {
   BackgroundTaskCallbackOrigin,
@@ -34,8 +36,7 @@ const REMOTE_SESSION_POLL_MS = 100;
 
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 
-/** Remote SSH launches never consult the local foreground sandbox policy. */
-const UNCONFINED_LAUNCH = { confined: false } as const;
+
 
 export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
 
@@ -75,9 +76,8 @@ export function spawnTask(
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
   // Resolved before any task directory, log, or metadata exists so a blocked
-  // launch leaves nothing behind. Remote SSH work is not a local execution path
-  // and keeps its existing remote semantics untouched.
-  const sandboxPlan = params.ssh ? UNCONFINED_LAUNCH : resolveForegroundSandboxPlan(pi);
+  // launch leaves nothing behind. Structured SSH must also honor launch restrictions.
+  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const logPath = logPathFor(id);
@@ -145,6 +145,8 @@ export function spawnTask(
       if (!latest) return;
       enforceLogRetention(latest);
       if (isTerminalStatus(latest.status)) return;
+      if (exitCode !== 0) recordFailure(latest, "execution", `Process exited with code ${exitCode ?? "unknown"}${signal ? ` (${signal})` : ""}`, "close", { category: "exit", at: Date.now() });
+      else recoverFailure(latest, "execution", "close");
       latest.status = exitCode === 0 ? "succeeded" : "failed";
       latest.endedAt = Date.now();
       latest.lastExitCode = exitCode;
@@ -181,11 +183,13 @@ async function launchRemoteTmux(
     appendLine(latest.logPath, `--- remote setup: ${bootstrap.message} ---`);
     writeMeta(latest);
     if (bootstrap.status !== "present" && bootstrap.status !== "installed") {
+      recordFailure(latest, "remote-bootstrap", bootstrap.message, "bootstrap", { category: "ssh" });
       latest.error = bootstrap.message;
       finalize(latest, { status: "failed", reason: bootstrap.message }, pi, getActiveSession);
       return;
     }
 
+    recoverFailure(latest, "remote-bootstrap", "bootstrap");
     const startAttempt = remoteTask.startTmuxSession(bootstrap.tmuxPath);
     remoteSessionStarts.set(id, startAttempt);
     let started: CommandResult;
@@ -200,9 +204,11 @@ async function launchRemoteTmux(
       const detail = started.stderr.trim() || started.stdout.trim() || "remote tmux returned no diagnostic";
       const reason = `Could not create remote tmux session ${afterStart.remote?.sessionName} on ${afterStart.ssh?.target} (exit ${started.exitCode ?? "unknown"}): ${detail}`;
       afterStart.error = reason;
+      recordFailure(afterStart, "remote-start", reason, "start", { category: "ssh", at: started.endedAt });
       finalize(afterStart, { status: "failed", reason, commandResult: started }, pi, getActiveSession);
       return;
     }
+    recoverFailure(afterStart, "remote-start", "start");
     appendLine(afterStart.logPath, `--- remote tmux session ${afterStart.remote?.sessionName} started on ${afterStart.ssh?.target} ---`);
     afterStart.remote = { ...afterStart.remote!, sessionStarted: true };
     afterStart.lastProgressAt = Date.now();
@@ -266,12 +272,15 @@ async function pollRemoteSession(
     }
     if (poll.status === "missing") {
       const reason = `Remote tmux session ${latest.remote?.sessionName} disappeared on ${latest.ssh?.target} before an exit status was captured.`;
+      recordFailure(latest, "remote-session", reason, "missing", { incomplete: true });
       latest.error = reason;
       finalize(latest, { status: "failed", reason }, pi, getActiveSession);
       return;
     }
     const commandResult = { ...poll.commandResult, exitCode: poll.status, stdout: poll.output };
     latest.lastExitCode = poll.status;
+    if (poll.status !== 0) recordFailure(latest, "execution", `Remote command exited with code ${poll.status}`, "exit", { category: "exit" });
+    else recoverFailure(latest, "execution", "exit");
     finalize(latest, {
       status: poll.status === 0 ? "succeeded" : "failed",
       reason: `remote command exited with code ${poll.status}`,
@@ -300,6 +309,7 @@ function failRemoteTask(
   if (!meta || meta.status !== "running" || meta.stopRequestedAt) return;
   const reason = error instanceof Error ? error.message : String(error);
   meta.error = reason;
+  recordFailure(meta, "remote-control", reason, "error", { category: "ssh" });
   finalize(meta, { status: "failed", reason }, pi, getActiveSession);
 }
 
@@ -315,7 +325,7 @@ export function startWatchTask(
     const error = condition && validateCondition(condition);
     if (error) throw new Error(`${name}: ${error}`);
   }
-  const sandboxPlan = params.ssh ? UNCONFINED_LAUNCH : resolveForegroundSandboxPlan(pi);
+  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const now = Date.now();
@@ -386,6 +396,7 @@ export function resumeRunningTask(
     void notifyTerminal(pi, meta, getActiveSession);
     return meta;
   }
+  scheduleFailureAttention(pi, meta.id, getActiveSession);
 
   if (meta.spawnPid !== process.pid || meta.spawnPidStartTime !== currentProcessStartToken()) {
     meta.spawnPid = process.pid;
@@ -413,6 +424,7 @@ export function resumeRunningTask(
     meta.endedAt = Date.now();
     meta.error = "process is no longer alive; exit result was not captured by this pi session";
     meta.result = { reason: meta.error };
+    recordFailure(meta, "execution", meta.error, "lost", { incomplete: true });
     writeMeta(meta);
     void notifyTerminal(pi, meta, getActiveSession);
     return meta;
@@ -514,6 +526,7 @@ export async function stopTask(
     }
   }
 
+  stopFailureAttention(id);
   meta.status = "cancelled";
   meta.endedAt = Date.now();
   meta.result = {
@@ -577,6 +590,7 @@ async function pollWatch(
     latest.lastSignal = result.signal;
     latest.lastState = extractLastState(result);
 
+    const pollKey = result.startedAt;
     if (result.timedOut) {
       finalize(latest, { status: "timed_out", reason: watchTimeoutReason(latest), commandResult: result }, pi, getActiveSession);
       return;
@@ -588,38 +602,56 @@ async function pollWatch(
       const error = condition && validateCondition(condition);
       if (error) {
         latest.error = `${name}: ${error}`;
+        if (result.exitCode !== 0) recordFailure(latest, "watch-poll", `Watch poll exited with code ${result.exitCode ?? "unknown"}`, pollKey,
+          { category: "exit", at: result.endedAt });
+        recordFailure(latest, name, latest.error, pollKey, { incomplete: true, at: result.endedAt });
         finalize(latest, { status: "failed", reason: latest.error, commandResult: result }, pi, getActiveSession);
         return;
       }
     }
 
-    if (latest.failureWhen) {
-      const failure = evaluateCondition(latest.failureWhen, result);
-      if (failure.error) conditionErrors.push(`failure_when: ${failure.error}`);
-      if (failure.matched) {
-        finalize(latest, { status: "failed", reason: "failure condition matched", matchedCondition: latest.failureWhen, commandResult: result }, pi, getActiveSession);
-        return;
+    // Evaluate both conditions before deciding whether either can terminate the watch.
+    const failure = latest.failureWhen ? evaluateCondition(latest.failureWhen, result) : undefined;
+    const success = latest.successWhen ? evaluateCondition(latest.successWhen, result) : undefined;
+    for (const [name, match] of [["failure_when", failure], ["success_when", success]] as const) {
+      if (match?.error) {
+        conditionErrors.push(`${name}: ${match.error}`);
+        recordFailure(latest, name, `${name}: ${match.error}`, pollKey, { incomplete: true, at: result.endedAt });
+      } else if (match) {
+        recoverFailure(latest, name, pollKey, result.endedAt);
       }
     }
-
     const transportFailure = sshTransportFailure(latest, result);
+    const expectedPollExit = !transportFailure && !conditionErrors.length && failure?.matched !== true &&
+      success?.matched === true && latest.successWhen?.type === "exit_code";
+    if (expectedPollExit) recoverFailure(latest, "watch-poll", pollKey, result.endedAt);
+    if (transportFailure) recordFailure(latest, "watch-poll", transportFailure, pollKey, { category: "ssh", at: result.endedAt });
+    else if (result.exitCode !== 0) recordFailure(latest, "watch-poll", `Watch poll exited with code ${result.exitCode ?? "unknown"}`, pollKey,
+      { category: "exit", expected: expectedPollExit, at: result.endedAt });
+    else recoverFailure(latest, "watch-poll", pollKey, result.endedAt);
+    if (conditionErrors.length) latest.error = conditionErrors.join("; ");
+    if (failure?.matched) {
+      recordFailure(latest, "failure_when", "failure condition matched", pollKey, { category: "condition", at: result.endedAt });
+      finalize(latest, { status: "failed", reason: "failure condition matched", matchedCondition: latest.failureWhen, commandResult: result }, pi, getActiveSession);
+      return;
+    }
     if (transportFailure) {
       latest.error = transportFailure;
       finalize(latest, { status: "failed", reason: transportFailure, commandResult: result }, pi, getActiveSession);
       return;
     }
-
-    if (latest.successWhen) {
-      const success = evaluateCondition(latest.successWhen, result);
-      if (success.error) conditionErrors.push(`success_when: ${success.error}`);
-      if (success.matched) {
-        finalize(latest, { status: "succeeded", reason: "success condition matched", matchedCondition: latest.successWhen, commandResult: result }, pi, getActiveSession);
-        return;
-      }
+    if (conditionErrors.length) {
+      writeMeta(latest);
+      scheduleFailureAttention(pi, id, getActiveSession);
+      scheduleWatch(pi, id, nextWatchDelayMs(latest), getActiveSession, runOnce);
+      return;
     }
-
-    if (conditionErrors.length) latest.error = conditionErrors.join("; ");
+    if (success?.matched) {
+      finalize(latest, { status: "succeeded", reason: "success condition matched", matchedCondition: latest.successWhen, commandResult: result }, pi, getActiveSession);
+      return;
+    }
     writeMeta(latest);
+    scheduleFailureAttention(pi, id, getActiveSession);
     scheduleWatch(pi, id, nextWatchDelayMs(latest), getActiveSession, runOnce);
   } catch (error) {
     const meta = readMeta(id);
@@ -630,6 +662,7 @@ async function pollWatch(
         meta.error = reason;
         appendLine(meta.logPath, `--- poll error ${new Date().toISOString()} ---\n${reason}`);
       }
+      recordFailure(meta, "watch-poll", reason, `throw:${meta.lastCheckedAt ?? meta.startedAt}`, { category: meta.ssh ? "ssh" : "execution" });
       finalize(meta, { status: "failed", reason }, pi, getActiveSession);
     }
   } finally {
@@ -643,6 +676,8 @@ function finalize(
   pi: ExtensionAPI,
   getActiveSession?: ActiveSessionProvider,
 ): void {
+  stopFailureAttention(meta.id);
+  if (terminal.status === "timed_out") recordFailure(meta, "timeout", terminal.reason, "deadline", { category: "timeout" });
   meta.status = terminal.status;
   meta.endedAt = Date.now();
   meta.result = {
@@ -800,12 +835,13 @@ async function notifyTerminal(
     writeMeta(latest);
     return;
   }
+  const pending = terminalFailureAttention(latest.id);
   const label = latest.name ? `${latest.name} (${latest.id})` : latest.id;
   getCallbackBatcher(pi).enqueue({
     source: "background-task",
     id: latest.id,
     label,
-    status: latest.status,
+    status: pending ? `${latest.status}: ${pending.summary}` : latest.status,
     detailTool: "bg_task_status",
     callback: true,
     isDelivered: () => {
@@ -814,7 +850,7 @@ async function notifyTerminal(
     },
     getSuppressionReason: () => {
       const current = readMeta(latest.id);
-      if (!current) return "background task metadata is unavailable";
+      if (!current) throw new Error("Background task metadata is unavailable; defer completion");
       return getCallbackSuppressionReason(current, getActiveSession?.());
     },
     onDelivered: (at) => {
@@ -822,6 +858,7 @@ async function notifyTerminal(
       if (!current || current.callbackSentAt !== undefined || current.callbackSuppressedAt !== undefined) return;
       current.callbackSentAt = at;
       writeMeta(current);
+      if (pending) markFailureAttentionDelivered(failurePath(latest.id), pending, at);
     },
     onSuppressed: (reason, at) => {
       const current = readMeta(latest.id);

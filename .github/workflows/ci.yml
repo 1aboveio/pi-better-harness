@@ -85,9 +85,11 @@ jobs:
             node_modules/pi-better-subagents/index.ts \
             node_modules/pi-better-subagents/shared-navigator.ts \
             node_modules/pi-better-subagents/shared-sandbox-core.ts \
+            node_modules/pi-better-subagents/shared-failure-observations.ts \
             node_modules/pi-better-background-tasks/src/index.ts \
             node_modules/pi-better-background-tasks/src/shared-navigator.ts \
             node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
+            node_modules/pi-better-background-tasks/src/shared-failure-observations.ts \
             node_modules/pi-better-ssh/src/index.ts \
             node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
             node_modules/pi-better-goal/src/index.ts \

@@ -38,9 +38,10 @@ import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { maybeBuildSandboxCommand } from "./sandbox.ts";
+import { observeSandboxPermissions, resolveSubagentPermissions } from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import {
     sessionsDir,
     runDir,
@@ -91,6 +92,8 @@ import {
 } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.ts";
 import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
+import { collectRunFailures, failurePath, failureSummary, formatFailureSummary, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
+import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
 import {
     text,
     subagentListTool,
@@ -334,11 +337,15 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
         || meta.completionCallbackSentAt !== undefined
         || meta.completionCallbackSuppressedAt !== undefined) return;
     const label = meta.name ? `${meta.name} (${id})` : id;
+    const observations = Object.values(collectRunFailures(id, meta.cwd, true).observations);
+    const unresolved = observations.filter((observation) => observation.status === "unresolved");
+    const observationStatus = unresolved.some((observation) => observation.category === "observation-incomplete")
+        ? "observation incomplete" : unresolved.length ? "unresolved failure observations" : undefined;
     getCallbackBatcher(pi).enqueue({
         source: "subagent",
         id,
         label,
-        status: meta.status,
+        status: observationStatus ? `${meta.status}; ${observationStatus}` : meta.status,
         detailTool: "subagent_result",
         callback: true,
         isDelivered: () => {
@@ -348,10 +355,18 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
         },
         getSuppressionReason: () => {
             const current = readMeta(id);
-            if (!current) return "subagent metadata is unavailable";
+            if (!current) throw new Error("Subagent metadata is unavailable; defer completion");
             return callbackSuppressionReason(current);
         },
-        onDelivered: (at) => markCompletionCallbackSent(id, at),
+        onDelivered: (at) => {
+            const state = collectRunFailures(id, meta.cwd, true);
+            const due = pendingFailureAttention(state, at, { terminal: true });
+            if (due) {
+                markFailureAttentionDelivered(failurePath(id), due, at);
+                if (due.incidents.some((incident) => pendingFailureAttention(collectRunFailures(id, meta.cwd, true), at, { terminal: true })?.incidents.includes(incident))) return;
+            }
+            markCompletionCallbackSent(id, at);
+        },
         onSuppressed: (reason, at) => markCompletionCallbackSuppressed(id, reason, at),
     });
 }
@@ -362,6 +377,27 @@ function recoverCompletionCallbacks(pi: ExtensionAPI): void {
         if (!ownedByThisParent(meta)) continue;
         enqueueCompletionCallback(pi, meta.id);
     }
+}
+
+function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, now: number): void {
+    if (!pi || meta.callback === false || callbackSuppressionReason(meta)) return;
+    if ((meta.status === "orphaned" || meta.status === "lost") && !isHealthCallbackHandled(meta, meta.status)) return;
+    const state = collectRunFailures(meta.id, meta.cwd, meta.status !== "running" && meta.status !== "orphaned");
+    const pending = pendingFailureAttention(state, now);
+    if (!pending || (meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined)) return;
+    const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+    void getCallbackBatcher(pi).deliverUrgent({
+        source: "subagent", id: meta.id, label, status: `failure:${pending.key}`,
+        customType: "subagent-failure",
+        content: `${formatFailureSummary(state)}\nInspect: subagent_output id=${JSON.stringify(meta.id)}`,
+        isDelivered: () => failureAttentionHandled(collectRunFailures(meta.id, meta.cwd), pending.incidents),
+        getSuppressionReason: () => {
+            const current = readMeta(meta.id);
+            if (!current) throw new Error("Subagent metadata is unavailable; defer failure notification");
+            return callbackSuppressionReason(current);
+        },
+        onDelivered: (at) => { markFailureAttentionDelivered(failurePath(meta.id), pending, at); },
+    });
 }
 
 function markHealthCallbackSuppressed(meta: RunMeta, status: "orphaned" | "lost", reason: string, now: number): void {
@@ -532,6 +568,9 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
 
     const callback = meta.callback !== false;
     const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+    const failureState = collectRunFailures(meta.id, meta.cwd, status === "lost");
+    const failureText = formatFailureSummary(failureState);
+    const attention = pendingFailureAttention(failureState, now, { terminal: status === "lost" });
     const delivery = buildHealthCallbackDelivery({ id: meta.id, label, status, callback });
     if (!delivery) {
         // callback:false — model follow-up suppressed; mark handled so recovery
@@ -547,19 +586,24 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
         label,
         status,
         customType: "subagent-health",
-        content: delivery.content,
+        content: prependFailureSummary(delivery.content, failureText),
         isDelivered: () => {
             const current = readMeta(meta.id);
-            return current ? isHealthCallbackHandled(current, status) : true;
+            if (!current) throw new Error("Subagent metadata is unavailable; defer health notification");
+            return isHealthCallbackHandled(current, status);
         },
         getSuppressionReason: () => {
             const current = readMeta(meta.id);
-            if (!current) return "subagent metadata is unavailable";
+            if (!current) throw new Error("Subagent metadata is unavailable; defer health notification");
             return callbackSuppressionReason(current);
         },
         onDelivered: (at) => {
             const current = readMeta(meta.id);
             if (!current || isHealthCallbackHandled(current, status)) return;
+            if (attention) {
+                markFailureAttentionDelivered(failurePath(meta.id), attention, at);
+                if (attention.incidents.some((incident) => pendingFailureAttention(collectRunFailures(meta.id, meta.cwd), at, { terminal: true })?.incidents.includes(incident))) return;
+            }
             if (status === "orphaned") current.orphanedCallbackSentAt = at;
             else current.lostCallbackSentAt = at;
             writeMeta(current);
@@ -586,12 +630,25 @@ function reconcileHealth(): void {
         if (!meta) continue;
         if (meta.status !== "running" && meta.status !== "orphaned" && meta.status !== "lost") continue;
         const now = Date.now();
+        if (meta.status === "orphaned" || meta.status === "lost") {
+            observeFailures(failurePath(meta.id), [{ id: `supervision:${meta.status}`, operation: `supervision:${meta.status}`, kind: "incomplete",
+                summary: meta.status === "lost" ? "Child supervision was lost; outcome is unknown" : "Child supervision interrupted; related work may still be alive" }], now);
+        }
+        deliverFailureAttention(pi, meta, now);
 
         if (meta.status === "running" || meta.status === "orphaned") {
             const result = reconcileRun(meta, realProcessProbe, now);
             if (result.changed) {
                 Object.assign(meta, result.patch, { status: result.status });
                 writeMeta(meta);
+                if (result.status === "lost") {
+                    observeFailures(failurePath(meta.id), [
+                        { id: "supervision:orphaned-resolved", operation: "supervision:orphaned", kind: "recovered", incidents: ["supervision:orphaned"] },
+                        { id: "supervision:lost", operation: "supervision:lost", kind: "incomplete", summary: "Child supervision was lost; outcome is unknown" },
+                    ], now);
+                } else if (result.status === "orphaned") {
+                    observeFailures(failurePath(meta.id), [{ id: "supervision:orphaned", operation: "supervision:orphaned", kind: "incomplete", summary: "Child supervision interrupted; related work may still be alive" }], now);
+                }
                 if (result.transition) {
                     // Human-visible health (always) on fresh transitions.
                     if (!callbackSuppressionReason(meta)) {
@@ -612,8 +669,13 @@ function reconcileHealth(): void {
             deliverHealthCallback(pi, meta, meta.status, now);
         }
     }
-    // Stop existing the moment nothing current-parent needs monitoring/recovery.
-    if (!needsMonitoring(listMetasForParent(process.pid))) stopHealthTicker();
+    // Completed runs can still have failed completion handoffs to retry.
+    for (const summary of listMetasForParent(process.pid)) {
+        if (!pi || !ownedByThisParent(summary) || summary.status === "running" || summary.status === "orphaned" || summary.status === "lost") continue;
+        const meta = readMeta(summary.id);
+        if (meta && meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined) enqueueCompletionCallback(pi!, meta.id);
+    }
+    if (!needsMonitoring(listMetasForParent(process.pid)) && !hasPendingFailureCallbacks()) stopHealthTicker();
 }
 
 /**
@@ -667,6 +729,12 @@ function reconcileAbandonedRuns(now: number = Date.now()): number {
         }
     } catch { /* best-effort */ }
     return adopted;
+}
+
+function hasPendingFailureCallbacks(): boolean {
+    return listMetasForParent(process.pid).some((m) => ownedByThisParent(m) && m.callback !== false &&
+        m.completionCallbackPendingAt !== undefined && m.completionCallbackSentAt === undefined && m.completionCallbackSuppressedAt === undefined &&
+        !callbackSuppressionReason(m));
 }
 
 /** Start the reconciliation loop if it isn't already running. */
@@ -847,6 +915,8 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
         if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
         if (row.tool) bits.push(row.tool);
         if (row.spend) bits.push(row.spend);
+        const failure = failureSummary(row.id, metaById.get(row.id)?.cwd ?? "", row.status !== "running" && row.status !== "orphaned");
+        const firstFailure = failure.split("\n")[0] || "";
         return {
             providerId: "subagents",
             id: row.id,
@@ -859,7 +929,8 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             statusTone: statusTone(row.status),
             kind: "subagent",
             elapsed: row.elapsed,
-            primary: bits.join(" · ") || "subagent run",
+            primary: firstFailure || bits.join(" · ") || "subagent run",
+            secondary: firstFailure ? bits.join(" · ") : undefined,
             facts: row.healthFacts,
             sortStartedAt: metaById.get(row.id)?.startedAt ?? now,
             expiresAt: (() => {
@@ -909,7 +980,9 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
     if (!detail) return null;
     void options;
     const transcript = readRunTranscript(id);
+    const failure = failureSummary(id, readMeta(id)?.cwd ?? "", detail.status !== "running" && detail.status !== "orphaned");
     const metadata = [
+        ...(failure ? [{ label: "failure", value: failure.split("\n")[0]! }] : []),
         { label: "provider", value: "Subagents" },
         { label: "id", value: detail.id },
         ...(detail.role ? [{ label: "role", value: String(detail.role) }] : []),
@@ -926,11 +999,11 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         title: detail.name || detail.id,
         status: detail.status,
         statusTone: statusTone(detail.status),
-        subtitle: detail.currentTool ? `current tool ${detail.currentTool}` : undefined,
+        subtitle: failure.split("\n")[0] || (detail.currentTool ? `current tool ${detail.currentTool}` : undefined),
         metadata,
-        evidence: { label: "transcript", text: detail.output || "(no transcript yet)" },
+        evidence: { label: "transcript", text: prependFailureSummary(detail.output || "(no transcript yet)", failure) },
         transcript: transcript.entries,
-        transcriptDiagnostic: transcript.diagnostic,
+        transcriptDiagnostic: failure ? prependFailureSummary(transcript.diagnostic ?? "", failure) : transcript.diagnostic,
         footerActions: [detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
     };
 }
@@ -1113,13 +1186,14 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     // Host-facing wrapper around first-party finalizer (finalization.ts).
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation; finalization.ts enforces canExitFinalize + lifecycle authority.
-    finalizeRunCore(id, code, {
+    const result = finalizeRunCore(id, code, {
         renderWidget,
         notify: (message, level) => {
             try { ctx.ui.notify(message, level); } catch { /* ignore */ }
         },
         sendMessage: () => enqueueCompletionCallback(pi, id),
     });
+    if (result.applied && hasPendingFailureCallbacks()) ensureHealthTicker();
 }
 
 /** String for one role, or an array when the caller assigns more than one. Arrays reach clarification instead of being rejected. */
@@ -1138,6 +1212,7 @@ export default function (pi: ExtensionAPI) {
     healthPi = pi;
     ensureSubagentProvider();
     registerSubagentsGoalProvider(pi);
+    observeSandboxPermissions(pi);
     let acceptanceResultToolRef: { execute: (toolCallId: string, params: { id: string }) => Promise<unknown> } | undefined;
     function publishAcceptanceHooks(tool?: NonNullable<typeof acceptanceResultToolRef>): void {
         if (process.env.PI_CATALOG_ACCEPTANCE_PROBE !== "1") return;
@@ -1238,6 +1313,7 @@ export default function (pi: ExtensionAPI) {
         sandboxDir?: string;
     }> {
         assertThinkingLevel(p.thinking);
+        const permissionPlan = resolveSubagentPermissions(pi, p.sandbox);
         const cfg = loadConfig();
         let model: string | undefined;
         let thinking: ThinkingLevel | undefined;
@@ -1268,11 +1344,12 @@ export default function (pi: ExtensionAPI) {
         // Sandbox is ON by default. sandbox_dir moves the confinement + working
         // dir elsewhere. git_clone_workspace prepares a disposable clone with
         // .git/ inside the writable root for Git-mutating sandboxed subagents.
-        const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string" || p.git_clone_workspace === true;
-        const sandboxEnabled = p.sandbox !== false; // default on
+        const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string" || p.git_clone_workspace === true || permissionPlan.enforced;
+        const sandboxEnabled = permissionPlan.sandboxEnabled;
 
-        mkdirSync(sessionsDir(), { recursive: true });
         const id = nextRunId();
+        const childSessionDir = permissionPlan.permissions ? join(sessionsDir(), id) : sessionsDir();
+        mkdirSync(childSessionDir, { recursive: true });
         mkdirSync(runDir(id), { recursive: true });
 
         const workspace = resolveSubagentWorkspace({
@@ -1320,7 +1397,7 @@ export default function (pi: ExtensionAPI) {
 
         const args = [
             "-p", "--mode", "json",
-            "--session-dir", sessionsDir(),
+            "--session-dir", childSessionDir,
             "--session-id", id,
             ...extArgs,
             ...(model ? ["--model", model] : []),
@@ -1332,10 +1409,22 @@ export default function (pi: ExtensionAPI) {
         ];
 
         const piBin = resolvePiBinary();
+        const writableContainsRunDir = requestedSandboxDir && (() => {
+            const rel = relative(runDir(id), requestedSandboxDir);
+            return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+        })();
+        const denyWrite = permissionPlan.enforced ? [
+            join(PiCodingAgent.getAgentDir?.() ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "extensions"),
+            ...(writableContainsRunDir ? [
+                join(runDir(id), "meta.json"), join(runDir(id), ".launch.json"),
+                promptPathFor(id), join(runDir(id), "sandbox.sb"),
+            ] : [runDir(id)]),
+        ] : undefined;
         const sandboxCommand = requestedSandboxDir
             ? maybeBuildSandboxCommand({
                 profilePath: join(runDir(id), "sandbox.sb"),
                 writableDir: requestedSandboxDir, home: homedir(), piBin, piArgs: args,
+                ...(permissionPlan.permissions ? { permissions: permissionPlan.permissions, denyWrite, runtimeDir: childSessionDir } : {}),
             }, { sandboxEnabled, explicitSandbox })
             : undefined;
         const cmd = sandboxCommand ?? { file: piBin, fileArgs: args };
@@ -1403,7 +1492,7 @@ export default function (pi: ExtensionAPI) {
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
-            "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
+            "By default the subagent is sandboxed. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Without published settings, legacy write confinement applies. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
         ],
         parameters: Type.Object({
@@ -1417,7 +1506,7 @@ export default function (pi: ExtensionAPI) {
             tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
             clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO extensions at all (only built-ins: read, bash, edit, write). Default false — the extensions backing the requested tools load, so web_fetch and model auth (e.g. xai) work." })),
-            sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE (macOS): kernel-confine the child's file WRITES to its working dir — reads and network stay open, but it cannot write outside, whatever it runs. Set false to allow writes anywhere." })),
+            sandbox: Type.Optional(Type.Boolean({ description: "Use the human Subagents profile from /sandbox. An enabled human profile cannot be bypassed with false. Without published settings, defaults to kernel write confinement; false opts out of that legacy default." })),
             sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
             callback: Type.Optional(Type.Boolean({ description: "Default TRUE: on completion, trigger a turn that calls subagent_result and presents the result. Set false to finish quietly — the result is then read on demand via subagent_result." })),
             cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
@@ -1475,7 +1564,7 @@ export default function (pi: ExtensionAPI) {
                     (p.callback === false
                         ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
                         : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
-                    (sandboxDir ? `Sandboxed: writes confined to ${sandboxDir}\n` : "") +
+                    (sandboxDir ? `Sandboxed: project root ${sandboxDir}; launch permissions apply.\n` : "") +
                     runtime + warn +
                     `Log: ${logPathFor(id)}`,
                 );
@@ -1518,7 +1607,7 @@ export default function (pi: ExtensionAPI) {
                 thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
                 tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
                 exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
-                sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE: kernel-confine writes to the working dir." })),
+                sandbox: Type.Optional(Type.Boolean({ description: "Use the human Subagents profile; false cannot override an enabled profile. Legacy default is write confinement." })),
                 sandbox_dir: Type.Optional(Type.String({ description: "Writable root for every job." })),
                 callback: Type.Optional(Type.Boolean({ description: "Default TRUE: post result back on completion." })),
                 clean: Type.Optional(Type.Boolean({ description: "Hermetic builtins-only child; no extensions load." })),
@@ -1810,7 +1899,7 @@ export default function (pi: ExtensionAPI) {
         // Resume supervision reconciliation + durable health-callback recovery
         // across /reload while current-parent work still needs the ticker
         // (running/orphaned, or unmarked lost); it stops itself when idle.
-        if (needsMonitoring(listMetasForParent(process.pid))) ensureHealthTicker();
+        if (needsMonitoring(listMetasForParent(process.pid)) || hasPendingFailureCallbacks()) ensureHealthTicker();
     });
 
     pi.on("session_before_switch", () => {

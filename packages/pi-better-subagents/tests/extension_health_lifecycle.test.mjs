@@ -45,7 +45,7 @@
 import { describe, it, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, appendFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -63,6 +63,9 @@ const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, nextRunId, runDir } = await import("../registry.ts");
 const { realProcessProbe, OLD_METADATA_LOST_CONFIRM_TICKS } = await import("../health.ts");
 const { killProcessTree } = await import("../spawn.ts");
+const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
+const { failurePath, readRunFailures, toolOperation } = await import("../failures.ts");
+const { observeFailures, pendingFailureAttention } = await import("../shared-failure-observations.ts");
 
 /** Above the Linux/macOS pid max: guaranteed dead, never a live group. */
 const DEAD_PID = 4194304;
@@ -193,6 +196,51 @@ function fakeSpawnIdentityProbe() {
         // Process-group-only (ADR 0002): no descendants method on ProcessProbe.
     };
 }
+
+describe("structured failure attention", () => {
+    it("prioritizes failed tools over green progress and retries urgent handoff across reload", async () => {
+        await withFakeClock(async () => {
+            let failOnce = true;
+            const h = makeHarness({ sendMessage: (message, options, sent) => {
+                if (message.customType === "subagent-failure" && failOnce) {
+                    failOnce = false;
+                    throw new Error("handoff failed");
+                }
+                sent.push({ message, options });
+            } });
+            try {
+                const { id, pid } = await spawnRun(h);
+                const events = [
+                    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "tests green" }] } },
+                    { type: "tool_execution_start", toolCallId: "bad-test", toolName: "bash", args: { command: "npm test" } },
+                    { type: "tool_execution_end", toolCallId: "bad-test", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "assertion failed" }] } },
+                    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "still working" }] } },
+                ];
+                appendFileSync(join(runDir(id), "output.log"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+                observeFailures(failurePath(id), [{ id: "tool:bad-test", operation: toolOperation("bash", { command: "npm test" }, readMeta(id).cwd), kind: "failure", summary: "assertion failed" }], Date.now() - 61_000);
+                const output = (await h.tools.get("subagent_output").execute("x", { id }, undefined, undefined, h.ctx)).content[0].text;
+                const result = (await h.tools.get("subagent_result").execute("x", { id }, undefined, undefined, h.ctx)).content[0].text;
+                const list = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
+                assert.ok(output.indexOf("Unresolved failure") < output.indexOf("still working"));
+                assert.match(result, /^Unresolved failure/);
+                assert.ok(list.includes("Unresolved failure"));
+                const detail = renderRegisteredWorkDetail("subagents", id, 120);
+                assert.match(detail.lines.join("\n"), /Unresolved failure/);
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+                assert.equal(pendingFailureAttention(readRunFailures(id), Date.now())?.incidents.length, 1);
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+                assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 1);
+                assert.equal(pendingFailureAttention(readRunFailures(id), Date.now()), undefined);
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 1);
+                await reapRun({ id, pid });
+            } finally { h.shutdown(); }
+        });
+    });
+});
 
 describe("AC1 — subagent_spawn persists process identity into meta.json", () => {
     it("persists every captured identity field through the production spawn path (fake probe)", async () => {
@@ -453,6 +501,40 @@ describe("completion callback batching", () => {
         } finally {
             h.shutdown();
         }
+    });
+    it("marks terminal incidents only after the completion batch succeeds", async () => {
+        let failOnce = true;
+        const h = makeHarness({ sendMessage(message, options, sent) {
+            if (message.customType === "background-completion-batch" && failOnce) {
+                failOnce = false;
+                throw new Error("simulated failure");
+            }
+            sent.push({ message, options });
+        } });
+        const id = nextRunId();
+        dirOnly.push(id);
+        try {
+            writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: process.pid, cwd: h.ctx.cwd,
+                callbackOrigin: { cwd: h.ctx.cwd, sessionId: "test-session" },
+                promptPreview: "terminal failure", startedAt: Date.now() - 1_000, endedAt: Date.now(), exitCode: 0,
+                logPath: join(runDir(id), "output.log"), sessionId: id, callback: true,
+                completionCallbackPendingAt: Date.now() });
+            writeFileSync(join(runDir(id), "output.log"), JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
+            observeFailures(failurePath(id), [{ id: "tool:failed", operation: "npm-test", kind: "failure", summary: "tests failed" }]);
+            await h.handlers.get("session_start")({}, h.ctx);
+            const batcher = getCallbackBatcher(h.pi);
+            assert.equal(await batcher.flush(), false);
+            assert.equal(readMeta(id).completionCallbackSentAt, undefined);
+            assert.deepEqual(pendingFailureAttention(readRunFailures(id), Date.now(), { terminal: true })?.incidents, ["tool:failed"]);
+            assert.equal(await batcher.flush(), true);
+            assert.ok(readMeta(id).completionCallbackSentAt > 0);
+            assert.equal(pendingFailureAttention(readRunFailures(id), Date.now(), { terminal: true }), undefined);
+            await h.handlers.get("session_start")({}, h.ctx);
+            assert.equal(batcher.pendingCount(), 0);
+            assert.equal(h.sent.filter((x) => x.message.customType === "background-completion-batch").length, 1);
+            assert.match(h.sent.find((x) => x.message.customType === "background-completion-batch").message.content, /unresolved failure observations/);
+            assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 0);
+        } finally { h.shutdown(); }
     });
 });
 

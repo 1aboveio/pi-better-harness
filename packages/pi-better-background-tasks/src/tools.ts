@@ -1,9 +1,11 @@
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { failurePath, failureSummary } from "./failures.js";
+import { readFailureState } from "./shared-failure-observations.js";
 import { readLog } from "./logs.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import { cancelCallbackBatch } from "./shared-callback-batcher.js";
-import { listActiveMetasForOrigin, listMetas, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
+import { listMetas, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
 import { ForegroundSandboxBlockedError } from "./sandbox.js";
@@ -120,7 +122,11 @@ export function registerTools(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     activeSession = getCallbackOrigin(ctx);
-    for (const meta of listActiveMetasForOrigin(activeSession)) resumeRunningTask(pi, meta, getActiveSession);
+    for (const meta of listMetasForOrigin(activeSession)) {
+      if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
+        resumeRunningTask(pi, meta, getActiveSession);
+      }
+    }
     runTaskMaintenance({ activeOrigin: activeSession });
   });
   pi.on("session_before_switch", () => {
@@ -331,23 +337,32 @@ export function formatLaunch(meta: BackgroundTaskMeta): string {
     : "";
   const setup = meta.remote?.bootstrapMessage ? ` Remote setup: ${meta.remote.bootstrapMessage}` : "";
   const warning = meta.remote?.warning ? ` Warning: ${meta.remote.warning}` : "";
-  return `Started background ${meta.kind} ${label}. Status: ${meta.status}.${remote}${setup}${warning} Log: ${meta.logPath}`;
+  const failure = failureSummary(meta.id);
+  return `${failure ? `${failure}\n` : ""}Started background ${meta.kind} ${label}. Status: ${meta.status}.${remote}${setup}${warning} Log: ${meta.logPath}`;
 }
 
 function formatList(metas: BackgroundTaskMeta[]): string {
   if (metas.length === 0) return "No background tasks found.";
   return metas.map((meta) => {
+    const failure = failureSummary(meta.id);
     const age = formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt);
     const label = meta.name ? `${meta.name} ` : "";
     const remote = meta.ssh ? ` ${meta.ssh.target}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : "";
-    return `${meta.id} ${label}${meta.kind} ${meta.status} ${age}${remote}`;
+    return `${failure ? `${failure}\n` : ""}${meta.id} ${label}${meta.kind} ${meta.status} ${age}${remote}`;
   }).join("\n");
 }
 
 function formatStatus(meta: BackgroundTaskMeta | undefined, id?: string, options: { verbose?: boolean } = {}): string {
   if (!meta) return `No background task found${id ? ` for id ${id}` : ""}.`;
-  if (!options.verbose) return formatCompactStatus(meta);
-  return JSON.stringify(meta, null, 2);
+  const failure = failureSummary(meta.id);
+  if (!options.verbose) return [failure, formatCompactStatus(meta)].filter(Boolean).join("\n");
+  const state = readFailureState(failurePath(meta.id));
+  const observations = Object.values(state.observations);
+  return JSON.stringify(observations.length ? {
+    failureSummary: failure, failureJournal: failurePath(meta.id),
+    failureObservations: observations.map((observation) => ({ ...observation, attentionDeliveredAt: state.delivered[observation.id] })),
+    ...meta,
+  } : meta, null, 2);
 }
 
 function formatCompactStatus(meta: BackgroundTaskMeta): string {
@@ -394,7 +409,8 @@ function formatLog(id: string, tailLines?: number): string {
   if (!meta) return `No background task found for id ${id}.`;
   const log = readLog(meta.logPath, tailLines ?? 5);
   const prefix = log.truncated ? `[showing tail of ${meta.logPath}]\n` : `[${meta.logPath}]\n`;
-  return prefix + (log.text || "(log is empty)");
+  const failure = failureSummary(id);
+  return `${failure ? `${failure}\n` : ""}${prefix}${log.text || "(log is empty)"}`;
 }
 
 function logText(id: string, tailLines?: number) {

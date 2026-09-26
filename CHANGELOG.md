@@ -4,6 +4,45 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [pi-better-harness@0.4.0] - 2026-09-27
+
+### Changed
+
+- Bundle `pi-better-sandbox@0.4.0`, `pi-better-subagents@0.3.0`, and `pi-better-background-tasks@0.2.17` for independent permission profiles and durable failure reporting.
+
+## [pi-better-sandbox@0.4.0] - 2026-09-27
+
+### Added
+
+- Configure independent Main and Subagents permission profiles in the flat `/sandbox` table, with saved defaults and retained inactive values.
+- Enforce project and outside file modes, credential-file overrides, command gates, and network restrictions on integrated execution surfaces.
+
+## [pi-better-subagents@0.3.0] - 2026-09-27
+
+### Added
+
+- Snapshot human permission profiles at launch and reserve private runtime directories; reject tool opt-outs that bypass enabled profiles.
+- Keep structured failure observations separate from lifecycle status and show them before stale assistant progress. Recovery requires a later matching retry.
+
+### Fixed
+
+- Retry notification handoffs and receipt writes without suppressing alerts on temporary read errors or repeatedly sending an already handed-off event.
+- Retain pending evidence on failed writes and report missing, truncated, or corrupt observations explicitly.
+
+## [pi-better-background-tasks@0.2.17] - 2026-09-27
+
+### Fixed
+
+- Reject invalid watcher JSON paths before launch; keep evaluator errors visible and withhold success while failure detection is incomplete.
+- Retain structured failure observations and matching recovery across task reporting surfaces, and replay undelivered terminal callbacks on session startup.
+- Retry evidence and delivery-receipt writes, defer unreadable callback state, and prevent repeated handoffs while receipt persistence is unavailable.
+
+### Changed
+
+- Inherit Main permissions for local launches and reject structured SSH when its client cannot apply those restrictions.
+
 ## [pi-better-plan@0.3.5] - 2026-09-25
 
 ### Fixed

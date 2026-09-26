@@ -16,8 +16,8 @@
  * be re-targeted between the check and the syscall: the guard and the `fs` call
  * are the same operation.
  *
- * Reads stay unrestricted. `edit`'s `readFile` is delegated untouched; only the
- * operations that can change the host filesystem are guarded.
+ * Reads and mutations use the same canonical file-permission decisions as the
+ * kernel policy; protected-path write denials remain stricter than broad grants.
  */
 
 import { constants } from "node:fs";
@@ -34,6 +34,7 @@ import {
     type CompiledSandboxWritePolicy,
     compileWritePolicy,
     evaluateWriteAccess,
+    evaluateReadAccess,
     type SandboxSeams,
     type SandboxWritePolicy,
     type WriteAccessDecision,
@@ -77,9 +78,9 @@ function explainDenial(
 ): string {
     const attempt = kind === "directory" ? "create directory" : "write";
     const refused = `Foreground sandbox refused to ${attempt} ${decision.path}; nothing was changed on disk.`;
-    return decision.reason === "outside-writable-root"
-        ? `${refused} Writes are confined to ${policy.writableRoot}.`
-        : `${refused} ${decision.deniedBy} is a write-denied path.`;
+    if (decision.reason === "outside-writable-root") return `${refused} Writes are confined to ${policy.writableRoot}.`;
+    if (decision.reason === "write-denied") return `${refused} ${decision.deniedBy} is a write-denied path.`;
+    return `${refused} The selected file permissions do not allow this write.`;
 }
 
 /**
@@ -95,7 +96,7 @@ export type ForegroundWriteGuard = (absolutePath: string, kind?: MutationKind) =
 
 /** Identity of a compiled policy, so it is recompiled on change and not per mutation. */
 function policyKey(policy: SandboxWritePolicy): string {
-    return JSON.stringify([policy.writableRoot, policy.denyWrite ?? [], policy.home]);
+    return JSON.stringify(policy);
 }
 
 /**
@@ -133,6 +134,17 @@ export function createForegroundWriteGuard(
         if (!decision.allowed) {
             throw new ForegroundSandboxWriteDeniedError(decision, compiled, kind);
         }
+        return decision.path;
+    };
+}
+
+/** Enforce reads in Pi's in-process file tools using the same canonical policy. */
+export function createForegroundReadGuard(controller: ForegroundSandboxController, seams: SandboxSeams = {}) {
+    return (absolutePath: string): string => {
+        const plan = controller.requireLaunchPlan();
+        if (!plan.confined) return absolutePath;
+        const decision = evaluateReadAccess(absolutePath, compileWritePolicy(plan.policy, seams), seams);
+        if (!decision.allowed) throw new Error(`Foreground sandbox refused to read ${decision.path}: ${decision.reason}.`);
         return decision.path;
     };
 }
@@ -189,18 +201,19 @@ export function createSandboxedWriteOperations(
  *
  * `access` is Pi's own pre-flight gate for `edit`, so guarding it refuses a
  * denied target before the file is read or a diff is computed; `writeFile` is
- * guarded because it is the mutation. `readFile` is delegated untouched — this
- * sandbox never restricts reads.
+ * guarded because it is the mutation. `readFile` also checks the selected read
+ * permissions before accessing content.
  */
 export function createSandboxedEditOperations(
     controller: ForegroundSandboxController,
     options: SandboxedEditOperationsOptions = {},
 ): EditOperations {
     const assertWritable = createForegroundWriteGuard(controller, options);
+    const assertReadable = createForegroundReadGuard(controller, options);
     const local = options.localOperations ?? localEditOperations;
 
     return {
-        readFile: (absolutePath) => local.readFile(absolutePath),
+        readFile: (absolutePath) => local.readFile(assertReadable(absolutePath)),
         async access(absolutePath) {
             return local.access(assertWritable(absolutePath));
         },

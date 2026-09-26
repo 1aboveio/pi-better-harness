@@ -26,6 +26,8 @@ import {
     lstatSync,
     readdirSync,
 } from "node:fs";
+import { EventEmitter } from "node:events";
+import { spawnSync } from "node:child_process";
 import { register } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -181,6 +183,11 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
+if [[ "$sess" == */"$id" ]]; then
+  printf 'runtime-ok' > "$sess/probe"
+  printf '%s\\n' '{"type":"agent_settled"}' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}'
+  exit 0
+fi
 base=$(dirname "$sess")
 log="$base/runs/$id/output.log"
 mkdir -p "$(dirname "$log")"
@@ -206,10 +213,13 @@ function makeCtx() {
     };
 }
 
-function loadExtension(mod) {
+function loadExtension(mod, permissionSnapshot) {
+    const events = new EventEmitter();
+    if (permissionSnapshot) events.on("pi-better-sandbox:policy-request", () => events.emit("pi-better-sandbox:policy", permissionSnapshot));
     const tools = {};
     const messages = [];
     const pi = {
+        events,
         registerTool(def) {
             tools[def.name] = def;
         },
@@ -253,12 +263,20 @@ describe("subagent_spawn_batch end-to-end", () => {
         assertCheckoutNodeModulesUntouched();
     });
 
-    beforeEach(() => {
+    beforeEach(async () => {
+        // A capacity test may finish while its admitted children still write
+        // session artifacts. Drain real children before removing their runtime.
+        await Promise.all(registry.listMetas()
+            .filter((meta) => meta.status === "running" && meta.pid !== process.pid)
+            .map((meta) => waitForFinished(registry.readMeta, meta.id)));
         clearRuns();
         capacity._resetSharedCapacityGateForTests();
     });
 
-    after(() => {
+    after(async () => {
+        await Promise.all(registry.listMetas()
+            .filter((meta) => meta.status === "running" && meta.pid !== process.pid)
+            .map((meta) => waitForFinished(registry.readMeta, meta.id)));
         process.env.PATH = origPath;
         // Cleanup owns only the temp RUNTIME tree created by this suite.
         rmSync(RUNTIME, { recursive: true, force: true });
@@ -593,6 +611,34 @@ describe("subagent_spawn_batch end-to-end", () => {
             } else {
                 process.env.PI_CODING_AGENT_DIR = origAgentDir;
             }
+        }
+    });
+
+    it("launches single and batch runs with the published default Subagents profile", {
+        skip: process.platform === "darwin"
+            ? spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]).status !== 0
+            : spawnSync("bwrap", ["--ro-bind", "/", "/", "--", "/bin/true"]).status !== 0,
+    }, async () => {
+        const profile = { enabled: true, projectFiles: "read-write", outsideProject: "read",
+            storedCredentials: "read", commands: true, network: true };
+        const { tools } = loadExtension(mod, { state: "disabled",
+            permissions: { ...profile, enabled: false }, subagentPermissions: profile });
+        const ctx = makeCtx();
+        const single = await tools.subagent_spawn.execute("profile-single", { prompt: "probe", model: "test/model" }, null, null, ctx);
+        const batch = await tools.subagent_spawn_batch.execute("profile-batch", {
+            shared: { model: "test/model" }, jobs: [{ prompt: "probe" }],
+        }, null, null, ctx);
+        const singleId = single.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+        const batchId = batch.content[0].text.match(/→ (sa_[a-z0-9_]+)/)?.[1];
+        assert.ok(singleId, single.content[0].text);
+        assert.ok(batchId, batch.content[0].text);
+        for (const id of [singleId, batchId]) {
+            const probe = join(registry.sessionsDir(), id, "probe");
+            for (let attempt = 0; attempt < 100 && !existsSync(probe); attempt++) {
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            assert.equal(readFileSync(probe, "utf8"), "runtime-ok");
+            assert.ok(registry.readMeta(id));
         }
     });
 

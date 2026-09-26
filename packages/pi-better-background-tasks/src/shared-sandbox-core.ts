@@ -2,11 +2,11 @@
 /**
  * OS-level write sandbox mechanism shared by Pi extensions.
  *
- * Kernel-enforced confinement: the sandboxed process may READ anywhere and use
- * the network (so web_fetch and the model API keep working), but may only WRITE
- * under a single canonical root plus the system paths pi itself needs. Unlike a
- * cooperative guardrails layer (which pattern-matches tool inputs), this cannot
- * be evaded by a crafted bash command — the write syscall itself is denied.
+ * Legacy policies are write-only: a sandboxed process may READ anywhere and use
+ * the network, but may only WRITE under a canonical root plus runtime paths.
+ * Optional permissions add capability restrictions for reads, writes, launches
+ * and network access. They cover known credential files, not OS keychains,
+ * credential services, or tokens inherited in the child environment.
  *
  * This module owns the mechanism only: backend discovery, canonical path
  * containment, write-deny compilation, macOS SBPL profile construction, Linux
@@ -35,6 +35,14 @@ import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
 /** Identifies which kernel mechanism a plan will use. */
 export type SandboxBackendId = "macos-seatbelt" | "linux-bubblewrap";
 
+export type SandboxPermissions = {
+    projectFiles: "off" | "read" | "read-write";
+    outsideProject: "off" | "read" | "read-write";
+    storedCredentials: "off" | "read" | "read-write";
+    commands: boolean;
+    network: boolean;
+};
+
 /**
  * What a sandboxed process may write. `writableRoot` and `denyWrite` entries may
  * be relative or contain symlinks; they are canonicalized before use.
@@ -55,6 +63,10 @@ export type SandboxWritePolicy = {
     denyWrite?: readonly string[];
     /** Home directory whose `~/.pi` state stays writable on macOS. */
     home: string;
+    /** Optional capability profile; omission preserves the original write-only sandbox. */
+    permissions?: SandboxPermissions;
+    /** Trusted per-launch runtime state, never supplied by model tool arguments. */
+    runtimeWrite?: readonly string[];
 };
 
 /** The executable and argv to run inside the sandbox, preserved verbatim. */
@@ -109,6 +121,9 @@ export type CompiledSandboxWritePolicy = {
     readonly writableRoot: string;
     readonly denyWrite: readonly string[];
     readonly home: string;
+    readonly permissions?: SandboxPermissions;
+    readonly credentialPaths?: readonly string[];
+    readonly runtimeWrite?: readonly string[];
 };
 
 /** Why a write target is or is not permitted by a compiled policy. */
@@ -117,10 +132,14 @@ export type WriteAccessDecision =
     | {
           allowed: false;
           path: string;
-          reason: "outside-writable-root" | "write-denied";
+          reason: "outside-writable-root" | "write-denied" | "permission-denied";
           /** The compiled deny entry that matched, for `write-denied` only. */
           deniedBy?: string;
       };
+
+export type ReadAccessDecision =
+    | { allowed: true; path: string }
+    | { allowed: false; path: string; reason: "read-denied" };
 
 /** What the current platform can enforce, and why it cannot when it cannot. */
 export type SandboxSupport =
@@ -141,6 +160,29 @@ type SandboxBackend = {
 
 const MACOS_SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
+const CREDENTIAL_LOCATIONS = [
+    ".ssh", ".aws", ".config/gh", ".config/gcloud", ".azure", ".kube",
+    ".docker/config.json", ".npmrc", ".netrc", ".git-credentials", ".pi/agent/auth.json",
+] as const;
+
+// Executables, dynamic libraries and OS frameworks needed to start a child.
+// This deliberately excludes the home directory, /etc, and credential stores.
+// A process relying on /etc or /proc configuration (DNS, certificates, NSS)
+// may not start or function under Linux outsideProject=off; callers must not
+// silently remount these broad host trees to work around that failure.
+const RUNTIME_ROOTS = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/System/Library", "/System/Cryptexes", "/Library/Apple", "/Library/Developer", "/opt/homebrew"];
+const TEMP_ROOTS = ["/private/var/folders", "/private/tmp", "/tmp", "/dev"];
+const READ_RUNTIME_ROOTS = [...RUNTIME_ROOTS, "/dev"];
+
+/** Only known on-disk credentials: keychains, services and inherited env tokens are out of scope. */
+export function credentialFilePaths(home: string, seams: SandboxSeams = {}): string[] {
+    const paths = CREDENTIAL_LOCATIONS.map((name) => join(home, name));
+    const configuredAgentDir = process.env.PI_CODING_AGENT_DIR;
+    if (configuredAgentDir) paths.push(join(configuredAgentDir.startsWith("~/")
+        ? join(home, configuredAgentDir.slice(2)) : configuredAgentDir, "auth.json"));
+    return [...new Set(paths.map((path) => canonicalizePath(path, seams)))].sort();
+}
+
 function currentPlatform(seams: SandboxSeams): string {
     return (seams.platform ?? osPlatform)();
 }
@@ -154,7 +196,19 @@ export function canonicalizePath(path: string, seams: SandboxSeams = {}): string
     const canonicalize = seams.canonicalize ?? realpathSync;
     const absolute = resolve(path);
     try {
-        return canonicalize(absolute);
+        const resolved = canonicalize(absolute);
+        // APFS firmlinks are not resolved by realpath. Normalize the Data-volume
+        // alias only when both names demonstrably refer to the same inode.
+        const dataPrefix = "/System/Volumes/Data";
+        if (!seams.canonicalize && currentPlatform(seams) === "darwin" && resolved.startsWith(`${dataPrefix}/`)) {
+            const candidate = resolved.slice(dataPrefix.length);
+            try {
+                const source = statSync(resolved);
+                const alias = statSync(candidate);
+                if (source.dev === alias.dev && source.ino === alias.ino) return realpathSync(candidate);
+            } catch { /* An unrelated Data-volume path keeps its original identity. */ }
+        }
+        return resolved;
     } catch {
         // Not created yet (or unreadable): canonicalize the parent instead.
     }
@@ -179,7 +233,14 @@ function compile(
         ...new Set((policy.denyWrite ?? []).map((entry) => canonicalizePath(entry, seams))),
     ].sort();
 
-    return { writableRoot, denyWrite, home: policy.home };
+    return {
+        writableRoot, denyWrite, home: policy.home,
+        ...(policy.permissions && {
+            permissions: { ...policy.permissions },
+            credentialPaths: credentialFilePaths(policy.home, seams),
+            runtimeWrite: (policy.runtimeWrite ?? []).map((path) => canonicalizePath(path, seams)),
+        }),
+    };
 }
 
 /**
@@ -198,6 +259,31 @@ function contains(root: string, target: string): boolean {
     return target.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
 
+function isCredential(path: string, policy: CompiledSandboxWritePolicy): boolean {
+    return (policy.credentialPaths ?? []).some((credential) => contains(credential, path));
+}
+
+function runtimeRoots(seams: SandboxSeams): string[] {
+    return [...new Set(READ_RUNTIME_ROOTS.map((path) => canonicalizePath(path, seams)))];
+}
+
+/** Decide read access using the same canonical path and capability precedence as writes. */
+export function evaluateReadAccess(
+    target: string,
+    policy: CompiledSandboxWritePolicy,
+    seams: SandboxSeams = {},
+): ReadAccessDecision {
+    const path = canonicalizePath(target, seams);
+    const permissions = policy.permissions;
+    if (!permissions) return { allowed: true, path };
+    const mode = isCredential(path, policy) ? permissions.storedCredentials
+        : policy.runtimeWrite?.some((root) => contains(root, path)) ? "read-write"
+        : contains(policy.writableRoot, path) ? permissions.projectFiles
+        : path === sep || runtimeRoots(seams).some((root) => contains(root, path)) ? "read"
+        : permissions.outsideProject;
+    return mode === "off" ? { allowed: false, path, reason: "read-denied" } : { allowed: true, path };
+}
+
 /**
  * Decide whether an in-process write to `target` is permitted by a compiled
  * policy. This is the same containment rule the kernel backends enforce, for
@@ -209,13 +295,21 @@ export function evaluateWriteAccess(
     seams: SandboxSeams = {},
 ): WriteAccessDecision {
     const path = canonicalizePath(target, seams);
-    if (!contains(policy.writableRoot, path)) {
+    if (!policy.permissions && !contains(policy.writableRoot, path)) {
         return { allowed: false, path, reason: "outside-writable-root" };
     }
     for (const denied of policy.denyWrite) {
         if (contains(denied, path)) {
             return { allowed: false, path, reason: "write-denied", deniedBy: denied };
         }
+    }
+    if (policy.permissions) {
+        const mode = isCredential(path, policy) ? policy.permissions.storedCredentials
+            : policy.runtimeWrite?.some((root) => contains(root, path)) ? "read-write"
+            : contains(policy.writableRoot, path) ? policy.permissions.projectFiles
+            : contains(canonicalizePath("/dev", seams), path) ? "read-write"
+            : policy.permissions.outsideProject;
+        if (mode !== "read-write") return { allowed: false, path, reason: "permission-denied" };
     }
     return { allowed: true, path };
 }
@@ -225,13 +319,70 @@ function sbpl(path: string): string {
     return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+function validateRuntimeHome(policy: CompiledSandboxWritePolicy, seams: SandboxSeams): void {
+    if (policy.permissions?.outsideProject !== "off") return;
+    const home = canonicalizePath(policy.home, seams);
+    if (RUNTIME_ROOTS.some((root) => contains(canonicalizePath(root, seams), home))) {
+        throw new Error("outsideProject=off cannot expose a home under a required system runtime root; move the home or use another permission mode.");
+    }
+}
+
+function protectedAncestors(paths: readonly string[]): string[] {
+    const parents = new Set<string>();
+    for (const path of paths) {
+        for (let parent = dirname(path); dirname(parent) !== parent; parent = dirname(parent)) parents.add(parent);
+    }
+    return [...parents].sort((a, b) => a.length - b.length);
+}
+
+function buildPermissionProfile(policy: CompiledSandboxWritePolicy, seams: SandboxSeams): string {
+    validateRuntimeHome(policy, seams);
+    const permissions = policy.permissions!;
+    const protectedPaths = [
+        ...policy.denyWrite,
+        ...(permissions.projectFiles !== "read-write" ? [policy.writableRoot] : []),
+        ...(permissions.storedCredentials !== "read-write" ? policy.credentialPaths ?? [] : []),
+    ];
+    const rules = ["(version 1)", "(allow default)", "(deny file-write*)"];
+    if (permissions.outsideProject === "off") {
+        rules.push("(deny file-read*)", "(allow file-read-metadata)", '(allow file-read* (literal "/"))');
+        for (const root of runtimeRoots(seams)) {
+            rules.push(`(allow file-read* (subpath ${sbpl(root)}))`);
+        }
+    }
+    if (permissions.outsideProject === "read-write") rules.push("(allow file-write*)");
+    // Temporary host paths are not granted for off/read: doing so would expose
+    // other users' files in temp. /dev remains necessary for basic shell I/O.
+    for (const root of TEMP_ROOTS.filter((path) => permissions.outsideProject === "read-write" || path === "/dev")
+        .map((path) => canonicalizePath(path, seams))) {
+        rules.push(`(allow file-write* (subpath ${sbpl(root)}))`);
+    }
+    const scoped = (root: string, mode: SandboxPermissions["projectFiles"]) => {
+        if (mode === "off") rules.push(`(deny file-read* (subpath ${sbpl(root)}))`);
+        else rules.push(`(allow file-read* (subpath ${sbpl(root)}))`);
+        if (mode === "read-write") rules.push(`(allow file-write* (subpath ${sbpl(root)}))`);
+        else rules.push(`(deny file-write* (subpath ${sbpl(root)}))`);
+    };
+    // Last matching SBPL rule wins. Credential rules override project and outside;
+    // explicit denyWrite entries always override every write allowance.
+    scoped(policy.writableRoot, permissions.projectFiles);
+    for (const path of policy.runtimeWrite ?? []) scoped(path, "read-write");
+    for (const path of policy.credentialPaths ?? []) scoped(path, permissions.storedCredentials);
+    for (const path of policy.denyWrite) rules.push(`(deny file-write* (subpath ${sbpl(path)}))`);
+    // Protect the directory entries, not their contents: unrelated children can
+    // still be created, while renaming a parent cannot move a denied subtree.
+    for (const path of protectedAncestors(protectedPaths)) rules.push(`(deny file-write-unlink (literal ${sbpl(path)}))`);
+    if (!permissions.network) rules.push("(deny network*)");
+    return [...rules, ""].join("\n");
+}
+
 /** Build the macOS sandbox-exec wrapper and its SBPL profile. */
 function buildMacOSSandboxCommand(args: SandboxCommandArgs, seams: SandboxSeams): SandboxCommand {
     // Match on the real (symlink-resolved) path — sandbox-exec evaluates the
     // canonical path, so /tmp/x must be written as /private/tmp/x.
     const policy = compile(args.policy, seams, false);
 
-    const profile = [
+    const profile = policy.permissions ? buildPermissionProfile(policy, seams) : [
         "(version 1)",
         "(allow default)",          // permissive base: reads, exec, network
         "(deny file-write*)",       // ...then deny all writes...
@@ -344,6 +495,7 @@ function buildLinuxSandboxCommand(
     // boundary. Canonicalizing it before bind-mounting keeps symlink aliases from
     // widening the writable root.
     const policy = compile(args.policy, seams, true);
+    if (policy.permissions) return buildLinuxPermissionCommand(bwrap, args, policy, seams);
     const materialize = seams.materializeDenyPath ?? materializeDenyPath;
     const denyBinds = policy.denyWrite.flatMap((path) => {
         const mountable = writableInsideLinuxSandbox(path, policy.writableRoot) && materialize(path);
@@ -365,6 +517,113 @@ function buildLinuxSandboxCommand(
             "--",
             args.execPath, ...args.execArgs,
         ],
+    };
+}
+
+function buildLinuxPermissionCommand(
+    bwrap: string,
+    args: SandboxCommandArgs,
+    policy: CompiledSandboxWritePolicy,
+    seams: SandboxSeams,
+): SandboxCommand {
+    const permissions = policy.permissions!;
+    validateRuntimeHome(policy, seams);
+    const project = policy.writableRoot;
+    const credentials = policy.credentialPaths ?? [];
+    const writableProject = permissions.projectFiles === "read-write";
+    const overlappingCredentials = credentials.filter((path) => contains(project, path));
+    if (credentials.some((path) => contains(path, project)) &&
+        permissions.projectFiles !== permissions.storedCredentials) {
+        throw new Error("Linux bubblewrap cannot apply differing project and credential permissions when a credential directory contains the project.");
+    }
+    if (writableProject && policy.denyWrite.some((path) => contains(path, project))) {
+        throw new Error("Linux bubblewrap cannot make a project writable inside a write-denied directory.");
+    }
+    // Protected leaves and their writable ancestors become mount points below.
+    // Linux refuses renaming mount points, preventing ancestor replacement.
+    if (permissions.outsideProject === "read-write" && (
+        permissions.projectFiles !== "read-write" || permissions.storedCredentials !== "read-write" ||
+        policy.denyWrite.length > 0
+    )) {
+        throw new Error("Linux bubblewrap cannot enforce restricted project/credential/denyWrite paths under a writable outsideProject mount.");
+    }
+    if (permissions.outsideProject === "read" && permissions.storedCredentials === "read-write" &&
+        credentials.some((path) => !contains(project, path))) {
+        throw new Error("Linux bubblewrap cannot write credential stores under a read-only outsideProject root.");
+    }
+    if (permissions.projectFiles === "read" && permissions.storedCredentials === "read-write" &&
+        overlappingCredentials.length > 0) {
+        throw new Error("Linux bubblewrap cannot write credential stores under a read-only project mount.");
+    }
+    if (permissions.outsideProject === "read" && permissions.storedCredentials === "off") {
+        throw new Error("Linux bubblewrap cannot hide stored credentials in a read-only whole-root bind.");
+    }
+    if (permissions.outsideProject === "off" && permissions.storedCredentials === "off" &&
+        credentials.some((path) => contains(project, path) && permissions.projectFiles !== "off")) {
+        throw new Error("Linux bubblewrap cannot hide credentials inside a visible read-only project.");
+    }
+    if (permissions.outsideProject === "off" && permissions.projectFiles === "off" &&
+        RUNTIME_ROOTS.some((root) => contains(canonicalizePath(root, seams), project))) {
+        throw new Error("Linux bubblewrap cannot hide a project nested under a required system runtime bind.");
+    }
+    if (permissions.outsideProject === "off" && credentials.some((path) =>
+        !contains(project, path) &&
+        RUNTIME_ROOTS.some((root) => contains(canonicalizePath(root, seams), path)) &&
+        permissions.storedCredentials === "off")) {
+        throw new Error("Linux bubblewrap cannot hide credentials under a required system runtime bind.");
+    }
+    if (permissions.outsideProject === "off" && permissions.storedCredentials === "read-write" &&
+        credentials.some((path) => !contains(project, path))) {
+        throw new Error("Linux bubblewrap cannot create or safely bind writable credential stores outside a hidden root.");
+    }
+    if (permissions.outsideProject === "off" && permissions.projectFiles === "off" &&
+        permissions.storedCredentials !== "off" && credentials.some((path) => contains(project, path))) {
+        throw new Error("Linux bubblewrap cannot expose credentials inside a hidden project without exposing the project.");
+    }
+    if (permissions.outsideProject !== "off" && permissions.projectFiles === "off") {
+        throw new Error("Linux bubblewrap cannot hide a project inside a visible outsideProject root.");
+    }
+    const mounts: string[] = permissions.outsideProject === "off" ? ["--tmpfs", "/"]
+        : [permissions.outsideProject === "read" ? "--ro-bind" : "--bind", "/", "/"];
+    if (permissions.outsideProject === "off") {
+        // Bounded system executable/library roots only. /tmp is private, not a
+        // host bind: otherwise outsideProject=off would expose user temp data.
+        for (const root of RUNTIME_ROOTS) {
+            if (existsSync(root)) mounts.push("--ro-bind", root, root);
+        }
+        mounts.push("--tmpfs", "/tmp");
+    } else {
+        mounts.push(permissions.outsideProject === "read" ? "--ro-bind" : "--bind", "/tmp", "/tmp");
+    }
+    mounts.push("--dev", "/dev");
+    if (permissions.projectFiles !== "off") {
+        mounts.push(writableProject ? "--bind" : "--ro-bind", project, project);
+    }
+    if (permissions.outsideProject === "off" && permissions.storedCredentials === "read") {
+        for (const path of credentials) {
+            if (existsSync(path) && !contains(project, path)) mounts.push("--ro-bind", path, path);
+        }
+    }
+    for (const path of policy.runtimeWrite ?? []) {
+        if ([...credentials, ...policy.denyWrite].some((protectedPath) => contains(path, protectedPath) || contains(protectedPath, path))) {
+            throw new Error("Runtime directory overlaps protected credentials or control paths.");
+        }
+        mounts.push("--bind", path, path);
+    }
+    const protectedPaths = [...policy.denyWrite,
+        ...(permissions.storedCredentials !== "read-write" ? overlappingCredentials : [])];
+    if (writableProject) {
+        const materialize = seams.materializeDenyPath ?? materializeDenyPath;
+        const leaves = protectedPaths.filter((path) => contains(project, path) && materialize(path));
+        for (const parent of protectedAncestors(leaves).filter((path) => contains(project, path) && path !== project)) {
+            mounts.push("--bind", parent, parent);
+        }
+        for (const path of leaves) mounts.push("--ro-bind", path, path);
+    }
+    return {
+        file: bwrap,
+        fileArgs: [...mounts, ...(!permissions.network ? ["--unshare-net"] : []),
+            "--", args.execPath, ...args.execArgs],
     };
 }
 
@@ -436,10 +695,16 @@ export function maybeBuildSandboxCommand(
     request: SandboxRequest,
     seams: SandboxSeams = {},
 ): SandboxCommand | undefined {
+    if (args.policy.permissions?.commands === false) {
+        throw new Error("Sandbox commands permission is off; enable commands before launching a sandboxed process (including bootstrap).");
+    }
     if (!request.sandboxEnabled) return undefined;
 
     const backend = selectedSandboxBackend(seams);
     if (!backend) {
+        if (args.policy.permissions) {
+            throw new Error(`Cannot enforce sandbox permissions: ${sandboxUnavailableMessage(seams)}`);
+        }
         if (request.explicitSandbox) {
             const reason = sandboxUnavailableMessage(seams);
             throw new Error(request.remedy ? `${reason} ${request.remedy}` : reason);
@@ -458,5 +723,12 @@ export function buildSandboxCommand(
     args: SandboxCommandArgs,
     seams: SandboxSeams = {},
 ): SandboxCommand {
-    return (selectedSandboxBackend(seams) ?? macOSSandboxBackend).buildCommand(args, seams);
+    if (args.policy.permissions?.commands === false) {
+        throw new Error("Sandbox commands permission is off; enable commands before launching a sandboxed process (including bootstrap).");
+    }
+    const backend = selectedSandboxBackend(seams);
+    if (!backend && args.policy.permissions) {
+        throw new Error(`Cannot enforce sandbox permissions: ${sandboxUnavailableMessage(seams)}`);
+    }
+    return (backend ?? macOSSandboxBackend).buildCommand(args, seams);
 }

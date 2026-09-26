@@ -27,7 +27,7 @@ import type { ForegroundSandboxController, ForegroundSandboxStatus } from "./sta
 export const SANDBOX_COMMAND_NAME = "sandbox";
 
 export const SANDBOX_COMMAND_DESCRIPTION =
-    "Show the foreground write sandbox, change session or persistent activation, or manage write-denied paths";
+    "Configure Main and Subagents sandbox permissions, activation defaults, and protected paths";
 
 const USAGE = [
     "Usage:",
@@ -80,6 +80,7 @@ export type SandboxCommandDeps = {
     onStateChange: (status: ForegroundSandboxStatus) => void;
     /** Persist a default and apply it to the current session. */
     setDefault: (enabled: boolean) => ForegroundSandboxStatus;
+    openPermissions?: (ctx: ExtensionCommandContext) => Promise<void>;
 };
 
 /** Build the `/sandbox` handler. Exported so its behaviour is directly testable. */
@@ -88,6 +89,7 @@ export function createSandboxCommandHandler({
     denyRules,
     onStateChange,
     setDefault,
+    openPermissions,
 }: SandboxCommandDeps) {
     return async function handleSandboxCommand(
         args: string,
@@ -101,6 +103,10 @@ export function createSandboxCommandHandler({
         const rest = trimmed.slice(verb.length).trim();
 
         if (subcommand === "") {
+            if (openPermissions && ctx.mode === "tui") {
+                await openPermissions(ctx);
+                return;
+            }
             ctx.ui.notify(formatSandboxReport(controller.status()), "info");
             return;
         }

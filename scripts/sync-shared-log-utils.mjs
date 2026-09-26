@@ -7,6 +7,7 @@ const logUtilsSource = resolve(root, "packages/log-utils/index.ts");
 const navigatorSource = resolve(root, "packages/navigator/index.ts");
 const renderSchedulerSource = resolve(root, "packages/render-scheduler/index.ts");
 const stallDetectorSource = resolve(root, "packages/stall-detector/index.ts");
+const failureObservationsSource = resolve(root, "packages/failure-observations/index.ts");
 const callbackBatcherSource = resolve(root, "packages/callback-batcher/index.ts");
 const banner = "// Generated from packages/log-utils/index.ts. Do not edit directly.\n";
 const logUtilsTargets = [
@@ -27,6 +28,10 @@ const stallDetectorTargets = [
   resolve(root, "packages/pi-better-background-tasks/src/shared-stall-detector.ts"),
   resolve(root, "packages/pi-better-subagents/shared-stall-detector.ts"),
   resolve(root, "packages/pi-better-goal/src/shared-stall-detector.ts"),
+];
+const failureObservationsTargets = [
+  resolve(root, "packages/pi-better-background-tasks/src/shared-failure-observations.ts"),
+  resolve(root, "packages/pi-better-subagents/shared-failure-observations.ts"),
 ];
 const callbackBatcherTargets = [
   resolve(root, "packages/pi-better-background-tasks/src/shared-callback-batcher.ts"),
@@ -52,6 +57,10 @@ for (const target of renderSchedulerTargets) {
 
 for (const target of stallDetectorTargets) {
   writeFileAtomically(target, stallDetectorContent);
+}
+
+for (const target of failureObservationsTargets) {
+  writeFileAtomically(target, `// Generated from packages/failure-observations/index.ts. Do not edit directly.\n${readFileSync(failureObservationsSource, "utf8")}`);
 }
 
 for (const target of callbackBatcherTargets) {
