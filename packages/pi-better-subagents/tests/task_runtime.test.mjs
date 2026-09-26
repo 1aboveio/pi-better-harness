@@ -14,8 +14,8 @@ import { createTaskBashOperations } from '../shared-task-sandbox.ts';
 import taskGuard from '../task-guard.ts';
 import { parseTaskPolicy, prepareTaskRuntime } from '../task-policy.ts';
 
-function fixture(t, permissions = {}) {
-    const base = realpathSync(mkdtempSync(join(tmpdir(), 'pi-task-runtime-')));
+function fixture(t, permissions = {}, fixtureParent = process.platform === 'win32' ? tmpdir() : '/var/tmp') {
+    const base = realpathSync(mkdtempSync(join(fixtureParent, 'pi-task-runtime-')));
     const project = join(base, 'project'), agent = join(base, 'agent'), control = join(base, 'control');
     const scratch = join(base, 'scratch');
     for (const dir of [project, agent, control, scratch]) mkdirSync(dir);
@@ -122,7 +122,7 @@ test('late replacement with a copied guarded schema still fails source verificat
     assert.equal(existsSync(join(f.base, 'outside.txt')), false);
 });
 
-test('task commands use private scratch without granting writes to other temporary paths', { skip: !supported }, async (t) => {
+test('task commands retain private scratch and deny ordinary outside writes', { skip: !supported }, async (t) => {
     const f = fixture(t);
     const session = await sessionFixture(t, f);
     const script = `
@@ -176,6 +176,63 @@ test('shell initialization executes only inside confinement and cancellation rem
     });
     assert.ok(trackedPid, 'the tracked command started');
     assert.throws(() => process.kill(trackedPid, 0), /ESRCH/, 'SDK shutdown cleanup must terminate the detached command');
+});
+
+test('default task tools retain literal /tmp writes without opening outside files or arbitrary locks', { skip: !supported || process.platform === 'win32' }, async (t) => {
+    const f = fixture(t);
+    const session = await sessionFixture(t, f);
+    const temporary = mkdtempSync('/tmp/pi-compat-task-');
+    t.after(() => rmSync(temporary, { recursive: true, force: true }));
+    await execute(session, 'write', { path: join(temporary, 'tool.log'), content: 'temporary file tool' });
+    const command = await execute(session, 'bash', { command: `printf shell > '${temporary}/shell.log'` });
+    assert.equal(readFileSync(join(temporary, 'shell.log'), 'utf8'), 'shell', JSON.stringify(command));
+    assert.equal(readFileSync(join(temporary, 'tool.log'), 'utf8'), 'temporary file tool');
+    await assert.rejects(execute(session, 'write', { path: join(f.base, 'unrelated.lock'), content: 'denied' }));
+    assert.equal(existsSync(join(f.base, 'unrelated.lock')), false);
+});
+
+test('compatibility temp cannot retarget project ancestors or sibling runtime controls', { skip: !supported || process.platform === 'win32' }, async (t) => {
+    const f = fixture(t, {}, '/tmp');
+    const session = await sessionFixture(t, f);
+    const outside = realpathSync(mkdtempSync('/var/tmp/pi-protected-sentinel-'));
+    t.after(() => rmSync(outside, { recursive: true, force: true }));
+    const script = `
+      const fs=require('node:fs'),assert=require('node:assert/strict');
+      for(const path of ${JSON.stringify([join(f.agent, 'settings.json'), join(f.control, 'policy')])}) {
+        assert.throws(()=>fs.writeFileSync(path,'forbidden'));
+      }
+      assert.throws(()=>fs.renameSync(${JSON.stringify(f.base)},${JSON.stringify(f.base + '-moved')}));
+      assert.throws(()=>fs.rmSync(${JSON.stringify(f.agent)},{recursive:true}));
+      fs.writeFileSync(${JSON.stringify(join(f.project, 'ordinary.txt'))},'allowed');
+    `;
+    const quote = (text) => `'${text.replaceAll("'", `'\\''`)}'`;
+    await execute(session, 'bash', { command: `${quote(process.execPath)} -e ${quote(script)}` });
+    assert.equal(readFileSync(join(f.project, 'ordinary.txt'), 'utf8'), 'allowed');
+    // A separate launch must still refer to the same captured project.
+    await execute(session, 'write', { path: 'second-launch.txt', content: 'same root' });
+    assert.equal(readFileSync(join(f.project, 'second-launch.txt'), 'utf8'), 'same root');
+    await assert.rejects(execute(session, 'write', { path: join(outside, 'denied.lock'), content: 'no' }));
+});
+
+test('default SDK task can retrieve a synthetic macOS Keychain item', { skip: !supported || process.platform !== 'darwin' }, async (t) => {
+    const f = fixture(t);
+    const keychainDirectory = realpathSync(mkdtempSync('/var/tmp/pi-synthetic-keychain-'));
+    const keychain = join(keychainDirectory, 'synthetic.keychain-db');
+    const security = (args) => {
+        const result = spawnSync('/usr/bin/security', args, { encoding: 'utf8', timeout: 10000 });
+        assert.equal(result.status, 0, result.stderr);
+    };
+    security(['create-keychain', '-p', 'synthetic-password', keychain]);
+    t.after(() => {
+        spawnSync('/usr/bin/security', ['delete-keychain', keychain], { encoding: 'utf8' });
+        rmSync(keychainDirectory, { recursive: true, force: true });
+    });
+    security(['unlock-keychain', '-p', 'synthetic-password', keychain]);
+    security(['add-generic-password', '-a', 'sandbox-fixture', '-s', 'pi-runtime-compatibility', '-w', 'synthetic-value', '-T', '/usr/bin/security', keychain]);
+    const session = await sessionFixture(t, f);
+    const result = await execute(session, 'bash', { command: `/usr/bin/security find-generic-password -a sandbox-fixture -s pi-runtime-compatibility -w '${keychain}'` });
+    assert.match(JSON.stringify(result), /synthetic-value/);
+    await assert.rejects(execute(session, 'write', { path: join(f.agent, 'settings.json'), content: 'denied' }));
 });
 
 test('policy snapshots validate and detach their mutable input', (t) => {

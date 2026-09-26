@@ -25,6 +25,15 @@ function fixture(run: (base: string, project: string, home: string) => void): vo
     try { run(base, project, home); } finally { rmSync(base, { recursive: true, force: true }); }
 }
 
+function linuxTempFixture(run: (base: string, project: string, home: string) => void): void {
+    const base = realpathSync(mkdtempSync("/tmp/sbx-compat-"));
+    const project = join(base, "project");
+    const home = join(base, "home");
+    mkdirSync(project);
+    mkdirSync(home);
+    try { run(base, project, home); } finally { rmSync(base, { recursive: true, force: true }); }
+}
+
 function args(base: string, project: string, home: string, permissions: SandboxPermissions = modes): SandboxCommandArgs {
     return {
         profilePath: join(base, "profile.sb"),
@@ -35,6 +44,15 @@ function args(base: string, project: string, home: string, permissions: SandboxP
 
 const linux = { platform: () => "linux", lookupExecutable: () => "/usr/bin/bwrap" };
 const mac = { platform: () => "darwin" };
+const macRuntime = {
+    ...mac,
+    getconf: (name: "DARWIN_USER_TEMP_DIR" | "DARWIN_USER_CACHE_DIR") =>
+        `/var/folders/ab/current-user/${name === "DARWIN_USER_TEMP_DIR" ? "T" : "C"}/`,
+};
+
+function mountIndex(argv: readonly string[], option: string, path: string): number {
+    return argv.findIndex((arg, index) => arg === option && argv[index + 1] === path && argv[index + 2] === path);
+}
 
 describe("shared capability decisions", () => {
     it("preserves legacy reads and write decisions when permissions are absent", () => fixture((base, project, home) => {
@@ -250,6 +268,186 @@ describe("backend permission construction", () => {
     }));
 });
 
+describe("bounded default runtime compatibility", () => {
+    it("adds only canonical temp and MDS paths on macOS when enabled with visible outside files", () => fixture((base, project, home) => {
+        const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read" });
+        const temp = "/private/var/folders/ab/current-user/T";
+        const mds = "/private/var/folders/ab/current-user/C/mds";
+        const tmp = realpathSync("/tmp");
+        request.policy.runtimeCompatibility = true;
+        const policy = compileWritePolicy(request.policy, macRuntime);
+        assert.deepEqual(policy.compatibilityWrite, [tmp, temp, mds]);
+        assert.equal(evaluateWriteAccess("/tmp/install.log", policy, macRuntime).allowed, true);
+        for (const path of [join(tmp, "install.log"), join(temp, "work"), join(mds, "mds.lock"), join(mds, "database")]) {
+            assert.equal(evaluateWriteAccess(path, policy, macRuntime).allowed, true, path);
+        }
+        for (const path of [join(base, "arbitrary.lock"), "/private/var/folders/ab/current-user/C/unrelated",
+            "/private/var/folders/other-user/C/mds/mds.lock", join(home, ".pi/other.lock")]) {
+            assert.equal(evaluateWriteAccess(path, policy, macRuntime).allowed, false, path);
+        }
+        buildSandboxCommand(request, macRuntime);
+        const profile = readFileSync(request.profilePath, "utf8");
+        for (const path of policy.compatibilityWrite!) {
+            assert.ok(profile.includes(`(allow file-write* (subpath "${path}"))`));
+            assert.ok(profile.includes(`(deny file-write-unlink (literal "${path}"))`));
+        }
+        assert.equal(profile.includes('(allow file-write* (subpath "/private/var/folders"))'), false);
+        const protectedRequest = args(base, project, join(tmp, "synthetic-home"),
+            { ...modes, outsideProject: "read", storedCredentials: "read" });
+        protectedRequest.policy.runtimeCompatibility = true;
+        protectedRequest.policy.denyWrite = [join(tmp, "control")];
+        const protectedPolicy = compileWritePolicy(protectedRequest.policy, macRuntime);
+        assert.equal(evaluateWriteAccess(join(tmp, "synthetic-home/.npmrc"), protectedPolicy, macRuntime).allowed, false);
+        assert.equal(evaluateWriteAccess(join(tmp, "control/state"), protectedPolicy, macRuntime).allowed, false);
+        buildSandboxCommand(protectedRequest, macRuntime);
+        const protectedProfile = readFileSync(protectedRequest.profilePath, "utf8");
+        const tmpAllow = protectedProfile.indexOf(`(allow file-write* (subpath "${tmp}"))`);
+        assert.ok(protectedProfile.indexOf(`(deny file-write* (subpath "${join(tmp, "synthetic-home/.npmrc")}"))`) > tmpAllow);
+        assert.ok(protectedProfile.indexOf(`(deny file-write* (subpath "${join(tmp, "control")}"))`) > tmpAllow);
+        assert.ok(protectedProfile.includes(`(deny file-write-unlink (literal "${tmp}"))`));
+    }));
+
+    it("leaves standalone defaults and Outside Off unchanged", () => fixture((base, project, home) => {
+        let calls = 0;
+        const seams = { ...macRuntime, getconf: (name: "DARWIN_USER_TEMP_DIR" | "DARWIN_USER_CACHE_DIR") => {
+            calls++;
+            return macRuntime.getconf(name);
+        } };
+        for (const outsideProject of ["off", "read"] as const) {
+            const policy = compileWritePolicy({ writableRoot: project, home,
+                permissions: { ...modes, outsideProject } }, seams);
+            assert.deepEqual(policy.compatibilityWrite, []);
+        }
+        const off = compileWritePolicy({ writableRoot: project, home, runtimeCompatibility: true,
+            permissions: { ...modes, outsideProject: "off" } }, seams);
+        assert.deepEqual(off.compatibilityWrite, []);
+        assert.equal(calls, 0);
+        assert.equal(evaluateWriteAccess("/private/var/folders/ab/current-user/C/mds/mds.lock", off, seams).allowed, false);
+        const linuxOff = compileWritePolicy({ writableRoot: project, home, runtimeCompatibility: true,
+            permissions: { ...modes, outsideProject: "off" } }, linux);
+        assert.deepEqual(linuxOff.compatibilityWrite, []);
+        const offCommand = args(base, project, home);
+        offCommand.policy.runtimeCompatibility = true;
+        const wrapper = buildSandboxCommand(offCommand, linux);
+        assert.ok(wrapper.fileArgs.join(" ").includes("--tmpfs /tmp"));
+        assert.equal(wrapper.fileArgs.join(" ").includes("--bind /tmp /tmp"), false);
+    }));
+
+    it("rejects redirected, broad, overlapping and unavailable macOS discovery", () => fixture((base, project, home) => {
+        const request = { writableRoot: project, home, runtimeCompatibility: true,
+            permissions: { ...modes, outsideProject: "read" as const } };
+        for (const raw of ["/", home, "/var/folders/ab/current-user/C/../T", "/var/folders/ab/current-user/T/../../other"])
+            assert.throws(() => compileWritePolicy(request, { ...macRuntime, getconf: () => raw }), /runtime directory/);
+        assert.throws(() => compileWritePolicy(request, { ...macRuntime, getconf: () => undefined }), /Invalid.*runtime directory/);
+        assert.throws(() => compileWritePolicy({ ...request, home: "/private/var/folders/ab/current-user/T/home" }, macRuntime),
+            /Unsafe.*runtime directory/);
+        assert.throws(() => compileWritePolicy({ ...request, writableRoot: "/private/var/folders/ab/current-user/C/mds/project" }, macRuntime),
+            /Unsafe.*runtime directory/);
+        const redirected = { ...macRuntime, canonicalize: (path: string) =>
+            path === "/private/var/folders/ab/current-user/T" ? home : path };
+        assert.throws(() => compileWritePolicy(request, redirected), /Unsafe.*runtime directory/);
+        const mdsAlias = { ...macRuntime, canonicalize: (path: string) =>
+            path === "/private/var/folders/ab/current-user/C/mds" ? home : path };
+        assert.throws(() => compileWritePolicy(request, mdsAlias), /Unsafe MDS/);
+    }));
+
+    it("keeps project permissions stricter than overlapping compatibility temp grants", () => {
+        const root = "/private/var/folders/ab/current-user/T/project";
+        const policy = compileWritePolicy({ writableRoot: root, home: "/Users/example", runtimeCompatibility: true,
+            permissions: { ...modes, outsideProject: "read", projectFiles: "read", storedCredentials: "read" } }, macRuntime);
+        assert.equal(evaluateWriteAccess(join(root, "data"), policy, macRuntime).allowed, false);
+        assert.equal(evaluateWriteAccess("/private/var/folders/ab/current-user/T/ordinary.log", policy, macRuntime).allowed, true);
+    });
+
+    it("preserves credential and control precedence over compatibility", () => linuxTempFixture((base, project, home) => {
+        const credential = join(home, ".npmrc");
+        symlinkSync(home, join(base, "home-alias"));
+        const control = join(base, "control");
+        mkdirSync(control);
+        const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read" });
+        request.policy.runtimeCompatibility = true;
+        request.policy.denyWrite = [control];
+        const policy = compileWritePolicy(request.policy, linux);
+        assert.equal(evaluateWriteAccess(join(base, "install.log"), policy, linux).allowed, true);
+        assert.equal(evaluateWriteAccess(credential, policy, linux).allowed, false);
+        assert.equal(evaluateWriteAccess(join(base, "home-alias/.npmrc"), policy, linux).allowed, false);
+        assert.deepEqual(evaluateWriteAccess(join(control, "state"), policy, linux), {
+            allowed: false, path: join(control, "state"), reason: "write-denied", deniedBy: control,
+        });
+        const wrapper = buildSandboxCommand(request, linux);
+        const argv = wrapper.fileArgs.join(" ");
+        assert.ok(argv.includes(`--ro-bind ${home} ${home}`));
+        assert.ok(argv.includes(`--ro-bind ${control} ${control}`));
+        assert.ok(argv.includes(`--bind ${base} ${base}`));
+        assert.ok(argv.indexOf(`--bind ${project} ${project}`) < argv.indexOf(`--ro-bind ${home} ${home}`));
+    }));
+
+    it("orders every writable ancestor before sibling read-only guards and anchors a nested project", () => linuxTempFixture((base, _project, home) => {
+        const container = join(base, "container");
+        const project = join(container, "project");
+        const first = join(base, "control-a");
+        const second = join(base, "control-b");
+        const runtime = join(base, "runtime");
+        mkdirSync(project, { recursive: true });
+        mkdirSync(first);
+        mkdirSync(second);
+        mkdirSync(runtime);
+        const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read" });
+        request.policy.runtimeCompatibility = true;
+        request.policy.runtimeWrite = [runtime];
+        request.policy.denyWrite = [first, second];
+        const argv = buildSandboxCommand(request, linux).fileArgs;
+        for (const ancestor of [base, container]) {
+            const index = mountIndex(argv, "--bind", ancestor);
+            assert.ok(index >= 0 && index < mountIndex(argv, "--bind", project), ancestor);
+            for (const guard of [first, second, home]) {
+                assert.ok(index < mountIndex(argv, "--ro-bind", guard), `${ancestor} must precede ${guard}`);
+            }
+        }
+        const firstGuard = mountIndex(argv, "--ro-bind", first);
+        assert.ok(firstGuard >= 0);
+        assert.ok(mountIndex(argv, "--bind", runtime) < firstGuard);
+        assert.equal(argv.slice(firstGuard + 3).includes("--bind"), false, "no writable bind after the first guard");
+        assert.ok(mountIndex(argv, "--ro-bind", home) > mountIndex(argv, "--bind", base));
+
+        request.policy.permissions = { ...request.policy.permissions!, projectFiles: "read" };
+        const readArgv = buildSandboxCommand(request, linux).fileArgs;
+        assert.ok(mountIndex(readArgv, "--bind", container) < mountIndex(readArgv, "--ro-bind", project));
+        request.policy.permissions = { ...request.policy.permissions!, outsideProject: "off", projectFiles: "off" };
+        const offArgv = buildSandboxCommand(request, linux).fileArgs;
+        assert.ok(offArgv.includes("--tmpfs"));
+        assert.equal(mountIndex(offArgv, "--bind", container), -1);
+        assert.equal(mountIndex(offArgv, "--bind", project), -1);
+    }));
+
+    it("keeps a project beneath a guarded home writable without reopening credential siblings", () => linuxTempFixture((base, _project, home) => {
+        const project = join(home, "work", "project");
+        mkdirSync(project, { recursive: true });
+        const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read" });
+        request.policy.runtimeCompatibility = true;
+        const argv = buildSandboxCommand(request, linux).fileArgs;
+        assert.ok(mountIndex(argv, "--ro-bind", home) < mountIndex(argv, "--ro-bind", join(home, "work")));
+        assert.ok(mountIndex(argv, "--ro-bind", join(home, "work")) < mountIndex(argv, "--bind", project));
+    }));
+
+    it("does not create absent protected leaves in host tmp and fails closed when unmaskable", () => linuxTempFixture((base, project, home) => {
+        const missing = join(base, "control", "not-created");
+        const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read" });
+        request.policy.runtimeCompatibility = true;
+        request.policy.denyWrite = [missing];
+        const wrapper = buildSandboxCommand(request, linux);
+        assert.equal(existsSync(missing), false);
+        assert.ok(wrapper.fileArgs.join(" ").includes(`--ro-bind ${base} ${base}`));
+        request.policy.denyWrite = [join(realpathSync("/tmp"), `absent-${process.pid}`, "state")];
+        assert.throws(() => buildSandboxCommand(request, linux), /Cannot protect an absent path/);
+        request.policy.denyWrite = [realpathSync("/tmp")];
+        assert.throws(() => buildSandboxCommand(request, linux), /write-denied directory|write-denied control path/);
+        request.policy.denyWrite = [];
+        request.policy.permissions = { ...request.policy.permissions!, storedCredentials: "off" };
+        assert.throws(() => buildSandboxCommand(request, linux), /hide stored credentials/);
+    }));
+});
+
 const macKernel = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") &&
     spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]).status === 0;
 if (process.env.PI_SANDBOX_REQUIRE_BACKEND === "macos-seatbelt" && !macKernel) {
@@ -261,6 +459,88 @@ const linuxKernel = process.platform === "linux" &&
 if (process.env.PI_SANDBOX_REQUIRE_BACKEND === "linux-bubblewrap" && !linuxKernel) {
     throw new Error("Linux Bubblewrap kernel required but unavailable");
 }
+
+describe("Linux compatibility guards (real kernel)", { skip: !linuxKernel }, () => {
+    it("keeps sibling controls and credential files denied while ordinary tmp and project writes work", () => linuxTempFixture((base, project, home) => {
+        const controls = [join(base, "control-a"), join(base, "control-b")];
+        for (const control of controls) mkdirSync(control);
+        // Materialize every synthetic credential so the two file denials cannot
+        // pass merely because an absent sibling caused the whole home to be guarded.
+        const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+        delete process.env.PI_CODING_AGENT_DIR;
+        try {
+            for (const path of credentialFilePaths(home)) {
+                mkdirSync(join(path, ".."), { recursive: true });
+                if ([".ssh", ".aws", "gh", "gcloud", ".azure", ".kube"].includes(path.split("/").at(-1)!)) {
+                    mkdirSync(path, { recursive: true });
+                } else {
+                    writeFileSync(path, "synthetic-only");
+                }
+            }
+            const credentials = [join(home, ".npmrc"), join(home, ".netrc")];
+            const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read", network: true });
+            request.policy.runtimeCompatibility = true;
+            request.policy.denyWrite = controls;
+            request.execArgs = ["-c", [
+                `printf ok > '${join(base, "ordinary")}'`,
+                "printf ok > ordinary-project",
+                ...controls.map((path) => `if printf no > '${join(path, "state")}' 2>/dev/null; then exit 11; fi`),
+                ...credentials.map((path) => `if printf no > '${path}' 2>/dev/null; then exit 12; fi`),
+            ].join("; ")];
+            const wrapper = buildSandboxCommand(request);
+            for (const credential of credentials) {
+                assert.ok(mountIndex(wrapper.fileArgs, "--ro-bind", credential) >= 0, credential);
+            }
+            const result = spawnSync(wrapper.file, wrapper.fileArgs, { cwd: project, encoding: "utf8" });
+            assert.equal(result.status, 0, result.stderr);
+            assert.equal(readFileSync(join(base, "ordinary"), "utf8"), "ok");
+            assert.equal(readFileSync(join(project, "ordinary-project"), "utf8"), "ok");
+            for (const control of controls) assert.equal(existsSync(join(control, "state")), false);
+            for (const credential of credentials) assert.equal(readFileSync(credential, "utf8"), "synthetic-only");
+        } finally {
+            if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+            else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+        }
+    }));
+
+    it("prevents renaming a project ancestor and redirecting the captured root on the next launch", () => linuxTempFixture((base, _project, home) => {
+        const container = join(base, "container");
+        const project = join(container, "project");
+        const target = join(base, "target");
+        mkdirSync(project, { recursive: true });
+        mkdirSync(join(target, "project"), { recursive: true });
+        for (const projectFiles of ["read-write", "read"] as const) {
+            const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read", projectFiles, network: true });
+            request.policy.runtimeCompatibility = true;
+            request.execArgs = ["-c", `mv '${container}' '${container}-moved' && ln -s '${target}' '${container}'`];
+            const captured = buildSandboxCommand(request);
+            const attempt = spawnSync(captured.file, captured.fileArgs, { cwd: project, encoding: "utf8" });
+            assert.notEqual(attempt.status, 0, `ancestor rename succeeded: ${attempt.stderr}`);
+            assert.equal(realpathSync(container), container);
+            request.execArgs = ["-c", projectFiles === "read-write" ? "printf ok > marker" : "test -d . && ! (printf no > marker 2>/dev/null)"];
+            const next = buildSandboxCommand(request);
+            const result = spawnSync(next.file, next.fileArgs, { cwd: project, encoding: "utf8" });
+            assert.equal(result.status, 0, result.stderr);
+            assert.equal(existsSync(join(target, "project", "marker")), false);
+        }
+        assert.equal(readFileSync(join(project, "marker"), "utf8"), "ok");
+        const nested = join(home, "work", "project");
+        mkdirSync(nested, { recursive: true });
+        const nestedRequest = args(base, nested, home, { ...modes, outsideProject: "read", storedCredentials: "read", network: true });
+        nestedRequest.policy.runtimeCompatibility = true;
+        nestedRequest.execArgs = ["-c", "printf ok > marker"];
+        const nestedWrapper = buildSandboxCommand(nestedRequest);
+        const nestedResult = spawnSync(nestedWrapper.file, nestedWrapper.fileArgs, { cwd: nested, encoding: "utf8" });
+        assert.equal(nestedResult.status, 0, nestedResult.stderr);
+        assert.equal(readFileSync(join(nested, "marker"), "utf8"), "ok");
+        const hidden = args(base, project, home, { ...modes, outsideProject: "off", projectFiles: "off", storedCredentials: "off", network: true });
+        hidden.policy.runtimeCompatibility = true;
+        hidden.execArgs = ["-c", `test ! -e '${project}'`];
+        const wrapper = buildSandboxCommand(hidden);
+        const result = spawnSync(wrapper.file, wrapper.fileArgs, { cwd: "/", encoding: "utf8" });
+        assert.equal(result.status, 0, result.stderr);
+    }));
+});
 
 describe("runtime state and protected ancestors (real kernel)", { skip: !macKernel && !linuxKernel }, () => {
     it("writes an actual Pi session only inside the assigned runtime directory", () => fixture((base, project, home) => {

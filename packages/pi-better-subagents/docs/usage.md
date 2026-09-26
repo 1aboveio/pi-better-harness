@@ -81,8 +81,10 @@ it does not depend on any other extension being installed.
   provider transport, and session persistence run as trusted runtime operations.
   Admitted task tools run under `sandbox-exec` or Linux Bubblewrap. Project files
   default to Read / write and outside files to Read, including `~/.pi`; runtime
-  control files remain protected. Commands use private scratch space, not a
-  general writable host `/tmp` allowance. See the permission details below.
+  control files remain protected. Commands use private scratch plus explicit
+  runtime exceptions for `/tmp` and the current user's macOS temporary and MDS
+  cache directories when Outside is Read or Read/write. Credential and control
+  denials retain precedence. See the permission details below.
 - **Tool allowlist.** Confined children admit only verified read/write/edit/bash
   implementations. Requested tools without adapters are reported as unavailable.
 - **No runaway recursion.** Confined children cannot spawn nested agents.

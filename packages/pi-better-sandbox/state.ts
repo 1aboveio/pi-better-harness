@@ -276,7 +276,7 @@ export class ForegroundSandboxController {
         const projectRoot = this.#projectRoot;
         const permissions = this.#permissions?.main;
         const runtimeAlias = permissions && [getAgentDir(), tmpdir(), getPackageDir()]
-            .map((path) => writableRuntimeAlias(path, projectRoot, permissions)).find(Boolean);
+            .map((path) => writableRuntimeAlias(path, projectRoot, permissions, true)).find(Boolean);
         if (runtimeAlias) {
             return Object.freeze({ ...base, state: "failed", writableRoot: undefined,
                 backend: support.supported ? support.backend : undefined,
@@ -343,6 +343,7 @@ export class ForegroundSandboxController {
         const policy: SandboxWritePolicy = {
             writableRoot: status.writableRoot,
             denyWrite: Object.freeze([...status.denyWrite, profileDir, this.#taskScratch.anchor]),
+            runtimeCompatibility: true,
             runtimeWrite: Object.freeze([this.#taskScratch.path]),
             home: (this.#seams.home ?? homedir)(),
             ...(status.permissions ? { permissions: status.permissions } : {}),

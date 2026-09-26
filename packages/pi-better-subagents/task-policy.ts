@@ -60,7 +60,7 @@ export function prepareTaskRuntime(options: {
     if (root === dirname(root) || root === canonicalizePath(home)) throw new Error("Task sandbox requires a project directory, not the filesystem or home root.");
     const permissions = options.permissions ?? DEFAULT_TASK_PERMISSIONS;
     const alias = [PiCodingAgent.getAgentDir(), PiCodingAgent.getPackageDir(), tmpdir()]
-        .map((path) => writableRuntimeAlias(path, root, permissions)).find(Boolean);
+        .map((path) => writableRuntimeAlias(path, root, permissions, true)).find(Boolean);
     if (alias) throw new Error(`Task sandbox runtime path uses a task-writable symlink (${alias}); restart Pi with canonical runtime paths.`);
     const runtimeDirectories = ensureHarnessRuntimeDirectories();
     const agentDir = canonicalizePath(PiCodingAgent.getAgentDir());
@@ -82,7 +82,7 @@ export function prepareTaskRuntime(options: {
         ])],
         tools: options.tools,
     });
-    compileWritePolicy({ writableRoot: root, home, permissions: policy.permissions, denyWrite: policy.denyWrite });
+    compileWritePolicy({ writableRoot: root, home, permissions: policy.permissions, denyWrite: policy.denyWrite, runtimeCompatibility: true });
     const policyPath = join(controlDir, "task-policy.json");
     writeFileSync(policyPath, JSON.stringify(policy), { mode: 0o600 });
     return {

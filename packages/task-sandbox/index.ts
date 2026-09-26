@@ -6,9 +6,9 @@ const { createBashToolDefinition, createReadToolDefinition, createWriteToolDefin
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { canonicalizePath, maybeBuildSandboxCommand } from "../sandbox-core/index.ts";
+import { canonicalizePath, compileWritePolicy, maybeBuildSandboxCommand, type SandboxPermissions } from "../sandbox-core/index.ts";
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
 
 export const TASK_BUILTINS = Object.freeze(["read", "write", "edit", "bash"] as const);
@@ -26,14 +26,20 @@ export function runtimeCodeRoot(path: string): string {
 
 export function writableRuntimeAlias(path: string, root: string, permissions: {
     projectFiles: string; outsideProject: string; storedCredentials: string;
-}): string | undefined {
+}, runtimeCompatibility = false): string | undefined {
+    const compatibility = runtimeCompatibility ? compileWritePolicy({ writableRoot: root, home: homedir(),
+        permissions: { ...permissions, commands: true, network: true } as SandboxPermissions,
+        runtimeCompatibility: true,
+    }).compatibilityWrite ?? [] : [];
     for (let current = resolve(path); dirname(current) !== current; current = dirname(current)) {
         try {
             if (!lstatSync(current).isSymbolicLink()) continue;
             const entry = join(canonicalizePath(dirname(current)), basename(current));
             accessSync(dirname(entry), constants.W_OK);
             const inProject = entry === root || entry.startsWith(root + sep);
-            const access = inProject ? permissions.projectFiles : permissions.outsideProject;
+            const access = inProject ? permissions.projectFiles
+                : compatibility.some((directory) => entry === directory || entry.startsWith(directory + sep)) ? "read-write"
+                : permissions.outsideProject;
             if (access === "read-write" || permissions.storedCredentials === "read-write") return entry;
         } catch { /* Nonexistent or OS-protected entries cannot be replaced by the task. */ }
     }

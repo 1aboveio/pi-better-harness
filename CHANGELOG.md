@@ -6,6 +6,32 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.5.1] - 2026-09-27
+
+### Fixed
+
+- Bundle sandbox `0.5.1`, subagents `0.4.1`, and background-tasks `0.2.19` for restored default temporary-file and macOS Keychain compatibility.
+
+## [pi-better-sandbox@0.5.1] - 2026-09-27
+
+### Fixed
+
+- Restore explicit runtime access to `/tmp`, the current user's macOS temporary directory, and its Security.framework MDS cache when Outside is Read or Read/write. Keychain-backed CLI authentication can initialize and refresh its runtime state without a global lock-file or home-directory allowance.
+- Preserve credential/control denials, stricter project permissions, and runtime symlink protection under the restored temporary-directory grants.
+
+## [pi-better-subagents@0.4.1] - 2026-09-27
+
+### Fixed
+
+- Apply the shared runtime compatibility policy to guarded task tools, restoring literal temporary-log writes and macOS Keychain-backed GitHub authentication.
+- Reject runtime aliases under newly writable temporary paths; protect Linux project ancestors against replacement between task launches.
+
+## [pi-better-background-tasks@0.2.19] - 2026-09-27
+
+### Fixed
+
+- Synchronize the shared sandbox core, including mount ordering that prevents sibling protections from being hidden by later ancestor binds.
+
 ## [pi-better-harness@0.5.0] - 2026-09-27
 
 ### Changed
