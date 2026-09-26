@@ -54,14 +54,10 @@ import {
     ForegroundSandboxWriteDeniedError,
 } from "../files.ts";
 import { ForegroundSandboxBlockedError, ForegroundSandboxController } from "../state.ts";
-import { ensureResolvableBackend } from "./support/resolvable-backend.ts";
+import { IN_PROCESS_BACKEND, realBackendSkip } from "./support/resolvable-backend.ts";
 
-// These tests are about the in-process containment check, not about kernel
-// enforcement, but the check only runs once the controller resolves a backend.
-// The controllers here — and the one pi's own loader builds in the last test —
-// read the real platform and PATH, so a host that resolves nothing is given the
-// one precondition they need. See the helper for why that is honest.
-after(ensureResolvableBackend());
+// Only the SDK loader case below launches the kernel-confined worker.
+const loadedRegistrationSkip = realBackendSkip();
 
 const fixtures = realpathSync(mkdtempSync(join(realpathSync(process.env.PI_SANDBOX_TEST_TMPDIR ?? "/var/tmp"), "pi-better-sandbox-files-")));
 after(() => rmSync(fixtures, { recursive: true, force: true }));
@@ -127,7 +123,7 @@ function unmodified(cwd: string): Tools {
 }
 
 function sessionAt(root: string): ForegroundSandboxController {
-    const controller = new ForegroundSandboxController();
+    const controller = new ForegroundSandboxController(IN_PROCESS_BACKEND);
     controller.beginSession(root, true);
     return controller;
 }
@@ -719,7 +715,7 @@ test("an abort raised mid-write still releases the queue for the next mutation",
     assert.equal(readFileSync(target, "utf8"), "after\n");
 });
 
-test("the registrations pi actually loads enforce the same policy on real files", async () => {
+test("the registrations pi actually loads enforce the same policy on real files", { skip: loadedRegistrationSkip }, async () => {
     // The real loader, the real entry point, the real session_start handler:
     // the tools exercised below are the ones a running pi would call.
     const { root, outside } = project("loaded-extension");

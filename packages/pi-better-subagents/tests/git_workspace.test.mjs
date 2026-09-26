@@ -9,7 +9,6 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-    chmodSync,
     existsSync,
     lstatSync,
     mkdirSync,
@@ -19,7 +18,7 @@ import {
     rmSync,
     writeFileSync,
 } from 'node:fs';
-import { homedir, platform, tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 // Hermetic registry: this file drives real spawns, and the spawn path runs
@@ -41,10 +40,24 @@ const {
     readGitRemotes,
 } = await import(new URL('../git-workspace.ts', import.meta.url).href);
 
-const {
-    maybeBuildSandboxCommand,
-    sandboxSupported,
-} = await import(new URL('../sandbox.ts', import.meta.url).href);
+const { maybeBuildSandboxCommand } = await import(new URL('../sandbox.ts', import.meta.url).href);
+const { describeSandboxSupport } = await import(new URL('../shared-sandbox-core.ts', import.meta.url).href);
+const backend = describeSandboxSupport();
+const requiredBackend = process.env.PI_SANDBOX_REQUIRE_BACKEND;
+if (requiredBackend && (!backend.supported || backend.backend !== requiredBackend)) {
+    throw new Error(`PI_SANDBOX_REQUIRE_BACKEND=${requiredBackend} but this runner selected ${backend.supported ? backend.backend : backend.reason}`);
+}
+let backendSkip = backend.supported ? false : `requires a real sandbox backend: ${backend.reason}`;
+if (backend.supported) {
+    const probe = backend.backend === 'linux-bubblewrap'
+        ? spawnSync(backend.executable, ['--ro-bind', '/', '/', '--', '/bin/true'], { encoding: 'utf-8' })
+        : spawnSync(backend.executable, ['-p', '(version 1) (allow default)', '/usr/bin/true'], { encoding: 'utf-8' });
+    if (probe.status !== 0) {
+        const reason = probe.error?.message ?? probe.stderr;
+        if (requiredBackend) throw new Error(`PI_SANDBOX_REQUIRE_BACKEND=${requiredBackend} but ${backend.backend} cannot start: ${reason}`);
+        backendSkip = `requires usable ${backend.backend}: ${reason}`;
+    }
+}
 
 function resolveGitBin() {
     try {
@@ -876,12 +889,11 @@ describe('git-workspace', () => {
         // @covers subagent_spawn.git_clone_workspace
         // @covers sandbox.command-wrapper
         // @level integration
-        it('runs Git workflow through the product sandbox wrapper with outside-write denial', () => {
+        it('runs Git workflow through the product sandbox wrapper with outside-write denial', { skip: backendSkip }, () => {
             const base = mkdtempSync(join(tmpdir(), 'pi-gitws-sbx-ops-'));
             // Outside probe must not sit under always-allowed prefixes on macOS
             // (/private/tmp, /private/var/folders, $HOME/.pi). Prefer $HOME.
             const outsideDir = join(homedir(), `pi-gitws-sbx-outside-${process.pid}-${Date.now()}`);
-            const prevPath = process.env.PATH;
             try {
                 mkdirSync(outsideDir, { recursive: true });
                 const outsideFile = join(outsideDir, 'should-not-exist.txt');
@@ -917,47 +929,7 @@ describe('git-workspace', () => {
                     'echo INSIDE_OK',
                 ].join('\n');
 
-                // Ensure a product sandbox wrapper is selected. On hosts without
-                // a real backend (Linux CI unit lane without bwrap), install a
-                // stub bwrap on PATH — same pattern as tests/sandbox_profile.test.mjs.
-                let wrapperFileHint = /sandbox-exec$|bwrap$/;
-                if (!sandboxSupported()) {
-                    assert.equal(
-                        platform(),
-                        'linux',
-                        'only the Linux stub-bwrap path is used when no real backend is present',
-                    );
-                    const stubDir = join(base, 'stub-bin');
-                    mkdirSync(stubDir, { recursive: true });
-                    const stubBwrap = join(stubDir, 'bwrap');
-                    // Product topology stub: skip flags until "--", then exec child.
-                    // Deny outside writes by removing any outside file the child creates
-                    // and failing closed — honest about being a stub, not kernel bwrap.
-                    writeFileSync(
-                        stubBwrap,
-                        [
-                            '#!/bin/sh',
-                            `OUTSIDE=${JSON.stringify(outsideFile)}`,
-                            'while [ "$#" -gt 0 ]; do',
-                            '  if [ "$1" = "--" ]; then shift; break; fi',
-                            '  shift',
-                            'done',
-                            '"$@"',
-                            'rc=$?',
-                            'if [ -f "$OUTSIDE" ]; then',
-                            '  rm -f "$OUTSIDE"',
-                            '  echo OUTSIDE_WRITE_DENIED',
-                            '  exit 12',
-                            'fi',
-                            'exit $rc',
-                            '',
-                        ].join('\n'),
-                    );
-                    chmodSync(stubBwrap, 0o755);
-                    process.env.PATH = `${stubDir}:${prevPath ?? ''}`;
-                    assert.equal(sandboxSupported(), true, 'stub bwrap on PATH must enable Linux sandbox support');
-                    wrapperFileHint = new RegExp(`${stubBwrap.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-                }
+                const wrapperFileHint = /sandbox-exec$|bwrap$/;
 
                 // 1) Git workflow through the product-selected wrapper.
                 const gitResult = runThroughProductSandbox({
@@ -996,20 +968,15 @@ describe('git-workspace', () => {
                 });
                 assert.match(denyResult.wrapper, wrapperFileHint, 'deny path must use product sandbox wrapper');
                 assert.equal(existsSync(outsideFile), false, 'outside write must not persist');
-                // Real backends: child exits 0 after failed write. Stub backend:
-                // may exit 12 after removing the file — both prove denial.
-                assert.ok(
-                    denyResult.exitCode === 0 || denyResult.exitCode === 12,
-                    `unexpected deny exit ${denyResult.exitCode}: ${denyResult.stdout}\n${denyResult.stderr}`,
-                );
+                // The real backend refuses the write before the child sees the file.
+                assert.equal(denyResult.exitCode, 0,
+                    `unexpected deny exit ${denyResult.exitCode}: ${denyResult.stdout}\n${denyResult.stderr}`);
                 assert.match(
                     `${denyResult.stdout}\n${denyResult.stderr}`,
                     /OUTSIDE_WRITE_DENIED/,
                     'outside write must be reported as denied',
                 );
             } finally {
-                if (prevPath === undefined) delete process.env.PATH;
-                else process.env.PATH = prevPath;
                 rmSync(base, { recursive: true, force: true });
                 rmSync(outsideDir, { recursive: true, force: true });
             }
