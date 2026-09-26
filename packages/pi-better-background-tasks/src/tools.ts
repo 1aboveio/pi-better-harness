@@ -10,12 +10,17 @@ import { ForegroundSandboxBlockedError } from "./sandbox.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 
+const JsonPathSchema = Type.String({
+  pattern: "^\\$",
+  description: "Root-prefixed JSON path, e.g. $.status, $.terminalFailure, or $.steps[0].status. Bare keys and wildcards are unsupported.",
+});
+
 const ConditionSchema = Type.Union([
   Type.Object({ type: Type.Literal("exit_code"), equals: Type.Number() }),
   Type.Object({ type: Type.Literal("stdout_contains"), value: Type.String() }),
   Type.Object({ type: Type.Literal("stderr_contains"), value: Type.String() }),
-  Type.Object({ type: Type.Literal("json_path_equals"), path: Type.String(), value: Type.Any() }),
-  Type.Object({ type: Type.Literal("json_path_exists"), path: Type.String() }),
+  Type.Object({ type: Type.Literal("json_path_equals"), path: JsonPathSchema, value: Type.Any() }),
+  Type.Object({ type: Type.Literal("json_path_exists"), path: JsonPathSchema }),
 ]);
 
 const SshSchema = Type.Object({

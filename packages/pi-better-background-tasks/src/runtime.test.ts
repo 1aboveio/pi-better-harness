@@ -12,6 +12,43 @@ const fakePi = {
 } as unknown as ExtensionAPI;
 
 describe("runtime", () => {
+  it.each(["success_when", "failure_when"] as const)("rejects malformed %s paths before starting", (field) => {
+    expect(() => startWatchTask(fakePi, {
+      command: "echo must-not-run",
+      success_when: { type: "stdout_contains", value: "done" },
+      [field]: { type: "json_path_equals", path: "terminalFailure", value: true },
+    }, process.cwd())).toThrow(/unsupported JSON path.*terminalFailure/);
+  });
+
+  it("fails a restored watcher with malformed persisted conditions", async () => {
+    const meta = startWatchTask(fakePi, {
+      command: 'node -e \'console.log(JSON.stringify({status:"FAILURE",terminalFailure:true}))\'',
+      interval_seconds: 60,
+      callback: false,
+      success_when: { type: "json_path_equals", path: "$.status", value: "SUCCESS" },
+      failure_when: { type: "json_path_equals", path: "$.terminalFailure", value: true },
+    }, process.cwd());
+    meta.failureWhen = { type: "json_path_equals", path: "terminalFailure", value: true };
+    writeMeta(meta);
+    resumeRunningTask(fakePi, meta);
+    const terminal = await waitForMeta(meta.id, (m) => m?.status === "failed");
+    expect(terminal?.error).toMatch(/failure_when.*unsupported JSON path/);
+  });
+
+  it("reports retryable evaluation errors and clears them after recovery", async () => {
+    const meta = startWatchTask(fakePi, {
+      command: 'node -e \'console.log(JSON.stringify({status:"pending"}))\'',
+      interval_seconds: 1,
+      callback: false,
+      success_when: { type: "json_path_equals", path: "$.missing", value: true },
+    }, process.cwd());
+    const waiting = await waitForMeta(meta.id, (m) => Boolean(m?.error));
+    expect(waiting?.status).toBe("running");
+    expect(waiting?.error).toContain("JSON path not found");
+    writeMeta({ ...waiting!, successWhen: { type: "json_path_equals", path: "$.status", value: "pending" } });
+    const terminal = await waitForMeta(meta.id, (m) => m?.status === "succeeded");
+    expect(terminal?.error).toBeUndefined();
+  });
   it("defaults command watchers to a 15 minute timeout", () => {
     const before = Date.now();
     const meta = startWatchTask(fakePi, {

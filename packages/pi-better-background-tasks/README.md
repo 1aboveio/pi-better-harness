@@ -80,6 +80,25 @@ timeout can terminate the local SSH client but the remote process may still be
 running. See the detailed usage notes for bootstrap policy, watch conditions,
 timeouts, and v1 non-goals.
 
+## Watch conditions
+
+JSON conditions require a root-prefixed path, such as `$.status` or
+`$.terminalFailure`; bare keys such as `status` are rejected before the command
+starts. For a command that emits `{"status":"FAILURE","terminalFailure":true}`,
+use:
+
+```json
+{
+  "success_when": { "type": "json_path_equals", "path": "$.status", "value": "SUCCESS" },
+  "failure_when": { "type": "json_path_equals", "path": "$.terminalFailure", "value": true }
+}
+```
+
+Persisted watchers with unsupported paths fail explicitly on their next poll.
+Missing JSON fields or invalid JSON output remain retryable; task status shows
+the condition evaluation error until a subsequent poll recovers. Keep a finite
+timeout to bound watches whose output never becomes evaluable.
+
 ## Install
 
 ```sh
