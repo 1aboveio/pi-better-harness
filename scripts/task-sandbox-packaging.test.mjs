@@ -13,9 +13,11 @@ test('both task executors match their canonical shared implementation', () => {
 
 test('standalone consumers include the task executor and mandatory child launcher', () => {
   for (const name of ['pi-better-sandbox', 'pi-better-subagents']) {
-    const [pack] = JSON.parse(execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+    const output = JSON.parse(execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
       cwd: resolve('packages', name), encoding: 'utf8', shell: process.platform === 'win32',
     }));
+    const pack = Array.isArray(output) ? output[0] : Object.values(output)[0];
+    assert.ok(pack?.files, `${name}: npm pack returned no file manifest`);
     const files = new Set(pack.files.map((entry) => entry.path));
     for (const path of ['shared-task-sandbox.ts', 'shared-task-files.ts']) assert.ok(files.has(path), `${name} missing ${path}`);
     if (name === 'pi-better-subagents') {
