@@ -146,7 +146,7 @@ export function createTaskFileOperations(controller: TaskFileController): {
         const writing = operation === "write" || operation === "mkdir" || operation === "access-edit";
         const decision = writing ? evaluateWriteAccess(path, policy) : evaluateReadAccess(path, policy);
         if (!decision.allowed && operation !== "existing-directory") {
-            if (operation === "mkdir") {
+            if (operation === "mkdir" && decision.reason === "permission-denied") {
                 // SDK write prepares the parent even when it already exists.
                 // Confirm that no-op inside confinement; never grant mkdir.
                 try { await run("existing-directory", path); return; } catch { /* Preserve the original refusal. */ }
