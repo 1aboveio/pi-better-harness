@@ -1,6 +1,6 @@
 # Sandbox default compatibility restoration
 
-Status: implementation and focused kernel tests complete; full verification, independent review, and final session replay pending. No PR until the session gate below passes.
+Status: implementation, full local verification, independent review fixes, manual cross-platform CI, and the mandatory three-session replay completed before PR. See [session validation](sandbox-session-validation.md).
 
 ## Baselines
 
@@ -16,7 +16,7 @@ Trusted runtime separation (`6a5bc71`, PR #308, harness 0.5.0) restored Pi setti
 |---|---|---|---|
 | Project files | Read/write | Read/write except protected paths | Retain; test read/write/edit and shell syscalls |
 | Ordinary outside files | Read; no writes | Read; no writes | Retain, including arbitrary `*.lock` files |
-| macOS Keychain | Worked incidentally through broad cache grant | Retrieval restored through current-user MDS runtime exception | Actual SDK synthetic-Keychain regression now passes; real safe GitHub replay pending |
+| macOS Keychain | Worked incidentally through broad cache grant | Retrieval restored through current-user MDS runtime exception | Actual SDK synthetic-Keychain regression passes; safe GitHub/Git replay passes under all nine recorded policies |
 | `/tmp` and `/private/tmp` | Writable runtime space | Explicit runtime exception restored when Outside is Read or Read/write; private TMPDIR retained | SDK file and shell tests pass; credential/control exclusions take precedence |
 | Current-user macOS temp/cache trees | Entire `/private/var/folders` writable | Current user's discovered T and C/mds only | Other caches and other users remain outside-write denied; reject unsafe path discovery |
 | Pi settings/auth/session state | Task and runtime could write `~/.pi` on macOS | Trusted runtime can write; tasks cannot mutate protected runtime files | Preserve trust split; no global task `~/.pi` grant |
