@@ -6,22 +6,42 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
-### Added
-
-- **failure reporting**: share durable failure observations, explicit recovery, and notification receipts across subagents and background tasks
-- **sandbox**: add the flat Main/Subagents permission table and saved defaults, with inactive values retained
-- **sandbox**: enforce project/outside file modes, known credential-file overrides, command-launch gates, and network restrictions on integrated execution surfaces
-- **subagents**: capture human permission profiles at launch and reserve a private runtime directory; reject tool opt-outs that bypass enabled profiles
-
-### Fixed
-
-- **subagents**: surface structured tool failures before stale assistant progress without misclassifying an active process as terminated
-- **background-tasks**: retain condition-evaluation failures and withhold success while failure detection is incomplete
-- **callbacks**: retry temporary delivery-state and ownership-read errors instead of permanently suppressing notifications
+## [pi-better-harness@0.4.0] - 2026-09-27
 
 ### Changed
 
-- **background-tasks**: inherit Main permissions for local launches and reject structured SSH when its client cannot apply those restrictions
+- Bundle `pi-better-sandbox@0.4.0`, `pi-better-subagents@0.3.0`, and `pi-better-background-tasks@0.2.17` for independent permission profiles and durable failure reporting.
+
+## [pi-better-sandbox@0.4.0] - 2026-09-27
+
+### Added
+
+- Configure independent Main and Subagents permission profiles in the flat `/sandbox` table, with saved defaults and retained inactive values.
+- Enforce project and outside file modes, credential-file overrides, command gates, and network restrictions on integrated execution surfaces.
+
+## [pi-better-subagents@0.3.0] - 2026-09-27
+
+### Added
+
+- Snapshot human permission profiles at launch and reserve private runtime directories; reject tool opt-outs that bypass enabled profiles.
+- Keep structured failure observations separate from lifecycle status and show them before stale assistant progress. Recovery requires a later matching retry.
+
+### Fixed
+
+- Retry notification handoffs and receipt writes without suppressing alerts on temporary read errors or repeatedly sending an already handed-off event.
+- Retain pending evidence on failed writes and report missing, truncated, or corrupt observations explicitly.
+
+## [pi-better-background-tasks@0.2.17] - 2026-09-27
+
+### Fixed
+
+- Reject invalid watcher JSON paths before launch; keep evaluator errors visible and withhold success while failure detection is incomplete.
+- Retain structured failure observations and matching recovery across task reporting surfaces, and replay undelivered terminal callbacks on session startup.
+- Retry evidence and delivery-receipt writes, defer unreadable callback state, and prevent repeated handoffs while receipt persistence is unavailable.
+
+### Changed
+
+- Inherit Main permissions for local launches and reject structured SSH when its client cannot apply those restrictions.
 
 ## [pi-better-plan@0.3.5] - 2026-09-25
 
