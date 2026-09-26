@@ -1,7 +1,7 @@
 import { statSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
-import { evaluateCondition } from "./conditions.js";
+import { evaluateCondition, validateCondition } from "./conditions.js";
 import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
 import { currentProcessStartToken, readProcessStartToken } from "./process-identity.js";
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.js";
@@ -311,6 +311,10 @@ export function startWatchTask(
   getActiveSession?: ActiveSessionProvider,
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
+  for (const [name, condition] of [["success_when", params.success_when], ["failure_when", params.failure_when]] as const) {
+    const error = condition && validateCondition(condition);
+    if (error) throw new Error(`${name}: ${error}`);
+  }
   const sandboxPlan = params.ssh ? UNCONFINED_LAUNCH : resolveForegroundSandboxPlan(pi);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
@@ -578,8 +582,20 @@ async function pollWatch(
       return;
     }
 
+    const conditionErrors: string[] = [];
+    delete latest.error;
+    for (const [name, condition] of [["success_when", latest.successWhen], ["failure_when", latest.failureWhen]] as const) {
+      const error = condition && validateCondition(condition);
+      if (error) {
+        latest.error = `${name}: ${error}`;
+        finalize(latest, { status: "failed", reason: latest.error, commandResult: result }, pi, getActiveSession);
+        return;
+      }
+    }
+
     if (latest.failureWhen) {
       const failure = evaluateCondition(latest.failureWhen, result);
+      if (failure.error) conditionErrors.push(`failure_when: ${failure.error}`);
       if (failure.matched) {
         finalize(latest, { status: "failed", reason: "failure condition matched", matchedCondition: latest.failureWhen, commandResult: result }, pi, getActiveSession);
         return;
@@ -595,12 +611,14 @@ async function pollWatch(
 
     if (latest.successWhen) {
       const success = evaluateCondition(latest.successWhen, result);
+      if (success.error) conditionErrors.push(`success_when: ${success.error}`);
       if (success.matched) {
         finalize(latest, { status: "succeeded", reason: "success condition matched", matchedCondition: latest.successWhen, commandResult: result }, pi, getActiveSession);
         return;
       }
     }
 
+    if (conditionErrors.length) latest.error = conditionErrors.join("; ");
     writeMeta(latest);
     scheduleWatch(pi, id, nextWatchDelayMs(latest), getActiveSession, runOnce);
   } catch (error) {

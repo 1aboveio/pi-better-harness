@@ -6,6 +6,13 @@ export interface ConditionMatch {
   error?: string;
 }
 
+export function validateCondition(condition: Condition): string | undefined {
+  if ((condition.type === "json_path_equals" || condition.type === "json_path_exists") && !parseJsonPath(condition.path)) {
+    return `unsupported JSON path: ${condition.path}. Use a root-prefixed path such as $.status or $.terminalFailure.`;
+  }
+  return undefined;
+}
+
 export function evaluateCondition(condition: Condition, result: CommandResult): ConditionMatch {
   switch (condition.type) {
     case "exit_code":
