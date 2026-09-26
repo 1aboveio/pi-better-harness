@@ -20,14 +20,14 @@ OS credential services (including macOS Keychain/securityd and Linux Secret Serv
 
 ## Enforcement boundaries
 
-The shared core owns file access decisions and OS wrapper rules. Foreground read, write, and edit use matching in-process checks; shell execution uses kernel confinement. Published snapshots carry permissions into local background tasks and subagent launch adapters. The model cannot mutate the controller through a tool.
+The shared core owns file access decisions and OS wrapper rules. Main and Subagents use a shared task executor: read, write, and edit retain the SDK tool contract while filesystem syscalls and shell commands run under kernel confinement. The model cannot mutate the controller through a tool. Tools without a verified execution adapter are blocked.
 
-Foreground confinement does not sandbox Pi's own provider connection, arbitrary extension code, or `pi.exec`; this remains the boundary established in ADR 0004. Unsupported launch combinations fail with an actionable error, never by silently dropping a restriction. Subagent confinement wraps the whole Pi child: a profile disabling commands prevents launching it, and disabling network must not silently permit the model connection. Until provider transport is separated from task execution, such subagent launches are refused explicitly.
+[ADR 0007](0007-trusted-runtime-task-boundary.md) separates trusted Pi startup, configuration/authentication locks, provider transport, and session persistence from task execution. Commands Off and Network Off constrain task operations while Pi can still initialize and use its provider. Task access to `~/.pi` remains subject to Outside project and Stored credentials, with runtime control files protected from task writes. Unsupported combinations fail explicitly; the launcher never silently drops confinement.
 
 Runtime system libraries and temporary paths need bounded allowances so the sandbox can execute at all. These allowances must be documented and must not grant a whole home directory or override credential-file restrictions. Linux backend limitations must be explicit and fail closed.
 
 ## Verification
 
-Required evidence includes table keyboard behavior and width bounds; persistence and migration; matching in-process and kernel file decisions; credential-file precedence; launch-time snapshots; and real-kernel checks using disposable synthetic files. No real credential values should be inspected by these tests.
+Required evidence includes table keyboard behavior and width bounds; persistence and migration; matching file decisions and actual kernel enforcement; credential-file precedence; launch-time snapshots; and real-kernel checks using disposable synthetic files. No real credential values should be inspected by these tests.
 
 Implementation verification includes a real Pi terminal save/reload test, real macOS kernel read/write/network checks, an actual Pi session writer confined to its private runtime directory, and single/batch default-profile subagent launches. Regression cases cover protected ancestor renames, Data-volume aliases, configured Pi auth paths, and Linux rejection of projects nested under stricter protected ancestors. Linux command construction is tested locally; its actual kernel behavior still requires a capable Linux runner.

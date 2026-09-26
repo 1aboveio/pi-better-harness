@@ -24,7 +24,7 @@ function fixture(before = false) {
 }
 
 describe("subagent permission policy", () => {
-    it("preserves legacy behavior when there is no publisher or event bus", () => {
+    it("keeps the default-on switch when there is no publisher or event bus", () => {
         assert.deepEqual(resolveSubagentPermissions({}, undefined), { sandboxEnabled: true, enforced: false });
         const pi = { events: new EventEmitter() };
         assert.deepEqual(resolveSubagentPermissions(pi, false), { sandboxEnabled: false, enforced: false });
@@ -57,12 +57,14 @@ describe("subagent permission policy", () => {
         assert.throws(() => resolveSubagentPermissions(pi, undefined), /Main sandbox profile disables commands/);
     });
 
-    it("blocks child commands and network before allocating a run", () => {
+    it("retains task restrictions while allowing trusted Pi startup", () => {
         const { pi, publish } = fixture();
-        publish({ state: "disabled", permissions: main, subagentPermissions: { ...child, commands: false } });
-        assert.throws(() => resolveSubagentPermissions(pi, undefined), /Subagents profile disables commands/);
-        publish({ state: "disabled", permissions: main, subagentPermissions: { ...child, network: false } });
-        assert.throws(() => resolveSubagentPermissions(pi, undefined), /model requests.*provider isolation/);
+        publish({ state: "disabled", permissions: main, subagentPermissions: { ...child, commands: false, network: false } });
+        const plan = resolveSubagentPermissions(pi, undefined);
+        assert.equal(plan.sandboxEnabled, true);
+        assert.equal(plan.enforced, true);
+        assert.equal(plan.permissions.commands, false);
+        assert.equal(plan.permissions.network, false);
     });
 
     it("never silently drops a selected capability profile in the adapter", () => {

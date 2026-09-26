@@ -2,9 +2,10 @@
  * The canonical write-deny rule module: validation, persistence, and putting
  * rules into force.
  *
- * Every fixture here is disposable and lives under /var/tmp, and the pi agent
- * directory is injected, so no test ever reads or writes the developer's real
- * ~/.pi state. That injection is also what lets these tests assert the exact
+ * Fixtures default to /var/tmp (outside the backend's blanket temporary
+ * allowances); PI_SANDBOX_TEST_TMPDIR can select another non-exempt directory.
+ * The pi agent directory is injected, so no test ever reads or writes the
+ * developer's real ~/.pi state. That injection is also what lets these tests assert the exact
  * bytes of the override file.
  */
 
@@ -42,7 +43,7 @@ import type { SandboxSeams } from "../shared-sandbox-core.ts";
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "../state.ts";
 
 const fixtures = realpathSync(
-    mkdtempSync(join(realpathSync("/var/tmp"), "pi-better-sandbox-deny-rules-")),
+    mkdtempSync(join(realpathSync(process.env.PI_SANDBOX_TEST_TMPDIR ?? "/var/tmp"), "pi-better-sandbox-deny-rules-")),
 );
 after(() => rmSync(fixtures, { recursive: true, force: true }));
 

@@ -130,15 +130,48 @@ describe("sandbox-core backend selection and wrapper construction", () => {
     // @fails-without-fix sandbox.backend-selection
     // @covers sandbox.backend-selection
     // @level unit
-    it("discovers an executable Linux bwrap without executing or probing it", async () => {
+    it("discovers an injected Linux bwrap without executing or probing it", async () => {
         const base = mkdtempSync(join(tmpdir(), "sbxcore-discovery-"));
         const executed = join(base, "executed");
-        writeBwrapStub(base, `#!/bin/sh\nprintf executed > '${executed}'\nexit 99\n`);
+        const stub = writeBwrapStub(base, `#!/bin/sh\nprintf executed > '${executed}'\nexit 99\n`);
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                assert.equal(sandboxSupported(), true);
-                assert.equal(existsSync(executed), false, "support discovery must not execute bwrap");
-            }));
+            const support = describeSandboxSupport({ platform: () => "linux", lookupExecutable: () => stub });
+            assert.equal(support.supported, true);
+            assert.equal(support.executable, stub);
+            assert.equal(existsSync(executed), false, "support discovery must not execute bwrap");
+        } finally {
+            rmSync(base, { recursive: true, force: true });
+        }
+    });
+
+    // @covers sandbox.backend-selection
+    // @level unit
+    it("never selects or runs a task-PATH bwrap in production lookup", async () => {
+        const base = mkdtempSync(join(tmpdir(), "sbxcore-untrusted-path-"));
+        const executed = join(base, "executed");
+        const stub = writeBwrapStub(base, `#!/bin/sh\nprintf executed > '${executed}'\nexit 99\n`);
+        try {
+            await withPlatform("linux", async () => {
+                const baseline = describeSandboxSupport();
+                await withPath(base, () => {
+                    const selected = describeSandboxSupport();
+                    assert.deepEqual(selected, baseline, "task PATH cannot alter backend selection");
+                    assert.notEqual(selected.executable, stub);
+                    assert.equal(sandboxSupported(), baseline.supported);
+                    const args = sandboxArgs(base, base);
+                    if (baseline.supported) {
+                        assert.equal(buildSandboxCommand(args).file, baseline.executable);
+                    } else {
+                        assert.throws(
+                            () => maybeBuildSandboxCommand(args, { sandboxEnabled: true, explicitSandbox: true }),
+                            /bubblewrap \(bwrap\) in \/usr\/bin or \/bin/,
+                        );
+                    }
+                    assert.equal(existsSync(executed), false, "the fake backend must not run");
+                    chmodSync(stub, 0o644);
+                    assert.deepEqual(describeSandboxSupport(), baseline, "a non-executable task-PATH bwrap is also ignored");
+                });
+            });
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
@@ -147,17 +180,10 @@ describe("sandbox-core backend selection and wrapper construction", () => {
     // @fails-without-fix sandbox.backend-selection
     // @covers sandbox.backend-selection
     // @level unit
-    it("reports Linux sandbox support false for absent or non-executable bwrap", async () => {
-        const base = mkdtempSync(join(tmpdir(), "sbxcore-absent-"));
-        try {
-            await withPlatform("linux", () => withPath(base, () => {
-                assert.equal(sandboxSupported(), false, "an absent bwrap is not a supported backend");
-                writeBwrapStub(base, "#!/bin/sh\nexit 0\n", 0o644);
-                assert.equal(sandboxSupported(), false, "a non-executable bwrap is not a supported backend");
-            }));
-        } finally {
-            rmSync(base, { recursive: true, force: true });
-        }
+    it("reports Linux support false when lookup finds no backend", () => {
+        const linux = { platform: () => "linux", lookupExecutable: () => undefined };
+        assert.equal(sandboxSupported(linux), false, "an absent bwrap is not a supported backend");
+        assert.equal(describeSandboxSupport(linux).supported, false);
     });
 
     // @fails-without-fix sandbox.spawn-policy
@@ -168,18 +194,17 @@ describe("sandbox-core backend selection and wrapper construction", () => {
         const writable = join(base, "work");
         mkdirSync(writable, { recursive: true });
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                const args = sandboxArgs(base, writable);
-                assert.equal(
-                    maybeBuildSandboxCommand(args, { sandboxEnabled: true, explicitSandbox: false }),
-                    undefined,
-                    "default-on mode must preserve the direct-execution degradation when bwrap is absent",
-                );
-                assert.throws(
-                    () => maybeBuildSandboxCommand(args, { sandboxEnabled: true, explicitSandbox: true }),
-                    /Linux sandbox requires executable bubblewrap \(bwrap\) on PATH/i,
-                );
-            }));
+            const args = sandboxArgs(base, writable);
+            const seams = { platform: () => "linux", lookupExecutable: () => undefined };
+            assert.equal(
+                maybeBuildSandboxCommand(args, { sandboxEnabled: true, explicitSandbox: false }, seams),
+                undefined,
+                "default-on mode must preserve the direct-execution degradation when bwrap is absent",
+            );
+            assert.throws(
+                () => maybeBuildSandboxCommand(args, { sandboxEnabled: true, explicitSandbox: true }, seams),
+                /Linux sandbox requires executable bubblewrap \(bwrap\) in \/usr\/bin or \/bin/i,
+            );
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
@@ -214,24 +239,22 @@ describe("sandbox-core backend selection and wrapper construction", () => {
         const base = mkdtempSync(join(tmpdir(), "sbxcore-bwrap-command-"));
         const writable = join(base, "work");
         mkdirSync(writable, { recursive: true });
-        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        const stub = writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                const args = sandboxArgs(base, writable);
-                const cmd = buildSandboxCommand(args);
-                const canonicalWorkdir = realpathSync(writable);
-                assert.equal(cmd.file, join(base, "bwrap"));
-                assert.deepEqual(cmd.fileArgs, [
-                    "--ro-bind", "/", "/",
-                    "--bind", canonicalWorkdir, canonicalWorkdir,
-                    "--bind", "/tmp", "/tmp",
-                    "--dev", "/dev",
-                    "--", "/usr/bin/true", "-p", "--mode", "json", "original prompt",
-                ]);
-                assert.equal(cmd.fileArgs.includes("--unshare-net"), false, "network must remain shared");
-                assert.equal(cmd.fileArgs.includes("--die-with-parent"), false, "detached children must remain durable");
-                assert.equal(cmd.fileArgs.some((arg) => arg.includes(".pi")), false, "~/.pi must have no writable binding");
-            }));
+            const args = sandboxArgs(base, writable);
+            const cmd = buildSandboxCommand(args, { platform: () => "linux", lookupExecutable: () => stub });
+            const canonicalWorkdir = realpathSync(writable);
+            assert.equal(cmd.file, stub);
+            assert.deepEqual(cmd.fileArgs, [
+                "--ro-bind", "/", "/",
+                "--bind", canonicalWorkdir, canonicalWorkdir,
+                "--bind", "/tmp", "/tmp",
+                "--dev", "/dev",
+                "--", "/usr/bin/true", "-p", "--mode", "json", "original prompt",
+            ]);
+            assert.equal(cmd.fileArgs.includes("--unshare-net"), false, "network must remain shared");
+            assert.equal(cmd.fileArgs.includes("--die-with-parent"), false, "detached children must remain durable");
+            assert.equal(cmd.fileArgs.some((arg) => arg.includes(".pi")), false, "~/.pi must have no writable binding");
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
@@ -246,20 +269,19 @@ describe("sandbox-core backend selection and wrapper construction", () => {
         const backendMarker = join(base, "backend-ran");
         const directMarker = join(base, "direct-child-ran");
         mkdirSync(writable, { recursive: true });
-        writeBwrapStub(base, `#!/bin/sh\nprintf backend > '${backendMarker}'\nexit 73\n`);
+        const stub = writeBwrapStub(base, `#!/bin/sh\nprintf backend > '${backendMarker}'\nexit 73\n`);
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                const args = sandboxArgs(base, writable);
-                args.execPath = "/bin/sh";
-                args.execArgs = ["-c", 'printf direct-child > "$1"', "sh", directMarker];
-                const cmd = maybeBuildSandboxCommand(args, { sandboxEnabled: true, explicitSandbox: true });
-                assert.ok(cmd, "an executable bwrap must be selected");
+            const args = sandboxArgs(base, writable);
+            args.execPath = "/bin/sh";
+            args.execArgs = ["-c", 'printf direct-child > "$1"', "sh", directMarker];
+            const cmd = maybeBuildSandboxCommand(args, { sandboxEnabled: true, explicitSandbox: true },
+                { platform: () => "linux", lookupExecutable: () => stub });
+            assert.ok(cmd, "an executable bwrap must be selected");
 
-                const spawned = spawnSync(cmd.file, cmd.fileArgs, { cwd: writable });
-                assert.equal(spawned.status, 73);
-                assert.equal(existsSync(backendMarker), true, "the selected backend was invoked");
-                assert.equal(existsSync(directMarker), false, "a failed backend must never retry the child bare");
-            }));
+            const spawned = spawnSync(cmd.file, cmd.fileArgs, { cwd: writable });
+            assert.equal(spawned.status, 73);
+            assert.equal(existsSync(backendMarker), true, "the selected backend was invoked");
+            assert.equal(existsSync(directMarker), false, "a failed backend must never retry the child bare");
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
@@ -295,7 +317,7 @@ describe("sandbox-core support diagnostics", () => {
     it("explains why an unsupported platform or missing backend has none", () => {
         const linux = describeSandboxSupport({ platform: () => "linux", lookupExecutable: () => undefined });
         assert.equal(linux.supported, false);
-        assert.match(linux.reason, /bubblewrap \(bwrap\) on PATH/);
+        assert.match(linux.reason, /bubblewrap \(bwrap\) in \/usr\/bin or \/bin/);
 
         const windows = describeSandboxSupport({ platform: () => "win32" });
         assert.equal(windows.supported, false);
@@ -314,7 +336,7 @@ describe("sandbox-core support diagnostics", () => {
             },
         };
         assert.equal(sandboxSupported(seams), true);
-        assert.equal(looked, 1, "discovery must ask the injected lookup, not scan the real PATH");
+        assert.equal(looked, 1, "discovery must ask the injected lookup, not scan system paths");
     });
 });
 
@@ -448,18 +470,15 @@ describe("sandbox-core write policy compilation and containment", () => {
         const root = join(base, "project");
         mkdirSync(root, { recursive: true });
         writeFileSync(join(root, ".env"), "SECRET=original\n");
-        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                const cmd = buildSandboxCommand({
-                    profilePath: join(base, "unused.sb"),
-                    policy: { writableRoot: root, home: base, denyWrite: [join(root, ".env")] },
-                    execPath: "/usr/bin/true",
-                    execArgs: [],
-                });
-                assert.ok(cmd.fileArgs.includes("--ro-bind"));
-                assert.equal(cmd.fileArgs.includes("--ro-bind-try"), false);
-            }));
+            const cmd = buildSandboxCommand({
+                profilePath: join(base, "unused.sb"),
+                policy: { writableRoot: root, home: base, denyWrite: [join(root, ".env")] },
+                execPath: "/usr/bin/true",
+                execArgs: [],
+            }, { platform: () => "linux", lookupExecutable: () => "/test/bwrap" });
+            assert.ok(cmd.fileArgs.includes("--ro-bind"));
+            assert.equal(cmd.fileArgs.includes("--ro-bind-try"), false);
             assert.equal(readFileSync(join(root, ".env"), "utf8"), "SECRET=original\n");
         } finally {
             rmSync(base, { recursive: true, force: true });
@@ -474,17 +493,14 @@ describe("sandbox-core write policy compilation and containment", () => {
         const denied = join(root, ".git", "hooks");
         mkdirSync(denied, { recursive: true });
         writeFileSync(join(denied, "pre-commit"), "#!/bin/sh\nexit 0\n");
-        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                const cmd = buildSandboxCommand({
-                    profilePath: join(base, "unused.sb"),
-                    policy: { writableRoot: root, home: base, denyWrite: [denied] },
-                    execPath: "/usr/bin/true",
-                    execArgs: [],
-                });
-                assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind", denied, denied]);
-            }));
+            const cmd = buildSandboxCommand({
+                profilePath: join(base, "unused.sb"),
+                policy: { writableRoot: root, home: base, denyWrite: [denied] },
+                execPath: "/usr/bin/true",
+                execArgs: [],
+            }, { platform: () => "linux", lookupExecutable: () => "/test/bwrap" });
+            assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind", denied, denied]);
             assert.equal(statSync(denied).isDirectory(), true);
             assert.equal(readFileSync(join(denied, "pre-commit"), "utf8"), "#!/bin/sh\nexit 0\n");
         } finally {
@@ -495,31 +511,28 @@ describe("sandbox-core write policy compilation and containment", () => {
     // @covers sandbox.command-wrapper
     // @level unit
     it("creates no placeholder for a denied path the sandbox never makes writable", async () => {
-        // Not tmpdir(): on Linux that IS /tmp, which the sandbox rebinds
-        // writable, so a fixture there would sit inside the very region this
-        // case exists to stay out of. /var/tmp is outside both backends'
-        // writable allowances on both platforms.
-        const base = realpathSync(mkdtempSync(join(realpathSync("/var/tmp"), "sbxcore-linux-elsewhere-")));
+        // The denied target is under /var/tmp, outside the writable /tmp
+        // rebind; only the project fixture needs a writable location.
+        const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-elsewhere-")));
+        const elsewhereDir = join(realpathSync("/var/tmp"), `sbxcore-denied-${process.pid}-${Date.now()}`);
         const root = join(base, "project");
         mkdirSync(root, { recursive: true });
         // Outside the writable root and outside the /tmp rebind, so the
         // read-only bind of / already covers it: materializing here would
         // litter the host to deny nothing new.
-        const elsewhere = join(base, "elsewhere", "secret");
-        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
+        const elsewhere = join(elsewhereDir, "secret");
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                const cmd = buildSandboxCommand({
-                    profilePath: join(base, "unused.sb"),
-                    policy: { writableRoot: root, home: base, denyWrite: [elsewhere] },
-                    execPath: "/usr/bin/true",
-                    execArgs: [],
-                });
-                assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind-try", elsewhere, elsewhere]);
-            }));
-            assert.equal(existsSync(join(base, "elsewhere")), false);
+            const cmd = buildSandboxCommand({
+                profilePath: join(base, "unused.sb"),
+                policy: { writableRoot: root, home: base, denyWrite: [elsewhere] },
+                execPath: "/usr/bin/true",
+                execArgs: [],
+            }, { platform: () => "linux", lookupExecutable: () => "/test/bwrap" });
+            assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind-try", elsewhere, elsewhere]);
+            assert.equal(existsSync(elsewhereDir), false);
         } finally {
             rmSync(base, { recursive: true, force: true });
+            rmSync(elsewhereDir, { recursive: true, force: true });
         }
     });
 
@@ -533,17 +546,14 @@ describe("sandbox-core write policy compilation and containment", () => {
         // confined process running as this same user cannot create it either.
         writeFileSync(join(root, "blocked"), "not a directory\n");
         const denied = join(root, "blocked", "secret");
-        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                const cmd = buildSandboxCommand({
-                    profilePath: join(base, "unused.sb"),
-                    policy: { writableRoot: root, home: base, denyWrite: [denied] },
-                    execPath: "/usr/bin/true",
-                    execArgs: [],
-                });
-                assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind-try", denied, denied]);
-            }));
+            const cmd = buildSandboxCommand({
+                profilePath: join(base, "unused.sb"),
+                policy: { writableRoot: root, home: base, denyWrite: [denied] },
+                execPath: "/usr/bin/true",
+                execArgs: [],
+            }, { platform: () => "linux", lookupExecutable: () => "/test/bwrap" });
+            assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind-try", denied, denied]);
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
@@ -555,15 +565,13 @@ describe("sandbox-core write policy compilation and containment", () => {
         const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-deny-")));
         const root = join(base, "project");
         mkdirSync(root, { recursive: true });
-        writeBwrapStub(base, "#!/bin/sh\nexit 0\n");
         try {
-            await withPlatform("linux", () => withPath(base, () => {
-                const cmd = buildSandboxCommand({
-                    profilePath: join(base, "unused.sb"),
-                    policy: { writableRoot: root, home: base, denyWrite: [join(root, ".env")] },
-                    execPath: "/usr/bin/true",
-                    execArgs: [],
-                });
+            const cmd = buildSandboxCommand({
+                profilePath: join(base, "unused.sb"),
+                policy: { writableRoot: root, home: base, denyWrite: [join(root, ".env")] },
+                execPath: "/usr/bin/true",
+                execArgs: [],
+            }, { platform: () => "linux", lookupExecutable: () => "/test/bwrap" });
                 // A hard --ro-bind, not --ro-bind-try: the absent .env was
                 // materialized first, because bubblewrap skips a bind whose
                 // source does not exist and would otherwise deny nothing.
@@ -575,8 +583,7 @@ describe("sandbox-core write policy compilation and containment", () => {
                     "--ro-bind", join(root, ".env"), join(root, ".env"),
                     "--", "/usr/bin/true",
                 ]);
-                assert.equal(readFileSync(join(root, ".env"), "utf8"), "");
-            }));
+            assert.equal(readFileSync(join(root, ".env"), "utf8"), "");
         } finally {
             rmSync(base, { recursive: true, force: true });
         }

@@ -37,12 +37,15 @@ import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
-import { maybeBuildSandboxCommand } from "./sandbox.ts";
+import { prepareTaskRuntime } from "./task-policy.ts";
+import { canonicalizePath } from "./shared-sandbox-core.ts";
+import { TASK_BUILTINS } from "./shared-task-sandbox.ts";
 import { observeSandboxPermissions, resolveSubagentPermissions } from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
-import { homedir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { join } from "node:path";
 import {
+    baseDir,
+    taskWorkspaceDir,
     sessionsDir,
     runDir,
     logPathFor,
@@ -1344,18 +1347,17 @@ export default function (pi: ExtensionAPI) {
         // Sandbox is ON by default. sandbox_dir moves the confinement + working
         // dir elsewhere. git_clone_workspace prepares a disposable clone with
         // .git/ inside the writable root for Git-mutating sandboxed subagents.
-        const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string" || p.git_clone_workspace === true || permissionPlan.enforced;
         const sandboxEnabled = permissionPlan.sandboxEnabled;
 
         const id = nextRunId();
-        const childSessionDir = permissionPlan.permissions ? join(sessionsDir(), id) : sessionsDir();
+        const childSessionDir = sandboxEnabled ? join(sessionsDir(), id) : sessionsDir();
         mkdirSync(childSessionDir, { recursive: true });
         mkdirSync(runDir(id), { recursive: true });
 
         const workspace = resolveSubagentWorkspace({
             ctxCwd: ctx.cwd,
             cwd: p.cwd,
-            sandboxDir: p.sandbox_dir,
+            sandboxDir: p.sandbox_dir ?? (sandboxEnabled && p.git_clone_workspace ? taskWorkspaceDir(id) : undefined),
             gitCloneWorkspace: p.git_clone_workspace,
             runId: id,
             runDirPath: runDir(id),
@@ -1379,9 +1381,14 @@ export default function (pi: ExtensionAPI) {
         }
 
         const resolution = resolveExtensions({
-            tools: allow, model, clean, allowNested: p.allow_nested, config: cfg,
+            tools: sandboxEnabled ? allow.split(",").filter((name) => (TASK_BUILTINS as readonly string[]).includes(name)).join(",") : allow,
+            model, clean, allowNested: sandboxEnabled ? false : p.allow_nested, config: cfg,
         });
-        const { args: extArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
+        const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
+        const extArgs = resolvedExtArgs.map((value, index) => sandboxEnabled && resolvedExtArgs[index - 1] === "--extension" ? canonicalizePath(value) : value);
+        if (sandboxEnabled && resolution.mode === "inherit") {
+            throw new Error("Task confinement requires explicit extensions; inheritExtensions is unsupported while sandboxing is enabled.");
+        }
         if (missing.length) {
             throw new Error(
                 `Subagent needs extension(s) that are not installed: ${missing.join(", ")}. ` +
@@ -1402,33 +1409,27 @@ export default function (pi: ExtensionAPI) {
             ...extArgs,
             ...(model ? ["--model", model] : []),
             ...(thinking ? ["--thinking", thinking] : []),
-            ...(allow ? ["--tools", allow] : []),
+            ...(allow && !sandboxEnabled ? ["--tools", allow] : []),
             ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
-            ...(p.approve ? ["--approve"] : []),
+            ...(sandboxEnabled ? ["--no-builtin-tools", "--no-approve"] : p.approve ? ["--approve"] : []),
             p.prompt,
         ];
 
         const piBin = resolvePiBinary();
-        const writableContainsRunDir = requestedSandboxDir && (() => {
-            const rel = relative(runDir(id), requestedSandboxDir);
-            return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-        })();
-        const denyWrite = permissionPlan.enforced ? [
-            join(PiCodingAgent.getAgentDir?.() ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "extensions"),
-            ...(writableContainsRunDir ? [
-                join(runDir(id), "meta.json"), join(runDir(id), ".launch.json"),
-                promptPathFor(id), join(runDir(id), "sandbox.sb"),
-            ] : [runDir(id)]),
-        ] : undefined;
-        const sandboxCommand = requestedSandboxDir
-            ? maybeBuildSandboxCommand({
-                profilePath: join(runDir(id), "sandbox.sb"),
-                writableDir: requestedSandboxDir, home: homedir(), piBin, piArgs: args,
-                ...(permissionPlan.permissions ? { permissions: permissionPlan.permissions, denyWrite, runtimeDir: childSessionDir } : {}),
-            }, { sandboxEnabled, explicitSandbox })
-            : undefined;
-        const cmd = sandboxCommand ?? { file: piBin, fileArgs: args };
-        const sandboxDir = sandboxCommand ? requestedSandboxDir : undefined;
+        const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
+        const unavailableTools = sandboxEnabled ? selectedTools.filter((name) => !(TASK_BUILTINS as readonly string[]).includes(name)) : [];
+        if (sandboxEnabled && selectedTools.length && unavailableTools.length === selectedTools.length) {
+            throw new Error(`No requested tool has a verified task sandbox adapter: ${unavailableTools.join(", ")}.`);
+        }
+        const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
+            root: requestedSandboxDir, controlDir: join(runDir(id), "control"), piBin,
+            tools: selectedTools, permissions: permissionPlan.permissions,
+            extensionPaths: extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]!] : []),
+            runtimeRoots: [baseDir()],
+        }) : undefined;
+        if (sandboxEnabled && !taskRuntime) throw new Error("Task sandbox has no workspace; refusing an unconfined child.");
+        const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: piBin, fileArgs: args };
+        const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
         const spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
         // Record process identity (pgid, start-time token) so health
@@ -1446,7 +1447,7 @@ export default function (pi: ExtensionAPI) {
             promptPreview: p.prompt.slice(0, 200),
             startedAt: Date.now(), logPath: logPathFor(id), sessionId: id,
             callbackOrigin,
-            sandbox: sandboxDir, callback: p.callback !== false,
+            sandbox: sandboxDir, taskRuntime: Boolean(taskRuntime), taskScratch: taskRuntime?.policy.scratch, callback: p.callback !== false,
             ...batchInfo,
             // The launch record is JSON. Registry freezes that value; it does not
             // require the resolver's nominal type to carry an index signature.
@@ -1468,11 +1469,11 @@ export default function (pi: ExtensionAPI) {
             : resolution.specs.length
                 ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
                 : `Runtime: isolated · built-in tools only\n`;
-        const warn = resolution.unmapped.length
+        const warn = (unavailableTools.length ? `Task sandbox: unavailable adapters for ${unavailableTools.join(", ")}; these tools are disabled.\n` : "") + (resolution.unmapped.length
             ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
               `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
               `Add a toolExtensions entry in config.json.\n`
-            : "";
+            : "");
         return { id, meta, spawned, runtime, warn, sandboxDir };
     }
 

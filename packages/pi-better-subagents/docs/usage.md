@@ -77,49 +77,46 @@ thresholds continue to take precedence for subagent health.
 Every subagent is confined by default, and the confinement is **self-contained** —
 it does not depend on any other extension being installed.
 
-- **OS sandbox (default on, macOS and Linux).** The child runs under
-  `sandbox-exec` on macOS or [bubblewrap](https://github.com/containers/bubblewrap)
-  (`bwrap`) on Linux with a simple rule: **reads and network are open; writes are
-  confined to the working directory and host `/tmp`.** Kernel-enforced — unlike a
-  cooperative guardrail that matches tool inputs, this denies the write syscall
-  itself, so a crafted `bash` command can't escape it. `sandbox:false` lifts it;
-  `sandbox_dir` moves the writable root (and becomes the child's cwd). `/dev`
-  remains usable. macOS also permits pi state writes under `~/.pi`; Linux exposes
-  that directory read-only, so Linux children must put writable pi state in their
-  work directory or `/tmp`. Everything else (your home, the repo, `/etc`, …) is
-  read-only to the subagent.
-- **Tool allowlist.** The child is scoped to an explicit set of tools, which also
-  decides what extension code loads (see below).
-- **No runaway recursion.** A subagent cannot spawn its own subagents unless
-  `allow_nested:true` — and not by denying the tools after the fact: without that
-  flag this package isn't loaded in the child, so the tools don't exist.
+- **Task sandbox (default on, macOS and Linux).** Pi startup, authentication,
+  provider transport, and session persistence run as trusted runtime operations.
+  Admitted task tools run under `sandbox-exec` or Linux Bubblewrap. Project files
+  default to Read / write and outside files to Read, including `~/.pi`; runtime
+  control files remain protected. Commands use private scratch space, not a
+  general writable host `/tmp` allowance. See the permission details below.
+- **Tool allowlist.** Confined children admit only verified read/write/edit/bash
+  implementations. Requested tools without adapters are reported as unavailable.
+- **No runaway recursion.** Confined children cannot spawn nested agents.
+  `allow_nested:true` loads nested-agent support only for unconfined children.
 
 ### Write sandbox
 
-The mechanism above — backend discovery, canonical containment, profile and mount
-construction, argv wrapping — is the private `sandbox-core` module, vendored into
-this package. The same module powers
-[`pi-better-sandbox`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme),
-which applies a write sandbox to Pi's **foreground** tools: the built-in `bash`,
-`write`, and `edit` tools and the `!` / `!!` commands you type.
+The shared `sandbox-core` and `task-sandbox` modules enforce task operations in
+both Main and Subagents. The defaults are Main Off and Subagents On, with project
+Read / write, outside Read, stored credential files Read, commands On, and network
+On. A subagent's project root is its selected workspace (`cwd` / `sandbox_dir`),
+or its disposable clone. `/sandbox off` changes Main, not Subagents.
 
-The two policies are separate on purpose. A subagent's writable root is its own
-run directory and is chosen per spawn through `sandbox` / `sandbox_dir`; the
-foreground policy is the directory you launched Pi from and is controlled by the
-human-only `/sandbox` commands. `/sandbox off` does not change subagent
-confinement, and no model-callable tool can change either.
+Pi runs as the trusted runtime so it can take settings/authentication locks,
+connect to its provider, and persist sessions. A mandatory guard loads before
+the task can run. Its immutable launch snapshot controls shell commands and
+kernel-confined file workers. Task access to `~/.pi` follows the outside and
+credential-file rules; there are no writable lock exceptions. Runtime code,
+configuration, and control files remain protected from task writes.
 
-Installing
-[`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme)
-brings both in by default, so ordinary `pi` starts with the foreground and its
-subagents confined at once. Nothing about how you start Pi changes; neither
-package ships a launcher.
+Commands Off still permits file tools according to their file permissions.
+Network Off blocks task network access while Pi's provider transport remains
+available. The confined file worker has an 8 MiB file limit and rejects larger
+files explicitly; use confined commands for larger files when commands are On.
 
-In every case reads and network access are **unrestricted** — only writes are
-confined, and only for these first-party execution paths. Pi's own process,
-`pi.exec` calls made by extensions, and unrelated third-party extension code are
-**not** confined by any of it. Confinement is also per surface: each surface
-denies its own control plane, not every other surface's.
+Currently `read`, `write`, `edit`, and `bash` have verified adapters. Other tools
+are disabled in confined children and listed in launch output. Provider
+extensions are trusted runtime code; arbitrary extension tools are not admitted
+merely because their names were requested. Confined children disable project
+runtime configuration and inherited extension discovery. Startup or backend
+failure never falls back to an unconfined child.
+
+You still start Pi normally. The subagent package's internal launcher requires
+Pi SDK 0.82.1 or newer; it is not a replacement user-facing Pi command.
 
 ### Git-mutating subagents and linked worktrees
 
@@ -163,10 +160,9 @@ preparation fails, the spawn fails fast with a message explaining that the
 linked-worktree Git metadata is outside the sandbox and recommending
 `git_clone_workspace:true`.
 
-Note that because children load only the extensions backing their tools, a
-guardrails extension (e.g. `@aliou/pi-guardrails`) does **not** apply inside a
-subagent unless you map a tool to it. The OS write sandbox above is what confines
-the child, and it doesn't depend on any extension.
+The mandatory task guard is independent of optional guardrails extensions.
+Adding a package to the tool map does not make its tools safe to execute outside
+the task boundary.
 
 ## Tool scoping (allowlist)
 
@@ -183,6 +179,14 @@ top.
   past the cap is rejected until a running one finishes.
 
 ## The allowlist also decides what LOADS
+
+For confined children, the requested list is first restricted to tools with
+verified task adapters. Unsupported task extensions are not loaded. Provider
+extensions can still load as trusted runtime dependencies. Nested spawning and
+inherited extension discovery are currently unavailable under confinement.
+
+The mapping behavior below applies to unconfined children and to admitted
+runtime dependencies:
 
 The `tools` allowlist does double duty: it is both what the child may call **and**
 which extension *code* is loaded into it. A child launches as
@@ -206,8 +210,9 @@ Ask for a tool with no mapping and the spawn still succeeds, but says so at
 launch — the tool simply will not exist in the child.
 
 `clean:true` is the narrowest case of the same mechanism: no extensions at all.
-`allow_nested:true` is the one thing that loads *this* package into the child;
-without it, nested spawning is impossible because the code isn't there.
+For unconfined children, `allow_nested:true` loads this package into the child;
+without it, nested spawning is unavailable. Confined children disable nesting
+regardless of this flag until a verified adapter exists.
 
 `inheritExtensions: true` in `config.json` restores the old load-everything
 behavior. It is **operator-only** — no spawn parameter can reach it, so the child

@@ -9,8 +9,9 @@
  * /private/var/folders and /private/tmp (pi needs them), and `os.tmpdir()` on
  * macOS lives under /private/var/folders — so an "outside" probe there would
  * false-pass. The Linux backend likewise bind-mounts /tmp read-write. Both the
- * project root and the outside probe therefore live under var/tmp, which
- * neither backend's blanket allowances cover.
+ * project root and the outside probe therefore default to var/tmp, which
+ * neither backend's blanket allowances cover. PI_SANDBOX_TEST_TMPDIR can
+ * select another directory outside those allowances on restricted runners.
  *
  * The same scenarios run on both backends. On Linux they need bubblewrap on
  * PATH; without a backend the whole file skips with a reason rather than
@@ -69,7 +70,7 @@ if (requiredBackend !== undefined && requiredBackend !== "") {
 
 // Not under any always-allowed prefix on either backend, so a denied write here
 // is a real denial and not an artefact of where the fixture happens to live.
-const fixtures = realpathSync(mkdtempSync(join(realpathSync("/var/tmp"), "pi-better-sandbox-kernel-")));
+const fixtures = realpathSync(mkdtempSync(join(realpathSync(process.env.PI_SANDBOX_TEST_TMPDIR ?? "/var/tmp"), "pi-better-sandbox-kernel-")));
 const projectRoot = join(fixtures, "project");
 const outside = join(fixtures, "outside");
 mkdirSync(projectRoot, { recursive: true });

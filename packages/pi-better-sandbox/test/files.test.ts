@@ -1,20 +1,20 @@
 /**
  * Real-filesystem proof for the built-in `write` and `edit` overrides.
  *
- * Every test here executes a real `ToolDefinition` produced by Pi's own
- * `createWriteToolDefinition` / `createEditToolDefinition` with this package's
- * operations injected, and asserts against real files. Nothing about the
- * enforcement is stubbed: the guard, the policy compilation, the canonical path
- * resolution, and the `fs` calls are the shipped ones.
+ * Most tests here execute real `ToolDefinition`s with this package's pure
+ * in-process operations injected, checking the guard against real files. The
+ * loaded-registration case instead runs the installed kernel-confined worker.
+ * Both preserve the SDK's tool contracts; the kernel case needs a usable OS
+ * sandbox backend.
  *
  * Fixture placement is load-bearing, for the same reason the kernel tests give:
  * on macOS `os.tmpdir()` resolves under /private/var/folders, which the product
  * profile always allows, so an "outside the project" probe there would pass for
- * the wrong reason. Everything lives under var/tmp instead.
+ * the wrong reason. Fixtures default to var/tmp; PI_SANDBOX_TEST_TMPDIR can
+ * select another non-exempt root.
  *
- * Every denial is paired with a negative control — the identical mutation
- * through the *unmodified* built-in tool — so a denial can never be an artefact
- * of a broken fixture path.
+ * Each pure-guard denial has a negative control using the unmodified SDK tool,
+ * so it cannot pass merely because the fixture path is broken.
  */
 
 import assert from "node:assert/strict";
@@ -36,11 +36,14 @@ import {
     createEditToolDefinition,
     createWriteToolDefinition,
     discoverAndLoadExtensions,
+    ExtensionRunner,
+    SessionManager,
     withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import type {
     ExtensionCommandContext,
     ExtensionContext,
+    ExtensionActions,
     ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
@@ -51,16 +54,12 @@ import {
     ForegroundSandboxWriteDeniedError,
 } from "../files.ts";
 import { ForegroundSandboxBlockedError, ForegroundSandboxController } from "../state.ts";
-import { ensureResolvableBackend } from "./support/resolvable-backend.ts";
+import { IN_PROCESS_BACKEND, realBackendSkip } from "./support/resolvable-backend.ts";
 
-// These tests are about the in-process containment check, not about kernel
-// enforcement, but the check only runs once the controller resolves a backend.
-// The controllers here — and the one pi's own loader builds in the last test —
-// read the real platform and PATH, so a host that resolves nothing is given the
-// one precondition they need. See the helper for why that is honest.
-after(ensureResolvableBackend());
+// Only the SDK loader case below launches the kernel-confined worker.
+const loadedRegistrationSkip = realBackendSkip();
 
-const fixtures = realpathSync(mkdtempSync(join(realpathSync("/var/tmp"), "pi-better-sandbox-files-")));
+const fixtures = realpathSync(mkdtempSync(join(realpathSync(process.env.PI_SANDBOX_TEST_TMPDIR ?? "/var/tmp"), "pi-better-sandbox-files-")));
 after(() => rmSync(fixtures, { recursive: true, force: true }));
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -124,7 +123,7 @@ function unmodified(cwd: string): Tools {
 }
 
 function sessionAt(root: string): ForegroundSandboxController {
-    const controller = new ForegroundSandboxController();
+    const controller = new ForegroundSandboxController(IN_PROCESS_BACKEND);
     controller.beginSession(root, true);
     return controller;
 }
@@ -716,7 +715,7 @@ test("an abort raised mid-write still releases the queue for the next mutation",
     assert.equal(readFileSync(target, "utf8"), "after\n");
 });
 
-test("the registrations pi actually loads enforce the same policy on real files", async () => {
+test("the registrations pi actually loads enforce the same policy on real files", { skip: loadedRegistrationSkip }, async () => {
     // The real loader, the real entry point, the real session_start handler:
     // the tools exercised below are the ones a running pi would call.
     const { root, outside } = project("loaded-extension");
@@ -727,6 +726,19 @@ test("the registrations pi actually loads enforce the same policy on real files"
     assert.deepEqual(loaded.errors, []);
     const extension = loaded.extensions[0];
     assert.ok(extension);
+
+    // Pi binds the loader's registered tool inventory before session_start.
+    const runner = new ExtensionRunner(
+        loaded.extensions, loaded.runtime, root, SessionManager.inMemory(root), {} as never,
+    );
+    runner.bindCore({
+        refreshTools: () => {},
+        getAllTools: () => [...extension.tools.values()].map(({ definition, sourceInfo }) => ({
+            name: definition.name, description: definition.description,
+            parameters: definition.parameters, promptGuidelines: definition.promptGuidelines,
+            sourceInfo,
+        })),
+    } as ExtensionActions, {} as never);
 
     const sessionStart = extension.handlers.get("session_start")?.[0];
     assert.ok(sessionStart, "the extension must handle session_start");
@@ -751,13 +763,13 @@ test("the registrations pi actually loads enforce the same policy on real files"
     assert.equal(readFileSync(join(root, "src", "loaded.txt"), "utf8"), "edited\n");
 
     await refuses(() => runWrite(tools, { path: ".env", content: "SECRET=stolen\n" }), {
-        message: /is a write-denied path/,
+        message: /write-denied/,
         unchangedFile: join(root, ".env"),
         unchangedContent: "SECRET=original\n",
     });
     await refuses(
         () => runWrite(tools, { path: join(outside, "loaded-escape.txt"), content: "nope\n" }),
-        { message: /selected file permissions do not allow this write/, absent: join(outside, "loaded-escape.txt") },
+        { message: /permission-denied/, absent: join(outside, "loaded-escape.txt") },
     );
 });
 

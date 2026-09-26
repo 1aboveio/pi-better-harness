@@ -7,19 +7,15 @@
  * with one writable root — the canonical directory Pi was launched from — and
  * the packaged write-denied paths carved back out of it. Selected file,
  * credential-file, command, and network permissions apply to protected tools.
- * In-process file tools use the same canonical policy as spawned commands.
+ * File-tool syscalls and shell commands run under the same kernel policy.
  *
  * This is a tool-execution sandbox. Pi's own process, `pi.exec` calls, and
  * unrelated third-party extension code are not confined by it.
  */
 
-import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-    createBashToolDefinition,
-    createReadToolDefinition,
-    createEditToolDefinition,
-    createWriteToolDefinition,
     SettingsManager,
     type ExtensionAPI,
     type ExtensionContext,
@@ -36,16 +32,12 @@ import {
     FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
     publishForegroundSandboxPolicy,
 } from "./events.ts";
-import {
-    createSandboxedEditOperations,
-    createSandboxedWriteOperations,
-    createForegroundReadGuard,
-} from "./files.ts";
+import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.ts";
 import { writeSandboxDefault } from "./preferences.ts";
 import { readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
 import { defaultSandboxPermissions } from "./permissions.ts";
 import { openPermissionsPage } from "./permissions-page.ts";
-import { createSandboxedBashOperations } from "./shell.ts";
+
 import { footerTone, formatFooterStatus } from "./status.ts";
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
 
@@ -57,47 +49,12 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     // Pi's shell setting is only readable once a session directory is known, so
     // it is resolved lazily and re-read on every session start.
     let shellPath: string | undefined;
-    const operations = createSandboxedBashOperations(controller, { shellPath: () => shellPath });
-
-    // Overriding the built-in bash tool by name. Only `operations` changes:
-    // Pi's own definition still owns the schema, streaming, timeout,
-    // cancellation, truncation, session environment, result details, and both
-    // renderers, so every bash contract stays the built-in one.
-    pi.registerTool(createBashToolDefinition(process.cwd(), { operations }));
-
-    // The same backend for user-entered ! and !! commands.
-    pi.on("user_bash", () => ({ operations }));
-
-    // Overriding the built-in write and edit tools the same way: only their
-    // file operations change, so Pi's own definitions keep the parameter
-    // schemas, prompt guidance, call rendering, write previews, edit diffs,
-    // result details, file-mutation queue, and cancellation checks. The guarded
-    // operations run inside that queue, which is where the enforcement belongs.
-    const writeOperations = createSandboxedWriteOperations(controller);
-    const editOperations = createSandboxedEditOperations(controller);
-    const assertReadable = createForegroundReadGuard(controller);
-
-    // `cwd` is what these tools resolve a relative `path` against, so it has to
-    // be the directory Pi itself resolves against. Registration is re-run when
-    // a session reports a different cwd (`pi --cwd ...`), which Pi supports and
-    // refreshes in the same session.
-    let fileToolCwd: string | undefined;
-    const registerFileTools = (cwd: string): void => {
-        if (fileToolCwd === cwd) return;
-        fileToolCwd = cwd;
-        pi.registerTool(createWriteToolDefinition(cwd, { operations: writeOperations }));
-        pi.registerTool(createEditToolDefinition(cwd, { operations: editOperations }));
-        const read = createReadToolDefinition(cwd);
-        pi.registerTool({
-            ...read,
-            execute: (id, params, signal, update, ctx) => {
-                const path = params.path.replace(/^@/, "");
-                const expanded = path === "~" ? homedir() : path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : resolve(cwd, path);
-                return read.execute(id, { ...params, path: assertReadable(expanded) }, signal, update, ctx);
-            },
-        });
-    };
-    registerFileTools(process.cwd());
+    const ownEntry = fileURLToPath(import.meta.url);
+    const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
+        trustedSources: [ownEntry,
+            join(dirname(ownEntry), "../../extensions/sandbox/index.ts"),
+            join(dirname(ownEntry), "../pi-better-harness/extensions/sandbox/index.ts")],
+    });
 
     pi.on("tool_call", (event) => {
         const status = controller.status();
@@ -142,7 +99,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
 
     pi.on("session_start", (_event, ctx: ExtensionContext) => {
         shellPath = resolveShellPath(ctx.cwd);
-        registerFileTools(ctx.cwd);
+        boundary.register(ctx.cwd);
         paintFooter = (status) => {
             ctx.ui.setStatus(
                 FOOTER_KEY,
@@ -167,6 +124,9 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             return;
         }
         controller.beginSession(ctx.cwd, settings.main.enabled);
+        controller.protectRuntimePaths((pi.getAllTools?.() ?? [])
+            .map((tool) => tool.sourceInfo?.path).filter((path): path is string => typeof path === "string" && isAbsolute(path))
+            .map(runtimeCodeRoot));
         controller.setPermissionSettings(settings);
         controller.applyDefault(settings.main.enabled);
 

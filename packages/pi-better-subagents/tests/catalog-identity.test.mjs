@@ -10,7 +10,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -303,7 +303,7 @@ process.stdout.write(JSON.stringify({
             const stdout = await spawnNode(script, { TMPDIR: isolatedTmp, TMP: isolatedTmp, TEMP: isolatedTmp });
             const reported = JSON.parse(stdout);
             assert.equal(reported.label, "developer-1");
-            assert.equal(reported.root, join(isolatedTmp, "pi-better-subagents"));
+            assert.equal(reported.root, join(realpathSync(isolatedTmp), "pi-better-subagents"));
             assert.equal(reported.reservation, true);
             assert.equal(reported.root.includes("sessions"), false);
         } finally {

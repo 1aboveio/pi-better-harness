@@ -11,11 +11,13 @@
  * default and clears the previous override.
  */
 
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createTaskScratch, ensureHarnessRuntimeDirectories, harnessRuntimeDirectories, runtimeCodeRoot, writableRuntimeAlias } from "./shared-task-sandbox.ts";
 
 import { parseSandboxPermissions, type SandboxPermissionSettings, type SandboxPermissionProfile } from "./permissions.ts";
 import {
@@ -119,6 +121,8 @@ export class ForegroundSandboxController {
     #profileDir: string | undefined;
     #permissions: SandboxPermissionSettings | undefined;
     #policyProblem: string | undefined;
+    #runtimePaths: readonly string[] = [];
+    #taskScratch: ReturnType<typeof createTaskScratch> | undefined;
 
     constructor(seams: ForegroundSandboxSeams = {}) {
         this.#seams = seams;
@@ -210,13 +214,21 @@ export class ForegroundSandboxController {
         return this.status();
     }
 
+    /** Host-discovered runtime code, never task-supplied permission grants. */
+    protectRuntimePaths(paths: readonly string[]): void {
+        this.#runtimePaths = Object.freeze(paths.map((path) => canonicalizePath(path, this.#seams)));
+    }
+
     /** The current effective status, recomputed from live runtime evidence. */
     status(): ForegroundSandboxStatus {
         const support = describeSandboxSupport(this.#seams);
         const base = {
             projectRoot: this.#projectRoot,
             denyWrite: this.#permissions
-                ? Object.freeze([...this.#denyWrite, join(getAgentDir(), "extensions")])
+                ? Object.freeze([...this.#denyWrite, getAgentDir(), ...harnessRuntimeDirectories(),
+                    runtimeCodeRoot(join(getPackageDir(), "dist", "index.js")),
+                    dirname(fileURLToPath(import.meta.url)),
+                    ...(this.#projectRoot ? [join(this.#projectRoot, ".pi")] : []), ...this.#runtimePaths])
                 : this.#denyWrite,
             platform: support.platform,
             readPolicy: this.isUserEnabled() && this.#permissions && (this.#permissions.main.projectFiles === "off" || this.#permissions.main.outsideProject === "off" || this.#permissions.main.storedCredentials === "off") ? "restricted" as const : "unrestricted" as const,
@@ -259,6 +271,17 @@ export class ForegroundSandboxController {
                       ? "The foreground sandbox is available but inactive by default. Use /sandbox on for this session or /sandbox default on to persist opt-in."
                       : `The foreground sandbox is inactive by default, and no backend is available: ${support.reason}`,
             });
+        }
+
+        const projectRoot = this.#projectRoot;
+        const permissions = this.#permissions?.main;
+        const runtimeAlias = permissions && [getAgentDir(), tmpdir(), getPackageDir()]
+            .map((path) => writableRuntimeAlias(path, projectRoot, permissions)).find(Boolean);
+        if (runtimeAlias) {
+            return Object.freeze({ ...base, state: "failed", writableRoot: undefined,
+                backend: support.supported ? support.backend : undefined,
+                executable: support.supported ? support.executable : undefined,
+                reason: `A Pi runtime directory uses a task-writable symlink (${runtimeAlias}). Restart Pi with canonical runtime, PI_CODING_AGENT_DIR, and TMPDIR paths before enabling confinement.` });
         }
 
         if (this.#unsafeRootReason !== undefined) {
@@ -315,9 +338,12 @@ export class ForegroundSandboxController {
         // published status: this is the mechanism protecting itself, not a rule
         // the operator wrote or can remove.
         const profileDir = this.#profileDirectory();
+        ensureHarnessRuntimeDirectories();
+        this.#taskScratch ??= createTaskScratch();
         const policy: SandboxWritePolicy = {
             writableRoot: status.writableRoot,
-            denyWrite: Object.freeze([...status.denyWrite, profileDir]),
+            denyWrite: Object.freeze([...status.denyWrite, profileDir, this.#taskScratch.anchor]),
+            runtimeWrite: Object.freeze([this.#taskScratch.path]),
             home: (this.#seams.home ?? homedir)(),
             ...(status.permissions ? { permissions: status.permissions } : {}),
         };
@@ -326,6 +352,10 @@ export class ForegroundSandboxController {
 
     /** Drop the generated profiles this session created. */
     dispose(): void {
+        if (this.#taskScratch) {
+            rmSync(this.#taskScratch.path, { recursive: true, force: true });
+            this.#taskScratch = undefined;
+        }
         if (this.#profileDir === undefined) return;
         if (this.#seams.createProfileDir === undefined) {
             rmSync(this.#profileDir, { recursive: true, force: true });

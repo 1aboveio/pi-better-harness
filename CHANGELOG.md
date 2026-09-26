@@ -6,6 +6,39 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.5.0] - 2026-09-27
+
+### Changed
+
+- Bundle `pi-better-sandbox@0.5.0`, `pi-better-subagents@0.4.0`, and `pi-better-background-tasks@0.2.18` to separate trusted Pi startup from kernel-confined task execution.
+- Enabled actor profiles now reject tool implementations without a verified execution adapter. Main remains Off by default.
+
+## [pi-better-sandbox@0.5.0] - 2026-09-27
+
+### Changed
+
+- Run read/write/edit filesystem operations in fixed kernel-confined workers, preserving SDK tool behavior while closing symlink-check races.
+- Verify guarded tool implementations and reject unknown extension execution under enabled profiles. Currently supported task tools are read, write, edit, and bash; SSH, MCP, background, and nested-agent tools require future adapters.
+- Protect runtime configuration/code and provide private task scratch space without granting writes to the rest of the system temporary directory. Confined file operations have an explicit 8 MiB limit.
+
+## [pi-better-subagents@0.4.0] - 2026-09-27
+
+### Fixed
+
+- Allow Pi settings/authentication locks, provider transport, and session persistence to run in a trusted runtime while task access to outside paths, including `~/.pi`, remains Read by default.
+
+### Changed
+
+- Start confined children through a mandatory guard and immutable permission snapshot. Missing backends, invalid guard initialization, inherited extension discovery, and unsupported runtimes fail closed.
+- Apply Commands Off and Network Off to task operations without disabling Pi startup or its provider connection. Require Pi SDK 0.82.1 or newer.
+- Load only admitted task dependencies and trusted provider dependencies. Report requested tools without adapters as unavailable, and keep task workspaces separate from protected runtime metadata.
+
+## [pi-better-background-tasks@0.2.18] - 2026-09-27
+
+### Fixed
+
+- Synchronize shared Linux confinement support so protected leaves remain read-only inside explicitly writable runtime directories.
+
 ## [pi-better-harness@0.4.0] - 2026-09-27
 
 ### Changed

@@ -1,0 +1,15 @@
+{
+  "name": "task-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared task execution boundary for trusted Pi runtimes.",
+  "scripts": {
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --types node --strict --skipLibCheck *.ts",
+    "test": "node --import tsx --test *.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "typescript": "^6.0.0"
+  }
+}

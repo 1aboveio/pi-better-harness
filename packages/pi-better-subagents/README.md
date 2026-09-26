@@ -29,7 +29,7 @@ Try it for one run:
 pi -e npm:pi-better-subagents
 ```
 
-Linux sandboxing uses `bubblewrap` when available, for example from `sudo apt-get install bubblewrap`. With [`pi-better-sandbox`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme) installed, `/sandbox` controls the independent Subagents profile. Each launch snapshots that profile; `sandbox:false` cannot bypass a human-enabled sandbox. Commands Off or Network access Off prevents a detached Pi launch, because the child runtime still needs its provider connection. Session/temp writes use a private directory for that run. Without published permission settings, the legacy default remains write confinement with unrestricted reads and network. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox).
+Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or newer. `/sandbox` controls the independent Subagents profile, which each launch freezes. Pi handles its own startup, authentication, and provider connection; task tools obey the selected file, command, and network permissions. Outside project defaults to Read. Currently confined children admit `read`, `write`, `edit`, and `bash`; unsupported requested tools are reported as unavailable. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox) for the runtime boundary and supported configurations.
 
 ## When To Use
 

@@ -146,6 +146,8 @@ jobs:
             pi-better-sandbox)
               check_pack_file /tmp/package-pack.json index.ts
               check_pack_file /tmp/package-pack.json shared-sandbox-core.ts
+              check_pack_file /tmp/package-pack.json shared-task-sandbox.ts
+              check_pack_file /tmp/package-pack.json shared-task-files.ts
               # This extension deliberately ships no launcher; ordinary `pi` loads it.
               node -e 'const data=require("/tmp/package-pack.json"); const p=Array.isArray(data)?data[0]:Object.values(data)[0]; const launcher=p.files.find((f)=>f.path.startsWith("bin/")); if (launcher) throw new Error("pi-better-sandbox must ship no launcher, found " + launcher.path);'
               ;;
@@ -156,6 +158,11 @@ jobs:
             pi-better-subagents)
               check_pack_file /tmp/package-pack.json shared-navigator.ts
               check_pack_file /tmp/package-pack.json shared-sandbox-core.ts
+              check_pack_file /tmp/package-pack.json shared-task-sandbox.ts
+              check_pack_file /tmp/package-pack.json shared-task-files.ts
+              check_pack_file /tmp/package-pack.json task-runtime.mjs
+              check_pack_file /tmp/package-pack.json task-guard.ts
+              check_pack_file /tmp/package-pack.json task-policy.ts
               check_pack_file /tmp/package-pack.json shared-failure-observations.ts
               ;;
             pi-better-goal)
@@ -176,8 +183,15 @@ jobs:
                 extensions/plan/index.ts \
                 node_modules/pi-better-sandbox/index.ts \
                 node_modules/pi-better-sandbox/shared-sandbox-core.ts \
+                node_modules/pi-better-sandbox/shared-task-sandbox.ts \
+                node_modules/pi-better-sandbox/shared-task-files.ts \
                 node_modules/pi-better-subagents/index.ts \
                 node_modules/pi-better-subagents/shared-sandbox-core.ts \
+                node_modules/pi-better-subagents/shared-task-sandbox.ts \
+                node_modules/pi-better-subagents/shared-task-files.ts \
+                node_modules/pi-better-subagents/task-runtime.mjs \
+                node_modules/pi-better-subagents/task-guard.ts \
+                node_modules/pi-better-subagents/task-policy.ts \
                 node_modules/pi-better-subagents/shared-failure-observations.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
