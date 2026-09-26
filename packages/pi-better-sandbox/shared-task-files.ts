@@ -6,7 +6,7 @@ import { constants } from "node:fs";
 import { access, mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import type { ReadOperations, WriteOperations, EditOperations } from "@earendil-works/pi-coding-agent";
 import {
-    compileWritePolicy, evaluateReadAccess, evaluateWriteAccess, maybeBuildSandboxCommand,
+    canonicalizePath, compileWritePolicy, evaluateReadAccess, evaluateWriteAccess, maybeBuildSandboxCommand,
     type SandboxWritePolicy,
 } from "./shared-sandbox-core.ts";
 
@@ -177,7 +177,7 @@ export function createTaskFileOperations(controller: TaskFileController): {
         let command;
         try {
             command = maybeBuildSandboxCommand({
-                execPath: process.execPath, execArgs: ["-e", FILE_WORKER],
+                execPath: canonicalizePath(process.execPath), execArgs: ["-e", FILE_WORKER], internalHelperExecutable: true,
                 profilePath, policy: helperPolicy,
             }, { sandboxEnabled: true, explicitSandbox: true });
         } catch (error) {

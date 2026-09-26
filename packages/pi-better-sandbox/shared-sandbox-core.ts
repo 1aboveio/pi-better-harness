@@ -79,6 +79,8 @@ export type SandboxCommandArgs = SandboxTarget & {
     /** Where the macOS backend writes its generated SBPL profile. */
     profilePath: string;
     policy: SandboxWritePolicy;
+    /** Fixed internal helper only: expose its executable in a hidden Linux root. */
+    internalHelperExecutable?: boolean;
 };
 
 /** The wrapper command to spawn: the backend executable and its full argv. */
@@ -606,6 +608,12 @@ function buildLinuxPermissionCommand(
             if (existsSync(root)) mounts.push("--ro-bind", root, root);
         }
         mounts.push("--tmpfs", "/tmp");
+        if (args.internalHelperExecutable) {
+            const executable = canonicalizePath(args.execPath, seams);
+            if (!RUNTIME_ROOTS.some((root) => contains(canonicalizePath(root, seams), executable))) {
+                mounts.push("--ro-bind", executable, executable);
+            }
+        }
     } else {
         mounts.push(permissions.outsideProject === "read" ? "--ro-bind" : "--bind", "/tmp", "/tmp");
     }

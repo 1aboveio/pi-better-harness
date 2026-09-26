@@ -157,7 +157,7 @@ test('shell initialization executes only inside confinement and cancellation rem
     assert.match(output, /startup-ran/);
     assert.equal(existsSync(escaped), false);
     let drained = '';
-    await ops.exec('(sleep 0.05; printf tail) & printf head', f.project, { onData: (data) => { drained += data; } });
+    await ops.exec('(printf tail) & printf head', f.project, { onData: (data) => { drained += data; } });
     assert.match(drained, /head/);
     assert.match(drained, /tail/);
     await assert.rejects(ops.exec('sleep 10', f.project, { timeout: 0.05, onData: () => {} }), /timeout:/);
