@@ -39,6 +39,31 @@ function recordingHost() {
   return { host, messages };
 }
 
+test("successful handoffs retry failed receipt hooks without sending again", async () => {
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 10000 });
+  let writable = false;
+  let receipts = 0;
+  const onDelivered = () => { if (!writable) throw new Error("receipt write failed"); receipts++; };
+  batcher.enqueue(event("ordinary", { onDelivered }));
+  assert.equal(await batcher.flush(), false);
+  assert.equal(await batcher.flush(), false);
+  assert.equal(messages.length, 1);
+  writable = true;
+  assert.equal(await batcher.flush(), true);
+  assert.equal(receipts, 1);
+  assert.equal(messages.length, 1);
+  writable = false;
+  const urgent = { source: "subagent" as const, id: "urgent", label: "urgent", status: "failure", customType: "failure", content: "failure", onDelivered };
+  assert.equal(await batcher.deliverUrgent(urgent), false);
+  assert.equal(await batcher.deliverUrgent(urgent), false);
+  assert.equal(messages.length, 2);
+  writable = true;
+  assert.equal(await batcher.deliverUrgent(urgent), true);
+  assert.equal(messages.length, 2);
+  batcher.cancel();
+});
+
 test("coalesces callback-enabled completions in stable enqueue order", async () => {
   const { host, messages } = recordingHost();
   const delivered: string[] = [];
@@ -158,6 +183,57 @@ test("filters callback:false and ownership-suppressed events out of a mixed batc
   assert.doesNotMatch(messages[0]!.message.content, /sa_quiet|bg_foreign/);
   assert.deepEqual(delivered, ["sa_active"]);
   assert.deepEqual(suppressed, ["origin session-a does not match active session-b"]);
+});
+
+test("delivery-state read errors defer a batch instead of permanently suppressing it", async () => {
+  let unreadable = true;
+  let sent = 0;
+  let suppressed = 0;
+  const batcher = createCallbackBatcher({ sendMessage() { sent++; } }, { windowMs: 10_000, retryMs: 10_000 });
+  try {
+    batcher.enqueue({ ...event("sa_read_error"),
+      isDelivered: () => { if (unreadable) throw new Error("temporary metadata read error"); return false; },
+      onSuppressed: () => { suppressed++; },
+    });
+    assert.equal(await batcher.flush(), false);
+    assert.equal(batcher.pendingCount(), 1);
+    assert.equal(suppressed, 0);
+    assert.equal(sent, 0);
+    unreadable = false;
+    assert.equal(await batcher.flush(), true);
+    assert.equal(sent, 1);
+  } finally { batcher.cancel(); }
+});
+
+test("one unreadable receipt does not block unrelated deliverable completions", async () => {
+  const messages: string[] = [];
+  const batcher = createCallbackBatcher({ sendMessage(message) { messages.push(message.content); } }, { windowMs: 10_000, retryMs: 10_000 });
+  try {
+    batcher.enqueue({ ...event("sa_unreadable"), isDelivered: () => { throw new Error("unreadable receipt"); } });
+    batcher.enqueue(event("sa_ready"));
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 1);
+    assert.match(messages[0]!, /sa_ready/);
+    assert.doesNotMatch(messages[0]!, /sa_unreadable/);
+    assert.equal(batcher.pendingCount(), 1);
+  } finally { batcher.cancel(); }
+});
+
+test("urgent ownership read errors remain retryable and do not acknowledge suppression", async () => {
+  let unreadable = true;
+  let sent = 0;
+  let suppressed = 0;
+  const batcher = createCallbackBatcher({ sendMessage() { sent++; } });
+  const urgent = { ...event("sa_unverified"), customType: "failure-attention", content: "Failure needs attention",
+    getSuppressionReason: () => { if (unreadable) throw new Error("temporary ownership read error"); return undefined; },
+    onSuppressed: () => { suppressed++; },
+  };
+  assert.equal(await batcher.deliverUrgent(urgent), false);
+  assert.equal(suppressed, 0);
+  assert.equal(sent, 0);
+  unreadable = false;
+  assert.equal(await batcher.deliverUrgent(urgent), true);
+  assert.equal(sent, 1);
 });
 
 test("urgent health signals bypass an ordinary batch and retry without early markers", async () => {

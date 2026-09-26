@@ -111,6 +111,27 @@ Try it for one run:
 pi -e npm:pi-better-background-tasks
 ```
 
+## Failure observations
+
+Task lifecycle and failure evidence are reported separately. A watch can remain
+`running` while a poll or condition evaluator has failed. Status, list, log, and
+navigator views show unresolved observations before ordinary progress. A success
+match cannot finish a watch while evaluation of its failure condition is broken;
+a definite failure match still terminates it.
+
+Observations live in `failures.jsonl` beside task metadata. Recovery requires a
+successful evaluation of the same operation. Repeated failures are grouped, and
+an explicitly configured nonzero success exit is treated as expected. Verbose
+status includes observation details and the journal path. Corrupt or unreadable
+evidence is reported as **observation incomplete**.
+
+Unresolved running failures become eligible for attention after 60 seconds;
+observation gaps are eligible immediately. Terminal failures use the normal
+completion notification. A delivery receipt is stored only after handoff;
+notification delivery does not clear the failure. `callback:false` stays quiet
+while all inspection surfaces retain the evidence. Journals follow the task's
+existing retention and explicit-clear behavior.
+
 ## When To Use
 
 Use this package for shell commands that need logs, status, cancellation, or completion notifications across a Pi turn.

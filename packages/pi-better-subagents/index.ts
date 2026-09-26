@@ -92,6 +92,8 @@ import {
 } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.ts";
 import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
+import { collectRunFailures, failurePath, failureSummary, formatFailureSummary, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
+import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
 import {
     text,
     subagentListTool,
@@ -335,11 +337,15 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
         || meta.completionCallbackSentAt !== undefined
         || meta.completionCallbackSuppressedAt !== undefined) return;
     const label = meta.name ? `${meta.name} (${id})` : id;
+    const observations = Object.values(collectRunFailures(id, meta.cwd, true).observations);
+    const unresolved = observations.filter((observation) => observation.status === "unresolved");
+    const observationStatus = unresolved.some((observation) => observation.category === "observation-incomplete")
+        ? "observation incomplete" : unresolved.length ? "unresolved failure observations" : undefined;
     getCallbackBatcher(pi).enqueue({
         source: "subagent",
         id,
         label,
-        status: meta.status,
+        status: observationStatus ? `${meta.status}; ${observationStatus}` : meta.status,
         detailTool: "subagent_result",
         callback: true,
         isDelivered: () => {
@@ -349,10 +355,18 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
         },
         getSuppressionReason: () => {
             const current = readMeta(id);
-            if (!current) return "subagent metadata is unavailable";
+            if (!current) throw new Error("Subagent metadata is unavailable; defer completion");
             return callbackSuppressionReason(current);
         },
-        onDelivered: (at) => markCompletionCallbackSent(id, at),
+        onDelivered: (at) => {
+            const state = collectRunFailures(id, meta.cwd, true);
+            const due = pendingFailureAttention(state, at, { terminal: true });
+            if (due) {
+                markFailureAttentionDelivered(failurePath(id), due, at);
+                if (due.incidents.some((incident) => pendingFailureAttention(collectRunFailures(id, meta.cwd, true), at, { terminal: true })?.incidents.includes(incident))) return;
+            }
+            markCompletionCallbackSent(id, at);
+        },
         onSuppressed: (reason, at) => markCompletionCallbackSuppressed(id, reason, at),
     });
 }
@@ -363,6 +377,27 @@ function recoverCompletionCallbacks(pi: ExtensionAPI): void {
         if (!ownedByThisParent(meta)) continue;
         enqueueCompletionCallback(pi, meta.id);
     }
+}
+
+function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, now: number): void {
+    if (!pi || meta.callback === false || callbackSuppressionReason(meta)) return;
+    if ((meta.status === "orphaned" || meta.status === "lost") && !isHealthCallbackHandled(meta, meta.status)) return;
+    const state = collectRunFailures(meta.id, meta.cwd, meta.status !== "running" && meta.status !== "orphaned");
+    const pending = pendingFailureAttention(state, now);
+    if (!pending || (meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined)) return;
+    const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+    void getCallbackBatcher(pi).deliverUrgent({
+        source: "subagent", id: meta.id, label, status: `failure:${pending.key}`,
+        customType: "subagent-failure",
+        content: `${formatFailureSummary(state)}\nInspect: subagent_output id=${JSON.stringify(meta.id)}`,
+        isDelivered: () => failureAttentionHandled(collectRunFailures(meta.id, meta.cwd), pending.incidents),
+        getSuppressionReason: () => {
+            const current = readMeta(meta.id);
+            if (!current) throw new Error("Subagent metadata is unavailable; defer failure notification");
+            return callbackSuppressionReason(current);
+        },
+        onDelivered: (at) => { markFailureAttentionDelivered(failurePath(meta.id), pending, at); },
+    });
 }
 
 function markHealthCallbackSuppressed(meta: RunMeta, status: "orphaned" | "lost", reason: string, now: number): void {
@@ -533,6 +568,9 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
 
     const callback = meta.callback !== false;
     const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
+    const failureState = collectRunFailures(meta.id, meta.cwd, status === "lost");
+    const failureText = formatFailureSummary(failureState);
+    const attention = pendingFailureAttention(failureState, now, { terminal: status === "lost" });
     const delivery = buildHealthCallbackDelivery({ id: meta.id, label, status, callback });
     if (!delivery) {
         // callback:false — model follow-up suppressed; mark handled so recovery
@@ -548,19 +586,24 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
         label,
         status,
         customType: "subagent-health",
-        content: delivery.content,
+        content: prependFailureSummary(delivery.content, failureText),
         isDelivered: () => {
             const current = readMeta(meta.id);
-            return current ? isHealthCallbackHandled(current, status) : true;
+            if (!current) throw new Error("Subagent metadata is unavailable; defer health notification");
+            return isHealthCallbackHandled(current, status);
         },
         getSuppressionReason: () => {
             const current = readMeta(meta.id);
-            if (!current) return "subagent metadata is unavailable";
+            if (!current) throw new Error("Subagent metadata is unavailable; defer health notification");
             return callbackSuppressionReason(current);
         },
         onDelivered: (at) => {
             const current = readMeta(meta.id);
             if (!current || isHealthCallbackHandled(current, status)) return;
+            if (attention) {
+                markFailureAttentionDelivered(failurePath(meta.id), attention, at);
+                if (attention.incidents.some((incident) => pendingFailureAttention(collectRunFailures(meta.id, meta.cwd), at, { terminal: true })?.incidents.includes(incident))) return;
+            }
             if (status === "orphaned") current.orphanedCallbackSentAt = at;
             else current.lostCallbackSentAt = at;
             writeMeta(current);
@@ -587,12 +630,25 @@ function reconcileHealth(): void {
         if (!meta) continue;
         if (meta.status !== "running" && meta.status !== "orphaned" && meta.status !== "lost") continue;
         const now = Date.now();
+        if (meta.status === "orphaned" || meta.status === "lost") {
+            observeFailures(failurePath(meta.id), [{ id: `supervision:${meta.status}`, operation: `supervision:${meta.status}`, kind: "incomplete",
+                summary: meta.status === "lost" ? "Child supervision was lost; outcome is unknown" : "Child supervision interrupted; related work may still be alive" }], now);
+        }
+        deliverFailureAttention(pi, meta, now);
 
         if (meta.status === "running" || meta.status === "orphaned") {
             const result = reconcileRun(meta, realProcessProbe, now);
             if (result.changed) {
                 Object.assign(meta, result.patch, { status: result.status });
                 writeMeta(meta);
+                if (result.status === "lost") {
+                    observeFailures(failurePath(meta.id), [
+                        { id: "supervision:orphaned-resolved", operation: "supervision:orphaned", kind: "recovered", incidents: ["supervision:orphaned"] },
+                        { id: "supervision:lost", operation: "supervision:lost", kind: "incomplete", summary: "Child supervision was lost; outcome is unknown" },
+                    ], now);
+                } else if (result.status === "orphaned") {
+                    observeFailures(failurePath(meta.id), [{ id: "supervision:orphaned", operation: "supervision:orphaned", kind: "incomplete", summary: "Child supervision interrupted; related work may still be alive" }], now);
+                }
                 if (result.transition) {
                     // Human-visible health (always) on fresh transitions.
                     if (!callbackSuppressionReason(meta)) {
@@ -613,8 +669,13 @@ function reconcileHealth(): void {
             deliverHealthCallback(pi, meta, meta.status, now);
         }
     }
-    // Stop existing the moment nothing current-parent needs monitoring/recovery.
-    if (!needsMonitoring(listMetasForParent(process.pid))) stopHealthTicker();
+    // Completed runs can still have failed completion handoffs to retry.
+    for (const summary of listMetasForParent(process.pid)) {
+        if (!pi || !ownedByThisParent(summary) || summary.status === "running" || summary.status === "orphaned" || summary.status === "lost") continue;
+        const meta = readMeta(summary.id);
+        if (meta && meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined) enqueueCompletionCallback(pi!, meta.id);
+    }
+    if (!needsMonitoring(listMetasForParent(process.pid)) && !hasPendingFailureCallbacks()) stopHealthTicker();
 }
 
 /**
@@ -668,6 +729,12 @@ function reconcileAbandonedRuns(now: number = Date.now()): number {
         }
     } catch { /* best-effort */ }
     return adopted;
+}
+
+function hasPendingFailureCallbacks(): boolean {
+    return listMetasForParent(process.pid).some((m) => ownedByThisParent(m) && m.callback !== false &&
+        m.completionCallbackPendingAt !== undefined && m.completionCallbackSentAt === undefined && m.completionCallbackSuppressedAt === undefined &&
+        !callbackSuppressionReason(m));
 }
 
 /** Start the reconciliation loop if it isn't already running. */
@@ -848,6 +915,8 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
         if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
         if (row.tool) bits.push(row.tool);
         if (row.spend) bits.push(row.spend);
+        const failure = failureSummary(row.id, metaById.get(row.id)?.cwd ?? "", row.status !== "running" && row.status !== "orphaned");
+        const firstFailure = failure.split("\n")[0] || "";
         return {
             providerId: "subagents",
             id: row.id,
@@ -860,7 +929,8 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             statusTone: statusTone(row.status),
             kind: "subagent",
             elapsed: row.elapsed,
-            primary: bits.join(" · ") || "subagent run",
+            primary: firstFailure || bits.join(" · ") || "subagent run",
+            secondary: firstFailure ? bits.join(" · ") : undefined,
             facts: row.healthFacts,
             sortStartedAt: metaById.get(row.id)?.startedAt ?? now,
             expiresAt: (() => {
@@ -910,7 +980,9 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
     if (!detail) return null;
     void options;
     const transcript = readRunTranscript(id);
+    const failure = failureSummary(id, readMeta(id)?.cwd ?? "", detail.status !== "running" && detail.status !== "orphaned");
     const metadata = [
+        ...(failure ? [{ label: "failure", value: failure.split("\n")[0]! }] : []),
         { label: "provider", value: "Subagents" },
         { label: "id", value: detail.id },
         ...(detail.role ? [{ label: "role", value: String(detail.role) }] : []),
@@ -927,11 +999,11 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         title: detail.name || detail.id,
         status: detail.status,
         statusTone: statusTone(detail.status),
-        subtitle: detail.currentTool ? `current tool ${detail.currentTool}` : undefined,
+        subtitle: failure.split("\n")[0] || (detail.currentTool ? `current tool ${detail.currentTool}` : undefined),
         metadata,
-        evidence: { label: "transcript", text: detail.output || "(no transcript yet)" },
+        evidence: { label: "transcript", text: prependFailureSummary(detail.output || "(no transcript yet)", failure) },
         transcript: transcript.entries,
-        transcriptDiagnostic: transcript.diagnostic,
+        transcriptDiagnostic: failure ? prependFailureSummary(transcript.diagnostic ?? "", failure) : transcript.diagnostic,
         footerActions: [detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
     };
 }
@@ -1114,13 +1186,14 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     // Host-facing wrapper around first-party finalizer (finalization.ts).
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation; finalization.ts enforces canExitFinalize + lifecycle authority.
-    finalizeRunCore(id, code, {
+    const result = finalizeRunCore(id, code, {
         renderWidget,
         notify: (message, level) => {
             try { ctx.ui.notify(message, level); } catch { /* ignore */ }
         },
         sendMessage: () => enqueueCompletionCallback(pi, id),
     });
+    if (result.applied && hasPendingFailureCallbacks()) ensureHealthTicker();
 }
 
 /** String for one role, or an array when the caller assigns more than one. Arrays reach clarification instead of being rejected. */
@@ -1826,7 +1899,7 @@ export default function (pi: ExtensionAPI) {
         // Resume supervision reconciliation + durable health-callback recovery
         // across /reload while current-parent work still needs the ticker
         // (running/orphaned, or unmarked lost); it stops itself when idle.
-        if (needsMonitoring(listMetasForParent(process.pid))) ensureHealthTicker();
+        if (needsMonitoring(listMetasForParent(process.pid)) || hasPendingFailureCallbacks()) ensureHealthTicker();
     });
 
     pi.on("session_before_switch", () => {

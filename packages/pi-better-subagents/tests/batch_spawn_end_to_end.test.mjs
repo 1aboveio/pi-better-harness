@@ -263,12 +263,20 @@ describe("subagent_spawn_batch end-to-end", () => {
         assertCheckoutNodeModulesUntouched();
     });
 
-    beforeEach(() => {
+    beforeEach(async () => {
+        // A capacity test may finish while its admitted children still write
+        // session artifacts. Drain real children before removing their runtime.
+        await Promise.all(registry.listMetas()
+            .filter((meta) => meta.status === "running" && meta.pid !== process.pid)
+            .map((meta) => waitForFinished(registry.readMeta, meta.id)));
         clearRuns();
         capacity._resetSharedCapacityGateForTests();
     });
 
-    after(() => {
+    after(async () => {
+        await Promise.all(registry.listMetas()
+            .filter((meta) => meta.status === "running" && meta.pid !== process.pid)
+            .map((meta) => waitForFinished(registry.readMeta, meta.id)));
         process.env.PATH = origPath;
         // Cleanup owns only the temp RUNTIME tree created by this suite.
         rmSync(RUNTIME, { recursive: true, force: true });

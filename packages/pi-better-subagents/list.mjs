@@ -74,10 +74,11 @@ export function formatSubagentListRow(meta, p) {
     const name = meta.name ? `${meta.name} ` : "";
     const stat = `${elapsed}${spend ? ` · ${spend}` : ""}`;
     const health = formatListHealthSuffix(p.health);
+    const failure = p.failure ? `\n    ${p.failure.replace(/\n/g, "\n    ")}` : "";
     const batch = meta.batchId
         ? `  [batch: ${meta.batchName ? `${meta.batchName} ` : ""}${meta.batchId}]`
         : "";
-    return `• ${name}${meta.id}  [${status}]  ${meta.model ?? "?"}  ${stat}${health}${batch}\n    ${promptPreview(meta)}`;
+    return `• ${name}${meta.id}  [${status}]  ${meta.model ?? "?"}  ${stat}${health}${batch}${failure}\n    ${promptPreview(meta)}`;
 }
 
 export function buildSubagentList(p) {
@@ -87,6 +88,7 @@ export function buildSubagentList(p) {
     const statusOf = p.statusOf ?? ((meta) => meta.status);
     const usageById = p.usageById ?? (() => undefined);
     const healthById = p.healthById ?? (() => undefined);
+    const failureById = p.failureById ?? (() => "");
 
     const scoped = (p.metas ?? [])
         .filter((meta) => options.all || meta.spawnPid === parentPid)
@@ -110,6 +112,7 @@ export function buildSubagentList(p) {
         now,
         usage: usageById(row.meta.id),
         health: healthById(row.meta.id),
+        failure: failureById(row.meta.id),
     })));
 
     if (matching.length > displayed.length) {

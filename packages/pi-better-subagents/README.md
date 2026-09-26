@@ -14,7 +14,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 - Non-blocking subagent launches, with an optional role and named-agent catalog (`docs/agent-catalog.md`, `docs/agent-catalog-lifecycle.md`).
 - Default OS write sandboxing on macOS and Linux.
 - Explicit tool allowlists for child sessions.
-- Durable logs and result retrieval across reloads.
+- Durable logs, result retrieval, and [failure observations](docs/failure-observations.md) independent of lifecycle status.
 - Live background-work navigator for active runs.
 
 ## Install

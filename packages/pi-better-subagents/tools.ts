@@ -18,6 +18,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listMetas, effectiveStatus, isFinalResultStatus, type RunMeta, type RunStatus } from "./registry.ts";
 import { parseRun, tailLog, formatSubagentOutputBody } from "./parse.ts";
 import { buildSubagentResultText } from "./finalization.ts";
+import { failureSummary, prependFailureSummary } from "./failures.ts";
 import { formatOrphanedResult } from "./lifecycle.ts";
 import { stopRun } from "./stop.ts";
 import { fmtElapsed, fmtSpend } from "./widget.ts";
@@ -258,6 +259,10 @@ export function subagentListTool(Type: TypeModule): ToolDefinition {
                 statusOf: effectiveStatus,
                 usageById: (id: string) => parseRun(id).usage,
                 healthById,
+                failureById: (id: string) => {
+                    const meta = metas.find((m) => m.id === id);
+                    return meta ? failureSummary(id, meta.cwd, meta.status !== "running" && meta.status !== "orphaned") : "";
+                },
             }));
         },
     } as ToolDefinition;
@@ -300,7 +305,7 @@ export function subagentOutputTool(Type: TypeModule): ToolDefinition {
             // Health diagnostics for orphaned/lost/degraded only (#67). Healthy/quiet
             // stays on today's body. Independent of meta.callback.
             const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
-            return text(appendHealthDiagnostic(body, healthLine));
+            return text(prependFailureSummary(appendHealthDiagnostic(body, healthLine), failureSummary(p.id, meta.cwd, st !== "running" && st !== "orphaned")));
         },
     } as ToolDefinition;
 }
@@ -342,9 +347,9 @@ export function subagentResultTool(Type: TypeModule): ToolDefinition {
                     const rawTail = tailLog(p.id, 40);
                     const body = `${head}\n${formatOrphanedResult(r, rawTail)}`;
                     const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
-                    return subagentResultText(appendHealthDiagnostic(body, healthLine));
+                    return subagentResultText(prependFailureSummary(appendHealthDiagnostic(body, healthLine), failureSummary(p.id, meta.cwd)));
                 }
-                return subagentResultText(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
+                return subagentResultText(prependFailureSummary(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`, failureSummary(p.id, meta.cwd)));
             }
             // Lifecycle-aware body (complete-stream authority + diagnostics).
             // Lost runs go through formatLostResult inside formatSubagentResult (#65).
@@ -356,7 +361,7 @@ export function subagentResultTool(Type: TypeModule): ToolDefinition {
             // Append degraded/lost health facts when present; completed/failed
             // happy paths stay quiet when observation is non-actionable.
             const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
-            return subagentResultText(appendHealthDiagnostic(body, healthLine));
+            return subagentResultText(prependFailureSummary(appendHealthDiagnostic(body, healthLine), failureSummary(p.id, meta.cwd, true)));
         },
     } as ToolDefinition;
 }

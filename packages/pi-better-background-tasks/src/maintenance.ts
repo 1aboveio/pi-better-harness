@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { recordFailure } from "./failures.js";
 import { baseDir, listMetas, removeMeta, writeMeta } from "./registry.js";
 import { processIdentityAlive as defaultProcessIdentityAlive } from "./process-identity.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
@@ -49,6 +50,7 @@ export function runTaskMaintenance(options: TaskMaintenanceOptions = {}): TaskMa
       meta.endedAt = now;
       meta.error = "task supervisor is no longer alive; execution result is unavailable";
       meta.result = { reason: meta.error };
+      recordFailure(meta, "execution", meta.error, "supervisor-lost", { incomplete: true, at: now });
       writeMeta(meta);
       reconciled += 1;
     }

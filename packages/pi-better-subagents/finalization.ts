@@ -6,6 +6,8 @@
  */
 
 import { buildCompletionDelivery } from "./completion.ts";
+import { collectRunFailures, failurePath } from "./failures.ts";
+import { observeFailures } from "./shared-failure-observations.ts";
 import {
     classifyChildExit,
     formatSubagentResult,
@@ -57,6 +59,18 @@ export function finalizeRun(
     // Lifecycle authority streams the complete NDJSON log; result text stays bounded.
     const r = parseRunForLifecycle(id);
     const outcome = classifyChildExit(code, r);
+    collectRunFailures(id, meta.cwd, true);
+    if (!outcome.incomplete && code !== null) {
+        observeFailures(failurePath(id), ["orphaned", "lost"].map((status) => ({
+            id: `supervision:${status}:exit-recovered`, operation: `supervision:${status}`,
+            kind: "recovered" as const, incidents: [`supervision:${status}`],
+        })));
+    }
+    if (code !== 0 || outcome.incomplete) {
+        observeFailures(failurePath(id), [{ id: `exit:${code ?? "unknown"}:${outcome.classification}`,
+            operation: "child-exit", kind: outcome.incomplete ? "incomplete" : "failure",
+            category: "exit", summary: outcome.incomplete ? "Child exit evidence is incomplete" : `Child exited with code ${code}` }]);
+    }
     meta.status = outcome.status;
     meta.lifecycleClassification = outcome.classification;
     if (outcome.incomplete) meta.failureReason = "incomplete-stream";

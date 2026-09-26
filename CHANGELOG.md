@@ -8,9 +8,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **failure reporting**: share durable failure observations, explicit recovery, and notification receipts across subagents and background tasks
 - **sandbox**: add the flat Main/Subagents permission table and saved defaults, with inactive values retained
 - **sandbox**: enforce project/outside file modes, known credential-file overrides, command-launch gates, and network restrictions on integrated execution surfaces
 - **subagents**: capture human permission profiles at launch and reserve a private runtime directory; reject tool opt-outs that bypass enabled profiles
+
+### Fixed
+
+- **subagents**: surface structured tool failures before stale assistant progress without misclassifying an active process as terminated
+- **background-tasks**: retain condition-evaluation failures and withhold success while failure detection is incomplete
+- **callbacks**: retry temporary delivery-state and ownership-read errors instead of permanently suppressing notifications
 
 ### Changed
 

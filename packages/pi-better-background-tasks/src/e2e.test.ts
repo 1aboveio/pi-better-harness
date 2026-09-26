@@ -1,11 +1,13 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
-import { readMeta, taskDir, writeMeta } from "./registry.js";
+import { recordFailure } from "./failures.js";
+import { getCallbackBatcher } from "./shared-callback-batcher.js";
+import { metaPathFor, readMeta, taskDir, writeMeta } from "./registry.js";
 
 type JsonSchema = {
   description?: string;
@@ -291,6 +293,71 @@ describe("extension e2e", () => {
     }
   });
 
+  it("replays an undelivered terminal failure through the real session-start handler", async () => {
+    const sessionId = `failure-replay-${Date.now()}`;
+    const harness = createHarness({ sessionId });
+    const id = `bg_failure_replay_${Date.now()}`;
+    const meta = {
+      id, kind: "process" as const, status: "failed" as const,
+      startedAt: Date.now() - 1000, endedAt: Date.now(),
+      logPath: `${taskDir(id)}/output.log`, callback: true,
+      callbackOrigin: { cwd: process.cwd(), sessionId },
+      command: "build", cwd: process.cwd(), spawnPid: process.pid,
+    };
+    writeMeta(meta);
+    recordFailure(meta, "execution", "build exited 9", "exit", { category: "exit" });
+    try {
+      await harness.fireSessionStart();
+      writeFileSync(metaPathFor(id), "{broken");
+      expect(await getCallbackBatcher(harness.pi).flush()).toBe(false);
+      expect(harness.messages).toHaveLength(0);
+      writeMeta(meta);
+      await getCallbackBatcher(harness.pi).flush();
+      expect(harness.messages).toHaveLength(1);
+      expect(harness.messages[0]).toContain("build exited 9");
+      expect(readMeta(id)?.callbackSentAt).toBeDefined();
+      await harness.fireSessionStart();
+      await getCallbackBatcher(harness.pi).flush();
+      expect(harness.messages).toHaveLength(1);
+    } finally { rmSync(taskDir(id), { recursive: true, force: true }); }
+  });
+
+  it("shows unresolved sidecar evidence ahead of task progress on every inspection surface", async () => {
+    const sessionId = "failure-surface-session";
+    const harness = createHarness({ sessionId, mode: "tui", hasUI: true });
+    const id = `bg_failure_surface_${Date.now()}`;
+    const meta = {
+      id, kind: "process" as const, status: "failed" as const,
+      startedAt: Date.now() - 1000, endedAt: Date.now(),
+      logPath: `${taskDir(id)}/output.log`, callback: false,
+      callbackOrigin: { cwd: process.cwd(), sessionId },
+      command: "background-build", cwd: process.cwd(), spawnPid: process.pid,
+    };
+    writeMeta(meta);
+    recordFailure(meta, "execution", "build failed with exit 9", "exit", { category: "exit" });
+    try {
+      const list = await harness.execute("bg_task_list", { status: ["failed"], limit: 100 });
+      const status = await harness.execute("bg_task_status", { id });
+      const verbose = await harness.execute("bg_task_status", { id, verbose: true });
+      const log = await harness.execute("bg_task_log", { id });
+      await harness.fireSessionStart();
+      const navigator = renderWidget(harness.lastWidget("background-work-list"));
+      for (const text of [list, status, log]) {
+        expect(text).toMatch(/^Unresolved failure.*build failed with exit 9/);
+        expect(text.indexOf("Unresolved failure")).toBeLessThan(text.indexOf(id));
+      }
+      expect(JSON.parse(verbose)).toMatchObject({
+        failureSummary: expect.stringContaining("build failed with exit 9"), id,
+        failureJournal: expect.stringContaining("failures.jsonl"),
+        failureObservations: [expect.objectContaining({ status: "unresolved", summary: "build failed with exit 9" })],
+      });
+      expect(verbose.indexOf("failureSummary")).toBeLessThan(verbose.indexOf('"status"'));
+      expect(navigator).toContain("build failed with exit 9");
+    } finally {
+      rmSync(taskDir(id), { recursive: true, force: true });
+    }
+  });
+
   it("supports the action-wrapper tools for watch, log, and stop", async () => {
     const harness = createHarness();
 
@@ -511,6 +578,7 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
   backgroundTasksExtension(pi);
 
   return {
+    pi,
     tools,
     messages,
     messageAttempts,

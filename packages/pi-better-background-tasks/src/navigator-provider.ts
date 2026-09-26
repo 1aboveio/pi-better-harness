@@ -9,6 +9,8 @@ import {
 } from "./shared-navigator.ts";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { activeFailures, readFailureState } from "./shared-failure-observations.js";
+import { failurePath, failureSummary } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
 import { stopTask } from "./runtime.js";
@@ -102,6 +104,7 @@ function isExpiredTerminalNavigatorRow(meta: BackgroundTaskMeta, now: number): b
 }
 
 function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
+  const failure = failureSummary(meta.id);
   const elapsed = formatDuration((meta.endedAt ?? now) - meta.startedAt);
   return {
     providerId: "background-tasks",
@@ -111,7 +114,7 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
     statusTone: toneForStatus(meta.status),
     kind: meta.kind === "command_watch" ? "watch" : "process",
     elapsed,
-    primary: compactCommandLabel(meta),
+    primary: failure ? failure.split("\n")[0]! : compactCommandLabel(meta),
     command: commandLabel(meta),
     tool: compactCommandLabel(meta),
     secondary: secondaryLabel(meta),
@@ -125,6 +128,7 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
 
 function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   if (!meta) return null;
+  const failure = failureSummary(meta.id);
   const log = readLog(meta.logPath, options?.logTailLines ?? 10);
   const command = commandLabel(meta);
   const metadata = [
@@ -159,7 +163,7 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
     title: meta.name || meta.id,
     status: meta.status,
     statusTone: toneForStatus(meta.status),
-    subtitle: compactCommandLabel(meta),
+    subtitle: failure ? failure.split("\n")[0]! : compactCommandLabel(meta),
     metadata,
     foldedSections: [{
       id: "command",
@@ -170,7 +174,7 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
     }],
     evidence: {
       label: log.truncated ? "log tail" : "log",
-      text: log.text || "(log is empty)",
+      text: [failure, log.text || "(log is empty)"].filter(Boolean).join("\n"),
     },
     footerActions: [meta.status === "running" ? "x stop" : "x dismiss"],
   };
@@ -212,6 +216,8 @@ function secondaryLabel(meta: BackgroundTaskMeta): string | undefined {
 
 function factsForMeta(meta: BackgroundTaskMeta, now: number): string[] {
   const facts: string[] = [];
+  const incident = activeFailures(readFailureState(failurePath(meta.id)))[0];
+  if (incident) facts.push(`${incident.category === "observation-incomplete" ? "Observation incomplete" : incident.status === "expected" ? "Expected failure" : "Unresolved failure"}: ${incident.summary}`);
   if (meta.status === "running") {
     const stall = observeBackgroundTaskStall(meta, now);
     if (stall.state === "stalled") facts.push("stalled");
