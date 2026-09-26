@@ -281,8 +281,9 @@ describe("bounded default runtime compatibility", () => {
         for (const path of [join(tmp, "install.log"), join(temp, "work"), join(mds, "mds.lock"), join(mds, "database")]) {
             assert.equal(evaluateWriteAccess(path, policy, macRuntime).allowed, true, path);
         }
-        for (const path of [join(base, "arbitrary.lock"), "/private/var/folders/ab/current-user/C/unrelated",
-            "/private/var/folders/other-user/C/mds/mds.lock", join(home, ".pi/other.lock")]) {
+        // Ordinary outside sentinels must remain outside /tmp on Linux too.
+        for (const path of ["/var/tmp/pi-runtime-outside/arbitrary.lock", "/private/var/folders/ab/current-user/C/unrelated",
+            "/private/var/folders/other-user/C/mds/mds.lock", "/var/tmp/pi-runtime-outside/home/.pi/other.lock"]) {
             assert.equal(evaluateWriteAccess(path, policy, macRuntime).allowed, false, path);
         }
         buildSandboxCommand(request, macRuntime);
