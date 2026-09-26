@@ -141,6 +141,7 @@ jobs:
             pi-better-background-tasks)
               check_pack_file /tmp/package-pack.json src/shared-navigator.ts
               check_pack_file /tmp/package-pack.json src/shared-sandbox-core.ts
+              check_pack_file /tmp/package-pack.json src/shared-failure-observations.ts
               ;;
             pi-better-sandbox)
               check_pack_file /tmp/package-pack.json index.ts
@@ -155,6 +156,7 @@ jobs:
             pi-better-subagents)
               check_pack_file /tmp/package-pack.json shared-navigator.ts
               check_pack_file /tmp/package-pack.json shared-sandbox-core.ts
+              check_pack_file /tmp/package-pack.json shared-failure-observations.ts
               ;;
             pi-better-goal)
               check_pack_file /tmp/package-pack.json src/index.ts
@@ -176,8 +178,10 @@ jobs:
                 node_modules/pi-better-sandbox/shared-sandbox-core.ts \
                 node_modules/pi-better-subagents/index.ts \
                 node_modules/pi-better-subagents/shared-sandbox-core.ts \
+                node_modules/pi-better-subagents/shared-failure-observations.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
+                node_modules/pi-better-background-tasks/src/shared-failure-observations.ts \
                 node_modules/pi-better-ssh/src/index.ts \
                 node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
                 node_modules/pi-better-goal/src/index.ts \
