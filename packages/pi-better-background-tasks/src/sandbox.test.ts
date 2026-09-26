@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -17,18 +17,21 @@ import {
   observeForegroundSandboxPolicy,
   resolveForegroundSandboxPlan,
 } from "./sandbox.js";
-import type { SandboxSeams } from "./shared-sandbox-core.js";
+import { compileWritePolicy, type SandboxSeams } from "./shared-sandbox-core.js";
 import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
 import type { CommandSpec } from "./types.js";
 
-// Disposable fixtures live under the canonical /var/tmp rather than
-// os.tmpdir(): the macOS profile always allows writes under /private/var/folders
-// (which is what os.tmpdir() returns there), so an "outside the project" probe
-// placed there would pass without the sandbox proving anything. realpath keeps
-// the same directory addressable on both platforms — /private/var/tmp on macOS,
-// /var/tmp on Linux.
+// Prefer /var/tmp so outside-project probes are meaningful on macOS. Some
+// restricted hosts disallow fixture creation there; policy/argv tests can use
+// the process temp directory without changing kernel integration fixtures.
 const varTmp = realpathSync("/var/tmp");
-const fixtureRoot = mkdtempSync(join(varTmp, "bg-sandbox-contract-"));
+let fixtureRoot: string;
+try {
+  fixtureRoot = realpathSync(mkdtempSync(join(varTmp, "bg-sandbox-contract-")));
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+  fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), "bg-sandbox-contract-")));
+}
 afterAll(() => rmSync(fixtureRoot, { recursive: true, force: true }));
 
 /**
@@ -172,6 +175,48 @@ describe("foreground sandbox policy contract", () => {
     expect(currentForegroundSandboxPolicy(pi)).toMatchObject({ state: "enabled" });
   });
 
+  it("captures permission values as a launch snapshot and rejects disabled Main commands", () => {
+    const { pi, events } = createPi();
+    const publisher = createSandboxPublisher(events);
+    const permissions = { enabled: true, projectFiles: "read-write", outsideProject: "read",
+      storedCredentials: "read", commands: true, network: false };
+    publisher.announce({ ...enabledPolicy(varTmp), permissions });
+    const plan = resolveForegroundSandboxPlan(pi);
+    expect(plan).toMatchObject({ confined: true, permissions: { network: false } });
+    permissions.network = true;
+    expect(plan).toMatchObject({ confined: true, permissions: { network: false } });
+
+    publisher.announce({ ...enabledPolicy(varTmp), permissions: { ...permissions, commands: false } });
+    expect(() => resolveForegroundSandboxPlan(pi)).toThrow(/Main profile disables commands/);
+  });
+
+  it("checks SSH launch permissions before allowing remote setup", () => {
+    const { pi, events } = createPi();
+    const publisher = createSandboxPublisher(events);
+    publisher.announce(enabledPolicy(varTmp));
+    expect(resolveForegroundSandboxPlan(pi, true)).toEqual({ confined: false });
+    const permissions = { enabled: true, projectFiles: "read-write", outsideProject: "read",
+      storedCredentials: "read", commands: true, network: false };
+    publisher.announce({ ...enabledPolicy(varTmp), permissions });
+    expect(() => resolveForegroundSandboxPlan(pi, true)).toThrow(/disables network/);
+    publisher.announce({ ...enabledPolicy(varTmp), permissions: { ...permissions, commands: false } });
+    expect(() => resolveForegroundSandboxPlan(pi, true)).toThrow(/disables commands/);
+    publisher.announce({ ...enabledPolicy(varTmp), permissions: { ...permissions, network: true } });
+    expect(() => resolveForegroundSandboxPlan(pi, true)).toThrow(/Structured SSH cannot apply/);
+    publisher.announce({ state: "disabled", permissions: { ...permissions, enabled: false } });
+    expect(resolveForegroundSandboxPlan(pi, true)).toEqual({ confined: false });
+  });
+
+  it("fails closed on invalid permission events instead of using an older policy", () => {
+    const { pi, events } = createPi();
+    const publisher = createSandboxPublisher(events);
+    publisher.announce(enabledPolicy(varTmp));
+    publisher.announce({
+      ...enabledPolicy(varTmp), permissions: { enabled: true, commands: "no" },
+    });
+    expect(() => resolveForegroundSandboxPlan(pi)).toThrow(/Invalid Main sandbox permission profile/);
+  });
+
   // @covers background-task.sandbox-policy-contract
   // @level unit
   it("runs unsandboxed when no sandbox extension publishes a policy", () => {
@@ -240,6 +285,19 @@ describe("foreground sandbox launch planning", () => {
     // The deny that protects the mechanism itself: the registry holds the launch
     // vector a resumed watch re-runs and the profile that vector names.
     expect(profile).toContain(`(deny file-write* (subpath "${realpathSync(baseDir())}"))`);
+  });
+
+  it("passes the permission snapshot to the backend, including network", () => {
+    const { spec, project, profilePath } = wrapFixture("permissions-macos");
+    const permissions = { projectFiles: "read-write", outsideProject: "read", storedCredentials: "read",
+      commands: true, network: false } as const;
+    const plan = { ...wrapPlan(project), permissions };
+    if (!("permissions" in compileWritePolicy({ writableRoot: project, home: homedir(), ...{ permissions } }))) {
+      expect(() => confineCommandSpec(spec, plan, profilePath, MACOS)).toThrow(/permission-aware sandbox core is unavailable/);
+    } else {
+      confineCommandSpec(spec, plan, profilePath, MACOS);
+      expect(readFileSync(profilePath, "utf8")).toContain("(deny network*)");
+    }
   });
 
   // @covers background-task.sandbox-launch-capture

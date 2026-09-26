@@ -10,8 +10,10 @@
  * is passed through unchanged.
  */
 
+import type { PermissionProfile } from "./permission-policy.ts";
 import {
     buildSandboxCommand as buildSharedSandboxCommand,
+    compileWritePolicy,
     maybeBuildSandboxCommand as maybeBuildSharedSandboxCommand,
     sandboxSupported as sharedSandboxSupported,
     type SandboxCommand,
@@ -25,17 +27,32 @@ type SandboxCommandArgs = {
     home: string;
     piBin: string;
     piArgs: string[];
+    permissions?: Omit<PermissionProfile, "enabled">;
+    denyWrite?: readonly string[];
+    runtimeDir?: string;
 };
 
 /** Map the subagent's single-writable-directory shape onto the shared policy. */
 function sharedArgs(args: SandboxCommandArgs): SharedSandboxCommandArgs {
     return {
         profilePath: args.profilePath,
-        // Subagents have no write-deny list: the run directory is the policy.
-        policy: { writableRoot: args.writableDir, home: args.home },
-        execPath: args.piBin,
-        execArgs: args.piArgs,
+        // Parent-owned run artifacts must never be writable by the child.
+        policy: { writableRoot: args.writableDir, home: args.home,
+            ...(args.permissions ? { permissions: args.permissions } : {}),
+            ...(args.denyWrite ? { denyWrite: args.denyWrite } : {}),
+            ...(args.runtimeDir ? { runtimeWrite: [args.runtimeDir] } : {}),
+        },
+        execPath: args.runtimeDir ? "/usr/bin/env" : args.piBin,
+        execArgs: args.runtimeDir
+            ? [`TMPDIR=${args.runtimeDir}`, `TMP=${args.runtimeDir}`, `TEMP=${args.runtimeDir}`, args.piBin, ...args.piArgs]
+            : args.piArgs,
     };
+}
+
+function assertPermissionCore(args: SandboxCommandArgs): void {
+    if (args.permissions && !("permissions" in compileWritePolicy(sharedArgs(args).policy))) {
+        throw new Error("Permission-aware sandbox core is unavailable; update the sandbox packages before launching a subagent.");
+    }
 }
 
 /** True when an OS write-sandbox backend can be applied on this platform. */
@@ -55,9 +72,12 @@ export function maybeBuildSandboxCommand(
     // `sandbox:false` is this surface's opt-out, and the only one its operator
     // has: a subagent has no slash commands. A caller that states its own remedy
     // keeps it.
+    assertPermissionCore(args);
     return maybeBuildSharedSandboxCommand(sharedArgs(args), {
         ...request,
-        remedy: request.remedy ?? "Pass sandbox:false to run this subagent unconfined.",
+        remedy: request.remedy ?? (args.permissions
+            ? "Change the Subagents permissions in /sandbox."
+            : "Pass sandbox:false to run this subagent unconfined."),
     });
 }
 
@@ -67,5 +87,6 @@ export function maybeBuildSandboxCommand(
  * bypass the request-policy helper above.
  */
 export function buildSandboxCommand(args: SandboxCommandArgs): SandboxCommand {
+    assertPermissionCore(args);
     return buildSharedSandboxCommand(sharedArgs(args));
 }

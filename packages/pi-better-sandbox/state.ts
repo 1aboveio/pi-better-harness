@@ -11,11 +11,13 @@
  * default and clears the previous override.
  */
 
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { parseSandboxPermissions, type SandboxPermissionSettings, type SandboxPermissionProfile } from "./permissions.ts";
 import {
     canonicalizePath,
     describeSandboxSupport,
@@ -58,9 +60,11 @@ export type ForegroundSandboxStatus = {
     readonly backend: SandboxBackendId | undefined;
     readonly executable: string | undefined;
     /** Reads are never restricted by this sandbox. */
-    readonly readPolicy: "unrestricted";
-    /** Network is never restricted by this sandbox. */
-    readonly networkPolicy: "unrestricted";
+    readonly readPolicy: "unrestricted" | "restricted";
+    /** Network policy for confined commands (not the parent Pi provider connection). */
+    readonly networkPolicy: "unrestricted" | "blocked";
+    readonly permissions?: Readonly<SandboxPermissionProfile>;
+    readonly subagentPermissions?: Readonly<SandboxPermissionProfile>;
     /** Human-readable evidence for why `state` is what it is. */
     readonly reason: string;
 };
@@ -113,6 +117,8 @@ export class ForegroundSandboxController {
     #defaultEnabled = false;
     #sessionOverride: boolean | undefined;
     #profileDir: string | undefined;
+    #permissions: SandboxPermissionSettings | undefined;
+    #policyProblem: string | undefined;
 
     constructor(seams: ForegroundSandboxSeams = {}) {
         this.#seams = seams;
@@ -133,6 +139,8 @@ export class ForegroundSandboxController {
         );
         this.#defaultEnabled = defaultEnabled;
         this.#sessionOverride = undefined;
+        this.#permissions = undefined;
+        this.#policyProblem = undefined;
         return this.status();
     }
 
@@ -145,6 +153,7 @@ export class ForegroundSandboxController {
     /** Turn protection off for this session only. Never persisted. */
     disable(): ForegroundSandboxStatus {
         this.#sessionOverride = false;
+        this.#policyProblem = undefined;
         return this.status();
     }
 
@@ -158,6 +167,27 @@ export class ForegroundSandboxController {
     /** Whether a human has left protection switched on. */
     isUserEnabled(): boolean {
         return this.#sessionOverride ?? this.#defaultEnabled;
+    }
+
+    /** Apply human-selected profiles. Disabled profiles keep their detail values. */
+    setPermissionSettings(settings: SandboxPermissionSettings): ForegroundSandboxStatus {
+        this.#permissions = parseSandboxPermissions(settings);
+        this.#policyProblem = undefined;
+        this.#sessionOverride = settings.main.enabled;
+        return this.status();
+    }
+
+    block(reason: string): ForegroundSandboxStatus {
+        this.#policyProblem = reason;
+        return this.status();
+    }
+
+    permissionSettings(): SandboxPermissionSettings | undefined {
+        if (!this.#permissions) return undefined;
+        return parseSandboxPermissions({
+            ...this.#permissions,
+            main: { ...this.#permissions.main, enabled: this.isUserEnabled() },
+        });
     }
 
     /** The deny-write templates currently in force (packaged defaults for now). */
@@ -185,11 +215,24 @@ export class ForegroundSandboxController {
         const support = describeSandboxSupport(this.#seams);
         const base = {
             projectRoot: this.#projectRoot,
-            denyWrite: this.#denyWrite,
+            denyWrite: this.#permissions
+                ? Object.freeze([...this.#denyWrite, join(getAgentDir(), "extensions")])
+                : this.#denyWrite,
             platform: support.platform,
-            readPolicy: "unrestricted",
-            networkPolicy: "unrestricted",
+            readPolicy: this.isUserEnabled() && this.#permissions && (this.#permissions.main.projectFiles === "off" || this.#permissions.main.outsideProject === "off" || this.#permissions.main.storedCredentials === "off") ? "restricted" as const : "unrestricted" as const,
+            networkPolicy: this.isUserEnabled() && this.#permissions?.main.network === false ? "blocked" as const : "unrestricted" as const,
+            ...(this.#permissions ? {
+                permissions: Object.freeze({ ...this.#permissions.main, enabled: this.isUserEnabled() }),
+                subagentPermissions: Object.freeze({ ...this.#permissions.subagents }),
+            } : {}),
         } as const;
+
+        if (this.#policyProblem !== undefined) {
+            return Object.freeze({ ...base, state: "failed", writableRoot: undefined,
+                backend: support.supported ? support.backend : undefined,
+                executable: support.supported ? support.executable : undefined,
+                reason: this.#policyProblem });
+        }
 
         if (this.#projectRoot === undefined) {
             return Object.freeze({
@@ -246,7 +289,9 @@ export class ForegroundSandboxController {
             writableRoot: this.#projectRoot,
             backend: support.backend,
             executable: support.executable,
-            reason: `Writes are confined to ${this.#projectRoot} by ${support.backend} (${support.executable}).`,
+            reason: this.#permissions
+                ? `Sandbox permissions are enforced by ${support.backend} (${support.executable}) for ${this.#projectRoot}.`
+                : `Writes are confined to ${this.#projectRoot} by ${support.backend} (${support.executable}).`,
         });
     }
 
@@ -274,6 +319,7 @@ export class ForegroundSandboxController {
             writableRoot: status.writableRoot,
             denyWrite: Object.freeze([...status.denyWrite, profileDir]),
             home: (this.#seams.home ?? homedir)(),
+            ...(status.permissions ? { permissions: status.permissions } : {}),
         };
         return { confined: true, policy, profilePath: this.#profilePathFor(policy) };
     }
@@ -296,7 +342,7 @@ export class ForegroundSandboxController {
      */
     #profilePathFor(policy: SandboxWritePolicy): string {
         const digest = createHash("sha256")
-            .update(JSON.stringify([policy.writableRoot, policy.denyWrite, policy.home]))
+            .update(JSON.stringify(policy))
             .digest("hex")
             .slice(0, 16);
         return join(this.#profileDirectory(), `foreground-${digest}.sb`);

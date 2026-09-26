@@ -34,8 +34,7 @@ const REMOTE_SESSION_POLL_MS = 100;
 
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 
-/** Remote SSH launches never consult the local foreground sandbox policy. */
-const UNCONFINED_LAUNCH = { confined: false } as const;
+
 
 export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
 
@@ -75,9 +74,8 @@ export function spawnTask(
   dependencies: TaskRuntimeDependencies = {},
 ): BackgroundTaskMeta {
   // Resolved before any task directory, log, or metadata exists so a blocked
-  // launch leaves nothing behind. Remote SSH work is not a local execution path
-  // and keeps its existing remote semantics untouched.
-  const sandboxPlan = params.ssh ? UNCONFINED_LAUNCH : resolveForegroundSandboxPlan(pi);
+  // launch leaves nothing behind. Structured SSH must also honor launch restrictions.
+  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const logPath = logPathFor(id);
@@ -315,7 +313,7 @@ export function startWatchTask(
     const error = condition && validateCondition(condition);
     if (error) throw new Error(`${name}: ${error}`);
   }
-  const sandboxPlan = params.ssh ? UNCONFINED_LAUNCH : resolveForegroundSandboxPlan(pi);
+  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const now = Date.now();

@@ -38,9 +38,10 @@ import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { maybeBuildSandboxCommand } from "./sandbox.ts";
+import { observeSandboxPermissions, resolveSubagentPermissions } from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import {
     sessionsDir,
     runDir,
@@ -1138,6 +1139,7 @@ export default function (pi: ExtensionAPI) {
     healthPi = pi;
     ensureSubagentProvider();
     registerSubagentsGoalProvider(pi);
+    observeSandboxPermissions(pi);
     let acceptanceResultToolRef: { execute: (toolCallId: string, params: { id: string }) => Promise<unknown> } | undefined;
     function publishAcceptanceHooks(tool?: NonNullable<typeof acceptanceResultToolRef>): void {
         if (process.env.PI_CATALOG_ACCEPTANCE_PROBE !== "1") return;
@@ -1238,6 +1240,7 @@ export default function (pi: ExtensionAPI) {
         sandboxDir?: string;
     }> {
         assertThinkingLevel(p.thinking);
+        const permissionPlan = resolveSubagentPermissions(pi, p.sandbox);
         const cfg = loadConfig();
         let model: string | undefined;
         let thinking: ThinkingLevel | undefined;
@@ -1268,11 +1271,12 @@ export default function (pi: ExtensionAPI) {
         // Sandbox is ON by default. sandbox_dir moves the confinement + working
         // dir elsewhere. git_clone_workspace prepares a disposable clone with
         // .git/ inside the writable root for Git-mutating sandboxed subagents.
-        const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string" || p.git_clone_workspace === true;
-        const sandboxEnabled = p.sandbox !== false; // default on
+        const explicitSandbox = p.sandbox === true || typeof p.sandbox_dir === "string" || p.git_clone_workspace === true || permissionPlan.enforced;
+        const sandboxEnabled = permissionPlan.sandboxEnabled;
 
-        mkdirSync(sessionsDir(), { recursive: true });
         const id = nextRunId();
+        const childSessionDir = permissionPlan.permissions ? join(sessionsDir(), id) : sessionsDir();
+        mkdirSync(childSessionDir, { recursive: true });
         mkdirSync(runDir(id), { recursive: true });
 
         const workspace = resolveSubagentWorkspace({
@@ -1320,7 +1324,7 @@ export default function (pi: ExtensionAPI) {
 
         const args = [
             "-p", "--mode", "json",
-            "--session-dir", sessionsDir(),
+            "--session-dir", childSessionDir,
             "--session-id", id,
             ...extArgs,
             ...(model ? ["--model", model] : []),
@@ -1332,10 +1336,22 @@ export default function (pi: ExtensionAPI) {
         ];
 
         const piBin = resolvePiBinary();
+        const writableContainsRunDir = requestedSandboxDir && (() => {
+            const rel = relative(runDir(id), requestedSandboxDir);
+            return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+        })();
+        const denyWrite = permissionPlan.enforced ? [
+            join(PiCodingAgent.getAgentDir?.() ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "extensions"),
+            ...(writableContainsRunDir ? [
+                join(runDir(id), "meta.json"), join(runDir(id), ".launch.json"),
+                promptPathFor(id), join(runDir(id), "sandbox.sb"),
+            ] : [runDir(id)]),
+        ] : undefined;
         const sandboxCommand = requestedSandboxDir
             ? maybeBuildSandboxCommand({
                 profilePath: join(runDir(id), "sandbox.sb"),
                 writableDir: requestedSandboxDir, home: homedir(), piBin, piArgs: args,
+                ...(permissionPlan.permissions ? { permissions: permissionPlan.permissions, denyWrite, runtimeDir: childSessionDir } : {}),
             }, { sandboxEnabled, explicitSandbox })
             : undefined;
         const cmd = sandboxCommand ?? { file: piBin, fileArgs: args };
@@ -1403,7 +1419,7 @@ export default function (pi: ExtensionAPI) {
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
-            "By default the subagent is sandboxed (writes confined to its working dir, reads and network open) and triggers completion here on finish. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
+            "By default the subagent is sandboxed. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Without published settings, legacy write confinement applies. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
         ],
         parameters: Type.Object({
@@ -1417,7 +1433,7 @@ export default function (pi: ExtensionAPI) {
             tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
             clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO extensions at all (only built-ins: read, bash, edit, write). Default false — the extensions backing the requested tools load, so web_fetch and model auth (e.g. xai) work." })),
-            sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE (macOS): kernel-confine the child's file WRITES to its working dir — reads and network stay open, but it cannot write outside, whatever it runs. Set false to allow writes anywhere." })),
+            sandbox: Type.Optional(Type.Boolean({ description: "Use the human Subagents profile from /sandbox. An enabled human profile cannot be bypassed with false. Without published settings, defaults to kernel write confinement; false opts out of that legacy default." })),
             sandbox_dir: Type.Optional(Type.String({ description: "Confine writes to (and run the child in) this directory instead of the working dir. Created if missing." })),
             callback: Type.Optional(Type.Boolean({ description: "Default TRUE: on completion, trigger a turn that calls subagent_result and presents the result. Set false to finish quietly — the result is then read on demand via subagent_result." })),
             cwd: Type.Optional(Type.String({ description: "Working directory (default: current)." })),
@@ -1475,7 +1491,7 @@ export default function (pi: ExtensionAPI) {
                     (p.callback === false
                         ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
                         : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
-                    (sandboxDir ? `Sandboxed: writes confined to ${sandboxDir}\n` : "") +
+                    (sandboxDir ? `Sandboxed: project root ${sandboxDir}; launch permissions apply.\n` : "") +
                     runtime + warn +
                     `Log: ${logPathFor(id)}`,
                 );
@@ -1518,7 +1534,7 @@ export default function (pi: ExtensionAPI) {
                 thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
                 tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
                 exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
-                sandbox: Type.Optional(Type.Boolean({ description: "Default TRUE: kernel-confine writes to the working dir." })),
+                sandbox: Type.Optional(Type.Boolean({ description: "Use the human Subagents profile; false cannot override an enabled profile. Legacy default is write confinement." })),
                 sandbox_dir: Type.Optional(Type.String({ description: "Writable root for every job." })),
                 callback: Type.Optional(Type.Boolean({ description: "Default TRUE: post result back on completion." })),
                 clean: Type.Optional(Type.Boolean({ description: "Hermetic builtins-only child; no extensions load." })),

@@ -5,17 +5,19 @@
  * keep starting Pi with plain `pi`. While enabled, the built-in `bash` tool and
  * user-entered `!` / `!!` commands run under macOS Seatbelt or Linux Bubblewrap
  * with one writable root — the canonical directory Pi was launched from — and
- * the packaged write-denied paths carved back out of it. The built-in `write`
- * and `edit` tools mutate files in Pi's own process rather than in a child, so
- * no argv wrapping can reach them; they are held to the same policy by an
- * in-process containment check instead. Reads and network are untouched.
+ * the packaged write-denied paths carved back out of it. Selected file,
+ * credential-file, command, and network permissions apply to protected tools.
+ * In-process file tools use the same canonical policy as spawned commands.
  *
  * This is a tool-execution sandbox. Pi's own process, `pi.exec` calls, and
  * unrelated third-party extension code are not confined by it.
  */
 
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import {
     createBashToolDefinition,
+    createReadToolDefinition,
     createEditToolDefinition,
     createWriteToolDefinition,
     SettingsManager,
@@ -37,8 +39,12 @@ import {
 import {
     createSandboxedEditOperations,
     createSandboxedWriteOperations,
+    createForegroundReadGuard,
 } from "./files.ts";
-import { readSandboxDefault, writeSandboxDefault } from "./preferences.ts";
+import { writeSandboxDefault } from "./preferences.ts";
+import { readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
+import { defaultSandboxPermissions } from "./permissions.ts";
+import { openPermissionsPage } from "./permissions-page.ts";
 import { createSandboxedBashOperations } from "./shell.ts";
 import { footerTone, formatFooterStatus } from "./status.ts";
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
@@ -69,6 +75,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     // operations run inside that queue, which is where the enforcement belongs.
     const writeOperations = createSandboxedWriteOperations(controller);
     const editOperations = createSandboxedEditOperations(controller);
+    const assertReadable = createForegroundReadGuard(controller);
 
     // `cwd` is what these tools resolve a relative `path` against, so it has to
     // be the directory Pi itself resolves against. Registration is re-run when
@@ -80,8 +87,41 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         fileToolCwd = cwd;
         pi.registerTool(createWriteToolDefinition(cwd, { operations: writeOperations }));
         pi.registerTool(createEditToolDefinition(cwd, { operations: editOperations }));
+        const read = createReadToolDefinition(cwd);
+        pi.registerTool({
+            ...read,
+            execute: (id, params, signal, update, ctx) => {
+                const path = params.path.replace(/^@/, "");
+                const expanded = path === "~" ? homedir() : path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : resolve(cwd, path);
+                return read.execute(id, { ...params, path: assertReadable(expanded) }, signal, update, ctx);
+            },
+        });
     };
     registerFileTools(process.cwd());
+
+    pi.on("tool_call", (event) => {
+        const status = controller.status();
+        if (status.state === "inactive" || status.state === "disabled") return;
+        const permissions = status.permissions;
+        if (!permissions) return;
+        const name = event.toolName;
+        const action = (event.input as { action?: string }).action;
+        const launch = ["bash", "powershell", "remote_bash", "subagent_spawn", "subagent_spawn_batch", "bg_task_spawn", "bg_task_watch"].includes(name) ||
+            (name === "bg_task" && (action === "spawn" || action === "watch"));
+        if (!permissions.commands && (launch || name === "grep" || name === "find")) {
+            return { block: true, reason: "Sandbox: Run commands & applications is Off. Change it in /sandbox to launch work." };
+        }
+        if (!permissions.network && (["web_search", "web_fetch", "firecrawl_scrape", "firecrawl_extract", "remote_bash", "mcp", "mcpScript"].includes(name) || name.startsWith("mcp__") ||
+            (launch && Boolean((event.input as { ssh?: unknown }).ssh)))) {
+            return { block: true, reason: "Sandbox: Network access is Off." };
+        }
+        if (name === "powershell" || name === "remote_bash") {
+            return { block: true, reason: `Sandbox: ${name} is not a confined execution surface; use bash (including ssh through bash).` };
+        }
+        if (status.readPolicy === "restricted" && ["grep", "find", "ls"].includes(name)) {
+            return { block: true, reason: "Sandbox: use the guarded read tool or a confined bash command for restricted file access." };
+        }
+    });
 
     let paintFooter: ((status: ForegroundSandboxStatus) => void) | undefined;
 
@@ -110,19 +150,25 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             );
         };
 
-        // Every session re-reads the persistent activation preference. Missing
-        // or malformed state resolves to the product default (off), never to an
-        // unexpected fail-closed session.
-        let defaultEnabled = false;
+        // Re-read saved profiles on each session. Malformed policy blocks protected
+        // operations rather than silently widening a restricted session.
+        let settings = defaultSandboxPermissions();
         try {
-            defaultEnabled = readSandboxDefault() === "on";
+            settings = readPermissionSettings();
         } catch (error) {
-            ctx.ui.notify(
-                `Foreground sandbox preference ignored; defaulting off: ${error instanceof Error ? error.message : String(error)}`,
-                "warning",
-            );
+            controller.beginSession(ctx.cwd, true);
+            const message = `Sandbox permissions could not be loaded: ${error instanceof Error ? error.message : String(error)}`;
+            settings.main.enabled = true;
+            settings.main.commands = false;
+            settings.subagents.commands = false;
+            controller.setPermissionSettings(settings);
+            announce(controller.block(message));
+            ctx.ui.notify(message, "error");
+            return;
         }
-        controller.beginSession(ctx.cwd, defaultEnabled);
+        controller.beginSession(ctx.cwd, settings.main.enabled);
+        controller.setPermissionSettings(settings);
+        controller.applyDefault(settings.main.enabled);
 
         // Then the rules are re-read and re-resolved, because the same global
         // template set means different absolute paths in a different project.
@@ -160,8 +206,18 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             denyRules,
             onStateChange: announce,
             setDefault: (enabled) => {
+                const settings = controller.permissionSettings() ?? defaultSandboxPermissions();
+                settings.main.enabled = enabled;
+                writePermissionSettings(settings);
                 writeSandboxDefault(enabled ? "on" : "off");
-                return controller.applyDefault(enabled);
+                return controller.setPermissionSettings(settings);
+            },
+            openPermissions: async (ctx) => {
+                await openPermissionsPage(ctx, {
+                    getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
+                    change: (settings) => announce(controller.setPermissionSettings(settings)),
+                    save: (settings) => writePermissionSettings(settings),
+                });
             },
         }),
     });

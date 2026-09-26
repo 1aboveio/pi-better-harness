@@ -57,7 +57,7 @@ export function formatSandboxReport(status: ForegroundSandboxStatus): string {
         "",
         `Project root:  ${status.projectRoot ?? "(not captured yet)"}`,
         `Writable root: ${status.writableRoot ?? "(none while not enabled)"}`,
-        `Reads:         ${status.readPolicy} (every filesystem path)`,
+        `Reads:         ${status.readPolicy}${status.readPolicy === "unrestricted" ? " (every filesystem path)" : " (selected file permissions)"}`,
         `Network:       ${status.networkPolicy}`,
         `Platform:      ${status.platform}`,
         `Backend:       ${status.backend ?? "(none resolved)"}`,

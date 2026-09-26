@@ -757,7 +757,7 @@ test("the registrations pi actually loads enforce the same policy on real files"
     });
     await refuses(
         () => runWrite(tools, { path: join(outside, "loaded-escape.txt"), content: "nope\n" }),
-        { message: /Writes are confined to /, absent: join(outside, "loaded-escape.txt") },
+        { message: /selected file permissions do not allow this write/, absent: join(outside, "loaded-escape.txt") },
     );
 });
 

@@ -1,6 +1,6 @@
 # pi-better-sandbox
 
-An opt-in write sandbox for Pi's foreground tools.
+Sandbox permissions for Pi's foreground tools and detached subagents.
 
 It is installed by default with [`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme), and can be installed on its own:
 
@@ -9,19 +9,37 @@ pi install npm:pi-better-sandbox
 ```
 
 Either way you keep starting Pi the way you always have — `pi`. There is
-no launcher or wrapper command. The sandbox starts inactive. Use `/sandbox on`
-for the current session or `/sandbox default on` to persist opt-in. While
-enabled, Pi's built-in `bash` tool and the `!` / `!!` commands you type yourself
-run inside an OS sandbox that lets them write only under the directory you
-launched Pi from, and the built-in `write` and `edit` tools are held to the same
-policy.
+no launcher or wrapper command. Main starts inactive; Subagents start confined.
+Open `/sandbox` to change either column, or use `/sandbox on` for the current
+Main session. **Save as defaults** persists both profiles.
 
+```text
+Sandbox permissions               Main             Subagents
+
+Sandbox                           Off              On
+
+Project files                     -                Read / write
+Outside project                   -                Read
+Stored credentials                -                Read
+Run commands & applications       -                On
+Network access                    -                On
+
+↑↓ Select row   ←→ Select column   Space Change
+Save as defaults
 ```
-Read:       every filesystem path
-Write:      the canonical launch directory and everything under it
-Exceptions: .git/hooks, .env, .env.local
-Network:    unchanged
-```
+
+File permissions cycle through Off, Read, and Read / write. Other rows toggle
+Off/On. Detail cells under an Off sandbox display a dimmed `-` and cannot be
+changed; their values return when the sandbox is enabled again. Outside project
+covers paths outside the assigned root without custom folder lists. Protected
+paths remain write-denied regardless of the broad file settings.
+
+**Stored credentials currently means known credential files.** It covers SSH,
+AWS, GitHub CLI, Google Cloud CLI, Azure, Kubernetes, Docker, npm, netrc, Git
+credentials, and Pi's file-based auth. These rules override ordinary file access.
+OS vault services such as Keychain and Secret Service, and tokens inherited in
+environment variables, are excluded. Read / write may be needed by a CLI that
+refreshes a token or updates its credential database.
 
 For shell commands the denial is done by the kernel, not by inspecting command
 text: macOS uses Seatbelt (`sandbox-exec`) and Linux uses Bubblewrap (`bwrap`).
@@ -36,16 +54,18 @@ nothing behind on disk.
 
 ## What is confined, and what is not
 
-**Reads and network access are never restricted.** Every path on the filesystem
-stays readable and network behaviour is exactly what it was. This sandbox limits
-writes, and nothing else.
+Selected file and network rules apply to confined commands. Main's model
+connection remains outside the tool sandbox. A detached subagent's OS sandbox
+surrounds its whole runtime: until provider networking is isolated, launching a
+subagent with Network access Off is refused with an explanation. Run commands &
+applications Off prevents new shell, application, background-task, and subagent
+launches; in-process file tools can still operate according to their file rules.
 
-Writes are confined for the integrated first-party execution paths, and only
-those:
+Permissions cover the integrated first-party execution paths:
 
 - Pi's built-in `bash` tool.
 - User-entered `!` and `!!` commands.
-- Pi's built-in `write` and `edit` tools.
+- Pi's built-in `read`, `write`, and `edit` tools.
 - Local [`pi-better-background-tasks`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-background-tasks#readme)
   spawns and watches, which capture this policy at launch.
 - [`pi-better-subagents`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-subagents#readme)
@@ -56,6 +76,11 @@ those:
 - Pi's own process.
 - `pi.exec` calls made by extensions.
 - Unrelated third-party extension code.
+- Remote filesystem operations: local permissions cannot constrain the remote
+  host. With Main sandbox enabled, the dedicated `remote_bash` and structured
+  SSH background launchers are blocked because their local SSH client does not
+  yet use the confinement wrapper. Run `ssh` through confined `bash` to apply
+  local file, credential, and network permissions to the SSH client.
 - Another first-party surface's control plane. Each surface denies its own —
   the files naming what it will run next — but not every other surface's, so
   confinement is per surface rather than global.
@@ -71,7 +96,7 @@ operations underneath them are replaced.
 ## Commands
 
 ```text
-/sandbox                     show the effective status
+/sandbox                     open the permission table (text status outside TUI)
 /sandbox on                  enable protection for operations started from now on
 /sandbox off                 turn protection off for this session (interactive confirmation)
 /sandbox default on          persist opt-in and enable it now
@@ -164,9 +189,11 @@ in your rule set but is held out in that project, with a message saying so.
 ## Lifecycle
 
 The foreground sandbox is inactive by default. Session overrides do not survive
-startup, new session, resume, fork, or reload. `/sandbox default on|off` stores
-the default for those future sessions in
-`~/.pi/agent/extensions/pi-better-sandbox-preferences.json`.
+startup, new session, resume, fork, or reload. Save as defaults writes both
+profiles to `~/.pi/agent/extensions/pi-better-sandbox-permissions.json` (or the
+corresponding `$PI_CODING_AGENT_DIR`). Existing activation preferences in
+`pi-better-sandbox-preferences.json` migrate when no profile file exists.
+`/sandbox default on|off` remains available and updates Main's saved switch.
 
 Toggles apply to operations launched after the change. A command already running
 keeps the policy it launched with.
@@ -197,6 +224,20 @@ that exact file, and an alias pointing at a denied file is denied too.
 | macOS    | Seatbelt (`sandbox-exec`)   | ships with the OS            |
 | Linux    | Bubblewrap (`bwrap`)        | install `bubblewrap`         |
 | Other    | none                        | protected commands are blocked |
+
+A detached subagent gets a private session/temp directory for Pi's runtime
+state. This directory stays writable even with Outside project set to Read or
+Off; other runs' state and the parent's launch metadata are not included.
+Read access to system executable and library directories, device I/O, and root
+directory metadata/listing remains available so a process can start. On macOS,
+the allowance excludes the broad `/System/Volumes` tree.
+
+Linux currently refuses combinations it cannot safely mount: hiding the
+project or credential files inside a visible whole-filesystem bind, writing
+credential stores under a read-only outside root, and a writable outside root
+with protected paths. These launch errors preserve the selected restrictions.
+The macOS permission combinations are covered by real-kernel tests; Linux
+mount behavior requires a Linux runner with Bubblewrap and user namespaces.
 
 ## For other extensions
 

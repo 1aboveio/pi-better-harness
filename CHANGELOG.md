@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **sandbox**: add the flat Main/Subagents permission table and saved defaults, with inactive values retained
+- **sandbox**: enforce project/outside file modes, known credential-file overrides, command-launch gates, and network restrictions on integrated execution surfaces
+- **subagents**: capture human permission profiles at launch and reserve a private runtime directory; reject tool opt-outs that bypass enabled profiles
+
+### Changed
+
+- **background-tasks**: inherit Main permissions for local launches and reject structured SSH when its client cannot apply those restrictions
+
 ## [pi-better-plan@0.3.5] - 2026-09-25
 
 ### Fixed

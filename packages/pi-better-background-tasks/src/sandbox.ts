@@ -29,7 +29,15 @@ import { dirname } from "node:path";
 
 import { commandExecution } from "./process.js";
 import { baseDir } from "./registry.js";
-import { maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
+import { compileWritePolicy, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
+
+type SandboxPermissions = {
+  projectFiles: "off" | "read" | "read-write";
+  outsideProject: "off" | "read" | "read-write";
+  storedCredentials: "off" | "read" | "read-write";
+  commands: boolean;
+  network: boolean;
+};
 import type { CommandSpec } from "./types.js";
 
 /**
@@ -70,6 +78,7 @@ export interface ForegroundSandboxPolicy {
   readonly denyWrite: readonly string[];
   /** Human-readable evidence for why `state` is what it is. */
   readonly reason: string;
+  readonly permissions?: Readonly<SandboxPermissions & { enabled: boolean }>;
 }
 
 /** The minimum `pi.events` surface this module uses. */
@@ -98,6 +107,7 @@ export type ForegroundSandboxPlan =
       readonly confined: true;
       readonly writableRoot: string;
       readonly denyWrite: readonly string[];
+      readonly permissions?: SandboxPermissions;
     };
 
 const UNCONFINED: ForegroundSandboxPlan = { confined: false };
@@ -111,7 +121,7 @@ const VALID_STATES = new Set<string>(["inactive", "enabled", "disabled", "unavai
  * sessions inside one process (and separate tests) cannot read each other's
  * policy.
  */
-const mirrors = new WeakMap<PolicyEventBus, { policy: ForegroundSandboxPolicy | undefined }>();
+const mirrors = new WeakMap<PolicyEventBus, { policy: ForegroundSandboxPolicy | undefined; error?: Error }>();
 
 function eventBusOf(pi: unknown): PolicyEventBus | undefined {
   const events = (pi as { events?: unknown } | undefined)?.events;
@@ -134,12 +144,32 @@ function readPolicy(data: unknown): ForegroundSandboxPolicy | undefined {
   const denyWrite = Array.isArray(value.denyWrite)
     ? value.denyWrite.filter((entry): entry is string => typeof entry === "string")
     : [];
+  const permissions = value.permissions === undefined ? undefined : readPermissions(value.permissions);
+  if (value.permissions !== undefined && !permissions) {
+    throw new Error("Invalid Main sandbox permission profile; update permissions in the sandbox UI.");
+  }
   return {
     state: value.state as ForegroundSandboxState,
     writableRoot,
     denyWrite: Object.freeze([...denyWrite]),
     reason: typeof value.reason === "string" ? value.reason : "No reason was published.",
+    ...(permissions ? { permissions } : {}),
   };
+}
+
+function readPermissions(value: unknown): ForegroundSandboxPolicy["permissions"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const p = value as Record<string, unknown>;
+  const access = (v: unknown) => v === "off" || v === "read" || v === "read-write";
+  if (typeof p.enabled !== "boolean" || typeof p.commands !== "boolean" ||
+      typeof p.network !== "boolean" || !access(p.projectFiles) ||
+      !access(p.outsideProject) || !access(p.storedCredentials)) return undefined;
+  return Object.freeze({
+    enabled: p.enabled, commands: p.commands, network: p.network,
+    projectFiles: p.projectFiles as SandboxPermissions["projectFiles"],
+    outsideProject: p.outsideProject as SandboxPermissions["outsideProject"],
+    storedCredentials: p.storedCredentials as SandboxPermissions["storedCredentials"],
+  });
 }
 
 /**
@@ -154,11 +184,15 @@ export function observeForegroundSandboxPolicy(pi: unknown): void {
   const events = eventBusOf(pi);
   if (!events || mirrors.has(events)) return;
 
-  const mirror: { policy: ForegroundSandboxPolicy | undefined } = { policy: undefined };
+  const mirror: { policy: ForegroundSandboxPolicy | undefined; error?: Error } = { policy: undefined };
   mirrors.set(events, mirror);
   events.on(FOREGROUND_SANDBOX_POLICY_CHANNEL, (data) => {
-    const policy = readPolicy(data);
-    if (policy) mirror.policy = policy;
+    try {
+      const policy = readPolicy(data);
+      if (policy) { mirror.policy = policy; mirror.error = undefined; }
+    } catch (error) {
+      mirror.error = error as Error;
+    }
   });
   events.emit(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, undefined);
 }
@@ -177,7 +211,9 @@ export function currentForegroundSandboxPolicy(pi: unknown): ForegroundSandboxPo
   const events = eventBusOf(pi);
   if (!events) return undefined;
   events.emit(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, undefined);
-  return mirrors.get(events)?.policy;
+  const mirror = mirrors.get(events);
+  if (mirror?.error) throw mirror.error;
+  return mirror?.policy;
 }
 
 /**
@@ -187,8 +223,16 @@ export function currentForegroundSandboxPolicy(pi: unknown): ForegroundSandboxPo
  * Throws for every state that is neither confinable nor intentionally
  * unconfined, which keeps a blocked launch from leaving task state behind.
  */
-export function resolveForegroundSandboxPlan(pi: unknown): ForegroundSandboxPlan {
-  return planFor(currentForegroundSandboxPolicy(pi));
+export function resolveForegroundSandboxPlan(pi: unknown, remote = false): ForegroundSandboxPlan {
+  const policy = currentForegroundSandboxPolicy(pi);
+  if (remote && !policy?.permissions) return UNCONFINED; // Preserve legacy SSH behavior.
+  const plan = planFor(policy);
+  if (remote && plan.confined) {
+    throw new ForegroundSandboxBlockedError(policy!, !plan.permissions?.network
+      ? "Main profile disables network. SSH launches are blocked."
+      : "Structured SSH cannot apply local file and credential permissions yet. Use SSH through confined bash, or change Main permissions in /sandbox.");
+  }
+  return plan;
 }
 
 /** The plan for one already-read policy. Exposed for tests and reuse. */
@@ -196,11 +240,22 @@ export function planFor(policy: ForegroundSandboxPolicy | undefined): Foreground
   // No sandbox extension is publishing: this package is installed on its own and
   // keeps its historical unsandboxed behaviour.
   if (!policy) return UNCONFINED;
+  if (policy.permissions?.enabled && !policy.permissions.commands) {
+    throw new ForegroundSandboxBlockedError(policy, "Main profile disables commands. Change permissions in the sandbox UI before launching background tasks.");
+  }
   if (policy.state === "inactive" || policy.state === "disabled") return UNCONFINED;
   if (policy.state !== "enabled" || !policy.writableRoot) {
     throw new ForegroundSandboxBlockedError(policy);
   }
-  return { confined: true, writableRoot: policy.writableRoot, denyWrite: policy.denyWrite };
+  const permissions = policy.permissions?.enabled ? {
+    projectFiles: policy.permissions.projectFiles,
+    outsideProject: policy.permissions.outsideProject,
+    storedCredentials: policy.permissions.storedCredentials,
+    commands: policy.permissions.commands,
+    network: policy.permissions.network,
+  } : undefined;
+  return { confined: true, writableRoot: policy.writableRoot, denyWrite: policy.denyWrite,
+    ...(permissions ? { permissions } : {}) };
 }
 
 /**
@@ -245,16 +300,21 @@ export function confineCommandSpec(
   const controlPlane = baseDir();
   mkdirSync(controlPlane, { recursive: true });
   const denyWrite = [...plan.denyWrite, controlPlane];
+  const policy = {
+    writableRoot: plan.writableRoot,
+    denyWrite,
+    home: homedir(),
+    ...(plan.permissions ? { permissions: plan.permissions } : {}),
+  };
   let command;
   try {
+    if (plan.permissions && !("permissions" in compileWritePolicy(policy))) {
+      throw new Error("permission-aware sandbox core is unavailable; update the sandbox packages before launching");
+    }
     command = maybeBuildSandboxCommand(
       {
         profilePath,
-        policy: {
-          writableRoot: plan.writableRoot,
-          denyWrite,
-          home: homedir(),
-        },
+        policy,
         execPath,
         execArgs,
       },
