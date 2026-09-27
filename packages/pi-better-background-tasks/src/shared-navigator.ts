@@ -1027,14 +1027,11 @@ function buildTranscriptDetailLines(
   ];
   const transcriptHeader = ["", dim(section(`transcript · latest ${tailRows} rows`, width), fg)];
   if (detail.transcriptDiagnostic) transcriptHeader.push(`   ${dim(detail.transcriptDiagnostic, fg)}`);
+  // Metadata always renders; the transcript tail takes only the rows left over (the tail size is a cap, not a guarantee).
+  lines.push(...optionalMetadata);
   if (options.maxRows !== undefined) {
-    const fixedRows = lines.length + transcriptHeader.length + 1;
-    const transcriptBudget = Math.max(1, options.maxRows - fixedRows);
+    const transcriptBudget = Math.max(1, options.maxRows - lines.length - transcriptHeader.length - 1);
     shownTranscriptLines = shownTranscriptLines.slice(-transcriptBudget);
-    const metadataBudget = Math.max(0, options.maxRows - fixedRows - shownTranscriptLines.length);
-    lines.push(...optionalMetadata.slice(0, metadataBudget));
-  } else {
-    lines.push(...optionalMetadata);
   }
   lines.push(...transcriptHeader);
   lines.push(...shownTranscriptLines);
@@ -1188,7 +1185,7 @@ function buildDetailLines(
       ? wrapLogText(body, width - 6)
       : wrapEvidenceText(body, width - 6);
     let shown = tailEvidence ? wrapped.slice(-tailRows) : wrapped;
-    // A tail that outgrows the viewport drops its oldest rows so the newest stay on screen (+1 for the trailing blank).
+    // Metadata above always renders; a tail that outgrows the remaining rows drops its oldest rows so the newest stay on screen (+1 for the trailing blank).
     if (tailEvidence && options.maxRows !== undefined) shown = shown.slice(-Math.max(1, options.maxRows - lines.length - 1));
     for (const raw of shown) lines.push(raw ? `   ${raw}` : "   ");
   }

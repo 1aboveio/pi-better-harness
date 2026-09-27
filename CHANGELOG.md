@@ -12,8 +12,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
-- **subagents**: the navigator detail view opens showing the latest 25 transcript rows (was 10); `l` switches between 25 and 10. `subagent_result` and `subagent_output` defaults are unchanged.
-- **background-tasks**: the navigator detail view opens showing the latest 25 log rows (was 10); `l` switches between 25 and 10. `bg_task_log` and `bg_task_status` defaults are unchanged.
+- **subagents**: the navigator detail view opens showing up to the latest 25 transcript rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the transcript shows as many newest rows as fit below them (previously metadata gave way to the transcript). `subagent_result` and `subagent_output` defaults are unchanged.
+- **background-tasks**: the navigator detail view opens showing up to the latest 25 log rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the log shows as many newest rows as fit below them. `bg_task_log` and `bg_task_status` defaults are unchanged.
 
 ### Fixed
 

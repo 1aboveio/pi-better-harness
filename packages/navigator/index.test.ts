@@ -1099,7 +1099,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("keeps the newest log rows visible when the 25-row tail exceeds the terminal height", () => {
+  it("keeps every metadata line and the newest log rows that fit when the 25-row tail exceeds the terminal height", () => {
     const log = Array.from({ length: 40 }, (_, i) => `log-row-${String(i + 1).padStart(2, "0")}`).join("\n");
     const unregister = registerBackgroundWorkProvider({
       id: "background-tasks",
@@ -1159,20 +1159,29 @@ describe("shared background work navigator", () => {
       const editor = ui.factory({}, {}, {});
       editor.handleInput("left");
       editor.handleInput("enter");
-      assert.equal(customOptions?.overlayOptions?.().visible(72, 30), true);
+      const assertTail = (height: number, header: RegExp, expectedRows: number) => {
+        assert.equal(customOptions?.overlayOptions?.().visible(72, height), true);
+        const renderedLines: string[] = component.render(72);
+        const rendered = renderedLines.join("\n");
+        assert.equal(renderedLines.length, height);
+        assert.match(rendered, header);
+        for (const label of ["provider", "kind", "elapsed", "cwd", "pid", "pgid"]) {
+          assert.match(rendered, new RegExp(`^   ${label}\\s`, "m"), `${label} metadata must stay visible at ${height} rows`);
+        }
+        const rows = [...rendered.matchAll(/log-row-(\d{2})/g)].map((match) => Number(match[1]));
+        const newest = Array.from({ length: expectedRows }, (_, i) => 41 - expectedRows + i);
+        assert.deepEqual(rows, newest, `${height}-row terminal shows the newest ${expectedRows} log rows`);
+      };
 
-      let renderedLines = component.render(72);
-      let rendered = renderedLines.join("\n");
-      assert.equal(renderedLines.length, 30);
-      assert.match(rendered, /log tail · latest 25 rows/);
-      assert.match(rendered, /provider/, "metadata stays visible above the log tail");
-      assert.match(rendered, /log-row-40/, "the newest log row must stay visible when the tail is height-constrained");
-      assert.doesNotMatch(rendered, /log-row-16/, "a height-constrained tail drops its oldest rows first");
+      // Rows left for the tail = height - 16 fixed detail rows (title, actions, status, 6 metadata,
+      // command section, blanks, log header) - 7 rail/input rows. The tail size is a cap, not a guarantee.
+      assertTail(24, /log tail · latest 25 rows/, 1);
+      assertTail(40, /log tail · latest 25 rows/, 17);
+      assertTail(60, /log tail · latest 25 rows/, 25);
 
-      assert.equal(customOptions?.overlayOptions?.().visible(72, 60), true);
-      rendered = component.render(72).join("\n");
-      for (let row = 16; row <= 40; row += 1) assert.match(rendered, new RegExp(`log-row-${row}`));
-      assert.doesNotMatch(rendered, /log-row-15/);
+      component.handleInput("l");
+      assertTail(60, /log tail · latest 10 rows/, 10);
+      assertTail(24, /log tail · latest 10 rows/, 1);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
@@ -1356,7 +1365,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("keeps requested structured transcript rows visible in constrained detail viewports", () => {
+  it("keeps every metadata line and the newest transcript rows that fit in constrained detail viewports", () => {
     const transcriptRows = Array.from({ length: 30 }, (_, i) => ` transcript-${String(i + 1).padStart(2, "0")}`);
     const unregister = registerBackgroundWorkProvider({
       id: "subagents",
@@ -1435,27 +1444,31 @@ describe("shared background work navigator", () => {
       assert.equal(typeof visible, "function");
       assert.equal(visible(80, 24), true);
 
-      let rendered = component.render(80).join("\n");
-      assert.match(rendered, /transcript · latest 25 rows/);
-      assert.doesNotMatch(rendered, /transcript-06|fallback should not render/, "a 24-row terminal cannot fit the full 25-row tail");
-      assert.match(rendered, /transcript-30/, "the height-constrained tail keeps the newest rows");
+      const metadataLabels = ["provider", "model", "elapsed", "tools", "spend", "pid", "pgid"];
+      const assertTail = (height: number, header: RegExp, expectedRows: number) => {
+        assert.equal(visible(80, height), true);
+        const renderedLines: string[] = component.render(80);
+        const rendered = renderedLines.join("\n");
+        assert.equal(renderedLines.length, height);
+        assert.match(rendered, header);
+        assert.doesNotMatch(rendered, /fallback should not render/);
+        for (const label of metadataLabels) {
+          assert.match(rendered, new RegExp(`^   ${label}\\s`, "m"), `${label} metadata must stay visible at ${height} rows`);
+        }
+        const rows = [...rendered.matchAll(/transcript-(\d{2})/g)].map((match) => Number(match[1]));
+        const newest = Array.from({ length: expectedRows }, (_, i) => 31 - expectedRows + i);
+        assert.deepEqual(rows, newest, `${height}-row terminal shows the newest ${expectedRows} transcript rows`);
+      };
 
-      assert.equal(visible(80, 40), true);
-      rendered = component.render(80).join("\n");
-      assert.match(rendered, /transcript · latest 25 rows/);
-      assert.doesNotMatch(rendered, /transcript-05/);
-      for (let row = 6; row <= 30; row += 1) {
-        assert.match(rendered, new RegExp(`transcript-${String(row).padStart(2, "0")}`));
-      }
+      // Rows left for the tail = height - 14 fixed detail rows (title, actions, status, 7 metadata,
+      // blanks, section header) - 7 rail/input rows. The tail size is a cap, not a guarantee.
+      assertTail(24, /transcript · latest 25 rows/, 3);
+      assertTail(40, /transcript · latest 25 rows/, 19);
+      assertTail(60, /transcript · latest 25 rows/, 25);
 
       component.handleInput("l");
-      assert.equal(visible(80, 24), true);
-      rendered = component.render(80).join("\n");
-      assert.match(rendered, /transcript · latest 10 rows/);
-      assert.doesNotMatch(rendered, /transcript-20/);
-      for (let row = 21; row <= 30; row += 1) {
-        assert.match(rendered, new RegExp(`transcript-${row}`));
-      }
+      assertTail(60, /transcript · latest 10 rows/, 10);
+      assertTail(24, /transcript · latest 10 rows/, 3);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

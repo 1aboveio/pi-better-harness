@@ -269,11 +269,12 @@ preserves detached-process output while preventing progress-heavy commands from
 growing a log without bound during supervision.
 
 Set `max_log_bytes` on `bg_task_spawn` or `bg_task_watch` to use a different
-budget, with a minimum of 64 KiB. The detail page shows the latest 25 terminal
-display rows initially; `l` switches between 25 and 10 rows. When the terminal
-is too short for the whole tail, the oldest rows are dropped first so the newest
-output stays on screen. This is the navigator view only; `bg_task_log` keeps its
-own 10-row default. Carriage-return
+budget, with a minimum of 64 KiB. The detail page shows up to the latest 25
+terminal display rows initially; `l` switches between 25 and 10 rows. The row
+count is a cap, not a guarantee: the task's metadata lines always stay visible,
+and on a short terminal the log shows only as many of its newest rows as fit
+below them. This is the navigator view only; `bg_task_log` keeps its own 10-row
+default. Carriage-return
 progress redraws such as `rsync --progress` are collapsed to their latest
 visible state, leaving subsequent error lines readable.
 
