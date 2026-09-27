@@ -1,6 +1,6 @@
 # Issue #312 model-facing payload baseline (after)
 
-Measured at 2026-09-27T08:45:10.726Z from fix/test-packaging-hygiene @ `ddf81a7f63c4e2d59540336648552ce7d1b42df0`.
+Measured at 2026-09-27T10:08:41.784Z from fix/test-packaging-hygiene @ `ff722263c9e84143d2881e37bcebbe2425c6e8b3`.
 Accounting: **UTF-8 bytes** (`Buffer.byteLength(text, "utf8")`). Tokenizer counts are not included.
 
 Runtime model for this capture session: `unknown/unknown` effort `unknown`.
