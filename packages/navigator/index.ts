@@ -542,7 +542,10 @@ function stableFacts(facts: string[] | undefined): string[] {
 
 function rowSummary(row: InternalRow): string {
   if (row.providerId === "subagents") {
+    const attention = row.facts?.map(singleLine).filter(Boolean);
+    if (attention?.length) return `${singleLine(row.status)} · ${attention.join(" · ")}`;
     const parts: string[] = [];
+    if (row.statusTone !== "running" && row.kind !== "main agent") parts.push(singleLine(row.status));
     if (row.model) parts.push(row.effort ? `${singleLine(row.model)} ${singleLine(row.effort)}` : singleLine(row.model));
     if (row.tool) parts.push(`tool ${singleLine(row.tool)}`);
     if (row.tokens) parts.push(singleLine(row.tokens));

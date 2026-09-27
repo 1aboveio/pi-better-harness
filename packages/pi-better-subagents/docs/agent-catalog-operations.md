@@ -6,6 +6,8 @@ Commands, the read-only discovery tool, and the Codex importer for `pi-agent/v1`
 
 `/agents` is one Pi command. Dialogs use `ctx.ui.select`, `confirm`, `input`, and `editor`. `ctx.hasUI` is false in print and JSON mode. When a choice or confirmation is required there, the command returns `clarification-needed` and writes nothing.
 
+In an interactive TUI, `/agents list` and `/agents show` open a focused catalog view instead of leaving the listing in a persistent widget. Rows align name, effective model, source, and launch state; narrow terminals retain name and model. The model is the resolved actual model when available, otherwise the requested or inherited preference, or `not resolved`. Type to filter by id, name, description, or base role; use Up/Down and Enter to inspect. The detail view puts launchability and its reason first, then source, inherited/overridden settings, and diagnostics. Press `p` in detail to read the complete effective instructions (role plus agent in add mode, agent text in replace mode); this is not the task-specific launch prompt. Up/Down scrolls detail or prompt; Left or Escape returns to detail, then list, clears the filter, then closes. `/agents show <id>` opens that definition directly. Print/JSON callers still receive the complete text and structured result.
+
 | Invocation | Effect |
 | --- | --- |
 | `/agents list` | Fresh read of project, personal, and bundled definitions. One bad file does not hide the others. |
