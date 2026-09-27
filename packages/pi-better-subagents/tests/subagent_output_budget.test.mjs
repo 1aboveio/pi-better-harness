@@ -267,9 +267,26 @@ describe("registered subagent payloads", () => {
         const progressAt = result.indexOf("PROGRESS_TEXT");
         assert.ok(failureAt >= 0, result);
         assert.ok(progressAt > failureAt, "failures must precede progress");
-        assert.match(result, /additional active failure observations retained/i);
+        assert.match(result, /omittedIncidents=7/);
+        assert.match(result, /incidentCursor=i1\./);
         assert.doesNotMatch(result, /tools used:/i);
         assert.doesNotMatch(result, /do-0.*do-1.*do-2/);
+        const incidentCursor = result.match(/incidentCursor=(i1\.\S+)/)?.[1];
+        assert.ok(incidentCursor, result);
+        let cursor = incidentCursor;
+        const pages = [result];
+        for (let i = 0; i < 20 && cursor; i += 1) {
+            const page = textOf(await resultTool.execute("tc", { id, cursor }));
+            pages.push(page);
+            assert.ok(utf8ByteLength(page) <= OUTPUT_BUDGET_BYTES.answer, page);
+            const next = page.match(/\bnextCursor=(i1\.\S+)/)?.[1];
+            if (!page.includes("hasMore=true") || !next || next === cursor) break;
+            cursor = next;
+        }
+        const reconstructed = pages.join("\n");
+        for (let i = 0; i < 12; i += 1) {
+            assert.match(reconstructed, new RegExp(`incident-${i}-failed`));
+        }
     });
 
     it("keeps incomplete and orphaned results diagnostic, not clean final answers", async () => {

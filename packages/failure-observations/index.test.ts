@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { emptyFailureState, reduceFailure, activeFailures, formatFailureSummary, pendingFailureAttention,
+import { emptyFailureState, reduceFailure, activeFailures, formatFailureSummary, formatFailureLines, pageFailureIncidents, isIncidentCursor, incidentCursorAt, pendingFailureAttention,
   observeFailures, readFailureState, markFailureAttentionDelivered, failureAttentionHandled, type FailureEvent } from "./index.ts";
 
 const failed: FailureEvent = { id: "call-1:end", operation: "cwd:project:tsc", kind: "failure",
@@ -176,6 +176,37 @@ test("bounded summaries prioritize unexpected failures over newer expected failu
   const summary = formatFailureSummary(state);
   assert.match(summary.split("\n")[0]!, /TypeScript exited 2/);
   assert.match(summary, /4 additional active failure observations/);
+});
+
+test("omitted incidents reconstruct through caller-owned incident pages", () => {
+  let state = reduceFailure(emptyFailureState(), failed, 1000);
+  for (let i = 0; i < 11; i++) {
+    state = reduceFailure(state, {
+      ...failed,
+      id: `incident-${i}`,
+      operation: `op-${i}`,
+      summary: `synthetic-incident-${i}`,
+    }, 2000 + i);
+  }
+  const lines = formatFailureLines(state);
+  assert.equal(lines.length, 12);
+  const first = pageFailureIncidents(state, { maxBytes: 400 });
+  assert.ok(first.represented >= 1);
+  assert.ok(first.hasMore);
+  assert.equal(first.omitted, lines.length - first.represented);
+  assert.equal(isIncidentCursor(first.nextCursor), true);
+  let cursor = first.cursor;
+  let rebuilt = "";
+  for (let pages = 0; pages < 50; pages += 1) {
+    const page = pageFailureIncidents(state, { cursor, maxBytes: 400 });
+    rebuilt += (rebuilt && page.text ? "\n" : "") + page.text;
+    if (!page.hasMore) break;
+    cursor = page.nextCursor;
+  }
+  assert.equal(rebuilt, lines.join("\n"));
+  const rest = pageFailureIncidents(state, { cursor: incidentCursorAt(state, 5), maxBytes: 8 * 1024 });
+  assert.equal(rest.text, lines.slice(5).join("\n"));
+  assert.equal(rest.omitted, 0);
 });
 
 test("special event IDs cannot suppress delivery through Object.prototype", () => {

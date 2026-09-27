@@ -108,3 +108,17 @@ took part of the cap.
 
 Lifecycle success is not semantic correctness. This module never infers
 structured failures from prose and never delivers callbacks.
+
+## Incident pages and urgent callbacks
+
+Omitted unresolved incidents are paged by `pageFailureIncidents` in
+`failure-observations` (`i1.` cursors). Consumers must expose that cursor on
+status/result tools so a count-only hint is never the only retrieval path.
+
+Urgent callback `content` is assembled by `formatUrgentCallback` in
+`callback-batcher` under the same 2 KiB default / 8 KiB hard cap as ordinary
+batches. Overflow rows remain pending (not receipted) across handoff failure
+and reload.
+
+UTF-8 slices that start on a continuation byte skip forward to the next complete
+character. They do not insert replacement characters or drop later source bytes.

@@ -46,7 +46,7 @@ import {
     type RunCallbackOrigin,
     type RunMeta,
 } from "./registry.ts";
-import { activeFailures } from "./shared-failure-observations.ts";
+import { activeFailures, incidentCursorAt, isIncidentCursor, pageFailureIncidents } from "./shared-failure-observations.ts";
 import { fmtElapsed } from "./widget.ts";
 
 export interface PayloadRequest {
@@ -247,8 +247,56 @@ function streamEvidence(run: ParsedRun): string {
 }
 
 function failureText(id: string, meta: RunMeta, terminal: boolean): string | undefined {
-    const summary = formatFailureSummary(collectRunFailures(id, meta.cwd, terminal));
-    return summary || undefined;
+    const state = collectRunFailures(id, meta.cwd, terminal);
+    const summary = formatFailureSummary(state);
+    if (!summary) return undefined;
+    const active = activeFailures(state);
+    if (active.length <= 5) return summary;
+    const omitted = active.length - 5;
+    const cursor = incidentCursorAt(state, 5);
+    return `omittedIncidents=${omitted} incidentCursor=${cursor}\n${summary}`;
+}
+
+function failureState(id: string, meta: RunMeta, terminal: boolean) {
+    return collectRunFailures(id, meta.cwd, terminal);
+}
+
+function incidentDiagnostics(id: string, meta: RunMeta, terminal: boolean): string | undefined {
+    const state = failureState(id, meta, terminal);
+    const active = activeFailures(state);
+    if (active.length <= 5) return undefined;
+    const omitted = active.length - 5;
+    const cursor = incidentCursorAt(state, 5);
+    return `${omitted} omitted incidents retrievable with cursor=${cursor} (subagent_result/subagent_output id="${id}"). Failure journal remains retained evidence.`;
+}
+
+function assembleIncidentPage(
+    id: string,
+    meta: RunMeta,
+    request: PayloadRequest,
+    terminal: boolean,
+): string {
+    const state = failureState(id, meta, terminal);
+    const maxBytes = budgetFor("answer", request.maxBytes);
+    const page = pageFailureIncidents(state, { cursor: request.cursor, maxBytes: Math.max(256, maxBytes - 400) });
+    return envelopeText({
+        maxBytes,
+        identity: `[${id} · incidents ${page.represented}/${page.total}]`,
+        failure: page.text || "No unresolved incidents.",
+        diagnostics: [
+            page.reset ? `reset=${page.reset}` : undefined,
+            page.omitted > 0
+                ? `${page.omitted} omitted incidents remain; pass nextCursor to continue.`
+                : "All retained incidents are included on this page.",
+        ].filter((line): line is string => Boolean(line)).join("\n"),
+        verbatim: () => ({
+            text: "",
+            hasMore: page.hasMore,
+            nextCursor: page.nextCursor,
+            omittedBytes: page.omitted,
+            reset: page.reset,
+        }),
+    });
 }
 
 function pageCursorFor(cursor: string | undefined): string | undefined {
@@ -366,17 +414,18 @@ export function assembleRunningResult(
     request: PayloadRequest = {},
     scopeKey = listScopeKey(false, undefined, process.pid),
 ): string {
+    const st = effectiveStatus(meta);
+    const terminal = st !== "running" && st !== "orphaned";
+    if (isIncidentCursor(request.cursor)) return assembleIncidentPage(id, meta, request, terminal);
     const resource = scopedResource("subagent_result", scopeKey, id);
     const unchanged = maybeUnchanged(resource, id, request.cursor);
     if (unchanged) return unchanged;
-    const st = effectiveStatus(meta);
-    const terminal = st !== "running" && st !== "orphaned";
     return envelopeText({
         maxBytes: budgetFor("answer", request.maxBytes),
         identity: `[${id} · ${st} · ${elapsedFor(meta)}]`,
         failure: failureText(id, meta, terminal),
         decision: `Run ${id} is still running — no result yet. You'll be notified when it finishes; don't poll.`,
-        diagnostics: parserDiagnostics(parseRun(id)),
+        diagnostics: joinSections([parserDiagnostics(parseRun(id)), incidentDiagnostics(id, meta, terminal)]),
         progress: `statusCursor=${currentStatusCursor(resource, id)}`,
         gaps: logGaps(id),
     });
@@ -418,10 +467,12 @@ export function assembleSubagentOutput(
     if (isRawMode(request.mode)) return assembleRaw(id, meta, st, request, "output", scopeKey);
 
     const resource = scopedResource("subagent_output", scopeKey, id);
+    const terminalEarly = st !== "running" && st !== "orphaned";
+    if (isIncidentCursor(request.cursor)) return assembleIncidentPage(id, meta, request, terminalEarly);
     const unchanged = maybeUnchanged(resource, id, request.cursor);
     if (unchanged) return unchanged;
     const pageCursor = pageCursorFor(request.cursor);
-    const terminal = st !== "running" && st !== "orphaned";
+    const terminal = terminalEarly;
     const run = parseRun(id);
     const parsed = bestParsed(run);
     const gaps = logGaps(id);
@@ -432,6 +483,7 @@ export function assembleSubagentOutput(
     const diagnostics = joinSections([
         healthLine || undefined,
         parserDiagnostics(run),
+        incidentDiagnostics(id, meta, terminal),
         emptyLog && !decision ? "(no output yet)" : undefined,
         !parsed && !emptyLog && gaps.length === 0 ? "(no parsed output yet)" : undefined,
         gaps.length || run.diagnostics.some((line) => /unreadable|truncated/i.test(line))
@@ -468,6 +520,7 @@ export function assembleOrphanedResult(
 ): string {
     if (isRawMode(request.mode)) return assembleRaw(id, meta, "orphaned", request, "result", scopeKey);
     const resource = scopedResource("subagent_result", scopeKey, id);
+    if (isIncidentCursor(request.cursor)) return assembleIncidentPage(id, meta, request, false);
     const unchanged = maybeUnchanged(resource, id, request.cursor);
     if (unchanged) return unchanged;
     const pageCursor = pageCursorFor(request.cursor);
@@ -482,6 +535,7 @@ export function assembleOrphanedResult(
         diagnostics: joinSections([
             healthLine || undefined,
             parserDiagnostics(run),
+            incidentDiagnostics(id, meta, false),
             gaps.length ? "Child log is missing or unreadable; this is not an empty healthy result." : undefined,
             formatOrphanedResult(run, "").split("\n").slice(0, 2).join("\n"),
             "--- best-current parsed output ---",
@@ -508,6 +562,8 @@ export function assembleSubagentResult(
     if (isRawMode(request.mode)) return assembleRaw(id, meta, String(st), request, "result", scopeKey);
 
     const resource = scopedResource("subagent_result", scopeKey, id);
+    const terminalEarly = true;
+    if (isIncidentCursor(request.cursor)) return assembleIncidentPage(id, meta, request, terminalEarly);
     const unchanged = maybeUnchanged(resource, id, request.cursor);
     if (unchanged) return unchanged;
     const pageCursor = pageCursorFor(request.cursor);
@@ -533,6 +589,7 @@ export function assembleSubagentResult(
                 formatLifecycleDiagnostics(lifecycle),
                 streamEvidence(run),
                 parserDiagnostics(run),
+                incidentDiagnostics(id, meta, terminal),
                 gaps.length ? "Child log is missing or unreadable; this is not an empty healthy result." : undefined,
                 "--- best available parsed output ---",
                 retrievalHint(id),
@@ -556,6 +613,7 @@ export function assembleSubagentResult(
                 healthLine || undefined,
                 formatLifecycleDiagnostics(lifecycle),
                 parserDiagnostics(run),
+                incidentDiagnostics(id, meta, terminal),
                 formatLostResult(run, "").split("\n").slice(0, 2).join("\n"),
                 "--- best-available parsed output ---",
                 retrievalHint(id),
@@ -585,6 +643,7 @@ export function assembleSubagentResult(
             healthLine || undefined,
             exceptional,
             parserDiagnostics(run),
+            incidentDiagnostics(id, meta, terminal),
             !answer && gaps.length ? "Child log is missing or unreadable; this is not an empty healthy result." : undefined,
             !answer ? retrievalHint(id) : undefined,
         ]),

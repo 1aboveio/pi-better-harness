@@ -88,7 +88,8 @@ export function finalizeRun(
     const verdict = outcome.verdict;
     const el = fmtElapsed(meta.endedAt - meta.startedAt);
     const spend = fmtSpend(r.usage);
-    const stat = `${el}${spend ? ` · ${spend}` : ""}`;
+    const humanStat = `${el}${spend ? ` · ${spend}` : ""}`;
+    const stat = el;
 
     // A finished run is no longer in the widget; redraw (and stop the ticker if
     // it was the last one).
@@ -97,7 +98,7 @@ export function finalizeRun(
     // Best-effort human toast. ctx may be stale by now; never let it throw.
     try {
         hooks.notify?.(
-            `Subagent ${label} ${verdict} · ${stat}`,
+            `Subagent ${label} ${verdict} · ${humanStat}`,
             meta.status === "completed" ? "info" : "warning",
         );
     } catch {

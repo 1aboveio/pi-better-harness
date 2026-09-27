@@ -84,18 +84,115 @@ export function activeFailures(state: FailureState): FailureObservation[] {
   return Object.values(state.observations).filter((x) => x.status !== "resolved")
     .sort((a, b) => priority(a) - priority(b) || (b.lastSequence ?? 0) - (a.lastSequence ?? 0) || b.lastObservedAt - a.lastObservedAt);
 }
+const INCIDENT_CURSOR_PREFIX = "i1.";
+const encoder = new TextEncoder();
+
+function failureRow(x: FailureObservation): string {
+  const label = x.status === "expected" ? "Expected failure" :
+    x.category === "observation-incomplete" ? "Observation incomplete" : "Unresolved failure";
+  const time = x.at === undefined ? `observed ${new Date(x.firstObservedAt).toISOString()}` : new Date(x.at).toISOString();
+  return `${label} · ${time} · ${x.summary}${x.count > 1 ? ` (${x.count} occurrences)` : ""}${x.evidence ? ` · evidence: ${text(x.evidence, "")}` : ""}`;
+}
+
+/** Every active incident as a priority row. Consumers page these; they are not a lossy summary. */
+export function formatFailureLines(state: FailureState): string[] {
+  return activeFailures(state).map(failureRow);
+}
+
 /** Shared priority text, placed BEFORE assistant progress on every consumer surface. */
 export function formatFailureSummary(state: FailureState): string {
-  const failures = activeFailures(state);
-  if (!failures.length) return "";
-  const rows = failures.slice(0, 5).map((x) => {
-    const label = x.status === "expected" ? "Expected failure" :
-      x.category === "observation-incomplete" ? "Observation incomplete" : "Unresolved failure";
-    const time = x.at === undefined ? `observed ${new Date(x.firstObservedAt).toISOString()}` : new Date(x.at).toISOString();
-    return `${label} · ${time} · ${x.summary}${x.count > 1 ? ` (${x.count} occurrences)` : ""}${x.evidence ? ` · evidence: ${text(x.evidence, "")}` : ""}`;
-  });
-  if (failures.length > 5) rows.push(`${failures.length - 5} additional active failure observations retained in the failure journal.`);
+  const lines = formatFailureLines(state);
+  if (!lines.length) return "";
+  const rows = lines.slice(0, 5);
+  if (lines.length > 5) rows.push(`${lines.length - 5} additional active failure observations retained in the failure journal.`);
   return rows.join("\n");
+}
+
+export interface FailureIncidentPage {
+  text: string;
+  total: number;
+  represented: number;
+  omitted: number;
+  cursor: string;
+  nextCursor: string;
+  hasMore: boolean;
+  reset?: "stale-cursor" | "source-replaced";
+}
+
+function incidentRevision(state: FailureState): string {
+  return failureIdentity(activeFailures(state).map((item) => [item.id, item.status, item.count, item.summary]));
+}
+
+function encodeIncidentCursor(offset: number, revision: string, total: number): string {
+  return INCIDENT_CURSOR_PREFIX + Buffer.from(JSON.stringify({ k: "i", o: offset, v: revision, n: total }), "utf8").toString("base64url");
+}
+
+function decodeIncidentCursor(cursor: string | undefined): { o: number; v: string; n: number } | undefined {
+  if (!cursor || !cursor.startsWith(INCIDENT_CURSOR_PREFIX)) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor.slice(INCIDENT_CURSOR_PREFIX.length), "base64url").toString("utf8")) as { k?: string; o?: number; v?: string; n?: number };
+    if (parsed?.k === "i" && typeof parsed.v === "string") {
+      return { o: Math.max(0, Math.floor(parsed.o ?? 0)), v: parsed.v, n: Math.max(0, Math.floor(parsed.n ?? 0)) };
+    }
+  } catch { /* stale */ }
+  return undefined;
+}
+
+export function isIncidentCursor(cursor: string | undefined): boolean {
+  return Boolean(cursor?.startsWith(INCIDENT_CURSOR_PREFIX));
+}
+
+function utf8Length(value: string): number {
+  return encoder.encode(value).byteLength;
+}
+
+/** Caller-owned incident pages. Consecutive pages concatenate to formatFailureLines(). */
+export function pageFailureIncidents(state: FailureState, request: { cursor?: string; maxBytes?: number } = {}): FailureIncidentPage {
+  const lines = formatFailureLines(state);
+  const revision = incidentRevision(state);
+  const total = lines.length;
+  let offset = 0;
+  let reset: FailureIncidentPage["reset"];
+  if (request.cursor) {
+    const parsed = decodeIncidentCursor(request.cursor);
+    if (!parsed) reset = "stale-cursor";
+    else if (parsed.v !== revision) reset = "source-replaced";
+    else offset = Math.min(total, parsed.o);
+  }
+  const maxBytes = Number.isFinite(request.maxBytes) && (request.maxBytes ?? 0) > 0
+    ? Math.floor(request.maxBytes as number)
+    : 2 * 1024;
+  const included: string[] = [];
+  for (let i = offset; i < lines.length; i += 1) {
+    const row = lines[i]!;
+    const candidate = included.length ? `${included.join("\n")}\n${row}` : row;
+    if (utf8Length(candidate) <= maxBytes) {
+      included.push(row);
+      continue;
+    }
+    if (included.length === 0) {
+      // One incident always makes forward progress so reconstruction does not skip it.
+      included.push(row);
+    }
+    break;
+  }
+  const represented = included.length;
+  const nextOffset = Math.min(total, offset + represented);
+  return {
+    text: included.join("\n"),
+    total,
+    represented,
+    omitted: Math.max(0, total - nextOffset),
+    cursor: encodeIncidentCursor(offset, revision, total),
+    nextCursor: encodeIncidentCursor(nextOffset, revision, total),
+    hasMore: nextOffset < total,
+    ...(reset ? { reset } : {}),
+  };
+}
+
+export function incidentCursorAt(state: FailureState, offset: number): string {
+  const lines = formatFailureLines(state);
+  return encodeIncidentCursor(Math.max(0, Math.floor(offset)), incidentRevision(state), lines.length);
 }
 export function pendingFailureAttention(state: FailureState, now: number, options: { terminal?: boolean; graceMs?: number } = {}): { key: string; incidents: string[]; summary: string } | undefined {
   const due = activeFailures(state).filter((x) => x.status === "unresolved" && !Object.hasOwn(state.delivered, x.id) &&

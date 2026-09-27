@@ -10,6 +10,7 @@ import {
   callbackBatchBudget,
   createCallbackBatcher,
   formatCallbackBatch,
+  formatUrgentCallback,
   packCallbackBatch,
   utf8ByteLength,
   type CallbackBatchEvent,
@@ -377,7 +378,7 @@ test("many failures keep decisive facts and omitted incident counts before routi
   const packed = packCallbackBatch(events);
   assert.ok(utf8ByteLength(packed.text) <= CALLBACK_BATCH_BUDGET_BYTES);
   assert.match(packed.text, /failure: Unresolved failure/);
-  assert.match(packed.text, /omittedIncidents=7 \(counted; inspect with cursor\/limit\)/);
+  assert.match(packed.text, /omittedIncidents=7 retrieve: subagent_result id="sa_fail"/);
   assert.match(packed.text, /Condition matched: \$\.terminalFailure = true/);
   assert.match(packed.text, /Permission denied while terminating process tree/);
   assert.match(packed.text, /subagent_result id="sa_fail"/);
@@ -457,5 +458,85 @@ test("origin isolation, callback:false, and pending overflow do not receipt omit
     }
   } finally {
     batcher.cancel();
+  }
+});
+
+test("urgent callback content is bounded to 2 KiB with receipts, counts, and retrieval", async () => {
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host);
+  try {
+    const huge = `URGENT_BODY ${"你".repeat(3_000)} ${"x".repeat(4_000)}`;
+    assert.ok(utf8ByteLength(huge) > CALLBACK_BATCH_BUDGET_BYTES);
+    let receipts = 0;
+    assert.equal(await batcher.deliverUrgent({
+      source: "subagent",
+      id: "sa_urgent_bound",
+      label: "reviewer",
+      status: "failure",
+      customType: "subagent-failure",
+      content: huge,
+      detailTool: "subagent_result",
+      incidentCount: 12,
+      omittedIncidents: 7,
+      onDelivered: () => { receipts += 1; },
+    }), true);
+    assert.equal(messages.length, 1);
+    const content = messages[0]!.message.content;
+    assert.ok(utf8ByteLength(content) <= CALLBACK_BATCH_BUDGET_BYTES, `urgent was ${utf8ByteLength(content)} bytes`);
+    assert.doesNotMatch(content, /\uFFFD/);
+    assert.match(content, /sa_urgent_bound/);
+    assert.match(content, /omittedIncidents=7 retrieve: Inspect: subagent_result id="sa_urgent_bound"/);
+    assert.match(content, /Inspect: subagent_result id="sa_urgent_bound"/);
+    assert.match(content, /omittedBytes=\d+/);
+    assert.equal(receipts, 1);
+    assert.equal(content.includes(huge), false);
+  } finally {
+    batcher.cancel();
+  }
+});
+
+test("callback overflow stays queued across a recreated batcher and is receipted once", async () => {
+  const { host, messages } = recordingHost();
+  const delivered: string[] = [];
+  const first = createCallbackBatcher(host, { windowMs: 10_000, retryMs: 10_000 });
+  const events = Array.from({ length: 40 }, (_, i) => event(`sa_overflow_${String(i).padStart(2, "0")}`, {
+    label: `overflow-${"文".repeat(30)}-${i}`,
+    onDelivered: () => delivered.push(`sa_overflow_${String(i).padStart(2, "0")}`),
+  }));
+  try {
+    for (const item of events) first.enqueue(item);
+    assert.equal(await first.flush(), true);
+    assert.equal(messages.length, 1);
+    assert.ok(utf8ByteLength(messages[0]!.message.content) <= CALLBACK_BATCH_BUDGET_BYTES);
+    const firstDelivered = [...delivered];
+    assert.ok(firstDelivered.length >= 1);
+    assert.ok(firstDelivered.length < 40);
+    assert.equal(first.pendingCount(), 40 - firstDelivered.length);
+    first.cancel();
+
+    const second = createCallbackBatcher(host, { windowMs: 10_000, retryMs: 10_000 });
+    try {
+      for (const item of events) {
+        second.enqueue({
+          ...item,
+          isDelivered: () => delivered.includes(item.id),
+        });
+      }
+      assert.equal(await second.flush(), true);
+      assert.equal(messages.length, 2);
+      assert.ok(utf8ByteLength(messages[1]!.message.content) <= CALLBACK_BATCH_BUDGET_BYTES);
+      for (const id of firstDelivered) {
+        assert.equal(delivered.filter((item) => item === id).length, 1, `${id} receipted twice after reload`);
+        assert.doesNotMatch(messages[1]!.message.content, new RegExp(`id=${id} \\|`));
+      }
+      assert.ok(delivered.length > firstDelivered.length);
+      assert.equal(await second.flush(), true);
+      const unique = new Set(delivered);
+      assert.equal(unique.size, delivered.length, "no event was receipted twice while draining overflow");
+    } finally {
+      second.cancel();
+    }
+  } finally {
+    first.cancel();
   }
 });

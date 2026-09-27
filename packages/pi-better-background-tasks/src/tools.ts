@@ -76,7 +76,7 @@ const WatchParams = Type.Object({
 
 const CursorFields = {
   cursor: Type.Optional(Type.String({ description: "Caller-owned continuation cursor from a previous page. Replay returns the same page or a no-change/failure-only notice; nextCursor continues. Independent callers do not consume each other. Cursors are bound to the selected session scope." })),
-  max_bytes: Type.Optional(Type.Number({ description: "Optional UTF-8 byte budget. Defaults: status/log/list 1 KiB, raw evidence 16 KiB. Larger explicit pages are allowed up to the shared hard cap (status 2 KiB, log/list 4 KiB, raw 64 KiB) until core constants are reconciled." })),
+  max_bytes: Type.Optional(Type.Number({ description: "Optional UTF-8 byte budget. Defaults: status/log/list 1 KiB, raw evidence 16 KiB. Larger explicit pages are allowed up to the shared hard cap (status 2 KiB, log/list 4 KiB, raw 64 KiB) Hard caps are OUTPUT_BUDGET_MAX_BYTES." })),
   all: Type.Optional(Type.Boolean({ description: "Inspect or list tasks across every session. Default false is current-session only. Unknown ownership is reported as a gap, never as missing or healthy." })),
 };
 
@@ -366,14 +366,14 @@ function withNavigatorRefresh(ctx: ExtensionContext, result: string): string {
   return result;
 }
 
-function getCallbackOrigin(ctx: ExtensionContext): BackgroundTaskCallbackOrigin {
+function getCallbackOrigin(ctx: ExtensionContext | undefined): BackgroundTaskCallbackOrigin {
   let sessionId: string | undefined;
   try {
-    sessionId = ctx.sessionManager?.getSessionId();
+    sessionId = ctx?.sessionManager?.getSessionId();
   } catch {
     sessionId = undefined;
   }
-  return { cwd: ctx.cwd, sessionId };
+  return { cwd: ctx?.cwd ?? "", sessionId };
 }
 
 function logText(id: string, options: OutputOptions) {

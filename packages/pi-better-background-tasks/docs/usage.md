@@ -165,10 +165,15 @@ bounded window expires. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 
 Callbacks point to `bg_task_status` first. The aggregate never contains result
-objects or raw logs. The default status response is a compact model-facing
-summary that omits large command bodies; use `verbose:true` only when full
-metadata is required. `bg_task_log` defaults to a 5-line terminal-aware tail.
-`tail_lines: 0` returns the retained raw log, up to a 512 KiB safe-read cap.
+objects or raw logs and is bounded to 2 KiB UTF-8 (urgent callbacks included).
+Omitted completion rows stay queued and unreceipted. Omitted incidents are
+counted and retrievable with `incidentCursor` on `bg_task_status`. The default
+status response is a compact 1 KiB model-facing summary; use `verbose:true` only
+when full metadata is required (environment values stay omitted). `bg_task_log`
+defaults to a 10-line terminal-aware tail under 1 KiB. `tail_lines: 0` pages
+retained raw bytes (16 KiB default, 64 KiB hard cap) from the oldest retained
+offset. Capture and retention loss are disclosed; this is not a full-history
+archive. See `docs/issue-312-output.md`.
 
 Pi's optional `followUpMode: all` still helps when a later completion arrives
 after an earlier 100 ms aggregate has already flushed: Pi can consume queued

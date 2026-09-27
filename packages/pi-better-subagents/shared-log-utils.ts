@@ -317,9 +317,11 @@ function nextCodepointEnd(bytes: Uint8Array, from: number): number {
 }
 
 function alignStart(bytes: Uint8Array, start: number): number {
-  if (start < 0) return 0;
-  if (start > bytes.length) return bytes.length;
-  return start;
+  if (start <= 0) return 0;
+  if (start >= bytes.length) return bytes.length;
+  let i = start;
+  while (i < bytes.length && isContinuation(bytes[i]!)) i += 1;
+  return i;
 }
 
 function sliceUtf8Range(

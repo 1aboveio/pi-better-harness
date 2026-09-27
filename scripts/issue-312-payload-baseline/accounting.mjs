@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 
 export const KIB = 1024;
 
-/** Proposed initial budgets from issue #312 (UTF-8 bytes). Not enforced. */
+/** Proposed initial budgets from issue #312 (UTF-8 bytes). Historical BEFORE comparison only. */
 export const PROPOSED_BUDGETS_BYTES = Object.freeze({
     background_status: 2 * KIB,
     subagent_result: 8 * KIB,
@@ -17,6 +17,16 @@ export const PROPOSED_BUDGETS_BYTES = Object.freeze({
     list_page: 4 * KIB,
     callback_batch: 8 * KIB,
     raw_evidence: 64 * KIB,
+});
+
+/** OUTPUT-POLICY defaults enforced after integration (UTF-8 bytes of full content). */
+export const POLICY_BUDGETS_BYTES = Object.freeze({
+    background_status: 1 * KIB,
+    subagent_result: 2 * KIB,
+    log_excerpt: 1 * KIB,
+    list_page: 1 * KIB,
+    callback_batch: 2 * KIB,
+    raw_evidence: 16 * KIB,
 });
 
 const CREDENTIAL_PATTERN =

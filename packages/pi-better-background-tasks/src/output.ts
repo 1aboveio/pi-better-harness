@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { activeFailures, formatFailureSummary, readFailureState } from "./shared-failure-observations.js";
+import { activeFailures, formatFailureSummary, incidentCursorAt, isIncidentCursor, pageFailureIncidents, readFailureState } from "./shared-failure-observations.js";
 import {
   assemblePriorityEnvelope,
   clampBudgetBytes,
@@ -67,8 +67,9 @@ export function backgroundBudget(surface: BackgroundOutputSurface, requested?: n
 
 
 function newestVerbatim(text: string, maxBytes: number): VerbatimPage {
+  const fromStart = pageVerbatimText(text, { maxBytes });
   const total = utf8ByteLength(text);
-  if (total <= maxBytes) return { text, hasMore: false, omittedBytes: 0 };
+  if (total <= maxBytes) return fromStart;
   const start = Math.max(0, total - maxBytes);
   const slice = sliceUtf8Bytes(text, start, maxBytes, false);
   let body = slice.text;
@@ -80,6 +81,8 @@ function newestVerbatim(text: string, maxBytes: number): VerbatimPage {
     text: body,
     hasMore: true,
     omittedBytes: total - utf8ByteLength(body),
+    nextCursor: fromStart.cursor,
+    revision: fromStart.revision,
   };
 }
 
@@ -134,15 +137,51 @@ function taskGaps(meta: BackgroundTaskMeta): EvidenceGap[] {
 }
 
 function failureSummaryText(id: string): string | undefined {
-  const summary = formatFailureSummary(readFailureState(failurePath(id)));
-  return summary || undefined;
+  const state = readFailureState(failurePath(id));
+  const summary = formatFailureSummary(state);
+  if (!summary) return undefined;
+  const active = activeFailures(state);
+  if (active.length <= 5) return summary;
+  const omitted = active.length - 5;
+  const cursor = incidentCursorAt(state, 5);
+  return `omittedIncidents=${omitted} incidentCursor=${cursor}\n${summary}`;
 }
 
 function failureCountLine(id: string): string | undefined {
-  const active = activeFailures(readFailureState(failurePath(id)));
+  const state = readFailureState(failurePath(id));
+  const active = activeFailures(state);
   if (active.length <= 5) return undefined;
   const omitted = active.length - 5;
-  return `${active.length} unresolved incidents · ${omitted} omitted from this summary`;
+  const cursor = incidentCursorAt(state, 5);
+  return `${active.length} unresolved incidents · ${omitted} omitted from this summary · incidentCursor=${cursor} (bg_task_status cursor pages remaining incidents; journal is retained evidence)`;
+}
+
+function assembleIncidentPage(id: string, options: OutputOptions): string {
+  const state = readFailureState(failurePath(id));
+  const maxBytes = backgroundBudget("status", options.maxBytes);
+  // Incident pages still use the status surface cap so the total response stays bounded.
+  const page = pageFailureIncidents(state, { cursor: options.cursor, maxBytes: Math.max(256, maxBytes - 400) });
+  return assembleBackgroundContent({
+    surface: "status",
+    maxBytes: options.maxBytes,
+    sections: {
+      identity: `Background task ${id} incidents ${page.represented}/${page.total}`,
+      failure: page.text || "No unresolved incidents.",
+      diagnostics: [
+        page.reset ? `reset=${page.reset}` : undefined,
+        page.omitted > 0
+          ? `${page.omitted} omitted incidents remain; pass nextCursor to continue. Failure journal is retained evidence.`
+          : "All retained incidents are included on this page.",
+      ].filter((line): line is string => Boolean(line)).join("\n"),
+    },
+    verbatim: () => ({
+      text: "",
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor,
+      omittedBytes: page.omitted,
+      reset: page.reset,
+    }),
+  });
 }
 
 function leadIdentity(id: string, identity: string): string {
@@ -403,6 +442,7 @@ export function formatStatus(
   const meta = inspectionValue.meta;
   const ownership = classifyOwnership(meta, options.origin, options.all === true);
   if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership);
+  if (isIncidentCursor(options.cursor)) return assembleIncidentPage(meta.id, options);
   if (options.verbose) {
     return JSON.stringify(redactedVerbose(meta), null, 2);
   }

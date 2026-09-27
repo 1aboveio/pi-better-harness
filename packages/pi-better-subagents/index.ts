@@ -398,7 +398,10 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
     void getCallbackBatcher(pi).deliverUrgent({
         source: "subagent", id: meta.id, label, status: `failure:${pending.key}`,
         customType: "subagent-failure",
-        content: `${formatFailureSummary(state)}\nInspect: subagent_output id=${JSON.stringify(meta.id)}`,
+        content: `${formatFailureSummary(state)}\nInspect: subagent_result id=${JSON.stringify(meta.id)}`,
+        detailTool: "subagent_result",
+        incidentCount: activeFailures(state).length || undefined,
+        omittedIncidents: activeFailures(state).length > 5 ? activeFailures(state).length - 5 : undefined,
         isDelivered: () => failureAttentionHandled(collectRunFailures(meta.id, meta.cwd), pending.incidents),
         getSuppressionReason: () => {
             const current = readMeta(meta.id);

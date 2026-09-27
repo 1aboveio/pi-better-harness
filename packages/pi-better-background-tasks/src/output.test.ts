@@ -306,6 +306,39 @@ describe("retained log paging and capture/retention disclosure", () => {
     expect(raw).toContain("tail-line-01");
     expect(raw).toContain("tail-line-25");
   });
+
+  it("does not replace UTF-8 in a clipped long-line tail and pages omitted incidents", () => {
+    const line = `{"msg":"${"你好🌟".repeat(800)}","end":"TAIL_MARK"}`;
+    const meta = fixture({ logLines: [line] });
+    for (let i = 0; i < 12; i += 1) {
+      recordFailure(meta, `poll-${i}`, `bg-incident-${i}`, `event-${i}`, { category: "operation" });
+    }
+    const status = formatStatus(inspectMeta(meta.id), { origin });
+    expect(utf8ByteLength(status)).toBeLessThanOrEqual(1024);
+    expect(status).not.toContain("\uFFFD");
+    expect(status).toMatch(/incidentCursor=i1\./);
+    const cursor = status.match(/incidentCursor=(i1\.\S+)/)?.[1];
+    expect(cursor).toBeTruthy();
+    const page = formatStatus(inspectMeta(meta.id), { origin, cursor });
+    expect(page).toMatch(/incidents \d+\/\d+/);
+    const combined = `${status}\n${page}`;
+    for (let i = 0; i < 12; i += 1) {
+      expect(combined).toContain(`bg-incident-${i}`);
+    }
+    const log = formatLog(meta.id, { origin });
+    expect(utf8ByteLength(log)).toBeLessThanOrEqual(1024);
+    expect(log).not.toContain("\uFFFD");
+    const rawPages: string[] = [];
+    let rawCursor: string | undefined;
+    for (let i = 0; i < 30; i += 1) {
+      const pageText = formatLog(meta.id, { origin, tailLines: 0, cursor: rawCursor, maxBytes: 4096 });
+      rawPages.push(pageText);
+      const next = pageText.match(/nextCursor=(\S+)/)?.[1];
+      if (!next || !pageText.includes("hasMore=true")) break;
+      rawCursor = next;
+    }
+    expect(rawPages.join("")).toContain("TAIL_MARK");
+  });
 });
 
 describe("list defaults", () => {

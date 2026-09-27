@@ -57,6 +57,9 @@ export function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActive
       source: "background-task", id: `failure:${id}:${pending.key}`, label: meta.name ?? id,
       status: "failure", customType: "background-task-failure",
       content: `Background task ${id}: ${pending.summary}\nInspect: bg_task_status id=${id}`,
+      detailTool: "bg_task_status",
+      incidentCount: pending.incidents.length || undefined,
+      omittedIncidents: pending.incidents.length > 5 ? pending.incidents.length - 5 : undefined,
       isDelivered: () => {
         const current = readMeta(id);
         if (!current) throw new Error("Task metadata is unavailable; defer failure notification");

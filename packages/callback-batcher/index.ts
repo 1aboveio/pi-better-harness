@@ -42,6 +42,9 @@ export interface UrgentCallbackEvent {
   status: "orphaned" | "lost" | string;
   customType: string;
   content: string;
+  detailTool?: CallbackDetailTool;
+  incidentCount?: number;
+  omittedIncidents?: number;
   isDelivered?: () => boolean;
   getSuppressionReason?: () => string | undefined;
   onDelivered?: (at: number) => void;
@@ -125,22 +128,26 @@ export function callbackBatchBudget(requested?: unknown): number {
   return Math.min(Math.max(1, Math.floor(parsed)), CALLBACK_BATCH_MAX_BYTES);
 }
 
+function completeUtf8End(bytes: Uint8Array, to: number): number {
+  if (to <= 0) return 0;
+  if (to >= bytes.length) return bytes.length;
+  let seqStart = to - 1;
+  while (seqStart > 0 && (bytes[seqStart]! & 0xc0) === 0x80) seqStart -= 1;
+  if ((bytes[seqStart]! & 0xc0) === 0x80) return to;
+  const lead = bytes[seqStart]!;
+  const needed = lead <= 0x7f ? 1
+    : (lead & 0xe0) === 0xc0 ? 2
+    : (lead & 0xf0) === 0xe0 ? 3
+    : (lead & 0xf8) === 0xf0 ? 4
+    : 1;
+  return seqStart + needed > to ? seqStart : to;
+}
+
 function clipUtf8Prefix(text: string, maxBytes: number): string {
   if (maxBytes <= 0) return "";
   const bytes = encoder.encode(text);
   if (bytes.byteLength <= maxBytes) return text;
-  let end = Math.min(maxBytes, bytes.byteLength);
-  while (end > 0 && (bytes[end - 1]! & 0xc0) === 0x80) end -= 1;
-  if (end > 0) {
-    const lead = bytes[end - 1]!;
-    const needed = lead <= 0x7f ? 1
-      : (lead & 0xe0) === 0xc0 ? 2
-      : (lead & 0xf0) === 0xe0 ? 3
-      : (lead & 0xf8) === 0xf0 ? 4
-      : 1;
-    if (end - 1 + needed > maxBytes) end -= 1;
-  }
-  return decoder.decode(bytes.subarray(0, end));
+  return decoder.decode(bytes.subarray(0, completeUtf8End(bytes, Math.min(maxBytes, bytes.byteLength))));
 }
 
 function boundedField(value: unknown, maxBytes: number): string {
@@ -175,7 +182,7 @@ function formatRow(event: CallbackBatchEvent): string {
     lines.push(`  incidents=${event.incidentCount}`);
   }
   if (event.omittedIncidents && event.omittedIncidents > 0) {
-    lines.push(`  omittedIncidents=${event.omittedIncidents} (counted; inspect with cursor/limit)`);
+    lines.push(`  omittedIncidents=${event.omittedIncidents} retrieve: ${inspectFor(event)} (incident page via cursor)`);
   }
   return lines.join("\n");
 }
@@ -205,6 +212,48 @@ function eventPriority(event: CallbackBatchEvent): number {
   const status = String(event.status ?? "").toLowerCase();
   if (/(?:fail|orphan|lost|timed_out|timeout|unresolved|incomplete|observation incomplete)/.test(status)) return 0;
   return 2;
+}
+
+export function formatUrgentCallback(
+  event: UrgentCallbackEvent,
+  options: CallbackBatchFormatOptions = {},
+): string {
+  const maxBytes = callbackBatchBudget(options.maxBytes);
+  const id = boundedField(event.id, MAX_ID_BYTES);
+  const label = boundedField(event.label, MAX_LABEL_BYTES);
+  const status = boundedField(event.status, MAX_STATUS_BYTES);
+  const tool = event.detailTool
+    ?? (event.source === "background-task" ? "bg_task_status" : "subagent_result");
+  const inspect = tool === "bg_task_status"
+    ? `Inspect: bg_task_status id=${id}`
+    : `Inspect: subagent_result id=${JSON.stringify(id)}`;
+  const counts: string[] = [];
+  if (event.incidentCount && event.incidentCount > 0) counts.push(`incidents=${event.incidentCount}`);
+  if (event.omittedIncidents && event.omittedIncidents > 0) {
+    counts.push(`omittedIncidents=${event.omittedIncidents} retrieve: ${inspect} (incident page via cursor)`);
+  }
+  const header = `${boundedField(event.source, 40)} id=${id} label=${JSON.stringify(label)} status=${status}`;
+  const source = String(event.content ?? "");
+  const footer = [...counts, inspect].join("\n");
+  const join = (body: string, note: string): string => [header, body, footer, note].filter((part) => part.length > 0).join("\n");
+  const fitBody = (note: string): string => {
+    const reserved = utf8ByteLength(join("", note));
+    const bodyBudget = Math.max(0, maxBytes - reserved);
+    return clipUtf8Prefix(source, bodyBudget);
+  };
+  let body = fitBody("");
+  let note = "";
+  const omitted = Math.max(0, utf8ByteLength(source) - utf8ByteLength(body));
+  if (omitted > 0) {
+    note = `omittedBytes=${omitted} retrieve: ${inspect}`;
+    body = fitBody(note);
+    const omittedAfter = Math.max(0, utf8ByteLength(source) - utf8ByteLength(body));
+    note = `omittedBytes=${omittedAfter} retrieve: ${inspect}`;
+    body = fitBody(note);
+  }
+  const rendered = join(body, note);
+  if (utf8ByteLength(rendered) <= maxBytes) return rendered;
+  return clipRendered(join("", [...counts, inspect].join("\n")), maxBytes);
 }
 
 export function packCallbackBatch(
@@ -409,7 +458,7 @@ export function createCallbackBatcher(
     urgentInFlight.add(key);
     try {
       const handoff = host.sendMessage(
-        { customType: event.customType, content: event.content, display: true },
+        { customType: event.customType, content: formatUrgentCallback(event, { maxBytes }), display: true },
         { deliverAs: "followUp", triggerTurn: true },
       );
       if (isPromiseLike(handoff)) {

@@ -7,6 +7,7 @@
  */
 import { FROZEN_NOW } from "./isolate.mjs";
 import {
+    POLICY_BUDGETS_BYTES,
     PROPOSED_BUDGETS_BYTES,
     measureText,
     scanCredentials,
@@ -53,6 +54,19 @@ function pushCase(cases, findings, spec, text) {
     findings.push(...scanCredentials(text, spec.id));
 }
 
+function nextCursorOf(content) {
+    return String(content ?? "").match(/\bnextCursor=(\S+)/)?.[1];
+}
+
+function incidentCursorOf(content) {
+    return String(content ?? "").match(/incidentCursor=(i1\.\S+)/)?.[1]
+        ?? String(content ?? "").match(/cursor=(i1\.\S+)/)?.[1];
+}
+
+function budgetsFor(phase) {
+    return phase === "after" ? POLICY_BUDGETS_BYTES : PROPOSED_BUDGETS_BYTES;
+}
+
 export async function collectBaseline({ phase = "before" } = {}) {
     const subagentRegistry = await import("../../packages/pi-better-subagents/registry.ts");
     const subagentTools = await import("../../packages/pi-better-subagents/tools.ts");
@@ -64,10 +78,16 @@ export async function collectBaseline({ phase = "before" } = {}) {
     const { registerTools } = await import("../../packages/pi-better-background-tasks/src/tools.ts");
     const { createCallbackBatcher } = await import("../../packages/callback-batcher/index.ts");
 
+    const origin = { cwd: fixtures.SYNTHETIC_CWD, sessionId: fixtures.SYNTHETIC_SESSION };
+    const session = { getActiveOrigin: () => origin };
+    const unavailableSession = { getActiveOrigin: () => undefined };
     const subagent = {
-        list: subagentTools.subagentListTool(TypeStub),
-        output: subagentTools.subagentOutputTool(TypeStub),
-        result: subagentTools.subagentResultTool(TypeStub),
+        list: subagentTools.subagentListTool(TypeStub, session),
+        output: subagentTools.subagentOutputTool(TypeStub, session),
+        result: subagentTools.subagentResultTool(TypeStub, session),
+    };
+    const subagentUnavailable = {
+        result: subagentTools.subagentResultTool(TypeStub, unavailableSession),
     };
 
     const bgRegistered = {};
@@ -89,6 +109,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         orphaned: fixtures.seedSubagentOrphaned(subagentRegistry),
         unicode: fixtures.seedSubagentUnicode(subagentRegistry),
         manyFailures: fixtures.seedSubagentManyFailures(subagentRegistry),
+        foreign: fixtures.seedSubagentForeign(subagentRegistry),
         bgSuccess: fixtures.seedBgSuccess(bgRegistry, bgLogs),
         bgFailed: fixtures.seedBgFailed(bgRegistry, bgLogs, bgFailures),
         bgRepeated: fixtures.seedBgRepeatedPoll(bgRegistry, bgLogs),
@@ -121,7 +142,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "subagent_result",
         invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
         params: { id: seeded.success.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.subagent_result,
+        proposedBudgetBytes: budgetsFor(phase).subagent_result,
     }, subagent.result, { id: seeded.success.id });
 
     await measureResult({
@@ -131,7 +152,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "subagent_output",
         invokePath: "packages/pi-better-subagents/tools.ts#subagentOutputTool.execute",
         params: { id: seeded.success.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.log_excerpt,
+        proposedBudgetBytes: budgetsFor(phase).log_excerpt,
     }, subagent.output, { id: seeded.success.id });
 
     pushCase(cases, credentialFindings, {
@@ -141,7 +162,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "finalizeRun.sendMessage",
         invokePath: "packages/pi-better-subagents/finalization.ts#finalizeRun",
         params: { id: seeded.success.id, exitCode: 0 },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.callback_batch,
+        proposedBudgetBytes: budgetsFor(phase).callback_batch,
     }, callbacks.success?.content ?? "");
 
     await measureResult({
@@ -151,7 +172,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "subagent_result",
         invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
         params: { id: seeded.failed.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.subagent_result,
+        proposedBudgetBytes: budgetsFor(phase).subagent_result,
     }, subagent.result, { id: seeded.failed.id });
 
     pushCase(cases, credentialFindings, {
@@ -161,7 +182,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "finalizeRun.sendMessage",
         invokePath: "packages/pi-better-subagents/finalization.ts#finalizeRun",
         params: { id: seeded.failed.id, exitCode: 1 },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.callback_batch,
+        proposedBudgetBytes: budgetsFor(phase).callback_batch,
     }, callbacks.failed?.content ?? "");
 
     await measureResult({
@@ -171,7 +192,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "subagent_result",
         invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
         params: { id: seeded.incomplete.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.subagent_result,
+        proposedBudgetBytes: budgetsFor(phase).subagent_result,
     }, subagent.result, { id: seeded.incomplete.id });
 
     pushCase(cases, credentialFindings, {
@@ -181,7 +202,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "finalizeRun.sendMessage",
         invokePath: "packages/pi-better-subagents/finalization.ts#finalizeRun",
         params: { id: seeded.incomplete.id, exitCode: 0 },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.callback_batch,
+        proposedBudgetBytes: budgetsFor(phase).callback_batch,
     }, callbacks.incomplete?.content ?? "");
 
     await measureResult({
@@ -191,7 +212,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "subagent_result",
         invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
         params: { id: seeded.orphaned.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.subagent_result,
+        proposedBudgetBytes: budgetsFor(phase).subagent_result,
     }, subagent.result, { id: seeded.orphaned.id });
 
     const orphanedCallback = formatHealthCallbackTrigger({
@@ -206,7 +227,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "formatHealthCallbackTrigger",
         invokePath: "packages/pi-better-subagents/completion.mjs#formatHealthCallbackTrigger",
         params: { id: seeded.orphaned.id, status: "orphaned" },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.callback_batch,
+        proposedBudgetBytes: budgetsFor(phase).callback_batch,
     }, orphanedCallback);
 
     await measureResult({
@@ -216,7 +237,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "subagent_result",
         invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
         params: { id: seeded.unicode.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.subagent_result,
+        proposedBudgetBytes: budgetsFor(phase).subagent_result,
         facts: { seededUnicodeJsonUtf8Bytes: utf8Bytes(fixtures.UNICODE_JSON_LINE) },
     }, subagent.result, { id: seeded.unicode.id });
 
@@ -227,7 +248,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "subagent_result",
         invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
         params: { id: seeded.manyFailures.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.subagent_result,
+        proposedBudgetBytes: budgetsFor(phase).subagent_result,
     }, subagent.result, { id: seeded.manyFailures.id });
 
     await measureResult({
@@ -236,9 +257,39 @@ export async function collectBaseline({ phase = "before" } = {}) {
         surface: "subagent_list",
         tool: "subagent_list",
         invokePath: "packages/pi-better-subagents/tools.ts#subagentListTool.execute",
-        params: { all: true, limit: 20 },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.list_page,
-    }, subagent.list, { all: true, limit: 20 });
+        params: { limit: 10 },
+        proposedBudgetBytes: budgetsFor(phase).list_page,
+    }, subagent.list, { limit: 10 });
+
+    const foreignResult = await subagent.result.execute("issue-312-baseline", { id: seeded.foreign.id }, undefined, undefined, ctx);
+    pushCase(cases, credentialFindings, {
+        id: "subagent.foreign.result",
+        family: "success",
+        surface: "subagent_result",
+        tool: "subagent_result",
+        invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
+        params: { id: seeded.foreign.id },
+        proposedBudgetBytes: budgetsFor(phase).subagent_result,
+        facts: {
+            ownershipGap: /foreign session/i.test(textOf(foreignResult)),
+            leakedForeignAnswer: textOf(foreignResult).includes("foreign-session secret answer"),
+        },
+    }, textOf(foreignResult));
+
+    const unavailableResult = await subagentUnavailable.result.execute("issue-312-baseline", { id: seeded.success.id }, undefined, undefined, ctx);
+    pushCase(cases, credentialFindings, {
+        id: "subagent.ownership.unavailable",
+        family: "success",
+        surface: "subagent_result",
+        tool: "subagent_result",
+        invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
+        params: { id: seeded.success.id, session: "unavailable" },
+        proposedBudgetBytes: budgetsFor(phase).subagent_result,
+        facts: {
+            ownershipGap: /ownership unavailable/i.test(textOf(unavailableResult)),
+            leakedEvidence: textOf(unavailableResult).includes("review complete"),
+        },
+    }, textOf(unavailableResult));
 
     await measureResult({
         id: "background.success.status",
@@ -247,7 +298,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_status",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgSuccess.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.background_status,
+        proposedBudgetBytes: budgetsFor(phase).background_status,
     }, bgRegistered.bg_task_status, { id: seeded.bgSuccess.id });
 
     const wrapperStatus = await bgRegistered.bg_status.execute(
@@ -257,7 +308,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         undefined,
         ctx,
     );
-    const standaloneStatus = textOf(await bgRegistered.bg_task_status.execute("issue-312-baseline", { id: seeded.bgSuccess.id }));
+    const standaloneStatus = textOf(await bgRegistered.bg_task_status.execute("issue-312-baseline", { id: seeded.bgSuccess.id }, undefined, undefined, ctx));
     pushCase(cases, credentialFindings, {
         id: "background.success.status.wrapper",
         family: "success",
@@ -265,7 +316,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_status",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#bg_status.execute",
         params: { action: "status", id: seeded.bgSuccess.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.background_status,
+        proposedBudgetBytes: budgetsFor(phase).background_status,
         facts: { wrapperMatchesStandalone: textOf(wrapperStatus) === standaloneStatus },
         tui: compactTui(bgRegistered.bg_status, wrapperStatus),
     }, textOf(wrapperStatus));
@@ -277,7 +328,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_log",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgSuccess.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.log_excerpt,
+        proposedBudgetBytes: budgetsFor(phase).log_excerpt,
     }, bgRegistered.bg_task_log, { id: seeded.bgSuccess.id });
 
     await measureResult({
@@ -287,7 +338,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_status",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgFailed.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.background_status,
+        proposedBudgetBytes: budgetsFor(phase).background_status,
     }, bgRegistered.bg_task_status, { id: seeded.bgFailed.id });
 
     await measureResult({
@@ -297,7 +348,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_status",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgRepeated.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.background_status,
+        proposedBudgetBytes: budgetsFor(phase).background_status,
         facts: {
             seededPollCount: seeded.bgRepeated.pollCount,
             seededDistinctStdout: seeded.bgRepeated.distinctStdout,
@@ -311,7 +362,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_log",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgRepeated.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.log_excerpt,
+        proposedBudgetBytes: budgetsFor(phase).log_excerpt,
         facts: { seededPollCount: seeded.bgRepeated.pollCount },
     }, bgRegistered.bg_task_log, { id: seeded.bgRepeated.id });
 
@@ -322,7 +373,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_log",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgRepeated.id, tail_lines: 0 },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.raw_evidence,
+        proposedBudgetBytes: budgetsFor(phase).raw_evidence,
         facts: { seededPollCount: seeded.bgRepeated.pollCount },
     }, bgRegistered.bg_task_log, { id: seeded.bgRepeated.id, tail_lines: 0 });
 
@@ -333,7 +384,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_status",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgUnicode.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.background_status,
+        proposedBudgetBytes: budgetsFor(phase).background_status,
         facts: { seededUnicodeJsonUtf8Bytes: utf8Bytes(fixtures.UNICODE_JSON_LINE) },
     }, bgRegistered.bg_task_status, { id: seeded.bgUnicode.id });
 
@@ -344,7 +395,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_log",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgUnicode.id, tail_lines: 0 },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.log_excerpt,
+        proposedBudgetBytes: budgetsFor(phase).raw_evidence,
         facts: { seededUnicodeJsonUtf8Bytes: utf8Bytes(fixtures.UNICODE_JSON_LINE) },
     }, bgRegistered.bg_task_log, { id: seeded.bgUnicode.id, tail_lines: 0 });
 
@@ -355,7 +406,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_status",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { id: seeded.bgManyFailures.id },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.background_status,
+        proposedBudgetBytes: budgetsFor(phase).background_status,
     }, bgRegistered.bg_task_status, { id: seeded.bgManyFailures.id });
 
     await measureResult({
@@ -365,7 +416,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "bg_task_list",
         invokePath: "packages/pi-better-background-tasks/src/tools.ts#registerTools.execute",
         params: { limit: 20 },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.list_page,
+        proposedBudgetBytes: budgetsFor(phase).list_page,
     }, bgRegistered.bg_task_list, { limit: 20 });
 
     const batchHost = { sendMessage(message, options) { batchHost.last = { message, options }; } };
@@ -390,12 +441,44 @@ export async function collectBaseline({ phase = "before" } = {}) {
         tool: "createCallbackBatcher.sendMessage",
         invokePath: "packages/callback-batcher/index.ts#createCallbackBatcher.flush",
         params: { eventCount: 50 },
-        proposedBudgetBytes: PROPOSED_BUDGETS_BYTES.callback_batch,
+        proposedBudgetBytes: budgetsFor(phase).callback_batch,
         facts: {
             batchedEventCount: 50,
             sendMessageCustomType: batchHost.last?.message?.customType ?? null,
         },
     }, batchHost.last?.message?.content ?? "");
+
+    if (phase === "after") {
+        const unicodeCase = cases.find((item) => item.id === "subagent.unicode.result");
+        if (unicodeCase) {
+            let cursor;
+            let rebuilt = "";
+            for (let i = 0; i < 64; i += 1) {
+                const page = textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.unicode.id, cursor }, undefined, undefined, ctx));
+                const body = page.split("\n---\n")[0] ?? page;
+                const lines = body.split("\n");
+                rebuilt += lines.slice(1).join("\n").replace(/\nstatusCursor=\S+\s*$/, "");
+                const next = nextCursorOf(page);
+                if (!next || !page.includes("hasMore=true")) break;
+                cursor = next;
+            }
+            unicodeCase.facts.reconstructedIncludesSeed = rebuilt.includes(fixtures.UNICODE_JSON_LINE.slice(0, 40));
+            unicodeCase.facts.reconstructionPages = rebuilt.length > 0;
+        }
+        const many = cases.find((item) => item.id === "subagent.many_failures.result");
+        if (many) {
+            const cursor = incidentCursorOf(many.content);
+            many.facts.incidentCursorPresent = Boolean(cursor);
+            if (cursor) {
+                const page = textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.manyFailures.id, cursor }, undefined, undefined, ctx));
+                many.facts.omittedIncidentsRetrievable = /incident|incidents/i.test(page);
+            }
+        }
+        const wrapper = cases.find((item) => item.id === "background.success.status.wrapper");
+        if (wrapper) {
+            wrapper.facts.wrapperMatchesStandalone = wrapper.facts.wrapperMatchesStandalone === true;
+        }
+    }
 
     const missing = fixtures.REQUIRED_FAMILIES.filter((family) => !cases.some((item) => item.family === family));
     if (missing.length) {
@@ -409,7 +492,8 @@ export async function collectBaseline({ phase = "before" } = {}) {
         phase,
         frozenNow: FROZEN_NOW,
         accounting: "utf8-bytes",
-        proposedBudgetsBytes: PROPOSED_BUDGETS_BYTES,
+        proposedBudgetsBytes: budgetsFor(phase),
+        policyBudgetsBytes: POLICY_BUDGETS_BYTES,
         registeredTools: {
             subagent: ["subagent_list", "subagent_output", "subagent_result"],
             background: Object.keys(bgRegistered).sort(),
@@ -424,12 +508,12 @@ export const LIMITATIONS = [
     "Payloads come from registered tool execute() / finalizeRun sendMessage / callback-batcher sendMessage. TUI renderResult is recorded only to show display folding is not the model-facing budget.",
     "Seeds are synthetic NDJSON / watch logs and failure journals. No live model child and no real credentials. Historical issue samples are not this checkout.",
     "Date.now is frozen for deterministic elapsed/status text. Production elapsed is live.",
-    "Proposed budgets are copied from issue #312 for comparison. This harness does not enforce them and does not treat over-budget output as a pass or fail.",
+    "BEFORE comparison uses the issue #312 discussion table. AFTER comparison uses OUTPUT-POLICY defaults (status/log/list 1 KiB, answer/callback 2 KiB, raw 16 KiB).",
     "Background status/log strings embed absolute registry paths. utf8Bytes includes that host prefix; facts.utf8BytesExcludingIsolatedTmpdir substitutes $TMPDIR so AFTER comparisons can ignore path-length drift.",
-    "Background log reads remain tail-capped at 512 KiB in the current reader; this harness does not claim full-history recovery.",
-    "Incomplete/orphaned raw tails are the current tailLog window (40 display rows, 256 KiB read cap). The formatter does not currently disclose skipped older bytes.",
-    "Process stdout/stderr 1 MiB capture overflow is not exercised (would need a live command). Retention-compaction gaps are not a pageable API on this base.",
-    "verbose:true status is not dumped here because it serializes full metadata. Targeted diagnostics vs env dumps are a later product change.",
+    "Session tools are wired with getActiveOrigin. Default list/status/result are current-session. Foreign and unavailable ownership are measured as gaps, not masked with all:true.",
+    "Raw retained evidence is pageable from the oldest retained offset. Capture/retention loss is disclosed and is not recoverable as full history.",
+    "Process stdout/stderr 1 MiB capture overflow is not exercised here (needs a live command); product tests cover capture counters.",
+    "verbose:true status remains an explicit recovery hatch and is not the default compact payload.",
 ];
 
 export function serializeReport(report, { git, measuredAt, model } = {}) {
@@ -441,6 +525,7 @@ export function serializeReport(report, { git, measuredAt, model } = {}) {
         accounting: report.accounting,
         frozenNow: report.frozenNow,
         proposedBudgetsBytes: report.proposedBudgetsBytes,
+        policyBudgetsBytes: report.policyBudgetsBytes,
         registeredTools: report.registeredTools,
         limitations: report.limitations,
         cases: report.cases.map((item) => {

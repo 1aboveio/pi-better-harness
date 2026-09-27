@@ -273,9 +273,10 @@ Driven by the child's `--mode json` usage events:
   with elapsed time, the current tool, and running token/cost spend, ticking once
   a second. It clears itself when the last run finishes. (TUI/RPC only; silent in
   `-p`/print mode.)
-- **On demand** — `subagent_list`, `subagent_output`, and `subagent_result` all
-  carry `elapsed · N tok (↑in ↓out) · $cost · tools`. The completion notice and
-  toast include the final elapsed + spend too.
+- **On demand** — `subagent_list`, `subagent_output`, and `subagent_result` are
+  bounded current-session pages (see `docs/issue-312-output.md`). They omit
+  ordered tool-name sequences and default token/cost lines. The human toast may
+  still include elapsed + spend; the model-facing callback does not.
 - **Folded result display.** In interactive TUI sessions, `subagent_result`
   renders a compact preview by default so long child answers do not flood the
   transcript. Clicking the tool row, or using the row expand action, shows the
@@ -367,7 +368,7 @@ and clears navigator footer statuses (TUI only).
   child session state). The `meta.json` sidecar is authoritative, so `list` /
   `output` / `result` survive turns, `/reload`, and pi restarts.
 - The child runs `--mode json`; `subagent_result` / `subagent_output` **parse**
-  the event stream and return just the final answer (plus which tools ran).
+  the event stream and return just the bounded final answer (no tool-name history).
   Non-JSON banner/warning lines fail to parse and are dropped, so the result is
   clean. The prompt is passed as a **positional argument**, never `@file` — some
   models refuse an @-attached file as untrusted content.
@@ -377,7 +378,7 @@ and clears navigator footer statuses (TUI only).
 
 ## Parent-process scoping
 
-The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. `subagent_list` shows newest runs first and is capped at 20 rows by default; pass `limit:N` to request fewer or more rows, up to the documented maximum of 100 (larger values are clamped with a clear note). Pass `all:true` for a global view; it still respects the default or explicit limit. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, transient `exited`, or durable `orphaned` / `lost`. Id-based `subagent_result` / `subagent_output` / `subagent_stop` still resolve any run id (cross-session recovery).
+The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. Default `subagent_list` is current-session, newest first, 10 compact rows / 1 KiB. Pass `limit:N` (max 100) or `maxBytes` (max 4 KiB) for an explicit larger page. Pass `all:true` for a global / foreign-session view. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, transient `exited`, or durable `orphaned` / `lost`. Id-based `subagent_result` / `subagent_output` default to the current session; pass `all:true` to read a foreign-session id. Unknown ownership is a gap, not “not found”.
 
 ## Supervision health (`orphaned` / `lost`)
 

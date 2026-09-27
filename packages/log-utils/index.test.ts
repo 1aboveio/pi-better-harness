@@ -149,6 +149,17 @@ describe("pageVerbatimText", () => {
     assert.equal(reconstructText(source, 40).text, source);
   });
 
+  it("does not split or replace UTF-8 when a tail starts on a continuation byte", () => {
+    const source = `café${"你".repeat(80)}😀END`;
+    const encoded = Buffer.from(source, "utf8");
+    const mid = encoded.indexOf(Buffer.from("你", "utf8")) + 1; // continuation of 你
+    const slice = sliceUtf8Bytes(source, mid, 40, false);
+    assert.doesNotMatch(slice.text, /\uFFFD/);
+    assert.match(slice.text, /你|😀|END/);
+    assert.equal(source.includes(slice.text), true);
+    assert.equal(reconstructText(source, 17).text, source);
+  });
+
   it("replays a caller cursor and keeps independent callers from consuming each other", () => {
     const source = "AAAA\nBBBB\nCCCC\nDDDD\n";
     const callerA = pageVerbatimText(source, { maxBytes: 5 });

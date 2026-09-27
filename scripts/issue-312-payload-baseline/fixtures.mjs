@@ -68,6 +68,7 @@ function seedSubagentMeta(registry, id, extras = {}) {
         exitCode: extras.exitCode,
         logPath: registry.logPathFor(id),
         sessionId: SYNTHETIC_SESSION,
+        callbackOrigin: extras.callbackOrigin ?? { cwd: SYNTHETIC_CWD, sessionId: SYNTHETIC_SESSION },
         callback: extras.callback ?? true,
         lifecycleClassification: extras.lifecycleClassification,
         failureReason: extras.failureReason,
@@ -340,6 +341,20 @@ export function seedBgManyFailures(registry, failures) {
             { category: "observation-incomplete", incomplete: i % 4 === 0, evidence: `${logPath}#poll=${i}` },
         );
     }
+    return { id };
+}
+
+export function seedSubagentForeign(registry) {
+    const id = "sa_issue312_foreign";
+    writeSubagentLog(registry, id, successEvents(`${SYNTHETIC_MARKER} foreign-session secret answer`));
+    seedSubagentMeta(registry, id, {
+        status: "completed",
+        exitCode: 0,
+        lifecycleClassification: "complete",
+        name: "foreign",
+        callbackOrigin: { cwd: SYNTHETIC_CWD, sessionId: "issue-312-other-session" },
+        sessionId: "issue-312-other-session",
+    });
     return { id };
 }
 
