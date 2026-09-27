@@ -1753,6 +1753,7 @@ describe("shared background work navigator", () => {
     });
     const mounted: any[] = [];
     let focusCalls = 0;
+    const unfocusTargets: unknown[] = [];
     const typed: string[] = [];
     const ui = {
       factory: undefined as any,
@@ -1767,7 +1768,10 @@ describe("shared background work navigator", () => {
           mounted.splice(mounted.indexOf(component), 1);
         });
         mounted.push(component);
-        options?.onHandle?.({ focus() { focusCalls += 1; } });
+        options?.onHandle?.({
+          focus() { focusCalls += 1; },
+          unfocus(unfocusOptions?: { target: unknown }) { unfocusTargets.push(unfocusOptions?.target); },
+        });
         return new Promise(() => undefined);
       },
     };
@@ -1786,9 +1790,12 @@ describe("shared background work navigator", () => {
       assert.equal(mounted.length, 1);
       assert.match(mounted[0].render(100).join("\n"), /alpha content/);
 
-      // Another UI took focus and handed it back to the editor while the overlay stayed mounted.
-      editor.handleInput("down");
-      editor.handleInput("down");
+      // Another extension re-installed the editor: Pi mounts a new instance with focus
+      // while the overlay stays mounted.
+      const swapped = ui.factory({}, {}, {});
+      assert.notEqual(swapped, editor);
+      swapped.handleInput("down");
+      swapped.handleInput("down");
       assert.equal(mounted.length, 1, "exactly one overlay stays mounted");
       assert.equal(focusCalls, 2, "the mounted overlay takes focus back");
       const screen = mounted[0].render(100).join("\n");
@@ -1797,15 +1804,64 @@ describe("shared background work navigator", () => {
 
       mounted[0].handleInput("escape");
       assert.equal(mounted.length, 0, "Esc closes the navigator");
-      editor.handleInput("h");
+      assert.deepEqual(unfocusTargets, [swapped], "focus goes to the live editor, not the unmounted one Pi remembered");
+      swapped.handleInput("h");
       assert.deepEqual(typed, ["h"], "keys reach the editor again");
 
       // A stale overlay also goes away when the editor-side main list is left with Esc.
-      editor.handleInput("left");
-      editor.handleInput("down");
+      swapped.handleInput("left");
+      swapped.handleInput("down");
       assert.equal(mounted.length, 1);
-      editor.handleInput("escape");
+      swapped.handleInput("escape");
       assert.equal(mounted.length, 0);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("lets Esc close a mounted overlay that lost focus after every row disappeared", () => {
+    let rows = ["alpha"];
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      visibleCount: () => rows.length,
+      listRows: () => rows.map((id) => ({
+        providerId: "subagents", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "subagent", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300,
+      })),
+    });
+    let mounted = 0;
+    const typed: string[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        mounted += 1;
+        factory({ requestRender() {} }, this.theme, {}, () => { mounted -= 1; });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput(data: string) { typed.push(data); } }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+      assert.equal(mounted, 1);
+      rows = [];
+      editor.handleInput("escape");
+      assert.equal(mounted, 0, "Esc closes the stale overlay even with no rows left");
+      editor.handleInput("escape");
+      assert.deepEqual(typed, ["escape"], "with no overlay, Esc goes to the editor as before");
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

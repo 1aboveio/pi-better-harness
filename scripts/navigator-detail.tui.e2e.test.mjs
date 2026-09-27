@@ -185,7 +185,7 @@ test("closing work from its detail opens the next row, then returns the keyboard
 
 // @covers navigator.detail-overlay
 // @level e2e
-test("a detail overlay that lost focus is reused, and Esc returns the keyboard to the editor", { skip }, () => {
+test("after an editor swap, the detail overlay is reused and Esc returns the keyboard to the live editor", { skip }, () => {
   assertPrivateRegistry();
   assert.ok(hasTmux, "navigator golden path requires tmux; skipping cannot satisfy this gate");
   mkdirSync(evidenceDir, { recursive: true });
@@ -200,10 +200,10 @@ test("a detail overlay that lost focus is reused, and Esc returns the keyboard t
   sendKey("Down");
   waitForScreen((screen) => screen.includes("provider Subagents") && hasSettledInputFrame(screen));
 
-  // Another extension's prompt takes focus and, when it closes, Pi hands focus to
-  // the editor while the navigator overlay is still mounted.
+  // Another extension re-installs the editor (setEditorComponent), which mounts a
+  // new editor instance with focus while the navigator overlay stays mounted.
   writeFileSync(focusStealPath, "");
-  waitFor(() => !existsSync(focusStealPath), "the probe to take focus");
+  waitFor(() => !existsSync(focusStealPath), "the probe to swap the editor");
   sleep(400);
   sendKey("Down");
   const moved = waitForScreen((screen) => screen.includes("provider Background Tasks") && hasSettledInputFrame(screen));
@@ -280,8 +280,8 @@ function startPiSession() {
 }
 
 function probeExtension(path, focusStealPath) {
-  // Besides reporting the session, the probe opens and closes a non-overlay prompt
-  // when the test creates focusStealPath, the way any extension dialog would.
+  // Besides reporting the session, the probe re-installs the current editor when the
+  // test creates focusStealPath, the way any extension that wraps the editor does.
   return `export default function(pi) {
   pi.on("session_start", async (_event, ctx) => {
     const fs = await import("node:fs");
@@ -289,10 +289,7 @@ function probeExtension(path, focusStealPath) {
     const timer = setInterval(() => {
       if (!fs.existsSync(${JSON.stringify(focusStealPath)})) return;
       fs.rmSync(${JSON.stringify(focusStealPath)}, { force: true });
-      void ctx.ui.custom((_tui, _theme, _keybindings, done) => {
-        setTimeout(() => done(null), 100);
-        return { render: () => ["probe prompt"], handleInput() {}, invalidate() {} };
-      });
+      ctx.ui.setEditorComponent(ctx.ui.getEditorComponent());
     }, 100);
     timer.unref?.();
   });

@@ -242,6 +242,21 @@ function processState(pid: number): string | undefined {
   }
 }
 
+/** The process group the kernel reports for a live pid (not what the product recorded). */
+function processGroupOf(pid: number): number | undefined {
+  if (process.platform === "linux") {
+    try {
+      // Fields after the parenthesised command: state ppid pgrp ...
+      const fields = readFileSync(`/proc/${pid}/stat`, "utf8").replace(/^.*\) /s, "").split(" ");
+      return Number(fields[2]) || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const ps = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" });
+  return ps.status === 0 ? Number(ps.stdout.trim()) || undefined : undefined;
+}
+
 function processGroupGone(pgid: number | undefined): boolean {
   if (!pgid || pgid <= 1) return false;
   try {
@@ -393,15 +408,20 @@ describe.skipIf(!support.supported)(
       await waitForMeta(id, () => existsSync(marker));
       const childPid = Number(readFileSync(marker, "utf8").trim());
       expect(processAlive(childPid)).toBe(true);
+      // The kernel's group for the child, read before the stop: a vanished group only
+      // proves the child stopped if it is the group the child really belonged to.
+      const childPgid = processGroupOf(childPid);
+      expect(childPgid).toBeGreaterThan(1);
 
       expect(await harness.execute("bg_task_stop", { id })).toContain(id);
       const stopped = await waitForMeta(id, (current) => current?.status === "cancelled");
+      expect(stopped.pgid).toBe(childPgid);
       await waitForCondition(
-        () => !processAlive(childPid, stopped.pgid),
-        () => `pid ${childPid} state ${processState(childPid) ?? "gone"}, pgid ${stopped.pgid} ${processGroupGone(stopped.pgid) ? "gone" : "present"}`,
+        () => !processAlive(childPid, childPgid),
+        () => `pid ${childPid} state ${processState(childPid) ?? "gone"}, pgid ${childPgid} ${processGroupGone(childPgid) ? "gone" : "present"}`,
       );
 
-      expect(processAlive(childPid, stopped.pgid)).toBe(false);
+      expect(processAlive(childPid, childPgid)).toBe(false);
     }, 30_000);
 
     // @covers background-task.sandbox-lifecycle-compat

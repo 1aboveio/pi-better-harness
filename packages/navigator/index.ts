@@ -93,6 +93,8 @@ type NavigatorState = {
   mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
   mainListDeadlineScheduler?: RenderScheduler;
   editorComponent?: Component;
+  /** The editor Pi currently has mounted (the wrapper the factory returned last). */
+  editorFocusTarget?: unknown;
   detailOverlayRows?: number;
   dispose?: () => void;
   /** The mounted detail overlay, reused instead of stacking a second one. */
@@ -630,7 +632,7 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
   if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
-  return new Proxy(inner, {
+  const proxy = new Proxy(inner, {
     get(target, prop) {
       if (prop === "handleInput") {
         return (data: string) => {
@@ -647,12 +649,24 @@ function wrapEditor(inner: any, deps: HostDeps): unknown {
       return Reflect.set(target, prop, value);
     },
   });
+  // Pi mounts and focuses whatever the factory returns; an extension that
+  // re-installs the editor replaces it, so this always names the live one.
+  state().editorFocusTarget = proxy;
+  return proxy;
 }
 
 function handleMainListInput(data: string, deps: HostDeps): boolean {
   const s = state();
   const rows = listRows();
-  if (rows.length === 0) return false;
+  if (rows.length === 0) {
+    // Every row is gone, but an overlay that lost focus may still be mounted: Esc still closes it.
+    if (s.overlay && deps.matchKey(data, "escape")) {
+      unfocusMainList();
+      dismissOverlay();
+      return true;
+    }
+    return false;
+  }
   if (!s.mainListFocused) {
     if (!deps.isOpenTrigger(data)) return false;
     focusMainList();
@@ -738,9 +752,11 @@ function openNavigator(): void {
   // An overlay that lost focus (another UI took it and handed it to the editor)
   // is still mounted: switch its detail and focus it rather than stacking a
   // second overlay over it, whose Esc would only reveal the stale one below.
-  if (s.overlay) {
-    s.overlay.showDetail(selectedId);
-    s.overlay.focus();
+  const mounted = s.overlay;
+  if (mounted) {
+    // showDetail may close the overlay (and clear s.overlay); focus() is then a no-op.
+    mounted.showDetail(selectedId);
+    mounted.focus();
     return;
   }
   try {
@@ -748,13 +764,20 @@ function openNavigator(): void {
     s.dispose = undefined;
     let disposeToken: (() => void) | undefined;
     let overlayRef: NavigatorState["overlay"];
-    let handle: { focus?(): void } | undefined;
+    let handle: { focus?(): void; unfocus?(options?: { target: unknown }): void } | undefined;
     const release = () => {
       if (overlayRef && s.overlay === overlayRef) s.overlay = undefined;
     };
     const opened = (ctx.ui as any).custom((tui: any, theme: any, _keybindings: any, done: (v: null) => void) => {
       const component = createOverlayComponent(rows, deps, tui, theme, (value) => {
         release();
+        // Pi restores focus to the editor that was focused when the overlay opened. If an
+        // extension re-installed the editor since, that instance is unmounted and every key
+        // would be lost; hand focus to the live editor before closing.
+        const liveEditor = s.editorFocusTarget;
+        if (liveEditor) {
+          try { handle?.unfocus?.({ target: liveEditor }); } catch { /* ignore */ }
+        }
         done(value);
       }, () => {
         s.lastHint = undefined;
@@ -762,13 +785,16 @@ function openNavigator(): void {
       }, selectedId);
       overlayRef = {
         showDetail: (navigatorId) => component.showDetail(navigatorId),
-        focus: () => { try { handle?.focus?.(); } catch { /* ignore */ } },
+        focus: () => {
+        if (s.overlay !== overlayRef) return;
+        try { handle?.focus?.(); } catch { /* ignore */ }
+      },
       };
       s.overlay = overlayRef;
       disposeToken = () => component.dismiss();
       s.dispose = disposeToken;
       return component;
-    }, { overlay: true, overlayOptions: detailOverlayOptions, onHandle: (h: { focus?(): void }) => { handle = h; } });
+    }, { overlay: true, overlayOptions: detailOverlayOptions, onHandle: (h: typeof handle) => { handle = h; } });
     const clear = () => {
       release();
       if (s.dispose === disposeToken) s.dispose = undefined;

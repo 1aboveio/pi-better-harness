@@ -25,7 +25,17 @@ process.env.TMPDIR = isolated;
 process.env.TMP = isolated;
 process.env.TEMP = isolated;
 
-process.on("exit", () => {
+function cleanUp() {
   // Only the process that created the directory removes it.
   try { rmSync(isolated, { recursive: true, force: true }); } catch { /* best-effort */ }
-});
+}
+
+process.on("exit", cleanUp);
+// A signal skips "exit" handlers: clean up, then re-raise so the process still
+// dies of the signal (and node --test reports it as such).
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    cleanUp();
+    process.kill(process.pid, signal);
+  });
+}
