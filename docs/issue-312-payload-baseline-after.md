@@ -1,24 +1,24 @@
 # Issue #312 model-facing payload baseline (after)
 
-Measured at 2026-09-27T06:31:48.182Z from rush/issue-312-fix @ `06254d591856674fa9c61510d3660bdebb8112db`.
+Measured at 2026-09-27T07:14:07.994Z from rush/issue-312-fix @ `3e8e28cdbbd3da8ca6f9940183ed4af0f3dd0b57`.
 Accounting: **UTF-8 bytes** (`Buffer.byteLength(text, "utf8")`). Tokenizer counts are not included.
 
 Runtime model for this capture session: `unknown/unknown` effort `unknown`.
 No model calls were made to seed the payloads.
 
-## How to rerun (BEFORE and AFTER)
+## How to rerun
 
 ```bash
-node --import tsx scripts/issue-312-payload-baseline.mjs --phase before \
-  --json-out docs/issue-312-payload-baseline.json \
-  --md-out docs/issue-312-payload-baseline.md
+node --import tsx scripts/issue-312-payload-baseline.mjs --phase after \
+  --json-out docs/issue-312-payload-baseline-after.json \
+  --md-out docs/issue-312-payload-baseline-after.md
 ```
 
-After the integration lands, rerun with `--phase after` and compare `utf8Bytes`, `facts.containsOrderedToolSequence`, longest-line bytes, and whether proposed budgets are exceeded. Do not treat this BEFORE file as a regression pin that blesses current over-budget or tool-history behavior.
+This AFTER capture measures the shipped OUTPUT-POLICY defaults. Compare it with the BEFORE file (`--phase before`) on `utf8Bytes`, `facts.containsOrderedToolSequence`, longest-line bytes, and whether budgets are exceeded.
 
-## Proposed budgets (issue discussion, not enforced)
+## OUTPUT-POLICY default budgets (enforced by the tools)
 
-| Surface | Proposed UTF-8 budget |
+| Surface | Default UTF-8 budget |
 |---|---:|
 | background_status | 1024 |
 | subagent_result | 2048 |
@@ -29,7 +29,7 @@ After the integration lands, rerun with `--phase after` and compare `utf8Bytes`,
 
 ## Cases
 
-| id | family | tool | UTF-8 bytes | UTF-16 units | longest line (UTF-8) | exceeds proposed | ordered tool sequence |
+| id | family | tool | UTF-8 bytes | UTF-16 units | longest line (UTF-8) | exceeds budget | ordered tool sequence |
 |---|---|---|---:|---:|---:|---|---|
 | `subagent.success.result` | success | subagent_result | 339 | 335 | 120 | no / 2048 | no |
 | `subagent.success.output` | success | subagent_output | 307 | 305 | 120 | no / 1024 | no |
@@ -55,7 +55,7 @@ After the integration lands, rerun with `--phase after` and compare `utf8Bytes`,
 | `background.unicode.status` | unicode-long-line-json | bg_task_status | 1024 | 694 | 497 | no / 1024 | no |
 | `background.unicode.log` | unicode-long-line-json | bg_task_log | 8074 | 3049 | 7647 | no / 16384 | no |
 | `background.many_failures.status` | many-failures | bg_task_status | 887 | 881 | 307 | no / 1024 | no |
-| `background.many_failures.list` | many-failures | bg_task_list | 920 | 915 | 279 | no / 1024 | no |
+| `background.many_failures.list` | many-failures | bg_task_list | 864 | 859 | 198 | no / 1024 | no |
 | `callback.many_completions.batch` | many-completions | createCallbackBatcher.sendMessage | 1949 | 1469 | 288 | no / 2048 | no |
 
 ## Facts worth carrying into AFTER
