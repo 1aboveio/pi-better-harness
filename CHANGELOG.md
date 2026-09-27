@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **plan**: while `rush-issues` owns the plan and a run is bound with `sync_workflow_plan`, `update_plan` accepts a `workflow` transition instead of `plan`. It sets fields on units, components, fleet stages, and run-level fields by id, can add new unit and component rows for a mid-run scope change, can append a `decisions` entry, and saves them as one revision: the task plan is replaced atomically with `planRevision + 1` and a new `updatedAt`, and one profiling event with the same revision is appended to the run's existing log (`profiling/run.jsonl` or `profiling.jsonl`). Unknown or duplicate ids, unknown or cyclic dependencies, invalid worker slots, off-contract status/stage values (fleet `n/a` is saved as `not-applicable`), and a stale expected `revision` are refused without writing. If a crash leaves the profiling log one revision ahead of the plan, the next event says so with `logAheadRevision`. The generic checklist is unchanged when no workflow owns the plan.
 - **subagents**: `subagent_result` accepts `lines`, an optional per-page line cap for the answer; `nextCursor` continues after the last line shown. (#321)
 - **subagents**: `subagent_output` and `subagent_result` accept `include: ["cost", "tools"]` to add one token/cost spend line and one tool-call count line (with the distinct tool names). Ordinary payloads still omit both. (#321)
 - **background-tasks**: `bg_task`/`bg_status` `action:clear` with `id` dismisses that one terminal task. (#322)

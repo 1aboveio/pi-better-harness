@@ -33,7 +33,15 @@ export interface WorkflowPlanBinding {
   runId: string;
 }
 
-export function readRushPlan(path: string, cwd: string): RushPlan {
+export interface RushPlanFile {
+  /** Real path of task-plan.json. */
+  file: string;
+  /** Run directory name, which is also the run id. */
+  runId: string;
+}
+
+/** Resolve a Rush task-plan.json path, refusing anything outside `<cwd>/.resolve-issues/rush/<run-id>/`. */
+export function resolveRushPlanFile(path: string, cwd: string): RushPlanFile {
   if (!isAbsolute(path) || basename(path) !== "task-plan.json") throw new Error("Expected an absolute Rush task-plan.json path.");
   const root = realpathSync(resolve(cwd, ".resolve-issues", "rush"));
   const file = realpathSync(path);
@@ -41,10 +49,20 @@ export function readRushPlan(path: string, cwd: string): RushPlan {
   if (!dir || dir.startsWith(".." + sep) || dir === ".." || dir.includes(sep)) {
     throw new Error("Rush plan must be inside this project's .resolve-issues/rush/<run-id> directory.");
   }
-  const size = statSync(file).size;
-  if (size > 2_000_000) throw new Error("Rush plan exceeds the 2 MB display limit.");
-  const data: unknown = JSON.parse(readFileSync(file, "utf8"));
-  if (!isRecord(data) || data.runId !== dir || !Number.isSafeInteger(data.planRevision) ||
+  if (statSync(file).size > MAX_RUSH_PLAN_BYTES) throw new Error("Rush plan exceeds the 2 MB display limit.");
+  return { file, runId: dir };
+}
+
+export const MAX_RUSH_PLAN_BYTES = 2_000_000;
+
+export function readRushPlan(path: string, cwd: string): RushPlan {
+  const { file, runId } = resolveRushPlanFile(path, cwd);
+  return projectRushPlan(JSON.parse(readFileSync(file, "utf8")), runId);
+}
+
+/** Validate a parsed task-plan.json document and project the fields the plan view shows. */
+export function projectRushPlan(data: unknown, runId: string): RushPlan {
+  if (!isRecord(data) || data.runId !== runId || !Number.isSafeInteger(data.planRevision) ||
       (data.planRevision as number) < 0 || !isRecord(data.fleet)) {
     throw new Error("Invalid Rush plan identity or revision.");
   }
@@ -78,7 +96,7 @@ export function readRushPlan(path: string, cwd: string): RushPlan {
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
