@@ -28,19 +28,11 @@ const cap = () => `S-1-15-3-1024-${Array.from({ length: 8 }, () => randomInt(1, 
 const R = cap(), W = cap(), D = cap(), C = cap(), N = cap(), A = cap(), P = cap();
 report.sids = { R, W, D, C, N, A, P };
 
-// DeriveCapabilitySidsFromName availability (no admin).
-try {
-    const koffi = (await import("koffi")).default;
-    const kb = koffi.load("kernelbase.dll");
-    const derive = kb.func("bool __stdcall DeriveCapabilitySidsFromName(str16, _Out_ void **, _Out_ uint32 *, _Out_ void **, _Out_ uint32 *)");
-    const toStr = koffi.load("advapi32.dll").func("bool __stdcall ConvertSidToStringSidW(void *, _Out_ void **)");
-    const g = [null], gc = [0], s = [null], sc = [0];
-    const ok = derive("pi-better-harness.spike.home-read", g, gc, s, sc);
-    const first = koffi.decode(s[0], "void *");
-    const str = [null];
-    toStr(first, str);
-    report.deriveCapabilitySid = ok ? { count: sc[0], sid: koffi.decode(str[0], "str16") } : "failed";
-} catch (e) { report.deriveCapabilitySid = `ERR ${e.message}`; }
+// DeriveCapabilitySidsFromName availability (no admin), isolated: a crash must not stop the spike.
+{
+    const r = spawnSync(process.execPath, [join(here, "derive.mjs")], { encoding: "utf8" });
+    report.deriveCapabilitySid = r.status === 0 ? r.stdout.trim() : `exit ${r.status} ${r.stderr.slice(0, 300)}`;
+}
 
 function buildTree() {
     for (const dir of [home, nogrant]) fs.rmSync(dir, { recursive: true, force: true });
