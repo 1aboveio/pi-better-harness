@@ -497,6 +497,67 @@ fi
         assert.match(readFileSync(join(run, "prompt.md"), "utf8"), /Look at payments\./);
     });
 
+    it("falls back named-agent and direct-role launches when OpenAI models are unavailable", async () => {
+        const host = ctx();
+        host.model = { provider: "xai", id: "grok-4.7" };
+        host.modelRegistry = registryOf(model("xai", "grok-4.7"));
+
+        const namedResult = await tools.subagent_spawn.execute("tc", {
+            prompt: "Use the named agent fallback.",
+            agent: "agent.payments",
+            tools: "read,bash",
+            sandbox: false,
+        }, null, null, host);
+        const roleResult = await tools.subagent_spawn.execute("tc", {
+            prompt: "Use the direct role fallback.",
+            role: "role.developer",
+            tools: "read,bash",
+            sandbox: false,
+        }, null, null, host);
+
+        const namedId = runIdFrom(namedResult);
+        const roleId = runIdFrom(roleResult);
+        const named = metaOf(namedId);
+        const role = metaOf(roleId);
+        const roleInstructions = loadCatalog({
+            cwd: fx.cwd,
+            projectTrusted: true,
+            userRoot: fx.userRoot,
+        }).roles.get("role.developer").definition.body;
+
+        assert.equal(named.name, "Payments Developer");
+        assert.equal(named.catalog.id, "agent.payments");
+        assert.equal(named.catalog.roleId, "role.developer");
+        assert.equal(named.model, "xai/grok-4.7");
+        assert.equal(named.effort, "high");
+        assert.equal(named.catalog.modelSelection.requested, "openai/gpt-6-sol");
+        assert.equal(named.catalog.modelSelection.requestedSource, "role-default");
+        assert.equal(named.catalog.modelSelection.source, "foreground");
+        assert.equal(named.catalog.effortSelection.source, "role-default");
+        assert.match(readFileSync(join(baseDir(), "runs", namedId, "prompt.md"), "utf8"), /Look at payments\./);
+
+        assert.match(role.name, /^developer-\d+$/);
+        assert.equal(role.catalog.roleId, "role.developer");
+        assert.equal(role.model, "xai/grok-4.7");
+        assert.equal(role.effort, "high");
+        assert.equal(role.catalog.modelSelection.requested, "openai/gpt-6-sol");
+        assert.equal(role.catalog.modelSelection.requestedSource, "role-default");
+        assert.equal(role.catalog.modelSelection.source, "foreground");
+        assert.equal(role.catalog.effortSelection.source, "role-default");
+        const rolePrompt = readFileSync(join(baseDir(), "runs", roleId, "prompt.md"), "utf8");
+        assert.ok(rolePrompt.includes(roleInstructions));
+        assert.match(rolePrompt, /Use the direct role fallback\./);
+
+        for (const id of [namedId, roleId]) {
+            await settledMeta(id);
+            const run = join(baseDir(), "runs", id);
+            const argv = readFileSync(join(run, "argv.txt"), "utf8");
+            assert.match(argv, /--model\nxai\/grok-4\.7/);
+            assert.match(argv, /--thinking\nhigh/);
+            assert.match(textOf(await tools.subagent_result.execute("tc", { id })), /done/);
+        }
+    });
+
     it("keeps a catalog-free launch free of catalog metadata", async () => {
         const result = await tools.subagent_spawn.execute("tc", {
             prompt: "Legacy.",
