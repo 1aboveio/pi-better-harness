@@ -191,9 +191,10 @@ export default function (pi: ExtensionAPI): void {
 
   const getGoal = (ctx: ExtensionContext): GoalSnapshot | null => currentGoalSnapshot(ctx);
   const getWorkflow = (ctx: ExtensionContext) => currentWorkflowOwner(ctx.sessionManager.getBranch());
+  const registeredSkillPath = (name: string): string | undefined =>
+    pi.getCommands?.().find((item) => item.name === `skill:${name}` && item.source === "skill")?.sourceInfo.path;
   const workflowAvailable = (owner: NonNullable<ReturnType<typeof currentWorkflowOwner>>): boolean => {
-    const command = pi.getCommands?.().find((item) => item.name === `skill:${owner.name}` && item.source === "skill");
-    if (command?.sourceInfo.path !== owner.path) return false;
+    if (registeredSkillPath(owner.name) !== owner.path) return false;
     try {
       return workflowOwnerFromSkill(owner.name, owner.path)?.planOwner === owner.planOwner;
     } catch {
@@ -392,7 +393,7 @@ export default function (pi: ExtensionAPI): void {
     }
     const goal = createGoalSnapshot(objective.trim(), tokenBudget, undefined, command ?? undefined);
     const owner = command?.source === "skill"
-      ? workflowOwnerFromSkill(command.name.slice("skill:".length), command.path)
+      ? workflowOwnerFromSkill(command.name.slice("skill:".length), command.path, registeredSkillPath)
       : null;
     if (getWorkflow(ctx)) recordWorkflow(null);
     setGoal(goal, ctx, source);
@@ -794,7 +795,7 @@ export default function (pi: ExtensionAPI): void {
       const command = pi.getCommands?.().find((item) => item.name === `skill:${skillName}` && item.source === "skill");
       if (command) {
         try {
-          const owner = workflowOwnerFromSkill(skillName, command.sourceInfo.path);
+          const owner = workflowOwnerFromSkill(skillName, command.sourceInfo.path, registeredSkillPath);
           if (owner) recordWorkflow(owner);
         } catch (error) {
           notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");

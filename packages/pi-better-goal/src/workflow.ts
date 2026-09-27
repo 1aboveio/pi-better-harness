@@ -16,7 +16,12 @@ interface SessionEntryLike {
   data?: unknown;
 }
 
-export function workflowOwnerFromSkill(name: string, path: string): WorkflowOwner | null {
+const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** Resolves a registered skill's name to its SKILL.md path, or undefined when it is not registered. */
+export type SkillPathResolver = (name: string) => string | undefined;
+
+function skillMetadata(path: string): Record<string, unknown> | null {
   const source = readFileSync(path, "utf8");
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
   if (!match) return null;
@@ -24,9 +29,34 @@ export function workflowOwnerFromSkill(name: string, path: string): WorkflowOwne
   if (!frontmatter || typeof frontmatter !== "object") return null;
   const metadata = (frontmatter as { metadata?: unknown }).metadata;
   if (!metadata || typeof metadata !== "object") return null;
-  const fields = metadata as Record<string, unknown>;
+  return metadata as Record<string, unknown>;
+}
+
+/**
+ * Reads a skill's workflow declaration. A coordinator declares `workflow-role: coordinator`.
+ * An alias declares `workflow-alias-of: <skill>` and resolves, through the registered skill
+ * commands, to that coordinator: the recorded owner is the target (its name and path), so
+ * invoking the alias is indistinguishable from invoking the coordinator. Aliases do not chain.
+ */
+export function workflowOwnerFromSkill(name: string, path: string, resolveSkillPath?: SkillPathResolver): WorkflowOwner | null {
+  const fields = skillMetadata(path);
+  if (!fields) return null;
   const role = fields["workflow-role"];
   const legacyRole = fields["pi-better-plan-workflow"];
+  const aliasOf = fields["workflow-alias-of"];
+  if (aliasOf !== undefined) {
+    if (typeof aliasOf !== "string" || !SKILL_NAME.test(aliasOf) || aliasOf === name ||
+        role !== undefined || legacyRole !== undefined) {
+      throw new Error(`Invalid workflow metadata in ${path}. Expected workflow-alias-of: <coordinator skill name> without workflow-role.`);
+    }
+    const targetPath = resolveSkillPath?.(aliasOf);
+    if (!targetPath) throw new Error(`Workflow alias ${name} targets ${aliasOf}, which is not a registered skill.`);
+    const target = workflowOwnerFromSkill(aliasOf, targetPath, () => {
+      throw new Error(`Workflow alias ${name} targets ${aliasOf}, which is itself an alias; aliases do not chain.`);
+    });
+    if (!target) throw new Error(`Workflow alias ${name} targets ${aliasOf}, which is not a workflow coordinator.`);
+    return target;
+  }
   if (role === undefined && legacyRole === undefined) {
     if (fields["pi-better-workflow-role"] !== undefined || fields["pi-better-plan-owner"] !== undefined) {
       throw new Error(`Outdated workflow metadata in ${path}. Use workflow-role: coordinator.`);
