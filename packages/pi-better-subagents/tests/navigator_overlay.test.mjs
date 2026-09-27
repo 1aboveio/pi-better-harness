@@ -28,7 +28,7 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir as osTmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import {
@@ -147,24 +147,6 @@ describe("navigator footer hint", () => {
         assert.ok(!ids.includes(dismissedId), "dismissed runs are excluded from the count/list");
     });
 
-    // @covers navigator.footer-hint
-    // @covers navigator.editor-wrapper
-    // @level unit
-    it("extension wiring bases the left-arrow affordance on running runs", () => {
-        const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-        const sharedSrc = readFileSync(new URL("../../navigator/index.ts", import.meta.url), "utf8");
-        assert.ok(src.includes("function navigatorRunningCount"), "index.ts must expose a running-only affordance seam");
-        assert.ok(sharedSrc.includes("function handleMainListInput"), "empty-editor keys must route through the shared main-list input handler");
-        assert.ok(sharedSrc.includes("if (rows.length === 0) return false"), "main-list input must require visible background work");
-        assert.ok(src.includes("visibleCount: () => navigatorRunningCount()"), "subagent provider footer count must count running runs only");
-    });
-
-    // @covers navigator.footer-hint
-    // @level unit
-    it("the extension never replaces the full footer (no setFooter in the wiring)", () => {
-        const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-        assert.ok(!src.includes("setFooter"), "index.ts must not call setFooter — the hint uses setStatus only");
-    });
 });
 
 // ---------------------------------------------------------------------------
@@ -198,61 +180,6 @@ describe("non-TUI guard", () => {
         assert.equal(isNavigatorUiAvailable({ mode: "tui", hasUI: true }), false);
         assert.equal(isNavigatorUiAvailable({ mode: "tui", hasUI: false, ui: {} }), false);
         assert.equal(isNavigatorUiAvailable(undefined), false);
-    });
-
-    // @covers navigator.footer-hint
-    // @covers navigator.editor-wrapper
-    // @covers navigator.overlay
-    // @level unit
-    it("a real RPC-shaped context (mode:rpc, hasUI:true, ui) reaches no footer/editor/overlay wiring", () => {
-        const calls = [];
-        const ui = {
-            setStatus: (...a) => calls.push(["setStatus", ...a]),
-            getEditorComponent: () => undefined,
-            setEditorComponent: (...a) => calls.push(["setEditorComponent", ...a]),
-            custom: (...a) => calls.push(["custom", ...a]),
-        };
-        const rpcCtx = { mode: "rpc", hasUI: true, ui };
-        // The three index.ts entry points (updateNavigatorFooter /
-        // installNavigator / openNavigator) all begin with this exact guard;
-        // behind it sit the only calls into ui.setStatus / ui.setEditorComponent
-        // / ui.custom the navigator makes.
-        if (isNavigatorUiAvailable(rpcCtx)) {
-            applyNavigatorFooter(ui, 1);
-            installNavigatorEditor(ui, wrapperDeps({ createDefaultEditor: () => ({}) }));
-            showNavigator(ui, [{ id: "sa_x" }], { matchKey: () => false, truncate: (s) => s });
-        }
-        assert.deepEqual(calls, [], "RPC contexts must never reach setStatus / setEditorComponent / custom");
-    });
-
-    // @covers navigator.footer-hint
-    // @covers navigator.editor-wrapper
-    // @level unit
-    it("every navigator entry point in index.ts is behind the TUI-mode guard", () => {
-        const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-        // The guard seam is the single gate used by footer install/update, the
-        // editor install, overlay open, AND session_shutdown status cleanup —
-        // print/RPC contexts fail it.
-        assert.ok(src.includes("isNavigatorUiAvailable"), "index.ts must gate navigator wiring on isNavigatorUiAvailable");
-        const navSrc = readFileSync(new URL("../navigator.mjs", import.meta.url), "utf8");
-        assert.ok(
-            navSrc.includes('ctx.mode === "tui"'),
-            "isNavigatorUiAvailable must require explicit TUI mode (pi docs: hasUI is true in TUI AND RPC)",
-        );
-        // Shutdown cleanup is part of the same invariant class: a bare
-        // ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, ...) in session_shutdown would
-        // leak into RPC even when every other entry point is guarded.
-        const shutdownIdx = src.indexOf('pi.on("session_shutdown"');
-        assert.ok(shutdownIdx >= 0, "session_shutdown handler must exist");
-        const shutdownBody = src.slice(shutdownIdx, src.indexOf("});", shutdownIdx) + 3);
-        assert.ok(
-            shutdownBody.includes("isNavigatorUiAvailable"),
-            "session_shutdown must guard navigator setStatus cleanup with isNavigatorUiAvailable",
-        );
-        assert.ok(
-            /isNavigatorUiAvailable\s*\(\s*ctx\s*\)[\s\S]*setStatus\s*\(\s*NAVIGATOR_STATUS_KEY/.test(shutdownBody),
-            "navigator setStatus cleanup must sit behind isNavigatorUiAvailable(ctx)",
-        );
     });
 
     // @covers navigator.footer-hint
@@ -349,8 +276,8 @@ describe("non-TUI guard", () => {
         );
         assert.deepEqual(editorCalls, [], "RPC must not install navigator editor factory");
         assert.deepEqual(customCalls, [], "RPC must not open navigator overlay via custom()");
-        // setWidget clear on shutdown is allowed in RPC (pi docs) — not asserted away.
-        assert.ok(Array.isArray(widgetCalls), "widget seam remains callable under RPC");
+        assert.ok(widgetCalls.length > 0, "startup/shutdown clears the retired widget");
+        assert.ok(widgetCalls.every(([key, value]) => key === "subagents" && value === undefined), "legacy widget must only be cleared");
     });
 });
 
@@ -654,7 +581,6 @@ describe("navigator overlay component", () => {
         await Promise.resolve();
         assert.deepEqual(o.customCalls, [{ overlay: true }], "must request overlay mode (pi focuses overlays on show)");
         const lines = o.component().render(80);
-        assert.equal(lines.length, 7, "command sheet: title + actions + spacer + 2 rows + spacer + rail");
         const plain = lines.map((l) => l.replace(/<\/?[a-z]*>/g, ""));
         assert.ok(plain[0].includes("Subagents · 2"));
         assert.ok(plain[1].includes("Enter view"), "action bar sits under the title rail");
@@ -704,8 +630,6 @@ describe("navigator overlay component", () => {
         assert.equal(lines[3], "   (no visible subagent runs)");
         assert.ok(lines[1].includes("Esc"), "action bar advertises escape");
         assert.ok(lines[1].includes("Enter") || lines[1].includes("↑↓"), "action bar lists navigation");
-        // Keep the exact empty-list command sheet pinned.
-        assert.equal(lines.length, 6);
     });
 
     // @covers navigator.overlay

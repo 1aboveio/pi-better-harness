@@ -128,6 +128,7 @@ test("concurrent plan updates persist and invalid updates leave the plan unchang
   assert.equal((concurrent.details as any).progress.inProgress, 2);
   assert.match((concurrent.content[0] as { text: string }).text, /2 steps in progress/);
   const entryCount = entries.length;
+  const expectedPlan = structuredClone((concurrent.details as any).plan);
   await assert.rejects(
     updatePlan.execute("invalid", { plan: [
       { step: "Same", status: "in_progress" },
@@ -136,6 +137,8 @@ test("concurrent plan updates persist and invalid updates leave the plan unchang
     /duplicates an earlier step/,
   );
   assert.equal(entries.length, entryCount);
+  const retained = await tools.get("get_plan")!.execute("retained", {}, undefined, undefined, ctx);
+  assert.deepEqual((retained.details as any).plan, expectedPlan);
 });
 
 test("plan tool reports ready DAG steps and rejects premature transitions", async () => {
@@ -172,10 +175,13 @@ test("plan tool reports ready DAG steps and rejects premature transitions", asyn
   const prompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
   assert.match(prompt.systemPrompt, /Ready pending steps: Build worker/);
   const count = entries.length;
+  const expectedPlan = structuredClone((updated.details as any).plan);
   await assert.rejects(updatePlan.execute("early", { plan: steps.map((item) =>
     item.id === "join" ? { ...item, status: "in_progress" } : item,
   ) }, undefined, undefined, ctx), /dependency api is completed/);
   assert.equal(entries.length, count);
+  const retained = await getPlan.execute("retained", {}, undefined, undefined, ctx);
+  assert.deepEqual((retained.details as any).plan, expectedPlan);
 });
 
 test("skill-owned workflow suppresses the generic plan and its update tool", async () => {

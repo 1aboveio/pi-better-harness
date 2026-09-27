@@ -48,6 +48,16 @@ test("continuation evidence ignores ephemeral call metadata but keeps action and
     },
   ]);
 
+  const changedAction = continuationEvidence([
+    { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command: "git diff" } }] },
+    { role: "toolResult", toolName: "bash", isError: false, content: [{ type: "text", text: "clean" }] },
+  ]);
+  assert.notEqual(first.signature, changedAction.signature, "changed arguments are progress even with identical output");
+  const changedTool = continuationEvidence([
+    { role: "assistant", content: [{ type: "toolCall", name: "read", arguments: { command: "git status" } }] },
+    { role: "toolResult", toolName: "bash", isError: false, content: [{ type: "text", text: "clean" }] },
+  ]);
+  assert.notEqual(first.signature, changedTool.signature, "the action name participates independently of the result");
   assert.equal(first.signature, same.signature);
   assert.notEqual(first.signature, changed.signature);
   assert.equal(first.summary, "bash");

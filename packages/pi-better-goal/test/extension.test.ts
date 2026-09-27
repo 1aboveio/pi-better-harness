@@ -9,7 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
-import extension, { goalArgumentCompletions } from "../src/index.js";
+import extension, { goalArgumentCompletions } from "./extension-fixture.js";
 
 interface SessionEntry {
   type: string;
@@ -41,7 +41,7 @@ test("goal action completions expose selectable actions with context", () => {
   assert.equal(goalArgumentCompletions("ship the release"), null);
 });
 
-test("active background work keeps plan verification and completion open", async (t) => {
+test("active background work adds completion-audit guidance to the agent prompt", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const entries: SessionEntry[] = [];
   const commands = new Map<string, CommandDefinition>();

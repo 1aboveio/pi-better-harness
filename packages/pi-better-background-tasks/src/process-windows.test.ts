@@ -172,7 +172,8 @@ describe("resolveDefaultShell", () => {
     vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
     fakePlatform("win32");
     mockExists.mockImplementation(
-      (p) => norm(String(p)) === norm("C:\\Program Files (x86)\\Git\\bin\\bash.exe"),
+      (p) => ["C:\\Program Files (x86)\\Git\\bin\\bash.exe", "C:\\Program Files\\Git\\usr\\bin\\bash.exe"]
+        .some((candidate) => norm(String(p)) === norm(candidate)),
     );
     expect(resolveDefaultShell()).toBe("C:\\Program Files (x86)\\Git\\bin\\bash.exe");
   });
@@ -299,7 +300,12 @@ describe("spawnCommand platform gating", () => {
     vi.stubEnv("PI_BETTER_BACKGROUND_TASKS_SHELL", "");
     fakePlatform("linux");
     const log = join(mkdtempSync(join(tmpdir(), "bbt-gate-")), "gate.log");
-    mockSpawn.mockImplementation(() => fakeChild);
+    mockSpawn.mockImplementation((_file, _args, options) => {
+      const stdio = options!.stdio as number[];
+      writeSync(stdio[1]!, "stdout probe\n");
+      writeSync(stdio[2]!, "stderr probe\n");
+      return fakeChild;
+    });
 
     spawnCommand({ shell: true, command: "echo hi" }, log, true);
 
@@ -310,8 +316,7 @@ describe("spawnCommand platform gating", () => {
     expect(args).toEqual(["-lc", "echo hi"]);
     expect(options).toMatchObject({ windowsHide: false, detached: true });
     expect(options.stdio[0]).toBe("ignore");
-    expect(typeof options.stdio[1]).toBe("number");
-    expect(typeof options.stdio[2]).toBe("number");
+    expect(readFileSync(log, "utf8")).toContain("stdout probe\nstderr probe\n");
   });
 
   it("closes the POSIX log fd when writing the spawn marker fails", () => {

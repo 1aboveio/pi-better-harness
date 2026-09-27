@@ -14,7 +14,7 @@
  * Rerun:  node docs/tests/issue-47-runtime-smoke.mjs > docs/tests/issue-47-runtime-smoke.json
  */
 import { execFileSync, spawn } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -299,25 +299,16 @@ await record(
         // (integrated-review P0: missing import → ReferenceError on second x).
         const indexPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../index.ts");
         execFileSync(process.execPath, ["--experimental-strip-types", "--check", indexPath], { stdio: "pipe" });
-        const indexSrc = readFileSync(indexPath, "utf8");
-        check(
-            /import\s*\{[^}]*\bstopRun\b[^}]*\}\s*from\s*["']\.\/stop\.ts["']/.test(indexSrc),
-            "index.ts must import stopRun from ./stop.ts for navigatorCloseRun",
-        );
-        const closeIdx = indexSrc.indexOf("function navigatorCloseRun");
-        check(closeIdx >= 0, "navigatorCloseRun exists");
-        const closeBody = indexSrc.slice(closeIdx, indexSrc.indexOf("\n}", closeIdx) + 2);
-        check(/\bstopRun\b/.test(closeBody), "navigatorCloseRun passes stopRun");
 
         // Registered extension-path regression must stay green (loads real index
         // factory → session_start → overlay → first+second x).
         execFileSync(
             process.execPath,
-            ["--test", path.join(path.dirname(fileURLToPath(import.meta.url)), "../../tests/navigator_close_extension_path.test.mjs")],
+            ["--import", "tsx", "--test", path.join(path.dirname(fileURLToPath(import.meta.url)), "../../tests/navigator_close_extension_path.test.mjs")],
             { stdio: "pipe", cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), "../..") },
         );
 
-        return "real registry+stopRun/dismissRun: running→killed+dismissed (pg gone); terminal dismiss preserves status; finish-during→exited dismiss no kill rewrite; overlay two-press within 3s dismisses+hides; expiry/dispose disarm non-mutating; footer confirm coexists with count; tools list/output/result still resolve dismissed; TUI guard; index.ts imports stopRun + strip-types check; registered extension-path second-x suite green";
+        return "real registry+stopRun/dismissRun: running→killed+dismissed (pg gone); terminal dismiss preserves status; finish-during→exited dismiss no kill rewrite; overlay two-press within 3s dismisses+hides; expiry/dispose disarm non-mutating; footer confirm coexists with count; tools list/output/result still resolve dismissed; TUI guard; index.ts syntax check; registered extension-path second-x suite green";
     },
 );
 

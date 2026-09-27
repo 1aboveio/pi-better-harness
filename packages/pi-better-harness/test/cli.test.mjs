@@ -22,6 +22,7 @@ test("install configures every component as a standalone Pi package", () => {
 
   assert.equal(status, 0);
   assert.deepEqual(calls.map((call) => call.args), componentPackages.map((name) => ["install", `npm:${name}`]));
+  assert.ok(calls.every((call) => call.command === (process.platform === "win32" ? "pi.cmd" : "pi")));
   assert.ok(calls.every((call) => call.options.stdio === "inherit"));
 });
 

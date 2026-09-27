@@ -298,22 +298,6 @@ describe("registered extension path: main-window navigator actions", () => {
 
     // @covers navigator.close
     // @level integration
-    it("source wiring imports stopRun for navigatorCloseRun (guards the ReferenceError class)", async () => {
-        const { readFileSync } = await import("node:fs");
-        const src = readFileSync(join(REPO_ROOT, "index.ts"), "utf8");
-        assert.match(
-            src,
-            /import\s*\{[^}]*\bstopRun\b[^}]*\}\s*from\s*["']\.\/stop\.ts["']/,
-            "index.ts must import stopRun from ./stop.ts",
-        );
-        const closeIdx = src.indexOf("function navigatorCloseRun");
-        assert.ok(closeIdx >= 0, "navigatorCloseRun must exist");
-        const closeBody = src.slice(closeIdx, src.indexOf("\n}", closeIdx) + 2);
-        assert.match(closeBody, /\bstopRun\b/, "navigatorCloseRun must pass stopRun into executeNavigatorClose");
-    });
-
-    // @covers navigator.close
-    // @level integration
     it("registered TUI path left focuses the main list and enter opens selected detail", async () => {
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const affordancePid = spawnSleeper();

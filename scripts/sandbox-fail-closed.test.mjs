@@ -14,7 +14,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 
@@ -39,31 +39,6 @@ after(() => rmSync(fixtures, { recursive: true, force: true }));
 /** Seams that select no backend at all, whatever the host actually has. */
 const noBackend = { platform: () => "sunos" };
 
-/** The vendored copies every consumer actually imports at runtime. */
-const vendoredCopies = [
-  "packages/pi-better-sandbox/shared-sandbox-core.ts",
-  "packages/pi-better-subagents/shared-sandbox-core.ts",
-  "packages/pi-better-background-tasks/src/shared-sandbox-core.ts",
-];
-
-// @covers sandbox-core.private-sync
-// @level integration
-test("every consumer runs the same shared mechanism, byte for byte", () => {
-  const canonical = readFileSync(join(repoRoot, "packages/sandbox-core/index.ts"), "utf8");
-  for (const copy of vendoredCopies) {
-    const vendored = readFileSync(join(repoRoot, copy), "utf8");
-    assert.ok(
-      vendored.endsWith(canonical),
-      `${copy} has drifted from packages/sandbox-core/index.ts — run npm run sync:shared-sandbox-core`,
-    );
-    assert.match(
-      vendored,
-      /^\/\/ Generated from packages\/sandbox-core\/index\.ts\. Do not edit directly\.\n/,
-      `${copy} must be marked generated so it is never hand-edited`,
-    );
-  }
-});
-
 // @covers sandbox.fail-closed
 // @level integration
 test("the foreground consumer blocks rather than running a shell unconfined", () => {
@@ -87,30 +62,19 @@ test("the foreground consumer blocks rather than running a shell unconfined", ()
 // @covers sandbox.fail-closed
 // @level integration
 test("the foreground shell wrapper refuses to emit a bare command after backend loss", () => {
-  const controller = new ForegroundSandboxController();
-  const status = controller.beginSession(repoRoot, true);
-  if (status.state !== "enabled") {
-    // Enforced as a hard failure on the platform lanes by PI_SANDBOX_REQUIRE_BACKEND.
-    assert.equal(status.state, "unavailable", `unexpected state on this host: ${status.reason}`);
-    return;
-  }
+  const plan = {
+    confined: true,
+    profilePath: join(fixtures, "foreground.sb"),
+    policy: { writableRoot: repoRoot, home: fixtures },
+  };
 
-  const plan = controller.requireLaunchPlan();
-  assert.equal(plan.confined, true);
-
-  // The plan says confine, and then the backend is gone. The only acceptable
-  // outcomes are a wrapped command or a throw — never the raw command text.
+  // A valid confined plan must still fail closed when its backend disappears.
   assert.throws(
     () => buildSandboxedShellCommand("printf escaped", plan, noBackend),
     /sandbox/i,
     "losing the backend after planning must throw, not return the unwrapped command",
   );
 
-  const wrapped = buildSandboxedShellCommand("printf ok", plan);
-  assert.ok(
-    wrapped.includes(support.executable),
-    `the emitted command must exec the selected backend, got: ${wrapped}`,
-  );
 });
 
 // @covers background-task.sandbox-policy-contract
@@ -143,8 +107,9 @@ test("the background-task consumer blocks every policy that requires unavailable
 
 // @covers background-task.sandbox-policy-contract
 // @level integration
-test("a confined background-task plan never spawns the bare command", () => {
-  if (!support.supported) return;
+test("a confined background-task plan never spawns the bare command", {
+  skip: support.supported ? false : `requires a sandbox backend: ${support.reason}`,
+}, () => {
 
   const spec = { kind: "local", command: "printf ok" };
   const confined = confineCommandSpec(

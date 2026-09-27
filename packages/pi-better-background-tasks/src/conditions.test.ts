@@ -17,20 +17,27 @@ describe("resolveJsonPath", () => {
     expect(resolveJsonPath(baseResult.stdout, "$.nested.count")).toEqual({ ok: true, value: 2 });
   });
 
-  it("reports unsupported paths", () => {
-    expect(resolveJsonPath(baseResult.stdout, "status")).toMatchObject({ ok: false });
-    expect(resolveJsonPath(baseResult.stdout, "$.missing.value")).toMatchObject({ ok: false });
+  it("distinguishes unsupported paths from missing fields", () => {
+    expect(resolveJsonPath(baseResult.stdout, "status")).toEqual({ ok: false, error: "unsupported JSON path: status" });
+    expect(resolveJsonPath(baseResult.stdout, "$.missing.value")).toEqual({ ok: false, error: "JSON path not found: $.missing.value" });
   });
 });
 
 describe("evaluateCondition", () => {
   it("matches exit code and stdout", () => {
     expect(evaluateCondition({ type: "exit_code", equals: 0 }, baseResult).matched).toBe(true);
+    expect(evaluateCondition({ type: "exit_code", equals: 1 }, baseResult).matched).toBe(false);
+    expect(evaluateCondition({ type: "stdout_contains", value: "pending" }, baseResult).matched).toBe(false);
+    expect(evaluateCondition({ type: "stdout_contains", value: "done" }, { ...baseResult, stdout: "", stderr: "done" }).matched).toBe(false);
     expect(evaluateCondition({ type: "stdout_contains", value: "done" }, baseResult).matched).toBe(true);
   });
 
   it("matches JSON path equality and existence", () => {
     expect(evaluateCondition({ type: "json_path_equals", path: "$.status", value: "done" }, baseResult).matched).toBe(true);
     expect(evaluateCondition({ type: "json_path_exists", path: "$.items[0]" }, baseResult).matched).toBe(true);
+    expect(evaluateCondition({ type: "json_path_equals", path: "$.status", value: "pending" }, baseResult).matched).toBe(false);
+    expect(evaluateCondition({ type: "json_path_exists", path: "$.items[1]" }, baseResult)).toEqual({
+      matched: false, error: "JSON path not found: $.items[1]",
+    });
   });
 });

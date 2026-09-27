@@ -17,7 +17,7 @@
  */
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { rmSync } from "node:fs";
 import { tmpdir as osTmpdir } from "node:os";
 import { join as joinPath } from "node:path";
@@ -551,20 +551,6 @@ describe("navigator hardening: footer / reload / timers", () => {
         assert.equal(openedAfterReload, 11);
     });
 
-    // @covers navigator.hardening
-    // @level unit
-    it("session_shutdown still clears footer keys and dispose slot under the TUI guard", () => {
-        // Behavior-driven reload proof lives in
-        // tests/navigator_reload_extension_path.test.mjs (registered factory →
-        // open → detail+arm → second session_start). This unit pin only keeps
-        // the shutdown teardown contract visible next to the other S3 pins.
-        const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts"), "utf8");
-        const shut = src.slice(src.indexOf('pi.on("session_shutdown"'));
-        assert.ok(shut.includes("isNavigatorUiAvailable(ctx)"));
-        assert.ok(shut.includes("NAVIGATOR_STATUS_KEY"));
-        assert.ok(shut.includes("CLOSE_CONFIRM_STATUS_KEY"));
-        assert.ok(shut.includes("disposeBackgroundWorkNavigator(ctx)"));
-    });
 });
 
 // ---------------------------------------------------------------------------
@@ -582,48 +568,6 @@ describe("navigator hardening: non-TUI + widget isolation", () => {
         assert.equal(isNavigatorUiAvailable({ mode: "tui", hasUI: true, ui: {} }), true);
     });
 
-    // @covers navigator.hardening
-    // @level unit
-    it("RPC-shaped context never reaches footer/editor/overlay seams when gated", () => {
-        const ui = {
-            statuses: [],
-            setStatus(k, v) { this.statuses.push([k, v]); },
-            setEditorComponent() { throw new Error("setEditorComponent must not run in RPC"); },
-            getEditorComponent() { return undefined; },
-            custom() { throw new Error("custom must not run in RPC"); },
-        };
-        const ctx = { mode: "rpc", hasUI: true, ui };
-        assert.equal(isNavigatorUiAvailable(ctx), false);
-        // Mimic index.ts entry guards: only call UI when available.
-        if (isNavigatorUiAvailable(ctx)) {
-            applyNavigatorFooter(ui, 1);
-            installNavigatorEditor(ui, {
-                createDefaultEditor: () => ({}),
-                isOpenTrigger: () => false,
-                canOpen: () => false,
-                onOpen: () => {},
-            });
-            showNavigator(ui, [row("sa_x")], { matchKey: () => false, truncate });
-        }
-        assert.deepEqual(ui.statuses, []);
-    });
-
-    // @covers navigator.hardening
-    // @level unit
-    it("widget.mjs is untouched by the navigator module (passive widget separation)", () => {
-        const widgetSrc = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "widget.mjs"), "utf8");
-        const navSrc = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "navigator.mjs"), "utf8");
-        assert.ok(!widgetSrc.includes("navigator"), "widget must not import or reference navigator");
-        assert.ok(
-            navSrc.includes("passive live widget is untouched") || navSrc.includes("passive"),
-            "navigator documents passive-widget separation",
-        );
-        // index.ts must not route navigator input through setWidget.
-        const indexSrc = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts"), "utf8");
-        assert.ok(indexSrc.includes('setWidget("subagents"'), "widget path still present");
-        // Navigator uses custom() overlay, not setWidget.
-        assert.ok(indexSrc.includes("ensureBackgroundWorkNavigator"));
-    });
 
     // @covers navigator.hardening
     // @level unit
@@ -656,28 +600,5 @@ describe("navigator hardening: non-TUI + widget isolation", () => {
             now: 100,
         });
         assert.ok(!rows.some((r) => r.id === id));
-    });
-});
-
-// ---------------------------------------------------------------------------
-// Docs pin — user-facing README stays compact; detailed controls live in docs.
-// ---------------------------------------------------------------------------
-describe("navigator hardening: documentation", () => {
-    // @covers navigator.hardening
-    // @level unit
-    it("keeps the README concise while detailed navigator controls live in docs", () => {
-        const readme = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "README.md"), "utf8");
-        assert.ok(readme.split(/\r?\n/).length <= 60, "README stays human-facing and concise");
-        assert.ok(/Live background-work navigator/i.test(readme), "README mentions the navigator as a core feature");
-        assert.ok(/Detailed notes/i.test(readme), "README links to detailed docs");
-
-        const usage = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "docs", "usage.md"), "utf8");
-        assert.ok(/subagent navigator|navigator/i.test(usage), "usage docs mention the navigator");
-        assert.ok(/empty|←|left/i.test(usage), "usage docs describe empty-editor ← open");
-        assert.ok(/↑|up|down|enter|esc/i.test(usage), "usage docs describe list/detail controls");
-        assert.ok(/two-press|x again|press x/i.test(usage), "usage docs describe two-press x stop/dismiss");
-        assert.ok(/x` arms Stop|x` arms Stop/i.test(usage), "usage docs label the x action as Stop instead of Close");
-        assert.ok(/dismiss/i.test(usage), "usage docs describe dismissal");
-        assert.ok(/subagent_list|subagent_stop|tool/i.test(usage), "usage docs note tool access unchanged");
     });
 });

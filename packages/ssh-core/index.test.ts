@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   createSshMuxController,
   createTmuxSessionController,
-  DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
-  DEFAULT_SSH_CONTROL_PERSIST_SECONDS,
   defaultSshControlPathRoot,
   resolveSshCommand,
   wrapRemoteBashCommand,
@@ -61,7 +59,6 @@ describe("ssh-core package contract", () => {
       },
     });
 
-    assert.equal(DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS, 10);
     assert.deepEqual(resolved.identity, {
       host: "example.com",
       user: "deploy",
@@ -122,7 +119,9 @@ describe("ssh-core package contract", () => {
       });
 
       assert.equal(execFileSync("sh", ["-c", wrapped], { encoding: "utf8" }), `profile|${payload}|${workdir}`);
-      assert.equal(wrapRemoteBashCommand({ command: "pwd" }), "bash -c 'pwd'");
+      assert.equal(execFileSync("sh", ["-c", wrapRemoteBashCommand({ command: "pwd" })], {
+        cwd: workdir, encoding: "utf8",
+      }).trim(), realpathSync(workdir));
       assert.throws(() => wrapRemoteBashCommand({ command: "  " }), /remote bash command is required/);
       assert.throws(() => wrapRemoteBashCommand({ command: "true", workdir: "" }), /workdir must not be empty/);
       assert.throws(() => wrapRemoteBashCommand({ command: "true", env: { "BAD-NAME": "x" } }), /invalid remote environment variable name/);
@@ -192,7 +191,6 @@ describe("ssh-core package contract", () => {
         controlPathRoot,
       });
 
-      assert.equal(DEFAULT_SSH_CONTROL_PERSIST_SECONDS, 600);
       assert.equal(mux.controlPath, sameIdentity.controlPath);
       assert.notEqual(mux.controlPath, differentScope.controlPath);
       assert.match(mux.controlPath, new RegExp(`^${controlPathRoot.replaceAll("/", "\\/")}\\/cm-[a-f0-9]{32}$`));

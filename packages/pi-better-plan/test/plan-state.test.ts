@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  COMPLETED_PLAN_RETENTION_MS,
   completedPlanClearDelay,
   planClearEntry,
   planDisplayEntry,
@@ -29,7 +28,9 @@ test("replaces a plan atomically and preserves identities for unchanged steps", 
   assert.equal(updated.revision, 2);
   assert.equal(updated.steps[0]?.id, initial.steps[0]?.id);
   assert.equal(updated.steps[1]?.id, initial.steps[1]?.id);
-  assert.equal(updated.steps[2]?.id, "step_2_3");
+  assert.ok(updated.steps[2]?.id);
+  assert.equal(new Set(updated.steps.map((step) => step.id)).size, updated.steps.length);
+  assert.equal(initial.steps[0]?.status, "in_progress", "replacement must not mutate the prior snapshot");
   assert.equal(updated.createdAt, 100);
   assert.equal(updated.updatedAt, 120);
 });
@@ -169,7 +170,8 @@ test("records the completion transition once and derives its remaining clear del
   assert.equal(completed.completedAtMs, 110_500);
   assert.equal(revisedComplete.completedAtMs, 110_500, "complete revisions keep the original deadline");
   assert.equal(completedPlanClearDelay(completed, 120_500), 20_000);
-  assert.equal(completedPlanClearDelay(completed, 110_500 + COMPLETED_PLAN_RETENTION_MS), 0);
+  assert.equal(completedPlanClearDelay(completed, 140_499), 1);
+  assert.equal(completedPlanClearDelay(completed, 140_500), 0);
   assert.equal(completedPlanClearDelay(active, 120_500), null);
 });
 

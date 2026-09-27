@@ -66,21 +66,6 @@ async function withPath<T>(value: string, run: () => T | Promise<T>): Promise<T>
     }
 }
 
-async function withUnreadablePath<T>(run: () => T | Promise<T>): Promise<T> {
-    const previous = process.env;
-    process.env = new Proxy(previous, {
-        get(target, property, receiver) {
-            if (property === "PATH") throw new Error("PATH must not be read for sandbox:false");
-            return Reflect.get(target, property, receiver);
-        },
-    });
-    try {
-        return await run();
-    } finally {
-        process.env = previous;
-    }
-}
-
 function writeBwrapStub(dir: string, body: string, mode = 0o755): string {
     const path = join(dir, "bwrap");
     writeFileSync(path, body);
@@ -218,15 +203,18 @@ describe("sandbox-core backend selection and wrapper construction", () => {
         const writable = join(base, "work");
         mkdirSync(writable, { recursive: true });
         try {
-            await withPlatform("linux", () => withUnreadablePath(() => {
-                assert.equal(
-                    maybeBuildSandboxCommand(sandboxArgs(base, writable), {
-                        sandboxEnabled: false,
-                        explicitSandbox: false,
-                    }),
-                    undefined,
-                );
-            }));
+            const unexpected = () => { throw new Error("sandbox:false must not discover or construct a backend"); };
+            assert.equal(maybeBuildSandboxCommand(sandboxArgs(base, writable), {
+                sandboxEnabled: false,
+                explicitSandbox: false,
+            }, {
+                platform: unexpected,
+                lookupExecutable: unexpected,
+                canonicalize: unexpected,
+                writeProfile: unexpected,
+                materializeDenyPath: unexpected,
+            }), undefined);
+            assert.equal(existsSync(join(base, "profile.sb")), false);
         } finally {
             rmSync(base, { recursive: true, force: true });
         }

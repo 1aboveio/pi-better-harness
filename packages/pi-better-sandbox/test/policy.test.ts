@@ -24,10 +24,10 @@ function project(name: string): string {
 }
 
 test("the packaged deny defaults are the three paths the design fixes in source", () => {
-    assert.deepEqual([...PACKAGED_DENY_WRITE_TEMPLATES], [".git/hooks", ".env", ".env.local"]);
+    assert.deepEqual([...PACKAGED_DENY_WRITE_TEMPLATES].sort(), [".env", ".env.local", ".git/hooks"]);
     assert.throws(() => {
         (PACKAGED_DENY_WRITE_TEMPLATES as string[]).push("extra");
-    });
+    }, TypeError);
 });
 
 test("packaged defaults resolve under the project root of whichever project is open", () => {

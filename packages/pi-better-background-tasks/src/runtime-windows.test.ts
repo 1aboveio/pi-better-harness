@@ -1,19 +1,22 @@
+import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { stopProcessGroup } from "./process.js";
 import { logPathFor, readMeta, taskDir, writeMeta } from "./registry.js";
 import { stopTask } from "./runtime.js";
 
-vi.mock("./process.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./process.js")>();
-  return { ...actual, stopProcessGroup: vi.fn() };
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawnSync: vi.fn() };
 });
+
+const realPlatform = process.platform;
 
 const ids: string[] = [];
 const pi = {} as ExtensionAPI;
 
 afterEach(() => {
+  Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
   vi.restoreAllMocks();
   for (const id of ids.splice(0)) rmSync(taskDir(id), { recursive: true, force: true });
 });
@@ -34,17 +37,20 @@ describe("Windows process termination failures", () => {
       pgid: 4242,
       spawnPid: process.pid,
     });
-    vi.mocked(stopProcessGroup).mockImplementation(() => {
-      throw new Error("taskkill failed with exit 5: Access is denied.");
-    });
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    vi.mocked(spawnSync).mockReturnValue({ status: 5, stderr: "Access is denied." } as ReturnType<typeof spawnSync>);
+    vi.spyOn(process, "kill").mockReturnValue(true);
 
     const stopped = await stopTask(pi, id);
 
     expect(stopped).toMatchObject({
       status: "running",
-      error: "taskkill failed with exit 5: Access is denied.",
+      error: "taskkill failed with exit 5 for PID 4242: Access is denied.",
     });
+    expect(spawnSync).toHaveBeenCalledWith("taskkill", ["/T", "/F", "/PID", "4242"],
+      expect.objectContaining({ windowsHide: true }));
     expect(stopped?.stopRequestedAt).toBeUndefined();
+    expect(readMeta(id)).toMatchObject({ status: "running", error: stopped!.error });
     expect(readMeta(id)?.result).toBeUndefined();
   });
 });

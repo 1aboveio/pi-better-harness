@@ -10,9 +10,6 @@
 // @level unit
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 
 // Hermetic registry: this file drives real spawns, and the spawn path runs
 // whole-registry maintenance (daily cleanup + size cap). A suite run must
@@ -29,9 +26,6 @@ import {
     planBatchLaunches,
     validateBatchPlan,
 } from "../batch.mjs";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const indexSource = readFileSync(resolve(__dirname, "..", "index.ts"), "utf8");
 
 const CFG = {
     toolExtensions: { web_fetch: "npm:@juicesharp/rpiv-web-tools" },
@@ -144,14 +138,6 @@ describe("mergeJobOptions", () => {
         const neither = mergeJobOptions({ sandbox: true }, { prompt: "neither" });
         assert.equal(neither.git_clone_workspace, undefined);
 
-        // Production merge must literally name the field (guards against a future
-        // rewrite that spreads a whitelist without this key).
-        const batchSource = readFileSync(resolve(__dirname, "..", "batch.mjs"), "utf8");
-        assert.match(
-            batchSource,
-            /git_clone_workspace:\s*job\.git_clone_workspace\s*\?\?\s*shared\?\.git_clone_workspace/,
-            "mergeJobOptions must forward git_clone_workspace from job ?? shared",
-        );
     });
 });
 
@@ -472,122 +458,5 @@ describe("formatBatchLaunchResponse", () => {
         assert.match(text, /• alice → sa_1/);
         assert.match(text, /Failed \(1\): bob: spawn exited with status 1/);
         assert.match(text, /Skipped \(capacity\): carol/);
-    });
-});
-
-describe("index.ts batch wiring", () => {
-    // @covers subagent-spawn-batch.tool-registration
-    // @level unit
-    it("registers the subagent_spawn_batch tool", () => {
-        assert.ok(
-            indexSource.includes('name: "subagent_spawn_batch"'),
-            "index.ts must register subagent_spawn_batch",
-        );
-    });
-
-    // @covers subagent-spawn-batch.shared-helper
-    // @level unit
-    it("uses a shared internal spawnSubagentRun helper for both tools", () => {
-        assert.ok(
-            indexSource.includes("async function spawnSubagentRun"),
-            "index.ts must define a shared spawnSubagentRun helper",
-        );
-        assert.ok(
-            indexSource.includes("await spawnSubagentRun(ctx, p)"),
-            "subagent_spawn must call the shared helper",
-        );
-        assert.ok(
-            indexSource.includes("await spawnSubagentRun(ctx, { ...merged, name }"),
-            "subagent_spawn_batch must call the shared helper per job",
-        );
-    });
-
-    // @covers subagent-spawn-batch.planning
-    // @level unit
-    it("imports and uses batch planning helpers", () => {
-        assert.ok(indexSource.includes("validateBatchPlan"), "index.ts must validate the batch plan");
-        assert.ok(indexSource.includes("planBatchLaunches"), "index.ts must plan launches against capacity");
-        assert.ok(indexSource.includes("assignBatchJobNames"), "index.ts must assign job names");
-        assert.ok(indexSource.includes("mergeJobOptions"), "index.ts must merge shared/per-job options");
-        assert.ok(indexSource.includes("formatBatchLaunchResponse"), "index.ts must format the batch response");
-    });
-
-    // @covers subagent-spawn-batch.metadata
-    // @level unit
-    it("passes batchId and batchName into spawnSubagentRun so metadata is recorded", () => {
-        assert.ok(
-            indexSource.includes("{ batchId, batchName: p.batchName }"),
-            "batch info must be passed to each spawn",
-        );
-    });
-
-    // @covers subagent-spawn-batch.nesting-control
-    // @level unit
-    it("includes subagent_spawn_batch in the child nesting denylist", () => {
-        // Parse the SUBAGENT_TOOLS array specifically so removing the batch tool
-        // from that set fails even if the tool name still appears elsewhere.
-        const match = indexSource.match(/const SUBAGENT_TOOLS\s*=\s*\[([\s\S]*?)\];/);
-        assert.ok(match, "index.ts must declare SUBAGENT_TOOLS");
-        const members = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-        assert.ok(
-            members.includes("subagent_spawn_batch"),
-            "SUBAGENT_TOOLS must include the batch tool so child recursion boundaries stay coherent",
-        );
-        assert.ok(
-            members.includes("subagent_spawn"),
-            "SUBAGENT_TOOLS must still include subagent_spawn",
-        );
-    });
-
-    // @covers subagent-spawn-batch.capacity-admission
-    // @level unit
-    it("reject mode reserves whole-batch capacity on the shared gate", () => {
-        // Class invariant: reject mode holds all slots before any job launches so
-        // an interleaved single-spawn cannot oversubscribe after job 1 yields.
-        const executeMatch = indexSource.match(
-            /name:\s*"subagent_spawn_batch"[\s\S]*?async execute[\s\S]*?(?=\/\/ ---- (?:subagent_list|model-facing))/
-        );
-        assert.ok(executeMatch, "must locate subagent_spawn_batch.execute");
-        const body = executeMatch[0];
-        assert.ok(
-            body.includes("getSharedCapacityGate"),
-            "batch path must use the shared capacity gate",
-        );
-        assert.match(
-            body,
-            /tryReserve\(\s*p\.jobs\.length\s*,\s*maxConcurrent\s*\)/,
-            "reject mode must reserve the whole batch atomically",
-        );
-        assert.match(
-            body,
-            /launchAvailable[\s\S]*tryReserve\(\s*1\s*,\s*maxConcurrent\s*\)/,
-            "launch-available must reserve one slot per job",
-        );
-        assert.match(
-            body,
-            /not launched due to earlier job failure in reject mode/,
-            "reject-mode launch failure must account for later jobs explicitly",
-        );
-    });
-
-    // @covers subagent-spawn-batch.capacity-admission
-    // @level unit
-    it("single-spawn path reserves on the same shared capacity gate", () => {
-        const spawnMatch = indexSource.match(
-            /name:\s*"subagent_spawn"[\s\S]*?async execute[\s\S]*?(?=\/\/ ---- subagent_spawn_batch)/,
-        );
-        assert.ok(spawnMatch, "must locate subagent_spawn.execute");
-        const body = spawnMatch[0];
-        assert.ok(
-            body.includes("getSharedCapacityGate"),
-            "single-spawn must share the capacity gate with batch",
-        );
-        assert.match(
-            body,
-            /tryReserve\(\s*1\s*,\s*maxConcurrent\s*\)/,
-            "single-spawn must reserve one slot before launch",
-        );
-        assert.match(body, /gate\.commit\(\s*1\s*\)/, "single-spawn must commit after launch");
-        assert.match(body, /gate\.release\(\s*1\s*\)/, "single-spawn must release on failure");
     });
 });

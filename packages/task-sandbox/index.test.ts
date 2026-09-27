@@ -9,7 +9,7 @@ import { writableRuntimeAlias } from './index.ts';
 
 test('runtime aliases inside compatibility temp are unsafe under Outside Read', { skip: process.platform === 'win32' }, (t) => {
     const temporary = realpathSync(mkdtempSync('/tmp/task-runtime-alias-'));
-    const outside = realpathSync(mkdtempSync('/var/tmp/task-runtime-target-'));
+    const outside = realpathSync(mkdtempSync(join(process.env.PI_SANDBOX_TEST_TMPDIR ?? '/var/tmp', 'task-runtime-target-')));
     t.after(() => { rmSync(temporary, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); });
     const project = join(outside, 'project'), runtime = join(outside, 'agent');
     mkdirSync(project); mkdirSync(runtime);

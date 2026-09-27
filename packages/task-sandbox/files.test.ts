@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
 import type { SandboxPermissions, SandboxWritePolicy } from "../sandbox-core/index.ts";
 
@@ -57,6 +57,12 @@ function tools(f: ReturnType<typeof fixture>) {
     };
 }
 
+function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+}
+
 async function denied(promise: Promise<unknown>, pattern: RegExp) {
     await assert.rejects(promise, pattern);
 }
@@ -74,7 +80,7 @@ test("inactive plan delegates ordinary local operations", async () => {
     } finally { f.cleanup(); }
 });
 
-test("SDK write/edit/read keep their queue and file semantics in a real sandbox", { skip: !kernel }, async () => {
+test("SDK write/edit/read preserve file semantics with task commands disabled", { skip: !kernel }, async () => {
     const f = fixture();
     try {
         const t = tools(f);
@@ -85,9 +91,41 @@ test("SDK write/edit/read keep their queue and file semantics in a real sandbox"
         const read = await t.read.execute("read", { path: "nested/new.txt" }, undefined, undefined, t.ctx);
         assert.match(JSON.stringify(read.content), /beta/);
         assert.equal(readFileSync(join(f.root, "nested/new.txt"), "utf8"), "beta\n");
-        // File helpers still work even when the selected task disallows commands.
-        assert.equal(f.policy.permissions?.commands, false);
+        // The fixture disables task commands; successful file I/O proves the
+        // fixed helper retains its separate execution privilege.
     } finally { f.cleanup(); }
+});
+
+test("SDK mutations through kernel workers wait for the same file queue and serialize write before edit", { skip: !kernel }, async () => {
+    const f = fixture();
+    const release = deferred();
+    const entered = deferred();
+    const target = join(f.root, "queued.txt");
+    const holder = withFileMutationQueue(target, async () => {
+        entered.resolve();
+        await release.promise;
+        writeFileSync(target, "holder\n");
+    });
+    await entered.promise;
+    let requests = 0;
+    const ops = createTaskFileOperations({ requireLaunchPlan: () => { requests++; return f.plan; } });
+    const t = tools({ ...f, ops });
+    const mutations = Promise.all([
+        t.write.execute("queued-write", { path: target, content: "alpha\n" }, undefined, undefined, t.ctx),
+        t.edit.execute("queued-edit", { path: target, edits: [{ oldText: "alpha", newText: "beta" }] }, undefined, undefined, t.ctx),
+    ]);
+    try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(requests, 0, "queued tools must not start a worker or check policy while the holder is active");
+        release.resolve();
+        await holder;
+        await mutations;
+        assert.equal(readFileSync(target, "utf8"), "beta\n");
+    } finally {
+        release.resolve();
+        await Promise.allSettled([holder, mutations]);
+        f.cleanup();
+    }
 });
 
 test("outside reads work, outside writes and symlink escapes do not", { skip: !kernel }, async () => {
@@ -172,6 +210,12 @@ test("image detection uses bytes, preserves SDK supported still formats", { skip
 test("bounded confined reads and writes reject oversized content", { skip: !kernel }, async () => {
     const f = fixture();
     try {
+        const atLimit = "é".repeat(4 * 1024 * 1024);
+        const boundary = join(f.root, "boundary.txt");
+        await f.ops.write.writeFile(boundary, atLimit);
+        assert.deepEqual(await f.ops.read.readFile(boundary), Buffer.from(atLimit));
+        await denied(f.ops.write.writeFile(boundary, atLimit + "é"), /8 MiB operation limit/);
+        assert.equal(readFileSync(boundary, "utf8"), atLimit, "oversized writes must not truncate an existing file");
         const big = join(f.root, "big.txt");
         writeFileSync(big, Buffer.alloc(8 * 1024 * 1024 + 1, 65));
         await denied(f.ops.read.readFile(big), /8 MiB operation limit/);

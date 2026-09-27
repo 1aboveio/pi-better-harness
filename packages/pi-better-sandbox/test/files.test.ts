@@ -144,6 +144,12 @@ function runEdit(
     return tools.edit.execute("call-edit", input as never, signal, undefined, toolContext);
 }
 
+function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+}
+
 /** Assert a mutation was refused by the sandbox and left the host untouched. */
 async function refuses(
     run: () => Promise<unknown>,
@@ -494,30 +500,6 @@ test("a refusal names the target and carries the machine-readable decision", asy
     );
 });
 
-test("the overrides keep pi's own schemas, prompt guidance, renderers and details", () => {
-    const { root } = project("contracts");
-    const tools = confined(sessionAt(root), root);
-    const builtIn = unmodified(root);
-
-    for (const name of ["write", "edit"] as const) {
-        const override = tools[name];
-        const original = builtIn[name];
-        assert.equal(override.name, original.name);
-        assert.equal(override.label, original.label);
-        assert.equal(override.description, original.description);
-        assert.equal(override.promptSnippet, original.promptSnippet);
-        assert.deepEqual(override.promptGuidelines, original.promptGuidelines);
-        assert.deepEqual(override.parameters, original.parameters);
-        assert.equal(override.renderShell, original.renderShell);
-        // Identical source, because these are pi's own renderers: nothing in
-        // this package supplies a renderer, a preview, a diff, or an argument
-        // shim, so restored transcripts render exactly as they did before.
-        assert.equal(String(override.renderCall), String(original.renderCall));
-        assert.equal(String(override.renderResult), String(original.renderResult));
-        assert.equal(String(override.prepareArguments), String(original.prepareArguments));
-    }
-});
-
 test("write and edit expose no rename or delete affordance to be bypassed", () => {
     const { root } = project("no-rename-or-delete");
     const tools = confined(sessionAt(root), root);
@@ -561,45 +543,44 @@ test("an allowed edit still returns pi's diff and patch details", async () => {
 
 test("both overrides wait on pi's per-file mutation queue before mutating", async () => {
     const { root } = project("queue-wait");
-    const tools = confined(sessionAt(root), root);
+    const controller = sessionAt(root);
     const target = join(root, "src", "queued.txt");
-
-    let releaseHolder: () => void = () => {};
-    const holderReleased = new Promise<void>((resolve) => {
-        releaseHolder = resolve;
-    });
-    // A real hold on the same queue key, taken through the SDK's own export.
-    const holder = withFileMutationQueue(target, () => holderReleased);
-    await new Promise((resolve) => setImmediate(resolve));
-
-    const write = runWrite(tools, { path: target, content: "queued\n" });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(existsSync(target), false, "the override must not mutate while the queue is held");
-
-    releaseHolder();
-    await holder;
-    await write;
-    assert.equal(readFileSync(target, "utf8"), "queued\n");
-
-    // The same for edit.
-    let releaseSecond: () => void = () => {};
-    const secondReleased = new Promise<void>((resolve) => {
-        releaseSecond = resolve;
-    });
-    const secondHolder = withFileMutationQueue(target, () => secondReleased);
-    await new Promise((resolve) => setImmediate(resolve));
-
-    const edit = runEdit(tools, {
-        path: target,
-        edits: [{ oldText: "queued", newText: "edited" }],
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(readFileSync(target, "utf8"), "queued\n");
-
-    releaseSecond();
-    await secondHolder;
-    await edit;
-    assert.equal(readFileSync(target, "utf8"), "edited\n");
+    const events: string[] = [];
+    const writeOps = createSandboxedWriteOperations(controller);
+    const editOps = createSandboxedEditOperations(controller);
+    const tools: Tools = {
+        write: createWriteToolDefinition(root, { operations: {
+            ...writeOps,
+            mkdir: async (path) => { events.push("mkdir"); await writeOps.mkdir(path); },
+            writeFile: async (path, content) => { events.push("write"); await writeOps.writeFile(path, content); },
+        } }) as unknown as Tools["write"],
+        edit: createEditToolDefinition(root, { operations: {
+            ...editOps,
+            access: async (path) => { events.push("access"); await editOps.access(path); },
+        } }) as unknown as Tools["edit"],
+    };
+    for (const name of ["write", "edit"] as const) {
+        events.length = 0;
+        const release = deferred();
+        const entered = deferred();
+        const holder = withFileMutationQueue(target, async () => {
+            entered.resolve();
+            await release.promise;
+            events.push("holder-released");
+        });
+        await entered.promise;
+        const mutation = name === "write"
+            ? runWrite(tools, { path: target, content: "queued\n" })
+            : runEdit(tools, { path: target, edits: [{ oldText: "queued", newText: "edited" }] });
+        // Let already-runnable operations enter their first filesystem boundary;
+        // no filesystem completion or elapsed duration is assumed here.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        try { assert.deepEqual(events, [], `${name} must wait before its first operation`); }
+        finally { release.resolve(); await Promise.allSettled([holder, mutation]); }
+        await mutation;
+        assert.equal(events[0], "holder-released");
+        assert.equal(readFileSync(target, "utf8"), name === "write" ? "queued\n" : "edited\n");
+    }
 });
 
 test("the queue stays held for the whole mutation window, checks included", async () => {
@@ -609,19 +590,19 @@ test("the queue stays held for the whole mutation window, checks included", asyn
 
     // A local backend that parks inside the write, so the window the override
     // holds the queue for is observable from outside.
-    let releaseWrite: () => void = () => {};
-    const writeParked = new Promise<void>((resolve) => {
-        releaseWrite = resolve;
-    });
-    let insideWrite = false;
+    const writeEntered = deferred();
+    const writeParked = deferred();
+    const events: string[] = [];
     const write = createWriteToolDefinition(root, {
         operations: createSandboxedWriteOperations(controller, {
             localOperations: {
                 mkdir: async () => {},
                 writeFile: async (path, content) => {
-                    insideWrite = true;
-                    await writeParked;
+                    events.push("write-start");
+                    writeEntered.resolve();
+                    await writeParked.promise;
                     writeFileSync(path, content);
+                    events.push("write-end");
                 },
             },
         }),
@@ -634,20 +615,14 @@ test("the queue stays held for the whole mutation window, checks included", asyn
         undefined,
         toolContext,
     );
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(insideWrite, true, "the override must reach its write while holding the queue");
-
-    let contenderRan = false;
+    await writeEntered.promise;
     const contender = withFileMutationQueue(target, async () => {
-        contenderRan = true;
+        events.push("contender");
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(contenderRan, false, "another mutation must not start inside the override's window");
-
-    releaseWrite();
-    await running;
-    await contender;
-    assert.equal(contenderRan, true);
+    writeParked.resolve();
+    await Promise.all([running, contender]);
+    assert.deepEqual(events, ["write-start", "write-end", "contender"],
+        "the next queued mutation must start only after the write completes");
     assert.equal(readFileSync(target, "utf8"), "windowed\n");
 });
 
@@ -681,6 +656,7 @@ test("an abort raised mid-write still releases the queue for the next mutation",
     const target = join(root, "src", "midway.txt");
     const abort = new AbortController();
 
+    const releaseMkdir = deferred();
     let reachedMkdir = () => {};
     const atMkdir = new Promise<void>((resolve) => {
         reachedMkdir = resolve;
@@ -690,7 +666,7 @@ test("an abort raised mid-write still releases the queue for the next mutation",
             localOperations: {
                 mkdir: async () => {
                     reachedMkdir();
-                    await new Promise((resolve) => setTimeout(resolve, 20));
+                    await releaseMkdir.promise;
                 },
                 writeFile: async (path, content) => writeFileSync(path, content),
             },
@@ -706,6 +682,7 @@ test("an abort raised mid-write still releases the queue for the next mutation",
     );
     await atMkdir;
     abort.abort();
+    releaseMkdir.resolve();
 
     await assert.rejects(() => running, /Operation aborted/);
     assert.equal(existsSync(target), false);

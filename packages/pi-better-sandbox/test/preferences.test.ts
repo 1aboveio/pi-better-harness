@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
@@ -24,8 +24,13 @@ test("on and off preferences round-trip through an atomic versioned file", () =>
     assert.equal(readSandboxDefault(seams), "on");
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { version: 1, default: "on" });
 
-    writeSandboxDefault("off", seams);
-    assert.equal(readSandboxDefault(seams), "off");
+    const previous = openSync(path, "r");
+    try {
+        writeSandboxDefault("off", seams);
+        assert.equal(readSandboxDefault(seams), "off");
+        assert.deepEqual(JSON.parse(readFileSync(previous, "utf8")), { version: 1, default: "on" },
+            "an existing reader keeps the old complete file after atomic replacement");
+    } finally { closeSync(previous); }
 });
 
 test("malformed preferences are reported instead of silently enabling confinement", () => {

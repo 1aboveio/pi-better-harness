@@ -8,7 +8,8 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -21,10 +22,12 @@ const sandbox = process.env.PI_ACCEPTANCE_SANDBOX
 const runId = "sa_muff44v8_1";
 
 describe("catalog navigator reload", { concurrency: false }, () => {
-    (enabled ? it : it.skip)("renders the preserved run from the registered navigator and result tool", { timeout: 120_000 }, async () => {
+    (enabled ? it : it.skip)("renders the preserved run from the registered navigator and result tool", { timeout: 120_000 }, async (t) => {
         assert.equal(existsSync(join(sandbox, "tmp/pi-better-subagents/runs", runId, "meta.json")), true);
-        const out = join(repoRoot, ".rush-results/navigator-reload.json");
-        const screen = join(repoRoot, ".rush-results/navigator-reload.pty");
+        const evidenceDir = mkdtempSync(join(tmpdir(), "navigator-reload-evidence-"));
+        t.after(() => rmSync(evidenceDir, { recursive: true, force: true }));
+        const out = join(evidenceDir, "navigator-reload.json");
+        const screen = join(evidenceDir, "navigator-reload.pty");
         const pi = process.env.PI_BIN ?? "pi";
         const child = spawn("python3", ["-"], {
             cwd: repoRoot,
@@ -123,7 +126,6 @@ else:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
-        time.sleep(0.5)
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:

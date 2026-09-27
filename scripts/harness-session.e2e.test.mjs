@@ -16,6 +16,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -73,14 +74,7 @@ after(() => {
 function defaultExtensionEntries() {
   const harnessDir = join(repoRoot, "packages/pi-better-harness");
   const manifest = JSON.parse(readFileSync(join(harnessDir, "package.json"), "utf8"));
-  return manifest.pi.extensions.map((entry) => {
-    const shim = readFileSync(join(harnessDir, entry), "utf8");
-    const match = /\.\.\/\.\.\/node_modules\/([^/"]+)\/([^"]+)/.exec(shim);
-    assert.ok(match, `${entry} must re-export a bundled dependency's entry point`);
-    // The shim points into the staged tarball copy; the same file in the
-    // workspace is what the tarball is packed from.
-    return { packageName: match[1], source: join(repoRoot, "packages", match[1], match[2]) };
-  });
+  return manifest.pi.extensions.map((entry) => join(harnessDir, entry));
 }
 
 const tools = new Map();
@@ -88,7 +82,6 @@ const commands = new Map();
 const sessionStartHandlers = [];
 const userBashHandlers = [];
 const events = new EventEmitter();
-const loaded = [];
 const notifications = [];
 let initialForegroundPolicy;
 
@@ -140,11 +133,15 @@ before(async () => {
   // when pi is launched from a project directory.
   process.chdir(projectRoot);
 
-  for (const { packageName, source } of defaultExtensionEntries()) {
+  // Stage current workspace packages, then execute the actual published shims.
+  // A comment containing an import path must never count as a loaded extension.
+  execFileSync(process.execPath, [join(repoRoot, "scripts/stage-harness-dependencies.mjs")], {
+    cwd: repoRoot, stdio: "pipe",
+  });
+  for (const source of defaultExtensionEntries()) {
     const extension = (await import(source)).default;
-    assert.equal(typeof extension, "function", `${packageName} must export an extension factory`);
+    assert.equal(typeof extension, "function", `${source} must export an extension factory`);
     extension(pi);
-    loaded.push(packageName);
   }
 
   for (const handler of sessionStartHandlers) {
@@ -173,14 +170,6 @@ async function runTool(name, params) {
 // @covers harness.default-capability
 // @level e2e
 test("the harness loads the sandbox alongside every other default extension", { skip }, () => {
-  assert.deepEqual(loaded, [
-    "pi-better-sandbox",
-    "pi-better-subagents",
-    "pi-better-background-tasks",
-    "pi-better-ssh",
-    "pi-better-goal",
-    "pi-better-plan",
-  ]);
   for (const name of [
     "bash",
     "write",
@@ -192,6 +181,8 @@ test("the harness loads the sandbox alongside every other default extension", { 
     "ssh_mux",
     "update_plan",
     "get_plan",
+    "get_goal",
+    "update_goal",
   ]) {
     assert.ok(tools.has(name), `a harness session must have the ${name} tool`);
   }
@@ -248,8 +239,16 @@ test("shell: writes stay inside the project and reads stay unrestricted", { skip
 // @level e2e
 test("shell: user-entered ! commands use the same confined backend", { skip }, async () => {
   assert.equal(userBashHandlers.length, 1, "exactly one extension may own user_bash");
-  const result = userBashHandlers[0]({ type: "user_bash", command: "printf ok" }, ctx);
+  const inside = join(projectRoot, "user-bash-allowed.txt");
+  const escaped = join(outside, "user-bash-escaped.txt");
+  const result = userBashHandlers[0]({ type: "user_bash", command: "true", cwd: projectRoot }, ctx);
   assert.ok(result?.operations, "user_bash must be routed through the sandboxed operations");
+  const allowed = await result.operations.exec(`printf 'inside\\n' > '${inside}'`, projectRoot, { onData: () => {} });
+  const denied = await result.operations.exec(`printf 'escaped\\n' > '${escaped}'`, projectRoot, { onData: () => {} });
+  assert.equal(allowed.exitCode, 0);
+  assert.equal(readFileSync(inside, "utf8"), "inside\n");
+  assert.notEqual(denied.exitCode, 0);
+  assert.equal(existsSync(escaped), false);
 });
 
 // @covers sandbox.write-containment
@@ -349,19 +348,29 @@ test("subagents run through the same shared mechanism", { skip }, async () => {
   );
 
   assert.equal(sandboxSupported(), true, "the subagent path must see the same backend");
+  const inside = join(projectRoot, "subagent-allowed.txt");
+  const escaped = join(outside, "subagent-escaped.txt");
   const command = maybeBuildSandboxCommand(
     {
       profilePath: join(fixtures, "subagent.sb"),
       writableDir: projectRoot,
       home: fixtures,
-      piBin: "/bin/echo",
-      piArgs: ["ok"],
+      piBin: process.execPath,
+      piArgs: ["-e", `
+        const fs = require('node:fs');
+        fs.writeFileSync(${JSON.stringify(inside)}, 'inside\\n');
+        try { fs.writeFileSync(${JSON.stringify(escaped)}, 'escaped\\n'); }
+        catch (error) { if (!['EACCES', 'EPERM', 'EROFS'].includes(error.code)) throw error; }
+      `],
     },
     { sandboxEnabled: true, explicitSandbox: false },
   );
 
   assert.ok(command, "a default-on subagent spawn must be wrapped, never bare");
   assert.equal(command.file, support.executable);
+  execFileSync(command.file, command.fileArgs, { cwd: projectRoot });
+  assert.equal(readFileSync(inside, "utf8"), "inside\n");
+  assert.equal(existsSync(escaped), false, "the subagent wrapper must enforce confinement");
 });
 
 // @covers sandbox.human-only-control

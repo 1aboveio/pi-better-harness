@@ -23,7 +23,10 @@ function plain(text: string): string {
 }
 
 function table(page: Component, width = 80): string[] {
-    return page.render(width).filter((line) => plain(line).trim()).slice(0, 8);
+    const lines = page.render(width).filter((line) => plain(line).trim());
+    const save = lines.findIndex((line) => plain(line).includes("Save as defaults"));
+    assert.ok(save >= 0, "the table must have a save action");
+    return lines.slice(0, save + 1);
 }
 
 function harness(overrides: Partial<PermissionPageHandlers> = {}) {

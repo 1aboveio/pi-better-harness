@@ -210,8 +210,7 @@ describe("executeRemoteBash", () => {
         maxLines: 2_000,
         maxBytes: 50 * 1024,
       });
-      expect(result.output).not.toContain("line-1\n");
-      expect(result.output).toContain("line-2100");
+      expect(result.output).toBe(fullOutput.split("\n").slice(-2000).join("\n"));
       expect(fullOutputPath && existsSync(fullOutputPath)).toBe(true);
       expect(readFileSync(fullOutputPath!, "utf8")).toBe(fullOutput);
     } finally {

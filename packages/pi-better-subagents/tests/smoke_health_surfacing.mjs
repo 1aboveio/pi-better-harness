@@ -1,7 +1,7 @@
 /**
  * Runtime smoke for issue #67 health surfacing.
  *
- * Exercises pure list/output/widget helpers against the real modules the
+ * Exercises pure list/output helpers against the real modules the
  * extension loads. Does not spawn OS processes.
  *
  *   node tests/smoke_health_surfacing.mjs [--json docs/tests/_generated/runtime-smoke-results-67.json]
@@ -12,11 +12,9 @@ import { fileURLToPath } from "node:url";
 import {
     formatListHealthSuffix,
     formatHealthDiagnosticLine,
-    formatWidgetHealthSuffix,
     isActionableHealth,
 } from "../health-surface.mjs";
 import { buildSubagentList, SUBAGENT_LIST_STATUSES } from "../list.mjs";
-import { buildWidgetLines } from "../widget.mjs";
 import { observeRunHealth } from "../health-observation.ts";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -71,8 +69,6 @@ must("list statuses include orphaned/lost", SUBAGENT_LIST_STATUSES.includes("orp
 must("healthy not actionable", isActionableHealth(healthy) === false);
 must("stale actionable", isActionableHealth(stale) === true && /stale/.test(formatListHealthSuffix(stale)));
 must("orphaned diagnostic", /orphaned/.test(formatHealthDiagnosticLine(orphaned)));
-must("widget healthy silent", formatWidgetHealthSuffix(healthy) === "");
-must("widget stale suffix", /stale/.test(formatWidgetHealthSuffix(stale)));
 
 const listOut = buildSubagentList({
     metas: [
@@ -126,15 +122,6 @@ const okRow = listOut.split("\n").find((l) => l.includes("sa_ok")) || "";
 const badRow = listOut.split("\n").find((l) => l.includes("sa_bad")) || "";
 must("list shows stale only on degraded", /stale/.test(badRow) && !/stale/.test(okRow), `${okRow} | ${badRow}`);
 
-const widget = buildWidgetLines({
-    running: [{ id: "sa_bad", name: "bad", model: "xai/grok", startedAt: BASE }],
-    frame: 0,
-    now: NOW,
-    spendById: {},
-    healthById: { sa_bad: stale },
-});
-must("widget paints degraded suffix", widget.some((l) => /stale/.test(l)), widget[1]);
-
 const failed = steps.filter((s) => s.status === "fail");
 const summary = {
     issue: 67,
@@ -143,8 +130,6 @@ const summary = {
     surfaces: [
         { id: "subagent.list-health", status: failed.length ? "fail" : "pass" },
         { id: "subagent.output-health", status: failed.length ? "fail" : "pass" },
-        { id: "widget.health", status: failed.length ? "fail" : "pass" },
-        { id: "subagent.health-notify", status: "pass", note: "wiring pin + #65 extension notify" },
     ],
     steps,
     pass: failed.length === 0,

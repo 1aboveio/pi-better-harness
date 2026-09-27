@@ -15,15 +15,11 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
 import {
     isActionableHealth,
     healthSurfaceFacts,
     formatListHealthSuffix,
     formatHealthDiagnosticLine,
-    formatWidgetHealthSuffix,
     appendHealthDiagnostic,
 } from "../health-surface.mjs";
 import {
@@ -32,15 +28,13 @@ import {
     formatSubagentListRow,
 } from "../list.mjs";
 import {
-    buildWidgetLines,
     isHealthLogCacheFresh,
     resolveHealthLogExtraction,
     HOT_PATH_REFRESH_FLOOR_MS,
 } from "../widget.mjs";
-import { observeRunHealth, extractChildEventFacts } from "../health-observation.ts";
+import { observeRunHealth } from "../health-observation.ts";
 import { formatSubagentOutputBody } from "../parse.ts";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NOW = 1_800_000_000_000;
 const BASE = NOW - 60_000;
 
@@ -105,8 +99,6 @@ describe("health surface helpers", () => {
         assert.equal(formatListHealthSuffix(healthy), "");
         assert.equal(formatListHealthSuffix(quiet), "");
         assert.equal(formatHealthDiagnosticLine(healthy), "");
-        assert.equal(formatWidgetHealthSuffix(healthy), "");
-        assert.equal(formatWidgetHealthSuffix(quiet), "");
     });
 
     // @covers subagent.list-health
@@ -128,7 +120,6 @@ describe("health surface helpers", () => {
         assert.equal(isActionableHealth(shortTool), false);
         assert.equal(formatListHealthSuffix(shortTool), "");
         assert.equal(formatHealthDiagnosticLine(shortTool), "");
-        assert.equal(formatWidgetHealthSuffix(shortTool), "");
 
         const listRow = formatSubagentListRow(meta("sa_bash", { name: "worker" }), {
             status: "running",
@@ -143,26 +134,6 @@ describe("health surface helpers", () => {
             outBody,
         );
 
-        const spendById = {
-            sa_bash: {
-                usage: { total: 0, input: 0, output: 0, costUSD: 0 },
-                tool: "bash",
-            },
-        };
-        const running = [{ id: "sa_bash", name: "worker", model: "xai/grok-4.5", startedAt: BASE }];
-        const baseline = buildWidgetLines({ running, frame: 0, now: NOW, spendById });
-        const withHealth = buildWidgetLines({
-            running,
-            frame: 0,
-            now: NOW,
-            spendById,
-            healthById: { sa_bash: shortTool },
-        });
-        // Widget already shows the tool via its normal label; health must not
-        // append a second degraded " · bash 10s" suffix on top of it.
-        assert.deepEqual(withHealth, baseline);
-        assert.match(baseline[1], / · bash$/); // normal tool label only
-        assert.doesNotMatch(baseline[1], /bash \d|long bash|health:/);
     });
 
     // @covers subagent.list-health
@@ -182,7 +153,6 @@ describe("health surface helpers", () => {
         assert.match(formatListHealthSuffix(colliding), /model error/);
         assert.doesNotMatch(formatListHealthSuffix(colliding), /model 10s/);
         assert.match(formatHealthDiagnosticLine(colliding), /\[health: model error\]/);
-        assert.match(formatWidgetHealthSuffix(colliding), /model error/);
 
         const retrying = {
             ...colliding,
@@ -404,70 +374,7 @@ describe("subagent_output health diagnostics", () => {
 // ---------------------------------------------------------------------------
 // passive widget
 // ---------------------------------------------------------------------------
-describe("passive widget health surfacing", () => {
-    // @covers widget.health
-    // @level unit
-    it("healthy/quiet runs keep today's widget line shape (non-regression)", () => {
-        const healthy = obsFor("running", emptyFacts({ lastMeaningfulAt: NOW - 5_000 }));
-        const baseline = buildWidgetLines({
-            running: [{ id: "a1", name: "watch", model: "xai/grok-4.5", startedAt: BASE }],
-            frame: 0,
-            now: NOW,
-            spendById: {},
-        });
-        const withHealth = buildWidgetLines({
-            running: [{ id: "a1", name: "watch", model: "xai/grok-4.5", startedAt: BASE }],
-            frame: 0,
-            now: NOW,
-            spendById: {},
-            healthById: { a1: healthy },
-        });
-        assert.deepEqual(withHealth, baseline);
-        assert.equal(baseline[0], "Subagents · 1 running");
-        assert.doesNotMatch(baseline[1], /stale|orphaned|health:/);
-    });
-
-    // @covers widget.health
-    // @level unit
-    it("degraded health can appear on the widget line without focus APIs", () => {
-        const stale = obsFor("running", emptyFacts({ lastMeaningfulAt: NOW - 200_000 }));
-        const lines = buildWidgetLines({
-            running: [{ id: "a1", name: "laggy", model: "xai/grok-4.5", startedAt: BASE }],
-            frame: 0,
-            now: NOW,
-            spendById: {},
-            healthById: { a1: stale },
-        });
-        assert.match(lines[1], / · stale/);
-        // Still a plain string[] widget — no focus/interactive contract.
-        assert.equal(typeof lines[1], "string");
-
-        const widgetSource = readFileSync(join(ROOT, "widget.mjs"), "utf8");
-        const indexSource = readFileSync(join(ROOT, "index.ts"), "utf8");
-        // Passive string[] only — no focus APIs on the widget helper surface.
-        assert.doesNotMatch(widgetSource, /setFocus|tabIndex|onFocus|\.focus\(/);
-        assert.match(indexSource, /setWidget\("subagents", WIDGET_CLEAR\)/);
-        // The retired legacy widget is clear-only; health is now supplied to the
-        // shared navigator rows/details instead of painting a second list surface.
-        assert.doesNotMatch(indexSource, /buildWidgetLines\(\{[\s\S]{0,240}healthById[\s\S]{0,240}\}\)/);
-        assert.match(indexSource, /healthFor: \(m: RunMeta\) => observeNavigatorHealth\(m, now\)/);
-        assert.doesNotMatch(indexSource, /healthById[\s\S]{0,120}custom\(/);
-    });
-
-    // @covers widget.health
-    // @level unit
-    it("orphaned runs can surface on the passive widget when included", () => {
-        const orphaned = obsFor("orphaned", emptyFacts({ lastMeaningfulAt: NOW - 5_000 }));
-        const lines = buildWidgetLines({
-            running: [{ id: "o1", name: "left", model: "xai/grok-4.5", startedAt: BASE, status: "orphaned" }],
-            frame: 0,
-            now: NOW,
-            spendById: {},
-            healthById: { o1: orphaned },
-        });
-        assert.match(lines[1], /orphaned/);
-    });
-
+describe("navigator health cache", () => {
     // @covers widget.health
     // @level unit
     it("widget health log parse is cached by size/mtime across frames", () => {
@@ -525,16 +432,6 @@ describe("passive widget health surfacing", () => {
         assert.equal(rewritten.hit, false);
         assert.equal(extracts, 3);
 
-        // index.ts must gate the navigator health path on the size/mtime helper.
-        const indexSource = readFileSync(join(ROOT, "index.ts"), "utf8");
-        assert.match(indexSource, /resolveHealthLogExtraction/);
-        assert.match(indexSource, /healthLogCache/);
-        const healthSection = indexSource.match(
-            /function observeWidgetHealth[\s\S]*?function syncWidgetNavSelection/,
-        )?.[0] ?? "";
-        assert.match(healthSection, /resolveHealthLogExtraction/);
-        // Direct extract still exists for the miss path, but must be behind the cache.
-        assert.match(healthSection, /extractChildEventFactsFromLog/);
     });
 
     // @covers widget.refresh-floor
@@ -570,63 +467,5 @@ describe("passive widget health surfacing", () => {
         const afterFloor = resolveHealthLogExtraction(cached, { logSize, mtimeMs: 999, now: later }, extract);
         assert.equal(afterFloor.hit, false);
         assert.equal(extracts, 2);
-
-        // Both hot-path readers in index.ts must apply the floor.
-        const indexSource = readFileSync(join(ROOT, "index.ts"), "utf8");
-        const healthSection = indexSource.match(
-            /function observeWidgetHealth[\s\S]*?function syncWidgetNavSelection/,
-        )?.[0] ?? "";
-        assert.match(healthSection, /withinRefreshFloor/, "health path must apply the floor");
-        const spendSection = indexSource.match(/function spendFor[\s\S]*?\n}/)?.[0] ?? "";
-        assert.match(spendSection, /withinRefreshFloor/, "spend path must apply the floor");
     });
 });
-
-// ---------------------------------------------------------------------------
-// notify / callback independence (wiring pins + helper facts)
-// ---------------------------------------------------------------------------
-describe("human notify vs callback independence", () => {
-    // @covers subagent.health-notify
-    // @level unit
-    it("index health tick notifies on transition without requiring callback:true", () => {
-        const indexSource = readFileSync(join(ROOT, "index.ts"), "utf8");
-        // Transition notify is unconditional on callback flag.
-        assert.match(indexSource, /ui\.notify\(note, "warning"\)/);
-        // callback:false only gates model delivery.
-        assert.match(indexSource, /buildHealthCallbackDelivery/);
-        assert.match(indexSource, /callback:false/);
-        // Marker path for suppressed model still exists.
-        assert.match(indexSource, /orphanedCallbackSentAt/);
-        assert.match(indexSource, /lostCallbackSentAt/);
-    });
-
-    // @covers subagent.health-notify
-    // @level unit
-    it("tools/output path does not gate TUI visibility on callback", () => {
-        const toolsSource = readFileSync(join(ROOT, "tools.ts"), "utf8");
-        // Health observation wiring must not early-return on meta.callback === false.
-        assert.doesNotMatch(
-            toolsSource,
-            /callback\s*===\s*false[\s\S]{0,80}health|health[\s\S]{0,80}callback\s*===\s*false/,
-        );
-    });
-});
-
-// ---------------------------------------------------------------------------
-// result diagnostics remain from #65 + optional health line
-// ---------------------------------------------------------------------------
-describe("subagent_result health/loss/orphan diagnostics", () => {
-    // @covers subagent.output-health
-    // @level unit
-    it("tools path still uses formatOrphanedResult / lost diagnostic wiring", () => {
-        const toolsSource = readFileSync(join(ROOT, "tools.ts"), "utf8");
-        const lifecycleSource = readFileSync(join(ROOT, "lifecycle.ts"), "utf8");
-        assert.match(toolsSource, /formatOrphanedResult/);
-        assert.match(lifecycleSource, /formatLostResult/);
-        // #67 may append health diagnostics but must keep #65 formatters.
-        assert.match(toolsSource, /formatHealthDiagnosticLine|healthSurface|observeRunHealth|appendHealthDiagnostic/);
-    });
-});
-
-// Keep extractChildEventFacts import live for future fixture expansion without lint noise.
-void extractChildEventFacts;

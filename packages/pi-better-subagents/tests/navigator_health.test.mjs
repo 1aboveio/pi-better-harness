@@ -312,18 +312,18 @@ describe("navigator status colorization", () => {
             colorizeStatus: true,
             fg: themeFg,
         });
-        // title + actions + spacer + 6 rows + spacer + bottom rail
-        assert.equal(lines.length, 11);
         const plain = lines.map(strip);
-        assert.ok(plain[3].includes("alpha · m · 1s · running"));
-        assert.ok(plain[4].includes("beta · m · 2s · failed · stale"));
-        // Color markers present on status tokens only.
-        assert.ok(lines[3].includes("<accent>running</>"), lines[3]);
-        assert.ok(lines[4].includes("<error>failed</>"), lines[4]);
-        assert.ok(lines[5].includes("<warning>orphaned</>"), lines[5]);
-        assert.ok(lines[6].includes("<error>lost</>"), lines[6]);
-        assert.ok(lines[7].includes("<success>completed</>"), lines[7]);
-        assert.ok(lines[8].includes("<warning>killed</>"), lines[8]);
+        assert.ok(plain.some((line) => line.includes("alpha · m · 1s · running")));
+        assert.ok(plain.some((line) => line.includes("beta · m · 2s · failed · stale")));
+        for (const [name, color, status] of [
+            ["alpha", "accent", "running"], ["beta", "error", "failed"],
+            ["gamma", "warning", "orphaned"], ["delta", "error", "lost"],
+            ["eps", "success", "completed"], ["zeta", "warning", "killed"],
+        ]) {
+            const line = lines.find((line) => strip(line).includes(`${name} ·`));
+            assert.ok(line, `missing row ${name}`);
+            assert.ok(line.includes(`<${color}>${status}</>`), line);
+        }
 
         for (const w of [20, 37, 80]) {
             const narrow = buildNavigatorLines(state, {
