@@ -35,7 +35,7 @@ import {
 import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.ts";
 import { writeSandboxDefault } from "./preferences.ts";
 import { readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
-import { defaultSandboxPermissions } from "./permissions.ts";
+import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSettings } from "./permissions.ts";
 import { openPermissionsPage } from "./permissions-page.ts";
 
 import { footerTone, formatFooterStatus } from "./status.ts";
@@ -177,6 +177,12 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
                     getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
                     change: (settings) => announce(controller.setPermissionSettings(settings)),
                     save: (settings) => writePermissionSettings(settings),
+                    // Persisting a looser default needs a second, explicit Enter.
+                    loosening: (settings) => {
+                        let previous: SandboxPermissionSettings;
+                        try { previous = readPermissionSettings(); } catch { previous = defaultSandboxPermissions(); }
+                        return describeLoosening(previous, settings);
+                    },
                 });
             },
         }),

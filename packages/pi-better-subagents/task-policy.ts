@@ -19,8 +19,13 @@ export type TaskPolicy = Readonly<{
     tools: readonly string[];
 }>;
 
+/**
+ * The Subagents default: Project files = Write & delete, Outside project = Write
+ * (broad writes across home and temp, removal only where it is disposable, and
+ * the fixed deny list). Matches `pi-better-sandbox`'s default Subagents column.
+ */
 export const DEFAULT_TASK_PERMISSIONS: Readonly<SandboxPermissions> = Object.freeze({
-    projectFiles: "read-write", outsideProject: "read", storedCredentials: "read", commands: true, network: true,
+    projectFiles: "read-write", outsideProject: "write", storedCredentials: "read", commands: true, network: true,
 });
 
 export function parseTaskPolicy(value: unknown): TaskPolicy {
@@ -33,15 +38,19 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {
     };
     if (v.version !== 1 || !v.permissions || typeof v.permissions !== "object") throw new Error("Unsupported task sandbox policy.");
     const p = v.permissions as Record<string, unknown>;
-    for (const key of ["projectFiles", "outsideProject", "storedCredentials"]) {
-        if (!["off", "read", "read-write"].includes(String(p[key]))) throw new Error(`Invalid task sandbox ${key}.`);
+    for (const key of ["projectFiles", "outsideProject"]) {
+        if (!["off", "read", "write", "read-write"].includes(String(p[key]))) throw new Error(`Invalid task sandbox ${key}.`);
     }
+    if (!["off", "read", "read-write"].includes(String(p.storedCredentials))) throw new Error("Invalid task sandbox storedCredentials.");
     if (typeof p.commands !== "boolean" || typeof p.network !== "boolean") throw new Error("Invalid task sandbox capabilities.");
     if (!Array.isArray(v.denyWrite) || !v.denyWrite.every((path) => typeof path === "string" && isAbsolute(path))) throw new Error("Invalid task sandbox protected paths.");
     if (!Array.isArray(v.tools) || !v.tools.every((name) => typeof name === "string" && name.length > 0)) throw new Error("Invalid task sandbox tool selection.");
     return Object.freeze({
         version: 1, root: absolute("root"), home: absolute("home"), agentDir: absolute("agentDir"), profilePath: absolute("profilePath"), scratch: absolute("scratch"),
-        permissions: Object.freeze({ ...p } as SandboxPermissions),
+        permissions: Object.freeze({
+            projectFiles: p.projectFiles, outsideProject: p.outsideProject, storedCredentials: p.storedCredentials,
+            commands: p.commands, network: p.network,
+        } as SandboxPermissions),
         denyWrite: Object.freeze([...v.denyWrite]), tools: Object.freeze([...v.tools]),
     });
 }
@@ -77,7 +86,10 @@ export function prepareTaskRuntime(options: {
         version: 1, root, home, agentDir, profilePath: join(controlDir, "task.sb"), scratch: scratch.path,
         permissions,
         denyWrite: [...new Set([
-            controlDir, scratch.anchor, agentDir, ...runtimeDirectories, ...(options.runtimeRoots ?? []), join(root, ".pi"), join(root, ".git", "hooks"), join(root, ".env"), join(root, ".env.local"),
+            controlDir, scratch.anchor, agentDir, ...runtimeDirectories, ...(options.runtimeRoots ?? []), join(root, ".pi"),
+            // Outside project = Write does not protect git hooks or config anywhere
+            // (ADR 0008): guarding the workspace's hooks would break `git init` there.
+            ...(permissions.outsideProject === "write" ? [] : [join(root, ".git", "hooks")]), join(root, ".env"), join(root, ".env.local"),
             runtimeCodeRoot(sdkEntry), runtimeCodeRoot(ownEntry), ...(options.extensionPaths ?? []).map(runtimeCodeRoot),
         ])],
         tools: options.tools,

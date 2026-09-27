@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
-import { canonicalizePath, compileWritePolicy, maybeBuildSandboxCommand, type SandboxPermissions } from "../sandbox-core/index.ts";
+import { canonicalizePath, compileWritePolicy, isRemovableUnderWrite, maybeBuildSandboxCommand, type SandboxPermissions } from "../sandbox-core/index.ts";
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
 
 export const TASK_BUILTINS = Object.freeze(["read", "write", "edit", "bash"] as const);
@@ -27,10 +27,11 @@ export function runtimeCodeRoot(path: string): string {
 export function writableRuntimeAlias(path: string, root: string, permissions: {
     projectFiles: string; outsideProject: string; storedCredentials: string;
 }, runtimeCompatibility = false): string | undefined {
-    const compatibility = runtimeCompatibility ? compileWritePolicy({ writableRoot: root, home: homedir(),
+    const compiled = compileWritePolicy({ writableRoot: root, home: homedir(),
         permissions: { ...permissions, commands: true, network: true } as SandboxPermissions,
-        runtimeCompatibility: true,
-    }).compatibilityWrite ?? [] : [];
+        runtimeCompatibility,
+    });
+    const compatibility = runtimeCompatibility ? compiled.compatibilityWrite ?? [] : [];
     const absolute = resolve(path);
     let current = parse(absolute).root;
     let pending = absolute.slice(current.length).split(sep);
@@ -55,7 +56,11 @@ export function writableRuntimeAlias(path: string, root: string, permissions: {
         const access = inProject ? permissions.projectFiles
             : compatibility.some((directory) => entry === directory || entry.startsWith(directory + sep)) ? "read-write"
             : permissions.outsideProject;
-        if (replaceable && (access === "read-write" || permissions.storedCredentials === "read-write")) return entry;
+        // Replacing a directory entry needs removal: Write levels only allow that
+        // in their disposable places (temp, hidden home entries, worktree folders).
+        const removable = access === "read-write" || compiled.permissions?.storedCredentials === "read-write" ||
+            (access === "write" && isRemovableUnderWrite(entry, compiled));
+        if (replaceable && removable) return entry;
         // Resolve targets component-by-component: realpath would erase the
         // intermediate links whose directory entries need protection.
         const target = readlinkSync(entry);

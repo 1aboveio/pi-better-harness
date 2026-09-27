@@ -284,6 +284,34 @@ test('default SDK task can retrieve a synthetic macOS Keychain item', { skip: !s
     await assert.rejects(execute(session, 'write', { path: join(f.agent, 'settings.json'), content: 'denied' }), /Task sandbox refused to write .*: write-denied/);
 });
 
+test('default Outside Write: caches work, sibling repos stay, controls and provenance stay unwritable', { skip: !supported || process.platform === 'win32' }, async (t) => {
+    // A home outside every temp root: temp is always removable, so a fixture
+    // home there would prove nothing about the home rules.
+    const f = fixture(t, { outsideProject: 'write' }, fileURLToPath(new URL('.', import.meta.url)));
+    const home = f.policy.home;
+    const sibling = join(home, 'projects', 'other-repo');
+    mkdirSync(join(home, '.cache'), { recursive: true });
+    mkdirSync(sibling, { recursive: true });
+    writeFileSync(join(sibling, 'README.md'), 'keep me');
+    const provenance = join(f.control, 'task-runtime');
+    mkdirSync(provenance);
+    writeFileSync(join(provenance, 'sa_1.json'), '{}');
+    const session = await sessionFixture(t, f);
+    const run = async (command) => JSON.stringify(await execute(session, 'bash', { command }).catch((error) => ({ error: String(error) })));
+    const cache = join(home, '.cache', 'tool');
+    assert.match(await run(`mkdir -p '${cache}' && printf x > '${cache}/entry' && rm -rf '${cache}' && echo cache-ok`), /cache-ok/);
+    assert.match(await run(`if rm -rf '${sibling}' 2>/dev/null; then echo removed; else echo refused; fi`), /refused/);
+    assert.match(await run(`if mv '${sibling}' '${join(home, '.cache', 'moved')}' 2>/dev/null; then echo moved; else echo refused; fi`), /refused/);
+    assert.equal(readFileSync(join(sibling, 'README.md'), 'utf8'), 'keep me');
+    assert.match(await run(`if printf '{}' > '${join(provenance, 'sa_2.json')}' 2>/dev/null; then echo forged; else echo refused; fi`), /refused/);
+    assert.match(await run(`if rm -f '${join(provenance, 'sa_1.json')}' 2>/dev/null; then echo deleted; else echo refused; fi`), /refused/);
+    assert.equal(existsSync(join(provenance, 'sa_2.json')), false);
+    assert.equal(existsSync(join(provenance, 'sa_1.json')), true);
+    await execute(session, 'write', { path: join(home, '.cache', 'from-tool.txt'), content: 'ok' });
+    assert.equal(readFileSync(join(home, '.cache', 'from-tool.txt'), 'utf8'), 'ok');
+    await assert.rejects(execute(session, 'write', { path: join(f.control, 'task-policy.json'), content: '{}' }), /Task sandbox refused to write .*: write-denied/);
+});
+
 test('policy snapshots validate and detach their mutable input', (t) => {
     const f = fixture(t);
     const frozen = parseTaskPolicy(f.policy);

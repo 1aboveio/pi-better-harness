@@ -23,6 +23,7 @@ import { join, resolve } from "node:path";
 import test, { after, before } from "node:test";
 
 import { describeSandboxSupport } from "../packages/sandbox-core/index.ts";
+process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const support = describeSandboxSupport();

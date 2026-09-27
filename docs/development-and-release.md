@@ -111,9 +111,11 @@ for this terminal journey.
 
 ### Sandbox compatibility golden paths
 
-`docs/tests/sandbox-compatibility.smoke.manifest.json` curates five release-blocking
+`docs/tests/sandbox-compatibility.smoke.manifest.json` curates six release-blocking
 journeys: workspace/temp operations, protected paths, runtime identity,
-Outside Off isolation, and synthetic credential-service retrieval. Run:
+Outside Off isolation, synthetic credential-service retrieval, and the Subagents
+default Outside project = Write (user cache written, sibling repository kept).
+Run:
 
 ```sh
 npm run test:golden:sandbox
@@ -175,6 +177,11 @@ npm run test:linux-sandbox -w packages/pi-better-subagents
 
 CI runs both lanes: `ci.yml`'s `macos-sandbox` and `linux-sandbox` jobs install
 and probe the backend, then run the confinement suites with that variable set.
+`npm test -w packages/sandbox-core` includes `broad-write.test.ts`, the
+real-kernel proof of the Write levels ([ADR 0008](adr/0008-write-without-delete.md)).
+Its fixture home is created inside the checkout, not temp, because temp is
+always removable under Write. On a Linux runner, sibling folders under that
+fixture home are expected to be read-only.
 `pi-better-subagents` keeps its Linux bubblewrap file outside its `tests/*.test.mjs`
 glob, so it is invoked by name through `test:linux-sandbox` rather than by
 `npm test`.

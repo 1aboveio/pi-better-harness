@@ -190,6 +190,19 @@ describe("foreground sandbox policy contract", () => {
     expect(() => resolveForegroundSandboxPlan(pi)).toThrow(/Main profile disables commands/);
   });
 
+  it("accepts the Write levels for file rows but not for stored credentials", () => {
+    const { pi, events } = createPi();
+    const publisher = createSandboxPublisher(events);
+    const permissions = { enabled: true, projectFiles: "write", outsideProject: "write",
+      storedCredentials: "read", commands: true, network: true };
+    publisher.announce({ ...enabledPolicy(varTmp), permissions });
+    expect(resolveForegroundSandboxPlan(pi)).toMatchObject({
+      confined: true, permissions: { projectFiles: "write", outsideProject: "write" },
+    });
+    publisher.announce({ ...enabledPolicy(varTmp), permissions: { ...permissions, storedCredentials: "write" } });
+    expect(() => resolveForegroundSandboxPlan(pi)).toThrow(/Invalid Main sandbox permission profile/);
+  });
+
   it("checks SSH launch permissions before allowing remote setup", () => {
     const { pi, events } = createPi();
     const publisher = createSandboxPublisher(events);

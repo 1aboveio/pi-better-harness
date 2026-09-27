@@ -18,9 +18,9 @@ Sandbox permissions               Main             Subagents
 
 Sandbox                           Off              On
 
-Project files                     -                Read / write
-Outside project                   -                Read
-Stored credentials                -                Read
+Project files                     -                Write & delete
+Outside project                   -                Write
+Stored credentials                -                Off (fixed)
 Run commands & applications       -                On
 Network access                    -                On
 
@@ -28,18 +28,108 @@ Network access                    -                On
 Save as defaults
 ```
 
-File permissions cycle through Off, Read, and Read / write. Other rows toggle
-Off/On. Detail cells under an Off sandbox display a dimmed `-` and cannot be
-changed; their values return when the sandbox is enabled again. Outside project
-covers paths outside the assigned root without custom folder lists. Protected
-paths remain write-denied regardless of the broad file settings.
+Project files and Outside project cycle through four levels:
+
+| Level | Meaning |
+| ----- | ------- |
+| Off | No access. |
+| Read | Read only. |
+| Write | Read, create, and overwrite in place. Nothing can be removed or renamed away. |
+| Write & delete | Full access, including removal. This was called "Read / write"; saved settings keep it. |
+
+Whatever these rows say, removal is always allowed in **temp**, **hidden
+directories and files directly under your home** (`~/.cache`, `~/.gradle`,
+`~/.npm`, …), and **git worktree folders** (`.worktrees/`, `*-worktrees/`). The
+deny list below still wins there.
+
+**Write blocks rename-based saves.** The kernel treats "rename a temp file over
+an existing file" as removing that file. Under Write, git commits and editors or
+package managers that save atomically fail outside those disposable places. Pi's
+own `write` and `edit` tools write in place and keep working. Choose Write &
+delete for a place where that matters. The table shows this hint when you
+select the row.
+
+**Outside project = Write** (the Subagents default) lets tasks write across your
+home directory and temp, so tool caches just work with no per-tool setup. It
+keeps one fixed deny list that is not configurable per tool:
+
+- **Credentials** are neither readable nor writable, whatever the Stored
+  credentials row says: the files listed below plus `~/Library/Keychains`,
+  `~/.claude/.credentials.json`, `~/.claude.json`, `~/.gnupg`,
+  `~/.codex/auth.json`, `~/.cargo/credentials(.toml)`, `~/.pgpass`, and
+  `~/.config/rclone`. The table shows
+  "Off (fixed)". Tasks that need git over SSH, `gh`, or cloud CLIs need Outside
+  project = Read or Write & delete.
+- **Code that runs later** cannot be written, removed, or renamed: shell startup
+  files (`.bashrc`, `.zshrc`, `.profile`, and the rest), `~/.config/fish`,
+  `~/.gitconfig`, `~/.config/git`, `~/.config/systemd/user`,
+  `~/.config/autostart`, `~/.pi` (or `$PI_CODING_AGENT_DIR`), `~/.claude`,
+  `~/.agents`, `~/Library/LaunchAgents`, `~/.local/bin`, `~/bin`,
+  `~/.git-templates`, `~/.oh-my-zsh/custom`, `~/.gradle/init.d`,
+  and `~/.cargo/config(.toml)`. These stay readable, because subagents read skills from them.
+  Their parent folders can't be removed or renamed either, so you can clean
+  inside `~/.gradle` but not delete `~/.gradle` itself.
+- **Harness state** (the subagent and background-task registries, run and
+  control directories, and task-runtime provenance) cannot be written, removed,
+  or renamed.
+
+Every entry is protected under the literal path under home, every symlink hop
+on the way to its target, and the target itself. So a dotfiles manager's links
+(stow, chezmoi), including chains of links, can't be swapped or retargeted.
+
+**Git config and hooks under home are not protected**, so git keeps working:
+`git init`, `git clone` and `git worktree add` copy hook samples into `.git/hooks`.
+A task can therefore plant code that a later git command runs, through any
+repository's `.git/hooks` or `.git/config` (`core.hooksPath`, `core.fsmonitor`,
+`diff.external`, filters, aliases), submodule hooks in `.git/modules/*/hooks`,
+`gitdir:` redirects, or files that `~/.gitconfig` pulls in with `[include]`.
+`~/.gitconfig`, `~/.config/git`, and `~/.git-templates` themselves stay protected. Add your own paths to the deny list with `/sandbox deny add <path>`. Under
+Write, those paths are also protected from removal and renaming.
+
+A looser value (a higher level, a capability switched on, or a sandbox switched
+off) takes effect only on a second Space, and saving looser defaults needs a
+second Enter. Each prompt lists what would loosen. No model
+tool can change these settings. Other rows toggle Off/On. Detail cells under an
+Off sandbox display a dimmed `-` and cannot be changed; their values return when
+the sandbox is enabled again.
+
+### Platforms
+
+| | macOS (Seatbelt) | Linux (Bubblewrap) | Windows |
+| - | - | - | - |
+| Outside project = Write | Writes across home and temp. Removal and renaming refused outside the disposable places. | Fallback: ordinary top-level home folders (`~/projects`, `~/Documents`, …) and home itself are **read-only**. Dot entries, temp, worktree folders (found within three levels of home), and the workspace are writable, removal included. | No backend: confined launches fail closed. |
+| Project files = Write | Enforced. | **Refused at launch** (bind mounts cannot separate removal from writing). Use Write & delete or Read. | No backend. |
+| Deny list | Path rules. | Credentials masked by empty mode-000 mounts. Code that runs later is bound read-only. | No backend. |
+
+Linux could separate removal from writing with Landlock (5.19+), but nothing
+here can apply it: Node has no binding and `bwrap` does not expose it. Windows
+could use NTFS `DELETE` rights with a restricted token or AppContainer, which
+would need a native launcher. Both are tracked as follow-ups; see
+[ADR 0008](../../docs/adr/0008-write-without-delete.md).
+
+### Recovery snapshot (macOS)
+
+When a confined subagent or background task starts with Outside project =
+Write or Write & delete, the harness starts `tmutil localsnapshot` in the
+background. That is an APFS local snapshot and needs no administrator rights.
+Write can still empty or re-permission files in place, and Write & delete can
+remove them. It takes at most one per 15 minutes per Pi process. The run never
+waits for it. A failure shows as a warning (subagents) or a task-log line
+(background tasks). Set `PI_SANDBOX_RECOVERY_SNAPSHOT=off` to turn it off.
+
+Local snapshots are purgeable, so treat them as a recovery aid, not a backup.
+The Seatbelt profile leaves Mach IPC to system daemons open, which is why
+`security` and `tmutil` work inside the sandbox. It also means a hostile task
+could likely delete these snapshots. Restore from one with Time Machine or
+`tmutil restore`.
 
 **Stored credentials currently means known credential files.** It covers SSH,
 AWS, GitHub CLI, Google Cloud CLI, Azure, Kubernetes, Docker, npm, netrc, Git
 credentials, and Pi's file-based auth. These rules override ordinary file access.
 OS vault services such as Keychain and Secret Service, and tokens inherited in
 environment variables, are excluded. Read / write may be needed by a CLI that
-refreshes a token or updates its credential database.
+refreshes a token or updates its credential database. Under Outside project =
+Write, credentials are always Off (see above).
 
 File and shell operations use the kernel: macOS uses Seatbelt (`sandbox-exec`)
 and Linux uses Bubblewrap (`bwrap`). `read`, `write`, and `edit` keep Pi's normal
@@ -185,6 +275,18 @@ a typo is never quietly turned into a lost rule set.
 A global rule that turns out to contain the root of a *different* project stays
 in your rule set but is held out in that project, with a message saying so.
 
+### Upgrading
+
+Nothing is migrated on disk. A saved `pi-better-sandbox-permissions.json` keeps
+its values: a saved `read-write` is now shown as Write & delete, and a saved
+Subagents Outside project = Read stays Read. Only a fresh configuration, or
+**Save as defaults** after you choose Write, uses the new Subagents default. To
+adopt it, open `/sandbox`, set Subagents → Outside project to Write, and save.
+
+`~/.pi/agent/sandbox.json` (`filesystem.allowWrite`, `allowRead`,
+`network.allowedDomains`) is the format of Pi's example sandbox extension. This
+package never reads it, and it has no effect on the harness.
+
 ## Lifecycle
 
 The foreground sandbox is inactive by default. Session overrides do not survive
@@ -233,8 +335,8 @@ the allowance excludes the broad `/System/Volumes` tree.
 
 Linux currently refuses combinations it cannot safely mount: hiding the
 project or credential files inside a visible whole-filesystem bind, writing
-credential stores under a read-only outside root, and a writable outside root
-with protected paths. These launch errors preserve the selected restrictions.
+credential stores under a read-only outside root, a writable outside root
+(Write & delete) with protected paths, and Project files = Write. These launch errors preserve the selected restrictions.
 The macOS permission combinations are covered by real-kernel tests; Linux
 mount behavior requires a Linux runner with Bubblewrap and user namespaces.
 

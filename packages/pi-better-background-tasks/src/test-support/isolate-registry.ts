@@ -9,6 +9,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "vitest";
+process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
 
 const isolated = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "pi-bg-tasks-test-")));
 process.env.TMPDIR = isolated;

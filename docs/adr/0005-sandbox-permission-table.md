@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Extends ADR 0003's shared enforcement mechanism and ADR 0004's opt-in Main/default-on Subagents policy.
+Accepted. Extends ADR 0003's shared enforcement mechanism and ADR 0004's opt-in Main/default-on Subagents policy. Amended by [ADR 0008](0008-write-without-delete.md): the file rows gain Write (no removal) and Write & delete (formerly Read / write), and the Subagents default becomes Outside project = Write.
 
 ## Decision
 

@@ -190,9 +190,19 @@ it does not depend on any other extension being installed.
 ### Write sandbox
 
 The shared `sandbox-core` and `task-sandbox` modules enforce task operations in
-both Main and Subagents. The defaults are Main Off and Subagents On, with project
-Read / write, outside Read, stored credential files Read, commands On, and network
-On. A subagent's project root is its selected workspace (`cwd` / `sandbox_dir`),
+both Main and Subagents. The defaults are Main Off and Subagents On. Subagents
+use Project files = Write & delete and Outside project = **Write**: tasks write
+across home and temp (tool caches such as `~/.gradle` and `~/.npm` just work), but
+outside the workspace they can only remove or rename files in temp, hidden home
+entries, and worktree folders (`.worktrees/`, `*-worktrees/`). Credential files
+are neither readable nor writable, and shell startup files, `~/.pi`, `~/.claude`,
+`~/.agents`, and harness state cannot be written, removed, or renamed. Rename-based
+saves and git commits in a sibling repository fail under Write; set Outside
+project to Write & delete when a task needs that. Linux uses a stricter fallback
+where ordinary home folders are read-only. See
+[pi-better-sandbox](../../pi-better-sandbox/README.md) and
+[ADR 0008](../../../docs/adr/0008-write-without-delete.md). Commands and network
+default On. A subagent's project root is its selected workspace (`cwd` / `sandbox_dir`),
 or its disposable clone. `/sandbox off` changes Main, not Subagents.
 
 Pi runs as the trusted runtime so it can take settings/authentication locks,

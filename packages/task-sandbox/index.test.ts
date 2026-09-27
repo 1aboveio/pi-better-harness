@@ -42,3 +42,23 @@ test('runtime aliases inside a writable project are unsafe even when outside wri
     assert.equal(writableRuntimeAlias(alias, project, { projectFiles: 'read', outsideProject: 'read-write', storedCredentials: 'read' }), undefined);
     assert.equal(writableRuntimeAlias(runtime, project, { projectFiles: 'read-write', outsideProject: 'read', storedCredentials: 'read' }), undefined);
 });
+
+test('Write levels treat a runtime alias as replaceable only where they allow removal', { skip: process.platform === 'win32' }, (t) => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'task-runtime-alias-write-')));
+    t.after(() => rmSync(base, { recursive: true, force: true }));
+    const project = join(base, 'project'), runtime = join(base, 'runtime');
+    mkdirSync(project); mkdirSync(runtime);
+    const alias = join(project, 'agent');
+    symlinkSync(runtime, alias);
+    // Project files = Write cannot unlink or rename over the link, so it stays put.
+    const outsideTemp = join(base, 'outside-agent');
+    symlinkSync(runtime, outsideTemp);
+    const legacyWrite = { projectFiles: 'write', outsideProject: 'read', storedCredentials: 'read' };
+    if (!project.startsWith('/tmp/') && !project.startsWith('/private/tmp/')) {
+        assert.equal(writableRuntimeAlias(alias, project, legacyWrite), undefined);
+    }
+    // Outside project = Write: temp is always disposable, so a link there is replaceable.
+    const broad = { projectFiles: 'read-write', outsideProject: 'write', storedCredentials: 'read' };
+    assert.equal(writableRuntimeAlias(outsideTemp, project, broad), outsideTemp);
+    assert.equal(writableRuntimeAlias(alias, project, broad), alias);
+});

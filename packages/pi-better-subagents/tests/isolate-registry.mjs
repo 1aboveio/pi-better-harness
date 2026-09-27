@@ -17,6 +17,7 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
 
 const machineTmp = realpathSync(tmpdir());
 const isolated = realpathSync(mkdtempSync(join(machineTmp, "pi-subagents-test-")));

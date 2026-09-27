@@ -8,6 +8,7 @@ import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
 import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
+import { takeRecoverySnapshot } from "./shared-sandbox-core.js";
 import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
@@ -156,11 +157,21 @@ export function spawnTask(
     ? commandSpec
     : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id));
   const tmuxBacked = remoteTask?.metadata.remote.session === "tmux";
+  // Outside project = Write or Write & delete can change files outside the
+  // project: start an APFS local snapshot (macOS, background, never blocks).
+  const snapshot = !remoteTask && sandboxPlan.confined ? takeRecoverySnapshot(sandboxPlan.permissions) : undefined;
   const spawned = tmuxBacked
     ? undefined
     : remoteTask
       ? remoteTask.spawn(logPath, true)
       : spawnCommand(launchSpec, logPath, true);
+  if (snapshot?.started) {
+    void snapshot.done.then((outcome) => {
+      if (!outcome.ok) {
+        try { appendLine(logPath, `--- recovery snapshot failed (task continues): ${outcome.detail} ---`); } catch { /* log gone */ }
+      }
+    });
+  }
   const now = Date.now();
   const meta: BackgroundTaskMeta = {
     id,

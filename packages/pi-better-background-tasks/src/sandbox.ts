@@ -32,8 +32,9 @@ import { baseDir } from "./registry.js";
 import { compileWritePolicy, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
 
 type SandboxPermissions = {
-  projectFiles: "off" | "read" | "read-write";
-  outsideProject: "off" | "read" | "read-write";
+  /** `write` = read, create and overwrite in place; `read-write` = Write & delete. */
+  projectFiles: "off" | "read" | "write" | "read-write";
+  outsideProject: "off" | "read" | "write" | "read-write";
   storedCredentials: "off" | "read" | "read-write";
   commands: boolean;
   network: boolean;
@@ -160,10 +161,11 @@ function readPolicy(data: unknown): ForegroundSandboxPolicy | undefined {
 function readPermissions(value: unknown): ForegroundSandboxPolicy["permissions"] | undefined {
   if (!value || typeof value !== "object") return undefined;
   const p = value as Record<string, unknown>;
-  const access = (v: unknown) => v === "off" || v === "read" || v === "read-write";
+  const credential = (v: unknown) => v === "off" || v === "read" || v === "read-write";
+  const access = (v: unknown) => credential(v) || v === "write";
   if (typeof p.enabled !== "boolean" || typeof p.commands !== "boolean" ||
       typeof p.network !== "boolean" || !access(p.projectFiles) ||
-      !access(p.outsideProject) || !access(p.storedCredentials)) return undefined;
+      !access(p.outsideProject) || !credential(p.storedCredentials)) return undefined;
   return Object.freeze({
     enabled: p.enabled, commands: p.commands, network: p.network,
     projectFiles: p.projectFiles as SandboxPermissions["projectFiles"],

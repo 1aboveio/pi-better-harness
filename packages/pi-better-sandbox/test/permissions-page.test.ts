@@ -61,9 +61,10 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.equal(lines.length, 8);
     assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents/);
     assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
-    assert.match(lines[2]!, /Project files\s+-\s+Read \/ write/);
-    assert.match(lines[3]!, /Outside project\s+-\s+Read/);
-    assert.match(lines[4]!, /Stored credentials\s+-\s+Read/);
+    assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
+    assert.match(lines[3]!, /Outside project\s+-\s+Write\s*$/);
+    // Outside project = Write always hides credential files.
+    assert.match(lines[4]!, /Stored credentials\s+-\s+Off \(fixed\)/);
     assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
     assert.match(lines[6]!, /Network access\s+-\s+On/);
     assert.match(lines[7]!, /Save as defaults/);
@@ -78,18 +79,18 @@ test("disabled details are dimmed and inactive but survive off/on toggles", asyn
     h.press(Key.up, Key.space);
     await settle();
     assert.equal(h.current.main.enabled, true);
-    assert.match(plain(table(h.page)[2]!), /Project files\s+Read \/ write\s+Read \/ write/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+Write & delete\s+Write & delete/);
     h.press(Key.down, Key.space);
     await settle();
     assert.equal(h.current.main.projectFiles, "off");
-    h.press(Key.up, Key.space);
+    h.press(Key.up, Key.space, Key.space);
     await settle();
     assert.equal(h.current.main.enabled, false);
     assert.equal(h.current.main.projectFiles, "off");
-    assert.match(plain(table(h.page)[2]!), /Project files\s+-\s+Read \/ write/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+-\s+Write & delete/);
     h.press(Key.space);
     await settle();
-    assert.match(plain(table(h.page)[2]!), /Project files\s+Off\s+Read \/ write/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+Off\s+Write & delete/);
 });
 
 test("arrows select rows and columns, Space cycles, Enter saves only on action, Escape closes", async () => {
@@ -97,10 +98,13 @@ test("arrows select rows and columns, Space cycles, Enter saves only on action, 
     h.press(Key.right, Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "off");
-    h.press(Key.space);
+    h.press(Key.space, Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "read");
-    h.press(Key.space);
+    h.press(Key.space, Key.space);
+    await settle();
+    assert.equal(h.current.subagents.projectFiles, "write");
+    h.press(Key.space, Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "read-write");
     h.press(Key.down, Key.down, Key.down, Key.down, Key.space);
@@ -118,6 +122,65 @@ test("arrows select rows and columns, Space cycles, Enter saves only on action, 
     assert.ok(h.renders > 0);
 });
 
+test("file rows cycle four levels and explain Write; credentials are fixed under Outside Write", async () => {
+    const h = harness();
+    const hint = () => h.page.render(120).map(plain).find((line) => /deletable|rename-based|always hides/.test(line));
+    h.press(Key.right, Key.down, Key.down);
+    assert.match(hint()!, /Write: git and rename-based saves fail outside the project except in worktree folders/);
+    h.press(Key.space, Key.space);
+    await settle();
+    assert.equal(h.current.subagents.outsideProject, "read-write");
+    assert.match(plain(table(h.page, 100)[3]!), /Outside project\s+-\s+Write & delete/);
+    assert.match(hint()!, /Always deletable: temp, hidden ~\/\.directories and worktree folders/);
+    h.press(Key.down);
+    assert.equal(hint(), undefined, "credentials are editable again");
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s*$/);
+    h.press(Key.up);
+    h.press(Key.space); await settle(); h.press(Key.space, Key.space); await settle(); h.press(Key.space, Key.space); await settle();
+    assert.equal(h.current.subagents.outsideProject, "write");
+    const before = h.changes.length;
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.changes.length, before, "Space does not change a fixed credential row");
+    assert.match(plain(h.page.render(120).at(-1)!), /always hides credential files/);
+});
+
+test("a looser value applies only on a second Space; a tighter one applies at once", async () => {
+    const h = harness();
+    h.press(Key.right, Key.down, Key.down, Key.space);
+    await settle();
+    assert.equal(h.changes.length, 0, "Write → Write & delete waits for confirmation");
+    assert.equal(h.current.subagents.outsideProject, "write");
+    assert.match(plain(h.page.render(140).at(-1)!), /Looser \(Subagents: outsideProject write → read-write\)\. Press Space again to apply/);
+    h.press(Key.up, Key.down, Key.space);
+    await settle();
+    assert.equal(h.changes.length, 0, "moving away cancels the pending change");
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.subagents.outsideProject, "read-write");
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.subagents.outsideProject, "off", "tightening applies immediately");
+});
+
+test("saving looser defaults needs a second Enter; any other key cancels it", async () => {
+    const h = harness({ loosening: (next) => next.subagents.network ? [] : ["Subagents: network on"] });
+    h.press(Key.right, ...Array(5).fill(Key.down), Key.space);
+    await settle();
+    assert.equal(h.current.subagents.network, false);
+    h.press(Key.down, Key.enter);
+    await settle();
+    assert.equal(h.saved.length, 0);
+    assert.match(plain(h.page.render(120).at(-1)!), /Looser defaults \(Subagents: network on\)\. Press Enter again to save/);
+    h.press(Key.up, Key.down, Key.enter);
+    await settle();
+    assert.equal(h.saved.length, 0, "moving away cancels the pending confirmation");
+    h.press(Key.enter);
+    await settle();
+    assert.equal(h.saved.length, 1);
+    assert.match(plain(h.page.render(120).at(-1)!), /Defaults saved/);
+});
+
 test("change and save failures stay inline without optimistic state or closing", async () => {
     let failChange = true;
     let failSave = true;
@@ -125,12 +188,12 @@ test("change and save failures stay inline without optimistic state or closing",
         change: () => { if (failChange) throw new Error("change failed"); },
         save: () => { if (failSave) throw new Error("save failed"); },
     });
-    h.press(Key.right, Key.space);
+    h.press(Key.right, Key.space, Key.space);
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /change failed/);
     assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/);
     failChange = false;
-    h.press(Key.space);
+    h.press(Key.space, Key.space);
     await settle();
     assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
     h.press(...Array(6).fill(Key.down));

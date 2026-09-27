@@ -45,6 +45,16 @@ describe("subagent permission policy", () => {
         assert.equal(resolveSubagentPermissions(pi, true).enforced, true);
     });
 
+    it("passes the Write levels through and rejects Write for stored credentials", () => {
+        const { pi, publish } = fixture();
+        publish({ state: "disabled", permissions: main, subagentPermissions: { ...child, outsideProject: "write", projectFiles: "write" } });
+        assert.deepEqual(resolveSubagentPermissions(pi, undefined).permissions, {
+            projectFiles: "write", outsideProject: "write", storedCredentials: "read", commands: true, network: true,
+        });
+        publish({ state: "disabled", permissions: main, subagentPermissions: { ...child, storedCredentials: "write" } });
+        assert.throws(() => currentSandboxPermissions(pi), /Invalid sandbox permission profile/);
+    });
+
     it("does not allow a tool opt-out to bypass the human-enabled profile", () => {
         const { pi } = fixture();
         assert.throws(() => resolveSubagentPermissions(pi, false), /sandbox:false cannot bypass/);

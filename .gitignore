@@ -14,3 +14,8 @@ coverage/
 # acceptance scratch (real Pi sessions, temp agent dir, logs)
 .acceptance-sandbox/
 .rush-results/
+
+# Real-kernel fixtures created outside temp (see ADR 0008); removed by the tests.
+.broad-fixture-*
+pi-task-runtime-*
+pi-compat-golden-*
