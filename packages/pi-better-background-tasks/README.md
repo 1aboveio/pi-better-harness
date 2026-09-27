@@ -43,9 +43,9 @@ A task follows Main's permission profile. With Main's Outside project = Write, t
 task writes across home and temp but can remove files outside the project only in
 temp, hidden home directories, and worktree folders (see
 [pi-better-sandbox](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme)).
-On macOS, a task launched with Outside project = Write & delete first takes an APFS
-local snapshot (`tmutil localsnapshot`) as a recovery aid. A failed snapshot is
-noted in the task log and never blocks the task.
+On macOS, a task launched with Outside project = Write or Write & delete starts an
+APFS local snapshot (`tmutil localsnapshot`) in the background as a recovery aid.
+A failed snapshot is noted in the task log and never blocks the task.
 
 Structured remote SSH tasks are unaffected: the foreground sandbox describes this
 machine, and remote work keeps its existing remote semantics. Without

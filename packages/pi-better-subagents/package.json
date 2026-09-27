@@ -36,7 +36,7 @@
     "test": "node --import tsx --import ./tests/isolate-registry.mjs --test tests/*.test.mjs",
     "test:cross-session": "node --import tsx --import ./tests/isolate-registry.mjs --test --test-name-pattern \"callback session isolation\" tests/extension_health_lifecycle.test.mjs",
     "pretest:macos-sandbox": "node ../../scripts/sync-shared-sandbox-core.mjs",
-    "test:macos-sandbox": "bash tests/test_sandbox_applied.sh && bash tests/test_sandbox_deny_outside.sh && bash tests/test_sandbox_wrapper_argv.sh && node --import tsx --test tests/sandbox_profile.test.mjs tests/child_incidents.test.mjs",
+    "test:macos-sandbox": "bash tests/test_sandbox_applied.sh && bash tests/test_sandbox_deny_outside.sh && bash tests/test_sandbox_wrapper_argv.sh && PI_SANDBOX_RECOVERY_SNAPSHOT=off node --import tsx --test tests/sandbox_profile.test.mjs tests/child_incidents.test.mjs",
     "pretest:linux-sandbox": "node ../../scripts/sync-shared-sandbox-core.mjs",
     "test:linux-sandbox": "node --import tsx --test tests/linux_bubblewrap.integration.mjs tests/child_incidents.test.mjs",
     "verify": "npm run typecheck && npm test"

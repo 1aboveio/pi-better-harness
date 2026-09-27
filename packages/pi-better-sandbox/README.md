@@ -55,24 +55,33 @@ keeps one fixed deny list that is not configurable per tool:
 
 - **Credentials** are neither readable nor writable, whatever the Stored
   credentials row says: the files listed below plus `~/Library/Keychains`,
-  `~/.claude/.credentials.json`, and `~/.claude.json`. The table shows
+  `~/.claude/.credentials.json`, `~/.claude.json`, `~/.gnupg`,
+  `~/.codex/auth.json`, `~/.cargo/credentials(.toml)`, `~/.pgpass`, and
+  `~/.config/rclone`. The table shows
   "Off (fixed)". Tasks that need git over SSH, `gh`, or cloud CLIs need Outside
   project = Read or Write & delete.
 - **Code that runs later** cannot be written, removed, or renamed: shell startup
   files (`.bashrc`, `.zshrc`, `.profile`, and the rest), `~/.config/fish`,
   `~/.gitconfig`, `~/.config/git`, `~/.config/systemd/user`,
   `~/.config/autostart`, `~/.pi` (or `$PI_CODING_AGENT_DIR`), `~/.claude`,
-  `~/.agents`, and `~/Library/LaunchAgents`. These stay readable, because
-  subagents read skills from them.
+  `~/.agents`, `~/Library/LaunchAgents`, `~/.local/bin`, `~/bin`,
+  `~/.git-templates`, `~/.oh-my-zsh/custom`, `~/.gradle/init.d`,
+  `~/.cargo/config(.toml)`, and, on macOS, the `.git/hooks` of every repository
+  under home. These stay readable, because subagents read skills from them.
+  Their parent folders can't be removed or renamed either, so you can clean
+  inside `~/.gradle` but not delete `~/.gradle` itself.
 - **Harness state** (the subagent and background-task registries, run and
   control directories, and task-runtime provenance) cannot be written, removed,
   or renamed.
 
-Add your own paths to the deny list with `/sandbox deny add <path>`. Under
+Every entry is protected both as the literal path under home and as the path
+it resolves to, so a dotfiles manager's symlinks (stow, chezmoi) can't be swapped
+for real files. Add your own paths to the deny list with `/sandbox deny add <path>`. Under
 Write, those paths are also protected from removal and renaming.
 
-Saving a looser default (a higher level, a capability switched on, or a sandbox
-switched off) asks for a second Enter that lists what would loosen. No model
+A looser value (a higher level, a capability switched on, or a sandbox switched
+off) takes effect only on a second Space, and saving looser defaults needs a
+second Enter. Each prompt lists what would loosen. No model
 tool can change these settings. Other rows toggle Off/On. Detail cells under an
 Off sandbox display a dimmed `-` and cannot be changed; their values return when
 the sandbox is enabled again.
@@ -94,11 +103,17 @@ would need a native launcher. Both are tracked as follow-ups; see
 ### Recovery snapshot (macOS)
 
 When a confined subagent or background task starts with Outside project =
-Write & delete, the harness first runs `tmutil localsnapshot`, an APFS local
-snapshot that needs no administrator rights. It takes at most one per 15 minutes
-per Pi process. A failure is logged in the subagent's launch output or the task
-log and never blocks the run. Local snapshots are purgeable, so treat them as a
-recovery aid, not a backup. Restore from one with Time Machine or
+Write or Write & delete, the harness starts `tmutil localsnapshot` in the
+background. That is an APFS local snapshot and needs no administrator rights.
+Write can still empty or re-permission files in place, and Write & delete can
+remove them. It takes at most one per 15 minutes per Pi process. The run never
+waits for it. A failure shows as a warning (subagents) or a task-log line
+(background tasks). Set `PI_SANDBOX_RECOVERY_SNAPSHOT=off` to turn it off.
+
+Local snapshots are purgeable, so treat them as a recovery aid, not a backup.
+The Seatbelt profile leaves Mach IPC to system daemons open, which is why
+`security` and `tmutil` work inside the sandbox. It also means a hostile task
+could likely delete these snapshots. Restore from one with Time Machine or
 `tmutil restore`.
 
 **Stored credentials currently means known credential files.** It covers SSH,

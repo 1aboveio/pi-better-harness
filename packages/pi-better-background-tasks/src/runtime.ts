@@ -157,16 +157,20 @@ export function spawnTask(
     ? commandSpec
     : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id));
   const tmuxBacked = remoteTask?.metadata.remote.session === "tmux";
-  // Outside project = Write & delete can remove files outside the project:
-  // take an APFS local snapshot first (macOS, best effort, never blocks).
+  // Outside project = Write or Write & delete can change files outside the
+  // project: start an APFS local snapshot (macOS, background, never blocks).
   const snapshot = !remoteTask && sandboxPlan.confined ? takeRecoverySnapshot(sandboxPlan.permissions) : undefined;
   const spawned = tmuxBacked
     ? undefined
     : remoteTask
       ? remoteTask.spawn(logPath, true)
       : spawnCommand(launchSpec, logPath, true);
-  if (snapshot?.taken === false && snapshot.reason === "failed") {
-    appendLine(logPath, `--- recovery snapshot failed (task continues): ${snapshot.detail ?? "unknown error"} ---`);
+  if (snapshot?.started) {
+    void snapshot.done.then((outcome) => {
+      if (!outcome.ok) {
+        try { appendLine(logPath, `--- recovery snapshot failed (task continues): ${outcome.detail} ---`); } catch { /* log gone */ }
+      }
+    });
   }
   const now = Date.now();
   const meta: BackgroundTaskMeta = {

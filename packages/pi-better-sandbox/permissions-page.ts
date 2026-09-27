@@ -1,7 +1,7 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import { defaultSandboxPermissions, type CredentialAccess, type FileAccess, type SandboxPermissionProfile as PermissionProfile, type SandboxPermissionSettings as PermissionSettings } from "./permissions.ts";
+import { defaultSandboxPermissions, describeLoosening, type CredentialAccess, type FileAccess, type SandboxPermissionProfile as PermissionProfile, type SandboxPermissionSettings as PermissionSettings } from "./permissions.ts";
 export type { PermissionProfile, PermissionSettings };
 
 export interface PermissionPageHandlers {
@@ -76,6 +76,7 @@ export function createPermissionsPage(
     let column = 0;
     let busy = false;
     let pendingConfirmation: string | undefined;
+    let pendingChange: string | undefined;
 
     function report(error: unknown): void {
         message = errorText(error);
@@ -104,6 +105,17 @@ export function createPermissionsPage(
             const current = next[profile][key];
             next[profile][key] = fileValues[(fileValues.indexOf(current) + 1) % fileValues.length]!;
         }
+        // A looser value is applied only on a second Space, like a looser Save.
+        const loosened = describeLoosening(settings, next);
+        const nextKey = JSON.stringify(next);
+        if (loosened.length && pendingChange !== nextKey) {
+            pendingChange = nextKey;
+            message = `Looser (${loosened.join("; ")}). Press Space again to apply.`;
+            isError = false;
+            requestRender();
+            return;
+        }
+        pendingChange = undefined;
         busy = true;
         try {
             await handlers.change(snapshot(next));
@@ -153,6 +165,7 @@ export function createPermissionsPage(
         invalidate() {},
         handleInput(data: string) {
             if (!matchesKey(data, Key.enter)) pendingConfirmation = undefined;
+            if (!matchesKey(data, Key.space)) pendingChange = undefined;
             if (matchesKey(data, Key.escape)) {
                 close();
             } else if (matchesKey(data, Key.up)) {

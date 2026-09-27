@@ -18,7 +18,7 @@
  * `SandboxSeams` argument so callers can plan deterministically in tests.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { platform as osPlatform } from "node:os";
 import {
     accessSync,
@@ -223,7 +223,10 @@ const CREDENTIAL_LOCATIONS = [
  * Credential stores added by the broad-write profile. They are never readable
  * or writable there, whatever the Stored credentials row says.
  */
-const BROAD_CREDENTIAL_LOCATIONS = ["Library/Keychains", ".claude/.credentials.json", ".claude.json"] as const;
+const BROAD_CREDENTIAL_LOCATIONS = [
+    "Library/Keychains", ".claude/.credentials.json", ".claude.json", ".gnupg",
+    ".codex/auth.json", ".cargo/credentials.toml", ".cargo/credentials", ".pgpass", ".config/rclone",
+] as const;
 
 /**
  * Code that runs later: shell startup files, agent/harness configuration and
@@ -236,13 +239,16 @@ const CODE_LATER_LOCATIONS = [
     ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout",
     ".config/fish", ".config/git", ".gitconfig", ".config/systemd/user", ".config/autostart",
     ".pi", ".claude", ".agents", "Library/LaunchAgents",
+    ".local/bin", "bin", ".git-templates", ".oh-my-zsh/custom", ".gradle/init.d",
+    ".cargo/config.toml", ".cargo/config",
 ] as const;
 
 /** Deny-list entries that are directories when they exist (Linux materializes them as such). */
 const DIRECTORY_LOCATIONS = new Set([
     ".ssh", ".aws", ".config/gh", ".config/gcloud", ".azure", ".kube", "Library/Keychains",
     ".config/fish", ".config/git", ".config/systemd/user", ".config/autostart",
-    ".pi", ".claude", ".agents", "Library/LaunchAgents",
+    ".pi", ".claude", ".agents", "Library/LaunchAgents", ".gnupg", ".config/rclone",
+    ".local/bin", "bin", ".git-templates", ".oh-my-zsh/custom", ".gradle/init.d",
 ]);
 
 const BROAD_TEMP_ROOTS: Record<string, readonly string[]> = {
@@ -354,8 +360,12 @@ function compile(
         ? (seams.canonicalize ?? realpathSync)(policy.writableRoot)
         : canonicalizePath(policy.writableRoot, seams);
 
+    // The broad profile also keeps each literal entry: its removal grants would
+    // otherwise let a task replace a symlinked control path.
+    const lexicalDeny = isBroadWritePermissions(policy.permissions);
     const denyWrite = [
-        ...new Set((policy.denyWrite ?? []).map((entry) => canonicalizePath(entry, seams))),
+        ...new Set((policy.denyWrite ?? []).flatMap((entry) => lexicalDeny
+            ? [resolve(entry), canonicalizePath(entry, seams)] : [canonicalizePath(entry, seams)])),
     ].sort();
 
     const broadMode = isBroadWritePermissions(policy.permissions);
@@ -390,10 +400,23 @@ function expandHome(path: string, home: string): string {
     return path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path;
 }
 
+/**
+ * A fixed-list location both as the literal entry under the canonical home and
+ * as the path it resolves to. A dotfiles manager (stow, chezmoi) makes
+ * `~/.zshrc` a symlink into an ordinary folder: guarding only the target would
+ * let a task remove the link and put a real file in its place.
+ */
+function lexicalAndCanonical(home: string, name: string, seams: SandboxSeams): string[] {
+    const lexical = join(canonicalizePath(home, seams), name);
+    return [lexical, canonicalizePath(lexical, seams)];
+}
+
 function broadCredentialPaths(home: string, seams: SandboxSeams): string[] {
+    const configuredAgentDir = process.env.PI_CODING_AGENT_DIR;
     return [...new Set([
         ...credentialFilePaths(home, seams),
-        ...BROAD_CREDENTIAL_LOCATIONS.map((name) => canonicalizePath(join(home, name), seams)),
+        ...[...CREDENTIAL_LOCATIONS, ...BROAD_CREDENTIAL_LOCATIONS].flatMap((name) => lexicalAndCanonical(home, name, seams)),
+        ...(configuredAgentDir ? [resolve(expandHome(configuredAgentDir, home), "auth.json")] : []),
     ])].sort();
 }
 
@@ -415,8 +438,9 @@ function compileBroadWrite(
         .map((path) => canonicalizePath(path, seams)))];
     const configuredAgentDir = process.env.PI_CODING_AGENT_DIR;
     const codePaths = [...new Set([
-        ...CODE_LATER_LOCATIONS.map((name) => canonicalizePath(join(home, name), seams)),
-        ...(configuredAgentDir ? [canonicalizePath(expandHome(configuredAgentDir, home), seams)] : []),
+        ...CODE_LATER_LOCATIONS.flatMap((name) => lexicalAndCanonical(home, name, seams)),
+        ...(configuredAgentDir ? [resolve(expandHome(configuredAgentDir, home)),
+            canonicalizePath(expandHome(configuredAgentDir, home), seams)] : []),
     ])].sort();
     return {
         home,
@@ -530,6 +554,9 @@ function evaluateBroadWrite(
     for (const denied of [...policy.denyWrite, ...broad.codePaths]) {
         if (contains(denied, path)) return { allowed: false, path, reason: "write-denied", deniedBy: denied };
     }
+    if (contains(broad.home, path) && /\/\.git\/hooks(\/|$)/.test(path.slice(broad.home.length))) {
+        return { allowed: false, path, reason: "write-denied" };
+    }
     if (isCredential(path, policy)) return { allowed: false, path, reason: "permission-denied" };
     if (policy.runtimeWrite?.some((root) => contains(root, path))) return { allowed: true, path };
     if (contains(policy.writableRoot, path)) {
@@ -602,52 +629,82 @@ export function isRemovableUnderWrite(path: string, policy: CompiledSandboxWrite
     return policy.permissions?.projectFiles === "write" && insideWorktreeFolder(path, policy.writableRoot);
 }
 
+/** Outcome of a finished snapshot attempt. */
+export type RecoverySnapshotOutcome = { ok: boolean; detail: string };
+
 /** Result of a best-effort recovery snapshot request. */
 export type RecoverySnapshotResult =
-    | { taken: true; detail: string }
-    | { taken: false; reason: "not-needed" | "unsupported" | "rate-limited" | "failed"; detail?: string };
+    | { started: true; done: Promise<RecoverySnapshotOutcome> }
+    | { started: false; reason: "not-needed" | "unsupported" | "rate-limited" };
 
 export type RecoverySnapshotSeams = {
     platform?: () => string;
     now?: () => number;
-    /** Defaults to `/usr/bin/tmutil localsnapshot` with a bounded timeout. */
-    run?: () => { status: number | null; output: string };
+    /** Defaults to an unref'd `/usr/bin/tmutil localsnapshot` child with a 30 s limit. */
+    run?: () => Promise<RecoverySnapshotOutcome>;
 };
 
 let lastRecoverySnapshot = 0;
 const RECOVERY_SNAPSHOT_INTERVAL_MS = 15 * 60 * 1000;
 
+function runLocalSnapshot(): Promise<RecoverySnapshotOutcome> {
+    return new Promise((resolveOutcome) => {
+        let output = "";
+        let settled = false;
+        const finish = (outcome: RecoverySnapshotOutcome) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolveOutcome(outcome);
+        };
+        const child = spawn("/usr/bin/tmutil", ["localsnapshot"], {
+            env: { PATH: "/usr/bin:/bin", LANG: "C" }, stdio: ["ignore", "pipe", "pipe"],
+        });
+        const timer = setTimeout(() => { child.kill("SIGKILL"); finish({ ok: false, detail: "tmutil timed out after 30 s" }); }, 30_000);
+        timer.unref();
+        child.unref();
+        for (const stream of [child.stdout, child.stderr]) {
+            stream?.on("data", (chunk: Buffer) => { output = (output + chunk.toString()).slice(-2048); });
+            (stream as { unref?: () => void } | null)?.unref?.();
+        }
+        child.on("error", (error) => finish({ ok: false, detail: error.message }));
+        child.on("close", (code) => finish(code === 0
+            ? { ok: true, detail: output.trim() }
+            : { ok: false, detail: output.trim() || `tmutil exited ${code}` }));
+    });
+}
+
 /**
- * Take an APFS local snapshot (`tmutil localsnapshot`) before a confined run
- * whose Outside project level is Write & delete, so files it removes outside
- * the project can be recovered. macOS only; it needs no elevated privileges.
- * Snapshots are volume-wide and purgeable, so one per 15 minutes per process
- * is enough. Never throws: a failure is reported for the caller to log, and
- * must never block the run.
+ * Start an APFS local snapshot (`tmutil localsnapshot`) before a confined run
+ * whose Outside project level lets it change files outside the project: Write
+ * & delete can remove them, and Write can still truncate, chmod or chflags
+ * them in place. macOS only; it needs no elevated privileges. The snapshot
+ * runs in the background and never blocks or fails the run; callers log a
+ * failed outcome. Snapshots are volume-wide and purgeable, so one per 15
+ * minutes per process is enough. `PI_SANDBOX_RECOVERY_SNAPSHOT=off` disables it
+ * (test suites set it so they do not create real snapshots).
  */
 export function takeRecoverySnapshot(
     permissions: SandboxPermissions | undefined,
     seams: RecoverySnapshotSeams = {},
 ): RecoverySnapshotResult {
-    if (permissions?.outsideProject !== "read-write") return { taken: false, reason: "not-needed" };
-    if ((seams.platform ?? osPlatform)() !== "darwin") return { taken: false, reason: "unsupported" };
+    if (!canWrite(permissions?.outsideProject) || process.env.PI_SANDBOX_RECOVERY_SNAPSHOT === "off") {
+        return { started: false, reason: "not-needed" };
+    }
+    if ((seams.platform ?? osPlatform)() !== "darwin") return { started: false, reason: "unsupported" };
     const now = (seams.now ?? Date.now)();
     if (lastRecoverySnapshot && now - lastRecoverySnapshot < RECOVERY_SNAPSHOT_INTERVAL_MS) {
-        return { taken: false, reason: "rate-limited" };
+        return { started: false, reason: "rate-limited" };
     }
+    lastRecoverySnapshot = now;
+    let done: Promise<RecoverySnapshotOutcome>;
     try {
-        const result = (seams.run ?? (() => {
-            const child = spawnSync("/usr/bin/tmutil", ["localsnapshot"], {
-                encoding: "utf8", timeout: 10_000, env: { PATH: "/usr/bin:/bin", LANG: "C" },
-            });
-            return { status: child.status, output: `${child.stdout ?? ""}${child.stderr ?? ""}`.trim() };
-        }))();
-        if (result.status !== 0) return { taken: false, reason: "failed", detail: result.output || `exit ${result.status}` };
-        lastRecoverySnapshot = now;
-        return { taken: true, detail: result.output };
+        done = (seams.run ?? runLocalSnapshot)().catch((error: unknown) =>
+            ({ ok: false, detail: error instanceof Error ? error.message : String(error) }));
     } catch (error) {
-        return { taken: false, reason: "failed", detail: error instanceof Error ? error.message : String(error) };
+        done = Promise.resolve({ ok: false, detail: error instanceof Error ? error.message : String(error) });
     }
+    return { started: true, done };
 }
 
 /** Test hook: forget the last snapshot time. */
@@ -788,6 +845,9 @@ function buildBroadProfile(policy: CompiledSandboxWritePolicy, seams: SandboxSea
         denyWrite(path);
     }
     for (const path of policy.denyWrite) denyWrite(path);
+    // Git hooks of any repository under home run on its next git command.
+    const hooks = `#"^${home}/(.+/)?[.]git/hooks(/|$)"`;
+    rules.push(`(deny file-write* (regex ${hooks}))`, `(deny file-write-unlink (regex ${hooks}))`);
     // Renaming an ancestor would move a protected subtree to an unprotected path,
     // and renaming the workspace's ancestors could redirect the next launch.
     const anchors = [...broadProtectedPaths(policy, broad), project];
@@ -1253,6 +1313,15 @@ function buildLinuxBroadCommand(
         .some((name) => canonicalizePath(join(broad.home, name), seams) === path);
     const guard = (path: string, hide: boolean) => {
         let directory: boolean | undefined;
+        if (canonicalizePath(path, seams) !== path) {
+            // A literal twin of a canonical deny entry: its target is guarded on
+            // its own. A symlink leaf inside a writable root could be replaced,
+            // so its directory becomes read-only; home itself already is.
+            let link = false;
+            try { link = lstatSync(path).isSymbolicLink(); } catch { /* absent or intermediate link */ }
+            if (link && dirname(path) !== broad.home && writableAt(dirname(path))) readOnly.add(dirname(path));
+            return;
+        }
         if (!exists(path)) {
             if (!writableAt(path)) return; // Nothing inside the sandbox can create it.
             let ancestor = dirname(path);

@@ -38,14 +38,16 @@ test("sandbox permission table edits both profiles and saves inactive values in 
         assert.match(text, /Project files\s+-\s+Write & delete/);
         key("Space"); wait(/Sandbox\s+On\s+On/);
         key("Down"); key("Space"); wait(/Project files\s+Off\s+Write & delete/);
-        key("Up"); key("Space"); wait(/Project files\s+-\s+Write & delete/);
+        // Switching a sandbox off is looser: the first Space asks, the second applies.
+        key("Up"); key("Space"); wait(/Press Space again to apply/); key("Space"); wait(/Project files\s+-\s+Write & delete/);
         key("Down"); key("Space"); // Inactive cell must not change the retained Off.
         key("Up"); key("Space"); wait(/Project files\s+Off\s+Write & delete/);
-        key("Space"); wait(/Sandbox\s+Off\s+On/);
+        key("Space"); key("Space"); wait(/Sandbox\s+Off\s+On/);
         key("Right"); key("Down"); key("Down");
         // Subagents default to Outside project = Write; its hint names the trade-off.
         wait(/Outside project\s+-\s+Write\s/);
         wait(/rename-based saves fail outside the project/);
+        key("Space"); wait(/Looser \(Subagents: outsideProject write → read-write\)/);
         key("Space");
         wait(/Outside project\s+-\s+Write & delete/);
         for (let i = 0; i < 4; i++) key("Down");
