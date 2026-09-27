@@ -15,9 +15,9 @@ not special cases in the runtime.
 | ---- | ------- |
 | `bg_task_spawn` | Start a long-running process and return immediately. |
 | `bg_task_watch` | Poll a command until success/failure/timeout. |
-| `bg_task_list` | List known tasks. |
-| `bg_task_status` | Inspect one task. Compact by default; pass `verbose:true` for full metadata JSON. |
-| `bg_task_log` | Read a bounded, terminal-aware task log tail. |
+| `bg_task_list` | List tasks, newest first (1 KiB / 10 rows by default). Params: `status`, `limit` (max 100), `cursor` (a returned `nextCursor` pages on; a `statusCursor` asks for changes only), `max_bytes` (max 4 KiB), `all` (every session). |
+| `bg_task_status` | Inspect one task (1 KiB compact summary). Params: `id`, `cursor` (a `statusCursor`, or an `incidentCursor` to page incidents), `max_bytes` (max 2 KiB; verbose up to 64 KiB), `verbose` (metadata JSON, environment omitted, paged when large), `all` (foreign session). |
+| `bg_task_log` | Read a bounded, terminal-aware tail (10 rows / 1 KiB). Params: `id`, `tail_lines` (`0` = raw pages), `raw`, `cursor` (a raw `nextCursor`), `max_bytes` (log max 4 KiB; raw 16 KiB default, 64 KiB max), `all`. |
 | `bg_task_stop` | Cancel a watcher or terminate a process task. |
 | `bg_task` | Action-based wrapper for `spawn`, `watch`, `list`, `status`, `log`, `stop`, `clear`. |
 | `bg_status` | Small action wrapper for `list`, `status`, `log`, `stop`, `clear`. |
@@ -165,10 +165,19 @@ bounded window expires. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 
 Callbacks point to `bg_task_status` first. The aggregate never contains result
-objects or raw logs. The default status response is a compact model-facing
-summary that omits large command bodies; use `verbose:true` only when full
-metadata is required. `bg_task_log` defaults to a 5-line terminal-aware tail.
-`tail_lines: 0` returns the retained raw log, up to a 512 KiB safe-read cap.
+objects or raw logs and is bounded to 2 KiB UTF-8 (urgent callbacks included).
+Omitted completion rows stay queued and unreceipted. Omitted incidents are
+counted; pass the returned `incidentCursor` value as the `cursor` parameter of
+`bg_task_status` to page them. The default
+status response is a compact 1 KiB model-facing summary; use `verbose:true` only
+when full metadata is required (environment values stay omitted). `bg_task_log`
+defaults to a 10-line terminal-aware tail under 1 KiB. `tail_lines: 0` pages
+retained raw bytes (16 KiB default, 64 KiB hard cap) from the oldest retained
+offset. Capture and retention loss are disclosed; this is not a full-history
+archive. `bg_task_list` pages every task newest first with a `nextCursor`;
+status and list responses also carry a `statusCursor` that returns a small
+no-change response until lifecycle, log, or failure facts change. See
+`docs/issue-312-output.md`.
 
 Pi's optional `followUpMode: all` still helps when a later completion arrives
 after an earlier 100 ms aggregate has already flushed: Pi can consume queued

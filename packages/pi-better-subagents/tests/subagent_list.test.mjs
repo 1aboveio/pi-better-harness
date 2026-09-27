@@ -49,7 +49,7 @@ function rowIds(output) {
 }
 
 describe("subagent_list helper", () => {
-    it("defaults to current-parent runs, newest first, capped at 20 rows", () => {
+    it("defaults to current-parent runs, newest first, capped at the default row limit", () => {
         const metas = [];
         for (let i = 0; i < 25; i++) {
             metas.push(meta(`sa_owned_${String(i).padStart(2, "0")}`, { startedAt: BASE + i }));
@@ -61,8 +61,8 @@ describe("subagent_list helper", () => {
 
         assert.equal(rowLines(output).length, SUBAGENT_LIST_DEFAULT_LIMIT);
         assert.equal(ids[0], "sa_owned_24");
-        assert.equal(ids.at(-1), "sa_owned_05");
-        assert.ok(!ids.includes("sa_owned_04"));
+        assert.equal(ids.at(-1), "sa_owned_15");
+        assert.ok(!ids.includes("sa_owned_14"));
         assert.ok(!ids.includes("sa_foreign_newest"));
     });
 
@@ -158,8 +158,9 @@ describe("subagent_list helper", () => {
 
         assert.equal(
             output,
-            "• reviewer sa_format  [completed]  xai/grok-4.5  45s · 1.2k tok (↑400 ↓800) · $0.0034\n    hello world from prompt",
+            "• reviewer sa_format  [completed]  xai/grok-4.5  45s\n    hello world from prompt",
         );
+        assert.doesNotMatch(output, /tok|\$/);
     });
 
     it("includes batch name and id for batch-launched runs only", () => {

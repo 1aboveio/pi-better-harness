@@ -62,4 +62,35 @@ describe("process shell execution", () => {
     expect(result.stdout).toBe("ok\n");
     expect(result.stderr).not.toContain("unexpected login shell");
   });
+
+  it("counts capture overflow above 1 MiB instead of silently dropping the tail", async () => {
+    const result = await runCommandOnce({
+      argv: [process.execPath, "-e", "process.stdout.write('x'.repeat(1_200_012) + 'END_MARKER')"],
+      shell: false,
+    });
+    expect(result.captureTruncated).toBe(true);
+    expect(result.stdoutDiscardedBytes).toBeGreaterThan(1_200_012 - 1024 * 1024);
+    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(1024 * 1024);
+    expect(result.stdout).not.toContain("END_MARKER");
+    expect(result.stdout.startsWith("x")).toBe(true);
+  });
+
+  it("discards a code point split across chunks at the cap instead of decoding U+FFFD", async () => {
+    const script = [
+      "process.stdout.write(Buffer.from([0x61, 0xf0, 0x9f]));",
+      "setTimeout(() => process.stdout.write(Buffer.from([0x98, 0x80, 0x62])), 60);",
+    ].join("");
+    const result = await runCommandOnce({ argv: [process.execPath, "-e", script], shell: false }, 4);
+    expect(result.stdout).toBe("a");
+    expect(result.stdout).not.toContain("\uFFFD");
+    expect(result.stdoutDiscardedBytes).toBe(5);
+    expect(result.captureTruncated).toBe(true);
+  });
+
+  it("does not split a multibyte UTF-8 character at the capture cap", async () => {
+    const { utf8PrefixLength } = await import("./process.js");
+    const buffer = Buffer.from("é");
+    expect(utf8PrefixLength(buffer, 1)).toBe(0);
+    expect(utf8PrefixLength(buffer, 2)).toBe(2);
+  });
 });

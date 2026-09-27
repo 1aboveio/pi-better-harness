@@ -1,16 +1,23 @@
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { failurePath, failureSummary } from "./failures.js";
-import { readFailureState } from "./shared-failure-observations.js";
-import { readLog } from "./logs.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
+import {
+  formatLaunch,
+  formatList,
+  formatLog,
+  formatStatus,
+  formatStopResult,
+  type OutputOptions,
+} from "./output.js";
 import { cancelCallbackBatch } from "./shared-callback-batcher.js";
-import { listMetas, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
+import { inspectMeta, listMetasForOrigin, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
 import { ForegroundSandboxBlockedError } from "./sandbox.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
+
+export { formatLaunch } from "./output.js";
 
 const JsonPathSchema = Type.String({
   pattern: "^\\$",
@@ -67,17 +74,27 @@ const WatchParams = Type.Object({
   failure_when: Type.Optional(ConditionSchema),
 });
 
+const CursorFields = {
+  cursor: Type.Optional(Type.String({ description: "Caller-owned continuation cursor from a previous page. Replay returns the same page or a no-change/failure-only notice; nextCursor continues. Independent callers do not consume each other. Cursors are bound to the selected session scope." })),
+  max_bytes: Type.Optional(Type.Number({ description: "Optional UTF-8 byte budget. Defaults: status/log/list 1 KiB, raw evidence 16 KiB. Larger explicit pages are allowed up to the shared hard cap (status 2 KiB, log/list 4 KiB, raw 64 KiB) Hard caps are OUTPUT_BUDGET_MAX_BYTES." })),
+  all: Type.Optional(Type.Boolean({ description: "Inspect or list tasks across every session. Default false is current-session only. Unknown ownership is reported as a gap, never as missing or healthy." })),
+};
+
 const IdParams = Type.Object({
   id: Type.String({ description: "Background task id." }),
-  verbose: Type.Optional(Type.Boolean({ description: "Return full raw metadata JSON. Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
+  verbose: Type.Optional(Type.Boolean({ description: "Return raw metadata JSON with environment values omitted, bounded like raw evidence (16 KiB default, max_bytes up to 64 KiB, paged with cursor when larger). Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
+  ...CursorFields,
 });
 const ListParams = Type.Object({
   status: Type.Optional(Type.Array(Type.String({ description: "Statuses to include." }))),
-  limit: Type.Optional(Type.Number({ description: "Maximum tasks to show. Default 20." })),
+  limit: Type.Optional(Type.Number({ description: "Maximum tasks to show. Default 10, max 100." })),
+  ...CursorFields,
 });
 const LogParams = Type.Object({
   id: Type.String({ description: "Background task id." }),
-  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing lines. Default 5 for compact model ingestion. Set <=0 only when the full log is explicitly required." })),
+  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing display rows. Default 10 for compact model ingestion. Set 0 to page retained raw bytes from the oldest retained offset." })),
+  raw: Type.Optional(Type.Boolean({ description: "Page retained raw log bytes (16 KiB default, 64 KiB hard cap) instead of the compact excerpt. Capture and retention loss are disclosed; this is not a full-history archive." })),
+  ...CursorFields,
 });
 
 const ActionParams = Type.Object({
@@ -99,6 +116,8 @@ const ActionParams = Type.Object({
   interval_seconds: Type.Optional(Type.Number()),
   success_when: Type.Optional(ConditionSchema),
   failure_when: Type.Optional(ConditionSchema),
+  raw: Type.Optional(Type.Boolean()),
+  ...CursorFields,
 });
 
 const StatusActionParams = Type.Object({
@@ -108,6 +127,8 @@ const StatusActionParams = Type.Object({
   limit: Type.Optional(Type.Number()),
   tail_lines: Type.Optional(Type.Number()),
   verbose: Type.Optional(Type.Boolean()),
+  raw: Type.Optional(Type.Boolean()),
+  ...CursorFields,
 });
 
 const BACKGROUND_ORCHESTRATION_GUIDELINES = [
@@ -169,34 +190,36 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_list",
     label: "BG List",
-    description: "List durable background tasks. Nonblocking.",
+    description: "List durable background tasks as compact rows under a 1 KiB UTF-8 budget (10 entries default), newest first. Current-session only unless all:true. Nonblocking. Pass the returned nextCursor as cursor to page further (every task is reachable), or statusCursor to get a small no-change response or failure-only updates; a higher limit/max_bytes gives a larger explicit page.",
     parameters: ListParams,
-    async execute(_toolCallId, params) {
-      return text(formatList(resolveList(params.status, params.limit)));
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      activeSession = getCallbackOrigin(ctx);
+      return text(formatList(listOptions(params, activeSession)));
     },
   });
 
   pi.registerTool({
     name: "bg_task_status",
     label: "BG Status",
-    description: "Inspect one background task. Default output is a compact model-facing summary; pass verbose:true only when full raw metadata is explicitly needed. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
+    description: "Inspect one background task. Default output is a compact model-facing summary (1 KiB UTF-8) with matched condition, exit/signal, stop error, and failure counts before progress. Current-session only unless all:true; unknown ownership is a gap, not missing or healthy. Pass verbose:true only when full raw metadata is explicitly needed. Environment values are omitted. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
     parameters: IdParams,
-    async execute(_toolCallId, params) {
-      const meta = readMeta(params.id);
-      return text(formatStatus(meta, params.id, { verbose: params.verbose === true }));
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      activeSession = getCallbackOrigin(ctx);
+      return text(formatStatus(inspectMeta(params.id), statusOptions(params, activeSession)));
     },
   });
 
   pi.registerTool({
     name: "bg_task_log",
     label: "BG Log",
-    description: "Read a background task log. Default output is a compact 5-line terminal-aware tail for model ingestion. Pass tail_lines for a bounded tail; tail_lines:0 returns the retained raw log, capped at 512 KiB for safe recovery. Nonblocking.",
+    description: "Read a background task log. Default output is a compact 10-line terminal-aware tail for model ingestion (1 KiB UTF-8). Current-session only unless all:true. Pass tail_lines for a bounded tail; tail_lines:0 pages the retained raw log from the oldest retained offset (16 KiB pages, 64 KiB hard cap) with a caller-owned cursor. Capture and retention loss are disclosed; this is not a full-history archive. Nonblocking.",
     parameters: LogParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
     },
-    async execute(_toolCallId, params) {
-      return logText(params.id, params.tail_lines);
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      activeSession = ctx ? getCallbackOrigin(ctx) : activeSession;
+      return logText(params.id, logOptions(params, activeSession));
     },
   });
 
@@ -207,7 +230,7 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const result = await formatStop(pi, params.id, ctx, getActiveSession);
+      const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, activeSession));
       refreshBackgroundTasksNavigator(ctx);
       return text(result);
     },
@@ -216,7 +239,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 only for explicit full logs.",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override.",
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
@@ -231,7 +254,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_status",
     label: "BG Status",
-    description: "Action wrapper for inspecting background tasks: list, status, log, stop, or clear. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or tail_lines:0 only for explicit full-data recovery.",
+    description: "Action wrapper for inspecting background tasks: list, status, log, stop, or clear. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or tail_lines:0 only for explicit full-data recovery. Shares the same output assembler as the standalone tools. Current-session default; pass all:true to override.",
     parameters: StatusActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -247,6 +270,38 @@ export function text(textValue: string, details?: unknown) {
   return { content: [{ type: "text" as const, text: textValue }], details };
 }
 
+function statusOptions(params: Record<string, unknown>, origin?: BackgroundTaskCallbackOrigin): OutputOptions {
+  return {
+    verbose: params.verbose === true,
+    cursor: typeof params.cursor === "string" ? params.cursor : undefined,
+    maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
+    all: params.all === true,
+    ...scopeOptions(origin),
+  };
+}
+
+function logOptions(params: Record<string, unknown>, origin?: BackgroundTaskCallbackOrigin): OutputOptions {
+  return {
+    tailLines: typeof params.tail_lines === "number" ? params.tail_lines : undefined,
+    raw: params.raw === true,
+    cursor: typeof params.cursor === "string" ? params.cursor : undefined,
+    maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
+    all: params.all === true,
+    ...scopeOptions(origin),
+  };
+}
+
+function listOptions(params: Record<string, unknown>, origin?: BackgroundTaskCallbackOrigin): OutputOptions {
+  return {
+    statuses: params.status as string[] | undefined,
+    limit: typeof params.limit === "number" ? params.limit : undefined,
+    cursor: typeof params.cursor === "string" ? params.cursor : undefined,
+    maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
+    all: params.all === true,
+    ...scopeOptions(origin),
+  };
+}
+
 async function actionText(
   pi: ExtensionAPI,
   params: Record<string, unknown>,
@@ -255,7 +310,7 @@ async function actionText(
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
 ) {
   if (params.action === "log" && params.id) {
-    return logText(String(params.id), params.tail_lines as number | undefined);
+    return logText(String(params.id), logOptions(params, callbackOrigin));
   }
   return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession));
 }
@@ -274,16 +329,16 @@ async function runAction(
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
       return withNavigatorRefresh(ctx, reportLaunch(() => startWatchTask(pi, params as never, ctx.cwd, callbackOrigin, getActiveSession)));
     case "list":
-      return formatList(resolveList(params.status as string[] | undefined, params.limit as number | undefined));
+      return formatList(listOptions(params, callbackOrigin));
     case "status":
       if (!params.id) return "Invalid parameters: status requires id.";
-      return formatStatus(readMeta(String(params.id)) ?? undefined, String(params.id), { verbose: params.verbose === true });
+      return formatStatus(inspectMeta(String(params.id)), statusOptions(params, callbackOrigin));
     case "log":
       if (!params.id) return "Invalid parameters: log requires id.";
-      return formatLog(String(params.id), params.tail_lines as number | undefined);
+      return formatLog(String(params.id), logOptions(params, callbackOrigin));
     case "stop":
       if (!params.id) return "Invalid parameters: stop requires id.";
-      return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession));
+      return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession, statusOptions(params, callbackOrigin)));
     case "clear":
       return withNavigatorRefresh(ctx, formatClear(params.status as string[] | undefined, callbackOrigin));
     default:
@@ -311,111 +366,33 @@ function withNavigatorRefresh(ctx: ExtensionContext, result: string): string {
   return result;
 }
 
-function getCallbackOrigin(ctx: ExtensionContext): BackgroundTaskCallbackOrigin {
+/** Origins whose session identity could not be read (the host threw). */
+const unavailableSessionOrigins = new WeakSet<BackgroundTaskCallbackOrigin>();
+
+function getCallbackOrigin(ctx: ExtensionContext | undefined): BackgroundTaskCallbackOrigin {
   let sessionId: string | undefined;
+  let unavailable = false;
   try {
-    sessionId = ctx.sessionManager?.getSessionId();
+    sessionId = ctx?.sessionManager?.getSessionId();
   } catch {
     sessionId = undefined;
+    unavailable = true;
   }
-  return { cwd: ctx.cwd, sessionId };
+  const origin = { cwd: ctx?.cwd ?? "", sessionId };
+  if (unavailable) unavailableSessionOrigins.add(origin);
+  return origin;
 }
 
-function resolveList(statuses?: string[], limit?: number): BackgroundTaskMeta[] {
-  let metas = listMetas();
-  if (statuses && statuses.length > 0) {
-    const wanted = new Set(statuses);
-    metas = metas.filter((meta) => wanted.has(meta.status));
-  }
-  return metas.slice(0, Math.max(1, Math.min(limit ?? 20, 100)));
+function scopeOptions(origin?: BackgroundTaskCallbackOrigin): Pick<OutputOptions, "origin" | "sessionUnavailable"> {
+  return {
+    origin,
+    ...(origin && unavailableSessionOrigins.has(origin) ? { sessionUnavailable: true } : {}),
+  };
 }
 
-export function formatLaunch(meta: BackgroundTaskMeta): string {
-  const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
-  const remote = meta.ssh
-    ? ` Remote: ${meta.ssh.target}${meta.remote?.session ? ` mode=${meta.remote.session}` : ""}${meta.remote?.sessionName ? ` session=${meta.remote.sessionName}` : ""}.`
-    : "";
-  const setup = meta.remote?.bootstrapMessage ? ` Remote setup: ${meta.remote.bootstrapMessage}` : "";
-  const warning = meta.remote?.warning ? ` Warning: ${meta.remote.warning}` : "";
-  const failure = failureSummary(meta.id);
-  return `${failure ? `${failure}\n` : ""}Started background ${meta.kind} ${label}. Status: ${meta.status}.${remote}${setup}${warning} Log: ${meta.logPath}`;
-}
-
-function formatList(metas: BackgroundTaskMeta[]): string {
-  if (metas.length === 0) return "No background tasks found.";
-  return metas.map((meta) => {
-    const failure = failureSummary(meta.id);
-    const age = formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt);
-    const label = meta.name ? `${meta.name} ` : "";
-    const remote = meta.ssh ? ` ${meta.ssh.target}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : "";
-    return `${failure ? `${failure}\n` : ""}${meta.id} ${label}${meta.kind} ${meta.status} ${age}${remote}`;
-  }).join("\n");
-}
-
-function formatStatus(meta: BackgroundTaskMeta | undefined, id?: string, options: { verbose?: boolean } = {}): string {
-  if (!meta) return `No background task found${id ? ` for id ${id}` : ""}.`;
-  const failure = failureSummary(meta.id);
-  if (!options.verbose) return [failure, formatCompactStatus(meta)].filter(Boolean).join("\n");
-  const state = readFailureState(failurePath(meta.id));
-  const observations = Object.values(state.observations);
-  return JSON.stringify(observations.length ? {
-    failureSummary: failure, failureJournal: failurePath(meta.id),
-    failureObservations: observations.map((observation) => ({ ...observation, attentionDeliveredAt: state.delivered[observation.id] })),
-    ...meta,
-  } : meta, null, 2);
-}
-
-function formatCompactStatus(meta: BackgroundTaskMeta): string {
-  const lines = [
-    `Background task ${meta.id}${meta.name ? ` (${meta.name})` : ""} is ${meta.status}.`,
-    `kind: ${meta.kind}`,
-    `elapsed: ${formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt)}`,
-  ];
-  if (meta.ssh) lines.push(`remote: ${meta.ssh.target}`);
-  if (meta.remote?.session) lines.push(`remote mode: ${meta.remote.session}`);
-  if (meta.remote?.sessionName) lines.push(`remote session: ${meta.remote.sessionName}`);
-  if (meta.remote?.bootstrapMessage) lines.push(`remote setup: ${oneLine(meta.remote.bootstrapMessage, 500)}`);
-  if (meta.remote?.warning) lines.push(`warning: ${oneLine(meta.remote.warning, 500)}`);
-  if (meta.remote?.stopMessage) lines.push(`remote stop: ${oneLine(meta.remote.stopMessage, 500)}`);
-  if (meta.deadlineAt && meta.status === "running") lines.push(`deadline: ${formatDuration(meta.deadlineAt - Date.now())} left`);
-  if (meta.lastExitCode !== undefined || meta.lastSignal !== undefined) lines.push(`last exit: ${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}`);
-  const reason = resultReason(meta.result);
-  if (reason) lines.push(`result: ${reason}`);
-  if (meta.error) lines.push(`error: ${oneLine(meta.error, 500)}`);
-  if (meta.lastState !== undefined) lines.push(`last state: ${oneLine(meta.lastState, 800)}`);
-  if (meta.logDiscardedBytes) lines.push(`log retention: ${meta.logDiscardedBytes} bytes discarded in ${meta.logRetentionEvents ?? 1} compaction(s).`);
-  lines.push(`log: ${meta.logPath}`);
-  lines.push(`For full metadata use bg_task_status id=${meta.id} verbose=true. For logs use bg_task_log id=${meta.id} tail_lines=5, or tail_lines=0 for the retained raw log.`);
-  return lines.join("\n");
-}
-
-function resultReason(result: unknown): string | undefined {
-  if (!result) return undefined;
-  if (typeof result === "object" && result !== null && "reason" in result) {
-    const reason = (result as { reason?: unknown }).reason;
-    return reason === undefined ? undefined : oneLine(reason, 500);
-  }
-  return oneLine(result, 500);
-}
-
-function oneLine(value: unknown, maxLength: number): string {
-  const raw = typeof value === "string" ? value : JSON.stringify(value);
-  const single = String(raw ?? "").replace(/\s+/g, " ").trim();
-  return single.length <= maxLength ? single : `${single.slice(0, Math.max(0, maxLength - 1))}…`;
-}
-
-function formatLog(id: string, tailLines?: number): string {
-  const meta = readMeta(id);
-  if (!meta) return `No background task found for id ${id}.`;
-  const log = readLog(meta.logPath, tailLines ?? 5);
-  const prefix = log.truncated ? `[showing tail of ${meta.logPath}]\n` : `[${meta.logPath}]\n`;
-  const failure = failureSummary(id);
-  return `${failure ? `${failure}\n` : ""}${prefix}${log.text || "(log is empty)"}`;
-}
-
-function logText(id: string, tailLines?: number) {
-  const body = formatLog(id, tailLines);
-  if (!readMeta(id)) return text(body);
+function logText(id: string, options: OutputOptions) {
+  const body = formatLog(id, options);
+  if (!inspectMeta(id).meta) return text(body);
   return text(body, buildBackgroundTaskLogDisplayDetails(body));
 }
 
@@ -464,8 +441,8 @@ export function renderBackgroundTaskLogDisplay(result: unknown, options: unknown
 
 function resultTextContent(result: unknown): string {
   const content = (result as { content?: Array<{ text?: string }> })?.content;
-  if (!Array.isArray(content)) return String(result ?? "");
-  return content.map((part) => part.text ?? "").join("\n");
+  if (Array.isArray(content)) return content.map((part) => part.text ?? "").join("\n");
+  return String(result ?? "");
 }
 
 function nonEmptyPreviewLines(lines: string[]): string[] {
@@ -519,12 +496,13 @@ async function formatStop(
   id: string,
   _ctx: ExtensionContext,
   getActiveSession?: () => BackgroundTaskCallbackOrigin | undefined,
+  options: OutputOptions = {},
 ): Promise<string> {
+  const existing = inspectMeta(id);
+  if (!existing.meta && !existing.found) return formatStopResult(existing, options);
   const meta = await stopTask(pi, id, getActiveSession);
-  if (!meta) return `No background task found for id ${id}.`;
-  const remoteStop = meta.remote?.stopMessage ? ` ${meta.remote.stopMessage}` : "";
-  const weakStop = meta.remote?.session === "direct" ? ` Warning: ${meta.remote.warning}` : "";
-  return `Background task ${id} is ${meta.status}.${remoteStop}${weakStop}`;
+  if (!meta) return formatStopResult({ id, found: existing.found, readable: false, error: existing.error }, options);
+  return formatStopResult({ id: meta.id, meta, found: true, readable: true }, options);
 }
 
 function formatClear(statuses: string[] | undefined, active: BackgroundTaskCallbackOrigin): string {
@@ -553,12 +531,4 @@ function belongsToActiveToolSession(meta: BackgroundTaskMeta, active: Background
   }
   if (active.sessionId) return false;
   return meta.cwd === active.cwd;
-}
-
-function formatDuration(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return `${minutes}m${rest.toString().padStart(2, "0")}s`;
 }

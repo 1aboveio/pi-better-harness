@@ -48,6 +48,9 @@ function plain(lines) {
     return lines.join("\n").replace(/<\/?[a-zA-Z][\w-]*>/g, "").replace(/<\/>/g, "");
 }
 
+const DISPLAY_ORIGIN = { cwd: "/tmp", sessionId: "display-session" };
+const DISPLAY_CTX = { cwd: DISPLAY_ORIGIN.cwd, sessionManager: { getSessionId: () => DISPLAY_ORIGIN.sessionId } };
+
 function writeTerminalRunWithLongResult(id, status = "completed", finalText = undefined) {
     writeMeta({
         id,
@@ -62,6 +65,7 @@ function writeTerminalRunWithLongResult(id, status = "completed", finalText = un
         exitCode: 0,
         logPath: logPathFor(id),
         sessionId: id,
+        callbackOrigin: DISPLAY_ORIGIN,
     });
     mkdirSync(runDir(id), { recursive: true });
     const resultText = finalText ?? Array.from({ length: 18 }, (_, i) => `result-line-${String(i + 1).padStart(2, "0")}`).join("\n");
@@ -184,9 +188,10 @@ describe("subagent_result folded TUI display", () => {
         assert.equal(typeof tool.renderResult, "function");
         assert.equal(globalThis[hooksKey], undefined, "acceptance probe must not publish unless PI_CATALOG_ACCEPTANCE_PROBE=1");
 
-        const result = await tool.execute("tc", { id });
+        const result = await tool.execute("tc", { id }, undefined, undefined, DISPLAY_CTX);
         const full = textOf(result);
-        assert.equal(full, buildSubagentResultText(id), "registered tool must keep the full model-facing result");
+        const withoutCursor = (text) => text.replace(/\nstatusCursor=\S+$/, "");
+        assert.equal(withoutCursor(full), withoutCursor(buildSubagentResultText(id)), "registered tool must keep the full model-facing result");
         assert.match(full, /result-line-18/);
         assert.equal(result.details?.kind, "subagent-result-display");
 
@@ -215,7 +220,7 @@ describe("subagent_result folded TUI display", () => {
             assert.ok(hooks, "enabled acceptance probe must publish hooks");
             assert.equal(hooks.subagentResult, probedTool, "probe must publish the registered tool object");
             assert.equal(typeof hooks.subagentResult.renderResult, "function");
-            const probedResult = await hooks.subagentResult.execute("probe", { id });
+            const probedResult = await hooks.subagentResult.execute("probe", { id }, undefined, undefined, DISPLAY_CTX);
             assert.equal(textOf(probedResult), full, "published tool must return the same full model result");
             const probedCompact = plain(hooks.subagentResult.renderResult(probedResult, { expanded: false }, theme, {}).render(80));
             assert.doesNotMatch(probedCompact, /result-line-18/, "published tool must keep folded display");

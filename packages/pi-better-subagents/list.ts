@@ -4,6 +4,7 @@ export {
     SUBAGENT_LIST_STATUSES,
     normalizeSubagentListOptions,
     formatSubagentListRow,
+    collectSubagentList,
     buildSubagentList,
 } from "./list.mjs";
 

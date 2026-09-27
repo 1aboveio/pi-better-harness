@@ -879,6 +879,89 @@ export function listMetas(): RunMeta[] {
         .sort((a, b) => b.startedAt - a.startedAt);
 }
 
+export interface RunRecordIndex {
+    metas: RunMeta[];
+    /** Run directories whose metadata is missing, unreadable, or corrupt. */
+    unreadable: Array<{ id: string; detail: string }>;
+    /** The runs directory itself could not be read (not "no runs"). */
+    indexError?: string;
+}
+
+/** Why parsed metadata is not a usable run record, or undefined when it is. */
+export function runMetaShapeProblem(meta: unknown, id: string): string | undefined {
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) return "not an object";
+    const value = meta as Partial<RunMeta>;
+    if (value.id !== id) return `id ${JSON.stringify(value.id ?? null)} does not match ${JSON.stringify(id)}`;
+    if (typeof value.status !== "string" || !value.status) return "missing status";
+    if (typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt)) return "missing startedAt";
+    return undefined;
+}
+
+/**
+ * Inspect one run's metadata without collapsing "missing" and "corrupt":
+ * `missing` only when neither metadata nor the run directory exists.
+ */
+export function inspectRunMeta(id: string): { kind: "ok"; meta: RunMeta } | { kind: "missing" } | { kind: "unreadable"; detail: string } {
+    let raw: string;
+    try {
+        registryIo.metadataFileReads += 1;
+        raw = readFileSync(metaPathFor(id), "utf-8");
+    } catch (error) {
+        metaCache.delete(id);
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") {
+            try {
+                statSync(runDir(id));
+                return { kind: "unreadable", detail: "metadata file is missing; the run directory and its evidence are retained" };
+            } catch {
+                return { kind: "missing" };
+            }
+        }
+        return { kind: "unreadable", detail: error instanceof Error ? error.message : String(error) };
+    }
+    let meta: RunMeta;
+    try {
+        meta = JSON.parse(raw) as RunMeta;
+    } catch (error) {
+        metaCache.delete(id);
+        return { kind: "unreadable", detail: `invalid JSON: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    const invalid = runMetaShapeProblem(meta, id);
+    if (invalid) {
+        metaCache.delete(id);
+        return { kind: "unreadable", detail: `invalid metadata: ${invalid}` };
+    }
+    metaCache.set(id, meta);
+    return { kind: "ok", meta };
+}
+
+/** Every run directory, counting unreadable records instead of dropping them. */
+export function listRunRecords(): RunRecordIndex {
+    let ids: string[];
+    try {
+        registryIo.fullDirectoryReads += 1;
+        ids = readdirSync(join(baseDir(), "runs"));
+    } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return { metas: [], unreadable: [] };
+        return { metas: [], unreadable: [], indexError: error instanceof Error ? error.message : String(error) };
+    }
+    const metas: RunMeta[] = [];
+    const unreadable: Array<{ id: string; detail: string }> = [];
+    for (const id of ids) {
+        const cached = metaCache.get(id);
+        if (cached && cached.status !== "running" && cached.status !== "orphaned") {
+            metas.push(cached);
+            continue;
+        }
+        const inspected = inspectRunMeta(id);
+        if (inspected.kind === "ok") metas.push(inspected.meta);
+        else if (inspected.kind === "unreadable") unreadable.push({ id, detail: inspected.detail });
+    }
+    metas.sort((a, b) => b.startedAt - a.startedAt);
+    return { metas, unreadable };
+}
+
 export function listMetasForParent(parentPid: number): RunMeta[] {
     const directory = join(baseDir(), "by-parent", String(parentPid));
     ensureIndex(directory, (meta) => meta.spawnPid === parentPid);
@@ -1015,18 +1098,18 @@ function ensureActiveParentIndex(directory: string, parentPid: number): void {
     initializedIndexes.add(directory);
 }
 
-function originOf(meta: RunMeta): RunCallbackOrigin {
+export function originOf(meta: RunMeta): RunCallbackOrigin {
     return meta.callbackOrigin ?? { cwd: meta.cwd };
 }
 
-function belongsToOrigin(meta: RunMeta, origin: RunCallbackOrigin): boolean {
+export function belongsToOrigin(meta: RunMeta, origin: RunCallbackOrigin): boolean {
     const candidate = originOf(meta);
     if (candidate.cwd !== origin.cwd) return false;
     if (candidate.sessionId || origin.sessionId) return candidate.sessionId === origin.sessionId;
     return true;
 }
 
-function originKey(origin: RunCallbackOrigin): string {
+export function originKey(origin: RunCallbackOrigin): string {
     return createHash("sha256")
         .update(origin.cwd)
         .update("\0")

@@ -13,7 +13,7 @@
     "README.md"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --strict --skipLibCheck index.ts index.test.ts",
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --types node --strict --skipLibCheck index.ts index.test.ts",
     "test": "node --import tsx --test index.test.ts"
   },
   "devDependencies": {

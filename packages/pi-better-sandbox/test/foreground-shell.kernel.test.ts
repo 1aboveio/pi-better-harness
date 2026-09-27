@@ -309,6 +309,15 @@ test("output still streams incrementally while the sandboxed command runs", { sk
     } finally { await running.close(); }
 });
 
+function processLingers(pid: number): boolean {
+    if (process.platform === "linux") {
+        try {
+            if (/\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"))) return false;
+        } catch { return false; }
+    }
+    try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 test("a sandboxed command still times out and its process tree is killed", { skip }, async () => {
     const marker = join(projectRoot, "timeout-marker.txt");
     let pids: number[] = [];
@@ -324,6 +333,12 @@ test("a sandboxed command still times out and its process tree is killed", { ski
     assert.match(result.ok ? "" : result.message, /timed out after 1 seconds/);
     assert.equal(pids.length, 2, "the shell and its descendant must start before timeout");
     for (const pid of pids) {
+        // SIGKILL delivery and exit are asynchronous: on a loaded runner the
+        // process can still be exiting when the timeout result returns. Give it
+        // a bounded grace period; a tree that was never killed keeps running
+        // `sleep 30` and still fails below.
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline && processLingers(pid)) await new Promise((r) => setTimeout(r, 50));
         // Linux may retain a killed, orphaned child as a zombie until init
         // reaps it. Such a process cannot execute or write the marker.
         if (process.platform === "linux") {

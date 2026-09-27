@@ -1,7 +1,7 @@
-import { fmtElapsed, fmtSpend } from "./widget.mjs";
+import { fmtElapsed } from "./widget.mjs";
 import { formatListHealthSuffix } from "./health-surface.mjs";
 
-export const SUBAGENT_LIST_DEFAULT_LIMIT = 20;
+export const SUBAGENT_LIST_DEFAULT_LIMIT = 10;
 export const SUBAGENT_LIST_MAX_LIMIT = 100;
 /** Effective + durable supervision statuses accepted by subagent_list filters. */
 export const SUBAGENT_LIST_STATUSES = [
@@ -65,60 +65,83 @@ export function normalizeSubagentListOptions(params = {}) {
     };
 }
 
+function bounded(value, max) {
+    const single = String(value ?? "").replace(/\s+/g, " ").trim();
+    return single.length <= max ? single : `${single.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/**
+ * One compact row. Free text (name, model, batch) is bounded so the id and
+ * status always sit within the row's first ~80 characters and survive clipping.
+ */
 export function formatSubagentListRow(meta, p) {
     const status = p.status;
     const now = p.now ?? Date.now();
-    const usage = p.usage;
     const elapsed = fmtElapsed((meta.endedAt ?? now) - meta.startedAt);
-    const spend = fmtSpend(usage);
-    const name = meta.name ? `${meta.name} ` : "";
-    const stat = `${elapsed}${spend ? ` · ${spend}` : ""}`;
+    const name = meta.name ? `${bounded(meta.name, 60)} ` : "";
     const health = formatListHealthSuffix(p.health);
-    const failure = p.failure ? `\n    ${p.failure.replace(/\n/g, "\n    ")}` : "";
+    const failure = p.failure ? ` · ${bounded(p.failure, 60)}` : "";
     const batch = meta.batchId
-        ? `  [batch: ${meta.batchName ? `${meta.batchName} ` : ""}${meta.batchId}]`
+        ? `  [batch: ${meta.batchName ? `${bounded(meta.batchName, 40)} ` : ""}${bounded(meta.batchId, 60)}]`
         : "";
-    return `• ${name}${meta.id}  [${status}]  ${meta.model ?? "?"}  ${stat}${health}${batch}${failure}\n    ${promptPreview(meta)}`;
+    return `• ${name}${meta.id}  [${status}]  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${batch}${failure}\n    ${promptPreview(meta)}`;
 }
 
-export function buildSubagentList(p) {
+export function collectSubagentList(p) {
     const options = normalizeSubagentListOptions(p.params ?? {});
     const now = p.now ?? Date.now();
     const parentPid = p.parentPid ?? process.pid;
     const statusOf = p.statusOf ?? ((meta) => meta.status);
-    const usageById = p.usageById ?? (() => undefined);
     const healthById = p.healthById ?? (() => undefined);
     const failureById = p.failureById ?? (() => "");
+    const inScope = p.inScope ?? ((meta) => options.all || meta.spawnPid === parentPid);
+    const offset = Math.max(0, Math.floor(Number(p.offset) || 0));
 
     const scoped = (p.metas ?? [])
-        .filter((meta) => options.all || meta.spawnPid === parentPid)
+        .filter((meta) => inScope(meta, options))
         .sort((a, b) => b.startedAt - a.startedAt)
         .map((meta) => ({ meta, status: statusOf(meta) }));
 
-    const matching = options.statuses === null
+    const items = options.statuses === null
         ? scoped
         : scoped.filter((row) => options.statuses.has(row.status));
 
-    const displayed = matching.slice(0, options.limit);
-    const lines = [...options.warnings];
+    const displayed = items.slice(offset, offset + options.limit);
+    const rows = displayed.map((row) => formatSubagentListRow(row.meta, {
+        status: row.status,
+        now,
+        health: healthById(row.meta.id),
+        failure: failureById(row.meta.id),
+    }));
 
-    if (matching.length === 0) {
+    return {
+        warnings: options.warnings,
+        items,
+        rows,
+        matching: items.length,
+        displayed: displayed.length,
+        offset,
+        limit: options.limit,
+        all: options.all,
+        empty: items.length === 0,
+    };
+}
+
+export function buildSubagentList(p) {
+    const collected = collectSubagentList(p);
+    const lines = [...collected.warnings];
+
+    if (collected.empty) {
         lines.push("No subagent runs match filters.");
         return lines.join("\n");
     }
 
-    lines.push(...displayed.map((row) => formatSubagentListRow(row.meta, {
-        status: row.status,
-        now,
-        usage: usageById(row.meta.id),
-        health: healthById(row.meta.id),
-        failure: failureById(row.meta.id),
-    })));
+    lines.push(...collected.rows);
 
-    if (matching.length > displayed.length) {
+    if (collected.matching > collected.displayed + collected.offset) {
         lines.push(
-            `Showing ${displayed.length} of ${matching.length} matching subagent runs ` +
-            `(limit ${options.limit}). Increase limit up to ${SUBAGENT_LIST_MAX_LIMIT} to see more.`,
+            `Showing ${collected.displayed} of ${collected.matching} matching subagent runs ` +
+            `(limit ${collected.limit}). Increase limit up to ${SUBAGENT_LIST_MAX_LIMIT} to see more.`,
         );
     }
 

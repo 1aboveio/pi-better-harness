@@ -84,18 +84,245 @@ export function activeFailures(state: FailureState): FailureObservation[] {
   return Object.values(state.observations).filter((x) => x.status !== "resolved")
     .sort((a, b) => priority(a) - priority(b) || (b.lastSequence ?? 0) - (a.lastSequence ?? 0) || b.lastObservedAt - a.lastObservedAt);
 }
+const INCIDENT_CURSOR_PREFIX = "i1.";
+const encoder = new TextEncoder();
+
+function failureRow(x: FailureObservation): string {
+  const label = x.status === "expected" ? "Expected failure" :
+    x.category === "observation-incomplete" ? "Observation incomplete" : "Unresolved failure";
+  const time = x.at === undefined ? `observed ${new Date(x.firstObservedAt).toISOString()}` : new Date(x.at).toISOString();
+  return `${label} · ${time} · ${x.summary}${x.count > 1 ? ` (${x.count} occurrences)` : ""}${x.evidence ? ` · evidence: ${text(x.evidence, "")}` : ""}`;
+}
+
+/** Every active incident as a priority row. Consumers page these; they are not a lossy summary. */
+export function formatFailureLines(state: FailureState): string[] {
+  return activeFailures(state).map(failureRow);
+}
+
 /** Shared priority text, placed BEFORE assistant progress on every consumer surface. */
 export function formatFailureSummary(state: FailureState): string {
-  const failures = activeFailures(state);
-  if (!failures.length) return "";
-  const rows = failures.slice(0, 5).map((x) => {
-    const label = x.status === "expected" ? "Expected failure" :
-      x.category === "observation-incomplete" ? "Observation incomplete" : "Unresolved failure";
-    const time = x.at === undefined ? `observed ${new Date(x.firstObservedAt).toISOString()}` : new Date(x.at).toISOString();
-    return `${label} · ${time} · ${x.summary}${x.count > 1 ? ` (${x.count} occurrences)` : ""}${x.evidence ? ` · evidence: ${text(x.evidence, "")}` : ""}`;
-  });
-  if (failures.length > 5) rows.push(`${failures.length - 5} additional active failure observations retained in the failure journal.`);
+  const lines = formatFailureLines(state);
+  if (!lines.length) return "";
+  const rows = lines.slice(0, 5);
+  if (lines.length > 5) rows.push(`${lines.length - 5} additional active failure observations retained in the failure journal.`);
   return rows.join("\n");
+}
+
+export interface FailureIncidentPage {
+  text: string;
+  total: number;
+  /** Rows completed on this page (a row split across pages counts where it ends). */
+  represented: number;
+  /** Rows not fully shown through this page, including a partially shown row. */
+  omitted: number;
+  cursor: string;
+  nextCursor: string;
+  hasMore: boolean;
+  reset?: "stale-cursor" | "source-replaced";
+  /** The first line continues a row begun on an earlier page. */
+  startsPartial: boolean;
+  /** The last line is the start of a row that continues on the next page. */
+  endsPartial: boolean;
+}
+
+/**
+ * Signature of every observation's reportable state. A change here is a
+ * failure-only change even when log bytes are unchanged; receipts and replay
+ * bookkeeping do not change it.
+ */
+export function failureRevision(state: FailureState): string {
+  return failureIdentity(Object.values(state.observations)
+    .map((item) => [item.id, item.status, item.category, item.count, item.lastSequence ?? 0, item.summary, item.evidence ?? ""])
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+}
+
+function incidentRevision(state: FailureState): string {
+  return failureIdentity(activeFailures(state).map((item) => [item.id, item.status, item.count, item.summary, item.evidence ?? ""])).slice(0, 16);
+}
+
+/** Cursors carry a digest of their resource/scope, not the scope text. */
+function resourceTag(resource: string | undefined): string | undefined {
+  return resource === undefined ? undefined : createHash("sha256").update(resource).digest("base64url").slice(0, 16);
+}
+
+interface IncidentCursor { o: number; b: number; v: string; n: number; r?: string }
+
+function encodeIncidentCursor(cursor: IncidentCursor): string {
+  return INCIDENT_CURSOR_PREFIX + Buffer.from(JSON.stringify({ k: "i", o: cursor.o, ...(cursor.b ? { b: cursor.b } : {}),
+    v: cursor.v, n: cursor.n, ...(cursor.r !== undefined ? { r: cursor.r } : {}) }), "utf8").toString("base64url");
+}
+
+function decodeIncidentCursor(cursor: string | undefined): IncidentCursor | undefined {
+  if (!cursor || !cursor.startsWith(INCIDENT_CURSOR_PREFIX)) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor.slice(INCIDENT_CURSOR_PREFIX.length), "base64url").toString("utf8")) as { k?: string; o?: number; b?: number; v?: string; n?: number; r?: string };
+    if (parsed?.k === "i" && typeof parsed.v === "string") {
+      return { o: Math.max(0, Math.floor(parsed.o ?? 0)), b: Math.max(0, Math.floor(parsed.b ?? 0)), v: parsed.v,
+        n: Math.max(0, Math.floor(parsed.n ?? 0)), ...(typeof parsed.r === "string" ? { r: parsed.r } : {}) };
+    }
+  } catch { /* stale */ }
+  return undefined;
+}
+
+export function isIncidentCursor(cursor: string | undefined): boolean {
+  return Boolean(cursor?.startsWith(INCIDENT_CURSOR_PREFIX));
+}
+
+function utf8Length(value: string): number {
+  return encoder.encode(value).byteLength;
+}
+
+/** Largest prefix of `bytes` within `room` that does not split a code point. */
+function utf8Prefix(bytes: Uint8Array, room: number): number {
+  if (room <= 0) return 0;
+  if (room >= bytes.length) return bytes.length;
+  let end = room;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return end;
+}
+
+export interface IncidentPageRequest {
+  cursor?: string;
+  maxBytes?: number;
+  /** Resource/scope bound into cursors; a cursor minted for another scope resets. */
+  resource?: string;
+}
+
+/**
+ * Caller-owned incident pages. Whole rows are preferred; a row larger than the
+ * page is split at a code-point boundary and resumes at that byte, so pages
+ * reconstruct formatFailureLines() exactly (join with "\n" except after a page
+ * that `endsPartial`). A page never exceeds `maxBytes`.
+ */
+export function pageFailureIncidents(state: FailureState, request: IncidentPageRequest = {}): FailureIncidentPage {
+  const lines = formatFailureLines(state);
+  const revision = incidentRevision(state);
+  const total = lines.length;
+  const resource = resourceTag(request.resource);
+  let offset = 0;
+  let byte = 0;
+  let reset: FailureIncidentPage["reset"];
+  if (request.cursor) {
+    const parsed = decodeIncidentCursor(request.cursor);
+    if (!parsed || parsed.r !== resource) reset = "stale-cursor";
+    else if (parsed.v !== revision) reset = "source-replaced";
+    else { offset = Math.min(total, parsed.o); byte = offset < total ? parsed.b : 0; }
+  }
+  const maxBytes = Number.isFinite(request.maxBytes) && (request.maxBytes ?? -1) >= 0
+    ? Math.floor(request.maxBytes as number)
+    : 2 * 1024;
+  const mint = (o: number, b: number) => encodeIncidentCursor({ o, b, v: revision, n: total, ...(resource !== undefined ? { r: resource } : {}) });
+  const parts: string[] = [];
+  let used = 0;
+  let nextRow = offset;
+  let nextByte = byte;
+  let endsPartial = false;
+  for (let i = offset; i < total; i += 1) {
+    const encoded = encoder.encode(lines[i]!);
+    const from = i === offset ? Math.min(byte, encoded.length) : 0;
+    const rest = encoded.subarray(from);
+    const sep = parts.length ? 1 : 0;
+    if (used + sep + rest.length <= maxBytes) {
+      parts.push(Buffer.from(rest).toString("utf8"));
+      used += sep + rest.length;
+      nextRow = i + 1;
+      nextByte = 0;
+      continue;
+    }
+    if (parts.length === 0) {
+      const cut = utf8Prefix(rest, maxBytes);
+      if (cut > 0) {
+        parts.push(Buffer.from(rest.subarray(0, cut)).toString("utf8"));
+        used += cut;
+        nextRow = i;
+        nextByte = from + cut;
+        endsPartial = true;
+      }
+    }
+    break;
+  }
+  const startsPartial = byte > 0 && offset < total;
+  const represented = Math.max(0, nextRow - offset);
+  return {
+    text: parts.join("\n"),
+    total,
+    represented,
+    omitted: Math.max(0, total - nextRow),
+    cursor: mint(offset, byte),
+    nextCursor: mint(nextRow, nextByte),
+    hasMore: nextRow < total,
+    ...(reset ? { reset } : {}),
+    startsPartial,
+    endsPartial,
+  };
+}
+
+export function incidentCursorAt(state: FailureState, offset: number, resource?: string): string {
+  const lines = formatFailureLines(state);
+  const tag = resourceTag(resource);
+  return encodeIncidentCursor({ o: Math.max(0, Math.floor(offset)), b: 0, v: incidentRevision(state), n: lines.length,
+    ...(tag !== undefined ? { r: tag } : {}) });
+}
+
+const MIN_PARTIAL_ROW_BYTES = 96;
+
+export interface IncidentSummary {
+  text: string;
+  total: number;
+  /** Rows fully shown. */
+  represented: number;
+  /** Rows not fully shown; retrievable from `nextCursor`. */
+  omitted: number;
+  nextCursor?: string;
+}
+
+/**
+ * The shared priority failure section for a byte budget. When every active
+ * incident fits, the rows are returned unchanged. Otherwise a count line leads:
+ * total, fully shown, omitted, and the incident cursor that resumes at the
+ * first byte not shown. Counts survive any budget that fits the count line.
+ */
+export function formatIncidentSummary(state: FailureState, options: { maxBytes: number; resource?: string; retrieval?: string }): IncidentSummary {
+  const maxBytes = Math.max(0, Math.floor(options.maxBytes));
+  const whole = pageFailureIncidents(state, { maxBytes, resource: options.resource });
+  if (whole.total === 0) return { text: "", total: 0, represented: 0, omitted: 0 };
+  if (!whole.hasMore) return { text: whole.text, total: whole.total, represented: whole.represented, omitted: 0 };
+  const header = (page: FailureIncidentPage): string =>
+    `${page.total} active failure observation${page.total === 1 ? "" : "s"} · ${page.represented} shown · ${page.omitted} omitted` +
+    ` · incidentCursor=${page.nextCursor}${options.retrieval ? ` (${options.retrieval})` : ""}`;
+  let rowBudget = maxBytes - utf8Length(header(whole)) - 1;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    let page = pageFailureIncidents(state, { maxBytes: Math.max(0, rowBudget), resource: options.resource });
+    // A few bytes of a clipped row are noise; show the count line alone and
+    // let the cursor start at that row.
+    if (page.represented === 0 && page.endsPartial && utf8Length(page.text) < MIN_PARTIAL_ROW_BYTES) {
+      page = pageFailureIncidents(state, { maxBytes: 0, resource: options.resource });
+    }
+    const line = header(page);
+    const text = page.text ? `${line}\n${page.text}` : line;
+    const overflow = utf8Length(text) - maxBytes;
+    if (overflow <= 0) {
+      return { text, total: page.total, represented: page.represented, omitted: page.omitted, nextCursor: page.nextCursor };
+    }
+    if (rowBudget <= 0) break;
+    rowBudget -= overflow;
+  }
+  // Not even the count line with its cursor fits. Never emit a clipped cursor:
+  // keep the exact counts and drop the cursor token whole, saying so.
+  const empty = pageFailureIncidents(state, { maxBytes: 0, resource: options.resource });
+  const withCursor = header(empty);
+  if (utf8Length(withCursor) <= maxBytes) {
+    return { text: withCursor, total: empty.total, represented: 0, omitted: empty.total, nextCursor: empty.nextCursor };
+  }
+  const plural = empty.total === 1 ? "" : "s";
+  for (const candidate of [
+    `${empty.total} active failure observation${plural} · 0 shown · ${empty.total} omitted · incident cursor not shown (page too small; retry with a larger maxBytes${options.retrieval ? ` or ${options.retrieval}` : ""})`,
+    `${empty.total} active failure observation${plural} · 0 shown · ${empty.total} omitted · incident cursor not shown (page too small)`,
+    `${empty.total} active failure observation${plural} (page too small for details)`,
+  ]) {
+    if (utf8Length(candidate) <= maxBytes) return { text: candidate, total: empty.total, represented: 0, omitted: empty.total };
+  }
+  return { text: "", total: empty.total, represented: 0, omitted: empty.total };
 }
 export function pendingFailureAttention(state: FailureState, now: number, options: { terminal?: boolean; graceMs?: number } = {}): { key: string; incidents: string[]; summary: string } | undefined {
   const due = activeFailures(state).filter((x) => x.status === "unresolved" && !Object.hasOwn(state.delivered, x.id) &&

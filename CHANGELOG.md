@@ -6,7 +6,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- **subagents, background-tasks** (#312): model-facing tool output is bounded by UTF-8 byte budgets that cover the whole response: status, log excerpts, and lists 1 KiB (10 rows/lines); subagent answer pages and callback batches 2 KiB; explicit raw evidence pages 16 KiB. Callers can ask for larger pages up to hard caps (status 2 KiB, log/list 4 KiB, answer/callback 8 KiB, raw 64 KiB) with `maxBytes` (subagents) or `max_bytes` (background tasks).
+- **subagents, background-tasks** (#312): long answers, logs, lists, incidents, and verbose metadata are paged instead of truncated. Responses carry `nextCursor` to continue, `statusCursor` for a small "no new evidence" reply until something changes (failure-only changes are reported), and `incidentCursor` for omitted failure incidents; pass any of them back as `cursor`. Raw pages end with an append-ready cursor. New parameters: `cursor` and `maxBytes` on `subagent_list`/`subagent_output`/`subagent_result`, `lines` on `subagent_output`, `mode: "raw"` on `subagent_output`/`subagent_result`; `cursor`, `max_bytes`, `all`, `raw` on the background list/status/log tools and wrappers.
+- **subagents, background-tasks** (#312): list, status, output, result, and log default to the current session. Pass `all:true` to read another session's runs or tasks. When ownership cannot be verified (session identity unreadable, or a legacy record without an origin) the response is an ownership gap, never evidence and never "not found".
+- **subagents, background-tasks** (#312): ordinary results, lists, and callbacks no longer include ordered tool-name histories or default token/cost lines. `subagent_list` defaults to 10 rows (was 20); `bg_task_log` defaults to a 10-row tail (was 5) and `tail_lines: 0` now pages raw bytes instead of returning up to 512 KiB.
+
 ### Fixed
+
+- **subagents, background-tasks** (#312): missing or corrupt metadata, missing logs, capture overflow, and log retention are reported as explicit gaps instead of empty or healthy results; final answers keep their whitespace; completion and urgent callbacks count exactly which failure incidents they show.
 
 - **goal**: an `escape` interrupt no longer leaves an active goal paused indefinitely. It is now a soft pause (`pauseReason: "interrupt"`): the next conversational message reactivates the goal, and automatic continuation resumes once that exchange settles. `/goal pause` and pauses for an unavailable command or workflow stay sticky until `/goal resume`; completed and budget-limited goals are unaffected. Previously a long orchestrator run sat idle after the user interrupted to ask a question, until the skill was re-invoked.
 - **goal**: background work that finishes while a blocking `ask_user_question` is pending is now steered to the agent right after the answer, instead of waiting behind the follow-up callback batch until the whole run ends. The prompt context also warns the agent, while background work runs, that a blocking question holds completions.

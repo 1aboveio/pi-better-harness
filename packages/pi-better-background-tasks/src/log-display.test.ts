@@ -45,6 +45,7 @@ function makeCompletedTask(id: string, logLines: string[]): void {
     cwd: "/tmp",
     shell: true,
     spawnPid: process.pid,
+    callbackOrigin: { cwd: "/tmp", sessionId: "s" },
   });
 }
 
@@ -62,7 +63,8 @@ describe("background task log folded display", () => {
       registerTool(tool: any) { tools[tool.name] = tool; },
     } as any);
 
-    const result = await tools.bg_task_log.execute("tc", { id, tail_lines: 18 });
+    const ctx = { cwd: "/tmp", sessionManager: { getSessionId: () => "s" } };
+    const result = await tools.bg_task_log.execute("tc", { id, tail_lines: 18 }, undefined, undefined, ctx);
     const full = textOf(result);
     expect(full).toContain("log-line-18");
     expect(result.details?.kind).toBe("background-task-log-display");
@@ -93,7 +95,7 @@ describe("background task log folded display", () => {
     expect(compact).not.toContain("wrapper-line-12");
   });
 
-  it("lets the default 5-line model tail fit entirely in the compact TUI preview", async () => {
+  it("defaults model-facing log reads to a 10-line tail", async () => {
     const id = `bg_log_default_compact_${Date.now()}`;
     makeCompletedTask(id, Array.from({ length: 18 }, (_, index) => `log-line-${String(index + 1).padStart(2, "0")}`));
     const tools: Record<string, any> = {};
@@ -102,13 +104,13 @@ describe("background task log folded display", () => {
       registerTool(tool: any) { tools[tool.name] = tool; },
     } as any);
 
-    const result = await tools.bg_task_log.execute("tc", { id });
-    expect(textOf(result)).toContain("log-line-14");
+    const ctx = { cwd: "/tmp", sessionManager: { getSessionId: () => "s" } };
+    const result = await tools.bg_task_log.execute("tc", { id }, undefined, undefined, ctx);
+    expect(textOf(result)).toContain("log-line-09");
     expect(textOf(result)).toContain("log-line-18");
-    expect(textOf(result)).not.toContain("log-line-13");
+    expect(textOf(result)).not.toContain("log-line-08");
     const compact = plain(tools.bg_task_log.renderResult(result, { expanded: false }, theme).render(80));
-    expect(compact).toContain("log-line-18");
-    expect(compact).toContain("Compact log");
+    expect(compact).toContain("log-line-09");
   });
 
   it("defaults model-facing log reads to a bounded tail and keeps full log explicit", async () => {
@@ -120,14 +122,14 @@ describe("background task log folded display", () => {
       registerTool(tool: any) { tools[tool.name] = tool; },
     } as any);
 
-    const defaultText = textOf(await tools.bg_task_log.execute("tc", { id }));
-    expect(defaultText).toContain("[showing tail of");
+    const ctx = { cwd: "/tmp", sessionManager: { getSessionId: () => "s" } };
+    const defaultText = textOf(await tools.bg_task_log.execute("tc", { id }, undefined, undefined, ctx));
     expect(defaultText).not.toContain("tail-line-01");
-    expect(defaultText).not.toContain("tail-line-20");
-    expect(defaultText).toContain("tail-line-21");
+    expect(defaultText).not.toContain("tail-line-15");
+    expect(defaultText).toContain("tail-line-16");
     expect(defaultText).toContain("tail-line-25");
 
-    const fullText = textOf(await tools.bg_task_log.execute("tc", { id, tail_lines: 0 }));
+    const fullText = textOf(await tools.bg_task_log.execute("tc", { id, tail_lines: 0 }, undefined, undefined, ctx));
     expect(fullText).toContain("tail-line-01");
     expect(fullText).toContain("tail-line-25");
   });

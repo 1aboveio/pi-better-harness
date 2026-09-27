@@ -92,15 +92,92 @@ export function onMetaChanged(listener: () => void): () => void {
 }
 
 export function readMeta(id: string): BackgroundTaskMeta | undefined {
+  return inspectMeta(id).meta;
+}
+
+export interface MetaInspection {
+  id: string;
+  meta?: BackgroundTaskMeta;
+  found: boolean;
+  readable: boolean;
+  error?: string;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Parsed JSON that lacks the identifying fields is corrupt, not a task. */
+function metaShapeProblem(meta: unknown, id: string): string | undefined {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return "not an object";
+  const value = meta as Partial<BackgroundTaskMeta>;
+  if (value.id !== id) return `id ${JSON.stringify(value.id ?? null)} does not match ${JSON.stringify(id)}`;
+  if (typeof value.status !== "string" || !value.status) return "missing status";
+  if (typeof value.logPath !== "string" || !value.logPath) return "missing logPath";
+  if (typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt)) return "missing startedAt";
+  return undefined;
+}
+
+/**
+ * Distinguish missing, unreadable, and healthy metadata. Callers must not treat
+ * an unreadable file as proof that a task does not exist.
+ */
+export function inspectMeta(id: string): MetaInspection {
+  const path = metaPathFor(id);
   try {
     registryIo.metadataFileReads += 1;
-    const meta = JSON.parse(readFileSync(metaPathFor(id), "utf8")) as BackgroundTaskMeta;
-    metaCache.set(id, meta);
-    return meta;
-  } catch {
+    const raw = readFileSync(path, "utf8");
+    try {
+      const meta = JSON.parse(raw) as BackgroundTaskMeta;
+      const invalid = metaShapeProblem(meta, id);
+      if (invalid) {
+        metaCache.delete(id);
+        return { id, found: true, readable: false, error: `invalid metadata: ${invalid}` };
+      }
+      metaCache.set(id, meta);
+      return { id, meta, found: true, readable: true };
+    } catch (error) {
+      metaCache.delete(id);
+      return { id, found: true, readable: false, error: `invalid JSON: ${errorText(error)}` };
+    }
+  } catch (error) {
     metaCache.delete(id);
-    return undefined;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      try {
+        statSync(taskDir(id));
+        return { id, found: true, readable: false, error: "metadata file is missing" };
+      } catch {
+        return { id, found: false, readable: false };
+      }
+    }
+    return { id, found: true, readable: false, error: errorText(error) };
   }
+}
+
+export interface TaskIndex {
+  records: MetaInspection[];
+  indexError?: string;
+}
+
+/** List every task directory, including unreadable metadata. */
+export function listTaskRecords(): TaskIndex {
+  let ids: string[];
+  try {
+    registryIo.fullDirectoryReads += 1;
+    ids = readdirSync(tasksDir());
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { records: [] };
+    return { records: [], indexError: errorText(error) };
+  }
+  return {
+    records: ids.map((id) => inspectMeta(id)).sort((a, b) => {
+      const aTime = a.meta?.startedAt ?? 0;
+      const bTime = b.meta?.startedAt ?? 0;
+      return bTime - aTime;
+    }),
+  };
 }
 
 export function removeMeta(meta: BackgroundTaskMeta): boolean {
@@ -164,11 +241,11 @@ function readOwnedMeta(id: string): BackgroundTaskMeta | undefined {
   return metaCache.get(id) ?? readMeta(id);
 }
 
-function originOf(meta: BackgroundTaskMeta): BackgroundTaskCallbackOrigin {
+export function originOf(meta: BackgroundTaskMeta): BackgroundTaskCallbackOrigin {
   return meta.callbackOrigin ?? { cwd: meta.cwd };
 }
 
-function belongsToOrigin(meta: BackgroundTaskMeta, origin: BackgroundTaskCallbackOrigin): boolean {
+export function belongsToOrigin(meta: BackgroundTaskMeta, origin: BackgroundTaskCallbackOrigin): boolean {
   const candidate = originOf(meta);
   if (candidate.cwd !== origin.cwd) return false;
   if (candidate.sessionId || origin.sessionId) return candidate.sessionId === origin.sessionId;

@@ -10,11 +10,10 @@ import { collectRunFailures, failurePath } from "./failures.ts";
 import { observeFailures } from "./shared-failure-observations.ts";
 import {
     classifyChildExit,
-    formatSubagentResult,
-    resolveLifecycle,
     type ChildExitOutcome,
 } from "./lifecycle.ts";
-import { parseRunForLifecycle, tailLog } from "./parse.ts";
+import { assembleSubagentResult } from "./output-payload.ts";
+import { parseRunForLifecycle } from "./parse.ts";
 import {
     canExitFinalize,
     effectiveStatus,
@@ -89,7 +88,8 @@ export function finalizeRun(
     const verdict = outcome.verdict;
     const el = fmtElapsed(meta.endedAt - meta.startedAt);
     const spend = fmtSpend(r.usage);
-    const stat = `${el}${spend ? ` · ${spend}` : ""}`;
+    const humanStat = `${el}${spend ? ` · ${spend}` : ""}`;
+    const stat = el;
 
     // A finished run is no longer in the widget; redraw (and stop the ticker if
     // it was the last one).
@@ -98,7 +98,7 @@ export function finalizeRun(
     // Best-effort human toast. ctx may be stale by now; never let it throw.
     try {
         hooks.notify?.(
-            `Subagent ${label} ${verdict} · ${stat}`,
+            `Subagent ${label} ${verdict} · ${humanStat}`,
             meta.status === "completed" ? "info" : "warning",
         );
     } catch {
@@ -138,28 +138,19 @@ export function finalizeRun(
  * Returns null when the run is still live so the tool can emit its running message.
  */
 export function buildSubagentResultText(id: string): string | null {
+    return buildSubagentResultPayload(id);
+}
+
+/** Optional paging/raw evidence for the registered result tool. */
+export function buildSubagentResultPayload(
+    id: string,
+    request?: { cursor?: string; maxBytes?: unknown; mode?: unknown; all?: unknown },
+    healthLine = "",
+    scopeKey = `parent:${process.pid}`,
+): string | null {
     const meta = readMeta(id);
     if (!meta) throw new Error(`Unknown run id: ${id}`);
     const st = effectiveStatus(meta);
-    // Non-final statuses (running / orphaned) have no final result body.
     if (!isFinalResultStatus(st)) return null;
-
-    const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
-    // Re-derive lifecycle diagnostics from the complete stream even when meta is stale.
-    const r = parseRunForLifecycle(id);
-    const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-    const spend = fmtSpend(r.usage);
-    const statSeg = ` · ${el}${spend ? ` · ${spend}` : ""}`;
-    const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
-    const lifecycle = resolveLifecycle(meta, r);
-    return formatSubagentResult({
-        id,
-        status: st,
-        exitCode: exit,
-        statSeg,
-        toolsSeg: tools,
-        run: r,
-        rawLogTail: tailLog(id, 40),
-        lifecycle,
-    });
+    return assembleSubagentResult(id, meta, request ?? {}, healthLine, scopeKey);
 }

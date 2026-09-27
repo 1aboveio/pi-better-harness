@@ -222,8 +222,10 @@ describe("structured failure attention", () => {
                 const result = (await h.tools.get("subagent_result").execute("x", { id }, undefined, undefined, h.ctx)).content[0].text;
                 const list = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
                 assert.ok(output.indexOf("Unresolved failure") < output.indexOf("still working"));
-                assert.match(result, /^Unresolved failure/);
-                assert.ok(list.includes("Unresolved failure"));
+                assert.match(result, /Unresolved failure/);
+                assert.ok(result.indexOf("Unresolved failure") < result.indexOf("still running") || result.indexOf("Unresolved failure") < result.indexOf("still working"));
+                assert.match(list, /incident/i);
+                assert.doesNotMatch(list, /assertion failed/);
                 const detail = renderRegisteredWorkDetail("subagents", id, 120);
                 assert.match(detail.lines.join("\n"), /Unresolved failure/);
                 mock.timers.tick(HEALTH_TICK_MS);
@@ -683,6 +685,8 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
             startedAt: Date.now() - 60_000,
             logPath,
             sessionId: id,
+            // Real launches record the foreground origin; tools default to it.
+            callbackOrigin: { cwd: tmpdir(), sessionId: "test-session" },
             pgid: DEAD_PID,
             pidStartTime: "gone-token",
         };
@@ -704,7 +708,7 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
                 status: "orphaned",
                 artifactLine: artifact,
             });
-            const res = await h.tools.get("subagent_result").execute("tc", { id: meta.id });
+            const res = await h.tools.get("subagent_result").execute("tc", { id: meta.id }, undefined, undefined, h.ctx);
             const out = toolText(res);
             assert.match(out, /orphaned/i, `must name orphaned status:\n${out}`);
             assert.match(out, /no final result/i, `must refuse a final result:\n${out}`);
@@ -723,7 +727,7 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
         try {
             const artifact = "partial-progress-before-loss";
             const meta = writeFixtureMeta({ status: "lost", artifactLine: artifact });
-            const res = await h.tools.get("subagent_result").execute("tc", { id: meta.id });
+            const res = await h.tools.get("subagent_result").execute("tc", { id: meta.id }, undefined, undefined, h.ctx);
             const out = toolText(res);
             assert.match(out, new RegExp(`\\[${meta.id} · lost ·`), `must open a terminal result head with lost:\n${out}`);
             assert.match(out, /Run is lost: no related process remains/i, `must include the lost diagnostic:\n${out}`);
@@ -739,8 +743,8 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
         try {
             const orphaned = writeFixtureMeta({ status: "orphaned", artifactLine: "o" });
             const lost = writeFixtureMeta({ status: "lost", artifactLine: "l" });
-            await assert.doesNotReject(() => h.tools.get("subagent_result").execute("tc", { id: orphaned.id }));
-            await assert.doesNotReject(() => h.tools.get("subagent_result").execute("tc", { id: lost.id }));
+            await assert.doesNotReject(() => h.tools.get("subagent_result").execute("tc", { id: orphaned.id }, undefined, undefined, h.ctx));
+            await assert.doesNotReject(() => h.tools.get("subagent_result").execute("tc", { id: lost.id }, undefined, undefined, h.ctx));
         } finally {
             h.shutdown();
         }
@@ -760,7 +764,7 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
             // completed fixture also needs endedAt for a sensible row; rewrite.
             writeMeta({ ...readMeta(completed.id), endedAt: Date.now(), exitCode: 0 });
 
-            const res = await h.tools.get("subagent_list").execute("tc", {});
+            const res = await h.tools.get("subagent_list").execute("tc", {}, undefined, undefined, h.ctx);
             const out = toolText(res);
             assert.match(out, new RegExp(`${orphaned.id}[^\n]*\\[orphaned\\]`), `default list must show orphaned runs:\n${out}`);
             assert.match(out, new RegExp(`${completed.id}[^\n]*\\[completed\\]`), `default list still shows completed runs:\n${out}`);
@@ -772,6 +776,45 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
                 new RegExp(`${orphaned.id}[^\n]*\\[(completed|failed|killed|lost|exited)\\]`),
                 `orphaned must not be listed under a terminal status:\n${out}`,
             );
+        } finally {
+            h.shutdown();
+        }
+    });
+});
+
+describe("registered tools fail closed on unverifiable ownership (#312)", () => {
+    function toolText(res) {
+        return res.content.map((c) => c.text).join("");
+    }
+
+    it("never reads a run without a verified session, and treats legacy no-origin runs as unowned", async () => {
+        const h = makeHarness();
+        try {
+            const cwd = tmpdir();
+            const legacy = nextRunId();
+            const own = nextRunId();
+            dirOnly.push(legacy, own);
+            for (const [id, extra, text] of [[legacy, {}, "LEGACY_EVIDENCE"], [own, { callbackOrigin: { cwd } }, "OWN_SESSIONLESS_EVIDENCE"]]) {
+                writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: process.pid, cwd, promptPreview: "p",
+                    startedAt: Date.now() - 1000, endedAt: Date.now(), exitCode: 0, logPath: join(runDir(id), "output.log"), sessionId: id, ...extra });
+                writeFileSync(join(runDir(id), "output.log"), JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text }] }] }) + "\n");
+            }
+            const unreadable = { ...h.ctx, sessionManager: { getSessionId: () => { throw new Error("offline"); } } };
+            const denied = toolText(await h.tools.get("subagent_result").execute("tc", { id: own }, undefined, undefined, unreadable));
+            assert.match(denied, /ownership unavailable/);
+            assert.doesNotMatch(denied, /OWN_SESSIONLESS_EVIDENCE/);
+            const noCtx = toolText(await h.tools.get("subagent_result").execute("tc", { id: own }));
+            assert.match(noCtx, /ownership unavailable/, "a registered tool without a host context must not read evidence");
+
+            await h.handlers.get("session_start")({}, { ...h.ctx, sessionManager: { getSessionId: () => undefined } });
+            const sessionless = { ...h.ctx, sessionManager: { getSessionId: () => undefined } };
+            const legacyText = toolText(await h.tools.get("subagent_result").execute("tc", { id: legacy }, undefined, undefined, sessionless));
+            assert.match(legacyText, /ownership unavailable/);
+            assert.doesNotMatch(legacyText, /LEGACY_EVIDENCE/);
+            const ownText = toolText(await h.tools.get("subagent_result").execute("tc", { id: own }, undefined, undefined, sessionless));
+            assert.match(ownText, /OWN_SESSIONLESS_EVIDENCE/);
+            const listed = toolText(await h.tools.get("subagent_list").execute("tc", { limit: 100, maxBytes: 4096 }, undefined, undefined, sessionless));
+            assert.doesNotMatch(listed, new RegExp(legacy));
         } finally {
             h.shutdown();
         }
@@ -819,6 +862,57 @@ describe("callback session isolation", () => {
         } finally {
             h.shutdown();
         }
+    });
+
+    it("bounds a lost health follow-up with many long incidents and keeps its explanation and counts", async () => {
+        await withFakeClock(async () => {
+            const cwd = tmpdir();
+            const h = makeHarness({ cwd, sessionId: "session-bounded" });
+            try {
+                const id = nextRunId();
+                dirOnly.push(id);
+                writeMeta({
+                    id,
+                    status: "lost",
+                    pid: DEAD_PID,
+                    pgid: DEAD_PID,
+                    pidStartTime: "gone-token",
+                    spawnPid: process.pid,
+                    cwd,
+                    promptPreview: "p",
+                    startedAt: Date.now() - 120_000,
+                    lostAt: Date.now() - 60_000,
+                    endedAt: Date.now() - 60_000,
+                    logPath: join(runDir(id), "output.log"),
+                    sessionId: id,
+                    callbackOrigin: { cwd, sessionId: "session-bounded" },
+                    callback: true,
+                });
+                writeFileSync(join(runDir(id), "output.log"), "lost-with-incidents\n");
+                observeFailures(failurePath(id), Array.from({ length: 12 }, (_, i) => ({
+                    id: `bounded-${i}`, operation: `bounded-op-${i}`, kind: "failure",
+                    summary: `failure-${i} ${"界".repeat(150)}`,
+                })), Date.now() - 120_000);
+
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+
+                const health = h.sent.filter((s) => s.message?.customType === "subagent-health" && s.message.content.includes(id));
+                assert.equal(health.length, 1);
+                const content = health[0].message.content;
+                assert.ok(Buffer.byteLength(content) <= 2048, `${Buffer.byteLength(content)} bytes`);
+                assert.match(content, /ATTENTION: a background subagent is lost/);
+                const counts = content.match(/incidents=(\d+) shown=(\d+) omittedIncidents=(\d+) retrieve: subagent_result id=/);
+                assert.ok(counts, content);
+                assert.equal(Number(counts[2]) + Number(counts[3]), Number(counts[1]));
+                assert.equal((content.match(/^(Unresolved failure|Observation incomplete|Expected failure) · /gm) ?? []).length, Number(counts[2]));
+                assert.equal(Number(counts[1]), 13, "12 tool incidents plus the supervision-lost observation");
+                assert.equal((content.match(/^Inspect: subagent_result/gm) ?? []).length, 1);
+            } finally {
+                h.shutdown();
+            }
+        });
     });
 
     it("suppresses recovered lost health follow-up after the foreground session changes", async () => {

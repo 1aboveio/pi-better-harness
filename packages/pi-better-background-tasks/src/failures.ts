@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  failureAttentionHandled, failureIdentity, formatFailureSummary, markFailureAttentionDelivered,
-  observeFailures, pendingFailureAttention, readFailureState,
+  failureAttentionHandled, failureIdentity, formatFailureLines, formatFailureSummary, markFailureAttentionDelivered,
+  observeFailures, pendingFailureAttention, readFailureState, type FailureState,
 } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir } from "./registry.js";
@@ -39,6 +39,27 @@ export function stopFailureAttention(id: string): void {
   attentionTimers.delete(id);
 }
 
+/**
+ * Model-facing fields of a running task's failure attention. The notification
+ * identity is per incident set; the inspect target is the real task id.
+ */
+export function failureAttentionFields(meta: BackgroundTaskMeta, state: FailureState, pending: { key: string; incidents: string[] }) {
+  const rows = formatFailureLines(state);
+  const due = pending.incidents.length;
+  return {
+    source: "background-task" as const,
+    id: `failure:${meta.id}:${pending.key}`,
+    inspectId: meta.id,
+    label: meta.name ?? meta.id,
+    status: "failure",
+    customType: "background-task-failure",
+    content: `Background task ${meta.id} is still running with ${due} unresolved failure observation${due === 1 ? "" : "s"} that need attention.`,
+    detailTool: "bg_task_status" as const,
+    failureRows: rows,
+    incidentCount: rows.length || undefined,
+  };
+}
+
 /** Running incidents get one grace wake. Terminal incidents ride the completion callback. */
 export function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): void {
   stopFailureAttention(id);
@@ -54,9 +75,7 @@ export function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActive
   const pending = pendingFailureAttention(state, Date.now());
   if (pending) {
     const delivery = getCallbackBatcher(pi).deliverUrgent({
-      source: "background-task", id: `failure:${id}:${pending.key}`, label: meta.name ?? id,
-      status: "failure", customType: "background-task-failure",
-      content: `Background task ${id}: ${pending.summary}\nInspect: bg_task_status id=${id}`,
+      ...failureAttentionFields(meta, state, pending),
       isDelivered: () => {
         const current = readMeta(id);
         if (!current) throw new Error("Task metadata is unavailable; defer failure notification");

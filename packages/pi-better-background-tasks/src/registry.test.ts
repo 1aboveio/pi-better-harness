@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { baseDir, ensureTaskDir, getRegistryIoMetrics, listActiveMetasForOrigin, listMetas, listMetasForOrigin, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, writeMeta } from "./registry.js";
+import { baseDir, ensureTaskDir, getRegistryIoMetrics, listActiveMetasForOrigin, inspectMeta, listMetas, listMetasForOrigin, listTaskRecords, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, writeMeta } from "./registry.js";
 import type { BackgroundTaskMeta } from "./types.js";
 
 describe("registry meta sweep cache", () => {
@@ -112,5 +112,19 @@ describe("session-owned registry index", () => {
     writeMeta({ ...meta, status: "succeeded", endedAt: Date.now() });
     expect(listActiveMetasForOrigin(origin)).toEqual([]);
     expect(listMetasForOrigin(origin).map((candidate) => candidate.id)).toEqual([meta.id]);
+  });
+});
+
+describe("metadata inspection", () => {
+  it("does not treat invalid metadata as missing", () => {
+    const meta = fixtureMeta("running", "broken");
+    ensureTaskDir(meta.id);
+    writeFileSync(metaPathFor(meta.id), "{broken");
+    const inspection = inspectMeta(meta.id);
+    expect(inspection.found).toBe(true);
+    expect(inspection.readable).toBe(false);
+    expect(inspection.meta).toBeUndefined();
+    expect(inspection.error).toMatch(/invalid JSON/);
+    expect(listTaskRecords().records.some((record) => record.id === meta.id && !record.readable)).toBe(true);
   });
 });
