@@ -1,13 +1,13 @@
 /** Kernel-confined operations for Pi's built-in file tools. */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { access, lstat, mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { ReadOperations, WriteOperations, EditOperations } from "@earendil-works/pi-coding-agent";
 import {
     canonicalizePath, compileWritePolicy, evaluateDeleteAccess, evaluateReadAccess, evaluateWriteAccess, maybeBuildSandboxCommand,
-    type CompiledSandboxWritePolicy, type SandboxWritePolicy, type WriteAccessDecision,
+    type CompiledSandboxWritePolicy, type SandboxSeams, type SandboxWritePolicy, type WriteAccessDecision,
 } from "../sandbox-core/index.ts";
 
 export interface TaskFileController {
@@ -110,12 +110,22 @@ function refusal(verb: string, decision: WriteAccessDecision): Error {
 /**
  * Removing an entry is judged on both its resolved target and its own directory
  * entry, so a link can neither remove a protected file nor hide a protected entry.
+ * The entry is evaluated without following its final component: the parent is
+ * canonicalized, the leaf is taken literally. Otherwise a link planted in
+ * `~/.ssh` or a sibling repository would be judged by its (deletable) target.
  */
-function removeDecision(path: string, policy: CompiledSandboxWritePolicy): WriteAccessDecision {
+export function removeDecision(path: string, policy: CompiledSandboxWritePolicy): WriteAccessDecision {
     const target = evaluateDeleteAccess(path, policy);
     if (!target.allowed) return target;
     const entry = join(canonicalizePath(dirname(path)), basename(path));
-    return entry === target.path ? target : evaluateDeleteAccess(entry, policy);
+    if (entry === target.path) return target;
+    const literalLeaf: SandboxSeams = {
+        canonicalize: (candidate) => {
+            if (candidate === entry) throw new Error("the leaf entry is judged literally");
+            return realpathSync(candidate);
+        },
+    };
+    return evaluateDeleteAccess(entry, policy, literalLeaf);
 }
 
 function mimeType(data: Buffer): string | null {

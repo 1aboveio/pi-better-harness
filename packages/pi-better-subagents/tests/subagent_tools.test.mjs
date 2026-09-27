@@ -15,23 +15,29 @@ function packages(t) {
     t.after(() => rmSync(base, { recursive: true, force: true }));
     const web = join(base, 'node_modules', '@juicesharp', 'rpiv-web-tools');
     const other = join(base, 'node_modules', 'other-web');
-    for (const dir of [web, other]) { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'index.ts'), ''); }
+    const ask = join(base, 'node_modules', '@juicesharp', 'rpiv-ask-user-question');
+    const harness = join(base, 'node_modules', 'pi-better-harness');
+    for (const dir of [web, other, ask, harness]) {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'index.ts'), '');
+        writeFileSync(join(dir, 'package.json'), '{}');
+    }
     const registered = [
         { name: 'web_fetch', sourceInfo: { path: join(web, 'index.ts'), source: 'npm:@juicesharp/rpiv-web-tools', baseDir: web } },
         { name: 'web_search', sourceInfo: { path: join(web, 'index.ts'), source: 'npm:@juicesharp/rpiv-web-tools', baseDir: web } },
-        { name: 'read', sourceInfo: { path: '/harness/node_modules/pi-better-harness/extensions/sandbox/index.ts', source: 'npm:pi-better-harness', baseDir: '/harness' } },
+        { name: 'read', sourceInfo: { path: join(harness, 'index.ts'), source: 'npm:pi-better-harness', baseDir: harness } },
         { name: 'grep', sourceInfo: { path: '<builtin:grep>', source: 'builtin' } },
-        { name: 'subagent_spawn', sourceInfo: { path: '/h/index.ts', source: 'npm:pi-better-harness', baseDir: '/h' } },
+        { name: 'subagent_spawn', sourceInfo: { path: join(harness, 'index.ts'), source: 'npm:pi-better-harness', baseDir: harness } },
         { name: 'apply_patch', sourceInfo: { path: '/v/src/index.ts', source: 'npm:@vanillagreen/pi-codex-minimal-tools', baseDir: '/v' } },
-        { name: 'ask_user_question', sourceInfo: { path: '/q/index.ts', source: 'npm:@juicesharp/rpiv-ask-user-question', baseDir: '/q' } },
+        { name: 'ask_user_question', sourceInfo: { path: join(ask, 'index.ts'), source: 'npm:@juicesharp/rpiv-ask-user-question', baseDir: ask } },
     ];
-    return { base, web, other, registered };
+    return { base, web, other, ask, registered };
 }
 
 test('discovery lists only third-party tools with their owning package', (t) => {
-    const { registered, web } = packages(t);
+    const { registered, web, ask } = packages(t);
     assert.deepEqual(discoverTrustedTools(registered), [
-        { name: 'ask_user_question', package: 'npm:@juicesharp/rpiv-ask-user-question', root: '/q' },
+        { name: 'ask_user_question', package: 'npm:@juicesharp/rpiv-ask-user-question', root: ask },
         { name: 'web_fetch', package: 'npm:@juicesharp/rpiv-web-tools', root: web },
         { name: 'web_search', package: 'npm:@juicesharp/rpiv-web-tools', root: web },
     ]);
@@ -65,4 +71,19 @@ test('network tools are refused with Network Off; unresolvable or mismatched pac
     assert.deepEqual(ticked.trusted.map((tool) => [tool.name, tool.root]), [['web_fetch', other]]);
     assert.deepEqual(planTaskTools({ ...base, requested: ['apply_patch'], network: true, settings: { applyPatch: false, trusted: [] } }).refused,
         [{ name: 'apply_patch', reason: 'apply_patch is off in /sandbox (Subagents · Tools)' }]);
+});
+
+test('a single extension file with no manifest is its own package: load and admit only that file', (t) => {
+    const { base } = packages(t);
+    const extensions = join(base, 'agent', 'extensions');
+    mkdirSync(extensions, { recursive: true });
+    const file = join(extensions, 'fetcher.ts');
+    writeFileSync(file, '');
+    writeFileSync(join(extensions, 'other.ts'), '');
+    const registered = [{ name: 'fetch_docs', sourceInfo: { path: file, source: 'local', scope: 'user', origin: 'top-level', baseDir: extensions } }];
+    assert.deepEqual(discoverTrustedTools(registered), [{ name: 'fetch_docs', package: file, root: file }]);
+    const plan = planTaskTools({ requested: ['fetch_docs'], settings: { applyPatch: false, trusted: [{ name: 'fetch_docs', package: file }] },
+        network: true, builtins: BUILTINS, registered, resolvePath: () => undefined });
+    assert.deepEqual(plan.trusted.map(({ root, loadPath }) => ({ root, loadPath })), [{ root: file, loadPath: file }],
+        'never the extensions directory, which Pi would scan for every extension');
 });

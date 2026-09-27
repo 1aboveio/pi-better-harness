@@ -45,8 +45,8 @@ Save as defaults
 - **Trusted** tools are the other tools your Pi has loaded, listed with their
   package. A ticked one is loaded into the subagent and runs in its Pi process,
   **outside the file rules**. Ticking one needs a second Space. It is admitted
-  only from the package you ticked, and network tools are refused while Network
-  access is Off.
+  only from the package you ticked. Known network tool names are refused while
+  Network access is Off: `web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name. That is a name list, not a network sandbox.
 
 Defaults: `apply_patch`, `web_fetch`, and `web_search` on; everything else off.
 See [ADR 0009](../../docs/adr/0009-guarded-and-trusted-subagent-tools.md).

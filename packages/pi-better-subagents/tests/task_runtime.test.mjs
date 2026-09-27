@@ -13,6 +13,7 @@ import { describeSandboxSupport } from '../shared-sandbox-core.ts';
 import { createTaskBashOperations } from '../shared-task-sandbox.ts';
 import taskGuard, { trustedToolRefusal } from '../task-guard.ts';
 import { parseTaskPolicy, prepareTaskRuntime } from '../task-policy.ts';
+import { planTaskTools } from '../subagent-tools.ts';
 
 function fixture(t, permissions = {}, fixtureParent = process.platform === 'win32' ? tmpdir() : '/var/tmp') {
     const base = realpathSync(mkdtempSync(join(fixtureParent, 'pi-task-runtime-')));
@@ -409,4 +410,31 @@ test('SDK-loaded apply_patch follows the task file rules in a confined session',
     assert.equal(readFileSync(join(f.base, 'outside.txt'), 'utf8'), 'keep\n');
     assert.equal(existsSync(join(f.base, 'new-outside.txt')), false);
     assert.equal(readFileSync(join(f.agent, 'settings.json'), 'utf8'), '{}');
+});
+
+test('a single-file extension is loaded and admitted by itself, never its whole directory', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const extensions = join(f.base, 'agent-extensions');
+    mkdirSync(extensions);
+    const marker = join(f.base, 'sibling-loaded');
+    const register = (text) => `pi.registerTool({ name: 'web_fetch', label: 'fetch', description: 'test fetch', parameters: { type: 'object', properties: {} },
+    async execute() { return { content: [{ type: 'text', text: ${JSON.stringify(text)} }], details: undefined }; } });`;
+    const good = join(extensions, 'fetcher.ts');
+    writeFileSync(good, `export default function (pi) { ${register('good')} }\n`);
+    // Unconfined extension code: if Pi scanned the directory, this would run and leave a marker.
+    const sibling = join(extensions, 'sibling.ts');
+    writeFileSync(sibling, `import { writeFileSync } from 'node:fs';\nexport default function (pi) { writeFileSync(${JSON.stringify(marker)}, 'x'); ${register('sibling')} }\n`);
+    const plan = planTaskTools({ requested: ['web_fetch'], settings: { applyPatch: false, trusted: [{ name: 'web_fetch', package: realpathSync(good) }] },
+        network: true, builtins: ['read', 'write', 'edit', 'bash'],
+        registered: [{ name: 'web_fetch', sourceInfo: { path: realpathSync(good), source: 'local', origin: 'top-level', baseDir: realpathSync(extensions) } }],
+        resolvePath: () => undefined });
+    const [tool] = plan.trusted;
+    assert.equal(tool.loadPath, realpathSync(good));
+    assert.equal(tool.root, realpathSync(good));
+    const admitted = startTrusted(t, f, { load: tool.loadPath, trustedRoot: tool.root });
+    assert.deepEqual(admitted.ready?.trusted, ['web_fetch'], admitted.output);
+    assert.equal(existsSync(marker), false, 'the sibling extension was never loaded');
+    const impostor = startTrusted(t, f, { load: realpathSync(sibling), trustedRoot: tool.root });
+    assert.equal(impostor.ready?.trusted, undefined, impostor.output);
+    assert.match(impostor.ready?.refused?.[0]?.reason ?? '', /not the trusted package/);
 });

@@ -7,7 +7,8 @@
  *   They run in the child Pi process, outside the file rules; a human ticks each
  *   one in /sandbox. Network tools are refused while Network is Off.
  */
-import { dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export interface TrustedToolEntry {
     /** Tool name as registered. */
@@ -70,7 +71,11 @@ export interface ToolSource {
 export interface DiscoveredTool {
     name: string;
     package: string;
-    /** The package's root directory (or the extension file for a top-level extension). */
+    /**
+     * What to load and admit: the package root directory, or, for an extension
+     * file with no package manifest, that file itself. Loading a manifest-less
+     * directory would make Pi discover every extension in it.
+     */
     root: string;
 }
 
@@ -78,8 +83,13 @@ export interface DiscoveredTool {
 export function toolPackage(tool: ToolSource): DiscoveredTool | undefined {
     const info = tool.sourceInfo;
     if (!info?.path || info.path.startsWith("<")) return undefined;
-    const pkg = info.source && info.source !== "builtin" ? info.source : info.path;
-    return { name: tool.name, package: pkg, root: info.baseDir ?? dirname(info.path) };
+    const base = info.baseDir ?? dirname(info.path);
+    if (!existsSync(join(base, "package.json"))) {
+        // A single extension file (e.g. ~/.pi/agent/extensions/foo.ts): it is its own package.
+        return { name: tool.name, package: info.path, root: info.path };
+    }
+    const pkg = info.source && info.source !== "builtin" ? info.source : base;
+    return { name: tool.name, package: pkg, root: base };
 }
 
 /** Candidate trusted tools in a running Pi, excluding builtins, guarded names and this harness. */
@@ -88,7 +98,7 @@ export function discoverTrustedTools(tools: readonly ToolSource[]): DiscoveredTo
     for (const tool of tools) {
         if (RESERVED_TOOL_NAMES.includes(tool.name)) continue;
         const owner = toolPackage(tool);
-        if (!owner || HARNESS_PACKAGES.test(owner.package.replace(/\/+$/, ""))) continue;
+        if (!owner || [owner.package, owner.root].some((id) => HARNESS_PACKAGES.test(id.replace(/\/+$/, "")))) continue;
         if (!found.some((t) => t.name === owner.name && t.package === owner.package)) found.push(owner);
     }
     return found.sort((a, b) => a.name.localeCompare(b.name) || a.package.localeCompare(b.package));

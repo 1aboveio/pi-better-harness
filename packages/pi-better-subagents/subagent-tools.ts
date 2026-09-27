@@ -6,8 +6,6 @@
  * package is loaded into the child. `toolExtensions` in config.json still picks
  * the package to load (an override), but the loaded package must be the ticked one.
  */
-import { statSync } from "node:fs";
-import { dirname } from "node:path";
 import { canonicalizePath } from "./shared-sandbox-core.ts";
 import { isNetworkTool, packageLabel, toolPackage, type SubagentToolSettings, type ToolSource } from "./shared-task-tools.ts";
 import type { TaskExtensionTool } from "./task-policy.ts";
@@ -26,10 +24,6 @@ export interface TaskToolPlan {
 function specList(value: unknown): string[] {
     if (typeof value === "string") return value.trim() ? [value.trim()] : [];
     return Array.isArray(value) ? value.filter((s): s is string => typeof s === "string" && !!s.trim()).map((s) => s.trim()) : [];
-}
-
-function packageRoot(path: string): string {
-    try { return statSync(path).isDirectory() ? path : dirname(path); } catch { return dirname(path); }
 }
 
 export function planTaskTools(options: {
@@ -82,8 +76,9 @@ export function planTaskTools(options: {
             plan.refused.push({ name, reason: problem ?? `config.json toolExtensions maps it to ${override.map(packageLabel).join(", ")}, not the ticked package ${ticked.map((t) => packageLabel(t.package)).join(", ")}` });
             continue;
         }
+        // A directory is admitted as a package root; a file admits only itself.
         let root: string;
-        try { root = canonicalizePath(packageRoot(chosen.loadPath)); }
+        try { root = canonicalizePath(chosen.loadPath); }
         catch { plan.refused.push({ name, reason: `its package path ${chosen.loadPath} can't be resolved` }); continue; }
         plan.trusted.push({ name, package: chosen.package, root, network, loadPath: chosen.loadPath });
     }

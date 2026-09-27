@@ -234,8 +234,10 @@ chosen in `/sandbox` → Subagents · Tools
   Their package is loaded into the child and they run in the child Pi process,
   **outside the file rules**. The child admits one only when both its name and
   its package match the ticked entry, so another package registering the same
-  name is refused. Network tools are refused while Network access is Off, and a
-  ticked tool whose package can't be found is refused at launch. Ticked tools
+  name is refused. A single extension file with no package manifest is loaded
+  and admitted by itself, never its directory. Known network tool names
+  (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network access is Off; this is a name list, not a
+  network sandbox. A ticked tool whose package can't be found is refused at launch. Ticked tools
   join the default tool list; an explicit `tools` list still decides.
 
 Other tools are disabled in confined children and listed in launch output with
