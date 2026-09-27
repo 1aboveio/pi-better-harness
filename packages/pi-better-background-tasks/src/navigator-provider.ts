@@ -9,7 +9,7 @@ import {
 } from "./shared-navigator.ts";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { activeFailures, readFailureState } from "./shared-failure-observations.js";
+import { activeFailures, failureLabel, readFailureState } from "./shared-failure-observations.js";
 import { failurePath, failureSummary } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
@@ -217,7 +217,7 @@ function secondaryLabel(meta: BackgroundTaskMeta): string | undefined {
 function factsForMeta(meta: BackgroundTaskMeta, now: number): string[] {
   const facts: string[] = [];
   const incident = activeFailures(readFailureState(failurePath(meta.id)))[0];
-  if (incident) facts.push(`${incident.category === "observation-incomplete" ? "Observation incomplete" : incident.status === "expected" ? "Expected failure" : "Unresolved failure"}: ${incident.summary}`);
+  if (incident) facts.push(`${failureLabel(incident)}: ${incident.summary}`);
   if (meta.status === "running") {
     const stall = observeBackgroundTaskStall(meta, now);
     if (stall.state === "stalled") facts.push("stalled");

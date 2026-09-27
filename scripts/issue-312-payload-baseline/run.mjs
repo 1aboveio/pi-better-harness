@@ -76,6 +76,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
     const { buildHealthCallbackDelivery } = await import("../../packages/pi-better-subagents/completion.mjs");
     const callbackFields = await import("../../packages/pi-better-subagents/callback-fields.ts");
     const { collectRunFailures } = await import("../../packages/pi-better-subagents/failures.ts");
+    const { pendingFailureAttention } = await import("../../packages/pi-better-subagents/shared-failure-observations.ts");
     const bgRegistry = await import("../../packages/pi-better-background-tasks/src/registry.ts");
     const bgLogs = await import("../../packages/pi-better-background-tasks/src/logs.ts");
     const bgFailures = await import("../../packages/pi-better-background-tasks/src/failures.ts");
@@ -131,7 +132,9 @@ export async function collectBaseline({ phase = "before" } = {}) {
         const host = { sendMessage(message, options) { callbacks[bucket] = { content: message.content, customType: message.customType, options }; } };
         const batcher = createCallbackBatcher(host, { windowMs: 60_000, retryMs: 60_000 });
         const meta = subagentRegistry.readMeta(id);
-        batcher.enqueue({ ...callbackFields.completionCallbackFields(meta, collectRunFailures(id, meta.cwd, true)), callback: true });
+        const state = collectRunFailures(id, meta.cwd, true);
+        const due = pendingFailureAttention(state, Date.now(), { terminal: true });
+        batcher.enqueue({ ...callbackFields.completionCallbackFields(meta, state, due?.incidents ?? []), callback: true });
         await batcher.flush();
         batcher.cancel();
     }
@@ -235,7 +238,9 @@ export async function collectBaseline({ phase = "before" } = {}) {
         const delivery = buildHealthCallbackDelivery({ id: meta.id, label: callbackFields.runLabel(meta), status: "orphaned", callback: true });
         const host = { sendMessage(message) { orphanedCallback = message.content; } };
         const batcher = createCallbackBatcher(host, { windowMs: 60_000, retryMs: 60_000 });
-        await batcher.deliverUrgent(callbackFields.healthCallbackFields(meta, "orphaned", collectRunFailures(meta.id, meta.cwd, false), delivery.content));
+        const state = collectRunFailures(meta.id, meta.cwd, false);
+        const due = pendingFailureAttention(state, Date.now(), { terminal: false });
+        await batcher.deliverUrgent(callbackFields.healthCallbackFields(meta, "orphaned", state, delivery.content, due?.incidents ?? []));
         batcher.cancel();
     }
     pushCase(cases, credentialFindings, {

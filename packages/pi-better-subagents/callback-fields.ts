@@ -7,7 +7,8 @@
  * batcher to capture actual delivered content.
  */
 import type { CallbackBatchEvent, UrgentCallbackEvent } from "./shared-callback-batcher.ts";
-import { activeFailures, formatFailureLines, type FailureState } from "./shared-failure-observations.ts";
+import { activeFailures, pendingAttentionNote, pendingAttentionRows, requiresAction, terminalFailureParts,
+    type FailureState } from "./shared-failure-observations.ts";
 import type { RunMeta } from "./registry.ts";
 
 export function runLabel(meta: Pick<RunMeta, "id" | "name">): string {
@@ -15,58 +16,77 @@ export function runLabel(meta: Pick<RunMeta, "id" | "name">): string {
 }
 
 type CompletionFields = Pick<CallbackBatchEvent,
-    "source" | "id" | "label" | "status" | "detailTool" | "outcome" | "failureRows" | "incidentCount">;
+    "source" | "id" | "label" | "status" | "detailTool" | "outcome" | "failureRows" | "decision" | "incidentCount">;
 
 type UrgentFields = Pick<UrgentCallbackEvent,
     "source" | "id" | "label" | "status" | "customType" | "content" | "detailTool" | "failureRows" | "incidentCount">;
 
-/** Ordinary terminal completion: outcome plus every active incident row for exact counting. */
-export function completionCallbackFields(meta: RunMeta, state: FailureState): CompletionFields {
-    const unresolved = Object.values(state.observations).filter((observation) => observation.status === "unresolved");
-    const observationStatus = unresolved.some((observation) => observation.category === "observation-incomplete")
-        ? "observation incomplete" : unresolved.length ? "unresolved failure observations" : undefined;
+/**
+ * Lifecycle, current actionability, and retained history are separate facts (#315). Rows are the
+ * actionable/incomplete incidents among `incidents` (the terminal pending set), counted exactly;
+ * unclassified tool failures, expected failures, closed history, and earlier deliveries are counts.
+ */
+function terminalFields(state: FailureState, incidents: readonly string[]) {
+    const { rows, notes } = terminalFailureParts(state, incidents);
+    return { failureRows: rows.length ? rows : undefined, incidentCount: rows.length || undefined, notes };
+}
+
+function observationStatus(state: FailureState): string | undefined {
     const active = activeFailures(state);
+    return [
+        active.some((observation) => requiresAction(observation)) ? "action required" : "",
+        active.some((observation) => observation.category === "observation-incomplete") ? "observation incomplete" : "",
+    ].filter(Boolean).join("; ") || undefined;
+}
+
+/** Ordinary terminal completion: outcome, pending actionable rows, and history as counts. */
+export function completionCallbackFields(meta: RunMeta, state: FailureState, incidents: readonly string[] = []): CompletionFields {
+    const status = observationStatus(state);
+    const { failureRows, incidentCount, notes } = terminalFields(state, incidents);
     return {
         source: "subagent",
         id: meta.id,
         label: runLabel(meta),
-        status: observationStatus ? `${meta.status}; ${observationStatus}` : meta.status,
+        status: status ? `${meta.status}; ${status}` : meta.status,
         detailTool: "subagent_result",
         outcome: meta.status,
-        failureRows: active.length ? formatFailureLines(state) : undefined,
-        incidentCount: active.length || undefined,
+        failureRows,
+        ...(notes.length ? { decision: notes.join(" ") } : {}),
+        incidentCount,
     };
 }
 
-/** Orphaned/lost health transition: the ATTENTION explanation plus incident rows. */
-export function healthCallbackFields(meta: RunMeta, status: "orphaned" | "lost", state: FailureState, content: string): UrgentFields {
-    const rows = formatFailureLines(state);
+/** Orphaned/lost health transition: the ATTENTION explanation, pending actionable rows, history as counts. */
+export function healthCallbackFields(meta: RunMeta, status: "orphaned" | "lost", state: FailureState, content: string,
+    incidents: readonly string[] = []): UrgentFields {
+    const { failureRows, incidentCount, notes } = terminalFields(state, incidents);
     return {
         source: "subagent",
         id: meta.id,
         label: runLabel(meta),
         status,
         customType: "subagent-health",
-        content,
+        content: notes.length ? `${content}\n${notes.join(" ")}` : content,
         detailTool: "subagent_result",
-        failureRows: rows.length ? rows : undefined,
-        incidentCount: rows.length || undefined,
+        failureRows,
+        incidentCount,
     };
 }
 
-/** Running/orphaned failure attention: why attention is needed plus incident rows. */
+/** Running/orphaned failure attention: exactly the pending incidents; earlier ones are counted, never repeated. */
 export function failureAttentionFields(meta: RunMeta, state: FailureState, pending: { key: string; incidents: string[] }): UrgentFields {
-    const rows = formatFailureLines(state);
-    const due = pending.incidents.length;
+    const rows = pendingAttentionRows(state, pending.incidents);
+    const note = pendingAttentionNote(state, pending.incidents);
+    const due = rows.length;
     return {
         source: "subagent",
         id: meta.id,
         label: runLabel(meta),
         status: `failure:${pending.key}`,
         customType: "subagent-failure",
-        content: `Subagent ${meta.id} (${meta.status}) has ${due} unresolved failure observation${due === 1 ? "" : "s"} that need attention.`,
+        content: `Subagent ${meta.id} (${meta.status}) has ${due} failure observation${due === 1 ? "" : "s"} that need attention.${note ? ` ${note}` : ""}`,
         detailTool: "subagent_result",
         failureRows: rows,
-        incidentCount: rows.length || undefined,
+        incidentCount: due || undefined,
     };
 }

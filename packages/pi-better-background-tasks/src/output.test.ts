@@ -100,7 +100,7 @@ describe("background output budgets", () => {
     expect(utf8ByteLength(status)).toBeLessThanOrEqual(1024);
     expect(utf8ByteLength(log)).toBeLessThanOrEqual(1024);
     expect(utf8ByteLength(list)).toBeLessThanOrEqual(1024);
-    expect(status).toMatch(/^Unresolved failure/);
+    expect(status).toMatch(/^Action required/);
     expect(status).toContain("Condition matched: $.terminalFailure = true");
     expect(status).toContain("observed: true");
     expect(status).toContain("capture overflow discarded 1200012");
@@ -224,7 +224,7 @@ describe("failure-only revisions and wrapper identity", () => {
     expect(cursor).toBeTruthy();
     recordFailure(meta, "poll", "poll failed", "1", { category: "operation" });
     const second = formatStatus(inspectMeta(meta.id), { origin, cursor });
-    expect(second).toContain("Unresolved failure");
+    expect(second).toContain("Action required");
     expect(second).toContain("poll failed");
     expect(second).toContain("change=failure");
     expect(second).not.toContain("No new evidence since cursor");
@@ -251,7 +251,7 @@ describe("failure-only revisions and wrapper identity", () => {
   it("keeps launch failures ahead of the started line", () => {
     const meta = fixture({ status: "failed" });
     recordFailure(meta, "execution", "Process exited with code 9", "close", { category: "exit" });
-    expect(formatLaunch(inspectMeta(meta.id)!.meta!)).toMatch(/^Unresolved failure.*Process exited with code 9/);
+    expect(formatLaunch(inspectMeta(meta.id)!.meta!)).toMatch(/^Action required.*Process exited with code 9/);
   });
 });
 
@@ -364,7 +364,7 @@ describe("list defaults", () => {
     expect(listed).toContain("hasMore=true omittedRows=2");
     expect(listed).toContain(ids[0]);
     expect(listed).not.toContain(ids[11]);
-    expect(listed).not.toMatch(/Unresolved failure[\s\S]*Unresolved failure/);
+    expect(listed).not.toMatch(/Action required[\s\S]*Action required/);
     const next = formatList({ origin, cursor: listed.match(/nextCursor=(\S+)/)?.[1] });
     expect(next).toContain(ids[10]);
     expect(next).toContain(ids[11]);
@@ -394,7 +394,7 @@ describe("callback facts", () => {
     expect(facts.outcome).toBe("failed");
     expect(facts.decision).toContain("Condition matched: $.terminalFailure = true");
     expect(facts.decision).toContain("capture overflow discarded 1200 bytes");
-    expect(facts.failureRows?.[0]).toMatch(/Unresolved failure/);
+    expect(facts.failureRows?.[0]).toMatch(/Action required/);
     expect(facts.incidentCount).toBe(1);
     expect(JSON.stringify(facts)).not.toContain("SECRET");
     expect(JSON.stringify(facts)).not.toMatch(/tools used:/);

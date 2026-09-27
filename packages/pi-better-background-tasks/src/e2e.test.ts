@@ -301,8 +301,8 @@ describe("extension e2e", () => {
       await harness.fireSessionStart();
       const navigator = renderWidget(harness.lastWidget("background-work-list"));
       for (const text of [list, status, log]) {
-        expect(text).toMatch(/^Unresolved failure.*build failed with exit 9/);
-        expect(text.indexOf("Unresolved failure")).toBeLessThan(text.indexOf(id));
+        expect(text).toMatch(/^Action required.*build failed with exit 9/);
+        expect(text.indexOf("Action required")).toBeLessThan(text.indexOf(id));
       }
       expect(JSON.parse(verbose)).toMatchObject({
         failureSummary: expect.stringContaining("build failed with exit 9"), id,

@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  failureAttentionHandled, failureIdentity, formatFailureLines, formatFailureSummary, markFailureAttentionDelivered,
-  observeFailures, pendingFailureAttention, readFailureState, type FailureState,
+  failureAttentionHandled, failureIdentity, formatFailureSummary, markFailureAttentionDelivered,
+  observeFailures, pendingAttentionNote, pendingAttentionRows, pendingFailureAttention, readFailureState, type FailureState,
 } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir } from "./registry.js";
@@ -42,9 +42,11 @@ export function stopFailureAttention(id: string): void {
 /**
  * Model-facing fields of a running task's failure attention. The notification
  * identity is per incident set; the inspect target is the real task id.
+ * Only the pending incidents are rows; earlier deliveries are counted, never repeated (#315).
  */
 export function failureAttentionFields(meta: BackgroundTaskMeta, state: FailureState, pending: { key: string; incidents: string[] }) {
-  const rows = formatFailureLines(state);
+  const rows = pendingAttentionRows(state, pending.incidents);
+  const note = pendingAttentionNote(state, pending.incidents);
   const due = pending.incidents.length;
   return {
     source: "background-task" as const,
@@ -53,7 +55,7 @@ export function failureAttentionFields(meta: BackgroundTaskMeta, state: FailureS
     label: meta.name ?? meta.id,
     status: "failure",
     customType: "background-task-failure",
-    content: `Background task ${meta.id} is still running with ${due} unresolved failure observation${due === 1 ? "" : "s"} that need attention.`,
+    content: `Background task ${meta.id} is still running with ${due} failure observation${due === 1 ? "" : "s"} that need attention.${note ? ` ${note}` : ""}`,
     detailTool: "bg_task_status" as const,
     failureRows: rows,
     incidentCount: rows.length || undefined,

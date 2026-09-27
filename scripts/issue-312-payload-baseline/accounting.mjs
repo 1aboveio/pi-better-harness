@@ -92,7 +92,7 @@ export function payloadFacts(text, { proposedBudgetBytes } = {}) {
         containsTruncationMarker: /\[showing tail of/i.test(content) || /…/.test(content),
         containsEmptyLogMasquerade: /\(log is empty\)|\(no output yet\)/i.test(content),
         additionalActiveFailuresRetained: additional ? Number(additional[1]) : 0,
-        containsUnresolvedFailure: /Unresolved failure/i.test(content),
+        containsUnresolvedFailure: /Unresolved failure|Action required|Unclassified failure observation/i.test(content),
         containsObservationIncomplete: /Observation incomplete/i.test(content),
         compactStatusShowsMatchedCondition: /Condition matched:/i.test(content),
         containsSyntheticMarker: /issue-312-synthetic/.test(content),

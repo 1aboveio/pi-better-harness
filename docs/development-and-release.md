@@ -155,6 +155,10 @@ and probe the backend, then run the confinement suites with that variable set.
 `pi-better-subagents` keeps its Linux bubblewrap file outside its `tests/*.test.mjs`
 glob, so it is invoked by name through `test:linux-sandbox` rather than by
 `npm test`.
+Its real-runtime child-intent suite (`tests/child_incidents.test.mjs`) is part of
+`npm test` but skips on a runner without a usable backend, so both
+`test:macos-sandbox` and `test:linux-sandbox` also run it by name under the
+required backend.
 
 ## Local Pi Development
 
