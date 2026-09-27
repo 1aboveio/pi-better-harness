@@ -10,8 +10,8 @@ No model calls were made to seed the payloads.
 
 ```bash
 node --import tsx scripts/issue-312-payload-baseline.mjs --phase before \
-  --json-out docs/issue-312-payload-baseline.json \
-  --md-out docs/issue-312-payload-baseline.md
+  --json-out docs/tests/issue-312-payload-baseline/before.json \
+  --md-out docs/tests/issue-312-payload-baseline/before.md
 ```
 
 After the integration lands, rerun with `--phase after` and compare `utf8Bytes`, `facts.containsOrderedToolSequence`, longest-line bytes, and whether proposed budgets are exceeded. Do not treat this BEFORE file as a regression pin that blesses current over-budget or tool-history behavior.

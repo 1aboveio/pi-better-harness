@@ -28,6 +28,7 @@ All notable changes to this project are documented in this file. The format is b
 - **subagents** (#325): the confined child checks `attemptId` reuse and validates dispositions against its whole session record (every branch), matching the parent's whole-log scan. After a branch switch or compaction a reuse the parent sees is always one the child refused, so a command that really ran and failed is never filed as a non-escalating `rejected-intent`
 - **subagents** (#325): after an orphaned or lost run's health callback, observation gaps are delivered promptly (once) instead of waiting for a callback that may never come
 - **subagents** (#325): the provenance record is removed on every run-removal path (age and size sweeps, including runs with unreadable metadata) and records whose run is gone are swept. A launch whose spawn fails removes its run directory, provenance, and task scratch
+- **background-tasks**: resume is per session. After `/new`, `/resume`, fork, or a session switch, the previous session's tasks keep running, but their watches, remote output collection, and `timeout_seconds` deadlines pause until that session is active again; an overdue deadline is enforced on resume. (#324)
 
 ### Deprecated
 
@@ -38,6 +39,7 @@ All notable changes to this project are documented in this file. The format is b
 
 - **subagents** (#325): a transient failure reading a run's metadata no longer pins its failure scan to the exact-retry rule. The scan waits for trust to be readable, for at most 30 seconds or until the run ends; after that the log is scanned under the exact-retry rule so real failures stay visible, with an `Observation incomplete` note that the metadata could not be read
 - **subagents, background-tasks** (#325): the terminal failure summary never exceeds its byte budget and is made of whole lines. Under a tight budget incident rows are dropped first, then lower-priority notes and the count line; the "Work correctness was not inferred from lifecycle alone." note is kept whenever it fits and never cut mid-sentence
+- **background-tasks**: completion callbacks are no longer lost across `/reload`. Before, the unloaded extension instance kept running watch and poll timers and child exit handlers with no active session; when a task finished there, its callback was durably suppressed as "active session identity is unavailable". Session shutdown now stops that instance's timers and it never notifies; work already in flight (a child exit, a remote tmux start, a timeout kill) only records its result, and the resuming instance delivers the callback once. A same-process task whose exit nobody records is marked lost after a 5 s grace period instead of immediately. (#324)
 
 ## [pi-better-harness@0.6.1] - 2026-09-27
 

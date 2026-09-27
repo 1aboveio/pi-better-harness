@@ -1,6 +1,6 @@
 # Issue #312 model-facing payload baseline (after)
 
-Measured at 2026-09-27T07:16:00.168Z from HEAD @ `880b99f084ace71cff9de9462815b29c6ffb3c7c`.
+Measured at 2026-09-27T10:08:41.784Z from fix/test-packaging-hygiene @ `ff722263c9e84143d2881e37bcebbe2425c6e8b3`.
 Accounting: **UTF-8 bytes** (`Buffer.byteLength(text, "utf8")`). Tokenizer counts are not included.
 
 Runtime model for this capture session: `unknown/unknown` effort `unknown`.
@@ -10,8 +10,8 @@ No model calls were made to seed the payloads.
 
 ```bash
 node --import tsx scripts/issue-312-payload-baseline.mjs --phase after \
-  --json-out docs/issue-312-payload-baseline-after.json \
-  --md-out docs/issue-312-payload-baseline-after.md
+  --json-out docs/tests/issue-312-payload-baseline/after.json \
+  --md-out docs/tests/issue-312-payload-baseline/after.md
 ```
 
 This AFTER capture measures the shipped OUTPUT-POLICY defaults. Compare it with the BEFORE file (`--phase before`) on `utf8Bytes`, `facts.containsOrderedToolSequence`, longest-line bytes, and whether budgets are exceeded.
@@ -41,8 +41,9 @@ This AFTER capture measures the shipped OUTPUT-POLICY defaults. Compare it with 
 | `subagent.orphaned.result` | orphaned | subagent_result | 725 | 719 | 131 | no / 2048 | no |
 | `subagent.orphaned.callback` | orphaned | createCallbackBatcher.deliverUrgent | 587 | 586 | 196 | no / 2048 | no |
 | `subagent.unicode.result` | unicode-long-line-json | subagent_result | 2047 | 984 | 1696 | no / 2048 | no |
+| `subagent.multi_page.result` | multi-page-answer | subagent_result | 1993 | 1719 | 151 | no / 2048 | no |
 | `subagent.many_failures.result` | many-failures | subagent_result | 630 | 623 | 251 | no / 2048 | no |
-| `subagent.list` | many-failures | subagent_list | 928 | 916 | 151 | no / 1024 | no |
+| `subagent.list` | many-failures | subagent_list | 899 | 888 | 147 | no / 1024 | no |
 | `subagent.foreign.result` | success | subagent_result | 165 | 164 | 88 | no / 2048 | no |
 | `subagent.ownership.unavailable` | success | subagent_result | 293 | 292 | 204 | no / 2048 | no |
 | `background.success.status` | success | bg_task_status | 589 | 589 | 318 | no / 1024 | no |
@@ -66,6 +67,7 @@ These are observations about the current producer, not blessed behavior.
 - `subagent.incomplete.callback`: contains Observation incomplete
 - `subagent.orphaned.result`: TUI compact 653 B vs model 725 B
 - `subagent.unicode.result`: TUI compact 464 B vs model 2047 B; UTF-8 2047 B > UTF-16 984
+- `subagent.multi_page.result`: 5420 B answer over 4 pages (max 2045 B/page); reconstructed exactly: true
 - `subagent.many_failures.result`: TUI compact 548 B vs model 630 B
 - `background.success.status.wrapper`: wrapper matches standalone: true; TUI compact 311 B vs model 589 B
 - `background.failed.status`: matched-condition path present: true; compact "Condition matched:" line present: true; compact result field currently shows `failure_when`

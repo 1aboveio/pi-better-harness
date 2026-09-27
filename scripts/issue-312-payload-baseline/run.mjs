@@ -65,6 +65,31 @@ function incidentCursorOf(content) {
         ?? String(content ?? "").match(/cursor=(i1\.\S+)/)?.[1];
 }
 
+/** The answer text of one subagent_result page: after the header line, before the continuation. */
+export function answerPageBody(content) {
+    let body = String(content ?? "");
+    const cont = body.indexOf("\n---\n");
+    if (cont !== -1) body = body.slice(0, cont);
+    const nl = body.indexOf("\n");
+    if (nl === -1) return "";
+    return body.slice(nl + 1).replace(/\nstatusCursor=\S+\s*$/, "");
+}
+
+/** Follow subagent_result's nextCursor until hasMore is false; returns every page's content. */
+async function readAnswerPages(tool, id, ctx) {
+    const pages = [];
+    let cursor;
+    for (let page = 1; page <= 100; page += 1) {
+        const content = textOf(await tool.execute("issue-312-baseline", cursor ? { id, cursor } : { id }, undefined, undefined, ctx));
+        pages.push(content);
+        if (!/hasMore=true/.test(content)) return pages;
+        const next = nextCursorOf(content);
+        if (!next || next === cursor) throw new Error(`subagent_result page ${page} for ${id} has hasMore=true without a new nextCursor`);
+        cursor = next;
+    }
+    throw new Error(`subagent_result for ${id} did not finish within 100 pages`);
+}
+
 function budgetsFor(phase) {
     return phase === "after" ? POLICY_BUDGETS_BYTES : PROPOSED_BUDGETS_BYTES;
 }
@@ -114,6 +139,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         orphaned: fixtures.seedSubagentOrphaned(subagentRegistry),
         unicode: fixtures.seedSubagentUnicode(subagentRegistry),
         manyFailures: fixtures.seedSubagentManyFailures(subagentRegistry),
+        multiPage: fixtures.seedSubagentMultiPage(subagentRegistry),
         foreign: fixtures.seedSubagentForeign(subagentRegistry),
         bgSuccess: fixtures.seedBgSuccess(bgRegistry, bgLogs),
         bgFailed: fixtures.seedBgFailed(bgRegistry, bgLogs, bgFailures),
@@ -263,6 +289,29 @@ export async function collectBaseline({ phase = "before" } = {}) {
         proposedBudgetBytes: budgetsFor(phase).subagent_result,
         facts: { seededUnicodeJsonUtf8Bytes: utf8Bytes(fixtures.UNICODE_JSON_LINE) },
     }, subagent.result, { id: seeded.unicode.id });
+
+    {
+        const pages = await readAnswerPages(subagent.result, seeded.multiPage.id, ctx);
+        const reconstructed = pages.map(answerPageBody).join("");
+        const pageBytes = pages.map(utf8Bytes);
+        pushCase(cases, credentialFindings, {
+            id: "subagent.multi_page.result",
+            family: "multi-page-answer",
+            surface: "subagent_result",
+            tool: "subagent_result",
+            invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute (nextCursor pages)",
+            params: { id: seeded.multiPage.id, followNextCursor: true },
+            proposedBudgetBytes: budgetsFor(phase).subagent_result,
+            facts: {
+                answerUtf8Bytes: utf8Bytes(fixtures.MULTI_PAGE_ANSWER),
+                pageCount: pages.length,
+                pageUtf8Bytes: pageBytes,
+                maxPageUtf8Bytes: Math.max(...pageBytes),
+                reconstructedUtf8Bytes: utf8Bytes(reconstructed),
+                reconstructedExactly: reconstructed === fixtures.MULTI_PAGE_ANSWER,
+            },
+        }, pages[0]);
+    }
 
     await measureResult({
         id: "subagent.many_failures.result",
@@ -537,6 +586,9 @@ export async function collectBaseline({ phase = "before" } = {}) {
     };
 }
 
+/** Where the committed BEFORE/AFTER captures live (#324 moved them out of the docs/ root). */
+export const BASELINE_DIR = "docs/tests/issue-312-payload-baseline";
+
 export const LIMITATIONS = [
     "Accounting is UTF-8 bytes via Buffer.byteLength, plus JS UTF-16 code-unit length. Tokenizer counts are not measured.",
     "Payloads come from registered tool execute() / finalizeRun sendMessage / callback-batcher sendMessage. TUI renderResult is recorded only to show display folding is not the model-facing budget.",
@@ -603,8 +655,8 @@ No model calls were made to seed the payloads.
 
 \`\`\`bash
 node --import tsx scripts/issue-312-payload-baseline.mjs --phase ${serializable.phase} \\
-  --json-out docs/issue-312-payload-baseline${serializable.phase === "after" ? "-after" : ""}.json \\
-  --md-out docs/issue-312-payload-baseline${serializable.phase === "after" ? "-after" : ""}.md
+  --json-out ${BASELINE_DIR}/${serializable.phase}.json \\
+  --md-out ${BASELINE_DIR}/${serializable.phase}.md
 \`\`\`
 
 ${serializable.phase === "after"
@@ -642,6 +694,7 @@ ${serializable.cases.map((item) => {
     if (item.facts.wrapperMatchesStandalone != null) notes.push(`wrapper matches standalone: ${item.facts.wrapperMatchesStandalone}`);
     if (item.facts.tuiFoldsDisplayOnly) notes.push(`TUI compact ${item.facts.tuiCompactUtf8Bytes} B vs model ${item.utf8Bytes} B`);
     if (item.facts.utf8GreaterThanUtf16 && item.family === "unicode-long-line-json") notes.push(`UTF-8 ${item.utf8Bytes} B > UTF-16 ${item.facts.utf16CodeUnits}`);
+    if (item.facts.pageCount != null) notes.push(`${item.facts.answerUtf8Bytes} B answer over ${item.facts.pageCount} pages (max ${item.facts.maxPageUtf8Bytes} B/page); reconstructed exactly: ${item.facts.reconstructedExactly}`);
     if (item.facts.longestLineUtf8Bytes >= 2048) notes.push(`longest line ${item.facts.longestLineUtf8Bytes} B`);
     if (!notes.length) return null;
     return `- \`${item.id}\`: ${notes.join("; ")}`;

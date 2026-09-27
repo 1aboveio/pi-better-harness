@@ -143,6 +143,19 @@ test('task commands retain private scratch and deny ordinary outside writes', { 
     assert.equal(existsSync(join(f.base, 'outside-temp')), false);
 });
 
+/**
+ * True while `pid` can still run. On Linux a killed, orphaned process may stay a zombie
+ * until its reaper collects it; a zombie cannot execute, so it counts as gone.
+ */
+function processLingers(pid) {
+    if (process.platform === 'linux') {
+        try {
+            if (/\) Z /.test(readFileSync(`/proc/${pid}/stat`, 'utf8'))) return false;
+        } catch { return false; }
+    }
+    try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 test('shell initialization executes only inside confinement and cancellation remains effective', { skip: !supported }, async (t) => {
     const f = fixture(t);
     const startup = join(f.project, 'startup.sh'), escaped = join(f.base, 'escaped');
@@ -175,7 +188,16 @@ test('shell initialization executes only inside confinement and cancellation rem
         },
     });
     assert.ok(trackedPid, 'the tracked command started');
-    assert.throws(() => process.kill(trackedPid, 0), /ESRCH/, 'SDK shutdown cleanup must terminate the detached command');
+    try {
+        // The kill is delivered before exec resolves, but the kernel may not have torn the
+        // process down yet: wait (bounded) instead of asserting immediately. A command that
+        // was never killed keeps running `sleep 10` and still fails.
+        const deadline = Date.now() + 3_000;
+        while (Date.now() < deadline && processLingers(trackedPid)) await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.equal(processLingers(trackedPid), false, 'SDK shutdown cleanup must terminate the detached command');
+    } finally {
+        try { process.kill(trackedPid, 'SIGKILL'); } catch { /* already gone */ }
+    }
 });
 
 test('default task tools retain literal /tmp writes without opening outside files or arbitrary locks', { skip: !supported || process.platform === 'win32' }, async (t) => {
