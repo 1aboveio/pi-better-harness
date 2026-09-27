@@ -12,7 +12,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { writeFileSync, mkdirSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
@@ -48,6 +48,8 @@ import {
     taskWorkspaceDir,
     sessionsDir,
     runDir,
+    recordTaskRuntimeProvenance,
+    removeRunDirectory,
     logPathFor,
     promptPathFor,
     nextRunId,
@@ -393,8 +395,10 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
     if ((meta.status === "orphaned" || meta.status === "lost") && !isHealthCallbackHandled(meta, meta.status)) return;
     const state = collectRunFailures(meta.id, meta.cwd, meta.status !== "running" && meta.status !== "orphaned");
     // Evidence gaps (oversized or malformed log records) are not something the parent can act on
-    // while the child runs; they ride the completion or health callback instead (#315).
-    const pending = pendingFailureAttention(state, now, { deferObservationGaps: true });
+    // while the child runs; they ride the completion or health callback instead (#315). Once an
+    // orphaned run's health callback is handled there is no later callback that is sure to come
+    // (the run may stay orphaned), so gaps found after it are delivered now (#325).
+    const pending = pendingFailureAttention(state, now, { deferObservationGaps: meta.status === "running" });
     if (!pending || (meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined)) return;
     // Only the pending incidents are rendered; earlier deliveries are counted, not repeated (#315).
     void getCallbackBatcher(pi).deliverUrgent({
@@ -1428,10 +1432,21 @@ export default function (pi: ExtensionAPI) {
             runtimeRoots: [baseDir()],
         }) : undefined;
         if (sandboxEnabled && !taskRuntime) throw new Error("Task sandbox has no workspace; refusing an unconfined child.");
+        // Parent-authored trust record, written before the child can run (#325).
+        if (taskRuntime) recordTaskRuntimeProvenance(id);
         const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: piBin, fileArgs: args };
         const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
-        const spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
+        let spawned: ReturnType<typeof spawnDetached>;
+        try {
+            spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
+        } catch (error) {
+            // Nothing references the run yet (no metadata): drop its directory (prompt, control/),
+            // its provenance record, and the task scratch, so a failed launch leaves nothing behind (#325).
+            try { removeRunDirectory(id); } catch { /* best effort */ }
+            if (taskRuntime?.policy.scratch) rmSync(taskRuntime.policy.scratch, { recursive: true, force: true });
+            throw error;
+        }
         // Record process identity (pgid, start-time token) so health
         // reconciliation can tell a supervised child from a recycled pid
         // or an orphaned process group (#63). Best-effort: when the OS

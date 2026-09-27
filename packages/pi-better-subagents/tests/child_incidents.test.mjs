@@ -18,9 +18,10 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { describeSandboxSupport } from "../shared-sandbox-core.ts";
 import taskGuard from "../task-guard.ts";
 import { collectRunFailures, failurePath } from "../failures.ts";
-import { logPathFor, runDir } from "../registry.ts";
+import { logPathFor, recordTaskRuntimeProvenance, runDir, taskRuntimeProvenancePath } from "../registry.ts";
 import { activeFailures, failureHistory } from "../shared-failure-observations.ts";
 import { readCommandIntent } from "../incident-model.ts";
+import { intentBashDefinition } from "../child-incidents.ts";
 
 /**
  * Real-kernel lane convention (docs/development-and-release.md, "Sandbox confinement lanes"):
@@ -86,8 +87,9 @@ function childRun(t, session) {
     const id = `sa_child_incidents_${randomUUID()}`;
     mkdirSync(runDir(id), { recursive: true });
     // Launched on the trusted task runtime: the parent-written flag that enables structured intent.
-    writeFileSync(join(runDir(id), "meta.json"), JSON.stringify({ id, status: "running", cwd: process.cwd(), taskRuntime: true }));
-    t.after(() => rmSync(runDir(id), { recursive: true, force: true }));
+    writeFileSync(join(runDir(id), "meta.json"), JSON.stringify({ id, status: "running", cwd: process.cwd(), taskRuntime: true, startedAt: 1 }));
+    recordTaskRuntimeProvenance(id);
+    t.after(() => { rmSync(runDir(id), { recursive: true, force: true }); rmSync(taskRuntimeProvenancePath(id), { force: true }); });
     const log = (row) => appendFileSync(logPathFor(id), JSON.stringify(row) + "\n");
     const assistant = (toolCall) => session.sessionManager.appendMessage({ role: "assistant", content: [toolCall], api: "test", provider: "test", model: "test",
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
@@ -170,4 +172,45 @@ test("a child supersedes its merge conflict through failure_disposition and the 
     assert.equal(readFileSync(failurePath(child.id), "utf8").match(/"kind":"disposition"/g).length, 1);
     // The reused-attemptId rejection stays visible as its own non-escalating incident; nothing else is open.
     assert.deepEqual(activeFailures(state).map((x) => [x.id, x.category]), [["tool:reuse", "rejected-intent"]]);
+});
+
+test("#325 after a branch switch the child still refuses a reused attemptId, so the parent never misfiles a real run", async (t) => {
+    // Branch A ran attempt a1; the child then moved to branch B, whose path no longer contains it.
+    // The parent scans the whole process log (both branches) and predicts a reuse; the child must agree.
+    const assistant = (id, args) => ({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: args }] } });
+    const result = (id) => ({ type: "message", message: { role: "toolResult", toolCallId: id, toolName: "bash", isError: true, content: [{ type: "text", text: "1 failing" }] } });
+    const earlier = [assistant("a-run", { command: "npm test", attemptId: "a1" }), result("a-run")];
+    const current = [assistant("b-run", { command: "npm test -- scoped", attemptId: "a1" })];
+    /** A real session manager whose branch/entries views are the scenario's. */
+    const sessionView = (branch, entries) => {
+        const real = SessionManager.inMemory(process.cwd());
+        return { sessionManager: new Proxy(real, { get: (target, key) => key === "getBranch" ? () => branch : key === "getEntries" ? () => entries
+            : typeof target[key] === "function" ? target[key].bind(target) : target[key] }) };
+    };
+    const ctx = sessionView(current, [...earlier, ...current]);
+    let ran = 0;
+    const operations = { exec: async () => { ran += 1; return { exitCode: 1 }; } };
+    const bash = intentBashDefinition(process.cwd(), operations);
+    await assert.rejects(bash.execute("b-run", { command: "npm test -- scoped", attemptId: "a1" }, undefined, undefined, ctx), /attemptId a1 was already used/);
+    assert.equal(ran, 0, "the reused attempt never ran");
+    // The parent's view of the same record: a rejected intent that never ran, not a failure of the named operation.
+    const id = `sa_child_incidents_${randomUUID()}`;
+    mkdirSync(runDir(id), { recursive: true });
+    writeFileSync(join(runDir(id), "meta.json"), JSON.stringify({ id, status: "running", cwd: process.cwd(), taskRuntime: true, startedAt: 1 }));
+    recordTaskRuntimeProvenance(id);
+    t.after(() => { rmSync(runDir(id), { recursive: true, force: true }); rmSync(taskRuntimeProvenancePath(id), { force: true }); });
+    const rows = [
+        { type: "tool_execution_start", toolCallId: "a-run", toolName: "bash", args: { command: "npm test", attemptId: "a1" } },
+        { type: "tool_execution_end", toolCallId: "a-run", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "1 failing" }] } },
+        { type: "tool_execution_start", toolCallId: "b-run", toolName: "bash", args: { command: "npm test -- scoped", attemptId: "a1" } },
+        { type: "tool_execution_end", toolCallId: "b-run", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "Invalid command intent: attemptId a1 was already used. The command was not run." }] } },
+    ];
+    appendFileSync(logPathFor(id), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const state = collectRunFailures(id, process.cwd());
+    assert.deepEqual(activeFailures(state).map((x) => [x.id, x.category]).sort(), [["tool:a-run", "tool"], ["tool:b-run", "rejected-intent"]]);
+    // With a fresh attemptId on the new branch the command runs normally.
+    const fresh = [assistant("b-2", { command: "npm test -- scoped", attemptId: "a2" })];
+    const ctx2 = sessionView(fresh, [...earlier, ...current, ...fresh]);
+    await assert.rejects(bash.execute("b-2", { command: "npm test -- scoped", attemptId: "a2" }, undefined, undefined, ctx2), /exit code 1|code 1/i);
+    assert.equal(ran, 1, "an unused attemptId runs");
 });

@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
-import { logPathFor, readMeta, runDir } from "./registry.ts";
+import { logPathFor, runDir, taskRuntimeTrust } from "./registry.ts";
 import { activeFailures, disposeIncidents, failureIdentity, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
     observeFailures, pendingFailureAttention, readFailureState, type FailureState } from "./shared-failure-observations.ts";
 import { evidenceText, foldToolEnd, foldToolStart, newIncidentModel, toolOperation, type IncidentModel, type IncidentSink } from "./incident-model.ts";
@@ -10,10 +10,14 @@ export const failurePath = (id: string) => join(runDir(id), "failures.jsonl");
 export const readRunFailures = (id: string): FailureState => readFailureState(failurePath(id));
 interface Scan { offset: number; head: string; identity: string; model: IncidentModel; retry?: number }
 const scans = new Map<string, Scan>();
+/** When each run's trust first could not be read, for the bounded wait (#325). */
+const trustUnknownSince = new Map<string, number>();
+/** How long a running scan waits for unreadable trust before scanning under the exact-retry rule. */
+export const TRUST_WAIT_MS = 30_000;
 /** Drop an in-memory scan cursor (e.g. on reload); the journal remains authoritative. */
 export function resetFailureScanCursor(id?: string): void {
-    if (id === undefined) scans.clear();
-    else scans.delete(id);
+    if (id === undefined) { scans.clear(); trustUnknownSince.clear(); }
+    else { scans.delete(id); trustUnknownSince.delete(id); }
 }
 const CHUNK = 64 * 1024;
 const MAX_LINE = 2 * 1024 * 1024;
@@ -97,8 +101,37 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
             scan = undefined;
         }
         // Structured intent and dispositions are honoured only for runs launched on the trusted task
-        // runtime, whose bash and failure_disposition tools are the guarded ones (parent-written metadata).
-        if (!scan) scan = { offset: 0, head, identity, model: newIncidentModel(readMeta(id)?.taskRuntime === true) };
+        // runtime, whose bash and failure_disposition tools are the guarded ones. Trust needs the
+        // parent-authored provenance record as well as `meta.taskRuntime` (#325). It is decided once
+        // per scan model, and only from a definite answer: while metadata or provenance cannot be read
+        // the scan waits (nothing is folded, so a brief read failure pins nothing to the exact rule).
+        // The wait is bounded: at a terminal read, or once trust has been unreadable for
+        // TRUST_WAIT_MS, the log is scanned under the exact-retry rule (untrusted) so real failures
+        // stay visible, and an observation gap says the metadata could not be read.
+        if (!scan) {
+            const trust = taskRuntimeTrust(id);
+            if (trust === "unknown") {
+                const now = Date.now();
+                const since = trustUnknownSince.get(id) ?? now;
+                trustUnknownSince.set(id, since);
+                while (trustUnknownSince.size > 256) trustUnknownSince.delete(trustUnknownSince.keys().next().value!);
+                const prior = readRunFailures(id);
+                const gap = prior.observations[failureIdentity("run-metadata")];
+                const waited = terminal || now - since >= TRUST_WAIT_MS;
+                if (waited && !(gap && gap.status === "unresolved")) {
+                    observeFailures(path, [{ id: failureIdentity("run-metadata-unreadable", gap?.id ?? "initial"), operation: "run-metadata", kind: "incomplete",
+                        summary: "Run metadata could not be read; tool failures are scanned under the exact-retry rule" }]);
+                }
+                if (!waited) return prior;
+                scan = { offset: 0, head, identity, model: newIncidentModel(false) };
+            } else {
+                trustUnknownSince.delete(id);
+                scan = { offset: 0, head, identity, model: newIncidentModel(trust === "trusted") };
+                const deferred = readRunFailures(id).observations[failureIdentity("run-metadata")];
+                if (deferred && deferred.status === "unresolved") observeFailures(path, [{ id: `run-metadata-readable:${deferred.id}`,
+                    operation: "run-metadata", kind: "recovered", incidents: [deferred.id] }]);
+            }
+        }
         scan.head = head;
         let position = scan.offset;
         let start = position;

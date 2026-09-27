@@ -26,8 +26,10 @@ const {
 const {
     baseDir,
     logPathFor,
+    recordTaskRuntimeProvenance,
     runDir,
     sessionsDir,
+    taskRuntimeProvenancePath,
     writeMeta,
 } = await import("../registry.ts");
 
@@ -238,6 +240,24 @@ describe("enforceRegistrySizeCapOnce", () => {
         assert.deepEqual(result.removed, [], "an owned run survives the cap");
         assert.equal(result.overBudget, true, "and the shortfall is reported");
         assert.equal(existsSync(runDir(id)), true);
+    });
+
+    it("#325 removes the provenance record with a run whose metadata is unreadable, and sweeps orphaned records", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        // The metadata-less removal path (daily age sweep of an unreadable run directory).
+        const id = "sa_unreadable_old";
+        mkdirSync(runDir(id), { recursive: true });
+        writeFileSync(join(runDir(id), "meta.json"), "{corrupt");
+        recordTaskRuntimeProvenance(id);
+        const old = new Date(DAY - 30 * DAY_MS);
+        utimesSync(runDir(id), old, old);
+        // A record whose run an older version already removed.
+        recordTaskRuntimeProvenance("sa_gone_1");
+        const result = runDailyCleanupOnce({ now: DAY });
+        assert.equal(result.ran, true);
+        assert.equal(existsSync(runDir(id)), false);
+        assert.equal(existsSync(taskRuntimeProvenancePath(id)), false, "no provenance outlives its run");
+        assert.equal(existsSync(taskRuntimeProvenancePath("sa_gone_1")), false, "orphaned records are swept");
     });
 
     it("defaults to a 2 GiB budget — tighter than a single observed log", () => {

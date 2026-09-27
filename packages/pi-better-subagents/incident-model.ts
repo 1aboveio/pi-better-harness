@@ -8,46 +8,12 @@
  * `operationId` or the exact tool/arguments/cwd hash; expected exits require a code
  * declared on the attempt before it ran and a structured exit code from the tool.
  */
-import { failureIdentity, findIncident, validateDisposition, INCIDENT_DISPOSITIONS, REJECTED_INTENT_CATEGORY,
-    type FailureEvent, type FailureState, type IncidentDisposition } from "./shared-failure-observations.ts";
+import { failureIdentity, findIncident, validateDisposition, INCIDENT_DISPOSITIONS, INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES,
+    REJECTED_INTENT_CATEGORY, readCommandIntent, type CommandIntent, type FailureEvent, type FailureState, type IncidentDisposition } from "./shared-failure-observations.ts";
 
 export const DISPOSITION_TOOL = "failure_disposition";
-/** Caller-chosen identifiers: short, printable, no whitespace. */
-export const INTENT_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$";
-const INTENT_ID = new RegExp(INTENT_ID_PATTERN);
-export const MAX_EXPECTED_EXIT_CODES = 16;
-
-export interface CommandIntent {
-    /** Stable across caller-declared modified retries of one logical operation. */
-    operationId?: string;
-    /** Names one concrete execution; evidence identity, never an operation match. */
-    attemptId?: string;
-    /** Non-zero exit codes declared intentional before execution. */
-    expectedExitCodes?: number[];
-}
-
-/** Validate structured intent fields. Absent fields are fine; malformed ones are an error. */
-export function readCommandIntent(args: unknown): { intent: CommandIntent; error?: string } {
-    const input = (args && typeof args === "object" ? args : {}) as Record<string, unknown>;
-    const intent: CommandIntent = {};
-    for (const key of ["operationId", "attemptId"] as const) {
-        const value = input[key];
-        if (value === undefined) continue;
-        if (typeof value !== "string" || !INTENT_ID.test(value)) {
-            return { intent: {}, error: `${key} must match ${INTENT_ID_PATTERN}` };
-        }
-        intent[key] = value;
-    }
-    const codes = input.expectedExitCodes;
-    if (codes !== undefined) {
-        if (!Array.isArray(codes) || codes.length === 0 || codes.length > MAX_EXPECTED_EXIT_CODES ||
-            !codes.every((code) => Number.isInteger(code) && code >= 1 && code <= 255) || new Set(codes).size !== codes.length) {
-            return { intent: {}, error: `expectedExitCodes must be 1-${MAX_EXPECTED_EXIT_CODES} distinct integers from 1 to 255` };
-        }
-        intent.expectedExitCodes = [...codes] as number[];
-    }
-    return { intent };
-}
+// The intent validator is shared with background tasks through the vendored failure-observations module (#325).
+export { INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES, readCommandIntent, type CommandIntent };
 
 function stable(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(stable);

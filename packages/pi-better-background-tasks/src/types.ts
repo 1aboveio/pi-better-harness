@@ -124,6 +124,13 @@ export interface BackgroundTaskMeta {
   spawnPidStartTime?: string;
   successWhen?: Condition;
   failureWhen?: Condition;
+  /**
+   * Caller-declared structured intent (#325), validated before launch. A later task of the same
+   * kind, cwd, SSH target, and session with the same operationId that succeeds recovers this
+   * task's earlier failures; exit codes in expectedExitCodes are recorded as expected failures.
+   */
+  operationId?: string;
+  expectedExitCodes?: number[];
   notifyOn?: "terminal";
   stopRequestedAt?: number;
   error?: string;

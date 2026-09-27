@@ -85,6 +85,49 @@ export const REJECTED_INTENT_CATEGORY = "rejected-intent";
 /** The same unresolved agent tool operation failing this many times is treated as stuck. */
 export const REPEATED_FAILURE_THRESHOLD = 3;
 
+/** Caller-chosen intent identifiers: short, printable, no whitespace. */
+export const INTENT_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$";
+const INTENT_ID = new RegExp(INTENT_ID_PATTERN);
+export const MAX_EXPECTED_EXIT_CODES = 16;
+/**
+ * Structured command intent (#315), declared by the caller before a command runs. Shared by the
+ * subagent task runtime's bash and background tasks (#325) so both validate identically.
+ */
+export interface CommandIntent {
+  /** Stable across caller-declared modified retries of one logical operation. */
+  operationId?: string;
+  /** Names one concrete execution; evidence identity, never an operation match. */
+  attemptId?: string;
+  /** Non-zero exit codes declared intentional before execution. */
+  expectedExitCodes?: number[];
+}
+export type CommandIntentField = keyof CommandIntent;
+/**
+ * Validate structured intent fields. Absent fields are fine; malformed ones are an error, and the
+ * caller must not run the command. `names` renames fields in the error (e.g. snake_case parameters).
+ */
+export function readCommandIntent(args: unknown, names: Partial<Record<CommandIntentField, string>> = {}): { intent: CommandIntent; error?: string } {
+  const input = (args && typeof args === "object" ? args : {}) as Record<string, unknown>;
+  const intent: CommandIntent = {};
+  for (const key of ["operationId", "attemptId"] as const) {
+    const value = input[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !INTENT_ID.test(value)) {
+      return { intent: {}, error: `${names[key] ?? key} must match ${INTENT_ID_PATTERN}` };
+    }
+    intent[key] = value;
+  }
+  const codes = input.expectedExitCodes;
+  if (codes !== undefined) {
+    if (!Array.isArray(codes) || codes.length === 0 || codes.length > MAX_EXPECTED_EXIT_CODES ||
+      !codes.every((code) => Number.isInteger(code) && code >= 1 && code <= 255) || new Set(codes).size !== codes.length) {
+      return { intent: {}, error: `${names.expectedExitCodes ?? "expectedExitCodes"} must be 1-${MAX_EXPECTED_EXIT_CODES} distinct integers from 1 to 255` };
+    }
+    intent.expectedExitCodes = [...codes] as number[];
+  }
+  return { intent };
+}
+
 /** The one current incident with this id, if it is still in the reduced state. */
 export function findIncident(state: FailureState, id: string): FailureObservation | undefined {
   return Object.values(state.observations).find((item) => item.id === id);
@@ -279,6 +322,8 @@ export function formatPendingAttention(state: FailureState, incidents: readonly 
   return lines.join("\n");
 }
 
+/** The terminal fact that lifecycle success is not evidence of correct work. Kept whenever it fits and never cut mid-sentence (#325). */
+export const CORRECTNESS_NOTE: string = "Work correctness was not inferred from lifecycle alone.";
 export interface TerminalFailureParts {
   /** Actionable and observation-incomplete incidents among `incidents`, one row each. */
   rows: string[];
@@ -301,7 +346,7 @@ export function terminalFailureParts(state: FailureState, incidents: readonly st
   if (counts.expected) notes.push(`${counts.expected} expected failure${counts.expected === 1 ? "" : "s"} recorded.`);
   const history = closedHistoryLine(state);
   if (history) notes.push(history);
-  if (counts.unclassified || counts.actionRequired) notes.push("Work correctness was not inferred from lifecycle alone.");
+  if (counts.unclassified || counts.actionRequired) notes.push(CORRECTNESS_NOTE);
   return { rows, notes };
 }
 export function formatTerminalFailureFacts(state: FailureState, incidents: readonly string[] = []): string {
@@ -586,6 +631,11 @@ export function formatIncidentSummary(state: FailureState, options: { maxBytes: 
  * observation-incomplete incidents (which lead the priority order) are shown as whole rows;
  * unclassified, expected, and closed incidents are counts. When any active row is not shown, a
  * count line gives the exact total, shown, omitted, and an incident cursor at the first unshown row.
+ *
+ * The result never exceeds `maxBytes` and is made of whole lines (#325). Under a tight budget it
+ * drops, in order: incident rows; the lower-priority notes (closed history, expected, earlier
+ * reported); the cursor's retrieval hint; the unclassified count; the cursor; the count line.
+ * The correctness note goes last, and only when it alone does not fit: it is never cut mid-sentence.
  */
 export function formatTerminalIncidentSummary(state: FailureState, options: { maxBytes: number; resource?: string; retrieval?: string }): IncidentSummary {
   const active = activeFailures(state);
@@ -595,14 +645,40 @@ export function formatTerminalIncidentSummary(state: FailureState, options: { ma
   const reportable = active.filter((x) => requiresAction(x) || x.category === "observation-incomplete").length;
   const lines = formatFailureLines(state).slice(0, reportable);
   const maxBytes = Math.max(0, Math.floor(options.maxBytes));
-  const header = (shown: number): string | undefined => shown >= total ? undefined :
+  const fits = (parts: readonly (string | undefined)[]) => utf8Length(parts.filter(Boolean).join("\n")) <= maxBytes;
+  // "full": cursor and retrieval hint; "bare": cursor only; "none": exact counts, no cursor.
+  type Header = "full" | "bare" | "none";
+  const header = (shown: number, mode: Header): string | undefined => shown >= total ? undefined :
     `${total} active failure observation${total === 1 ? "" : "s"} · ${shown} shown · ${total - shown} omitted` +
-    ` · incidentCursor=${incidentCursorAt(state, shown, options.resource)}${options.retrieval ? ` (${options.retrieval})` : ""}`;
-  const render = (shown: number) => [header(shown), ...lines.slice(0, shown), ...notes].filter((x): x is string => Boolean(x)).join("\n");
-  let shown = lines.length;
-  while (shown > 0 && utf8Length(render(shown)) > maxBytes) shown -= 1;
-  const omitted = total - shown;
-  return { text: render(shown), total, represented: shown, omitted, ...(omitted > 0 ? { nextCursor: incidentCursorAt(state, shown, options.resource) } : {}) };
+    (mode === "none" ? " · incident cursor not shown (page too small)"
+      : ` · incidentCursor=${incidentCursorAt(state, shown, options.resource)}${mode === "full" && options.retrieval ? ` (${options.retrieval})` : ""}`);
+  const done = (parts: readonly (string | undefined)[], shown: number, mode: Header): IncidentSummary => {
+    const omitted = total - shown;
+    return { text: parts.filter((x): x is string => Boolean(x)).join("\n"), total, represented: shown, omitted,
+      ...(omitted > 0 && mode !== "none" ? { nextCursor: incidentCursorAt(state, shown, options.resource) } : {}) };
+  };
+  // 1. Drop incident rows, lowest priority first, keeping every note and the count line with its cursor.
+  for (let shown = lines.length; shown >= 0; shown -= 1) {
+    const parts = [header(shown, "full"), ...lines.slice(0, shown), ...notes];
+    if (fits(parts)) return done(parts, shown, "full");
+  }
+  // 2. No rows. Then, in order: the lower-priority notes (history, expected, earlier reported), the
+  //    cursor's retrieval hint, the unclassified count, the cursor, and the count line. The
+  //    correctness note goes last, and only when it alone does not fit.
+  const correctness: string[] = notes.filter((x) => x === CORRECTNESS_NOTE);
+  const unclassified = notes.filter((x) => x !== CORRECTNESS_NOTE && /remains? unclassified\.$/.test(x));
+  const low = notes.filter((x) => !correctness.includes(x) && !unclassified.includes(x));
+  const ladder: Array<{ mode: Header | undefined; notes: string[] }> = [];
+  for (let keep = low.length - 1; keep >= 0; keep -= 1) ladder.push({ mode: "full", notes: [...low.slice(0, keep), ...unclassified, ...correctness] });
+  ladder.push({ mode: "bare", notes: [...unclassified, ...correctness] });
+  ladder.push({ mode: "bare", notes: correctness });
+  ladder.push({ mode: "none", notes: correctness });
+  ladder.push({ mode: undefined, notes: correctness });
+  for (const step of ladder) {
+    const parts = [step.mode ? header(0, step.mode) : undefined, ...step.notes];
+    if (parts.some(Boolean) && fits(parts)) return done(parts, 0, step.mode ?? "none");
+  }
+  return done([], 0, "none");
 }
 /**
  * Incidents due for a notification. Terminal: every current unresolved incident not yet delivered

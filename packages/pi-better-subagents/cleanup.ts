@@ -12,8 +12,11 @@ import {
     baseDir,
     listMetas,
     ownedByThisParent,
+    orphanedTaskRuntimeProvenance,
     readMeta,
     removeMetaArtifacts,
+    removeRunDirectory,
+    removeTaskRuntimeProvenance,
     runDir,
     sessionsDir,
     type RunMeta,
@@ -166,6 +169,17 @@ function safeStatMtime(path: string): number | undefined {
     }
 }
 
+/** A metadata-less run directory, with its provenance record (#325). */
+function removeRun(id: string, errors: string[]): boolean {
+    try {
+        removeRunDirectory(id);
+        return true;
+    } catch (err) {
+        errors.push(`${runDir(id)}: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+    }
+}
+
 function removePath(path: string, errors: string[]): boolean {
     try {
         rmSync(path, { recursive: true, force: true });
@@ -197,8 +211,10 @@ function cleanRunDirs(cutoff: number, errors: string[]): number {
         }
 
         const mtimeMs = safeStatMtime(dir);
-        if (mtimeMs !== undefined && mtimeMs < cutoff && removePath(dir, errors)) removed += 1;
+        if (mtimeMs !== undefined && mtimeMs < cutoff && removeRun(id, errors)) removed += 1;
     }
+    // Provenance whose run is already gone (#325).
+    for (const id of orphanedTaskRuntimeProvenance()) removeTaskRuntimeProvenance(id);
     return removed;
 }
 
@@ -382,7 +398,7 @@ export function enforceRegistrySizeCapOnce(options: SizeCapOptions = {}): SizeCa
     const removed: string[] = [];
     for (const id of plan.remove) {
         const meta = readMeta(id);
-        if (meta ? removeMetaArtifacts(meta) : removePath(runDir(id), errors)) removed.push(id);
+        if (meta ? removeMetaArtifacts(meta) : removeRun(id, errors)) removed.push(id);
         else if (meta) errors.push(`${runDir(id)}: could not remove run artifacts`);
     }
 

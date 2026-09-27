@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { runDir, logPathFor } from "../registry.ts";
-import { collectRunFailures, failurePath, failureSummary, readRunFailures, resetFailureScanCursor, toolOperation } from "../failures.ts";
+import { runDir, logPathFor, baseDir, recordTaskRuntimeProvenance, taskRuntimeProvenancePath } from "../registry.ts";
+import { collectRunFailures, failurePath, failureSummary, readRunFailures, resetFailureScanCursor, toolOperation, TRUST_WAIT_MS } from "../failures.ts";
 import { activeFailures, markFailureAttentionDelivered, pendingFailureAttention } from "../shared-failure-observations.ts";
 
 function fixture(t) {
@@ -119,7 +119,9 @@ import { runFailureFacts } from "../failures.ts";
 /** A run launched on the trusted task runtime: parent-written metadata is what enables structured intent. */
 function confinedFixture(t) {
     const f = fixture(t);
-    writeFileSync(join(runDir(f.id), "meta.json"), JSON.stringify({ id: f.id, status: "running", cwd: "/repo", taskRuntime: true }));
+    writeFileSync(join(runDir(f.id), "meta.json"), JSON.stringify({ id: f.id, status: "running", cwd: "/repo", taskRuntime: true, startedAt: 1 }));
+    recordTaskRuntimeProvenance(f.id);
+    t.after(() => rmSync(taskRuntimeProvenancePath(f.id), { force: true }));
     return f;
 }
 const bashStart = (toolCallId, args) => ({ type: "tool_execution_start", toolCallId, toolName: "bash", args });
@@ -314,4 +316,76 @@ test("#315 review: a later exact-retry success does not erase an expected classi
     const state = collectRunFailures(f.id, "/repo");
     assert.equal(failureCounts(state).expected, 1);
     assert.equal(failureCounts(state).recovered, 0);
+});
+
+// ---- #325 follow-ups -------------------------------------------------------------------------
+
+/** Intent a trusted child would use to recover and excuse failures. */
+function appendIntentRun(f) {
+    f.append(bashStart("t1", { command: "npm test", operationId: "t" }), bashFail("t1", "1 failing"),
+        bashStart("t2", { command: "npm test -- scoped", operationId: "t" }), bashOk("t2"),
+        bashStart("probe", { command: "rg nope", expectedExitCodes: [1] }), bashOk("probe", "", { exitCode: 1, expectedExit: true }));
+}
+
+test("#325 a child-forged taskRuntime flag is ignored: trust needs the parent-authored provenance record", (t) => {
+    const forged = fixture(t);
+    // What a child able to write its own run directory could do: claim the trusted runtime in meta.json.
+    writeFileSync(join(runDir(forged.id), "meta.json"), JSON.stringify({ id: forged.id, status: "running", cwd: "/repo", taskRuntime: true, startedAt: 1 }));
+    appendIntentRun(forged);
+    let state = collectRunFailures(forged.id, "/repo");
+    assert.deepEqual(active315(state).map((x) => [x.id, x.status]), [["tool:t1", "unresolved"]], "exact rule: no declared recovery, no expected exit");
+    // A provenance record naming another run does not transfer trust either.
+    const other = fixture(t);
+    writeFileSync(join(runDir(other.id), "meta.json"), JSON.stringify({ id: other.id, status: "running", cwd: "/repo", taskRuntime: true, startedAt: 1 }));
+    mkdirSync(join(baseDir(), "task-runtime"), { recursive: true });
+    writeFileSync(taskRuntimeProvenancePath(other.id), JSON.stringify({ version: 1, id: forged.id }));
+    t.after(() => rmSync(taskRuntimeProvenancePath(other.id), { force: true }));
+    appendIntentRun(other);
+    assert.deepEqual(active315(collectRunFailures(other.id, "/repo")).map((x) => x.id), ["tool:t1"]);
+    // The record lives outside every run directory, under the registry root the task policy denies to the child.
+    assert.ok(taskRuntimeProvenancePath(forged.id).startsWith(baseDir() + "/"));
+    assert.ok(!taskRuntimeProvenancePath(forged.id).startsWith(runDir(forged.id) + "/"));
+    // The same log from a genuinely parent-launched run is honoured.
+    const trusted = confinedFixture(t);
+    appendIntentRun(trusted);
+    state = collectRunFailures(trusted.id, "/repo");
+    assert.deepEqual(active315(state).map((x) => [x.id, x.status]), [["tool:probe", "expected"]]);
+    assert.equal(failureCounts(state).recovered, 1);
+});
+
+test("#325 a transient metadata read failure defers the scan instead of pinning the run to the exact rule", (t) => {
+    const f = confinedFixture(t);
+    const meta = join(runDir(f.id), "meta.json");
+    const good = readFileSync(meta, "utf8");
+    writeFileSync(meta, "{not json"); // e.g. read mid-replace, or a transient I/O error
+    appendIntentRun(f);
+    let state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).length, 0, "nothing is folded while trust is unknown");
+    assert.equal(readRunFailures(f.id).seen.length, 0, "and nothing is journaled under the wrong rule");
+    writeFileSync(meta, good);
+    state = collectRunFailures(f.id, "/repo");
+    assert.deepEqual(active315(state).map((x) => [x.id, x.status]), [["tool:probe", "expected"]], "the retry honours the trusted runtime");
+    assert.equal(failureCounts(state).recovered, 1, "the declared retry recovered");
+});
+
+test("#325 permanently unreadable metadata: the wait is bounded and real failures stay visible under the exact rule", (t) => {
+    // Terminal read: no waiting at all.
+    const done = confinedFixture(t);
+    writeFileSync(join(runDir(done.id), "meta.json"), "{corrupt");
+    appendIntentRun(done);
+    let state = collectRunFailures(done.id, "/repo", true);
+    const facts = runFailureFacts(state, true);
+    assert.match(facts, /Observation incomplete · .*Run metadata could not be read/);
+    assert.deepEqual(active315(state).filter((x) => x.category !== "observation-incomplete").map((x) => [x.id, x.status]), [["tool:t1", "unresolved"]],
+        "the real failure is scanned (exact rule: the undeclared-trust retry does not recover it)");
+    // Running read: waits, then scans once TRUST_WAIT_MS has passed.
+    const running = confinedFixture(t);
+    writeFileSync(join(runDir(running.id), "meta.json"), "{corrupt");
+    appendIntentRun(running);
+    const start = Date.now();
+    t.mock.method(Date, "now", () => start);
+    assert.equal(active315(collectRunFailures(running.id, "/repo")).length, 0, "within the bound: deferred");
+    Date.now.mock.mockImplementation(() => start + TRUST_WAIT_MS);
+    state = collectRunFailures(running.id, "/repo");
+    assert.deepEqual(active315(state).map((x) => x.id).sort(), [active315(state).find((x) => x.category === "observation-incomplete").id, "tool:t1"].sort());
 });
