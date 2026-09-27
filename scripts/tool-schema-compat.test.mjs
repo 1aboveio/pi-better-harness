@@ -12,6 +12,7 @@ import {
   subagentResultTool,
   subagentStopTool,
 } from "../packages/pi-better-subagents/tools.ts";
+import planExtension from "../packages/pi-better-plan/src/index.ts";
 
 function plain(schema) {
   return JSON.parse(JSON.stringify(schema));
@@ -37,4 +38,21 @@ test("subagent list/output/result/stop schemas use only provider-accepted keywor
   assert.equal(result.properties.include.type, "array");
   assert.equal(result.properties.include.uniqueItems, undefined, "include uniqueness is enforced in code, not the schema");
   assert.ok(result.properties.lines && result.properties.max_bytes && result.properties.maxBytes);
+});
+
+test("plan tool schemas, including update_plan's workflow transition, use only provider-accepted keywords", () => {
+  const tools = new Map();
+  planExtension({
+    events: { on: () => () => {} },
+    registerTool(tool) { tools.set(tool.name, tool); },
+    registerCommand() {},
+    on() {},
+    appendEntry() {},
+  });
+  assert.deepEqual([...tools.keys()].sort(), ["get_plan", "sync_workflow_plan", "update_plan"]);
+  for (const [name, tool] of tools) {
+    assert.deepEqual(findProviderRejectedKeywords(plain(tool.parameters)), [], name);
+  }
+  const workflow = plain(tools.get("update_plan").parameters).properties.workflow;
+  assert.deepEqual(Object.keys(workflow.properties).sort(), ["changes", "decision", "event", "profiling", "revision"]);
 });

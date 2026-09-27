@@ -17,6 +17,7 @@ import {
   createRushPlanComponent, readRushPlan, renderRushPlan, workflowBinding,
   WORKFLOW_PLAN_ENTRY, type RushPlan, type WorkflowPlanBinding,
 } from "./workflow-plan.js";
+import { applyRushPlanUpdate, type RushPlanUpdate } from "./workflow-plan-update.js";
 import {
   EXTENSION_NAME,
   type PlanDisplayMode,
@@ -38,9 +39,35 @@ const PlanStepSchema = Type.Object({
   dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Ids of prerequisite steps in this plan. All must be completed before this step starts." })),
 });
 
+const WorkflowRowChangeSchema = Type.Object({
+  id: Type.Optional(Type.String({ description: "Unit id, component id (e.g. C1), or fleet stage (explore, combine, canary, review, cicd). Omit for run-level fields." })),
+  target: Type.Optional(StringEnum(["unit", "component", "fleet", "run"] as const, { description: "Only needed when the same id names two kinds of row." })),
+  set: Type.Object({}, {
+    additionalProperties: true,
+    description: "Fields to set on that row, e.g. status, stage, attempt, retries, diagnoses, worker, clock, note, headSha, pr. Each value replaces the old one; null clears it.",
+  }),
+});
+
+const WorkflowUpdateSchema = Type.Object({
+  event: Type.String({ description: "Short name for this transition in the profiling log, e.g. unit-validated or component-pr-opened." }),
+  revision: Type.Optional(Type.Integer({ minimum: 0, description: "The planRevision you last saw. The update is refused if the saved plan has a different revision." })),
+  changes: Type.Optional(Type.Array(WorkflowRowChangeSchema, { maxItems: 50, description: "Every row this transition changes. All of them are saved together as one revision." })),
+  decision: Type.Optional(Type.Object({
+    id: Type.String({ description: "New, unique decision id." }),
+    humanWords: Type.String({ description: "The human's words, quoted or closely paraphrased." }),
+    changes: Type.String({ description: "What the decision changes: units, validation, forbidden actions." }),
+    supersedes: Type.Optional(Type.String({ description: "Id of the earlier decision this one replaces." })),
+  }, { description: "A human decision to record with this transition." })),
+  profiling: Type.Optional(Type.Object({}, {
+    additionalProperties: true,
+    description: "Extra fields for this transition's profiling event, e.g. outcome, wallMs, waitMs, headSha.",
+  })),
+}, { description: "Workflow task-plan transition. Use only while a workflow owns the plan and it is bound with sync_workflow_plan; send this instead of plan." });
+
 const UpdatePlanSchema = Type.Object({
   explanation: Type.Optional(Type.String({ description: "Why the plan or its status changed." })),
-  plan: Type.Array(PlanStepSchema, { minItems: 1, maxItems: 50 }),
+  plan: Type.Optional(Type.Array(PlanStepSchema, { minItems: 1, maxItems: 50, description: "The full generic checklist. Required unless you send workflow." })),
+  workflow: Type.Optional(WorkflowUpdateSchema),
 });
 
 const LEGACY_PLAN_NAV_STATUS_KEY = "pi-better-plan-nav";
@@ -230,7 +257,7 @@ export default function planExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "sync_workflow_plan",
     label: "Sync Workflow Plan",
-    description: "Display the persisted rush-issues task plan at its exact checkpoint revision. Read-only; Rush retains plan ownership.",
+    description: "Bind and display the persisted rush-issues task plan at its exact checkpoint revision. Record later transitions with update_plan's workflow field.",
     parameters: Type.Object({
       path: Type.String({ description: "Absolute path to .resolve-issues/rush/<run-id>/task-plan.json" }),
       revision: Type.Integer({ minimum: 0, description: "Persisted planRevision to display" }),
@@ -259,7 +286,7 @@ export default function planExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "update_plan",
     label: "Update Plan",
-    description: "Create or atomically replace the current structured execution plan and its step statuses.",
+    description: "Create or atomically replace the current structured execution plan and its step statuses. While rush-issues owns a bound plan, send workflow instead of plan to save one task-plan transition.",
     promptSnippet: "Create and update a persistent structured execution plan",
     promptGuidelines: [
       "Use update_plan for work with three or more meaningful steps unless a skill owns planning; update it immediately when a step completes, becomes blocked, or scope changes.",
@@ -268,12 +295,33 @@ export default function planExtension(pi: ExtensionAPI): void {
       "For generic plans only, before the first implementation milestone identify independent substantial work. Launch a bounded subagent task while you continue another, or state the concrete reason delegation is unsuitable.",
       "Use a generic plan as the foreground coordinator's milestone ledger only when no workflow owns planning. Otherwise follow the workflow's task plan and foreground role.",
       "For generic plans, use separate steps for distinct deliverables, not one step per worker process. Before completing verification or the plan, inspect and integrate every relevant delegated result or failure.",
+      "While rush-issues owns the plan and it is bound with sync_workflow_plan, record every transition with update_plan's workflow field instead of editing task-plan.json or its profiling log; it saves the rows, the next planRevision, and the matching profiling event together.",
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const owner = workflowPlanOwner(ctx);
-      if (owner) throw new Error(`${owner} owns the task plan. Update its workflow plan instead of update_plan.`);
-      const input = params as { explanation?: string; plan: PlanStepInput[] };
+      const input = params as { explanation?: string; plan?: PlanStepInput[]; workflow?: RushPlanUpdate };
+      if (input.workflow !== undefined) {
+        if (!owner) throw new Error("No workflow owns the task plan; send plan instead of workflow.");
+        if (owner !== "rush-issues") throw new Error(`${owner} owns the task plan and does not accept update_plan workflow changes.`);
+        if (input.plan !== undefined) throw new Error("Send either plan or workflow, not both.");
+        if (!rushBinding) throw new Error("No rush-issues plan is bound; call sync_workflow_plan with the task-plan.json path first.");
+        const result = applyRushPlanUpdate(rushBinding.path, ctx.cwd, rushBinding.runId, input.workflow);
+        rushPlan = result.plan;
+        rushError = null;
+        refresh(true);
+        const rows = result.changed.map(({ target, id }) => id === null ? "run" : target === "unit" ? `#${id}` : id);
+        return {
+          content: [{ type: "text", text: `Saved rush-issues rev ${result.revision} (${input.workflow.event.trim()})${rows.length ? `: ${rows.join(", ")}` : ""}${input.workflow.decision ? `${rows.length ? ";" : ":"} decision ${input.workflow.decision.id}` : ""}. Profiling: ${result.profilingPath}` }],
+          details: { ok: true, runId: result.plan.runId, revision: result.revision, changed: result.changed, profilingPath: result.profilingPath },
+        };
+      }
+      if (owner) {
+        throw new Error(owner === "rush-issues"
+          ? "rush-issues owns the task plan. Send workflow (bound with sync_workflow_plan) instead of plan."
+          : `${owner} owns the task plan. Update its workflow plan instead of update_plan.`);
+      }
+      if (input.plan === undefined) throw new Error("plan is required: send the full list of steps.");
       const plan = replacePlan(currentPlan, input.plan, input.explanation);
       persistPlan(plan);
       const progress = planProgress(plan);
@@ -284,7 +332,9 @@ export default function planExtension(pi: ExtensionAPI): void {
     },
     renderCall(args, theme) {
       return new Text(
-        theme.fg("toolTitle", theme.bold("update_plan ")) + theme.fg("muted", `${args.plan.length} steps`),
+        theme.fg("toolTitle", theme.bold("update_plan ")) + theme.fg("muted", args.workflow
+          ? `workflow ${args.workflow.event ?? ""}`.trimEnd()
+          : `${args.plan?.length ?? 0} steps`),
         0,
         0,
       );
