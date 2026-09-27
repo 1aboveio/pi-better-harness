@@ -140,6 +140,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         unicode: fixtures.seedSubagentUnicode(subagentRegistry),
         manyFailures: fixtures.seedSubagentManyFailures(subagentRegistry),
         multiPage: fixtures.seedSubagentMultiPage(subagentRegistry),
+        quietHistory: fixtures.seedSubagentQuietHistory(subagentRegistry),
         foreign: fixtures.seedSubagentForeign(subagentRegistry),
         bgSuccess: fixtures.seedBgSuccess(bgRegistry, bgLogs),
         bgFailed: fixtures.seedBgFailed(bgRegistry, bgLogs, bgFailures),
@@ -322,6 +323,45 @@ export async function collectBaseline({ phase = "before" } = {}) {
         params: { id: seeded.manyFailures.id },
         proposedBudgetBytes: budgetsFor(phase).subagent_result,
     }, subagent.result, { id: seeded.manyFailures.id });
+
+    {
+        // Nothing needs action, so the default result must not invite paging history.
+        const result = await subagent.result.execute("issue-312-baseline", { id: seeded.quietHistory.id }, undefined, undefined, ctx);
+        const content = textOf(result);
+        const cursor = incidentCursorOf(content);
+        const followed = cursor
+            ? textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.quietHistory.id, cursor, max_bytes: 8000 }, undefined, undefined, ctx))
+            : "";
+        // The explicit history view, followed to its end: every row must be retrievable on request.
+        const historyPages = [textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.quietHistory.id, history: true }, undefined, undefined, ctx))];
+        for (let i = 0; i < 16; i += 1) {
+            const last = historyPages.at(-1);
+            const next = last.includes("hasMore=true") ? last.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+            if (!next) break;
+            historyPages.push(textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.quietHistory.id, cursor: next }, undefined, undefined, ctx)));
+        }
+        const history = historyPages.join("\n");
+        pushCase(cases, credentialFindings, {
+            id: "subagent.quiet_history.result",
+            family: "quiet-history",
+            surface: "subagent_result",
+            tool: "subagent_result",
+            invokePath: "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
+            params: { id: seeded.quietHistory.id },
+            proposedBudgetBytes: budgetsFor(phase).subagent_result,
+            tui: compactTui(subagent.result, result),
+            facts: {
+                unclassifiedToolErrors: fixtures.QUIET_HISTORY_TOOL_ERRORS.length,
+                expectedFailures: 2,
+                incidentCursorPresent: Boolean(cursor),
+                followedIncidentCursorUtf8Bytes: utf8Bytes(followed),
+                explicitHistoryUtf8Bytes: utf8Bytes(history),
+                explicitHistoryPages: historyPages.length,
+                explicitHistoryRows: (history.match(/^(Unclassified failure observation|Expected failure) · /gm) ?? []).length,
+                containsToolResultWrapper: /\{"content":\[\{"type":"text"/.test(`${content}\n${followed}\n${history}`),
+            },
+        }, content);
+    }
 
     await measureResult({
         id: "subagent.list",

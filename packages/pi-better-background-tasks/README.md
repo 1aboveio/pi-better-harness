@@ -161,6 +161,13 @@ notification delivery does not clear the failure. `callback:false` stays quiet
 while all inspection surfaces retain the evidence. Journals follow the task's
 existing retention and explicit-clear behavior.
 
+Status, log, and list count and list only failures that need action (**Action
+required** and **Observation incomplete**). Expected and closed failures are one
+history count line with no incident cursor; pass `history: true` to
+`bg_task_status` (or `action:status`) to page them. Incident rows are compact
+(120-byte excerpt, evidence such as `output.log#poll=3`); the raw log keeps the
+full evidence path.
+
 ## When To Use
 
 Use this package for shell commands that need logs, status, cancellation, or completion notifications across a Pi turn.

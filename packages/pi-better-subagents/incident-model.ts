@@ -39,10 +39,12 @@ export function evidenceText(value: unknown): string | undefined {
     const raw = typeof value === "string" ? value : JSON.stringify(value);
     return raw?.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 300);
 }
+/** The text a tool result carries (its first text part, stderr, or error), not its JSON wrapper. */
+function resultText(result: any): string | undefined {
+    return evidenceText(result?.content?.find?.((x: any) => x?.type === "text")?.text ?? result?.stderr ?? result?.error ?? result);
+}
 function resultError(result: any): string | undefined {
-    if (result?.isError === true || (typeof result?.exitCode === "number" && result.exitCode !== 0)) {
-        return evidenceText(result?.content?.find?.((x: any) => x?.type === "text")?.text ?? result?.stderr ?? result?.error ?? result);
-    }
+    if (result?.isError === true || (typeof result?.exitCode === "number" && result.exitCode !== 0)) return resultText(result);
     return undefined;
 }
 function time(row: any): number | undefined {
@@ -229,7 +231,7 @@ export function foldToolEnd(model: IncidentModel, row: any, cwd: string, evidenc
     const details = row.result?.details;
     const declaredExit = row.isError === false && details?.expectedExit === true && typeof details.exitCode === "number" &&
         (intent.expectedExitCodes ?? []).includes(details.exitCode) ? details.exitCode as number : undefined;
-    const error = row.isError === true ? evidenceText(row.result) ?? "Tool returned an error" : resultError(row.result);
+    const error = row.isError === true ? resultText(row.result) ?? "Tool returned an error" : resultError(row.result);
     const finished: Finished = { ...(attempt ?? { toolCallId, toolName, operation, intent, startSequence: seq }),
         ok: !error && declaredExit === undefined, endSequence: seq, evidence };
     model.finished.set(toolCallId, finished);

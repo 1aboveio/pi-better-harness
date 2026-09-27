@@ -106,6 +106,15 @@ const IdParams = Type.Object({
   verbose: Type.Optional(Type.Boolean({ description: "Return raw metadata JSON with environment values omitted, bounded like raw evidence (16 KiB default, max_bytes up to 64 KiB, paged with cursor when larger). Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
   ...CursorFields,
 });
+const HistoryField = {
+  history: Type.Optional(Type.Boolean({ description: "If true, return an incident page that also lists failure history: expected failures and recovered or superseded incidents. Default output lists only failures that need action and counts the rest." })),
+};
+const StatusParams = Type.Object({
+  id: Type.String({ description: "Background task id." }),
+  verbose: Type.Optional(Type.Boolean({ description: "Return raw metadata JSON with environment values omitted, bounded like raw evidence (16 KiB default, max_bytes up to 64 KiB, paged with cursor when larger). Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
+  ...HistoryField,
+  ...CursorFields,
+});
 const ListParams = Type.Object({
   status: Type.Optional(Type.Array(Type.String({ description: "Statuses to include." }))),
   limit: Type.Optional(Type.Number({ description: "Maximum tasks to show. Default 10, max 100." })),
@@ -140,6 +149,7 @@ const ActionParams = Type.Object({
   success_when: Type.Optional(ConditionSchema),
   failure_when: Type.Optional(ConditionSchema),
   raw: Type.Optional(Type.Boolean()),
+  ...HistoryField,
   ...CursorFields,
 });
 
@@ -152,6 +162,7 @@ const StatusActionParams = Type.Object({
   tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines." })),
   verbose: Type.Optional(Type.Boolean()),
   raw: Type.Optional(Type.Boolean()),
+  ...HistoryField,
   ...CursorFields,
 });
 
@@ -225,8 +236,8 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_status",
     label: "BG Status",
-    description: "Inspect one background task. Default output is a compact model-facing summary (1 KiB UTF-8) with matched condition, exit/signal, stop error, and failure counts before progress. Current-session only unless all:true; unknown ownership is a gap, not missing or healthy. Pass verbose:true only when full raw metadata is explicitly needed. Environment values are omitted. A raw log nextCursor passed as cursor continues the raw log page; an incidentCursor pages incidents. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
-    parameters: IdParams,
+    description: "Inspect one background task. Default output is a compact model-facing summary (1 KiB UTF-8) with matched condition, exit/signal, stop error, and failure counts before progress. Current-session only unless all:true; unknown ownership is a gap, not missing or healthy. Pass verbose:true only when full raw metadata is explicitly needed. Environment values are omitted. A raw log nextCursor passed as cursor continues the raw log page; an incidentCursor pages incidents that need action; history:true lists failure history too. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
+    parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
       return text(formatStatus(inspectMeta(params.id), statusOptions(params, activeSession)));
@@ -303,6 +314,7 @@ function requestedMaxBytes(params: Record<string, unknown>): number | undefined 
 function statusOptions(params: Record<string, unknown>, origin?: BackgroundTaskCallbackOrigin): OutputOptions {
   return {
     verbose: params.verbose === true,
+    history: params.history === true,
     cursor: typeof params.cursor === "string" ? params.cursor : undefined,
     maxBytes: requestedMaxBytes(params),
     all: params.all === true,

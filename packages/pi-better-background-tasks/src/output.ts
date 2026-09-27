@@ -1,15 +1,19 @@
 import {
-  activeFailures,
+  actionableFailures,
   failureRevision,
   formatFailureLines,
   formatFailureSummary,
   formatIncidentSummary,
+  incidentCursorScope,
   incidentPageHeading,
   incidentResource,
   incidentVerbatimPage,
   isIncidentCursor,
   readFailureState,
+  scopedFailures,
   type FailureState,
+  type IncidentDetail,
+  type IncidentScope,
 } from "./shared-failure-observations.js";
 import {
   assemblePriorityEnvelope,
@@ -69,6 +73,8 @@ export interface OutputOptions {
   cursor?: string;
   maxBytes?: number;
   verbose?: boolean;
+  /** Status: return an incident page that also lists failure history (expected and closed incidents). */
+  history?: boolean;
   tailLines?: number;
   raw?: boolean;
   statuses?: string[];
@@ -142,27 +148,31 @@ function failureStateFor(id: string): FailureState {
  * incident rows when they fit, otherwise a count line (total / shown /
  * omitted) with an incident cursor that resumes at the first byte not shown.
  */
-function incidentSection(id: string, options: OutputOptions, state = failureStateFor(id)): ((budget: number) => string | undefined) | undefined {
-  if (activeFailures(state).length === 0) return undefined;
+function incidentSection(id: string, options: OutputOptions, state = failureStateFor(id), detail: IncidentDetail = "compact"): ((budget: number) => string | undefined) | undefined {
+  // Only what needs action is listed; history (expected, closed) is one count line without a cursor.
+  if (!formatIncidentSummary(state, { maxBytes: Number.MAX_SAFE_INTEGER }).text) return undefined;
   const resource = incidentResource(scopeKey(options), id);
   return (budget) => formatIncidentSummary(state, {
     maxBytes: budget,
     resource,
     retrieval: `pass as cursor to bg_task_status id=${id}`,
+    detail,
   }).text || undefined;
 }
 
 function assembleIncidentPage(meta: BackgroundTaskMeta, options: OutputOptions): string {
   const state = failureStateFor(meta.id);
   const resource = incidentResource(scopeKey(options), meta.id);
+  const cursor = isIncidentCursor(options.cursor) ? options.cursor : undefined;
+  const scope: IncidentScope = options.history ? "all" : incidentCursorScope(cursor) ?? "actionable";
   return assembleBackgroundContent({
     surface: "status",
     maxBytes: options.maxBytes,
     sections: {
-      identity: `${identityLine(meta)} ${incidentPageHeading(activeFailures(state).length)}`,
+      identity: `${identityLine(meta)} ${incidentPageHeading(scopedFailures(state, scope).length, scope)}`,
       decision: formatDecision(meta),
     },
-    verbatim: (budget) => incidentVerbatimPage(state, { cursor: options.cursor, maxBytes: budget, resource }),
+    verbatim: (budget) => incidentVerbatimPage(state, { cursor, scope, maxBytes: budget, resource }),
   });
 }
 
@@ -525,7 +535,7 @@ export function formatStatus(
   const meta = inspectionValue.meta;
   const ownership = classifyOwnership(meta, options);
   if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership, options);
-  if (isIncidentCursor(options.cursor)) return assembleIncidentPage(meta, options);
+  if (isIncidentCursor(options.cursor) || options.history) return assembleIncidentPage(meta, options);
   // A page cursor from another view of this task continues that view instead
   // of resetting a status revision (#323): a raw/file cursor pages the log,
   // a text cursor pages verbose metadata.
@@ -547,8 +557,8 @@ export function formatStatus(
       maxBytes: options.maxBytes,
       sections: {
         identity: `${identityLine(meta)} · unchanged`,
-        failure: activeFailures(state).length
-          ? `${activeFailures(state).length} active failure observation(s), unchanged.`
+        failure: actionableFailures(state).length
+          ? `${actionableFailures(state).length} active failure observation(s), unchanged.`
           : undefined,
         decision: formatUnchangedEvidence(options.cursor),
       },
@@ -590,7 +600,8 @@ export function formatLog(id: string, options: OutputOptions = {}): string {
   if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership, options);
   const fileCursor = cursorKind(options.cursor) === "f";
   const raw = options.raw === true || options.tailLines === 0 || fileCursor;
-  const failure = incidentSection(id, options);
+  // Raw evidence keeps whole excerpts and evidence paths.
+  const failure = incidentSection(id, options, undefined, raw ? "full" : "compact");
   if (raw) {
     return assembleBackgroundContent({
       surface: "rawPage",
@@ -688,7 +699,7 @@ export function formatList(options: OutputOptions = {}): string {
   const resource = `list:${scope}:${statusesKey}`;
   const limit = Math.max(1, Math.min(Math.floor(options.limit ?? DEFAULT_LIST_ENTRIES), MAX_LIST_ENTRIES));
   const states = new Map(allowed.map((meta) => [meta.id, failureStateFor(meta.id)] as const));
-  const incidentsOf = (id: string) => activeFailures(states.get(id)!).length;
+  const incidentsOf = (id: string) => actionableFailures(states.get(id)!).length;
   const revision = inspectStatusRevision({
     resource,
     contentRevision: revisionOf(allowed.map((meta) => [meta.id, meta.status, meta.endedAt ?? null])),

@@ -177,7 +177,10 @@ Incidents are rendered and paged by `failure-observations`:
 `formatIncidentSummary` (whole rows when they fit, otherwise
 `N active failure observations · K shown · M omitted · incidentCursor=…`) and
 `pageFailureIncidents` (`i1.` cursors that resume at the first unshown byte,
-including inside a row larger than one page). Consumers accept the incident
+including inside a row larger than one page). Both cover only incidents that
+need action; history (unclassified, expected, closed) is a count line, and
+`scope: "all"` pages it on explicit request. Rows are compact unless
+`detail: "full"`; the cursor records scope and detail. Consumers accept the incident
 cursor on their status/result tools and render the explicit page with the
 shared `incidentVerbatimPage`, `incidentPageHeading`, and `incidentResource`.
 `failureJournalFingerprint(path)` is a cheap change key for caching counts

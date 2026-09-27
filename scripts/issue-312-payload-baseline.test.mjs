@@ -77,6 +77,15 @@ describe("issue-312 payload baseline harness", () => {
         );
         assert.match(multi.content, /hasMore=true/);
 
+        const quiet = report.cases.find((item) => item.id === "subagent.quiet_history.result");
+        assert.ok(quiet, "quiet-history case must be measured");
+        assert.ok(quiet.utf8Bytes <= 1024, `nothing needs action, so the default result stays small: ${quiet.utf8Bytes} B`);
+        assert.match(quiet.content, /No failures need action · 8 unclassified tool errors · 2 expected \(history\)/);
+        assert.doesNotMatch(quiet.content, /incidentCursor|active failure observation/);
+        assert.equal(quiet.facts.incidentCursorPresent, false);
+        assert.equal(quiet.facts.explicitHistoryRows, 10, "history:true still retrieves every row");
+        assert.equal(quiet.facts.containsToolResultWrapper, false);
+
         const serialized = serializeReport(report, {
             git: { branch: "test", sha: "0".repeat(40), dirty: false },
             measuredAt: "1970-01-01T00:00:00.000Z",
@@ -108,6 +117,14 @@ describe("issue-312 payload baseline artifacts", () => {
         assert.ok(multi, "regenerate after.json with --phase after");
         assert.ok(multi.facts.pageCount >= 3);
         assert.equal(multi.facts.reconstructedExactly, true);
+    });
+
+    it("the committed AFTER capture includes a small quiet-history case", () => {
+        const after = JSON.parse(readFileSync(resolve(repoRoot, BASELINE_DIR, "after.json"), "utf8"));
+        const quiet = after.cases.find((item) => item.id === "subagent.quiet_history.result");
+        assert.ok(quiet, "regenerate after.json with --phase after");
+        assert.ok(quiet.utf8Bytes <= 1024);
+        assert.equal(quiet.facts.incidentCursorPresent, false);
     });
 
     it("rerun instructions and docs point at the moved files", () => {

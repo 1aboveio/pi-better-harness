@@ -8,7 +8,8 @@ import { emptyFailureState, reduceFailure, activeFailures, formatFailureSummary,
   formatIncidentSummary, failureRevision, incidentVerbatimPage, incidentPageHeading, incidentResource, failureJournalFingerprint,
   observeFailures, readFailureState, markFailureAttentionDelivered, failureAttentionHandled, type FailureEvent,
   disposeIncidents, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, validateDisposition,
-  formatTerminalIncidentSummary, CORRECTNESS_NOTE, readCommandIntent } from "./index.ts";
+  formatTerminalIncidentSummary, CORRECTNESS_NOTE, readCommandIntent, COMPACT_EXCERPT_BYTES, unwrapToolResultText, shortEvidence,
+  incidentCursorScope, scopedFailures } from "./index.ts";
 
 const failed: FailureEvent = { id: "call-1:end", operation: "cwd:project:tsc", kind: "failure",
   summary: "TypeScript exited 2", category: "exit", evidence: "output.log#call-1" };
@@ -104,7 +105,8 @@ test("repeated failures group into one incident; recovery then failure starts a 
 
 test("explicitly expected errors stay visible without attention; expected label cannot excuse an existing unexpected failure", () => {
   const expected = reduceFailure(emptyFailureState(), { ...failed, expected: true }, 1000);
-  assert.match(formatFailureSummary(expected), /Expected failure/);
+  assert.equal(formatFailureSummary(expected), "No failures need action · 1 expected (history)");
+  assert.match(formatFailureLines(expected, { scope: "all" })[0]!, /^Expected failure/);
   assert.equal(pendingFailureAttention(expected, 999_999, { terminal: true }), undefined);
   const unexpectedRetry = reduceFailure(expected, { ...failed, id: "unexpected-retry" }, 2000);
   assert.ok(pendingFailureAttention(unexpectedRetry, 999_999));
@@ -178,7 +180,9 @@ test("bounded summaries prioritize unexpected failures over newer expected failu
     operation: `red-test-${i}`, expected: true, summary: "Expected red test" }, 2000 + i);
   const summary = formatFailureSummary(state);
   assert.match(summary.split("\n")[0]!, /TypeScript exited 2/);
-  assert.match(summary, /4 additional active failure observations/);
+  assert.equal(summary.split("\n").length, 2, "expected failures are history: counted, not listed");
+  assert.match(summary, /^Also in history: 8 expected$/m);
+  assert.match(formatFailureLines(state, { scope: "all" })[0]!, /TypeScript exited 2/, "the history view still leads with what needs action");
 });
 
 test("omitted incidents reconstruct through caller-owned incident pages", () => {
@@ -221,11 +225,12 @@ function manyIncidents(count: number, summary: (i: number) => string): ReturnTyp
 }
 
 /** Concatenate incident pages exactly: rows are newline-joined except where a row continues. */
-function reconstructIncidents(state: ReturnType<typeof emptyFailureState>, maxBytes: number, cursor?: string, resource?: string): string {
+function reconstructIncidents(state: ReturnType<typeof emptyFailureState>, maxBytes: number, cursor?: string, resource?: string,
+  detail?: "compact" | "full"): string {
   let rebuilt = "";
-  let previousPartial = cursor ? pageFailureIncidents(state, { cursor, maxBytes: 0, resource }).startsPartial : false;
+  let previousPartial = cursor ? pageFailureIncidents(state, { cursor, maxBytes: 0, resource, detail }).startsPartial : false;
   for (let pages = 0; pages < 500; pages += 1) {
-    const page = pageFailureIncidents(state, { cursor, maxBytes, resource });
+    const page = pageFailureIncidents(state, { cursor, maxBytes, resource, detail });
     assert.equal(page.reset, undefined);
     assert.ok(Buffer.byteLength(page.text) <= maxBytes, `page of ${Buffer.byteLength(page.text)} bytes exceeds ${maxBytes}`);
     assert.equal(page.startsPartial, previousPartial);
@@ -238,11 +243,12 @@ function reconstructIncidents(state: ReturnType<typeof emptyFailureState>, maxBy
 }
 
 test("rows larger than the page split at a code point and resume at that byte", () => {
+  // Full rows keep long excerpts, so a row can still exceed a page.
   const state = manyIncidents(8, (i) => `incident-${i} ${"界".repeat(150)}`);
-  const lines = formatFailureLines(state);
+  const lines = formatFailureLines(state, { detail: "full" });
   assert.ok(Buffer.byteLength(lines[0]!) > 300);
-  assert.equal(reconstructIncidents(state, 300), lines.join("\n"));
-  const first = pageFailureIncidents(state, { maxBytes: 300 });
+  assert.equal(reconstructIncidents(state, 300, undefined, undefined, "full"), lines.join("\n"));
+  const first = pageFailureIncidents(state, { maxBytes: 300, detail: "full" });
   assert.equal(first.represented, 0, "a clipped row is not counted as shown");
   assert.equal(first.omitted, 8);
   assert.equal(first.endsPartial, true);
@@ -251,9 +257,9 @@ test("rows larger than the page split at a code point and resume at that byte", 
 
 test("the incident summary counts shown and omitted rows exactly and its cursor resumes at the first unshown byte", () => {
   const state = manyIncidents(8, (i) => `incident-${i} ${"界".repeat(150)}`);
-  const lines = formatFailureLines(state);
+  const lines = formatFailureLines(state, { detail: "full" });
   for (const budget of [200, 700, 1_200, 2_000]) {
-    const summary = formatIncidentSummary(state, { maxBytes: budget, resource: "incidents:s:bg_1" });
+    const summary = formatIncidentSummary(state, { maxBytes: budget, resource: "incidents:s:bg_1", detail: "full" });
     assert.ok(Buffer.byteLength(summary.text) <= budget, `summary ${Buffer.byteLength(summary.text)} > ${budget}`);
     assert.equal(summary.total, 8);
     assert.equal(summary.represented + summary.omitted, 8);
@@ -319,7 +325,8 @@ const toolFailure = (id: string, operation = "bash:npm test", summary = "bash fa
 
 test("a single agent tool failure is retained but is not running attention; the same operation failing three times is", () => {
   let state = reduceFailure(emptyFailureState(), toolFailure("t1"), 1000);
-  assert.match(formatFailureSummary(state), /^Unclassified failure observation · .*tests failed/);
+  assert.equal(formatFailureSummary(state), "No failures need action · 1 unclassified tool error (history)");
+  assert.match(formatFailureLines(state, { scope: "all" })[0]!, /^Unclassified failure observation · .*tests failed/);
   assert.equal(pendingFailureAttention(state, 999_999), undefined, "the child owns its own tool errors while alive");
   assert.deepEqual(pendingFailureAttention(state, 1001, { terminal: true })?.incidents, ["t1"], "terminal delivery still reports it once");
   state = reduceFailure(state, toolFailure("t2"), 2000);
@@ -407,7 +414,8 @@ test("expected and open dispositions: expected leaves attention, open makes an a
   let state = reduceFailure(emptyFailureState(), toolFailure("probe", "rg"), 1000);
   state = reduceFailure(state, { id: "e", operation: "incident-disposition", kind: "disposition", disposition: "expected",
     incidents: ["probe"], reason: "rg exit 1 means no match" }, 2000);
-  assert.match(formatFailureSummary(state), /^Expected failure · .*expected: rg exit 1 means no match/);
+  assert.match(formatFailureLines(state, { scope: "all" })[0]!, /^Expected failure · .*expected: rg exit 1 means no match/);
+  assert.deepEqual(formatFailureLines(state), [], "an expected failure needs no action");
   assert.equal(pendingFailureAttention(state, 999_999, { terminal: true }), undefined);
   state = reduceFailure(state, toolFailure("blocked", "gh auth", "bash failed: HTTP 401"), 3000);
   assert.equal(pendingFailureAttention(state, 999_999), undefined);
@@ -440,7 +448,7 @@ test("exit zero or a success claim never resolves an unrelated incident; only na
   state = reduceFailure(state, { id: "retry", operation: "op", kind: "recovered", incidents: ["t"] }, 3000);
   assert.equal(activeFailures(state).length, 0);
   assert.equal(failureCounts(state).recovered, 1);
-  assert.match(formatFailureSummary(reduceFailure(state, toolFailure("n", "op2"), 4000)), /Closed incidents retained in history: 1 recovered\./);
+  assert.equal(formatFailureSummary(reduceFailure(state, toolFailure("n", "op2"), 4000)), "No failures need action · 1 unclassified tool error · 1 recovered (history)");
 });
 
 test("a consumer can defer running observation gaps to its terminal callback without losing them", () => {
@@ -465,7 +473,8 @@ test("an expected-disposed incident keeps its classification when a later exact 
 test("rejected command intents are agent-owned, visible, and never actionable on their own", () => {
   const state = reduceFailure(emptyFailureState(), { id: "r", operation: "rejected-intent:r", kind: "failure", category: "rejected-intent",
     summary: "bash not run: invalid command intent" }, 1000);
-  assert.match(formatFailureSummary(state), /^Unclassified failure observation · .*not run/);
+  assert.match(formatFailureLines(state, { scope: "all" })[0]!, /^Unclassified failure observation · .*not run/);
+  assert.equal(formatFailureSummary(state), "No failures need action · 1 unclassified tool error (history)");
   assert.equal(pendingFailureAttention(state, 999_999), undefined);
 });
 
@@ -569,4 +578,100 @@ test("#325 one command-intent validator for subagents and background tasks, with
   for (const bad of [[0], [256], [], [1.5], Array.from({ length: 17 }, (_, i) => i + 1)]) {
     assert.ok(readCommandIntent({ expectedExitCodes: bad }).error, JSON.stringify(bad));
   }
+});
+
+// ---- quiet history: only what needs action is active; history is explicit --------------
+
+/** The evidence shape: eight unclassified child tool errors and two expected failures, nothing actionable. */
+function quietHistoryState() {
+  let state = emptyFailureState();
+  for (let i = 0; i < 8; i++) {
+    state = reduceFailure(state, toolFailure(`q${i}`, `read-${i}`,
+      `read failed: {"content":[{"type":"text","text":"ENOENT: no such file or directory, access '/Users/x/projects/kyc/src/file-${i}.ts'"}]}`), 1000 + i);
+  }
+  for (let i = 0; i < 2; i++) state = reduceFailure(state, { ...toolFailure(`e${i}`, `probe-${i}`, "bash exited with declared expected code 1"), expected: true }, 2000 + i);
+  return state;
+}
+
+test("when nothing needs action, summaries are one history line with no incident cursor", () => {
+  const state = quietHistoryState();
+  const terminal = formatTerminalIncidentSummary(state, { maxBytes: 2_048, resource: "incidents:s:sa_1", retrieval: "pass as cursor" });
+  assert.equal(terminal.text, `No failures need action · 8 unclassified tool errors · 2 expected (history)\n${CORRECTNESS_NOTE}`);
+  assert.equal(terminal.total, 0);
+  assert.equal(terminal.nextCursor, undefined);
+  const running = formatIncidentSummary(state, { maxBytes: 2_048, resource: "incidents:s:sa_1" });
+  assert.equal(running.text, "No failures need action · 8 unclassified tool errors · 2 expected (history)");
+  assert.equal(running.nextCursor, undefined);
+  assert.doesNotMatch(`${terminal.text}\n${running.text}`, /incidentCursor|active failure observation/);
+  assert.deepEqual(formatFailureLines(state), [], "history is not paged by the default incident view");
+  assert.equal(pageFailureIncidents(state).total, 0);
+  // Under a budget too small for both lines the correctness note is kept whole.
+  assert.equal(formatTerminalIncidentSummary(state, { maxBytes: 60 }).text, CORRECTNESS_NOTE);
+});
+
+test("actionable counts and cursors stay exact while history is only counted", () => {
+  let state = quietHistoryState();
+  for (let i = 0; i < 4; i++) {
+    state = reduceFailure(state, { id: `x${i}`, operation: `exit-${i}`, kind: "failure", category: "exit", summary: `Child check ${i} exited 1 ${"z".repeat(90)}` }, 3000 + i);
+  }
+  const actionable = formatFailureLines(state);
+  assert.equal(actionable.length, 4);
+  for (const surface of [formatIncidentSummary, formatTerminalIncidentSummary]) {
+    const summary = surface(state, { maxBytes: 400, resource: "incidents:s:sa_1" });
+    assert.ok(Buffer.byteLength(summary.text) <= 400);
+    assert.equal(summary.total, 4, "the count covers what needs action, not history");
+    assert.match(summary.text, new RegExp(`^4 active failure observations · ${summary.represented} shown · ${summary.omitted} omitted · incidentCursor=`));
+    assert.equal(incidentCursorScope(summary.nextCursor), "actionable");
+    const rest = reconstructIncidents(state, 4_096, summary.nextCursor, "incidents:s:sa_1");
+    assert.equal(rest, actionable.slice(summary.represented).join("\n"), "the cursor resumes at the first unshown actionable row");
+    assert.doesNotMatch(rest, /Unclassified|Expected failure/);
+  }
+  const whole = formatIncidentSummary(state, { maxBytes: 4_096 });
+  assert.match(whole.text, /\nAlso in history: 8 unclassified tool errors · 2 expected$/);
+});
+
+test("the history view is explicit, pages every incident, and its cursor keeps the view", () => {
+  let state = quietHistoryState();
+  state = reduceFailure(state, { id: "x", operation: "exit", kind: "failure", category: "exit", summary: "Child exited 1" }, 3000);
+  state = reduceFailure(state, toolFailure("r", "retried", "bash failed: flaky"), 3001);
+  state = reduceFailure(state, { id: "ok", operation: "retried", kind: "recovered", incidents: ["r"] }, 3002);
+  const all = formatFailureLines(state, { scope: "all" });
+  assert.equal(all.length, 12, "actionable, unclassified, expected, and closed incidents");
+  assert.equal(scopedFailures(state, "all").length, 12);
+  assert.match(all[0]!, /^Action required · .*Child exited 1/);
+  assert.match(all.at(-1)!, /^Recovered · .*flaky/);
+  const resource = "incidents:s:sa_1";
+  const first = pageFailureIncidents(state, { scope: "all", maxBytes: 500, resource });
+  assert.equal(incidentCursorScope(first.nextCursor), "all");
+  assert.equal(reconstructIncidents(state, 500, first.cursor, resource), all.join("\n"), "a history cursor continues without the flag");
+  assert.equal(pageFailureIncidents(state, { cursor: first.nextCursor, scope: "actionable", maxBytes: 500, resource }).reset, "stale-cursor");
+  const heading = incidentPageHeading(12, "all");
+  assert.match(heading, /^History page of 12 failure observations/);
+  const quiet = incidentVerbatimPage(quietHistoryState(), { resource });
+  assert.equal(quiet.text, "No failures need action. Pass history:true to list history.");
+  assert.equal(incidentVerbatimPage(emptyFailureState(), { scope: "all", resource }).text, "No failure observations recorded.");
+});
+
+test("compact rows unwrap tool-result JSON, cap the excerpt at whole UTF-8, and shorten evidence paths", () => {
+  const wrapped = `read failed: {"content":[{"type":"text","text":"Offset 400 is beyond end of file\\n(212 lines) \\u00e9 \\"quoted\\"`;
+  assert.equal(unwrapToolResultText(wrapped), `read failed: Offset 400 is beyond end of file (212 lines) é "quoted"`, "a wrapper cut mid-string still decodes");
+  assert.equal(unwrapToolResultText("plain error"), "plain error");
+  assert.equal(shortEvidence("/private/var/folders/x/T/pi-subagents/runs/sa_1/output.log#byte=2575"), "output.log#byte=2575");
+  assert.equal(shortEvidence("C:\\Users\\x\\runs\\bg_1\\output.log#poll=3"), "output.log#poll=3");
+  assert.equal(shortEvidence("attempt scoped-tests"), "attempt scoped-tests");
+  const state = reduceFailure(emptyFailureState(), { id: "w", operation: "w", kind: "failure", category: "exit",
+    summary: `bash failed: {"content":[{"type":"text","text":"${"界".repeat(100)}"}]}`,
+    evidence: "/private/var/folders/x/T/pi-subagents/runs/sa_1/output.log#byte=2575" }, 1000);
+  const [row] = formatFailureLines(state);
+  assert.doesNotMatch(row!, /\{"content"|\uFFFD/);
+  assert.match(row!, / · evidence: output\.log#byte=2575$/);
+  const excerpt = row!.split(" · ")[2]!;
+  assert.ok(Buffer.byteLength(excerpt) <= COMPACT_EXCERPT_BYTES, `${Buffer.byteLength(excerpt)} bytes`);
+  assert.match(excerpt, /^bash failed: 界+…$/);
+  const [full] = formatFailureLines(state, { detail: "full" });
+  assert.match(full!, /evidence: \/private\/var\/folders\/x\/T\/pi-subagents\/runs\/sa_1\/output\.log#byte=2575$/, "full rows keep the whole path");
+  assert.equal(full!.split(" · ")[2], `bash failed: ${"界".repeat(100)}`, "full rows keep the whole excerpt");
+  const page = pageFailureIncidents(state, { detail: "full", maxBytes: 50 });
+  assert.match(pageFailureIncidents(state, { cursor: page.nextCursor, maxBytes: 4_096 }).text, /runs\/sa_1/, "a full-row cursor keeps full rows");
+  assert.equal(pageFailureIncidents(state, { cursor: page.nextCursor, detail: "compact", maxBytes: 4_096 }).reset, "stale-cursor");
 });

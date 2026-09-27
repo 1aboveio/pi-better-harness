@@ -24,7 +24,7 @@ test("failure after green progress survives tail noise, reload-style replay and 
     f.append(progress("tests green"), start("bad", "npm test"), end("bad", true, "tests failed"));
     appendFileSync(f.log, Array.from({ length: 200 }, () => JSON.stringify(progress("all good"))).join("\n") + "\n");
     let state = collectRunFailures(f.id, "/repo");
-    assert.match(failureSummary(f.id, "/repo"), /^Unclassified failure observation.*tests failed/s);
+    assert.equal(failureSummary(f.id, "/repo"), "No failures need action · 1 unclassified tool error (history)");
     f.append(start("other", "pwd"), end("other", false, "ok"));
     state = collectRunFailures(f.id, "/repo");
     assert.equal(activeFailures(state).length, 1);
@@ -105,7 +105,7 @@ test("truncation is incomplete without erasing prior incident", (t) => {
     writeFileSync(f.log, JSON.stringify(progress("new log")) + "\n");
     const summary = failureSummary(f.id, "/repo", true);
     assert.match(summary, /1 earlier tool failure remains unclassified/);
-    assert.match(failureSummary(f.id, "/repo"), /Unclassified failure observation.*failed/);
+    assert.match(failureSummary(f.id, "/repo"), /\nAlso in history: 1 unclassified tool error$/);
     assert.match(summary, /truncated or rewritten/);
 });
 
