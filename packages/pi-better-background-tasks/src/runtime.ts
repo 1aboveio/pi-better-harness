@@ -34,8 +34,11 @@ const remoteSessionStarts = new Map<string, Promise<CommandResult>>();
 const activePolls = new Set<string>();
 const logRetentionTimers = new Map<string, ReturnType<typeof setInterval>>();
 const LOG_RETENTION_CHECK_MS = 1000;
-const handoffTimers = new Map<string, ReturnType<typeof setInterval>>();
+const handoffTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// The handoff check backs off from 250 ms to 4 s while the task keeps running,
+// and returns to 250 ms once its process is gone so the grace period is timed closely.
 const HANDOFF_CHECK_MS = 250;
+const HANDOFF_MAX_CHECK_MS = 4_000;
 const HANDOFF_LOST_GRACE_MS = 5_000;
 let scheduledWorkSuspended = false;
 const REMOTE_SESSION_POLL_MS = 100;
@@ -62,8 +65,9 @@ export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
  * tasks keep running, but their watches do not poll, remote tmux output is not
  * collected, and their `timeout_seconds` deadlines are not enforced until that
  * session is active again; an overdue deadline is enforced immediately on resume.
- * A local process that exits meanwhile is recorded as terminal and its callback
- * is delivered when its session resumes.
+ * A local process that exits meanwhile, while this Pi process is still running,
+ * is recorded as terminal and its callback is delivered when its session resumes;
+ * after Pi quits, a resumed task whose process is gone is marked lost instead.
  */
 export function suspendScheduledWork(): void {
   scheduledWorkSuspended = true;
@@ -71,7 +75,7 @@ export function suspendScheduledWork(): void {
   for (const timer of remoteSessionTimers.values()) clearTimeout(timer);
   for (const timer of processTimeoutTimers.values()) clearTimeout(timer);
   for (const timer of logRetentionTimers.values()) clearInterval(timer);
-  for (const timer of handoffTimers.values()) clearInterval(timer);
+  for (const timer of handoffTimers.values()) clearTimeout(timer);
   handoffTimers.clear();
   watcherTimers.clear();
   remoteSessionTimers.clear();
@@ -528,7 +532,9 @@ function scheduleHandoff(
   stopHandoff(id);
   if (scheduledWorkSuspended) return;
   let deadSince: number | undefined;
-  const timer = setInterval(() => {
+  let delayMs = HANDOFF_CHECK_MS;
+  const check = () => {
+    handoffTimers.delete(id);
     const meta = readMeta(id);
     if (!meta) {
       stopHandoff(id);
@@ -554,16 +560,26 @@ function scheduleHandoff(
         clearProcessTimeout(id);
         stopLogRetention(id);
         markProcessLost(pi, meta, getActiveSession);
+        return;
       }
+      delayMs = HANDOFF_CHECK_MS;
+    } else {
+      delayMs = Math.min(HANDOFF_MAX_CHECK_MS, delayMs * 2);
     }
-  }, HANDOFF_CHECK_MS);
-  timer.unref();
-  handoffTimers.set(id, timer);
+    arm();
+  };
+  const arm = () => {
+    if (scheduledWorkSuspended) return;
+    const timer = setTimeout(check, delayMs);
+    timer.unref();
+    handoffTimers.set(id, timer);
+  };
+  arm();
 }
 
 function stopHandoff(id: string): void {
   const timer = handoffTimers.get(id);
-  if (timer) clearInterval(timer);
+  if (timer) clearTimeout(timer);
   handoffTimers.delete(id);
 }
 

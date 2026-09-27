@@ -99,9 +99,11 @@ After `/new`, `/resume`, fork, or switching to another session, the previous
 session's tasks keep running but are paused from Pi's side: watches do not poll,
 remote tmux output is not collected, and `timeout_seconds` deadlines are not
 enforced until that session is active again. An overdue deadline is enforced as
-soon as the session resumes, so a timeout can land late but is never skipped. A
-local process that exits in the meantime is recorded as finished, and its
-callback is delivered when its session resumes.
+soon as the session resumes, so a timeout can land late but is never skipped.
+While the same Pi process stays open, a local process that exits in the meantime
+is recorded as finished, and its callback is delivered when its session resumes.
+If you quit Pi first, nothing records that exit: when the session is resumed in a
+new Pi process, a task whose process is gone is marked lost.
 
 ## Watch conditions
 
