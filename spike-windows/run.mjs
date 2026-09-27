@@ -106,11 +106,13 @@ for (const [name, cfg] of Object.entries(variants)) {
     try { report.registrySetup = registrySetup() || "ok"; } catch (e) { report.registrySetup = `ERR ${e.stderr ?? e.message}`; }
     const cfgPath = join(here, `cfg-${name}.json`);
     fs.writeFileSync(cfgPath, JSON.stringify(cfg));
-    const env = { ...process.env, SPIKE_HOME: home, SPIKE_NOGRANT: nogrant, TEMP: join(home, "tmp"), TMP: join(home, "tmp") };
+    const probeOut = join(os.tmpdir(), `probe-${name}.json`);
+    fs.rmSync(probeOut, { force: true });
+    const env = { ...process.env, SPIKE_OUT: probeOut, SPIKE_HOME: home, SPIKE_NOGRANT: nogrant, TEMP: join(home, "tmp"), TMP: join(home, "tmp") };
     const r = spawnSync(process.execPath, [join(here, "launch.mjs"), cfgPath, "--", `"${process.execPath}"`, `"${join(here, "probe.mjs")}"`],
         { encoding: "utf8", env, timeout: 300_000 });
     let parsed;
-    try { parsed = JSON.parse(r.stdout); } catch { parsed = { launchFailed: `exit ${r.status}`, stdout: r.stdout?.slice(0, 500), stderr: r.stderr?.slice(0, 1000) }; }
+    try { parsed = JSON.parse(r.stdout || fs.readFileSync(probeOut, "utf8")); } catch { parsed = { launchFailed: `exit ${r.status}`, stdout: r.stdout?.slice(0, 500), stderr: r.stderr?.slice(0, 1000) }; }
     if (r.stderr) parsed._stderr = r.stderr.slice(0, 600);
     report.results[name] = parsed;
     console.error("variant", name, "status", r.status, r.error?.message ?? "", (r.stderr ?? "").slice(0, 300));
@@ -129,6 +131,8 @@ for (const [name, cfg] of Object.entries(variants)) {
         direct: time(() => spawnSync("cmd.exe", ["/d", "/c", "exit 0"])),
         viaLauncher: time(() => spawnSync(process.execPath, [join(here, "launch.mjs"), cfgPath, "--", "cmd.exe /d /c exit 0"])),
     };
+    const echo = spawnSync(process.execPath, [join(here, "launch.mjs"), cfgPath, "--", "cmd.exe /d /c echo hello-from-sandbox"], { encoding: "utf8" });
+    report.echoThroughLauncher = { status: echo.status, stdout: echo.stdout, stderr: echo.stderr };
 }
 
 // Propagation cost: 20k files in 200 folders, one inherited grant.

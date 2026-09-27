@@ -123,10 +123,12 @@ const CREATE_SUSPENDED = 0x4, CREATE_UNICODE_ENVIRONMENT = 0x400;
 if (!CreateProcessAsUserW(restricted[0], null, cmd, null, null, true, CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
     null, config.cwd ?? process.cwd(), si, pi)) fail("CreateProcessAsUserW");
 if (!AssignProcessToJobObject(job, pi.hProcess)) fail("AssignProcessToJobObject");
+console.error(`launch: pid ${pi.dwProcessId} hProcess ${pi.hProcess ? "set" : "null"}`);
 ResumeThread(pi.hThread);
-WaitForSingleObject(pi.hProcess, 0xffffffff);
+const waited = WaitForSingleObject(pi.hProcess, 0xffffffff);
 const code = [0];
-GetExitCodeProcess(pi.hProcess, code);
+const gotCode = GetExitCodeProcess(pi.hProcess, code);
+console.error(`launch: wait=${waited} gotCode=${gotCode} code=${code[0]} err=${GetLastError()}`);
 CloseHandle(pi.hThread);
 CloseHandle(pi.hProcess);
 process.exit(code[0]);

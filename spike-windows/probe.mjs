@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 const H = process.env.SPIKE_HOME;
 const NOGRANT = process.env.SPIKE_NOGRANT;
 const out = {};
+process.stderr.write("probe: started\n");
 const p = (...parts) => join(H, ...parts);
 
 function t(name, fn) {
@@ -102,3 +103,4 @@ t("tool.dotnet", () => sh("dotnet", ["--version"]));
 t("net.fetch", () => sh(process.execPath, ["-e", "fetch('https://example.com').then(r=>console.log(r.status)).catch(e=>{console.log('ERR',e.cause?.code??e.message);process.exit(1)})"]));
 
 process.stdout.write(JSON.stringify(out));
+if (process.env.SPIKE_OUT) { try { fs.writeFileSync(process.env.SPIKE_OUT, JSON.stringify(out)); } catch (e) { process.stderr.write(`probe: out file ${e.code}`); } }
