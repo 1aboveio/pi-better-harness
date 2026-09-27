@@ -11,6 +11,15 @@ All notable changes to this project are documented in this file. The format is b
 - **subagents**: the harness now times every run. A soft deadline (default 30 min) steers the child to stop starting new work, commit what is done, and report, and wakes the parent once; grace (default 5 min) starts when that message reaches the child, after its current tool call, so a test run started just before the deadline is not killed mid-run; an unfinished run is then stopped and its completion reports `stopped: deadline`. A hard ceiling (default 90 min) stops without grace (`stopped: ceiling`), also for orphaned runs. No progress for 10 min (progress = any successful tool call that is not an exact repeat of an earlier one, by tool name and normalized arguments; edits, writes, commits, and a success after a failure always count; time inside a running tool call does not count) wakes the parent once (`stuck`) without stopping the run. `subagent_spawn` and `subagent_spawn_batch` accept `deadline_minutes`, `grace_minutes`, `max_minutes`, and `stuck_minutes` (0 = off; null = inherit: shared in a batch, then the default); global defaults come from `PI_SUBAGENT_*_MINUTES` or `config.json`. The policy lives in run metadata, so `/reload` keeps it. The reason shows on list, output, result, and completion callbacks.
 - **subagents**: add adjustable `manual`, `adaptive`, and `coordinator` delegation modes, session-persisted `/subagents mode ...` overrides, role-first coordinator guidance, and explicit ownership boundaries for bundled roles. Generic plans now follow the active delegation mode. (#334)
 
+### Changed
+
+- **subagents**: the navigator detail view opens showing up to the latest 25 transcript rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the transcript shows as many newest rows as fit below them (previously metadata gave way to the transcript). `subagent_result` and `subagent_output` defaults are unchanged.
+- **background-tasks**: the navigator detail view opens showing up to the latest 25 log rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the log shows as many newest rows as fit below them. `bg_task_log` and `bg_task_status` defaults are unchanged.
+
+### Fixed
+
+- **background-tasks**: a navigator log tail taller than the terminal now drops its oldest rows instead of cutting off the newest ones.
+
 ## [pi-better-harness@0.7.0] - 2026-09-27
 
 ### Changed

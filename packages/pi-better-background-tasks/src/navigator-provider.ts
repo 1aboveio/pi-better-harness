@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  DEFAULT_LOG_TAIL_ROWS as NAVIGATOR_DETAIL_ROWS,
   ensureBackgroundWorkNavigator,
   refreshBackgroundWorkNavigator,
   registerBackgroundWorkProvider,
@@ -129,7 +130,7 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
 function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   if (!meta) return null;
   const failure = failureSummary(meta.id);
-  const log = readLog(meta.logPath, options?.logTailLines ?? 10);
+  const log = readLog(meta.logPath, options?.logTailLines ?? NAVIGATOR_DETAIL_ROWS);
   const command = commandLabel(meta);
   const metadata = [
     { label: "provider", value: "Background Tasks" },
