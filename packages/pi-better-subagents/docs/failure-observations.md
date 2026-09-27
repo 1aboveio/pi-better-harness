@@ -22,6 +22,17 @@ status=completed
 Work correctness was not inferred from lifecycle alone.
 ```
 
+## What the parent sees by default
+
+Only incidents that need action are listed: `Action required` and `Observation incomplete`. Unclassified and expected failures are counted as history, never listed or paged by default. A completed run with nothing to act on says so in one line, with no incident cursor:
+
+```text
+No failures need action · 8 unclassified tool errors · 2 expected (history)
+Work correctness was not inferred from lifecycle alone.
+```
+
+Pass `history: true` to `subagent_result` or `subagent_output` to page every incident, including recovered and superseded ones. Rows are compact: a tool's result JSON is shown as its text, the excerpt is capped at 120 bytes, and evidence reads `output.log#byte=N`. `mode: "raw"` keeps the whole excerpt and the full log path.
+
 ## When the parent is notified
 
 - **While the child runs**, a single tool error does not wake the parent; the child owns it. The parent is woken, after a 60-second grace period, only for non-tool failures, for an operation that failed three times with no recovery, and for incidents the child marked `open`. Each incident is delivered once. Observation gaps (for example an oversized log record) stay visible on every surface and are delivered with the completion or health callback, since the parent cannot act on them mid-run.

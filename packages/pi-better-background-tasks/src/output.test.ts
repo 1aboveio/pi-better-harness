@@ -406,6 +406,44 @@ describe("callback facts", () => {
   });
 });
 
+describe("quiet failure history", () => {
+  it("counts expected failures as history without an incident cursor and lists them only on request", async () => {
+    const meta = fixture({ status: "failed", lastExitCode: 1, callbackOrigin: origin });
+    recordFailure(meta, "exit", "process exited with code 1 (declared expected)", "exit", { category: "exit", expected: true, evidence: `${meta.logPath}#exit` });
+    const status = formatStatus(meta, { origin });
+    expect(status).toContain("No failures need action · 1 expected (history)");
+    expect(status).not.toMatch(/incidentCursor=|Expected failure ·/);
+    const facts = formatCallbackFacts(meta);
+    expect(facts.failureRows).toBeUndefined();
+    expect(facts.decision).toContain("No failures need action · 1 expected (history)");
+    const tools = register();
+    const history = textOf(await tools.bg_task_status.execute("x", { id: meta.id, history: true }, undefined, undefined, { cwd: origin.cwd, sessionManager: { getSessionId: () => origin.sessionId } }));
+    expect(history).toMatch(/History page of 1 failure observation/);
+    expect(history).toMatch(/^Expected failure · .*declared expected\) · evidence: output\.log#exit$/m);
+  });
+
+  it("completion callback facts count history beside actionable rows", () => {
+    const meta = fixture({ status: "failed", lastExitCode: 7, callbackOrigin: origin });
+    recordFailure(meta, "probe", "probe exited with code 1 (declared expected)", "probe", { category: "exit", expected: true });
+    recordFailure(meta, "poll", "evaluator failed", "poll-1", { category: "condition" });
+    const facts = formatCallbackFacts(meta);
+    expect(facts.failureRows).toHaveLength(1);
+    expect(facts.decision).toContain("Also in history: 1 expected");
+  });
+
+  it("renders compact rows on status and keeps full evidence paths on the raw log", () => {
+    const meta = fixture({ status: "failed", lastExitCode: 7, callbackOrigin: origin });
+    recordFailure(meta, "poll", `evaluator failed: ${"界".repeat(80)}`, "poll-1", { category: "condition", evidence: `${meta.logPath}#poll=1` });
+    const status = formatStatus(meta, { origin });
+    const row = status.split("\n").find((line) => line.startsWith("Action required · "))!;
+    expect(row).toMatch(/ · evidence: output\.log#poll=1$/);
+    expect(Buffer.byteLength(row.split(" · ")[2]!)).toBeLessThanOrEqual(120);
+    const raw = formatLog(meta.id, { raw: true, origin });
+    expect(raw).toContain(`evidence: ${meta.logPath}#poll=1`);
+    expect(raw).toContain("界".repeat(80));
+  });
+});
+
 describe("review regressions (#312)", () => {
   it("reports a deleted log after a status cursor instead of 'no new evidence'", () => {
     const meta = fixture({ logLines: ["ok"] });

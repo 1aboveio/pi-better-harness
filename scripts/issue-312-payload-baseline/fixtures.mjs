@@ -215,6 +215,48 @@ export function seedSubagentManyFailures(registry) {
     return { id, finalText };
 }
 
+/**
+ * The quiet-history evidence shape (Pi session 01a0e22e, run sa_mujnmann_3): a completed run whose
+ * only failures are eight unclassified child tool errors (ENOENT reads, a read past the end
+ * of a file, an rg no-match) and two declared expected failures. Nothing needs action.
+ */
+export const QUIET_HISTORY_TOOL_ERRORS = [
+    ["read", { path: "src/kyc/rules.ts" }, "ENOENT: no such file or directory, access '/Users/synthetic/projects/kyc/src/kyc/rules.ts'"],
+    ["read", { path: "src/kyc/checks.ts" }, "ENOENT: no such file or directory, access '/Users/synthetic/projects/kyc/src/kyc/checks.ts'"],
+    ["read", { path: "docs/kyc/flow.md" }, "ENOENT: no such file or directory, access '/Users/synthetic/projects/kyc/docs/kyc/flow.md'"],
+    ["read", { path: "src/kyc/index.ts", offset: 400 }, "Offset 400 is beyond end of file (212 lines total)"],
+    ["read", { path: "src/kyc/types.ts", offset: 900 }, "Offset 900 is beyond end of file (88 lines total)"],
+    ["bash", { command: "rg -n 'riskTier' src/kyc" }, "(no output)\n\nCommand exited with code 1"],
+    ["bash", { command: "rg -n 'sanctionsList' packages" }, "(no output)\n\nCommand exited with code 1"],
+    ["read", { path: "src/kyc/legacy/adapter.ts" }, "ENOENT: no such file or directory, access '/Users/synthetic/projects/kyc/src/kyc/legacy/adapter.ts'"],
+];
+
+export function seedSubagentQuietHistory(registry) {
+    const id = "sa_issue312_quiet_history";
+    const events = [assistantText("reviewing the kyc module")];
+    QUIET_HISTORY_TOOL_ERRORS.forEach(([tool, args, text], i) => {
+        const callId = `call_quiet_${i}`;
+        events.push(toolStart(callId, tool, args));
+        events.push(toolEnd(callId, tool, { isError: true, result: { content: [{ type: "text", text }] } }));
+    });
+    for (let i = 0; i < 2; i += 1) {
+        const callId = `call_expected_${i}`;
+        const command = `git diff --exit-code -- src/kyc/part-${i}.ts`;
+        events.push(toolStart(callId, "bash", { command }));
+        events.push(toolEnd(callId, "bash", { isError: true, expected: true, result: { content: [{ type: "text", text: "Command exited with code 1" }] } }));
+    }
+    const finalText = `${SYNTHETIC_MARKER} kyc review complete; no blocking findings.`;
+    events.push(assistantText(finalText), agentEnd(finalText));
+    writeSubagentLog(registry, id, events);
+    seedSubagentMeta(registry, id, {
+        status: "completed",
+        exitCode: 0,
+        lifecycleClassification: "complete",
+        name: "quiet-history",
+    });
+    return { id, finalText };
+}
+
 function seedBgMeta(registry, id, extras = {}) {
     mkdirSync(registry.taskDir(id), { recursive: true });
     const logPath = registry.logPathFor(id);
@@ -392,4 +434,5 @@ export const REQUIRED_FAMILIES = [
     "many-failures",
     "many-completions",
     "multi-page-answer",
+    "quiet-history",
 ];

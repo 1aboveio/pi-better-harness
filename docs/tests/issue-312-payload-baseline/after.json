@@ -1,9 +1,9 @@
 {
   "phase": "after",
-  "measuredAt": "2026-09-27T10:08:41.784Z",
+  "measuredAt": "2026-09-27T11:10:38.919Z",
   "git": {
-    "branch": "fix/test-packaging-hygiene",
-    "sha": "ff722263c9e84143d2881e37bcebbe2425c6e8b3",
+    "branch": "fix/quiet-failure-history",
+    "sha": "2d43e40e358d80b91f4aa8db5a14d528aad8c0e9",
     "dirty": false
   },
   "model": {
@@ -62,7 +62,7 @@
     {
       "id": "subagent.success.result",
       "utf8Bytes": 339,
-      "sha256": "552cec00ad887fc245d67e00571119fe3cb8e64741ca655d47e6230e66b8e14a",
+      "sha256": "95f2b358ec25e2ff354dea7b50e9dd4dccb238a7d7700f6373fc351f3a81a005",
       "excerpt": "[sa_issue312_success · completed · exit 0 · 45s · lifecycle complete] issue-312-synthetic review complete. Finding: the helper returns the bounded page. Next: reconstruct unread bytes through the caller cursor. --- statusCursor=p1.eyJrIjoi…",
       "facts": {
         "utf16CodeUnits": 335,
@@ -99,7 +99,7 @@
     {
       "id": "subagent.success.output",
       "utf8Bytes": 307,
-      "sha256": "074fe7864b9992eef97a21ef1688416d53c7e7b248f29b3fdeb792ac6fca7a37",
+      "sha256": "1aae208ba02990a82914fc3f13cbafff9d245257ea2172b7b6c987071090d865",
       "excerpt": "[sa_issue312_success · completed · 45s] issue-312-synthetic review complete. Finding: the helper returns the bounded page. Next: reconstruct unread bytes through the caller cursor. --- statusCursor=p1.eyJrIjoicyIsInIiOiIwYzJzeFNzYmh5SW5iSn…",
       "facts": {
         "utf16CodeUnits": 305,
@@ -170,7 +170,7 @@
     {
       "id": "subagent.failed.result",
       "utf8Bytes": 515,
-      "sha256": "c744cc3f91a4a3059d044449892eb97c2190fe42a0e7a14c40a6dc26429567b7",
+      "sha256": "5aa9988ce7103e557074e002d0a547c9ad1858cfbf1948970772d4b46efff238",
       "excerpt": "[sa_issue312_failed · failed · exit 1 · 45s · lifecycle failed_exit] Action required · observed 2023-11-14T22:13:20.000Z · Child exited with code 1 Work correctness was not inferred from lifecycle alone. Lifecycle: failed_exit Lifecycle di…",
       "facts": {
         "utf16CodeUnits": 509,
@@ -243,7 +243,7 @@
     {
       "id": "subagent.incomplete.result",
       "utf8Bytes": 818,
-      "sha256": "b1adedf38cd202846f7ee08e002cf0b46ab8e35b68b5fd1bfb20f984afe4f7f6",
+      "sha256": "4f9e11f7b6a75b1bd67b1ce2ec069f2e147224d5c819c9efc655683a060e967e",
       "excerpt": "[sa_issue312_incomplete · failed · exit 0 · 45s · lifecycle incomplete_no_terminal_event] Observation incomplete · observed 2023-11-14T22:13:20.000Z · Child exit evidence is incomplete Run ended unexpectedly before producing a coherent fin…",
       "facts": {
         "utf16CodeUnits": 812,
@@ -316,7 +316,7 @@
     {
       "id": "subagent.orphaned.result",
       "utf8Bytes": 725,
-      "sha256": "d3fa6efae1c3d0853e77731f1bdcf57c215651e37928cb29f9dc69dbe21168d1",
+      "sha256": "f0e99a1a1aa1123695b46d8b67f8567cf1e0758e3b423af67eaca077cae4f30d",
       "excerpt": "[sa_issue312_orphaned · orphaned · 45s] Run is orphaned — non-final. Supervision was lost; related processes may still be alive. There is no final result yet. [health: orphaned] Run is orphaned — non-final. Supervision was lost; related pr…",
       "facts": {
         "utf16CodeUnits": 719,
@@ -389,7 +389,7 @@
     {
       "id": "subagent.unicode.result",
       "utf8Bytes": 2047,
-      "sha256": "525a7ffc204edd71e2ddeeecf7bee7fc08c9075c7bb63274d5bfda2b78432ae1",
+      "sha256": "7a701537afc340e101a103b03053e18b9872fb47b707bc76dde667ed17c97f71",
       "excerpt": "[sa_issue312_unicode · completed · exit 0 · 45s · lifecycle complete] {\"marker\":\"issue-312-synthetic\",\"note\":\"合成任务 ✓ 测量载荷\",\"emoji\":\"📦🧠✅\",\"combining\":\"é\",\"terminalFailure\":true,\"payload\":\"你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你…",
       "facts": {
         "utf16CodeUnits": 984,
@@ -429,7 +429,7 @@
     {
       "id": "subagent.multi_page.result",
       "utf8Bytes": 1993,
-      "sha256": "a7659c1e69b9679a27ce10358632cdbfebfc0910493c95bc04c34bd104c6fb15",
+      "sha256": "b5e64956c42d12be3956359a1c6d88fd226c7f44e596dbca78fed25beb2dea29",
       "excerpt": "[sa_issue312_multi_page · completed · exit 0 · 45s · lifecycle complete] issue-312-synthetic multi-page answer begins. 001 finding: 合成段落 ✓ café 📦 — keep line 1 intact across page boundaries. 002 finding: 合成段落 ✓ café 📦 — keep line 2 intac…",
       "facts": {
         "utf16CodeUnits": 1719,
@@ -475,13 +475,13 @@
     },
     {
       "id": "subagent.many_failures.result",
-      "utf8Bytes": 630,
-      "sha256": "6150eefe3c0c7ed8043bb809f6a10d11b8e43745ddb6f1e4994a09f3133ca458",
-      "excerpt": "[sa_issue312_many_failures · completed · exit 0 · 45s · lifecycle complete] 12 active failure observations · 0 shown · 12 omitted · incidentCursor=i1.eyJrIjoiaSIsIm8iOjAsInYiOiJjZmNiODQ2MGEwMzEwN2MyIiwibiI6MTIsInIiOiJoQm1uR3Y2OTVycGN6UVJfI…",
+      "utf8Bytes": 397,
+      "sha256": "1befc65c4311258b4e364ac1c8a886507c87b3ac1eea8272922a045d7f6590bc",
+      "excerpt": "[sa_issue312_many_failures · completed · exit 0 · 45s · lifecycle complete] No failures need action · 12 unclassified tool errors (history) Work correctness was not inferred from lifecycle alone. issue-312-synthetic finished with unresolve…",
       "facts": {
-        "utf16CodeUnits": 623,
-        "lineCount": 7,
-        "longestLineUtf8Bytes": 251,
+        "utf16CodeUnits": 392,
+        "lineCount": 6,
+        "longestLineUtf8Bytes": 120,
         "containsNonAscii": true,
         "utf8GreaterThanUtf16": true,
         "orderedToolSequence": null,
@@ -497,12 +497,11 @@
         "containsSyntheticMarker": true,
         "proposedBudgetBytes": 2048,
         "exceedsProposedBudget": false,
-        "utf8BytesExcludingIsolatedTmpdir": 630,
+        "utf8BytesExcludingIsolatedTmpdir": 397,
         "isolatedTmpdirPrefixBytes": 0,
-        "tuiCompactUtf8Bytes": 548,
-        "tuiFoldsDisplayOnly": true,
-        "incidentCursorPresent": true,
-        "omittedIncidentsRetrievable": true
+        "tuiCompactUtf8Bytes": 483,
+        "tuiFoldsDisplayOnly": false,
+        "incidentCursorPresent": false
       },
       "family": "many-failures",
       "surface": "subagent_result",
@@ -513,13 +512,58 @@
       }
     },
     {
-      "id": "subagent.list",
-      "utf8Bytes": 899,
-      "sha256": "017c43023b4db55e757ca105e129cec3784078ff60a34ea22055d8c4f6af3c9f",
-      "excerpt": "subagent_list · 7 matching · scope session:8b6b2a7d71b42ec1d28e3968 · newest first 3 listed runs with active failure observations; inspect with subagent_result • unicode-json sa_issue312_unicode [completed] ? 45s synthetic issue-312-synthe…",
+      "id": "subagent.quiet_history.result",
+      "utf8Bytes": 401,
+      "sha256": "4e1a2fa1ff830f5d16e9a19050ddd597a61665578d753248e62408e42a3ced05",
+      "excerpt": "[sa_issue312_quiet_history · completed · exit 0 · 45s · lifecycle complete] No failures need action · 8 unclassified tool errors · 2 expected (history) Work correctness was not inferred from lifecycle alone. issue-312-synthetic kyc review …",
       "facts": {
-        "utf16CodeUnits": 888,
-        "lineCount": 13,
+        "utf16CodeUnits": 395,
+        "lineCount": 6,
+        "longestLineUtf8Bytes": 120,
+        "containsNonAscii": true,
+        "utf8GreaterThanUtf16": true,
+        "orderedToolSequence": null,
+        "containsOrderedToolSequence": false,
+        "containsToolsUsedHeader": false,
+        "containsMatchedConditionPath": false,
+        "containsTruncationMarker": false,
+        "containsEmptyLogMasquerade": false,
+        "additionalActiveFailuresRetained": 0,
+        "containsUnresolvedFailure": false,
+        "containsObservationIncomplete": false,
+        "compactStatusShowsMatchedCondition": false,
+        "containsSyntheticMarker": true,
+        "proposedBudgetBytes": 2048,
+        "exceedsProposedBudget": false,
+        "utf8BytesExcludingIsolatedTmpdir": 401,
+        "isolatedTmpdirPrefixBytes": 0,
+        "tuiCompactUtf8Bytes": 487,
+        "tuiFoldsDisplayOnly": false,
+        "unclassifiedToolErrors": 8,
+        "expectedFailures": 2,
+        "incidentCursorPresent": false,
+        "followedIncidentCursorUtf8Bytes": 0,
+        "explicitHistoryUtf8Bytes": 2498,
+        "explicitHistoryPages": 2,
+        "explicitHistoryRows": 10,
+        "containsToolResultWrapper": false
+      },
+      "family": "quiet-history",
+      "surface": "subagent_result",
+      "tool": "subagent_result",
+      "invokePath": "packages/pi-better-subagents/tools.ts#subagentResultTool.execute",
+      "params": {
+        "id": "sa_issue312_quiet_history"
+      }
+    },
+    {
+      "id": "subagent.list",
+      "utf8Bytes": 1024,
+      "sha256": "deb405b11f3d13b816a52fcef44821cb4f87242c3c69a502e3022ac12d5dc1ff",
+      "excerpt": "subagent_list · 8 matching · scope session:8b6b2a7d71b42ec1d28e3968 · newest first 2 listed runs with active failure observations; inspect with subagent_result • unicode-json sa_issue312_unicode [completed] ? 45s synthetic issue-312-synthe…",
+      "facts": {
+        "utf16CodeUnits": 1011,
+        "lineCount": 15,
         "longestLineUtf8Bytes": 147,
         "containsNonAscii": true,
         "utf8GreaterThanUtf16": true,
@@ -536,7 +580,7 @@
         "containsSyntheticMarker": true,
         "proposedBudgetBytes": 1024,
         "exceedsProposedBudget": false,
-        "utf8BytesExcludingIsolatedTmpdir": 899,
+        "utf8BytesExcludingIsolatedTmpdir": 1024,
         "isolatedTmpdirPrefixBytes": 0
       },
       "family": "many-failures",
@@ -625,7 +669,7 @@
     {
       "id": "background.success.status",
       "utf8Bytes": 589,
-      "sha256": "3fc831876c4c39ef089aa9d9dd613e7f2b583adb55210a3e53cc428380e3578a",
+      "sha256": "6eb52ee5e219b6ab215581ff71cf9b4351576dd16259346908d0dca2f9c8b1cb",
       "excerpt": "Background task bg_issue312_success is succeeded. exit=0 exit_code running checks ready exit 0 kind: process name: synthetic-success elapsed: 45s --- hasMore=true omittedBytes=52 nextCursor=p1.eyJrIjoiZiIsInIiOiJKMEdzLWVKWTYzR05IUTRvIiwiby…",
       "facts": {
         "utf16CodeUnits": 589,
@@ -660,7 +704,7 @@
     {
       "id": "background.success.status.wrapper",
       "utf8Bytes": 589,
-      "sha256": "3fc831876c4c39ef089aa9d9dd613e7f2b583adb55210a3e53cc428380e3578a",
+      "sha256": "6eb52ee5e219b6ab215581ff71cf9b4351576dd16259346908d0dca2f9c8b1cb",
       "excerpt": "Background task bg_issue312_success is succeeded. exit=0 exit_code running checks ready exit 0 kind: process name: synthetic-success elapsed: 45s --- hasMore=true omittedBytes=52 nextCursor=p1.eyJrIjoiZiIsInIiOiJKMEdzLWVKWTYzR05IUTRvIiwiby…",
       "facts": {
         "utf16CodeUnits": 589,
@@ -735,13 +779,13 @@
     },
     {
       "id": "background.failed.status",
-      "utf8Bytes": 818,
-      "sha256": "51872482b3604cba83e9dc006bd2a33c9457cac6d6f86a488e84cf1dbbe55f35",
-      "excerpt": "Action required · observed 2023-11-14T22:13:20.000Z · issue-312-synthetic matched $.terminalFailure = true · evidence: /private/var/folders/hh/j9d9ym9d1n3b_lks9_4b5zx40000gn/T/issue-312-payload-baseline/pi-better-background-tasks/tasks/bg_…",
+      "utf8Bytes": 682,
+      "sha256": "7cb1995de63f6abd33bc73a1b98a2441c1aa40959b918b12100bcfc95e9dfacc",
+      "excerpt": "Action required · observed 2023-11-14T22:13:20.000Z · issue-312-synthetic matched $.terminalFailure = true · evidence: output.log#poll=18 Background task bg_issue312_failed is failed. Condition matched: $.terminalFailure = true observed: u…",
       "facts": {
-        "utf16CodeUnits": 815,
+        "utf16CodeUnits": 679,
         "lineCount": 15,
-        "longestLineUtf8Bytes": 276,
+        "longestLineUtf8Bytes": 140,
         "containsNonAscii": true,
         "utf8GreaterThanUtf16": true,
         "orderedToolSequence": null,
@@ -757,8 +801,8 @@
         "containsSyntheticMarker": true,
         "proposedBudgetBytes": 1024,
         "exceedsProposedBudget": false,
-        "utf8BytesExcludingIsolatedTmpdir": 742,
-        "isolatedTmpdirPrefixBytes": 76
+        "utf8BytesExcludingIsolatedTmpdir": 682,
+        "isolatedTmpdirPrefixBytes": 0
       },
       "family": "failed",
       "surface": "bg_task_status",
@@ -771,7 +815,7 @@
     {
       "id": "background.repeated_poll.status",
       "utf8Bytes": 842,
-      "sha256": "ee4266a21c50d91355026ad275ce10bc620791e6e66c9fd13b36062dbe412293",
+      "sha256": "d0bf80fdb6e939c62900a5eceedad9f33dcf47f600243a68e4045d249129cb54",
       "excerpt": "Background task bg_issue312_repeated_poll is running. exit=0 {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} --- check 2023-11-14T22:52:05.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} k…",
       "facts": {
         "utf16CodeUnits": 842,
@@ -808,7 +852,7 @@
     {
       "id": "background.repeated_poll.log.default",
       "utf8Bytes": 962,
-      "sha256": "3dddd5c97e25f8f45df2974de3e445b4a9a048a69e5fe8c0d4621e2396e30997",
+      "sha256": "adde8c18e0423d59308d105ae4a5f5e462fe078e61244b821669413203f9264c",
       "excerpt": "bg_issue312_repeated_poll log (running) · newest 10 display rows exit=0 {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} --- check 2023-11-14T22:50:35.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-312-sy…",
       "facts": {
         "utf16CodeUnits": 961,
@@ -846,7 +890,7 @@
     {
       "id": "background.repeated_poll.log.full",
       "utf8Bytes": 10495,
-      "sha256": "5182f405091a1b658fab6fa5433355821b88e62ede1059b9bb43a86e4929f5cb",
+      "sha256": "9c30d93ffb355756771683291751528430df427b7c39265676e6c6565cf88d1d",
       "excerpt": "bg_issue312_repeated_poll raw log (running) exit=0 Raw retained bytes; capture/retention loss is not recoverable as full history. --- check 2023-11-14T22:12:35.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-…",
       "facts": {
         "utf16CodeUnits": 10495,
@@ -885,7 +929,7 @@
     {
       "id": "background.unicode.status",
       "utf8Bytes": 1024,
-      "sha256": "9315bc35e921660dfc6bc4af44fe5becd642ba7c3566237197e67b5bf0f33bc5",
+      "sha256": "d3bac88cf3c00a2298901f6633d591af05aa6dacab75041148a247b3631c8c8c",
       "excerpt": "Background task bg_issue312_unicode is succeeded. exit=0 json_path_equals 你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你…",
       "facts": {
         "utf16CodeUnits": 694,
@@ -921,7 +965,7 @@
     {
       "id": "background.unicode.log",
       "utf8Bytes": 8074,
-      "sha256": "a95a16b5ad13fd9cb8b80a94fa07cf7df8a848995d46646bdee773162754ab93",
+      "sha256": "d683ba36f90e3a43a699ff69adc851a060f0f239dc8364ea9d3d1a600661d302",
       "excerpt": "bg_issue312_unicode raw log (succeeded) exit=0 json_path_equals Raw retained bytes; capture/retention loss is not recoverable as full history. {\"marker\":\"issue-312-synthetic\",\"note\":\"合成任务 ✓ 测量载荷\",\"emoji\":\"📦🧠✅\",\"combining\":\"é\",\"terminalF…",
       "facts": {
         "utf16CodeUnits": 3049,
@@ -959,13 +1003,13 @@
     },
     {
       "id": "background.many_failures.status",
-      "utf8Bytes": 887,
-      "sha256": "50371533eda19412ebd61b3972c4975abf8084d3a75d62722074a869d881b208",
-      "excerpt": "12 active failure observations · 1 shown · 11 omitted · incidentCursor=i1.eyJrIjoiaSIsIm8iOjEsInYiOiIwOWI0NGM4MWVlOGExY2NiIiwibiI6MTIsInIiOiJpaFBGLXpiQkt3VkVlUFhGIn0 (pass as cursor to bg_task_status id=bg_issue312_many_failures) Observati…",
+      "utf8Bytes": 752,
+      "sha256": "0069a1b428797ad82125b548e6beb21ba98bc09d0d4699b6f5d5f0ce5ce97d7c",
+      "excerpt": "12 active failure observations · 1 shown · 11 omitted · incidentCursor=i1.eyJrIjoiaSIsIngiOjIsIm8iOjEsInYiOiJhNjMzNTdmODMxYTZlN2JmIiwibiI6MTIsInIiOiJpaFBGLXpiQkt3VkVlUFhGIn0 (pass as cursor to bg_task_status id=bg_issue312_many_failures) O…",
       "facts": {
-        "utf16CodeUnits": 881,
+        "utf16CodeUnits": 746,
         "lineCount": 11,
-        "longestLineUtf8Bytes": 307,
+        "longestLineUtf8Bytes": 240,
         "containsNonAscii": true,
         "utf8GreaterThanUtf16": true,
         "orderedToolSequence": null,
@@ -981,8 +1025,8 @@
         "containsSyntheticMarker": true,
         "proposedBudgetBytes": 1024,
         "exceedsProposedBudget": false,
-        "utf8BytesExcludingIsolatedTmpdir": 811,
-        "isolatedTmpdirPrefixBytes": 76
+        "utf8BytesExcludingIsolatedTmpdir": 752,
+        "isolatedTmpdirPrefixBytes": 0
       },
       "family": "many-failures",
       "surface": "bg_task_status",
@@ -994,13 +1038,13 @@
     },
     {
       "id": "background.many_failures.list",
-      "utf8Bytes": 864,
-      "sha256": "ec1421d45052b8b2643a5a45a632f7f17b6dfa61824ba4845d0efdeafc1fe8c8",
-      "excerpt": "Action required · observed 2023-11-14T22:13:20.000Z · issue-312-synthetic matched $.terminalFailure = true · evidence: /private/var/folders/hh/j9d9ym9d1n3b_lks9_4b5zx40000gn/T/issue-312 (clipped) 2 tasks with unresolved incidents; newest b…",
+      "utf8Bytes": 806,
+      "sha256": "61c5cd7700c74b11e187d5b0614cbd7f72de44194147be9c6d9281a3495359a6",
+      "excerpt": "Action required · observed 2023-11-14T22:13:20.000Z · issue-312-synthetic matched $.terminalFailure = true · evidence: output.log#poll=18 2 tasks with unresolved incidents; newest bg_issue312_failed has 1. Full incidents: bg_task_status id…",
       "facts": {
-        "utf16CodeUnits": 859,
+        "utf16CodeUnits": 801,
         "lineCount": 10,
-        "longestLineUtf8Bytes": 198,
+        "longestLineUtf8Bytes": 140,
         "containsNonAscii": true,
         "utf8GreaterThanUtf16": true,
         "orderedToolSequence": null,
@@ -1016,7 +1060,7 @@
         "containsSyntheticMarker": true,
         "proposedBudgetBytes": 1024,
         "exceedsProposedBudget": false,
-        "utf8BytesExcludingIsolatedTmpdir": 864,
+        "utf8BytesExcludingIsolatedTmpdir": 806,
         "isolatedTmpdirPrefixBytes": 0
       },
       "family": "many-failures",
@@ -1066,7 +1110,7 @@
     }
   ],
   "totals": {
-    "caseCount": 27,
+    "caseCount": 28,
     "families": [
       "success",
       "failed",
@@ -1075,17 +1119,19 @@
       "unicode-long-line-json",
       "multi-page-answer",
       "many-failures",
+      "quiet-history",
       "repeated-poll",
       "many-completions"
     ],
     "utf8BytesByFamily": {
       "success": 2759,
-      "failed": 1862,
+      "failed": 1726,
       "incomplete": 1318,
       "orphaned": 1312,
       "unicode-long-line-json": 11145,
       "multi-page-answer": 1993,
-      "many-failures": 3280,
+      "many-failures": 2979,
+      "quiet-history": 401,
       "repeated-poll": 12299,
       "many-completions": 1949
     }

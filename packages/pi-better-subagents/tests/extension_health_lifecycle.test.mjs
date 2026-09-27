@@ -287,7 +287,10 @@ describe("#315 child tool failures and parent wakes", () => {
                 assert.equal(failureWakes(h).length, 0);
                 assert.match(failureSummary(id), /Observation incomplete/);
                 const output = (await h.tools.get("subagent_output").execute("x", { id }, undefined, undefined, h.ctx)).content[0].text;
-                assert.match(output, /Unclassified failure observation|\d+ active failure observations · \d+ shown/, "the observations stay visible to inspection");
+                assert.match(output, /5 unclassified tool errors/, "the observations stay counted on inspection");
+                assert.doesNotMatch(output, /Unclassified failure observation ·|incidentCursor=/, "history is not listed or paged by default");
+                const history = (await h.tools.get("subagent_output").execute("x", { id, history: true, max_bytes: 4096 }, undefined, undefined, h.ctx)).content[0].text;
+                assert.equal((history.match(/^Unclassified failure observation · /gm) ?? []).length, 5, "history:true lists them");
                 // The same operation failing again with no recovery: now stuck.
                 appendAgedFailures(id, [...toolEvents("red-test-2", "npm test", "1 failing\n\nCommand exited with code 1"),
                     ...toolEvents("red-test-3", "npm test", "1 failing\n\nCommand exited with code 1")]);

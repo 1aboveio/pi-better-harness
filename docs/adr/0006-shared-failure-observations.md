@@ -56,6 +56,20 @@ Replaying the session from issue #315 (29 children, 181 tool failures) yields 17
 - **Background-task intent.** `bg_task_spawn`, `bg_task_watch`, and `bg_task` accept `operation_id` and `expected_exit_codes`. The parent agent launches these commands itself, so the declaration is trusted. They are validated before launch with the shared validator. A declared exit code is recorded as expected. A later task that succeeds with the same `operation_id` (same kind, cwd, and SSH target, and the same owner: an equal non-empty session id, or for sessionless tasks the same spawning process, #312's rule), and that started after the failure, recovers the earlier task's unresolved failures; observation gaps and expected failures are left alone.
 - **Budget-safe terminal notes.** The terminal summary never exceeds its budget and is made of whole lines. It drops, in order: incident rows, lower-priority notes (history, expected, earlier reported), the cursor's retrieval hint, the unclassified count, the cursor, and the count line. The correctness note is kept whenever it fits.
 
+## Amendment: quiet history
+
+### Problem
+
+A completed run with no incident needing action still printed `10 active failure observations · 0 shown · 10 omitted · incidentCursor=…` for eight unclassified child tool errors and two expected failures. The cursor invited the orchestrator to page them, and it got about 3.7 KiB of history whose rows were mostly a raw tool-result JSON wrapper and a repeated absolute log path.
+
+### Decision
+
+- **Active means needs action.** Active incidents are unresolved `Action required` incidents and observation gaps. Counts, `shown`/`omitted`, and the incident cursor cover only those, with #312's exactness.
+- **History is counted, and listed only on request.** Unclassified and expected failures (and closed incidents) are a count line. When nothing needs action, surfaces say so in one line with no cursor. `history: true` on the result, output, and status tools returns an incident page of every incident; the cursor records its view, so following it stays in history.
+- **Compact rows.** Rows unwrap tool-result JSON to its text, cap the excerpt at 120 UTF-8 bytes on a code-point boundary, and show evidence as the file name and fragment. Raw evidence pages keep full rows. The journal is unchanged.
+- **Cursor format.** Incident cursors carry a format version, and their revision digest includes scope and row detail. A cursor minted before this change points into a full-detail row, so it resets with `stale-cursor` rather than resuming inside a compact row.
+- Delivery (#315) is unchanged: callbacks still report each incident once and count history. Background-task completion callbacks add the same history line, so a declared expected exit is not read as a plain failure.
+
 ## Scope and limits
 
 This provides assurance for supported structured evidence. It cannot prove semantic task correctness from exit zero, detect failures a producer never reports, or declare an arbitrary prose claim verified. Lifecycle remains independent of the observations. Per-consumer adapters must explicitly document which evidence they support, and classify gaps instead of silently treating unsupported evidence as success.

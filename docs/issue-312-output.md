@@ -66,7 +66,7 @@ Cursors are opaque and caller-owned. Replaying `cursor` returns the same page.
 | Retained file | `p1.` `k=f` (log-utils) | Raw retained log bytes |
 | Status revision | `p1.` `k=s` (log-utils) | Unchanged vs failure-only vs content |
 | List | `l1.` (log-utils `pageRows`) | Compact list rows (keyset: last row shown) |
-| Incidents | `i1.` (failure-observations) | Active incidents, resumable inside a row |
+| Incidents | `i1.` (failure-observations) | Incidents that need action (or, from `history: true`, every incident), resumable inside a row |
 
 The change-detection cursor is printed as `statusCursor=…`; the page cursor as
 `nextCursor=…`. A status cursor with unchanged content **and** failures
@@ -110,7 +110,19 @@ shows whole rows when they fit; otherwise it leads with
 `N active failure observations · K shown · M omitted · incidentCursor=…`, where
 the counts are exact and the cursor resumes at the first byte not shown (even
 inside a row longer than a page). Pass `incidentCursor` as `cursor` to
-`subagent_result` / `subagent_output` / `bg_task_status`. `bg_task_status`
+`subagent_result` / `subagent_output` / `bg_task_status`.
+
+"Active" means *needs action*: `Action required` incidents and observation
+gaps. The counts, `shown` / `omitted`, and `incidentCursor` cover only those.
+Unclassified tool errors and expected failures are history: one count line
+(`Also in history: …`), or, when nothing needs action, a single line such as
+`No failures need action · 8 unclassified tool errors · 2 expected (history)`
+with no incident cursor. `history: true` on the same tools returns an incident
+page of every incident, including recovered and superseded ones; its
+`nextCursor` stays in that view. Rows are compact everywhere: tool-result JSON
+is unwrapped to its text, the excerpt is capped at 120 UTF-8 bytes (whole code
+points), and evidence reads `output.log#byte=N`. Raw pages (`mode: "raw"`, raw
+background logs) keep the whole excerpt and the full evidence path. `bg_task_status`
 also continues a raw log `nextCursor` (as the raw log page) and a verbose
 metadata `nextCursor`, instead of resetting them as stale status cursors
 (#323). The failure journal

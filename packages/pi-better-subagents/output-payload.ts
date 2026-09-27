@@ -46,17 +46,20 @@ import {
     type RunMeta,
 } from "./registry.ts";
 import {
-    activeFailures,
+    actionableFailures,
     failureJournalFingerprint,
     failureRevision,
     formatIncidentSummary,
     formatTerminalIncidentSummary,
+    incidentCursorScope,
     incidentPageHeading,
     incidentResource as sharedIncidentResource,
     incidentVerbatimPage,
     isIncidentCursor,
     requiresAction,
+    scopedFailures,
     type FailureState,
+    type IncidentScope,
 } from "./shared-failure-observations.ts";
 import { fmtElapsed, fmtSpend } from "./widget.ts";
 
@@ -75,6 +78,11 @@ export interface PayloadRequest {
     limit?: unknown;
     /** Explicit opt-in facts: `cost` (token/cost spend) and/or `tools` (tool-call count). */
     include?: unknown;
+    /**
+     * `true` lists failure history: unclassified, expected, and closed incidents as well as
+     * those that need action, as an incident page. Default output lists only what needs action.
+     */
+    history?: unknown;
 }
 
 export type LoadedRun =
@@ -272,15 +280,25 @@ function incidentResource(ctx: CallContext): string {
  * Shared failure section: whole rows when they fit, otherwise exact counts plus a resuming cursor.
  * Terminal runs list only actionable/incomplete rows and count unclassified history (#315).
  */
-function failureSection(ctx: CallContext, cap?: number): EnvelopeFailure | undefined {
-    if (activeFailures(ctx.state).length === 0 && !ctx.terminal) return undefined;
+function failureSection(ctx: CallContext, cap?: number, detail: "compact" | "full" = "compact"): EnvelopeFailure | undefined {
     const summarize = ctx.terminal ? formatTerminalIncidentSummary : formatIncidentSummary;
-    if (ctx.terminal && !summarize(ctx.state, { maxBytes: Number.MAX_SAFE_INTEGER }).text) return undefined;
+    if (!summarize(ctx.state, { maxBytes: Number.MAX_SAFE_INTEGER }).text) return undefined;
     return (budget) => summarize(ctx.state, {
         maxBytes: cap === undefined ? budget : Math.min(budget, cap),
         resource: incidentResource(ctx),
         retrieval: `pass as cursor to subagent_result/subagent_output id="${ctx.id}"`,
+        detail,
     }).text || undefined;
+}
+
+/** An explicit history request: `history: true`. */
+function wantsHistory(request: PayloadRequest): boolean {
+    return isAll(request.history);
+}
+
+/** An incident page is served for an incident cursor or an explicit history request. */
+function wantsIncidentPage(request: PayloadRequest): boolean {
+    return isIncidentCursor(request.cursor) || wantsHistory(request);
 }
 
 function envelopeText(input: {
@@ -312,10 +330,12 @@ function envelopeText(input: {
 }
 
 function assembleIncidentPage(ctx: CallContext, identity: string): string {
+    const cursor = isIncidentCursor(ctx.request.cursor) ? ctx.request.cursor : undefined;
+    const scope: IncidentScope = wantsHistory(ctx.request) ? "all" : incidentCursorScope(cursor) ?? "actionable";
     return envelopeText({
         maxBytes: budgetFor("answer", ctx.request.maxBytes),
-        identity: `${identity} ${incidentPageHeading(activeFailures(ctx.state).length)}`,
-        verbatim: (budget) => incidentVerbatimPage(ctx.state, { cursor: ctx.request.cursor, maxBytes: budget, resource: incidentResource(ctx) }),
+        identity: `${identity} ${incidentPageHeading(scopedFailures(ctx.state, scope).length, scope)}`,
+        verbatim: (budget) => incidentVerbatimPage(ctx.state, { cursor, scope, maxBytes: budget, resource: incidentResource(ctx) }),
         statusCursor: ctx.statusCursor,
     });
 }
@@ -331,7 +351,7 @@ function maybeUnchanged(ctx: CallContext, identity: string): string | undefined 
         failureRevision: failureRevision(ctx.state),
     });
     if (inspected.change !== "none") return undefined;
-    const active = activeFailures(ctx.state).length;
+    const active = actionableFailures(ctx.state).length;
     return envelopeText({
         maxBytes: budgetFor("status", ctx.request.maxBytes),
         identity: `${identity} · unchanged`,
@@ -490,7 +510,7 @@ export function assembleRunningResult(
     const terminal = st !== "running" && st !== "orphaned";
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", terminal);
     const identity = `[${id} · ${st} · ${elapsedFor(meta)}]`;
-    if (isIncidentCursor(request.cursor)) return assembleIncidentPage(ctx, identity);
+    if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
     return envelopeText({
@@ -526,7 +546,8 @@ function assembleRaw(
     return envelopeText({
         maxBytes,
         identity: `${identity} raw retained log`,
-        failure: failureSection(ctx, continuing ? CONTINUATION_FAILURE_BYTES : 1024),
+        // Raw evidence keeps whole excerpts and evidence paths.
+        failure: failureSection(ctx, continuing ? CONTINUATION_FAILURE_BYTES : 1024, "full"),
         diagnostics: joinSections([changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]),
         gaps: logGaps(id),
         verbatim: (remaining) => rawPage(ctx, pageCursorFor(request.cursor), remaining),
@@ -547,7 +568,7 @@ export function assembleSubagentOutput(
     const terminal = st !== "running" && st !== "orphaned";
     const ctx = callContext(id, meta, request, scopeKey, "subagent_output", terminal);
     const identity = outputIdentity(id, st, elapsedFor(meta));
-    if (isIncidentCursor(request.cursor)) return assembleIncidentPage(ctx, identity);
+    if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
     const pageCursor = pageCursorFor(request.cursor);
@@ -598,7 +619,7 @@ export function assembleOrphanedResult(
     if (isRawMode(request.mode) || cursorKind(request.cursor) === "f") return assembleRaw(id, meta, "orphaned", request, "result", scopeKey);
     const ctx = callContext(id, meta, request, scopeKey, "subagent_result", false);
     const identity = `[${id} · orphaned · ${elapsedFor(meta)}]`;
-    if (isIncidentCursor(request.cursor)) return assembleIncidentPage(ctx, identity);
+    if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
     const pageCursor = pageCursorFor(request.cursor);
@@ -646,7 +667,7 @@ export function assembleSubagentResult(
     const run = parseRunForLifecycle(id);
     const lifecycle = resolveLifecycle(meta, run);
     const identity = resultIdentity(id, String(st), exit, elapsedFor(meta), lifecycle.classification);
-    if (isIncidentCursor(request.cursor)) return assembleIncidentPage(ctx, identity);
+    if (wantsIncidentPage(request)) return assembleIncidentPage(ctx, identity);
     const unchanged = maybeUnchanged(ctx, identity);
     if (unchanged) return unchanged;
     const pageCursor = pageCursorFor(request.cursor);
@@ -775,7 +796,8 @@ export function listIncidentCount(id: string, cwd: string, terminal: boolean): L
     if (hit && hit.key === before) return hit.value;
     const state = collectRunFailures(id, cwd, terminal);
     listIncidentComputations += 1;
-    const active = activeFailures(state);
+    // List rows count what needs action; unclassified and expected failures are history.
+    const active = actionableFailures(state);
     const value = { count: active.length, actionRequired: active.filter(requiresAction).length, revision: failureRevision(state) };
     // Cache only a stable read: when the scan (or a concurrent writer) changed
     // the log or journal meanwhile, the next call recomputes and caches then.

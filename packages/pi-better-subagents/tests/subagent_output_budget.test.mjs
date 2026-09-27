@@ -275,23 +275,23 @@ describe("registered subagent payloads", () => {
 
         const result = textOf(await resultTool.execute("tc", { id }));
         assert.ok(utf8ByteLength(result) <= OUTPUT_BUDGET_BYTES.answer);
-        // #315: a completed run counts unclassified tool failures instead of presenting them as its outcome.
-        const failureAt = result.indexOf("12 earlier tool failures remain unclassified.");
+        // A completed run counts unclassified tool failures as history instead of presenting them as its
+        // outcome, and does not offer an incident cursor for them: nothing needs action.
+        const failureAt = result.indexOf("No failures need action · 12 unclassified tool errors (history)");
         const progressAt = result.indexOf("PROGRESS_TEXT");
         assert.ok(failureAt >= 0, result);
         assert.ok(progressAt > failureAt, "failures must precede progress");
-        const counts = result.match(/12 active failure observations · (\d+) shown · (\d+) omitted · incidentCursor=i1\./);
-        assert.ok(counts, result);
-        assert.equal(Number(counts[1]) + Number(counts[2]), 12);
-        assert.equal(Number(counts[1]), 0, "unclassified rows are paged, not re-listed");
+        assert.doesNotMatch(result, /incidentCursor=|active failure observation/, "history is not paged by default");
         assert.match(result, /Work correctness was not inferred from lifecycle alone\./);
         assert.doesNotMatch(result.slice(0, progressAt), /incident-\d+-failed/);
         assert.doesNotMatch(result, /tools used:/i);
         assert.doesNotMatch(result, /do-0.*do-1.*do-2/);
-        const incidentCursor = result.match(/incidentCursor=(i1\.\S+)/)?.[1];
-        assert.ok(incidentCursor, result);
-        let cursor = incidentCursor;
-        const pages = [result];
+        // history:true is the explicit view; its cursor continues it without the flag.
+        const first = textOf(await resultTool.execute("tc", { id, history: true }));
+        assert.match(first, /History page of 12 failure observations/);
+        assert.doesNotMatch(first, /\{"content"/, "rows show the tool's text, not its result JSON");
+        let cursor = first.includes("hasMore=true") ? first.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+        const pages = [first];
         for (let i = 0; i < 20 && cursor; i += 1) {
             const page = textOf(await resultTool.execute("tc", { id, cursor }));
             pages.push(page);
@@ -308,6 +308,45 @@ describe("registered subagent payloads", () => {
         }
         assert.deepEqual([...occurrences.keys()].sort((a, b) => a - b), Array.from({ length: 12 }, (_, i) => String(i)));
         assert.ok([...occurrences.values()].every((count) => count === 1), "each incident is shown exactly once across the summary and its pages");
+    });
+
+    it("renders compact incident rows by default and keeps full evidence paths in mode=raw", async () => {
+        const id = trackDisk(`sa_budget_compact_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        const events = [];
+        // The same operation failing three times needs action; a one-off error and an expected probe are history.
+        for (let i = 0; i < 3; i += 1) {
+            events.push({ type: "tool_execution_start", toolCallId: `stuck_${i}`, toolName: "bash", args: { command: "npm test" } });
+            events.push({ type: "tool_execution_end", toolCallId: `stuck_${i}`, toolName: "bash", isError: true,
+                result: { content: [{ type: "text", text: `1 failing ${"界".repeat(80)}\n\nCommand exited with code 1` }] } });
+        }
+        events.push({ type: "tool_execution_start", toolCallId: "miss", toolName: "read", args: { path: "missing.md" } });
+        events.push({ type: "tool_execution_end", toolCallId: "miss", toolName: "read", isError: true,
+            result: { content: [{ type: "text", text: "ENOENT: no such file or directory" }] } });
+        events.push({ type: "tool_execution_start", toolCallId: "probe", toolName: "bash", args: { command: "rg x" } });
+        events.push({ type: "tool_execution_end", toolCallId: "probe", toolName: "bash", isError: true, expected: true,
+            result: { content: [{ type: "text", text: "Command exited with code 1" }] } });
+        events.push({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "DONE" }] }] });
+        writeEvents(id, events);
+
+        const result = textOf(await resultTool.execute("tc", { id }));
+        const row = result.split("\n").find((line) => line.startsWith("Action required · "));
+        assert.ok(row, result);
+        assert.doesNotMatch(row, /\{"content"|\uFFFD/);
+        assert.match(row, /\(3 occurrences\) · evidence: output\.log#byte=\d+$/, "evidence is the log name and offset, not its path");
+        assert.ok(Buffer.byteLength(row.split(" · ")[2].replace(/ \(3 occurrences\)$/, "")) <= 120, row);
+        assert.match(result, /Also in history: 1 unclassified tool error · 1 expected|1 earlier tool failure remains unclassified/);
+        assert.doesNotMatch(result, /ENOENT|Unclassified failure observation ·|Expected failure ·/, "history rows are not listed");
+
+        const raw = textOf(await outputTool.execute("tc", { id, mode: "raw" }));
+        const rawRow = raw.split("\n").find((line) => line.startsWith("Action required · "));
+        assert.ok(rawRow, raw);
+        assert.ok(rawRow.includes(`evidence: ${logPathFor(id)}#byte=`), "raw mode keeps the full evidence path");
+        assert.match(rawRow, new RegExp(`${"界".repeat(80)}`), "raw mode keeps the whole excerpt");
+
+        const list = textOf(await listTool.execute("tc", { all: true, limit: 50, max_bytes: 4096 }));
+        const listRow = list.split("\n").find((line) => line.includes(id));
+        assert.match(listRow ?? "", /1 incident · 1 action required/, "list rows count what needs action, not history");
     });
 
     it("keeps incomplete and orphaned results diagnostic, not clean final answers", async () => {

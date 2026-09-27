@@ -98,6 +98,7 @@ function normalizeOutputRequest<T extends Record<string, unknown>>(params: T): T
 }
 
 const MAX_BYTES_ALIAS_DESCRIPTION = "Deprecated alias for max_bytes. max_bytes wins when both are given.";
+const HISTORY_DESCRIPTION = "If true, return an incident page that also lists failure history: unclassified child tool errors, expected failures, and recovered or superseded incidents. Default output lists only failures that need action and counts the rest.";
 const INCLUDE_DESCRIPTION = "Explicit opt-in facts omitted by default: \"cost\" adds one token/cost spend line, \"tools\" adds one tool-call count line with the distinct tool names.";
 
 /** pi's tool-result text shape. */
@@ -388,11 +389,12 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
             maxBytes: Type.Optional(Type.Number({ description: MAX_BYTES_ALIAS_DESCRIPTION })),
             mode: Type.Optional(Type.String({ description: "raw = page retained log bytes. Default is the bounded assembled excerpt." })),
             include: Type.Optional(Type.Array(Type.String(), { description: INCLUDE_DESCRIPTION })),
+            history: Type.Optional(Type.Boolean({ description: HISTORY_DESCRIPTION })),
             all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
         }),
         async execute(_id: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
             const session = forCall(baseSession, ctx);
-            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown };
+            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown; history?: boolean };
             const access = resolveRunAccess(p.id, p, session);
             if (access.kind === "missing") throw unknownRunError(p.id);
             if (access.kind === "unreadable") return text(assembleUnreadableMetadata(p.id, access.detail, p));
@@ -425,6 +427,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines. lines wins when both are given." })),
             mode: Type.Optional(Type.String({ description: "raw = page retained log bytes (16 KiB default, 64 KiB cap). Default is the bounded assembled result." })),
             include: Type.Optional(Type.Array(Type.String(), { description: INCLUDE_DESCRIPTION })),
+            history: Type.Optional(Type.Boolean({ description: HISTORY_DESCRIPTION })),
             all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
         }),
         renderResult(result: unknown, options: unknown, theme: unknown) {
@@ -432,7 +435,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         },
         async execute(_id: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
             const session = forCall(baseSession, ctx);
-            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown };
+            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown; history?: boolean };
             const access = resolveRunAccess(p.id, p, session);
             if (access.kind === "missing") throw unknownRunError(p.id);
             if (access.kind === "unreadable") {
