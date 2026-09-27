@@ -6,6 +6,7 @@ import {
   BACKGROUND_OUTPUT_BUDGET_BYTES,
   BACKGROUND_OUTPUT_HARD_CAP_BYTES,
   backgroundBudget,
+  formatCallbackFacts,
   formatLaunch,
   formatList,
   formatLog,
@@ -70,6 +71,7 @@ const ctx = {
 describe("background output budgets", () => {
   it("uses revised consumer defaults and clamps explicit pages to the core hard cap", () => {
     expect(BACKGROUND_OUTPUT_BUDGET_BYTES).toEqual({ status: 1024, log: 1024, list: 1024, rawPage: 16 * 1024 });
+    expect(BACKGROUND_OUTPUT_HARD_CAP_BYTES).toEqual({ status: 2 * 1024, log: 4 * 1024, list: 4 * 1024, rawPage: 64 * 1024 });
     expect(backgroundBudget("status")).toBe(1024);
     expect(backgroundBudget("log", 512)).toBe(512);
     expect(backgroundBudget("rawPage", 32 * 1024)).toBe(32 * 1024);
@@ -321,5 +323,30 @@ describe("list defaults", () => {
     expect(listed).not.toMatch(/Unresolved failure[\s\S]*Unresolved failure/);
     const wider = formatList({ origin, limit: 20, maxBytes: 4096 });
     expect(wider).toContain(ids[11]);
+  });
+});
+
+describe("callback facts", () => {
+  it("exposes matched-condition and gap facts without env dumps or tool histories", () => {
+    const meta = fixture({
+      status: "failed",
+      env: { SECRET: "should-not-appear" },
+      result: {
+        reason: "failure condition matched",
+        matchedCondition: { type: "json_path_equals", path: "$.terminalFailure", value: true },
+        matchedValue: true,
+      },
+      lastExitCode: 0,
+      captureDiscardedBytes: 1200,
+      captureOverflowEvents: 1,
+    });
+    recordFailure(meta, "failure_when", "failure condition matched", "poll", { category: "condition" });
+    const facts = formatCallbackFacts(meta);
+    expect(facts.outcome).toBe("failed");
+    expect(facts.decision).toContain("Condition matched: $.terminalFailure = true");
+    expect(facts.decision).toContain("capture overflow discarded 1200 bytes");
+    expect(facts.failure).toMatch(/Unresolved failure/);
+    expect(JSON.stringify(facts)).not.toContain("SECRET");
+    expect(JSON.stringify(facts)).not.toMatch(/tools used:/);
   });
 });

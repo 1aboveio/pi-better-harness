@@ -5,8 +5,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CALLBACK_BATCH_BUDGET_BYTES,
+  CALLBACK_BATCH_MAX_BYTES,
+  callbackBatchBudget,
   createCallbackBatcher,
   formatCallbackBatch,
+  packCallbackBatch,
+  utf8ByteLength,
   type CallbackBatchEvent,
   type CallbackBatchHost,
 } from "./index.ts";
@@ -126,6 +131,8 @@ test("bounds event text and excludes caller-supplied result and log payloads", (
   assert.match(content, /subagent_result id="sa_bounded"/);
   assert.doesNotMatch(content, new RegExp(`${resultSentinel}|${logSentinel}`));
   assert.match(content, /Full results and logs are intentionally omitted/);
+  assert.match(content, /cursor\/limit/);
+  assert.doesNotMatch(content, /tools used:| · tools: |read,bash,write/);
 });
 
 test("keeps failed snapshots retryable and merges concurrent arrivals exactly once", async () => {
@@ -275,4 +282,180 @@ test("urgent health signals bypass an ordinary batch and retry without early mar
   assert.equal(await batcher.flush(), true);
   assert.equal(sends.length, 3);
   assert.match(sends[2]!, /sa_ordinary/);
+});
+
+
+test("callback batch default budget is 2 KiB and explicit pages clamp to 8 KiB", () => {
+  assert.equal(CALLBACK_BATCH_BUDGET_BYTES, 2 * 1024);
+  assert.equal(CALLBACK_BATCH_MAX_BYTES, 8 * 1024);
+  assert.equal(callbackBatchBudget(), 2 * 1024);
+  assert.equal(callbackBatchBudget(512), 512);
+  assert.equal(callbackBatchBudget(99_999), 8 * 1024);
+  assert.equal(callbackBatchBudget(0), 2 * 1024);
+  assert.equal(callbackBatchBudget(Number.NaN), 2 * 1024);
+});
+
+test("large batches stay within 2 KiB, count omitted rows, and receipt only represented events", async () => {
+  const { host, messages } = recordingHost();
+  const delivered: string[] = [];
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, retryMs: 10_000 });
+  try {
+    for (let i = 0; i < 80; i++) {
+      const failed = i % 7 === 0;
+      batcher.enqueue(event(`sa_${String(i).padStart(3, "0")}`, {
+        status: failed ? "failed; unresolved failure observations" : "completed",
+        outcome: failed ? "failed" : "completed",
+        failure: failed ? `Unresolved failure · incident ${i} · poll exploded` : undefined,
+        omittedIncidents: failed ? 3 : undefined,
+        incidentCount: failed ? 4 : undefined,
+        onDelivered: () => delivered.push(`sa_${String(i).padStart(3, "0")}`),
+      }));
+    }
+    assert.equal(await batcher.flush(), true);
+    assert.equal(messages.length, 1);
+    const content = messages[0]!.message.content;
+    assert.ok(utf8ByteLength(content) <= CALLBACK_BATCH_BUDGET_BYTES, `batch was ${utf8ByteLength(content)} bytes`);
+    assert.match(content, /omitted from this batch \(not receipted; still queued\)/);
+    assert.match(content, /cursor\/limit/);
+    assert.match(content, /failure:/);
+    assert.match(content, /omittedIncidents=3/);
+    assert.doesNotMatch(content, /tools used:/);
+    assert.ok(delivered.length >= 1);
+    assert.ok(delivered.length < 80);
+    assert.equal(batcher.pendingCount(), 80 - delivered.length);
+    assert.match(content, /status=failed/);
+    const first = [...delivered];
+    assert.equal(await batcher.flush(), true);
+    assert.equal(messages.length, 2);
+    assert.ok(utf8ByteLength(messages[1]!.message.content) <= CALLBACK_BATCH_BUDGET_BYTES);
+    assert.ok(delivered.length > first.length);
+    for (const id of first) {
+      assert.equal(delivered.filter((item) => item === id).length, 1, `${id} was receipted twice`);
+      assert.doesNotMatch(messages[1]!.message.content, new RegExp(`id=${id} \\|`));
+    }
+  } finally {
+    batcher.cancel();
+  }
+});
+
+test("Unicode long labels stay inside the UTF-8 budget without splitting a code point", async () => {
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000 });
+  try {
+    const label = "日本語🔥".repeat(400);
+    batcher.enqueue(event("sa_unicode", { label, status: "completed" }));
+    assert.equal(await batcher.flush(), true);
+    const content = messages[0]!.message.content;
+    assert.ok(utf8ByteLength(content) <= CALLBACK_BATCH_BUDGET_BYTES, `unicode batch was ${utf8ByteLength(content)} bytes`);
+    assert.doesNotMatch(content, /\uFFFD/);
+    assert.match(content, /日本語|🔥/);
+    assert.match(content, /id=sa_unicode/);
+  } finally {
+    batcher.cancel();
+  }
+});
+
+test("many failures keep decisive facts and omitted incident counts before routine completions", () => {
+  const events = [
+    event("sa_ok", { status: "completed", outcome: "completed" }),
+    event("sa_fail", {
+      status: "failed; unresolved failure observations",
+      outcome: "failed",
+      failure: "Unresolved failure · poll exploded · evidence: ref=e42",
+      decision: "Condition matched: $.terminalFailure = true",
+      incidentCount: 12,
+      omittedIncidents: 7,
+    }),
+    event("bg_gap", {
+      source: "background-task",
+      detailTool: "bg_task_status",
+      status: "failed",
+      outcome: "failed",
+      decision: "Permission denied while terminating process tree. The task may still be executing.",
+    }),
+  ];
+  const packed = packCallbackBatch(events);
+  assert.ok(utf8ByteLength(packed.text) <= CALLBACK_BATCH_BUDGET_BYTES);
+  assert.match(packed.text, /failure: Unresolved failure/);
+  assert.match(packed.text, /omittedIncidents=7 \(counted; inspect with cursor\/limit\)/);
+  assert.match(packed.text, /Condition matched: \$\.terminalFailure = true/);
+  assert.match(packed.text, /Permission denied while terminating process tree/);
+  assert.match(packed.text, /subagent_result id="sa_fail"/);
+  assert.match(packed.text, /bg_task_status id=bg_gap/);
+  assert.doesNotMatch(packed.text, /tools used:|FULL_LOG|environment/);
+  assert.equal(packed.omitted, 0);
+});
+
+test("a failed sendMessage receipts nobody and retries the same represented plus overflow rows", async () => {
+  let failNext = true;
+  const contents: string[] = [];
+  const delivered: string[] = [];
+  const host: CallbackBatchHost = {
+    sendMessage(message) {
+      if (failNext) {
+        failNext = false;
+        throw new Error("simulated handoff failure");
+      }
+      contents.push(message.content);
+    },
+  };
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, retryMs: 10_000 });
+  try {
+    for (let i = 0; i < 40; i++) {
+      batcher.enqueue(event(`row_${i}`, {
+        label: `long-label-${"🔥".repeat(20)}-${i}`,
+        status: i === 39 ? "failed" : "completed",
+        failure: i === 39 ? "Unresolved failure · last row" : undefined,
+        onDelivered: () => delivered.push(`row_${i}`),
+      }));
+    }
+    assert.equal(await batcher.flush(), false);
+    assert.deepEqual(delivered, []);
+    assert.equal(batcher.pendingCount(), 40);
+    assert.equal(await batcher.flush(), true);
+    assert.equal(contents.length, 1);
+    assert.ok(utf8ByteLength(contents[0]!) <= CALLBACK_BATCH_BUDGET_BYTES);
+    assert.ok(delivered.length >= 1);
+    assert.ok(delivered.length < 40);
+    assert.match(contents[0]!, /failure:/);
+    assert.equal(batcher.pendingCount(), 40 - delivered.length);
+  } finally {
+    batcher.cancel();
+  }
+});
+
+test("origin isolation, callback:false, and pending overflow do not receipt omitted rows", async () => {
+  const { host, messages } = recordingHost();
+  const delivered: string[] = [];
+  const suppressed: string[] = [];
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, retryMs: 10_000 });
+  try {
+    batcher.enqueue(event("sa_quiet", {
+      callback: false,
+      onDelivered: () => delivered.push("sa_quiet"),
+    }));
+    batcher.enqueue(event("sa_foreign", {
+      getSuppressionReason: () => "origin session-a does not match active session-b",
+      onSuppressed: (reason) => suppressed.push(reason),
+      onDelivered: () => delivered.push("sa_foreign"),
+    }));
+    for (let i = 0; i < 30; i++) {
+      batcher.enqueue(event(`sa_keep_${i}`, {
+        label: `worker ${"x".repeat(80)} ${i}`,
+        onDelivered: () => delivered.push(`sa_keep_${i}`),
+      }));
+    }
+    assert.equal(await batcher.flush(), true);
+    assert.equal(messages.length, 1);
+    assert.doesNotMatch(messages[0]!.message.content, /sa_quiet|sa_foreign/);
+    assert.deepEqual(suppressed, ["origin session-a does not match active session-b"]);
+    assert.ok(!delivered.includes("sa_quiet"));
+    assert.ok(!delivered.includes("sa_foreign"));
+    assert.ok(utf8ByteLength(messages[0]!.message.content) <= CALLBACK_BATCH_BUDGET_BYTES);
+    if (batcher.pendingCount() > 0) {
+      assert.match(messages[0]!.message.content, /not receipted; still queued/);
+    }
+  } finally {
+    batcher.cancel();
+  }
 });

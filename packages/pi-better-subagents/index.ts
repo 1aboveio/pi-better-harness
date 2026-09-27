@@ -96,7 +96,7 @@ import {
 import { buildHealthCallbackDelivery } from "./completion.ts";
 import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
 import { collectRunFailures, failurePath, failureSummary, formatFailureSummary, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
-import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
+import { activeFailures, failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
 import {
     text,
     subagentListTool,
@@ -340,16 +340,22 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
         || meta.completionCallbackSentAt !== undefined
         || meta.completionCallbackSuppressedAt !== undefined) return;
     const label = meta.name ? `${meta.name} (${id})` : id;
-    const observations = Object.values(collectRunFailures(id, meta.cwd, true).observations);
+    const state = collectRunFailures(id, meta.cwd, true);
+    const observations = Object.values(state.observations);
     const unresolved = observations.filter((observation) => observation.status === "unresolved");
     const observationStatus = unresolved.some((observation) => observation.category === "observation-incomplete")
         ? "observation incomplete" : unresolved.length ? "unresolved failure observations" : undefined;
+    const active = activeFailures(state);
     getCallbackBatcher(pi).enqueue({
         source: "subagent",
         id,
         label,
         status: observationStatus ? `${meta.status}; ${observationStatus}` : meta.status,
         detailTool: "subagent_result",
+        outcome: meta.status,
+        failure: formatFailureSummary(state) || undefined,
+        incidentCount: active.length || undefined,
+        omittedIncidents: active.length > 5 ? active.length - 5 : undefined,
         callback: true,
         isDelivered: () => {
             const current = readMeta(id);

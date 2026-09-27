@@ -9,6 +9,8 @@ import {
   sliceUtf8Bytes,
   utf8ByteLength,
   OUTPUT_BUDGET_BYTES,
+  OUTPUT_BUDGET_MAX_BYTES,
+  OUTPUT_PAGE_DEFAULTS,
   type EnvelopeSections,
   type EvidenceGap,
   type VerbatimPage,
@@ -19,28 +21,28 @@ import { belongsToOrigin, inspectMeta, listTaskRecords, originOf, type MetaInspe
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition } from "./types.js";
 
 /**
- * Issue #312 consumer budgets. Core `OUTPUT_BUDGET_BYTES` stay the hard cap
- * until a later integration reconciles shared defaults. Pass `maxBytes` for a
- * larger explicit page, clamped to that hard cap. Totals are UTF-8 bytes of
- * the whole model-facing `content`, including headers, failures, gaps, and
+ * Issue #312 consumer budgets. Defaults follow OUTPUT-POLICY / shared
+ * `OUTPUT_BUDGET_BYTES`. Explicit larger pages clamp to `OUTPUT_BUDGET_MAX_BYTES`
+ * (hard caps), not the new smaller defaults. Totals are UTF-8 bytes of the
+ * whole model-facing `content`, including headers, failures, gaps, and
  * continuation.
  */
 export const BACKGROUND_OUTPUT_BUDGET_BYTES = {
-  status: 1024,
-  log: 1024,
-  list: 1024,
-  rawPage: 16 * 1024,
-} as const;
-
-export const BACKGROUND_OUTPUT_HARD_CAP_BYTES = {
   status: OUTPUT_BUDGET_BYTES.status,
   log: OUTPUT_BUDGET_BYTES.log,
   list: OUTPUT_BUDGET_BYTES.list,
   rawPage: OUTPUT_BUDGET_BYTES.rawPage,
 } as const;
 
-export const DEFAULT_LOG_TAIL_ROWS = 10;
-export const DEFAULT_LIST_ENTRIES = 10;
+export const BACKGROUND_OUTPUT_HARD_CAP_BYTES = {
+  status: OUTPUT_BUDGET_MAX_BYTES.status,
+  log: OUTPUT_BUDGET_MAX_BYTES.log,
+  list: OUTPUT_BUDGET_MAX_BYTES.list,
+  rawPage: OUTPUT_BUDGET_MAX_BYTES.rawPage,
+} as const;
+
+export const DEFAULT_LOG_TAIL_ROWS = OUTPUT_PAGE_DEFAULTS.logLines;
+export const DEFAULT_LIST_ENTRIES = OUTPUT_PAGE_DEFAULTS.listEntries;
 const MAX_LIST_ENTRIES = 100;
 
 export type BackgroundOutputSurface = keyof typeof BACKGROUND_OUTPUT_BUDGET_BYTES;
@@ -187,6 +189,31 @@ function formatDecision(meta: BackgroundTaskMeta): string | undefined {
   }
   if (result.reason && !result.matchedCondition) lines.push(oneLine(result.reason, 240));
   return lines.length ? lines.join("\n") : undefined;
+}
+
+/** Compact decision/gap facts for completion callbacks (no env/command dump). */
+export function formatCallbackFacts(meta: BackgroundTaskMeta): {
+  outcome: string;
+  failure?: string;
+  decision?: string;
+  incidentCount?: number;
+  omittedIncidents?: number;
+} {
+  const state = readFailureState(failurePath(meta.id));
+  const active = activeFailures(state);
+  const failure = formatFailureSummary(state) || undefined;
+  const gapLines = [
+    meta.logDiscardedBytes ? `retention discarded ${meta.logDiscardedBytes} bytes; not recoverable` : undefined,
+    meta.captureDiscardedBytes ? `capture overflow discarded ${meta.captureDiscardedBytes} bytes; not full history` : undefined,
+  ].filter((line): line is string => Boolean(line));
+  const decision = [formatDecision(meta), ...gapLines].filter(Boolean).join("\n") || undefined;
+  return {
+    outcome: meta.status,
+    failure,
+    decision: decision || undefined,
+    incidentCount: active.length || undefined,
+    omittedIncidents: active.length > 5 ? active.length - 5 : undefined,
+  };
 }
 
 function formatDiagnostics(meta: BackgroundTaskMeta, extra: string[] = []): string | undefined {

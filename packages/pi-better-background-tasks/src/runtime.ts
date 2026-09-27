@@ -11,6 +11,7 @@ import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
 import { failurePath, recordFailure, recoverFailure, scheduleFailureAttention, stopFailureAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
+import { formatCallbackFacts } from "./output.js";
 import type {
   BackgroundTaskCallbackOrigin,
   BackgroundTaskMeta,
@@ -852,12 +853,18 @@ async function notifyTerminal(
   }
   const pending = terminalFailureAttention(latest.id);
   const label = latest.name ? `${latest.name} (${latest.id})` : latest.id;
+  const facts = formatCallbackFacts(latest);
   getCallbackBatcher(pi).enqueue({
     source: "background-task",
     id: latest.id,
     label,
     status: pending ? `${latest.status}: ${pending.summary}` : latest.status,
     detailTool: "bg_task_status",
+    outcome: facts.outcome,
+    failure: facts.failure,
+    decision: facts.decision,
+    incidentCount: facts.incidentCount,
+    omittedIncidents: facts.omittedIncidents,
     callback: true,
     isDelivered: () => {
       const current = readMeta(latest.id);
