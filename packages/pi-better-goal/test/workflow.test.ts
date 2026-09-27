@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -127,4 +127,98 @@ test("a legacy slash-shaped goal pauses on resume rather than executing as plain
   assert.equal(currentGoalSnapshot(ctx)?.status, "paused");
   assert.equal(messages.length, 0);
   await handlers.get("session_shutdown")?.({}, ctx);
+});
+
+test("an alias declaring workflow-alias-of binds its coordinator, so the coordinator's plan can sync", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const dir = mkdtempSync(join(tmpdir(), "pi-workflow-alias-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const rushPath = join(dir, "rush-issues.md");
+  writeFileSync(rushPath, "---\nname: rush-issues\nmetadata:\n  workflow-role: coordinator\n---\n# Rush\nCoordinate the rush run.\n");
+  const aliasPath = join(dir, "resolve-issues.md");
+  writeFileSync(aliasPath, "---\nname: resolve-issues\nmetadata:\n  workflow-alias-of: rush-issues\n---\n# Alias\nRun rush-issues unchanged.\n");
+  const registered = new Map([["rush-issues", rushPath], ["resolve-issues", aliasPath]]);
+  const resolve = (name: string) => registered.get(name);
+  const rushOwner = { name: "rush-issues", path: rushPath, role: "coordinator", planOwner: "workflow" };
+
+  assert.deepEqual(workflowOwnerFromSkill("resolve-issues", aliasPath, resolve), rushOwner);
+  assert.throws(() => workflowOwnerFromSkill("resolve-issues", aliasPath), /rush-issues, which is not a registered skill/);
+  const ordinaryPath = join(dir, "ordinary.md");
+  writeFileSync(ordinaryPath, "---\nname: ordinary\n---\n");
+  const toOrdinary = join(dir, "to-ordinary.md");
+  writeFileSync(toOrdinary, "---\nmetadata:\n  workflow-alias-of: ordinary\n---\n");
+  assert.throws(() => workflowOwnerFromSkill("to-ordinary", toOrdinary, () => ordinaryPath), /not a workflow coordinator/);
+  const chained = join(dir, "chained.md");
+  writeFileSync(chained, "---\nmetadata:\n  workflow-alias-of: resolve-issues\n---\n");
+  assert.throws(() => workflowOwnerFromSkill("chained", chained, resolve), /aliases do not chain/);
+  const both = join(dir, "both.md");
+  writeFileSync(both, "---\nmetadata:\n  workflow-alias-of: rush-issues\n  workflow-role: coordinator\n---\n");
+  assert.throws(() => workflowOwnerFromSkill("both", both, resolve), /Invalid workflow metadata/);
+  const self = join(dir, "self.md");
+  writeFileSync(self, "---\nmetadata:\n  workflow-alias-of: self\n---\n");
+  assert.throws(() => workflowOwnerFromSkill("self", self, resolve), /Invalid workflow metadata/);
+
+  // The session-level failure: after /skill:resolve-issues, pi-better-plan's
+  // sync_workflow_plan refused with "Only an active rush-issues workflow can sync its plan."
+  const { default: planExtension } = await import("../../pi-better-plan/src/index.js");
+  const runDir = join(dir, ".resolve-issues", "rush", "run-1");
+  mkdirSync(runDir, { recursive: true });
+  const planPath = join(runDir, "task-plan.json");
+  writeFileSync(planPath, JSON.stringify({
+    runId: "run-1", planRevision: 1, warehouseCanaryRequired: false,
+    fleet: { explore: { status: "pending" }, combine: { status: "pending" } },
+    issues: [{ id: "1", title: "Unit", stage: "pending", status: "pending", dependsOn: [] }],
+  }));
+  type Command = { handler(args: string, ctx: ExtensionContext): Promise<void> | void };
+  const entries: Array<{ type: string; customType?: string; data?: unknown }> = [];
+  const goalHandlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+  const goalCommands = new Map<string, Command>();
+  const planTools = new Map<string, ToolDefinition>();
+  const userMessages: string[] = [];
+  const notices: string[] = [];
+  const ctx = {
+    cwd: dir, hasUI: true, isIdle: () => true,
+    sessionManager: { getBranch: () => entries, getSessionId: () => "alias-session" },
+    ui: { notify: (text: string) => notices.push(text), setStatus() {}, setWidget() {} },
+  } as unknown as ExtensionContext;
+  const shared = {
+    events: new EventEmitter(),
+    appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
+    getCommands: () => [...registered].map(([name, path]) => ({ name: `skill:${name}`, source: "skill", sourceInfo: { path } })),
+    sendMessage() {},
+    sendUserMessage(content: string) { userMessages.push(content); },
+  };
+  extension({
+    ...shared,
+    registerCommand(name: string, command: Command) { goalCommands.set(name, command); },
+    registerTool() {},
+    on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { goalHandlers.set(event, handler); },
+  } as unknown as ExtensionAPI);
+  planExtension({
+    ...shared,
+    registerCommand() {},
+    registerTool(tool: ToolDefinition) { planTools.set(tool.name, tool); },
+    on() {},
+  } as unknown as Parameters<typeof planExtension>[0]);
+
+  await goalHandlers.get("session_start")?.({ reason: "startup" }, ctx);
+  await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
+  assert.deepEqual(currentWorkflowOwner(entries), rushOwner);
+  const prompt = await goalHandlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  assert.match(prompt.systemPrompt, /Coordinate the rush run/, "resumed turns carry the coordinator's instructions");
+  const synced = await planTools.get("sync_workflow_plan")!.execute("bind", { path: planPath, revision: 1 }, undefined, undefined, ctx);
+  assert.equal((synced.details as { runId: string }).runId, "run-1");
+
+  await goalCommands.get("workflow")?.handler("clear", ctx);
+  await goalCommands.get("goal")?.handler("/skill:resolve-issues #312", ctx);
+  assert.equal(userMessages.at(-1), "/skill:resolve-issues #312");
+  assert.deepEqual(currentWorkflowOwner(entries), rushOwner, "a goal bound to the alias binds the coordinator too");
+
+  await goalCommands.get("workflow")?.handler("clear", ctx);
+  registered.delete("rush-issues");
+  const result = await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
+  assert.deepEqual(result, { action: "handled" }, "an alias whose coordinator is not installed is refused, not run bare");
+  assert.match(notices.at(-1) ?? "", /not a registered skill/);
+  assert.equal(currentWorkflowOwner(entries), null);
+  await goalHandlers.get("session_shutdown")?.({}, ctx);
 });
