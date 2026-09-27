@@ -798,6 +798,120 @@ export function revisionOf(value: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Shared output-control parameters, session scope keys, and log identity facts
+// (#321/#323). Subagent and background-task tools both read these, so the two
+// families cannot drift.
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical output-control parameter names and their deprecated aliases.
+ * Canonical names follow this repo's dominant snake_case tool-parameter style
+ * (`max_log_bytes`, `timeout_seconds`, `exclude_tools`, `sandbox_dir`, ...).
+ */
+export const OUTPUT_CONTROL_ALIASES = {
+  max_bytes: "maxBytes",
+  lines: "tail_lines",
+} as const;
+
+export interface OutputControls {
+  /** Raw requested byte budget (canonical `max_bytes`, else deprecated `maxBytes`). */
+  maxBytes?: unknown;
+  /** Raw requested line count (canonical `lines`, else deprecated `tail_lines`). */
+  lines?: unknown;
+  /** Deprecated alias names the caller used (whether or not the canonical name won). */
+  deprecated: string[];
+}
+
+/**
+ * Resolve output-control parameters. Both spellings work; when both are given
+ * the canonical name wins. Values are returned unvalidated so each surface
+ * keeps its own defaults and hard caps.
+ */
+export function readOutputControls(params: unknown): OutputControls {
+  const p = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
+  const deprecated: string[] = [];
+  const pick = (canonical: keyof typeof OUTPUT_CONTROL_ALIASES): unknown => {
+    const alias = OUTPUT_CONTROL_ALIASES[canonical];
+    if (p[alias] !== undefined) deprecated.push(alias);
+    return p[canonical] !== undefined ? p[canonical] : p[alias];
+  };
+  const maxBytes = pick("max_bytes");
+  const lines = pick("lines");
+  return {
+    ...(maxBytes !== undefined ? { maxBytes } : {}),
+    ...(lines !== undefined ? { lines } : {}),
+    deprecated,
+  };
+}
+
+/** Explicit opt-in sections for otherwise-omitted spend and tool facts. */
+export const OUTPUT_INCLUDE_VALUES = ["cost", "tools"] as const;
+export type OutputInclude = (typeof OUTPUT_INCLUDE_VALUES)[number];
+
+/** Parse an `include` request into known values and unknown ones (both deduplicated). */
+export function readOutputInclude(value: unknown): { include: Set<OutputInclude>; unknown: string[] } {
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  const include = new Set<OutputInclude>();
+  const unknown: string[] = [];
+  for (const entry of raw) {
+    const name = String(entry ?? "").trim().toLowerCase();
+    if (!name) continue;
+    if ((OUTPUT_INCLUDE_VALUES as readonly string[]).includes(name)) include.add(name as OutputInclude);
+    else if (!unknown.includes(name)) unknown.push(name);
+  }
+  return { include, unknown };
+}
+
+/** Session identity that a read or mutation is scoped to. */
+export interface ScopeOrigin {
+  cwd: string;
+  sessionId?: string;
+}
+
+/** Stable digest of one cwd + session origin (the digest the subagent registry indexes by). */
+export function originScopeDigest(origin: ScopeOrigin): string {
+  return createHash("sha256").update(origin.cwd).update("\0").update(origin.sessionId ?? "").digest("hex").slice(0, 24);
+}
+
+/**
+ * Cursor scope. Every pagination and revision cursor binds this key, so a
+ * cursor never crosses session scopes. `unavailable` wins over an origin: a
+ * caller whose session identity could not be read is never the same scope as
+ * a readable one.
+ */
+export function sessionScopeKey(input: {
+  all?: boolean;
+  unavailable?: boolean;
+  origin?: ScopeOrigin;
+  /** Key when there is no origin at all (for example, a per-process scope). */
+  fallback?: string;
+}): string {
+  if (input.all) return "all";
+  if (input.unavailable) return "session:unavailable";
+  if (input.origin) return `session:${originScopeDigest(input.origin)}`;
+  return input.fallback ?? "none";
+}
+
+/**
+ * Identity facts of a retained log for a content revision: device, inode,
+ * size, and whole-millisecond mtime, or the read error. A deleted, replaced,
+ * or appended log is a content change.
+ */
+export function logIdentityFacts(path: string): unknown {
+  try {
+    const stats = statSync(path);
+    return [stats.dev, stats.ino, stats.size, Math.trunc(stats.mtimeMs)];
+  } catch (error) {
+    return ["unreadable", (error as NodeJS.ErrnoException).code ?? String(error)];
+  }
+}
+
+/** Content revision: consumer lifecycle facts followed by the retained log's identity. */
+export function lifecycleContentRevision(facts: readonly unknown[], logPath: string): string {
+  return revisionOf([...facts, logIdentityFacts(logPath)]);
+}
+
+// ---------------------------------------------------------------------------
 // Row pages (lists). Keyset cursors keep paging stable while new rows arrive.
 // ---------------------------------------------------------------------------
 

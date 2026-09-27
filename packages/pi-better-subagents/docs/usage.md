@@ -47,10 +47,15 @@ thresholds continue to take precedence for subagent health.
 |------|---------|--------------|
 | `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; same optional params as `subagent_spawn`), `onCapacity` (`reject` or `launch-available`). |
-| `subagent_list` | never | Compact current-session list (default 10 rows / 1 KiB page). Params: `all` (machine-global / foreign session), `limit` (default 10, max 100), `cursor`, `maxBytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
-| `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `maxBytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
-| `subagent_result` | never | Finished-run answer for the current session (2 KiB page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `maxBytes` (max 8 KiB), `mode` (`raw`), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
+| `subagent_list` | never | Compact current-session list (default 10 rows / 1 KiB page). Params: `all` (machine-global / foreign session), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
+| `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
+| `subagent_result` | never | Finished-run answer for the current session (2 KiB page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (max 8 KiB), `lines` (optional line cap per answer page), `mode` (`raw`), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
 | `subagent_stop` | never | SIGTERM a running run's process group. |
+
+Output-control parameters are spelled the same across subagents and background
+tasks: `max_bytes` and `lines`. The older spellings `maxBytes` and `tail_lines`
+are deprecated aliases; both work, and the canonical name wins when both are
+given.
 
 ## Non-blocking, by construction
 
@@ -275,8 +280,11 @@ Driven by the child's `--mode json` usage events:
   `-p`/print mode.)
 - **On demand** — `subagent_list`, `subagent_output`, and `subagent_result` are
   bounded current-session pages (see `docs/issue-312-output.md`). They omit
-  ordered tool-name sequences and default token/cost lines. The human toast may
-  still include elapsed + spend; the model-facing callback does not.
+  ordered tool-name sequences and default token/cost lines. Pass
+  `include: ["cost"]` to `subagent_output` or `subagent_result` for one spend
+  line (`spend: 1.2k tok (↑400 ↓800) · $0.0034`) and `include: ["tools"]` for
+  one tool-call line (`tools: 7 calls · distinct: bash, read, edit`). The human
+  toast may still include elapsed + spend; the model-facing callback does not.
 - **Folded result display.** In interactive TUI sessions, `subagent_result`
   renders a compact preview by default so long child answers do not flood the
   transcript. Clicking the tool row, or using the row expand action, shows the
@@ -378,7 +386,7 @@ and clears navigator footer statuses (TUI only).
 
 ## Parent-process scoping
 
-The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. Default `subagent_list` is current-session, newest first, 10 compact rows / 1 KiB. Pass `limit:N` (max 100) or `maxBytes` (max 4 KiB) for an explicit larger page. Pass `all:true` for a global / foreign-session view. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, transient `exited`, or durable `orphaned` / `lost`. Id-based `subagent_result` / `subagent_output` default to the current session; pass `all:true` to read a foreign-session id. Unknown ownership is a gap, not “not found”; when the current session identity cannot be read, no run's ownership is treated as verified and `all:true` is required. List pages are reached with the returned `nextCursor` (every run is reachable, not only the first 100). Runs whose metadata is missing or corrupt are reported as gaps and counted on lists, never as nonexistent.
+The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. Default `subagent_list` is current-session, newest first, 10 compact rows / 1 KiB. Pass `limit:N` (max 100) or `max_bytes` (max 4 KiB) for an explicit larger page. Pass `all:true` for a global / foreign-session view. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, transient `exited`, or durable `orphaned` / `lost`. Id-based `subagent_result` / `subagent_output` default to the current session; pass `all:true` to read a foreign-session id. Unknown ownership is a gap, not “not found”; when the current session identity cannot be read, no run's ownership is treated as verified and `all:true` is required. List pages are reached with the returned `nextCursor` (every run is reachable, not only the first 100). Runs whose metadata is missing or corrupt are reported as gaps and counted on lists, never as nonexistent.
 
 ## Supervision health (`orphaned` / `lost`)
 

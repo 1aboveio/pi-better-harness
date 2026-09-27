@@ -101,7 +101,11 @@ const DEFAULT_WINDOW_MS = 100;
 const DEFAULT_RETRY_MS = 1_000;
 const MAX_LABEL_BYTES = 160;
 const MAX_ID_BYTES = 200;
-const MAX_STATUS_BYTES = 80;
+/**
+ * Status field bound. Long statuses keep whole `; `-separated notes and say
+ * how many were left out, instead of cutting mid-word (#323).
+ */
+const MAX_STATUS_BYTES = 160;
 const MAX_FAILURE_BYTES = 400;
 const MAX_DECISION_BYTES = 400;
 const encoder = new TextEncoder();
@@ -168,6 +172,33 @@ function boundedField(value: unknown, maxBytes: number): string {
   return `${clipUtf8Prefix(oneLine, Math.max(0, maxBytes - utf8ByteLength(ellipsis)))}${ellipsis}`;
 }
 
+/**
+ * The status field under MAX_STATUS_BYTES without losing meaning: the leading
+ * lifecycle note is always kept, later `; `-separated notes are kept whole
+ * while they fit, and anything left out is named with a count and the inspect
+ * tool rather than an ellipsis.
+ */
+function boundedStatus(value: unknown): string {
+  const status = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (utf8ByteLength(status) <= MAX_STATUS_BYTES) return status;
+  const notes = status.split(/;\s+/).filter(Boolean);
+  const omission = (count: number) => ` (+${count} more status note${count === 1 ? "" : "s"}; see inspect)`;
+  const reserve = utf8ByteLength(omission(notes.length));
+  let kept = notes[0] ?? "";
+  if (utf8ByteLength(kept) + reserve > MAX_STATUS_BYTES) {
+    const suffix = " (clipped; see inspect)";
+    return `${clipUtf8Prefix(kept, MAX_STATUS_BYTES - utf8ByteLength(suffix))}${suffix}`;
+  }
+  let count = 1;
+  for (const note of notes.slice(1)) {
+    const next = `${kept}; ${note}`;
+    if (utf8ByteLength(next) + reserve > MAX_STATUS_BYTES) break;
+    kept = next;
+    count += 1;
+  }
+  return count < notes.length ? `${kept}${omission(notes.length - count)}` : kept;
+}
+
 function inspectFor(event: Pick<CallbackBatchEvent, "id" | "detailTool">): string {
   const id = boundedField(event.id, MAX_ID_BYTES);
   return event.detailTool === "bg_task_status"
@@ -231,7 +262,7 @@ function formatRow(event: CallbackBatchEvent, detailBytes = MAX_FAILURE_BYTES + 
   const source = boundedField(event.source, 40);
   const id = boundedField(event.id, MAX_ID_BYTES);
   const label = boundedField(event.label, MAX_LABEL_BYTES);
-  const status = boundedField(event.status, MAX_STATUS_BYTES);
+  const status = boundedStatus(event.status);
   const inspect = inspectFor(event);
   const lines = [
     `- source=${source} | id=${id} | label=${JSON.stringify(label)} | status=${status} | inspect: ${inspect}`,
@@ -290,7 +321,7 @@ export function formatUrgentCallback(
   const target = event.inspectId ?? event.id;
   const id = boundedField(target, MAX_ID_BYTES);
   const label = boundedField(event.label, MAX_LABEL_BYTES);
-  const status = boundedField(event.status, MAX_STATUS_BYTES);
+  const status = boundedStatus(event.status);
   const tool = event.detailTool
     ?? (event.source === "background-task" ? "bg_task_status" : "subagent_result");
   const inspectTarget = tool === "bg_task_status" ? `bg_task_status id=${id}` : `subagent_result id=${JSON.stringify(id)}`;

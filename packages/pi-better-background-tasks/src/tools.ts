@@ -2,13 +2,17 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import {
+  classifyOwnership,
   formatLaunch,
   formatList,
   formatLog,
+  formatMissingTask,
+  formatMutationRefusal,
   formatStatus,
   formatStopResult,
   type OutputOptions,
 } from "./output.js";
+import { readOutputControls } from "./shared-log-utils.js";
 import { cancelCallbackBatch } from "./shared-callback-batcher.js";
 import { inspectMeta, listMetasForOrigin, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
@@ -32,13 +36,21 @@ const ConditionSchema = Type.Union([
   Type.Object({ type: Type.Literal("json_path_exists"), path: JsonPathSchema }),
 ]);
 
+/**
+ * String-to-string map. Uses additionalProperties rather than Type.Record,
+ * whose patternProperties keyword OpenAI rejects in tool schemas (#327).
+ */
+function StringMap(description: string) {
+  return Type.Unsafe<Record<string, string>>({ type: "object", additionalProperties: { type: "string" }, description });
+}
+
 const SshSchema = Type.Object({
   host: Type.String({ description: "SSH host. Required when ssh is set." }),
   user: Type.Optional(Type.String({ description: "SSH user." })),
   port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65_535, description: "SSH port." })),
   identity_file: Type.Optional(Type.String({ description: "SSH identity file path." })),
   jump: Type.Optional(Type.String({ description: "SSH jump host passed with -J." })),
-  options: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Additional SSH -o key/value options. Agent-safe defaults remain enforced." })),
+  options: Type.Optional(StringMap("Additional SSH -o key/value options. Agent-safe defaults remain enforced.")),
 }, {
   description: "Structured SSH connection for remote background tasks. Set ssh instead of wrapping command in a hand-written ssh command; command is the remote command, and Pi keeps durable local logs, status, callbacks, and remote stop semantics.",
 });
@@ -57,7 +69,7 @@ const CommandFields = {
   argv: Type.Optional(Type.Array(Type.String(), { description: "Argument vector. Use with shell:false to avoid shell parsing." })),
   shell: Type.Optional(Type.Boolean({ description: "Run command through the package's bash-compatible shell. Default true." })),
   cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current pi cwd." })),
-  env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Extra environment variables." })),
+  env: Type.Optional(StringMap("Extra environment variables.")),
   max_log_bytes: Type.Optional(Type.Number({ description: "Maximum retained raw-log bytes. Default 4194304 (4 MiB). Older output is compacted while the task runs." })),
   callback: Type.Optional(Type.Boolean({ description: "Queue a follow-up when the task reaches a terminal state. Default true." })),
   timeout_seconds: Type.Optional(Type.Number({ description: "Optional timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to disable. Spawned processes have no default timeout." })),
@@ -76,8 +88,9 @@ const WatchParams = Type.Object({
 
 const CursorFields = {
   cursor: Type.Optional(Type.String({ description: "Caller-owned continuation cursor from a previous page. Replay returns the same page or a no-change/failure-only notice; nextCursor continues. Independent callers do not consume each other. Cursors are bound to the selected session scope." })),
-  max_bytes: Type.Optional(Type.Number({ description: "Optional UTF-8 byte budget. Defaults: status/log/list 1 KiB, raw evidence 16 KiB. Larger explicit pages are allowed up to the shared hard cap (status 2 KiB, log/list 4 KiB, raw 64 KiB) Hard caps are OUTPUT_BUDGET_MAX_BYTES." })),
-  all: Type.Optional(Type.Boolean({ description: "Inspect or list tasks across every session. Default false is current-session only. Unknown ownership is reported as a gap, never as missing or healthy." })),
+  max_bytes: Type.Optional(Type.Number({ description: "Optional UTF-8 byte budget. Defaults: status/log/list 1 KiB, raw evidence 16 KiB. Larger explicit pages are allowed up to the shared hard cap (status 2 KiB, log/list 4 KiB, raw 64 KiB). Hard caps are OUTPUT_BUDGET_MAX_BYTES." })),
+  maxBytes: Type.Optional(Type.Number({ description: "Deprecated alias for max_bytes. max_bytes wins when both are given." })),
+  all: Type.Optional(Type.Boolean({ description: "Inspect, list, stop, or clear-by-id tasks across every session. Default false is current-session only. Unknown ownership is reported as a gap, never as missing or healthy; stop and clear refuse tasks outside the current session." })),
 };
 
 const IdParams = Type.Object({
@@ -92,7 +105,8 @@ const ListParams = Type.Object({
 });
 const LogParams = Type.Object({
   id: Type.String({ description: "Background task id." }),
-  tail_lines: Type.Optional(Type.Number({ description: "Number of trailing display rows. Default 10 for compact model ingestion. Set 0 to page retained raw bytes from the oldest retained offset." })),
+  lines: Type.Optional(Type.Number({ description: "Number of trailing display rows. Default 10 for compact model ingestion. Set 0 to page retained raw bytes from the oldest retained offset." })),
+  tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines. lines wins when both are given." })),
   raw: Type.Optional(Type.Boolean({ description: "Page retained raw log bytes (16 KiB default, 64 KiB hard cap) instead of the compact excerpt. Capture and retention loss are disclosed; this is not a full-history archive." })),
   ...CursorFields,
 });
@@ -110,7 +124,8 @@ const ActionParams = Type.Object({
   id: Type.Optional(Type.String()),
   status: Type.Optional(Type.Array(Type.String())),
   limit: Type.Optional(Type.Number()),
-  tail_lines: Type.Optional(Type.Number()),
+  lines: Type.Optional(Type.Number({ description: "action:log trailing display rows (default 10; 0 pages raw bytes)." })),
+  tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines." })),
   verbose: Type.Optional(Type.Boolean()),
   ...CommandFields,
   interval_seconds: Type.Optional(Type.Number()),
@@ -125,7 +140,8 @@ const StatusActionParams = Type.Object({
   id: Type.Optional(Type.String()),
   status: Type.Optional(Type.Array(Type.String())),
   limit: Type.Optional(Type.Number()),
-  tail_lines: Type.Optional(Type.Number()),
+  lines: Type.Optional(Type.Number({ description: "action:log trailing display rows (default 10; 0 pages raw bytes)." })),
+  tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines." })),
   verbose: Type.Optional(Type.Boolean()),
   raw: Type.Optional(Type.Boolean()),
   ...CursorFields,
@@ -201,7 +217,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_status",
     label: "BG Status",
-    description: "Inspect one background task. Default output is a compact model-facing summary (1 KiB UTF-8) with matched condition, exit/signal, stop error, and failure counts before progress. Current-session only unless all:true; unknown ownership is a gap, not missing or healthy. Pass verbose:true only when full raw metadata is explicitly needed. Environment values are omitted. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
+    description: "Inspect one background task. Default output is a compact model-facing summary (1 KiB UTF-8) with matched condition, exit/signal, stop error, and failure counts before progress. Current-session only unless all:true; unknown ownership is a gap, not missing or healthy. Pass verbose:true only when full raw metadata is explicitly needed. Environment values are omitted. A raw log nextCursor passed as cursor continues the raw log page; an incidentCursor pages incidents. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -212,7 +228,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_log",
     label: "BG Log",
-    description: "Read a background task log. Default output is a compact 10-line terminal-aware tail for model ingestion (1 KiB UTF-8). Current-session only unless all:true. Pass tail_lines for a bounded tail; tail_lines:0 pages the retained raw log from the oldest retained offset (16 KiB pages, 64 KiB hard cap) with a caller-owned cursor. Capture and retention loss are disclosed; this is not a full-history archive. Nonblocking.",
+    description: "Read a background task log. Default output is a compact 10-line terminal-aware tail for model ingestion (1 KiB UTF-8). Current-session only unless all:true. Pass lines for a bounded tail (tail_lines is a deprecated alias); lines:0 pages the retained raw log from the oldest retained offset (16 KiB pages, 64 KiB hard cap) with a caller-owned cursor. Capture and retention loss are disclosed; this is not a full-history archive. Nonblocking.",
     parameters: LogParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -226,7 +242,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_stop",
     label: "BG Stop",
-    description: "Cancel a watcher or terminate a background task. For a tmux-backed SSH task, stop kills its remote tmux session before marking it cancelled. Direct SSH stop only tears down the local client and may leave the remote process running.",
+    description: "Cancel a watcher or terminate a background task. Only a task owned by the current session stops; a foreign-session or unverifiable task is refused unless all:true. For a tmux-backed SSH task, stop kills its remote tmux session before marking it cancelled. Direct SSH stop only tears down the local client and may leave the remote process running.",
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -239,7 +255,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use tail_lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override.",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override. Stop and clear change only current-session tasks: clear dismisses every owned terminal task, or one task with id (all:true allows another session's task by id).",
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
@@ -254,7 +270,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_status",
     label: "BG Status",
-    description: "Action wrapper for inspecting background tasks: list, status, log, stop, or clear. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or tail_lines:0 only for explicit full-data recovery. Shares the same output assembler as the standalone tools. Current-session default; pass all:true to override.",
+    description: "Action wrapper for inspecting background tasks: list, status, log, stop, or clear. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or lines:0 only for explicit full-data recovery. Shares the same output assembler as the standalone tools. Current-session default; pass all:true to override. Stop and clear change only current-session tasks (clear with id and all:true for another session's task).",
     parameters: StatusActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
@@ -270,22 +286,30 @@ export function text(textValue: string, details?: unknown) {
   return { content: [{ type: "text" as const, text: textValue }], details };
 }
 
+/** Requested byte budget: canonical `max_bytes`, else the deprecated `maxBytes` alias (#321). */
+function requestedMaxBytes(params: Record<string, unknown>): number | undefined {
+  const value = readOutputControls(params).maxBytes;
+  return typeof value === "number" ? value : undefined;
+}
+
 function statusOptions(params: Record<string, unknown>, origin?: BackgroundTaskCallbackOrigin): OutputOptions {
   return {
     verbose: params.verbose === true,
     cursor: typeof params.cursor === "string" ? params.cursor : undefined,
-    maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
+    maxBytes: requestedMaxBytes(params),
     all: params.all === true,
     ...scopeOptions(origin),
   };
 }
 
 function logOptions(params: Record<string, unknown>, origin?: BackgroundTaskCallbackOrigin): OutputOptions {
+  // Canonical `lines`, else the deprecated `tail_lines` alias (#321).
+  const lines = readOutputControls(params).lines;
   return {
-    tailLines: typeof params.tail_lines === "number" ? params.tail_lines : undefined,
+    tailLines: typeof lines === "number" ? lines : undefined,
     raw: params.raw === true,
     cursor: typeof params.cursor === "string" ? params.cursor : undefined,
-    maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
+    maxBytes: requestedMaxBytes(params),
     all: params.all === true,
     ...scopeOptions(origin),
   };
@@ -296,7 +320,7 @@ function listOptions(params: Record<string, unknown>, origin?: BackgroundTaskCal
     statuses: params.status as string[] | undefined,
     limit: typeof params.limit === "number" ? params.limit : undefined,
     cursor: typeof params.cursor === "string" ? params.cursor : undefined,
-    maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
+    maxBytes: requestedMaxBytes(params),
     all: params.all === true,
     ...scopeOptions(origin),
   };
@@ -340,7 +364,7 @@ async function runAction(
       if (!params.id) return "Invalid parameters: stop requires id.";
       return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession, statusOptions(params, callbackOrigin)));
     case "clear":
-      return withNavigatorRefresh(ctx, formatClear(params.status as string[] | undefined, callbackOrigin));
+      return withNavigatorRefresh(ctx, formatClear(params, statusOptions(params, callbackOrigin)));
     default:
       return `Unknown action: ${String(params.action)}`;
   }
@@ -500,35 +524,62 @@ async function formatStop(
 ): Promise<string> {
   const existing = inspectMeta(id);
   if (!existing.meta && !existing.found) return formatStopResult(existing, options);
+  if (!existing.meta) return formatMissingTask(existing, options);
+  // Same ownership rule as reads (#322): only a task owned by the current
+  // session stops unless the caller passes all:true.
+  const ownership = classifyOwnership(existing.meta, options);
+  if (ownership !== "allow") return formatMutationRefusal(id, ownership, "stop", options);
   const meta = await stopTask(pi, id, getActiveSession);
   if (!meta) return formatStopResult({ id, found: existing.found, readable: false, error: existing.error }, options);
   return formatStopResult({ id: meta.id, meta, found: true, readable: true }, options);
 }
 
-function formatClear(statuses: string[] | undefined, active: BackgroundTaskCallbackOrigin): string {
+/**
+ * Dismiss terminal tasks with the same ownership rule as reads (#322). Bulk
+ * clear never crosses the current session scope (stricter than reads, which
+ * accept all:true for a list); clear with an id honours all:true like a read
+ * by id. Tasks whose ownership cannot be verified are counted, not dismissed.
+ */
+function formatClear(params: Record<string, unknown>, options: OutputOptions): string {
+  if (typeof params.id === "string" && params.id) return formatClearById(params.id, options);
+  const statuses = params.status as string[] | undefined;
   const wanted = statuses && statuses.length > 0 ? new Set(statuses) : undefined;
+  const statusLabel = wanted ? ` matching ${Array.from(wanted).join(",")}` : "";
+  const origin = options.origin;
+  if (!origin || options.sessionUnavailable) {
+    return "Dismissed 0 terminal background tasks: the current session identity is unavailable, so no task's ownership can be verified. Clear one task with id and all:true.";
+  }
+  const scoped: OutputOptions = { ...options, all: false };
   const now = Date.now();
   let cleared = 0;
-  for (const meta of listMetasForOrigin(active)) {
+  let unverified = 0;
+  for (const meta of listMetasForOrigin(origin)) {
     if (meta.dismissedAt !== undefined) continue;
     if (!isTerminalStatus(meta.status)) continue;
     if (wanted && !wanted.has(meta.status)) continue;
-    if (!belongsToActiveToolSession(meta, active)) continue;
+    if (classifyOwnership(meta, scoped) !== "allow") {
+      unverified += 1;
+      continue;
+    }
     meta.dismissedAt = now;
     writeMeta(meta);
     cleared += 1;
   }
-  const statusLabel = wanted ? ` matching ${Array.from(wanted).join(",")}` : "";
-  return `Dismissed ${cleared} terminal background task${cleared === 1 ? "" : "s"}${statusLabel}.`;
+  const skipped = unverified
+    ? ` ${unverified} terminal task${unverified === 1 ? "" : "s"} with unverifiable ownership ${unverified === 1 ? "was" : "were"} not dismissed; clear one with id and all:true.`
+    : "";
+  return `Dismissed ${cleared} terminal background task${cleared === 1 ? "" : "s"}${statusLabel}.${skipped}`;
 }
 
-function belongsToActiveToolSession(meta: BackgroundTaskMeta, active: BackgroundTaskCallbackOrigin): boolean {
-  const origin = meta.callbackOrigin;
-  if (origin) {
-    if (origin.cwd !== active.cwd) return false;
-    if (origin.sessionId || active.sessionId) return origin.sessionId === active.sessionId;
-    return true;
-  }
-  if (active.sessionId) return false;
-  return meta.cwd === active.cwd;
+function formatClearById(id: string, options: OutputOptions): string {
+  const inspection = inspectMeta(id);
+  if (!inspection.meta) return formatMissingTask(inspection, options);
+  const meta = inspection.meta;
+  const ownership = classifyOwnership(meta, options);
+  if (ownership !== "allow") return formatMutationRefusal(id, ownership, "clear", options);
+  if (!isTerminalStatus(meta.status)) return `Background task ${id} is ${meta.status}; only terminal tasks can be dismissed. Stop it first.`;
+  if (meta.dismissedAt !== undefined) return `Background task ${id} was already dismissed.`;
+  meta.dismissedAt = Date.now();
+  writeMeta(meta);
+  return `Dismissed terminal background task ${id} (${meta.status}).`;
 }

@@ -22,8 +22,19 @@ of source bytes.
 
 Default log excerpts are 10 display rows (`OUTPUT_PAGE_DEFAULTS.logLines`).
 Default lists are 10 compact rows (`OUTPUT_PAGE_DEFAULTS.listEntries`).
-Callers may pass a lower `maxBytes` / `lines` / `limit`, or an explicit larger
+Callers may pass a lower `max_bytes` / `lines` / `limit`, or an explicit larger
 page up to the hard cap.
+
+### Parameter names (#321)
+
+Output controls use one spelling on every subagent and background-task tool:
+`max_bytes` (byte budget) and `lines` (line count; `0` pages raw bytes on
+`bg_task_log`). `maxBytes` and `tail_lines` are deprecated aliases: both work,
+and the canonical name wins when both are given. `snake_case` was chosen
+because it is this repo's dominant tool-parameter style (`max_log_bytes`,
+`timeout_seconds`, `exclude_tools`, `sandbox_dir`, `git_clone_workspace`, …);
+`lines` is one word, so no casing question arises. `subagent_result` also
+takes `lines` as an optional per-page line cap on the answer.
 
 Standalone tools and action wrappers share one assembler
 (`assemblePriorityEnvelope`). A page never exceeds its budget: a pager that
@@ -99,12 +110,19 @@ shows whole rows when they fit; otherwise it leads with
 `N active failure observations · K shown · M omitted · incidentCursor=…`, where
 the counts are exact and the cursor resumes at the first byte not shown (even
 inside a row longer than a page). Pass `incidentCursor` as `cursor` to
-`subagent_result` / `subagent_output` / `bg_task_status`. The failure journal
+`subagent_result` / `subagent_output` / `bg_task_status`. `bg_task_status`
+also continues a raw log `nextCursor` (as the raw log page) and a verbose
+metadata `nextCursor`, instead of resetting them as stale status cursors
+(#323). The failure journal
 remains retained evidence.
 
 ## Callbacks
 
-Ordinary completions share one 2 KiB batch. Rows that do not fit stay queued,
+Ordinary completions share one 2 KiB batch. A row's `status` field is the
+lifecycle status (background tasks add an attention count, e.g.
+`failed; 2 incidents need attention`); a status over 160 bytes keeps whole
+`; `-separated notes and names how many it left out, never a mid-word
+ellipsis (#323). Rows that do not fit stay queued,
 are **not** receipted, and flush on the next window. Overflow survives
 handoff failure and `/reload` via durable pending markers; already-receipted
 rows are not sent again. Each row reports `incidents=N shown=K` and, when rows
@@ -122,8 +140,10 @@ identity are separate).
 ## Ordinary output
 
 Ordinary result / output / list / callback payloads omit ordered tool-name
-sequences and default token/cost lines. Spend remains on the TUI widget and is
-opt-in for explicit transcript/evidence retrieval. Final answers are verbatim,
+sequences and default token/cost lines. Spend remains on the TUI widget. On
+`subagent_output` / `subagent_result`, `include: ["cost"]` adds one spend line
+and `include: ["tools"]` adds one tool-call count line with the distinct tool
+names (#321). Final answers are verbatim,
 including leading indentation and trailing newlines. Verbose background
 metadata is explicit evidence under the raw-page budget: plain JSON when it
 fits, otherwise paged with a cursor.

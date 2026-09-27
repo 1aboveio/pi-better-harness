@@ -6,6 +6,28 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **subagents**: `subagent_result` accepts `lines`, an optional per-page line cap for the answer; `nextCursor` continues after the last line shown. (#321)
+- **subagents**: `subagent_output` and `subagent_result` accept `include: ["cost", "tools"]` to add one token/cost spend line and one tool-call count line (with the distinct tool names). Ordinary payloads still omit both. (#321)
+- **background-tasks**: `bg_task`/`bg_status` `action:clear` with `id` dismisses that one terminal task. (#322)
+
+### Changed
+
+- **subagents**, **background-tasks**: output-control parameters use one spelling across both tool families: `max_bytes` and `lines`. `maxBytes` (subagents) and `tail_lines` (background tasks, and `subagent_output`) remain accepted as deprecated aliases; when both spellings are given, the canonical one wins. Byte budgets, hard caps, and defaults are unchanged. (#321)
+- **background-tasks**: stop and clear use the same session ownership rule as reads. `bg_task_stop` and `action:stop` refuse a task owned by another session or whose ownership cannot be verified unless `all:true` is passed; clearing by id works the same way. Bulk `action:clear` dismisses only tasks the current session owns, never crosses sessions (even with `all:true`), and counts the terminal tasks it skipped because their ownership could not be verified. (#322)
+- **background-tasks**: a raw log `nextCursor` passed to `bg_task_status` continues the raw log page, and a verbose-metadata cursor continues verbose pages, instead of resetting as a stale status cursor. (#323)
+- **background-tasks**, **subagents**: completion callback rows no longer clip the `status` field to 80 bytes with an ellipsis. Background-task rows carry the lifecycle status plus an attention count (`failed; 2 incidents need attention`); the incident text stays on its own rows with exact counts. Any status longer than 160 bytes keeps whole `; `-separated notes and says how many it left out. (#323)
+- **subagents**: `subagent_list` caches each run's incident counts and recomputes only runs whose child log or failure journal changed, so a list call no longer rescans every matching run. (#323)
+
+### Fixed
+
+- **background-tasks**: the `env` and `ssh.options` parameters of `bg_task_spawn`, `bg_task_watch`, and `bg_task` no longer use `patternProperties` (from `Type.Record`), a keyword OpenAI rejects in tool schemas; they are plain string maps. A test now checks every background-task tool schema and the subagent list/output/result/stop schemas for provider-rejected keywords.
+
+### Internal
+
+- Incident pages, cursor scope keys, and lifecycle content revisions for both tool families now come from the shared `failure-observations` and `log-utils` modules instead of per-package copies. (#323)
+
 ## [pi-better-harness@0.6.1] - 2026-09-27
 
 ### Fixed

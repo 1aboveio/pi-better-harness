@@ -602,3 +602,33 @@ test("urgent callbacks under a tiny budget still keep the counts ahead of any bo
   assert.ok(utf8ByteLength(content) <= 400);
   assert.match(content, /incidents=4 shown=0 omittedIncidents=4/);
 });
+
+test("long completion statuses keep whole notes and name omissions instead of an ellipsis (#323)", () => {
+  const notes = ["failed", "action required", "observation incomplete", ...Array.from({ length: 8 }, (_, i) => `note-${i}-${"q".repeat(20)}`)];
+  const status = notes.join("; ");
+  assert.ok(utf8ByteLength(status) > 160);
+  const content = formatCallbackBatch([event("bg_long_status", { source: "background-task", status, detailTool: "bg_task_status", incidentCount: 3 })]);
+  const field = content.match(/status=(.*?) \| inspect:/)?.[1];
+  assert.ok(field, content);
+  assert.ok(utf8ByteLength(field) <= 160, field);
+  assert.doesNotMatch(field, /\.\.\.|…/);
+  assert.match(field, /^failed; action required; observation incomplete; /);
+  const kept = field.replace(/ \(\+\d+ more status notes?; see inspect\)$/, "").split("; ");
+  for (const note of kept) assert.ok(notes.includes(note), `kept note ${note} must be whole`);
+  const omitted = Number(field.match(/\(\+(\d+) more status notes?; see inspect\)$/)?.[1]);
+  assert.equal(kept.length + omitted, notes.length);
+  assert.match(content, /incidents=3 shown=0/);
+
+  const short = formatCallbackBatch([event("bg_short_status", { status: "failed; 2 incidents need attention" })]);
+  assert.match(short, /status=failed; 2 incidents need attention \| inspect:/);
+
+  const urgent = formatUrgentCallback({
+    source: "subagent", id: "sa_status", label: "w", status, customType: "subagent-health", content: "lost",
+  });
+  const header = urgent.split("\n")[0]!;
+  assert.doesNotMatch(header, /\.\.\.|…/);
+  assert.match(header, /status=failed; action required; .* \(\+\d+ more status notes?; see inspect\)$/);
+
+  const single = formatCallbackBatch([event("sa_single_note", { status: `failed:${"z".repeat(400)}` })]);
+  assert.match(single, /status=failed:z+ \(clipped; see inspect\) \| inspect:/);
+});

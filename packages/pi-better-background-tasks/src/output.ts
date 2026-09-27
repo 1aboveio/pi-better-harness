@@ -1,12 +1,13 @@
-import { statSync } from "node:fs";
 import {
   activeFailures,
   failureRevision,
   formatFailureLines,
   formatFailureSummary,
   formatIncidentSummary,
+  incidentPageHeading,
+  incidentResource,
+  incidentVerbatimPage,
   isIncidentCursor,
-  pageFailureIncidents,
   readFailureState,
   type FailureState,
 } from "./shared-failure-observations.js";
@@ -16,9 +17,11 @@ import {
   cursorKind,
   formatUnchangedEvidence,
   inspectStatusRevision,
+  lifecycleContentRevision,
   pageRows,
   pageVerbatimText,
   revisionOf,
+  sessionScopeKey,
   sliceUtf8Bytes,
   utf8ByteLength,
   OUTPUT_BUDGET_BYTES,
@@ -112,11 +115,7 @@ function stringifyObserved(value: unknown): string {
 
 /** Cursor scope: pagination and revision cursors never cross session scopes. */
 function scopeKey(options: OutputOptions): string {
-  if (options.all) return "all";
-  if (options.sessionUnavailable) return "unavailable";
-  const origin = options.origin;
-  if (!origin) return "none";
-  return revisionOf([origin.cwd, origin.sessionId ?? ""]);
+  return sessionScopeKey({ all: options.all, unavailable: options.sessionUnavailable, origin: options.origin });
 }
 
 function taskGaps(meta: BackgroundTaskMeta): EvidenceGap[] {
@@ -145,7 +144,7 @@ function failureStateFor(id: string): FailureState {
  */
 function incidentSection(id: string, options: OutputOptions, state = failureStateFor(id)): ((budget: number) => string | undefined) | undefined {
   if (activeFailures(state).length === 0) return undefined;
-  const resource = `incidents:${scopeKey(options)}:${id}`;
+  const resource = incidentResource(scopeKey(options), id);
   return (budget) => formatIncidentSummary(state, {
     maxBytes: budget,
     resource,
@@ -155,27 +154,15 @@ function incidentSection(id: string, options: OutputOptions, state = failureStat
 
 function assembleIncidentPage(meta: BackgroundTaskMeta, options: OutputOptions): string {
   const state = failureStateFor(meta.id);
-  const resource = `incidents:${scopeKey(options)}:${meta.id}`;
-  const total = activeFailures(state).length;
+  const resource = incidentResource(scopeKey(options), meta.id);
   return assembleBackgroundContent({
     surface: "status",
     maxBytes: options.maxBytes,
     sections: {
-      identity: `${identityLine(meta)} Incident page of ${total} active failure observation${total === 1 ? "" : "s"}.`,
+      identity: `${identityLine(meta)} ${incidentPageHeading(activeFailures(state).length)}`,
       decision: formatDecision(meta),
     },
-    verbatim: (budget) => {
-      const page = pageFailureIncidents(state, { cursor: options.cursor, maxBytes: budget, resource });
-      return {
-        text: page.text || (page.total === 0 ? "No active failure observations." : ""),
-        hasMore: page.hasMore,
-        cursor: page.cursor,
-        nextCursor: page.nextCursor,
-        omittedBytes: 0,
-        omittedRows: page.omitted,
-        reset: page.reset,
-      };
-    },
+    verbatim: (budget) => incidentVerbatimPage(state, { cursor: options.cursor, maxBytes: budget, resource }),
   });
 }
 
@@ -284,14 +271,7 @@ function identityLine(meta: BackgroundTaskMeta): string {
 
 /** Lifecycle, result, and retained-log facts. A deleted or rewritten log is a change. */
 function contentRevision(meta: BackgroundTaskMeta): string {
-  let log: unknown;
-  try {
-    const stats = statSync(meta.logPath);
-    log = [stats.dev, stats.ino, stats.size, Math.trunc(stats.mtimeMs)];
-  } catch (error) {
-    log = ["unreadable", (error as NodeJS.ErrnoException).code ?? String(error)];
-  }
-  return revisionOf([
+  return lifecycleContentRevision([
     meta.status,
     meta.endedAt ?? null,
     meta.lastCheckedAt ?? null,
@@ -307,8 +287,7 @@ function contentRevision(meta: BackgroundTaskMeta): string {
     meta.lastState ?? null,
     meta.remote?.bootstrapStatus ?? null,
     meta.remote?.stopMessage ?? null,
-    log,
-  ]);
+  ], meta.logPath);
 }
 
 export function assembleBackgroundContent(input: {
@@ -376,14 +355,43 @@ function formatOwnershipGap(id: string, kind: "foreign" | "unknown", options: Ou
   });
 }
 
-type Ownership = "allow" | "foreign" | "unknown";
+export type Ownership = "allow" | "foreign" | "unknown";
 
 /**
- * Current-session ownership. Without a current session id, ownership is only
- * verified for a task this process launched with the same sessionless origin;
- * a legacy task with no recorded origin is never assumed to be ours.
+ * Refusal for a mutation (stop, clear) of a task outside the current session
+ * scope. Mutations use the same ownership rule as reads (#322): only an owned
+ * task changes; nothing about a foreign or unverifiable task is disclosed.
  */
-function classifyOwnership(meta: BackgroundTaskMeta, options: OutputOptions): Ownership {
+export function formatMutationRefusal(
+  id: string,
+  kind: Exclude<Ownership, "allow">,
+  action: "stop" | "clear",
+  options: OutputOptions,
+): string {
+  const verb = action === "stop" ? "stopped" : "dismissed";
+  const detail = kind === "foreign"
+    ? `This task belongs to another session, so it was not ${verb}. Pass all:true to ${action} it explicitly.`
+    : options.sessionUnavailable
+      ? `The current session identity is unavailable, so ownership cannot be verified and the task was not ${verb}. Pass all:true to ${action} it explicitly.`
+      : `Task ownership is unavailable or unreadable, so the task was not ${verb}. Pass all:true to ${action} it explicitly.`;
+  return assembleBackgroundContent({
+    surface: "status",
+    maxBytes: options.maxBytes,
+    sections: {
+      identity: `Background task ${id} is outside the current session scope; not ${verb}.`,
+      diagnostics: detail,
+    },
+    gaps: [{ kind: "read", detail: kind === "foreign" ? "foreign-session" : "ownership-unavailable" }],
+  });
+}
+
+/**
+ * Current-session ownership, shared by reads and mutations. Without a current
+ * session id, ownership is only verified for a task this process launched with
+ * the same sessionless origin; a legacy task with no recorded origin is never
+ * assumed to be ours.
+ */
+export function classifyOwnership(meta: BackgroundTaskMeta, options: OutputOptions): Ownership {
   if (options.all === true) return "allow";
   if (options.sessionUnavailable) return "unknown";
   const origin = options.origin;
@@ -518,6 +526,12 @@ export function formatStatus(
   const ownership = classifyOwnership(meta, options);
   if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership, options);
   if (isIncidentCursor(options.cursor)) return assembleIncidentPage(meta, options);
+  // A page cursor from another view of this task continues that view instead
+  // of resetting a status revision (#323): a raw/file cursor pages the log,
+  // a text cursor pages verbose metadata.
+  const pageKind = cursorKind(options.cursor);
+  if (pageKind === "f") return formatLog(meta.id, { ...options, raw: true });
+  if (pageKind === "t") return formatVerbose(meta, options);
   if (options.verbose) return formatVerbose(meta, options);
   const state = failureStateFor(meta.id);
   const resource = `status:${scopeKey(options)}:${meta.id}`;
@@ -594,7 +608,7 @@ export function formatLog(id: string, options: OutputOptions = {}): string {
   }
   const tailLines = options.tailLines && options.tailLines > 0 ? Math.floor(options.tailLines) : DEFAULT_LOG_TAIL_ROWS;
   const log = readLog(meta.logPath, tailLines);
-  const staleCursor = options.cursor ? ["reset=stale-cursor (compact tails have no cursor; pass a raw nextCursor or tail_lines:0)"] : [];
+  const staleCursor = options.cursor ? ["reset=stale-cursor (compact tails have no cursor; pass a raw nextCursor or lines:0)"] : [];
   if (log.error) {
     return assembleBackgroundContent({
       surface: "log",
