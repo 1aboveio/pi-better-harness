@@ -32,7 +32,7 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
-          $pw = 'Sp1ke!Passw0rd#344'
+          $pw = 'Sp1ke!Pw#344x'
           net user spikeuser $pw /add | Out-Null
           $cred = New-Object System.Management.Automation.PSCredential('spikeuser', (ConvertTo-SecureString $pw -AsPlainText -Force))
           $node = (Get-Command node).Source

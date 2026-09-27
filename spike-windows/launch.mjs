@@ -124,11 +124,12 @@ if (config.mediumIntegrity) {
     if (!SetTokenInformation(restricted[0], 25 /* TokenIntegrityLevel */, label, 16)) fail("SetTokenInformation(IntegrityLevel)");
 }
 
-const job = CreateJobObjectW(null, null);
-if (!job) fail("CreateJobObjectW");
+const useJob = config.jobFlags !== 0;
+const job = useJob ? CreateJobObjectW(null, null) : null;
+if (useJob && !job) fail("CreateJobObjectW");
 const limits = Buffer.alloc(144); // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (x64)
-limits.writeUInt32LE(0x2000, 16); // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-if (!SetInformationJobObject(job, 9, limits, 144)) fail("SetInformationJobObject");
+limits.writeUInt32LE(config.jobFlags ?? 0x2000, 16); // KILL_ON_JOB_CLOSE (+ BREAKAWAY_OK 0x800 / SILENT_BREAKAWAY_OK 0x1000)
+if (useJob && !SetInformationJobObject(job, 9, limits, 144)) fail("SetInformationJobObject");
 
 // Node marks its std handles non-inheritable at startup (uv_disable_stdio_inheritance).
 for (const n of [-10, -11, -12]) { const h = GetStdHandle(n); if (h && !SetHandleInformation(h, 1, 1)) console.error(`launch: SetHandleInformation ${n} err ${GetLastError()}`); }
@@ -143,7 +144,7 @@ const cmd = Buffer.from(`${commandLine}\0`, "utf16le");
 const CREATE_SUSPENDED = 0x4, CREATE_UNICODE_ENVIRONMENT = 0x400;
 if (!CreateProcessAsUserW(restricted[0], null, cmd, null, null, true, CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
     null, config.cwd ?? process.cwd(), si, pi)) fail("CreateProcessAsUserW");
-if (!AssignProcessToJobObject(job, pi.hProcess)) fail("AssignProcessToJobObject");
+if (useJob && !AssignProcessToJobObject(job, pi.hProcess)) fail("AssignProcessToJobObject");
 console.error(`launch: pid ${pi.dwProcessId} hProcess ${pi.hProcess ? "set" : "null"}`);
 ResumeThread(pi.hThread);
 const waited = WaitForSingleObject(pi.hProcess, 0xffffffff);

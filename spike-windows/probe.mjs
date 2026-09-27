@@ -1,7 +1,7 @@
 // Runs INSIDE the restricted token. Prints one JSON object: { name: "ok" | "ERR:<code>" | detail }.
 import fs from "node:fs";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 const H = process.env.SPIKE_HOME;
 const NOGRANT = process.env.SPIKE_NOGRANT;
@@ -77,6 +77,11 @@ t("ws.gitWorktreeAdd", () => sh("git", ["worktree", "add", "-q", join(W, ".workt
 t("nogrant.read", () => void fs.readFileSync(join(NOGRANT, "x.txt")));
 // Temp.
 t("temp.createDelete", () => { const f = join(process.env.TEMP, "spike.tmp"); fs.writeFileSync(f, "t"); fs.unlinkSync(f); });
+
+// Spawn diagnostics.
+t("spawn.ignoreStdio", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "exit 7"], { stdio: "ignore" }); return r.error ? `ERR:${r.error.code}` : `status ${r.status}`; });
+t("spawn.detached", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "exit 7"], { stdio: "ignore", detached: true }); return r.error ? `ERR:${r.error.code}` : `status ${r.status}`; });
+t("spawn.pipes", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "echo piped"], { encoding: "utf8" }); return r.error ? `ERR:${r.error.code}` : r.stdout.trim(); });
 
 // Token facts.
 t("whoami.priv", () => sh("whoami", ["/priv", "/fo", "csv", "/nh"]).split(/\r?\n/).map((l) => l.split(",")[0].replace(/"/g, "")).join(" "));

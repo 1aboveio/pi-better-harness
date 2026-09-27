@@ -92,6 +92,8 @@ const base = {
 const tokenObjectDacl = [logonSid];
 const variants = {
     full: { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: elevated, tokenObjectDacl },
+    fullBreakawayOk: { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: elevated, tokenObjectDacl, jobFlags: 0x2000 | 0x800 },
+    fullNoJob: { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: elevated, tokenObjectDacl, jobFlags: 0 },
     fullNoTokenDacl: { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: elevated },
     fullHighIL: elevated ? { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: false, tokenObjectDacl } : undefined,
     fullNoDefaultDacl: { ...base, writeRestricted: false, defaultDacl: false, mediumIntegrity: elevated, tokenObjectDacl },
