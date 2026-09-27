@@ -19,16 +19,23 @@ All budgets and offsets are **UTF-8 bytes**, not JS UTF-16 units. The budget
 covers the complete textual model-facing payload, including headers, failure
 summaries, gaps, and continuation metadata.
 
-| Surface | Default | Constant |
-|---|---:|---|
-| Background status/result | 2 KiB | `OUTPUT_BUDGET_BYTES.status` |
-| Subagent final-answer page | 8 KiB | `OUTPUT_BUDGET_BYTES.answer` |
-| Log excerpt / list page | 4 KiB | `OUTPUT_BUDGET_BYTES.log` / `.list` |
-| Completion callback batch | 8 KiB | `OUTPUT_BUDGET_BYTES.callbackBatch` |
-| Explicit raw evidence page | 64 KiB | `OUTPUT_BUDGET_BYTES.rawPage` |
+| Surface | Default | Hard cap | Constant |
+|---|---:|---:|---|
+| Background status/result | 1 KiB | 2 KiB | `OUTPUT_BUDGET_BYTES.status` |
+| Subagent final-answer page | 2 KiB | 8 KiB | `OUTPUT_BUDGET_BYTES.answer` |
+| Log excerpt | 1 KiB | 4 KiB | `OUTPUT_BUDGET_BYTES.log` |
+| List page | 1 KiB | 4 KiB | `OUTPUT_BUDGET_BYTES.list` |
+| Completion callback batch | 2 KiB | 8 KiB | `OUTPUT_BUDGET_BYTES.callbackBatch` |
+| Explicit raw evidence page | 16 KiB | 64 KiB | `OUTPUT_BUDGET_BYTES.rawPage` |
 
-`budgetFor(surface, requested)` and `clampBudgetBytes(value, fallback)` allow a
-lower caller budget and reject nonpositive/NaN inputs by falling back.
+Default log excerpts are also capped at `OUTPUT_PAGE_DEFAULTS.logLines` (10)
+and list pages at `OUTPUT_PAGE_DEFAULTS.listEntries` (10). Callers may request
+larger pages with `maxBytes` / `maxLines` / `limit` up to the hard cap.
+
+`budgetFor(surface, requested)` applies the default when `requested` is omitted
+or unsafe, allows a lower caller budget, and clamps explicit larger pages to
+`OUTPUT_BUDGET_MAX_BYTES`. `clampBudgetBytes(value, fallback)` only rejects
+nonpositive/NaN inputs.
 
 ## Verbatim paging
 

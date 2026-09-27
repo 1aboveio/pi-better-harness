@@ -299,7 +299,8 @@ export interface FormatSubagentResultInput {
     status: string;
     exitCode: string | number;
     statSeg: string;
-    toolsSeg: string;
+    /** @deprecated Ordinary tool-name sequences are omitted from result heads (#312). */
+    toolsSeg?: string;
     run: ParsedRun;
     rawLogTail: string;
     lifecycle: LifecycleValidation;
@@ -312,8 +313,9 @@ export interface FormatSubagentResultInput {
  * consistent with the registered tool path.
  */
 export function formatSubagentResult(input: FormatSubagentResultInput): string {
-    const { id, status, exitCode, statSeg, toolsSeg, run, rawLogTail, lifecycle } = input;
-    const head = `[${id} · ${status} · exit ${exitCode}${statSeg}${toolsSeg} · lifecycle ${lifecycle.classification}]`;
+    const { id, status, exitCode, statSeg, run, rawLogTail, lifecycle } = input;
+    // Ordinary ordered tool histories are omitted from the head (#312).
+    const head = `[${id} · ${status} · exit ${exitCode}${statSeg} · lifecycle ${lifecycle.classification}]`;
     if (lifecycle.incomplete) {
         return `${head}\n${formatIncompleteResult(run, rawLogTail, lifecycle)}`;
     }
@@ -325,9 +327,8 @@ export function formatSubagentResult(input: FormatSubagentResultInput): string {
         || (run.lastActivity
             ? `(no final answer parsed; latest activity)\n${run.lastActivity}`
             : `(no final answer parsed)\n\n--- raw log tail ---\n${rawLogTail}`);
-    return [
-        head,
-        formatLifecycleDiagnostics(lifecycle),
-        body,
-    ].join("\n");
+    const exceptional = lifecycle.classification !== "complete" || lifecycle.incomplete;
+    return exceptional
+        ? [head, formatLifecycleDiagnostics(lifecycle), body].join("\n")
+        : [head, body].join("\n");
 }

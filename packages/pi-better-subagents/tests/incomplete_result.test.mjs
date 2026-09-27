@@ -78,7 +78,7 @@ describe("subagent_result for incomplete child exits", () => {
 
     // @covers subagent.result
     // @level unit
-    it("formats normal completion with lifecycle complete diagnostics", () => {
+    it("formats normal completion without routine diagnostics or tool-name history", () => {
         const lifecycle = resolveLifecycle(
             { status: "completed", exitCode: 0, lifecycleClassification: "complete" },
             coherentRun,
@@ -95,9 +95,10 @@ describe("subagent_result for incomplete child exits", () => {
         });
 
         assert.match(content, /lifecycle complete/);
-        assert.match(content, /terminal event: yes/i);
         assert.match(content, /Final answer/);
         assert.doesNotMatch(content, /ended unexpectedly/i);
+        assert.doesNotMatch(content, /tools: read/);
+        assert.doesNotMatch(content, /terminal event: yes/i);
     });
 
     // @covers subagent.result
@@ -191,10 +192,13 @@ describe("subagent_result for incomplete child exits", () => {
         const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
         const finalizationSource = readFileSync(new URL("../finalization.ts", import.meta.url), "utf8");
 
-        assert.match(toolsSource, /buildSubagentResultText/);
-        assert.match(indexSource, /subagentResultTool\(Type\)/);
-        assert.match(finalizationSource, /formatSubagentResult/);
-        assert.match(finalizationSource, /resolveLifecycle/);
+        const payloadSource = readFileSync(new URL("../output-payload.ts", import.meta.url), "utf8");
+        assert.match(toolsSource, /buildSubagentResultPayload/);
+        assert.match(indexSource, /subagentResultTool\(Type/);
+        assert.match(finalizationSource, /assembleSubagentResult/);
         assert.match(finalizationSource, /lifecycleClassification/);
+        assert.match(payloadSource, /formatLifecycleDiagnostics/);
+        assert.match(payloadSource, /resolveLifecycle/);
+        assert.match(payloadSource, /assemblePriorityEnvelope/);
     });
 });

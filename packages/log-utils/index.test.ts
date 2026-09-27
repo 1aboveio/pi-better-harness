@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
   OUTPUT_BUDGET_BYTES,
+  OUTPUT_BUDGET_MAX_BYTES,
+  OUTPUT_PAGE_DEFAULTS,
   assemblePriorityEnvelope,
   budgetFor,
   clampBudgetBytes,
@@ -94,14 +96,23 @@ describe("tailTerminalDisplay", () => {
 });
 
 describe("output budgets", () => {
-  it("uses the issue #312 UTF-8 byte defaults and rejects unsafe caller values", () => {
-    assert.equal(OUTPUT_BUDGET_BYTES.status, 2 * 1024);
-    assert.equal(OUTPUT_BUDGET_BYTES.answer, 8 * 1024);
-    assert.equal(OUTPUT_BUDGET_BYTES.log, 4 * 1024);
-    assert.equal(OUTPUT_BUDGET_BYTES.list, 4 * 1024);
-    assert.equal(OUTPUT_BUDGET_BYTES.callbackBatch, 8 * 1024);
-    assert.equal(OUTPUT_BUDGET_BYTES.rawPage, 64 * 1024);
+  it("uses OUTPUT-POLICY UTF-8 byte defaults and clamps explicit pages to the hard cap", () => {
+    assert.equal(OUTPUT_BUDGET_BYTES.status, 1 * 1024);
+    assert.equal(OUTPUT_BUDGET_BYTES.answer, 2 * 1024);
+    assert.equal(OUTPUT_BUDGET_BYTES.log, 1 * 1024);
+    assert.equal(OUTPUT_BUDGET_BYTES.list, 1 * 1024);
+    assert.equal(OUTPUT_BUDGET_BYTES.callbackBatch, 2 * 1024);
+    assert.equal(OUTPUT_BUDGET_BYTES.rawPage, 16 * 1024);
+    assert.equal(OUTPUT_BUDGET_MAX_BYTES.status, 2 * 1024);
+    assert.equal(OUTPUT_BUDGET_MAX_BYTES.answer, 8 * 1024);
+    assert.equal(OUTPUT_BUDGET_MAX_BYTES.log, 4 * 1024);
+    assert.equal(OUTPUT_BUDGET_MAX_BYTES.list, 4 * 1024);
+    assert.equal(OUTPUT_BUDGET_MAX_BYTES.callbackBatch, 8 * 1024);
+    assert.equal(OUTPUT_BUDGET_MAX_BYTES.rawPage, 64 * 1024);
+    assert.equal(OUTPUT_PAGE_DEFAULTS.logLines, 10);
+    assert.equal(OUTPUT_PAGE_DEFAULTS.listEntries, 10);
     assert.equal(budgetFor("answer", 100), 100);
+    assert.equal(budgetFor("answer", 99_999), OUTPUT_BUDGET_MAX_BYTES.answer);
     assert.equal(budgetFor("status", 0), OUTPUT_BUDGET_BYTES.status);
     assert.equal(budgetFor("log", -8), OUTPUT_BUDGET_BYTES.log);
     assert.equal(budgetFor("rawPage", Number.NaN), OUTPUT_BUDGET_BYTES.rawPage);
@@ -173,6 +184,26 @@ describe("pageVerbatimText", () => {
     const page = pageVerbatimText("hello", { cursor: "not-a-cursor", maxBytes: 8 });
     assert.equal(page.reset, "stale-cursor");
     assert.equal(page.text, "hello");
+  });
+
+  it("keeps a final line with no trailing newline when the remainder fits", () => {
+    const source = Array.from({ length: 18 }, (_, i) => `result-line-${String(i + 1).padStart(2, "0")}`).join("\n");
+    const page = pageVerbatimText(source, { maxBytes: 8 * 1024 });
+    assert.equal(page.hasMore, false);
+    assert.equal(page.text, source);
+    assert.equal(page.text.endsWith("result-line-18"), true);
+  });
+
+  it("honors maxLines without embedding source bytes in the cursor", () => {
+    const source = Array.from({ length: 20 }, (_, i) => `line-${i + 1}`).join("\n");
+    const page = pageVerbatimText(source, { maxBytes: 8 * 1024, maxLines: 10 });
+    assert.equal(page.hasMore, true);
+    assert.equal(page.text.split("\n").filter(Boolean).length, 10);
+    assert.equal(page.text.includes("line-11"), false);
+    assert.equal(page.cursor.includes("line-1"), false);
+    assert.equal(page.nextCursor.includes(source.slice(0, 20)), false);
+    const next = pageVerbatimText(source, { cursor: page.nextCursor, maxBytes: 8 * 1024, maxLines: 10 });
+    assert.match(next.text, /^line-11/);
   });
 });
 

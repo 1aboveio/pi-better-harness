@@ -58,13 +58,15 @@ describe("wiring", () => {
     it("registered subagent_result uses orphaned/lost diagnostic formatters", () => {
         const toolsSource = readFileSync(new URL("../tools.ts", import.meta.url), "utf8");
         const lifecycleSource = readFileSync(new URL("../lifecycle.ts", import.meta.url), "utf8");
+        const payloadSource = readFileSync(new URL("../output-payload.ts", import.meta.url), "utf8");
         const finalizationSource = readFileSync(new URL("../finalization.ts", import.meta.url), "utf8");
-        // Orphaned is non-final: tools.ts formats best-current artifacts directly.
-        assert.match(toolsSource, /formatOrphanedResult/);
-        // Lost is terminal: finalization → formatSubagentResult → formatLostResult.
+        assert.match(toolsSource, /assembleOrphanedResult/);
         assert.match(lifecycleSource, /formatLostResult/);
         assert.match(lifecycleSource, /formatLostResult\(run, rawLogTail\)/);
-        assert.match(finalizationSource, /formatSubagentResult/);
-        assert.match(toolsSource, /buildSubagentResultText/);
+        assert.match(payloadSource, /formatLostResult/);
+        assert.match(payloadSource, /formatOrphanedResult/);
+        assert.match(finalizationSource, /assembleSubagentResult/);
+        assert.match(toolsSource, /buildSubagentResultPayload/);
+        assert.match(payloadSource, /assemblePriorityEnvelope/);
     });
 });

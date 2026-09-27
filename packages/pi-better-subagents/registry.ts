@@ -1015,18 +1015,18 @@ function ensureActiveParentIndex(directory: string, parentPid: number): void {
     initializedIndexes.add(directory);
 }
 
-function originOf(meta: RunMeta): RunCallbackOrigin {
+export function originOf(meta: RunMeta): RunCallbackOrigin {
     return meta.callbackOrigin ?? { cwd: meta.cwd };
 }
 
-function belongsToOrigin(meta: RunMeta, origin: RunCallbackOrigin): boolean {
+export function belongsToOrigin(meta: RunMeta, origin: RunCallbackOrigin): boolean {
     const candidate = originOf(meta);
     if (candidate.cwd !== origin.cwd) return false;
     if (candidate.sessionId || origin.sessionId) return candidate.sessionId === origin.sessionId;
     return true;
 }
 
-function originKey(origin: RunCallbackOrigin): string {
+export function originKey(origin: RunCallbackOrigin): string {
     return createHash("sha256")
         .update(origin.cwd)
         .update("\0")

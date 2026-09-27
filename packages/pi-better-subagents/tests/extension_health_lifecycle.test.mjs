@@ -222,8 +222,10 @@ describe("structured failure attention", () => {
                 const result = (await h.tools.get("subagent_result").execute("x", { id }, undefined, undefined, h.ctx)).content[0].text;
                 const list = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
                 assert.ok(output.indexOf("Unresolved failure") < output.indexOf("still working"));
-                assert.match(result, /^Unresolved failure/);
-                assert.ok(list.includes("Unresolved failure"));
+                assert.match(result, /Unresolved failure/);
+                assert.ok(result.indexOf("Unresolved failure") < result.indexOf("still running") || result.indexOf("Unresolved failure") < result.indexOf("still working"));
+                assert.match(list, /incident/i);
+                assert.doesNotMatch(list, /assertion failed/);
                 const detail = renderRegisteredWorkDetail("subagents", id, 120);
                 assert.match(detail.lines.join("\n"), /Unresolved failure/);
                 mock.timers.tick(HEALTH_TICK_MS);

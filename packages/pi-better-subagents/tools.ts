@@ -16,18 +16,32 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readMeta, listMetas, effectiveStatus, isFinalResultStatus, type RunMeta, type RunStatus } from "./registry.ts";
-import { parseRun, tailLog, formatSubagentOutputBody } from "./parse.ts";
-import { buildSubagentResultText } from "./finalization.ts";
-import { failureSummary, prependFailureSummary } from "./failures.ts";
-import { formatOrphanedResult } from "./lifecycle.ts";
+import { buildSubagentResultPayload } from "./finalization.ts";
 import { stopRun } from "./stop.ts";
-import { fmtElapsed, fmtSpend } from "./widget.ts";
 import {
     SUBAGENT_LIST_DEFAULT_LIMIT,
     SUBAGENT_LIST_MAX_LIMIT,
     SUBAGENT_LIST_STATUSES,
-    buildSubagentList,
+    collectSubagentList,
+    formatSubagentListRow,
 } from "./list.ts";
+import {
+    assembleOrphanedResult,
+    assembleRunningResult,
+    assembleSubagentListPayload,
+    assembleSubagentOutput,
+    assembleUnreadableMetadata,
+    decodeListOffset,
+    listIncidentLabel,
+    listRevisions,
+    listScopeKey,
+    loadRunRecord,
+    resolveActiveOrigin,
+    resolveRunAccess,
+    runInListScope,
+    unknownRunError,
+    type SubagentToolSession,
+} from "./output-payload.ts";
 import {
     extractChildEventFactsFromLog,
     loadHealthThresholdsFromConfig,
@@ -35,7 +49,6 @@ import {
     type HealthObservation,
 } from "./health-observation.ts";
 import {
-    appendHealthDiagnostic,
     formatHealthDiagnosticLine,
     statusThemeColor,
     truncateToVisibleWidth,
@@ -222,25 +235,39 @@ function displayThemeColor(status: string): string {
 type ToolDefinition = Parameters<ExtensionAPI["registerTool"]>[0];
 
 // ---- subagent_list --------------------------------------------------------
-export function subagentListTool(Type: TypeModule): ToolDefinition {
+export type { SubagentToolSession };
+
+export function subagentListTool(Type: TypeModule, session: SubagentToolSession = {}): ToolDefinition {
     return {
         name: "subagent_list",
         label: "List Subagents",
         description:
-            `List background subagent runs with status and metadata. Non-blocking. ` +
-            `Default: this parent process only, newest first, limit ${SUBAGENT_LIST_DEFAULT_LIMIT}. ` +
-            `Pass all:true for machine-global; limit is clamped to max ${SUBAGENT_LIST_MAX_LIMIT}.`,
+            `List background subagent runs with compact status rows. Non-blocking. ` +
+            `Default: current session, newest first, limit ${SUBAGENT_LIST_DEFAULT_LIMIT} (1 KiB page). ` +
+            `Pass all:true for machine-global; limit is clamped to max ${SUBAGENT_LIST_MAX_LIMIT}. ` +
+            `Pass cursor to continue. Incident counts are compact; full failure text lives on subagent_result/output.`,
         promptSnippet: "List background subagent runs and their status",
         parameters: Type.Object({
-            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = only runs spawned by this pi process." })),
+            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = current session only." })),
             limit: Type.Optional(Type.Number({ description: `Maximum rows to display (default ${SUBAGENT_LIST_DEFAULT_LIMIT}, max ${SUBAGENT_LIST_MAX_LIMIT}; larger values are clamped).` })),
             status: Type.Optional(Type.Array(Type.String(), { description: `Effective statuses to include: ${SUBAGENT_LIST_STATUSES.join(", ")}.` })),
+            cursor: Type.Optional(Type.String({ description: "Caller-owned page or status cursor from a previous list response." })),
+            maxBytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 1 KiB, max 4 KiB)." })),
         }),
         async execute(_toolCallId: string, params: unknown) {
-            const p = (params ?? {}) as { all?: boolean; limit?: number; status?: string[] | string };
+            const p = (params ?? {}) as {
+                all?: boolean; limit?: number; status?: string[] | string; cursor?: string; maxBytes?: number;
+            };
             const now = Date.now();
             const metas = listMetas();
-            // Cache observations per id so usage + health share one parse where needed.
+            const parentPid = process.pid;
+            const resolved = resolveActiveOrigin(session);
+            const origin = resolved.origin;
+            const scopeKey = listScopeKey(p.all === true, origin, parentPid);
+            let sessionWarning: string | undefined;
+            if (p.all !== true && resolved.wired && !resolved.available) {
+                sessionWarning = "Session identity unavailable; default list is empty. Pass all:true for machine-global.";
+            }
             const healthCache = new Map<string, HealthObservation>();
             const healthById = (id: string) => {
                 const hit = healthCache.get(id);
@@ -251,117 +278,137 @@ export function subagentListTool(Type: TypeModule): ToolDefinition {
                 healthCache.set(id, obs);
                 return obs;
             };
-            return text(buildSubagentList({
+            const inScope = (meta: RunMeta) => runInListScope(
+                meta,
+                { all: p.all === true },
+                origin,
+                parentPid,
+                !(resolved.wired && !resolved.available),
+            );
+            const collected = collectSubagentList({
                 metas,
                 params: p,
-                parentPid: process.pid,
+                parentPid,
                 now,
                 statusOf: effectiveStatus,
-                usageById: (id: string) => parseRun(id).usage,
                 healthById,
-                failureById: (id: string) => {
-                    const meta = metas.find((m) => m.id === id);
-                    return meta ? failureSummary(id, meta.cwd, meta.status !== "running" && meta.status !== "orphaned") : "";
-                },
+                inScope,
+            });
+            const ids = collected.items.map((row: { meta: RunMeta }) => row.meta.id);
+            const incidentLabels = collected.items.map((row: { meta: RunMeta }) => {
+                return listIncidentLabel(row.meta.id, row.meta.cwd, row.meta.status !== "running" && row.meta.status !== "orphaned");
+            });
+            const revisions = listRevisions(ids, incidentLabels);
+            const offset = decodeListOffset(p.cursor, scopeKey, revisions.contentRevision);
+            const windowItems = collected.items.slice(offset, offset + collected.limit);
+            const rows = windowItems.map((row: { meta: RunMeta; status: string }) => formatSubagentListRow(row.meta, {
+                status: row.status,
+                now,
+                health: healthById(row.meta.id),
+                failure: listIncidentLabel(row.meta.id, row.meta.cwd, row.meta.status !== "running" && row.meta.status !== "orphaned"),
+            }));
+            return text(assembleSubagentListPayload({
+                warnings: collected.warnings,
+                rows,
+                matching: collected.matching,
+                displayed: rows.length,
+                limit: collected.limit,
+                empty: collected.empty,
+                offset,
+                cursor: p.cursor,
+                maxBytes: p.maxBytes,
+                contentRevision: revisions.contentRevision,
+                failureRevision: revisions.failureRevision,
+                scopeKey,
+                sessionWarning,
             }));
         },
     } as ToolDefinition;
 }
 
 // ---- subagent_output ------------------------------------------------------
-export function subagentOutputTool(Type: TypeModule): ToolDefinition {
+export function subagentOutputTool(Type: TypeModule, session: SubagentToolSession = {}): ToolDefinition {
     return {
         name: "subagent_output",
         label: "Subagent Output",
         description:
-            "Tail the live output of a subagent run. Non-blocking: returns whatever exists right now and " +
-            "returns immediately whether or not the run has finished. Never waits.",
+            "Read a subagent run's current output without waiting. Default is a 1 KiB / 10-line excerpt of the current session. " +
+            "Pass all:true to read a foreign-session id. Pass mode=raw for retained-log pages (16 KiB default, 64 KiB cap). " +
+            "Pass cursor to continue or to poll for failure-only changes. Missing or unreadable logs are reported as gaps, not as empty healthy output.",
         promptSnippet: "Peek at a subagent's current output without waiting",
         promptGuidelines: [
             "Use subagent_output only when the user explicitly asks how a run is progressing. It never waits — do not call it in a loop.",
+            "Do not poll unchanged output. If the response says no new evidence since a cursor, stop.",
         ],
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
-            tail_lines: Type.Optional(Type.Number({ description: "How many trailing lines to show (default 40)." })),
+            tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines." })),
+            lines: Type.Optional(Type.Number({ description: "Max lines in the default excerpt (default 10)." })),
+            cursor: Type.Optional(Type.String({ description: "Caller-owned page or status cursor from a previous response." })),
+            maxBytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 1 KiB, max 4 KiB; raw default 16 KiB, max 64 KiB)." })),
+            mode: Type.Optional(Type.String({ description: "raw = page retained log bytes. Default is the bounded assembled excerpt." })),
+            all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
         }),
         async execute(_id: string, params: unknown) {
-            const p = params as { id: string; tail_lines?: number };
-            const meta = readMeta(p.id);
-            if (!meta) throw new Error(`Unknown run id: ${p.id}`);
-            const st = effectiveStatus(meta);
-            const r = parseRun(p.id);
-            const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-            const spend = fmtSpend(r.usage);
-            const head = `[${p.id} · ${st} · ${el}${spend ? ` · ${spend}` : ""}]`;
-            const tools = r.toolCalls.length ? `\ntools used: ${r.toolCalls.join(", ")}` : "";
-            const raw = tailLog(p.id, p.tail_lines ?? 40);
-            const body = formatSubagentOutputBody(
-                head,
-                tools,
-                r.finalText || r.lastActivity || undefined,
-                raw,
-                r.diagnostics,
-            );
-            // Health diagnostics for orphaned/lost/degraded only (#67). Healthy/quiet
-            // stays on today's body. Independent of meta.callback.
-            const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
-            return text(prependFailureSummary(appendHealthDiagnostic(body, healthLine), failureSummary(p.id, meta.cwd, st !== "running" && st !== "orphaned")));
+            const p = params as { id: string; cursor?: string; maxBytes?: number; mode?: string; all?: boolean; lines?: number; tail_lines?: number };
+            const access = resolveRunAccess(p.id, p, session);
+            if (access.kind === "missing") throw unknownRunError(p.id);
+            if (access.kind === "unreadable") return text(assembleUnreadableMetadata(p.id, access.detail, p));
+            if (access.kind === "denied") return text(access.payload);
+            const resolved = resolveActiveOrigin(session);
+            const scopeKey = listScopeKey(p.all === true, resolved.origin, process.pid);
+            const healthLine = formatHealthDiagnosticLine(observeMetaHealth(access.meta));
+            return text(assembleSubagentOutput(p.id, access.meta, p, healthLine, scopeKey));
         },
     } as ToolDefinition;
 }
 
 // ---- subagent_result ------------------------------------------------------
-export function subagentResultTool(Type: TypeModule): ToolDefinition {
+export function subagentResultTool(Type: TypeModule, session: SubagentToolSession = {}): ToolDefinition {
     return {
         name: "subagent_result",
         label: "Subagent Result",
         description:
-            "Read a subagent's final output if it has finished. NEVER waits: if the run is still going it " +
-            "says so and returns immediately.",
+            "Read a subagent's final output if it has finished. NEVER waits. Default current session. Ordinary answers are preserved verbatim in a 2 KiB UTF-8 page (max 8 KiB); pass cursor to reconstruct the rest. Pass all:true for a foreign-session id. mode=raw pages retained log bytes (16 KiB default, 64 KiB cap). Failures and exceptional lifecycle facts come before progress. No tool-name histories or default cost lines.",
         promptSnippet: "Read a finished subagent's final result (never waits)",
         promptGuidelines: [
             "Use subagent_result to collect a finished run's output. If it reports the run is still going, stop — do not poll; you'll be notified when it finishes.",
+            "If the response includes nextCursor, call again with that cursor to read the rest of the answer. Do not summarize away unread pages.",
         ],
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
+            cursor: Type.Optional(Type.String({ description: "Caller-owned answer page or status cursor from a previous response." })),
+            maxBytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 2 KiB, max 8 KiB)." })),
+            mode: Type.Optional(Type.String({ description: "raw = page retained log bytes (16 KiB default, 64 KiB cap). Default is the bounded assembled result." })),
+            all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
         }),
         renderResult(result: unknown, options: unknown, theme: unknown) {
             return renderSubagentResultDisplay(result, options, theme);
         },
         async execute(_id: string, params: unknown) {
-            const p = params as { id: string };
-            const meta = readMeta(p.id);
-            if (!meta) throw new Error(`Unknown run id: ${p.id}`);
+            const p = params as { id: string; cursor?: string; maxBytes?: number; mode?: string; all?: boolean };
+            const access = resolveRunAccess(p.id, p, session);
+            if (access.kind === "missing") throw unknownRunError(p.id);
+            if (access.kind === "unreadable") {
+                return subagentResultText(assembleUnreadableMetadata(p.id, access.detail, p));
+            }
+            if (access.kind === "denied") return subagentResultText(access.payload);
+            const meta = access.meta;
+            const resolved = resolveActiveOrigin(session);
+            const scopeKey = listScopeKey(p.all === true, resolved.origin, process.pid);
             const st = effectiveStatus(meta);
+            const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
             if (!isFinalResultStatus(st)) {
                 if (st === "orphaned") {
-                    // Non-terminal: supervision is broken but related process-
-                    // group work may still be alive — never present this as a
-                    // final result. Surface best-CURRENT artifacts (#65) plus
-                    // health diagnostic (#67).
-                    const r = parseRun(p.id);
-                    const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-                    const spend = fmtSpend(r.usage);
-                    const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
-                    const head = `[${p.id} · orphaned · ${el}${spend ? ` · ${spend}` : ""}${tools}]`;
-                    const rawTail = tailLog(p.id, 40);
-                    const body = `${head}\n${formatOrphanedResult(r, rawTail)}`;
-                    const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
-                    return subagentResultText(prependFailureSummary(appendHealthDiagnostic(body, healthLine), failureSummary(p.id, meta.cwd)));
+                    return subagentResultText(assembleOrphanedResult(p.id, meta, healthLine, p, scopeKey));
                 }
-                return subagentResultText(prependFailureSummary(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`, failureSummary(p.id, meta.cwd)));
+                return subagentResultText(assembleRunningResult(p.id, meta, p, scopeKey));
             }
-            // Lifecycle-aware body (complete-stream authority + diagnostics).
-            // Lost runs go through formatLostResult inside formatSubagentResult (#65).
-            const body = buildSubagentResultText(p.id);
+            const body = buildSubagentResultPayload(p.id, p, healthLine, scopeKey);
             if (body === null) {
-                // Defensive: status race between effectiveStatus and body assembly.
-                return subagentResultText(`Run ${p.id} is still running — no result yet. You'll be notified when it finishes; don't poll.`);
+                return subagentResultText(assembleRunningResult(p.id, meta, p, scopeKey));
             }
-            // Append degraded/lost health facts when present; completed/failed
-            // happy paths stay quiet when observation is non-actionable.
-            const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
-            return subagentResultText(prependFailureSummary(appendHealthDiagnostic(body, healthLine), failureSummary(p.id, meta.cwd, true)));
+            return subagentResultText(body);
         },
     } as ToolDefinition;
 }

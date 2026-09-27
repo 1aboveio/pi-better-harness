@@ -621,10 +621,11 @@ describe("subagent_result health/loss/orphan diagnostics", () => {
     it("tools path still uses formatOrphanedResult / lost diagnostic wiring", () => {
         const toolsSource = readFileSync(join(ROOT, "tools.ts"), "utf8");
         const lifecycleSource = readFileSync(join(ROOT, "lifecycle.ts"), "utf8");
-        assert.match(toolsSource, /formatOrphanedResult/);
+        const payloadSource = readFileSync(join(ROOT, "output-payload.ts"), "utf8");
+        assert.match(toolsSource, /assembleOrphanedResult/);
+        assert.match(payloadSource, /formatOrphanedResult/);
         assert.match(lifecycleSource, /formatLostResult/);
-        // #67 may append health diagnostics but must keep #65 formatters.
-        assert.match(toolsSource, /formatHealthDiagnosticLine|healthSurface|observeRunHealth|appendHealthDiagnostic/);
+        assert.match(toolsSource, /formatHealthDiagnosticLine|healthSurface|observeRunHealth/);
     });
 });
 
