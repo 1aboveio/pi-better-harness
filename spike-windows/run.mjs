@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomInt } from "node:crypto";
 
+process.on("uncaughtException", (e) => { console.error("UNCAUGHT", e?.stack ?? e); process.exit(3); });
+console.error("run.mjs start", process.version);
 const outPath = process.argv[2] ?? join(import.meta.dirname, "out.json");
 const here = import.meta.dirname;
 const home = join(os.homedir(), "spikehome");
@@ -108,6 +110,7 @@ const variants = {
 
 report.hkcuSoftwareAcl = hkcuRootAcl();
 report.results = {};
+console.error("setup done", JSON.stringify({ userSid, logonSid, integrity: report.integrity, derive: report.deriveCapabilitySid }));
 for (const [name, cfg] of Object.entries(variants)) {
     if (!cfg) continue;
     buildTree();
@@ -122,6 +125,7 @@ for (const [name, cfg] of Object.entries(variants)) {
     try { parsed = JSON.parse(r.stdout); } catch { parsed = { launchFailed: `exit ${r.status}`, stdout: r.stdout?.slice(0, 500), stderr: r.stderr?.slice(0, 1000) }; }
     if (r.stderr) parsed._stderr = r.stderr.slice(0, 600);
     report.results[name] = parsed;
+    console.error("variant", name, "status", r.status, r.error?.message ?? "", (r.stderr ?? "").slice(0, 300));
     // Post-run registry check (did Run/RunOnce really get written?).
     try {
         report.results[name]._runKeyPresent = sh("powershell", ["-NoProfile", "-Command",

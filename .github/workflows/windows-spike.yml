@@ -22,7 +22,12 @@ jobs:
           whoami /groups /fo list | Select-String "Mandatory"
       - name: Spike as the runner (elevated)
         shell: pwsh
-        run: node C:\spike\run.mjs C:\spike\out-elevated.json
+        run: |
+          node --version
+          node -e "console.log('node ok')"
+          node C:\spike\run.mjs C:\spike\out-elevated.json 2>&1
+          Write-Host "exit: $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Spike as a standard user
         shell: pwsh
         continue-on-error: true
