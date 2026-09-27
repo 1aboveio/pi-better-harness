@@ -557,4 +557,59 @@ describe("review regressions (#312)", () => {
     expect(status).toContain("stop failed: Permission denied");
     expect(status).toMatch(/8 active failure observations · \d+ shown · \d+ omitted · incidentCursor=/);
   });
+
+  it("always shows a row or a usable cursor on a default list led by a long incident", async () => {
+    const base = Date.now() + 5_000_000;
+    const ids = Array.from({ length: 21 }, (_, index) => fixture({ id: `bg_lead_${String(index).padStart(2, "0")}_${base}`, startedAt: base + index }).id);
+    const newest = inspectMeta(ids[20]!).meta!;
+    recordFailure(newest, "deploy", `deploy failed ${"e".repeat(450)}`, "1", { category: "operation" });
+    const tools = register();
+    const first = textOf(await tools.bg_task_list.execute("tc", {}, undefined, undefined, ctx));
+    expect(utf8ByteLength(first)).toBeLessThanOrEqual(1024);
+    expect(first).toMatch(new RegExp(`^${ids[20]} `, "m"));
+    expect(first).toContain(`Full incidents: bg_task_status id=${ids[20]}`);
+    const seen = new Set<string>();
+    let text = first;
+    for (let page = 0; page < 30; page += 1) {
+      for (const match of text.matchAll(/^(bg_lead_\d+_\d+) /gm)) seen.add(match[1]!);
+      if (!text.includes("hasMore=true")) break;
+      const cursor = text.match(/nextCursor=(\S+)/)?.[1];
+      expect(cursor, text).toBeTruthy();
+      const next = textOf(await tools.bg_task_list.execute("tc", { cursor }, undefined, undefined, ctx));
+      expect(next).not.toBe(text);
+      text = next;
+    }
+    expect(seen.size).toBe(21);
+  });
+
+  it("keeps change and read-gap facts beside many long incidents", () => {
+    const meta = fixture({ status: "running", endedAt: undefined, logLines: ["x"] });
+    for (let i = 0; i < 8; i += 1) recordFailure(meta, `op-${i}`, `incident-${i} ${"界".repeat(150)}`, `e-${i}`, { category: "operation" });
+    const first = formatStatus(inspectMeta(meta.id), { origin });
+    const cursor = first.match(/statusCursor=(\S+)/)?.[1];
+    recordFailure(meta, "op-late", `late ${"界".repeat(150)}`, "late", { category: "operation" });
+    const second = formatStatus(inspectMeta(meta.id), { origin, cursor });
+    expect(utf8ByteLength(second)).toBeLessThanOrEqual(1024);
+    expect(second).toContain("change=failure");
+    rmSync(meta.logPath);
+    const third = formatStatus(inspectMeta(meta.id), { origin, cursor: "p1.garbage" });
+    expect(utf8ByteLength(third)).toBeLessThanOrEqual(1024);
+    expect(third).toContain("reset=stale-cursor");
+    expect(third).toContain("log unreadable");
+  });
+
+  it("does not treat a legacy no-origin task as owned when the session id is absent", async () => {
+    const legacy = fixture({ logLines: ["LEGACY_NO_ORIGIN"], callbackOrigin: undefined });
+    const ours = fixture({ logLines: ["OWN_SESSIONLESS"], callbackOrigin: { cwd: origin.cwd } });
+    const tools = register();
+    const sessionless = { cwd: origin.cwd, sessionManager: { getSessionId: () => undefined } };
+    const legacyLog = textOf(await tools.bg_task_log.execute("tc", { id: legacy.id }, undefined, undefined, sessionless));
+    expect(legacyLog).not.toContain("LEGACY_NO_ORIGIN");
+    expect(legacyLog).toContain("ownership is unavailable");
+    const ownLog = textOf(await tools.bg_task_log.execute("tc", { id: ours.id }, undefined, undefined, sessionless));
+    expect(ownLog).toContain("OWN_SESSIONLESS");
+    const list = textOf(await tools.bg_task_list.execute("tc", { limit: 100, max_bytes: 4096 }, undefined, undefined, sessionless));
+    expect(list).not.toContain(`${legacy.id} `);
+    expect(list).toContain(`${ours.id} `);
+  });
 });

@@ -57,6 +57,8 @@ export const DEFAULT_LOG_TAIL_ROWS = OUTPUT_PAGE_DEFAULTS.logLines;
 export const DEFAULT_LIST_ENTRIES = OUTPUT_PAGE_DEFAULTS.listEntries;
 const MAX_LIST_ENTRIES = 100;
 const STATUS_EXCERPT_ROWS = 3;
+/** Longest incident preview a list lead-in may show; the rest is on bg_task_status. */
+const LIST_LEAD_PREVIEW_BYTES = 200;
 
 export type BackgroundOutputSurface = keyof typeof BACKGROUND_OUTPUT_BUDGET_BYTES;
 
@@ -323,7 +325,9 @@ export function assembleBackgroundContent(input: {
     sections: input.sections,
     verbatim: input.verbatim,
     // Explicit evidence pages always advance: half the page is held for bytes.
-    verbatimReserve: input.surface === "rawPage" ? Math.floor(maxBytes / 2) : undefined,
+    // Explicit evidence pages and list rows always get room: half the page
+    // is held back from failure/diagnostic sections.
+    verbatimReserve: input.surface === "rawPage" || input.surface === "list" ? Math.floor(maxBytes / 2) : undefined,
     gaps: input.gaps,
     statusCursor: input.statusCursor,
     // ADR 0006 surface contract: background summaries lead with failures.
@@ -374,11 +378,22 @@ function formatOwnershipGap(id: string, kind: "foreign" | "unknown", options: Ou
 
 type Ownership = "allow" | "foreign" | "unknown";
 
+/**
+ * Current-session ownership. Without a current session id, ownership is only
+ * verified for a task this process launched with the same sessionless origin;
+ * a legacy task with no recorded origin is never assumed to be ours.
+ */
 function classifyOwnership(meta: BackgroundTaskMeta, options: OutputOptions): Ownership {
   if (options.all === true) return "allow";
   if (options.sessionUnavailable) return "unknown";
   const origin = options.origin;
   if (!origin) return "allow";
+  if (!origin.sessionId) {
+    const recorded = meta.callbackOrigin;
+    if (!recorded) return "unknown";
+    if (recorded.cwd === origin.cwd && !recorded.sessionId && meta.spawnPid === process.pid) return "allow";
+    return recorded.sessionId ? "foreign" : "unknown";
+  }
   if (belongsToOrigin(meta, origin)) return "allow";
   const taskOrigin = originOf(meta);
   if (!meta.callbackOrigin || (!taskOrigin.sessionId && origin.sessionId)) return "unknown";
@@ -527,10 +542,12 @@ export function formatStatus(
     });
   }
   const log = readLog(meta.logPath, STATUS_EXCERPT_ROWS);
-  const extraDiagnostics = [
+  // Change/reset and read-gap facts are short and decision-relevant: they are
+  // budgeted with the decision section, ahead of long incident rows.
+  const changeFacts = [
     ...(revision.change === "failure" ? ["change=failure"] : []),
     ...(revision.reset ? [`reset=${revision.reset}`] : []),
-    ...(log.error ? [`log unreadable: ${log.error}`, "Cannot treat this as an empty healthy log."] : []),
+    ...(log.error ? [`log unreadable: ${oneLine(log.error, 200)}; cannot treat this as an empty healthy log.`] : []),
   ];
   return assembleBackgroundContent({
     surface: "status",
@@ -538,8 +555,8 @@ export function formatStatus(
     sections: {
       identity: identityLine(meta),
       failure: incidentSection(meta.id, options, state),
-      decision: formatDecision(meta),
-      diagnostics: formatDiagnostics(meta, extraDiagnostics),
+      decision: [...changeFacts, formatDecision(meta)].filter(Boolean).join("\n") || undefined,
+      diagnostics: formatDiagnostics(meta),
       progress: formatProgress(meta),
     },
     verbatim: log.error ? undefined : (budget) => excerptPage(meta, options, log, budget),
@@ -683,9 +700,10 @@ export function formatList(options: OutputOptions = {}): string {
   const listFailure = (budget: number): string | undefined => {
     const newest = failing[0];
     if (!newest) return undefined;
-    const count = `${withIncidents} task${withIncidents === 1 ? "" : "s"} with unresolved incidents; newest ${newest.id} has ${incidentsOf(newest.id)}. Inspect with bg_task_status.`;
+    const count = `${withIncidents} task${withIncidents === 1 ? "" : "s"} with unresolved incidents; newest ${newest.id} has ${incidentsOf(newest.id)}. Full incidents: bg_task_status id=${newest.id}.`;
     const top = formatFailureLines(states.get(newest.id)!)[0] ?? "";
-    const room = budget - utf8ByteLength(count) - 1;
+    // The lead-in is a pointer, not the incident page: at most a short preview.
+    const room = Math.min(LIST_LEAD_PREVIEW_BYTES, budget - utf8ByteLength(count) - 1);
     if (room < 48 || !top) return count;
     const shown = utf8ByteLength(top) <= room ? top : `${sliceUtf8Bytes(top, 0, room - 12, false).text} (clipped)`;
     return `${shown}\n${count}`;

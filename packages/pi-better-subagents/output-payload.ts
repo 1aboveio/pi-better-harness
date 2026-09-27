@@ -141,9 +141,25 @@ export function runInListScope(
     sessionAvailable = true,
 ): boolean {
     if (options.all) return true;
-    if (origin) return belongsToOrigin(meta, origin);
+    if (origin) return ownership(meta, origin, parentPid) === "own";
     if (!sessionAvailable) return false;
     return meta.spawnPid === parentPid;
+}
+
+/**
+ * Current-session ownership. Without a current session id, ownership is only
+ * verified for a run this process launched with the same sessionless origin;
+ * a legacy run with no recorded origin is never assumed to be ours.
+ */
+export function ownership(meta: RunMeta, origin: RunCallbackOrigin, parentPid = process.pid): "own" | "foreign" | "unavailable" {
+    const recorded = meta.callbackOrigin;
+    if (!origin.sessionId) {
+        if (!recorded) return "unavailable";
+        if (recorded.cwd === origin.cwd && !recorded.sessionId && meta.spawnPid === parentPid) return "own";
+        return recorded.sessionId ? "foreign" : "unavailable";
+    }
+    if (belongsToOrigin(meta, origin)) return "own";
+    return recorded ? "foreign" : "unavailable";
 }
 
 function logFacts(id: string): unknown {
@@ -421,12 +437,17 @@ export function resolveRunAccess(
     if (loaded.kind === "unreadable") return loaded;
     if (isAll(request.all)) return { kind: "ok", meta: loaded.meta };
     const resolved = resolveActiveOrigin(session);
+    // Unwired factories (no session provider) exist only for unit tests that
+    // build a tool without the extension. index.ts always passes a provider,
+    // so registered tools never take this branch; see the
+    // "registered tools fail closed" test in subagent_output_budget.test.mjs.
     if (!resolved.wired) return { kind: "ok", meta: loaded.meta };
     if (!resolved.available || !resolved.origin) {
         return { kind: "denied", payload: assembleOwnershipGap(id, "unavailable", request) };
     }
-    if (!belongsToOrigin(loaded.meta, resolved.origin)) {
-        return { kind: "denied", payload: assembleOwnershipGap(id, "foreign", request) };
+    const owner = ownership(loaded.meta, resolved.origin);
+    if (owner !== "own") {
+        return { kind: "denied", payload: assembleOwnershipGap(id, owner, request) };
     }
     return { kind: "ok", meta: loaded.meta };
 }
@@ -794,6 +815,8 @@ export function assembleSubagentListPayload(input: {
                 keyOf: (item) => ({ time: item.meta.startedAt, id: item.meta.id }),
                 render: input.render,
             }),
+        // List rows always get half the page; the lead-in is a pointer.
+        verbatimReserve: Math.floor(maxBytes / 2),
         statusCursor: status.nextCursor,
     });
 }

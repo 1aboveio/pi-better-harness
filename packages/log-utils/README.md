@@ -46,8 +46,9 @@ string at UTF-8 boundaries, preferring newlines. A page never exceeds
 `maxBytes: 0` is an explicit empty page positioned at the cursor; other
 nonpositive or non-numeric values fall back to the default. Consecutive pages
 concatenate to the original string. The returned `cursor` replays that page;
-`nextCursor` continues. Two callers holding different cursors do not consume
-each other. A content-hash change returns `reset: "source-replaced"`.
+`nextCursor` continues. A page ends after a newline only when that keeps at
+least half of the page; otherwise it ends at a UTF-8 boundary. Two callers
+holding different cursors do not consume each other. A content-hash change returns `reset: "source-replaced"`.
 
 `resource` binds the cursor to one resource **and session scope** (for example
 `answer:<scope>:<runId>`). A cursor minted for another resource, run, or scope
@@ -100,6 +101,9 @@ compact list rows newest first. The `l1.` cursor records the last row shown
 (time + id), so rows inserted ahead of it never shift later pages; every row
 is reachable regardless of `limit`. Only whole rows are counted; a single row
 larger than the page is clipped with `…` (callers keep the id near the start).
+`hasMore` always comes with a `nextCursor`; when no row fits, it points at the
+page's own start so a larger page can retry. List surfaces reserve half the
+page for rows, so failure lead-ins cannot crowd rows out.
 A cursor from another scope or filter resets with `stale-cursor`.
 
 ## Envelope integration contract

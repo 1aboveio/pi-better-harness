@@ -267,6 +267,24 @@ test("the incident summary counts shown and omitted rows exactly and its cursor 
   assert.doesNotMatch(all.text, /incidentCursor/);
 });
 
+test("a summary too small for its cursor drops the whole cursor token instead of clipping it", () => {
+  const state = manyIncidents(8, (i) => `incident-${i} ${"x".repeat(200)}`);
+  const full = formatIncidentSummary(state, { maxBytes: 0, resource: "incidents:session-a:bg_1" });
+  for (let budget = 0; budget <= 400; budget += 7) {
+    const summary = formatIncidentSummary(state, { maxBytes: budget, resource: "incidents:session-a:bg_1", retrieval: "pass as cursor to bg_task_status id=bg_1" });
+    assert.ok(Buffer.byteLength(summary.text) <= budget, `budget ${budget}: ${Buffer.byteLength(summary.text)} bytes`);
+    const cursor = summary.text.match(/incidentCursor=(\S+)/)?.[1];
+    if (cursor) {
+      assert.equal(cursor, summary.nextCursor, `budget ${budget}: cursor must be whole`);
+      assert.equal(pageFailureIncidents(state, { cursor, maxBytes: 4_096, resource: "incidents:session-a:bg_1" }).reset, undefined);
+    } else if (summary.text) {
+      assert.match(summary.text, /8 active failure observations/);
+      assert.equal(summary.nextCursor, undefined);
+    }
+  }
+  assert.equal(full.text, "");
+});
+
 test("incident cursors are bound to their resource scope", () => {
   const state = manyIncidents(6, (i) => `incident-${i} ${"x".repeat(200)}`);
   const first = pageFailureIncidents(state, { maxBytes: 300, resource: "incidents:session-a:bg_1" });

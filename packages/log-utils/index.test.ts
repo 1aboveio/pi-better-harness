@@ -209,6 +209,18 @@ describe("pageVerbatimText", () => {
     assert.equal(zero.nextCursor, zero.cursor);
   });
 
+  it("prefers a newline break only when it keeps at least half the page", () => {
+    const source = `a\n${"x".repeat(3_000)}`;
+    const page = pageVerbatimText(source, { maxBytes: 2_048 });
+    assert.equal(utf8ByteLength(page.text), 2_048);
+    assert.equal(reconstructText(source, 2_048).text, source);
+    const lines = `${"l".repeat(1_500)}\n${"y".repeat(3_000)}`;
+    assert.equal(pageVerbatimText(lines, { maxBytes: 2_048 }).text, `${"l".repeat(1_500)}\n`);
+    const path = join(tempDir(), "shortline.log");
+    writeFileSync(path, source);
+    assert.equal(pageRetainedFile(path, { maxBytes: 2_048, resource: "r" }).endByte, 2_048);
+  });
+
   it("binds text cursors to the resource so a scope change resets", () => {
     const source = "answer ".repeat(100);
     const first = pageVerbatimText(source, { maxBytes: 20, resource: "answer:session-a:sa_1" });
@@ -713,6 +725,21 @@ describe("pageRows", () => {
     const other = pageRows(items, { ...request(first.nextCursor), resource: "list:all:" });
     assert.equal(other.reset, "stale-cursor");
     assert.equal(other.before, 0);
+  });
+
+  it("returns a cursor at this page's start when no row fits, so a larger page can retry", () => {
+    const items = rows(21);
+    const none = pageRows(items, { ...request(), maxBytes: 3 });
+    assert.equal(none.shown, 0);
+    assert.equal(none.hasMore, true);
+    assert.ok(none.nextCursor, "hasMore always comes with a cursor");
+    const retry = pageRows(items, request(none.nextCursor));
+    assert.equal(retry.reset, undefined);
+    assert.equal(retry.text.split("\n")[0], "task_020 ok");
+    const second = pageRows(items, request(retry.nextCursor));
+    const stuck = pageRows(items, { ...request(second.nextCursor), maxBytes: 3 });
+    assert.equal(stuck.shown, 0);
+    assert.equal(pageRows(items, request(stuck.nextCursor)).text.split("\n")[0], "task_000 ok");
   });
 
   it("clips a single oversized row but keeps its leading id", () => {

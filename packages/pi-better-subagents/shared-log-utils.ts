@@ -368,8 +368,14 @@ function alignStart(bytes: Uint8Array, start: number): number {
   return i;
 }
 
+/**
+ * End the page after the last newline in [from, to) when that keeps at least
+ * half of the page; otherwise cut at `to` (already a UTF-8 boundary), so a
+ * short line followed by a huge one does not produce a nearly empty page.
+ */
 function preferNewlineEnd(bytes: Uint8Array, from: number, to: number): number {
-  for (let i = to - 1; i >= from; i -= 1) {
+  const floor = from + Math.ceil((to - from) / 2);
+  for (let i = to - 1; i >= floor - 1 && i >= from; i -= 1) {
     if (bytes[i] === NEWLINE) return i + 1;
   }
   return to;
@@ -850,6 +856,9 @@ export function isRowCursor(cursor: string | undefined): boolean {
   return decodeRowCursor(cursor) !== undefined;
 }
 
+/** Sorts before every real row: a cursor anchored here starts at the first row. */
+const HEAD_ROW_KEY: RowKey = { time: Number.MAX_SAFE_INTEGER, id: "" };
+
 function rowOrder(a: RowKey, b: RowKey): number {
   if (a.time !== b.time) return b.time - a.time;
   return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
@@ -917,9 +926,11 @@ export function pageRows<T>(items: readonly T[], request: RowPageRequest<T>): Ro
   const shown = lines.length;
   const remaining = Math.max(0, total - index);
   const current = request.cursor && !reset ? request.cursor : undefined;
-  const last = shown > 0 ? keyed[index - 1]!.key : undefined;
+  // The next page starts after the last row shown, or — when no row fit —
+  // at this page's own start, so a caller can always retry with a larger page.
+  const anchor = shown > 0 ? keyed[index - 1]!.key : start > 0 ? keyed[start - 1]!.key : HEAD_ROW_KEY;
   const nextCursor = remaining > 0
-    ? (last ? encodeRowCursor({ k: "l", r: resource, t: last.time, i: last.id }) : current)
+    ? encodeRowCursor({ k: "l", r: resource, t: anchor.time, i: anchor.id })
     : undefined;
   return {
     text: lines.join("\n"),

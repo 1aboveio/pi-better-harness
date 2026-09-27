@@ -301,13 +301,28 @@ export function formatIncidentSummary(state: FailureState, options: { maxBytes: 
     const line = header(page);
     const text = page.text ? `${line}\n${page.text}` : line;
     const overflow = utf8Length(text) - maxBytes;
-    if (overflow <= 0 || rowBudget <= 0) {
+    if (overflow <= 0) {
       return { text, total: page.total, represented: page.represented, omitted: page.omitted, nextCursor: page.nextCursor };
     }
+    if (rowBudget <= 0) break;
     rowBudget -= overflow;
   }
+  // Not even the count line with its cursor fits. Never emit a clipped cursor:
+  // keep the exact counts and drop the cursor token whole, saying so.
   const empty = pageFailureIncidents(state, { maxBytes: 0, resource: options.resource });
-  return { text: header(empty), total: empty.total, represented: 0, omitted: empty.total, nextCursor: empty.nextCursor };
+  const withCursor = header(empty);
+  if (utf8Length(withCursor) <= maxBytes) {
+    return { text: withCursor, total: empty.total, represented: 0, omitted: empty.total, nextCursor: empty.nextCursor };
+  }
+  const plural = empty.total === 1 ? "" : "s";
+  for (const candidate of [
+    `${empty.total} active failure observation${plural} · 0 shown · ${empty.total} omitted · incident cursor not shown (page too small; retry with a larger maxBytes${options.retrieval ? ` or ${options.retrieval}` : ""})`,
+    `${empty.total} active failure observation${plural} · 0 shown · ${empty.total} omitted · incident cursor not shown (page too small)`,
+    `${empty.total} active failure observation${plural} (page too small for details)`,
+  ]) {
+    if (utf8Length(candidate) <= maxBytes) return { text: candidate, total: empty.total, represented: 0, omitted: empty.total };
+  }
+  return { text: "", total: empty.total, represented: 0, omitted: empty.total };
 }
 export function pendingFailureAttention(state: FailureState, now: number, options: { terminal?: boolean; graceMs?: number } = {}): { key: string; incidents: string[]; summary: string } | undefined {
   const due = activeFailures(state).filter((x) => x.status === "unresolved" && !Object.hasOwn(state.delivered, x.id) &&

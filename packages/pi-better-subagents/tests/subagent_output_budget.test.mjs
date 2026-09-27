@@ -710,5 +710,30 @@ describe("registered subagent payloads", () => {
             }
             for (const id of ids) assert.ok(seen.has(id), `${id} never listed`);
         });
+
+        it("always shows a row or a usable cursor on a default list led by failures", async () => {
+            const stamp = Date.now() + 40_000_000;
+            const ids = [];
+            for (let i = 0; i < 21; i += 1) {
+                const id = trackDisk(`sa_review_lead_${stamp}_${String(i).padStart(2, "0")}`);
+                ids.push(id);
+                seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: origin, startedAt: stamp + i, promptPreview: "p".repeat(100) });
+                writeEvents(id, completedLog("x"));
+                observeFailures(failurePath(id), [{ id: `lead-${i}`, operation: `lead-op-${i}`, kind: "failure", summary: "e".repeat(450) }]);
+            }
+            const seen = new Set();
+            let content = textOf(await scopedList.execute("tc", {}));
+            for (let page = 0; page < 30; page += 1) {
+                assert.ok(utf8ByteLength(content) <= OUTPUT_BUDGET_BYTES.list);
+                for (const id of ids) if (content.includes(id)) seen.add(id);
+                if (!/hasMore=true/.test(content)) break;
+                const cursor = nextCursorOf(content);
+                assert.ok(cursor, content);
+                const next = textOf(await scopedList.execute("tc", { cursor }));
+                assert.notEqual(next, content);
+                content = next;
+            }
+            assert.equal(seen.size, 21);
+        });
     });
 });

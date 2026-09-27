@@ -594,25 +594,27 @@ Accounting: **UTF-8 bytes** (\`Buffer.byteLength(text, "utf8")\`). Tokenizer cou
 Runtime model for this capture session: \`${serializable.model?.id ?? "?"}\` effort \`${serializable.model?.effort ?? "?"}\`.
 No model calls were made to seed the payloads.
 
-## How to rerun (BEFORE and AFTER)
+## How to rerun
 
 \`\`\`bash
-node --import tsx scripts/issue-312-payload-baseline.mjs --phase before \\
-  --json-out docs/issue-312-payload-baseline.json \\
-  --md-out docs/issue-312-payload-baseline.md
+node --import tsx scripts/issue-312-payload-baseline.mjs --phase ${serializable.phase} \\
+  --json-out docs/issue-312-payload-baseline${serializable.phase === "after" ? "-after" : ""}.json \\
+  --md-out docs/issue-312-payload-baseline${serializable.phase === "after" ? "-after" : ""}.md
 \`\`\`
 
-After the integration lands, rerun with \`--phase after\` and compare \`utf8Bytes\`, \`facts.containsOrderedToolSequence\`, longest-line bytes, and whether proposed budgets are exceeded. Do not treat this BEFORE file as a regression pin that blesses current over-budget or tool-history behavior.
+${serializable.phase === "after"
+        ? "This AFTER capture measures the shipped OUTPUT-POLICY defaults. Compare it with the BEFORE file (`--phase before`) on `utf8Bytes`, `facts.containsOrderedToolSequence`, longest-line bytes, and whether budgets are exceeded."
+        : "This BEFORE capture records pre-#312 behavior. Rerun with `--phase after` to measure the shipped defaults. Do not treat this BEFORE file as a regression pin that blesses over-budget or tool-history behavior."}
 
-## Proposed budgets (issue discussion, not enforced)
+## ${serializable.phase === "after" ? "OUTPUT-POLICY default budgets (enforced by the tools)" : "Proposed budgets (issue discussion, not enforced)"}
 
-| Surface | Proposed UTF-8 budget |
+| Surface | ${serializable.phase === "after" ? "Default" : "Proposed"} UTF-8 budget |
 |---|---:|
 ${Object.entries(serializable.proposedBudgetsBytes).map(([name, bytes]) => `| ${name} | ${bytes} |`).join("\n")}
 
 ## Cases
 
-| id | family | tool | UTF-8 bytes | UTF-16 units | longest line (UTF-8) | exceeds proposed | ordered tool sequence |
+| id | family | tool | UTF-8 bytes | UTF-16 units | longest line (UTF-8) | exceeds budget | ordered tool sequence |
 |---|---|---|---:|---:|---:|---|---|
 ${rows.join("\n")}
 
@@ -624,7 +626,7 @@ ${serializable.cases.map((item) => {
     const notes = [];
     if (item.facts.containsOrderedToolSequence) notes.push(`ordered tool sequence: \`${item.facts.orderedToolSequence}\``);
     if (item.facts.containsToolsUsedHeader) notes.push("`tools used:` header present");
-    if (item.facts.exceedsProposedBudget) notes.push(`exceeds proposed ${item.facts.proposedBudgetBytes} B (${item.utf8Bytes} B)`);
+    if (item.facts.exceedsProposedBudget) notes.push(`exceeds budget ${item.facts.proposedBudgetBytes} B (${item.utf8Bytes} B)`);
     if (item.facts.additionalActiveFailuresRetained) notes.push(`${item.facts.additionalActiveFailuresRetained} additional failure observations retained beyond the 5-row summary`);
     if (item.facts.containsObservationIncomplete) notes.push("contains Observation incomplete");
     if (item.id === "background.failed.status") {

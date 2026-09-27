@@ -782,6 +782,45 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
     });
 });
 
+describe("registered tools fail closed on unverifiable ownership (#312)", () => {
+    function toolText(res) {
+        return res.content.map((c) => c.text).join("");
+    }
+
+    it("never reads a run without a verified session, and treats legacy no-origin runs as unowned", async () => {
+        const h = makeHarness();
+        try {
+            const cwd = tmpdir();
+            const legacy = nextRunId();
+            const own = nextRunId();
+            dirOnly.push(legacy, own);
+            for (const [id, extra, text] of [[legacy, {}, "LEGACY_EVIDENCE"], [own, { callbackOrigin: { cwd } }, "OWN_SESSIONLESS_EVIDENCE"]]) {
+                writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: process.pid, cwd, promptPreview: "p",
+                    startedAt: Date.now() - 1000, endedAt: Date.now(), exitCode: 0, logPath: join(runDir(id), "output.log"), sessionId: id, ...extra });
+                writeFileSync(join(runDir(id), "output.log"), JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text }] }] }) + "\n");
+            }
+            const unreadable = { ...h.ctx, sessionManager: { getSessionId: () => { throw new Error("offline"); } } };
+            const denied = toolText(await h.tools.get("subagent_result").execute("tc", { id: own }, undefined, undefined, unreadable));
+            assert.match(denied, /ownership unavailable/);
+            assert.doesNotMatch(denied, /OWN_SESSIONLESS_EVIDENCE/);
+            const noCtx = toolText(await h.tools.get("subagent_result").execute("tc", { id: own }));
+            assert.match(noCtx, /ownership unavailable/, "a registered tool without a host context must not read evidence");
+
+            await h.handlers.get("session_start")({}, { ...h.ctx, sessionManager: { getSessionId: () => undefined } });
+            const sessionless = { ...h.ctx, sessionManager: { getSessionId: () => undefined } };
+            const legacyText = toolText(await h.tools.get("subagent_result").execute("tc", { id: legacy }, undefined, undefined, sessionless));
+            assert.match(legacyText, /ownership unavailable/);
+            assert.doesNotMatch(legacyText, /LEGACY_EVIDENCE/);
+            const ownText = toolText(await h.tools.get("subagent_result").execute("tc", { id: own }, undefined, undefined, sessionless));
+            assert.match(ownText, /OWN_SESSIONLESS_EVIDENCE/);
+            const listed = toolText(await h.tools.get("subagent_list").execute("tc", { limit: 100, maxBytes: 4096 }, undefined, undefined, sessionless));
+            assert.doesNotMatch(listed, new RegExp(legacy));
+        } finally {
+            h.shutdown();
+        }
+    });
+});
+
 /**
  * Session isolation for unsolicited coordinator messages. Explicit id-based
  * tools remain global for recovery, but callbacks must only target the
