@@ -221,6 +221,14 @@ async function waitForMeta(
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function processAlive(pid: number): boolean {
+  // A Linux zombie awaiting its reaper cannot run; it counts as gone.
+  if (process.platform === "linux") {
+    try {
+      if (/\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"))) return false;
+    } catch {
+      return false;
+    }
+  }
   try {
     process.kill(pid, 0);
     return true;
