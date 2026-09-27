@@ -15,7 +15,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readMeta, listMetas, effectiveStatus, isFinalResultStatus, type RunMeta, type RunStatus } from "./registry.ts";
+import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunMeta, type RunStatus } from "./registry.ts";
 import { buildSubagentResultPayload } from "./finalization.ts";
 import { stopRun } from "./stop.ts";
 import {
@@ -31,11 +31,10 @@ import {
     assembleSubagentListPayload,
     assembleSubagentOutput,
     assembleUnreadableMetadata,
-    decodeListOffset,
-    listIncidentLabel,
+    listIncidentCount,
     listRevisions,
     listScopeKey,
-    loadRunRecord,
+    requestScopeKey,
     resolveActiveOrigin,
     resolveRunAccess,
     runInListScope,
@@ -237,7 +236,14 @@ type ToolDefinition = Parameters<ExtensionAPI["registerTool"]>[0];
 // ---- subagent_list --------------------------------------------------------
 export type { SubagentToolSession };
 
-export function subagentListTool(Type: TypeModule, session: SubagentToolSession = {}): ToolDefinition {
+/** The session provider bound to this tool call's host context. */
+function forCall(session: SubagentToolSession, ctx: unknown): SubagentToolSession {
+    const provider = session.getActiveOrigin;
+    if (typeof provider !== "function") return session;
+    return { getActiveOrigin: () => provider(ctx) };
+}
+
+export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSession = {}): ToolDefinition {
     return {
         name: "subagent_list",
         label: "List Subagents",
@@ -254,19 +260,22 @@ export function subagentListTool(Type: TypeModule, session: SubagentToolSession 
             cursor: Type.Optional(Type.String({ description: "Caller-owned page or status cursor from a previous list response." })),
             maxBytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 1 KiB, max 4 KiB)." })),
         }),
-        async execute(_toolCallId: string, params: unknown) {
+        async execute(_toolCallId: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
+            const session = forCall(baseSession, ctx);
             const p = (params ?? {}) as {
                 all?: boolean; limit?: number; status?: string[] | string; cursor?: string; maxBytes?: number;
             };
             const now = Date.now();
-            const metas = listMetas();
+            const index = listRunRecords();
+            const metas = index.metas;
             const parentPid = process.pid;
             const resolved = resolveActiveOrigin(session);
             const origin = resolved.origin;
-            const scopeKey = listScopeKey(p.all === true, origin, parentPid);
+            const sessionAvailable = !(resolved.wired && !resolved.available);
+            const scopeKey = listScopeKey(p.all === true, origin, parentPid, sessionAvailable);
             let sessionWarning: string | undefined;
-            if (p.all !== true && resolved.wired && !resolved.available) {
-                sessionWarning = "Session identity unavailable; default list is empty. Pass all:true for machine-global.";
+            if (p.all !== true && !sessionAvailable) {
+                sessionWarning = `Session identity unavailable; ownership of ${metas.length} run(s) cannot be verified, so none are listed. Pass all:true for machine-global.`;
             }
             const healthCache = new Map<string, HealthObservation>();
             const healthById = (id: string) => {
@@ -283,7 +292,7 @@ export function subagentListTool(Type: TypeModule, session: SubagentToolSession 
                 { all: p.all === true },
                 origin,
                 parentPid,
-                !(resolved.wired && !resolved.available),
+                sessionAvailable,
             );
             const collected = collectSubagentList({
                 metas,
@@ -294,40 +303,48 @@ export function subagentListTool(Type: TypeModule, session: SubagentToolSession 
                 healthById,
                 inScope,
             });
-            const ids = collected.items.map((row: { meta: RunMeta }) => row.meta.id);
-            const incidentLabels = collected.items.map((row: { meta: RunMeta }) => {
-                return listIncidentLabel(row.meta.id, row.meta.cwd, row.meta.status !== "running" && row.meta.status !== "orphaned");
-            });
-            const revisions = listRevisions(ids, incidentLabels);
-            const offset = decodeListOffset(p.cursor, scopeKey, revisions.contentRevision);
-            const windowItems = collected.items.slice(offset, offset + collected.limit);
-            const rows = windowItems.map((row: { meta: RunMeta; status: string }) => formatSubagentListRow(row.meta, {
-                status: row.status,
-                now,
-                health: healthById(row.meta.id),
-                failure: listIncidentLabel(row.meta.id, row.meta.cwd, row.meta.status !== "running" && row.meta.status !== "orphaned"),
-            }));
+            const items = collected.items as Array<{ meta: RunMeta; status: string }>;
+            const incidents = new Map(items.map((row) => [row.meta.id, listIncidentCount(
+                row.meta.id,
+                row.meta.cwd,
+                row.meta.status !== "running" && row.meta.status !== "orphaned",
+            )] as const));
+            const revisions = listRevisions(
+                items.map((row) => ({ id: row.meta.id, status: String(row.status), meta: row.meta })),
+                items.map((row) => incidents.get(row.meta.id)?.revision ?? ""),
+            );
+            const statusesKey = Array.isArray(p.status) ? [...p.status].map(String).sort().join(",") : String(p.status ?? "");
+            const incidentRuns = items.filter((row) => (incidents.get(row.meta.id)?.count ?? 0) > 0).length;
             return text(assembleSubagentListPayload({
                 warnings: collected.warnings,
-                rows,
-                matching: collected.matching,
-                displayed: rows.length,
-                limit: collected.limit,
-                empty: collected.empty,
-                offset,
+                items,
+                render: (row) => {
+                    const count = incidents.get(row.meta.id)?.count ?? 0;
+                    return formatSubagentListRow(row.meta, {
+                        status: row.status,
+                        now,
+                        health: healthById(row.meta.id),
+                        failure: count > 0 ? `${count} incident${count === 1 ? "" : "s"}` : "",
+                    });
+                },
+                limit: Math.max(1, collected.limit),
                 cursor: p.cursor,
                 maxBytes: p.maxBytes,
                 contentRevision: revisions.contentRevision,
                 failureRevision: revisions.failureRevision,
                 scopeKey,
+                statusesKey,
                 sessionWarning,
+                unreadable: index.unreadable,
+                indexError: index.indexError,
+                incidentRuns,
             }));
         },
     } as ToolDefinition;
 }
 
 // ---- subagent_output ------------------------------------------------------
-export function subagentOutputTool(Type: TypeModule, session: SubagentToolSession = {}): ToolDefinition {
+export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSession = {}): ToolDefinition {
     return {
         name: "subagent_output",
         label: "Subagent Output",
@@ -349,14 +366,14 @@ export function subagentOutputTool(Type: TypeModule, session: SubagentToolSessio
             mode: Type.Optional(Type.String({ description: "raw = page retained log bytes. Default is the bounded assembled excerpt." })),
             all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
         }),
-        async execute(_id: string, params: unknown) {
+        async execute(_id: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
+            const session = forCall(baseSession, ctx);
             const p = params as { id: string; cursor?: string; maxBytes?: number; mode?: string; all?: boolean; lines?: number; tail_lines?: number };
             const access = resolveRunAccess(p.id, p, session);
             if (access.kind === "missing") throw unknownRunError(p.id);
             if (access.kind === "unreadable") return text(assembleUnreadableMetadata(p.id, access.detail, p));
             if (access.kind === "denied") return text(access.payload);
-            const resolved = resolveActiveOrigin(session);
-            const scopeKey = listScopeKey(p.all === true, resolved.origin, process.pid);
+            const scopeKey = requestScopeKey(p, session);
             const healthLine = formatHealthDiagnosticLine(observeMetaHealth(access.meta));
             return text(assembleSubagentOutput(p.id, access.meta, p, healthLine, scopeKey));
         },
@@ -364,7 +381,7 @@ export function subagentOutputTool(Type: TypeModule, session: SubagentToolSessio
 }
 
 // ---- subagent_result ------------------------------------------------------
-export function subagentResultTool(Type: TypeModule, session: SubagentToolSession = {}): ToolDefinition {
+export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSession = {}): ToolDefinition {
     return {
         name: "subagent_result",
         label: "Subagent Result",
@@ -385,7 +402,8 @@ export function subagentResultTool(Type: TypeModule, session: SubagentToolSessio
         renderResult(result: unknown, options: unknown, theme: unknown) {
             return renderSubagentResultDisplay(result, options, theme);
         },
-        async execute(_id: string, params: unknown) {
+        async execute(_id: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
+            const session = forCall(baseSession, ctx);
             const p = params as { id: string; cursor?: string; maxBytes?: number; mode?: string; all?: boolean };
             const access = resolveRunAccess(p.id, p, session);
             if (access.kind === "missing") throw unknownRunError(p.id);
@@ -394,8 +412,7 @@ export function subagentResultTool(Type: TypeModule, session: SubagentToolSessio
             }
             if (access.kind === "denied") return subagentResultText(access.payload);
             const meta = access.meta;
-            const resolved = resolveActiveOrigin(session);
-            const scopeKey = listScopeKey(p.all === true, resolved.origin, process.pid);
+            const scopeKey = requestScopeKey(p, session);
             const st = effectiveStatus(meta);
             const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
             if (!isFinalResultStatus(st)) {

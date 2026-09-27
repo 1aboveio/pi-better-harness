@@ -65,17 +65,26 @@ export function normalizeSubagentListOptions(params = {}) {
     };
 }
 
+function bounded(value, max) {
+    const single = String(value ?? "").replace(/\s+/g, " ").trim();
+    return single.length <= max ? single : `${single.slice(0, Math.max(0, max - 1))}…`;
+}
+
+/**
+ * One compact row. Free text (name, model, batch) is bounded so the id and
+ * status always sit within the row's first ~80 characters and survive clipping.
+ */
 export function formatSubagentListRow(meta, p) {
     const status = p.status;
     const now = p.now ?? Date.now();
     const elapsed = fmtElapsed((meta.endedAt ?? now) - meta.startedAt);
-    const name = meta.name ? `${meta.name} ` : "";
+    const name = meta.name ? `${bounded(meta.name, 60)} ` : "";
     const health = formatListHealthSuffix(p.health);
-    const failure = p.failure ? ` · ${String(p.failure).replace(/\s+/g, " ").trim()}` : "";
+    const failure = p.failure ? ` · ${bounded(p.failure, 60)}` : "";
     const batch = meta.batchId
-        ? `  [batch: ${meta.batchName ? `${meta.batchName} ` : ""}${meta.batchId}]`
+        ? `  [batch: ${meta.batchName ? `${bounded(meta.batchName, 40)} ` : ""}${bounded(meta.batchId, 60)}]`
         : "";
-    return `• ${name}${meta.id}  [${status}]  ${meta.model ?? "?"}  ${elapsed}${health}${batch}${failure}\n    ${promptPreview(meta)}`;
+    return `• ${name}${meta.id}  [${status}]  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${batch}${failure}\n    ${promptPreview(meta)}`;
 }
 
 export function collectSubagentList(p) {

@@ -12,7 +12,7 @@
  */
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { observeFailures } from "../shared-failure-observations.ts";
 import { failurePath } from "../failures.ts";
@@ -87,6 +87,17 @@ async function reconstructAnswer(id, original) {
         cursor = next;
     }
     throw new Error(`did not reconstruct ${original.length} chars`);
+}
+
+/** Retained raw bytes of one raw page: the text after its header lines and before the continuation. */
+function rawBody(content) {
+    let body = String(content);
+    const cont = body.indexOf("\n---\n");
+    if (cont !== -1) body = body.slice(0, cont);
+    const lines = body.split("\n").slice(1);
+    const header = /^(Observation incomplete|Unresolved failure|Expected failure|\d+ active failure observation|\[parser:|change=|reset=)/;
+    while (lines.length && header.test(lines[0])) lines.shift();
+    return lines.join("\n");
 }
 
 function seedMeta(id, extras = {}) {
@@ -267,8 +278,9 @@ describe("registered subagent payloads", () => {
         const progressAt = result.indexOf("PROGRESS_TEXT");
         assert.ok(failureAt >= 0, result);
         assert.ok(progressAt > failureAt, "failures must precede progress");
-        assert.match(result, /omittedIncidents=7/);
-        assert.match(result, /incidentCursor=i1\./);
+        const counts = result.match(/12 active failure observations · (\d+) shown · (\d+) omitted · incidentCursor=i1\./);
+        assert.ok(counts, result);
+        assert.equal(Number(counts[1]) + Number(counts[2]), 12);
         assert.doesNotMatch(result, /tools used:/i);
         assert.doesNotMatch(result, /do-0.*do-1.*do-2/);
         const incidentCursor = result.match(/incidentCursor=(i1\.\S+)/)?.[1];
@@ -283,10 +295,14 @@ describe("registered subagent payloads", () => {
             if (!page.includes("hasMore=true") || !next || next === cursor) break;
             cursor = next;
         }
-        const reconstructed = pages.join("\n");
-        for (let i = 0; i < 12; i += 1) {
-            assert.match(reconstructed, new RegExp(`incident-${i}-failed`));
+        const occurrences = new Map();
+        for (const page of pages) {
+            for (const match of page.matchAll(/incident-(\d+)-failed/g)) {
+                occurrences.set(match[1], (occurrences.get(match[1]) ?? 0) + 1);
+            }
         }
+        assert.deepEqual([...occurrences.keys()].sort((a, b) => a - b), Array.from({ length: 12 }, (_, i) => String(i)));
+        assert.ok([...occurrences.values()].every((count) => count === 1), "each incident is shown exactly once across the summary and its pages");
     });
 
     it("keeps incomplete and orphaned results diagnostic, not clean final answers", async () => {
@@ -387,12 +403,11 @@ describe("registered subagent payloads", () => {
         for (let pages = 1; pages <= 20; pages += 1) {
             const content = textOf(await outputTool.execute("tc", { id, mode: "raw", cursor }));
             assert.ok(utf8ByteLength(content) <= OUTPUT_BUDGET_BYTES.rawPage, `raw page ${pages} exceeded raw budget`);
-            text += stripEnvelope(content);
+            text += rawBody(content);
             if (!/hasMore=true/.test(content)) break;
             cursor = nextCursorOf(content);
         }
-        assert.ok(text.endsWith(marker) || text.includes(marker), "raw reconstruction must keep the retained tail");
-        assert.ok(text.includes("R".repeat(100)));
+        assert.equal(text, blob, "raw pages must concatenate to the retained bytes exactly");
     });
 
     it("paginates list rows under the list budget without full failure paragraphs", async () => {
@@ -526,5 +541,174 @@ describe("registered subagent payloads", () => {
         assert.match(crossed, /reset=stale-cursor|foreign|scope session:/);
         assert.doesNotMatch(crossed, /b-secret/);
         assert.ok(!idsA.some((id) => stripEnvelope(crossed).includes(id)) || /reset=stale-cursor/.test(crossed), crossed);
+    });
+
+    describe("review regressions (#312)", () => {
+        const origin = { cwd: "/tmp", sessionId: `review-${Date.now()}` };
+        const session = { getActiveOrigin: () => origin };
+        const scopedResult = subagentResultTool(TypeStub, session);
+        const scopedOutput = subagentOutputTool(TypeStub, session);
+        const scopedList = subagentListTool(TypeStub, session);
+
+        it("reconstructs a default answer exactly while long failures take priority", async () => {
+            const id = trackDisk(`sa_review_heavy_${Date.now()}`);
+            seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: origin });
+            const answer = `BEGIN_${"答".repeat(1_600)}_END`;
+            writeEvents(id, completedLog(answer));
+            observeFailures(failurePath(id), Array.from({ length: 5 }, (_, i) => ({
+                id: `heavy-${i}`, operation: `heavy-op-${i}`, kind: "failure",
+                summary: `FAILURE_${i}_${"界".repeat(120)}`, evidence: "界".repeat(120),
+            })));
+            let cursor;
+            let rebuilt = "";
+            for (let page = 0; page < 20; page += 1) {
+                const content = textOf(await scopedResult.execute("tc", { id, cursor }));
+                assert.ok(utf8ByteLength(content) <= OUTPUT_BUDGET_BYTES.answer, `${utf8ByteLength(content)} bytes`);
+                assert.match(content, /5 active failure observations · \d+ shown · \d+ omitted · incidentCursor=/);
+                const start = content.indexOf(page === 0 ? "BEGIN_" : "答");
+                const end = content.indexOf("\n---\n");
+                const body = content.slice(start, end === -1 ? undefined : end);
+                assert.ok(body.length > 0, `page ${page} shows answer bytes`);
+                rebuilt += body;
+                if (!/hasMore=true/.test(content)) break;
+                cursor = nextCursorOf(content);
+            }
+            assert.equal(rebuilt, answer);
+        });
+
+        it("reports a metadata-only lifecycle transition against a status cursor", async () => {
+            const id = trackDisk(`sa_review_lifecycle_${Date.now()}`);
+            seedMeta(id, { status: "running", pid: process.pid, endedAt: undefined, exitCode: undefined, callbackOrigin: origin });
+            writeEvents(id, [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "short" }] } }]);
+            const before = textOf(await scopedOutput.execute("tc", { id }));
+            const cursor = statusCursorOf(before);
+            assert.match(textOf(await scopedOutput.execute("tc", { id, cursor })), /No new evidence since cursor/);
+            writeMeta({ ...readMeta(id), status: "failed", endedAt: Date.now(), exitCode: 2 });
+            const after = textOf(await scopedOutput.execute("tc", { id, cursor }));
+            assert.doesNotMatch(after, /No new evidence/);
+            assert.match(after, /failed/);
+            assert.match(after, /change=content/);
+        });
+
+        it("reports list lifecycle and repeated-failure changes against a status cursor", async () => {
+            const id = trackDisk(`sa_review_list_${Date.now()}`);
+            seedMeta(id, { status: "failed", exitCode: 1, callbackOrigin: origin, startedAt: Date.now() + 10_000_000 });
+            writeEvents(id, completedLog("x"));
+            observeFailures(failurePath(id), [{ id: "rep-1", operation: "rep-op", kind: "failure", summary: "first" }]);
+            const before = textOf(await scopedList.execute("tc", {}));
+            const cursor = statusCursorOf(before);
+            assert.match(textOf(await scopedList.execute("tc", { cursor })), /No new evidence/);
+            observeFailures(failurePath(id), [{ id: "rep-2", operation: "rep-op", kind: "failure", summary: "second" }]);
+            const repeated = textOf(await scopedList.execute("tc", { cursor }));
+            assert.doesNotMatch(repeated, /No new evidence/);
+            assert.match(repeated, /change=failure/);
+            const cursor2 = statusCursorOf(repeated);
+            writeMeta({ ...readMeta(id), status: "completed", exitCode: 0 });
+            const transitioned = textOf(await scopedList.execute("tc", { cursor: cursor2 }));
+            assert.doesNotMatch(transitioned, /No new evidence/);
+        });
+
+        it("reports missing metadata beside retained evidence as unreadable, not unknown", async () => {
+            const id = trackDisk(`sa_review_nometa_${Date.now()}`);
+            seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: origin });
+            writeEvents(id, completedLog("retained evidence"));
+            unlinkSync(join(runDir(id), "meta.json"));
+            const payload = textOf(await scopedResult.execute("tc", { id }));
+            assert.match(payload, /metadata unreadable/);
+            assert.match(payload, /metadata file is missing/);
+            assert.doesNotMatch(payload, /retained evidence/);
+            await assert.rejects(() => scopedResult.execute("tc", { id: `sa_review_never_${Date.now()}` }), /Unknown run id/);
+        });
+
+        it("counts corrupt run records in the list instead of dropping them", async () => {
+            const id = trackDisk(`sa_review_corrupt_${Date.now()}`);
+            mkdirSync(runDir(id), { recursive: true });
+            writeFileSync(join(runDir(id), "meta.json"), "{not json");
+            const listed = textOf(await scopedList.execute("tc", {}));
+            assert.match(listed, /run record\(s\) with missing or unreadable metadata/);
+            assert.match(listed, /gap read/);
+        });
+
+        it("does not expose a legacy same-process run when session identity is unavailable", async () => {
+            const id = trackDisk(`sa_review_legacy_${Date.now()}`);
+            seedMeta(id, { status: "completed", exitCode: 0, spawnPid: process.pid, callbackOrigin: undefined });
+            writeEvents(id, completedLog("UNVERIFIED_SESSION_EVIDENCE"));
+            const unavailable = { getActiveOrigin: () => undefined };
+            const payload = textOf(await subagentResultTool(TypeStub, unavailable).execute("tc", { id }));
+            assert.match(payload, /ownership unavailable/);
+            assert.doesNotMatch(payload, /UNVERIFIED_SESSION_EVIDENCE/);
+            const listed = textOf(await subagentListTool(TypeStub, unavailable).execute("tc", {}));
+            assert.doesNotMatch(listed, new RegExp(id));
+            const allowed = textOf(await subagentResultTool(TypeStub, unavailable).execute("tc", { id, all: true }));
+            assert.match(allowed, /UNVERIFIED_SESSION_EVIDENCE/);
+        });
+
+        it("resets answer and raw cursors when the session scope changes", async () => {
+            const id = trackDisk(`sa_review_scope_${Date.now()}`);
+            seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: origin });
+            writeEvents(id, completedLog("answer ".repeat(2_000)));
+            const answer = textOf(await scopedResult.execute("tc", { id }));
+            const crossed = textOf(await scopedResult.execute("tc", { id, all: true, cursor: nextCursorOf(answer) }));
+            assert.match(crossed, /reset=stale-cursor/);
+            const raw = textOf(await scopedOutput.execute("tc", { id, mode: "raw", maxBytes: 4096 }));
+            const rawCrossed = textOf(await scopedOutput.execute("tc", { id, mode: "raw", all: true, cursor: nextCursorOf(raw) }));
+            assert.match(rawCrossed, /reset=stale-cursor/);
+        });
+
+        it("returns an append-ready raw cursor at the end and then only appended bytes", async () => {
+            const id = trackDisk(`sa_review_eof_${Date.now()}`);
+            seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: origin });
+            writeEvents(id, completedLog("done"));
+            const end = textOf(await scopedOutput.execute("tc", { id, mode: "raw" }));
+            assert.doesNotMatch(end, /hasMore=true/);
+            const cursor = end.match(/end nextCursor=(\S+)/)?.[1];
+            assert.ok(cursor, end);
+            appendFileSync(logPathFor(id), "APPENDED_LINE\n");
+            const appended = textOf(await scopedOutput.execute("tc", { id, mode: "raw", cursor }));
+            assert.match(appended, /APPENDED_LINE/);
+            assert.doesNotMatch(appended, /tool_execution_start/);
+        });
+
+        it("resets a raw cursor after an in-place rewrite of the same log inode", async () => {
+            const id = trackDisk(`sa_review_rewrite_${Date.now()}`);
+            seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: origin });
+            writeFileSync(logPathFor(id), `${"a".repeat(300)}${"b".repeat(30_000)}`);
+            const inode = statSync(logPathFor(id)).ino;
+            const first = textOf(await scopedOutput.execute("tc", { id, mode: "raw" }));
+            writeFileSync(logPathFor(id), `${"a".repeat(300)}${"c".repeat(30_000)}`);
+            assert.equal(statSync(logPathFor(id)).ino, inode);
+            const next = textOf(await scopedOutput.execute("tc", { id, mode: "raw", cursor: nextCursorOf(first) }));
+            assert.match(next, /reset=source-replaced/);
+            assert.match(next, /a{300}c/);
+        });
+
+        it("keeps final-answer indentation and trailing newlines verbatim", async () => {
+            const id = trackDisk(`sa_review_ws_${Date.now()}`);
+            seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: origin });
+            writeEvents(id, completedLog("  indented\n\n    code\n"));
+            const payload = textOf(await scopedResult.execute("tc", { id }));
+            assert.ok(payload.includes("\n  indented\n\n    code\n"), payload);
+        });
+
+        it("keeps a long-named run's id visible and pages every run", async () => {
+            const stamp = Date.now() + 20_000_000;
+            const ids = [];
+            for (let i = 0; i < 4; i += 1) {
+                const id = trackDisk(`sa_review_names_${stamp}_${i}`);
+                ids.push(id);
+                seedMeta(id, { status: "completed", exitCode: 0, callbackOrigin: origin, name: "n".repeat(2_000), startedAt: stamp + i });
+                writeEvents(id, completedLog("x"));
+            }
+            const seen = new Set();
+            let cursor;
+            for (let page = 0; page < 10; page += 1) {
+                const content = textOf(await scopedList.execute("tc", { cursor, limit: 2 }));
+                assert.ok(utf8ByteLength(content) <= OUTPUT_BUDGET_BYTES.list);
+                for (const id of ids) if (content.includes(id)) seen.add(id);
+                if (!/hasMore=true/.test(content)) break;
+                cursor = nextCursorOf(content);
+            }
+            for (const id of ids) assert.ok(seen.has(id), `${id} never listed`);
+        });
     });
 });

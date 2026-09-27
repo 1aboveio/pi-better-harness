@@ -97,13 +97,20 @@ export function tailLog(id: string, n: number, maxBytes = maxRawTailBytes()): st
     return out === "" ? "(no output yet)" : out;
 }
 
-/** Join the text blocks of a message into a plain string. */
+/**
+ * Join the text blocks of a message verbatim. Leading indentation and trailing
+ * newlines are part of the answer (Markdown, code); whitespace-only text is
+ * treated as no text.
+ */
 function messageText(msg: Msg | undefined): string {
     if (!msg) return "";
     const c = msg.content;
-    if (typeof c === "string") return c;
-    if (!Array.isArray(c)) return "";
-    return c.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join("").trim();
+    const joined = typeof c === "string"
+        ? c
+        : Array.isArray(c)
+            ? c.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join("")
+            : "";
+    return joined.trim() ? joined : "";
 }
 
 export interface UnmatchedToolCall {

@@ -95,8 +95,9 @@ import {
 } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.ts";
 import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
+import { completionCallbackFields, failureAttentionFields, healthCallbackFields } from "./callback-fields.ts";
 import { collectRunFailures, failurePath, failureSummary, formatFailureSummary, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
-import { activeFailures, failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
+import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
 import {
     text,
     subagentListTool,
@@ -262,6 +263,17 @@ function callbackOriginFromContext(ctx: ExtensionContext): RunCallbackOrigin {
     return { cwd: ctx.cwd, sessionId };
 }
 
+/** Origin with a readable session id, or undefined when identity is unavailable. */
+function verifiedOriginFromContext(ctx: ExtensionContext | undefined): RunCallbackOrigin | undefined {
+    if (!ctx?.sessionManager || typeof ctx.cwd !== "string") return undefined;
+    try {
+        const sessionId = ctx.sessionManager.getSessionId();
+        return sessionId ? { cwd: ctx.cwd, sessionId } : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 function callbackSuppressionReason(meta: RunMeta, active: RunCallbackOrigin | undefined = activeCallbackOrigin): string | undefined {
     const origin = meta.callbackOrigin;
     if (origin) {
@@ -339,23 +351,9 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
         || meta.completionCallbackPendingAt === undefined
         || meta.completionCallbackSentAt !== undefined
         || meta.completionCallbackSuppressedAt !== undefined) return;
-    const label = meta.name ? `${meta.name} (${id})` : id;
     const state = collectRunFailures(id, meta.cwd, true);
-    const observations = Object.values(state.observations);
-    const unresolved = observations.filter((observation) => observation.status === "unresolved");
-    const observationStatus = unresolved.some((observation) => observation.category === "observation-incomplete")
-        ? "observation incomplete" : unresolved.length ? "unresolved failure observations" : undefined;
-    const active = activeFailures(state);
     getCallbackBatcher(pi).enqueue({
-        source: "subagent",
-        id,
-        label,
-        status: observationStatus ? `${meta.status}; ${observationStatus}` : meta.status,
-        detailTool: "subagent_result",
-        outcome: meta.status,
-        failure: formatFailureSummary(state) || undefined,
-        incidentCount: active.length || undefined,
-        omittedIncidents: active.length > 5 ? active.length - 5 : undefined,
+        ...completionCallbackFields(meta, state),
         callback: true,
         isDelivered: () => {
             const current = readMeta(id);
@@ -394,14 +392,8 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
     const state = collectRunFailures(meta.id, meta.cwd, meta.status !== "running" && meta.status !== "orphaned");
     const pending = pendingFailureAttention(state, now);
     if (!pending || (meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined)) return;
-    const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
     void getCallbackBatcher(pi).deliverUrgent({
-        source: "subagent", id: meta.id, label, status: `failure:${pending.key}`,
-        customType: "subagent-failure",
-        content: `${formatFailureSummary(state)}\nInspect: subagent_result id=${JSON.stringify(meta.id)}`,
-        detailTool: "subagent_result",
-        incidentCount: activeFailures(state).length || undefined,
-        omittedIncidents: activeFailures(state).length > 5 ? activeFailures(state).length - 5 : undefined,
+        ...failureAttentionFields(meta, state, pending),
         isDelivered: () => failureAttentionHandled(collectRunFailures(meta.id, meta.cwd), pending.incidents),
         getSuppressionReason: () => {
             const current = readMeta(meta.id);
@@ -581,7 +573,6 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
     const callback = meta.callback !== false;
     const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
     const failureState = collectRunFailures(meta.id, meta.cwd, status === "lost");
-    const failureText = formatFailureSummary(failureState);
     const attention = pendingFailureAttention(failureState, now, { terminal: status === "lost" });
     const delivery = buildHealthCallbackDelivery({ id: meta.id, label, status, callback });
     if (!delivery) {
@@ -593,12 +584,7 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
         return;
     }
     void getCallbackBatcher(pi).deliverUrgent({
-        source: "subagent",
-        id: meta.id,
-        label,
-        status,
-        customType: "subagent-health",
-        content: prependFailureSummary(delivery.content, failureText),
+        ...healthCallbackFields(meta, status, failureState, delivery.content),
         isDelivered: () => {
             const current = readMeta(meta.id);
             if (!current) throw new Error("Subagent metadata is unavailable; defer health notification");
@@ -1794,7 +1780,11 @@ export default function (pi: ExtensionAPI) {
     // the factories return, so tests invoke the same execute handlers the
     // model reaches (no drift-prone second copy). Stop's only UI side effect
     // (widget redraw after a kill) is injected as onStopped.
-    const toolSession = { getActiveOrigin: () => activeCallbackOrigin };
+    // The foreground origin from session_start; otherwise the calling context's
+    // own session. An unreadable session id stays unavailable (never cwd-wide).
+    const toolSession = {
+        getActiveOrigin: (ctx?: unknown) => activeCallbackOrigin ?? verifiedOriginFromContext(ctx as ExtensionContext | undefined),
+    };
     pi.registerTool(subagentListTool(Type, toolSession));
     pi.registerTool(subagentOutputTool(Type, toolSession));
     const acceptanceResultTool = subagentResultTool(Type, toolSession);
