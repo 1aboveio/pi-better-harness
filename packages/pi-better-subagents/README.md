@@ -31,6 +31,17 @@ pi -e npm:pi-better-subagents
 
 Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or newer. `/sandbox` controls the independent Subagents profile, which each launch freezes. Pi handles its own startup, authentication, and provider connection; task tools obey the selected file, command, and network permissions. Outside project defaults to Read. Currently confined children admit `read`, `write`, `edit`, and `bash`; unsupported requested tools are reported as unavailable. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox) for the runtime boundary and supported configurations.
 
+## Delegation Modes
+
+`config.json` sets `delegationMode` to `manual`, `adaptive` (default), or
+`coordinator`. `/subagents` displays the active mode, and
+`/subagents mode manual|adaptive|coordinator` changes it for the current
+session without changing config. Manual delegates only on explicit user or workflow request, even with a
+plan. Adaptive delegates substantial independent work when useful. Coordinator
+uses `agents_catalog` to discover current role descriptions and delegates every
+nontrivial role-owned task, while the foreground coordinates, integrates, and
+verifies. See [usage notes](docs/usage.md#delegation-mode).
+
 ## When To Use
 
 Use this package for independent coding, review, research, or verification work that can finish later. Do not use it for steps that need immediate foreground interaction or user clarification.

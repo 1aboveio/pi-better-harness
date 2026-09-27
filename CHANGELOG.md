@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **subagents**: add adjustable `manual`, `adaptive`, and `coordinator` delegation modes, session-persisted `/subagents mode ...` overrides, role-first coordinator guidance, and explicit ownership boundaries for bundled roles. Generic plans now follow the active delegation mode. (#334)
+
 ## [pi-better-harness@0.7.0] - 2026-09-27
 
 ### Changed

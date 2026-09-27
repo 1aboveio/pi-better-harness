@@ -17,9 +17,20 @@ Plan progress is checklist progress, not an estimate of effort. The extension ne
 
 Use the plan as the foreground coordinator's milestone ledger. Delegate independent, sufficiently substantial work early with subagents, and use background tasks for long-running processes or repeated checks. Keep doing unblocked foreground work after launch; do not poll workers.
 
-Before the first implementation milestone, check for an independent task that can run alongside foreground work. Launch a bounded subagent task when available; otherwise state the specific dependency or shared-worktree constraint that rules delegation out. The plan records milestones, not worker scheduling.
+Before the first implementation milestone, check for independent work and follow
+the active subagent delegation mode. Without `pi-better-subagents`, the plan uses
+adaptive guidance. Manual keeps planned work in the foreground unless the user or
+an active workflow explicitly requires delegation. Adaptive delegates substantial
+independent work when useful. Coordinator consults current catalog roles and
+delegates nontrivial role-owned work while retaining integration and final
+verification in the foreground.
 
-Independent foreground and delegated milestones may both be `in_progress`. Use steps for distinct deliverables, not individual worker processes; worker tools and the background-work navigator own run status. Complete verification and the plan only after every relevant delegated task is terminal and its result or failure has been inspected and integrated.
+Independent foreground and delegated milestones may both be `in_progress` only
+when both are actually underway. Use steps for distinct deliverables, not
+individual worker processes; worker tools and the background-work navigator own
+run status. Complete verification and the plan only after every relevant
+delegated task is terminal and its result or failure has been inspected and
+integrated.
 
 For a DAG, assign stable ids to prerequisite steps and list those ids in dependent steps' `dependsOn`. Dependencies must exist in the same plan; cycles and starting or completing a step before its prerequisites are complete are rejected. `get_plan` reports pending steps whose prerequisites are complete as ready. Plans without edges keep their existing behavior.
 

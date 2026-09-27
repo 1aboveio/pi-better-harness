@@ -75,6 +75,14 @@ const UpdatePlanSchema = Type.Object({
 });
 
 const LEGACY_PLAN_NAV_STATUS_KEY = "pi-better-plan-nav";
+const DELEGATION_MODE_REQUEST = "pi-better-subagents:delegation-mode-request";
+type DelegationMode = "manual" | "adaptive" | "coordinator";
+
+function activeDelegationMode(pi: ExtensionAPI): DelegationMode {
+  const request: { mode?: string } = {};
+  pi.events.emit(DELEGATION_MODE_REQUEST, request);
+  return request.mode === "manual" || request.mode === "coordinator" ? request.mode : "adaptive";
+}
 
 function workflowPlanOwner(ctx: ExtensionContext): string | null {
   let owner: string | null = null;
@@ -294,10 +302,10 @@ export default function planExtension(pi: ExtensionAPI): void {
     promptSnippet: "Create and update a persistent structured execution plan",
     promptGuidelines: [
       "Use update_plan for work with three or more meaningful steps unless a skill owns planning; update it immediately when a step completes, becomes blocked, or scope changes.",
-      "For generic plans only, mark independent foreground and delegated milestones in_progress concurrently when work is actually underway. Do not mark a delegated step completed until its result or failure has been inspected and integrated.",
-      "For generic plans with prerequisites, give steps stable ids and dependsOn edges. Start only ready steps whose prerequisites are completed; independent ready steps may run in parallel, including in subagents.",
-      "For generic plans only, before the first implementation milestone identify independent substantial work. Launch a bounded subagent task while you continue another, or state the concrete reason delegation is unsuitable.",
-      "Use a generic plan as the foreground coordinator's milestone ledger only when no workflow owns planning. Otherwise follow the workflow's task plan and foreground role.",
+      "For generic plans only, mark distinct milestones in_progress when work is actually underway. Do not mark a delegated step completed until its result or failure has been inspected and integrated.",
+      "For generic plans with prerequisites, give steps stable ids and dependsOn edges. Start only ready steps whose prerequisites are completed; independent ready steps may run in parallel when the active delegation mode permits it.",
+      "For generic plans, follow the active delegation mode. Manual forbids proactive delegation even in plan mode; adaptive favors substantial independent work; coordinator delegates nontrivial role-owned tasks after agents_catalog discovery.",
+      "Use a generic plan as a milestone ledger only when no workflow owns planning. Otherwise follow the workflow's task plan and foreground role.",
       "For generic plans, use separate steps for distinct deliverables, not one step per worker process. Before completing verification or the plan, inspect and integrate every relevant delegated result or failure.",
       "While rush-issues owns the plan and it is bound with sync_workflow_plan, record every transition with update_plan's workflow field instead of editing task-plan.json or its profiling log; it saves the rows, the next planRevision, and the matching profiling event together.",
     ],
@@ -429,7 +437,7 @@ export default function planExtension(pi: ExtensionAPI): void {
     if (workflowPlanOwner(ctx)) return;
     if (!currentPlan) return;
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${planPrompt(currentPlan)}`,
+      systemPrompt: `${event.systemPrompt}\n\n${planPrompt(currentPlan, activeDelegationMode(pi))}`,
     };
   });
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -469,7 +477,12 @@ function formatPlan(plan: PlanSnapshot): string {
   ].join("\n");
 }
 
-function planPrompt(plan: PlanSnapshot): string {
+function planPrompt(plan: PlanSnapshot, mode: DelegationMode): string {
+  const delegation = mode === "manual"
+    ? "Manual delegation mode: a plan does not authorize proactive delegation. Work in the foreground unless the user explicitly asks or an active workflow explicitly requires delegation."
+    : mode === "coordinator"
+      ? "Coordinator delegation mode: consult agents_catalog and delegate nontrivial role-owned milestones according to current role descriptions. Keep orchestration, cross-role decisions, unowned or ambiguous work, integration, and final verification in the foreground."
+      : "Adaptive delegation mode: identify substantial independent work before implementation. Delegate a bounded task when useful and available while continuing unblocked foreground work; keep tightly coupled work in the foreground.";
   return [
     "Current structured execution plan:",
     ...plan.steps.map(stepLine),
@@ -477,8 +490,7 @@ function planPrompt(plan: PlanSnapshot): string {
       ? [`Ready pending steps: ${planProgress(plan).readyIndices.map((index) => plan.steps[index]!.step).join(", ") || "none"}. Start only steps whose prerequisites are complete.`]
       : []),
     "Use update_plan immediately when a step completes, becomes blocked, or the scope changes.",
-    "Before starting the first implementation milestone, identify independent substantial work. If a subagent is available, launch one bounded task early while you continue another; otherwise briefly state the concrete dependency or shared-worktree constraint that makes delegation unsuitable.",
-    "Treat the plan as the foreground coordinator's milestone ledger: delegate independent, sufficiently substantial work early, mark distinct foreground and delegated milestones in_progress concurrently, and continue unblocked foreground work instead of waiting or polling.",
-    "Do not complete verification or the plan until relevant delegated work is terminal, its results or failures have been inspected and integrated, and the outcome is evidence-backed.",
+    delegation,
+    "Mark distinct foreground and delegated milestones in_progress concurrently only when both are actually underway. Do not complete verification or the plan until relevant delegated work is terminal, inspected, integrated, and the outcome is evidence-backed.",
   ].join("\n");
 }

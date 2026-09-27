@@ -62,7 +62,7 @@ test("plan tools persist progress without taking over editor navigation", async 
   await handlers.get("session_start")?.({ reason: "startup" }, ctx);
   const updatePlan = tools.get("update_plan");
   assert.ok(updatePlan);
-  assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("coordinator's milestone ledger")));
+  assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("active delegation mode")));
   assert.ok(updatePlan.promptGuidelines?.some((line) => line.includes("separate steps for distinct deliverables")));
   await updatePlan.execute("update", {
     explanation: "Start implementation",
@@ -94,9 +94,40 @@ test("plan tools persist progress without taking over editor navigation", async 
   assert.equal((result.details as any).plan.steps[1].status, "in_progress");
 
   const promptUpdate = await handlers.get("before_agent_start")?.({ systemPrompt: "base prompt" }, ctx) as { systemPrompt?: string };
-  assert.match(promptUpdate.systemPrompt ?? "", /foreground coordinator's milestone ledger/);
-  assert.match(promptUpdate.systemPrompt ?? "", /mark distinct foreground and delegated milestones in_progress concurrently/);
-  assert.match(promptUpdate.systemPrompt ?? "", /results or failures have been inspected and integrated/);
+  assert.match(promptUpdate.systemPrompt ?? "", /Adaptive delegation mode/);
+  assert.match(promptUpdate.systemPrompt ?? "", /Mark distinct foreground and delegated milestones in_progress concurrently/);
+  assert.match(promptUpdate.systemPrompt ?? "", /inspected, integrated/);
+});
+
+test("active delegation mode controls plan guidance without changing plan steps", async () => {
+  const entries: SessionEntry[] = [];
+  const tools = new Map<string, ToolDefinition>();
+  const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+  const events = new EventEmitter();
+  let mode: string = "manual";
+  events.on("pi-better-subagents:delegation-mode-request", (request: { mode?: string }) => { request.mode = mode; });
+  const ctx = {
+    mode: "print", hasUI: false,
+    sessionManager: { getBranch: () => entries },
+    ui: { setWidget() {}, setStatus() {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    events,
+    appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
+    registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
+    registerCommand() {},
+    on(name: string, handler: (event: any, ctx: ExtensionContext) => unknown) { handlers.set(name, handler); },
+  } as unknown as ExtensionAPI;
+  extension(pi);
+  await handlers.get("session_start")?.({}, ctx);
+  await tools.get("update_plan")!.execute("plan", { plan: [{ step: "Build", status: "in_progress" }] }, undefined, undefined, ctx);
+  const prompt = async () => (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  assert.match(await prompt(), /Manual delegation mode: a plan does not authorize proactive delegation/);
+  assert.doesNotMatch(await prompt(), /Delegate a bounded task/);
+  mode = "coordinator";
+  assert.match(await prompt(), /consult agents_catalog and delegate nontrivial role-owned milestones/);
+  mode = "invalid";
+  assert.match(await prompt(), /Adaptive delegation mode/);
 });
 
 test("concurrent plan updates persist and invalid updates leave the plan unchanged", async () => {
