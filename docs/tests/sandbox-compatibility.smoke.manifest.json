@@ -87,6 +87,17 @@
       "profiles": [
         "pr-local"
       ]
+    },
+    {
+      "id": "outside-write",
+      "surface": "cli",
+      "command": "npm run test:golden:sandbox",
+      "observable": "Outside project = Write (the Subagents default): a user cache dir is written and cleaned; a sibling repo cannot be removed or moved (macOS edits it in place, the Linux fallback keeps it read-only); controls stay unwritable.",
+      "mutates": true,
+      "tenant": "e2e-sandbox-compatibility",
+      "profiles": [
+        "pr-local"
+      ]
     }
   ]
 }

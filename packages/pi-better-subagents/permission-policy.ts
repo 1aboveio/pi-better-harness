@@ -2,12 +2,13 @@
 export const SANDBOX_POLICY_CHANNEL = "pi-better-sandbox:policy";
 export const SANDBOX_POLICY_REQUEST_CHANNEL = "pi-better-sandbox:policy-request";
 
-type Access = "off" | "read" | "read-write";
+type Access = "off" | "read" | "write" | "read-write";
+type CredentialAccess = "off" | "read" | "read-write";
 export type PermissionProfile = Readonly<{
     enabled: boolean;
     projectFiles: Access;
     outsideProject: Access;
-    storedCredentials: Access;
+    storedCredentials: CredentialAccess;
     commands: boolean;
     network: boolean;
 }>;
@@ -32,9 +33,10 @@ function busOf(pi: unknown): EventBus | undefined {
 function profile(value: unknown): PermissionProfile {
     if (!value || typeof value !== "object") throw new Error("Invalid sandbox permission profile.");
     const p = value as Record<string, unknown>;
-    const access = (v: unknown): v is Access => v === "off" || v === "read" || v === "read-write";
+    const credential = (v: unknown): v is CredentialAccess => v === "off" || v === "read" || v === "read-write";
+    const access = (v: unknown): v is Access => credential(v) || v === "write";
     if (typeof p.enabled !== "boolean" || typeof p.commands !== "boolean" || typeof p.network !== "boolean" ||
-        !access(p.projectFiles) || !access(p.outsideProject) || !access(p.storedCredentials)) {
+        !access(p.projectFiles) || !access(p.outsideProject) || !credential(p.storedCredentials)) {
         throw new Error("Invalid sandbox permission profile; update permissions in the sandbox UI.");
     }
     return Object.freeze({

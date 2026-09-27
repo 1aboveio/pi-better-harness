@@ -35,16 +35,22 @@ test("sandbox permission table edits both profiles and saves inactive values in 
         literal("/sandbox"); key("Enter");
         let text = wait(/Sandbox permissions\s+Main\s+Subagents/);
         assert.match(text, /Sandbox\s+Off\s+On/);
-        assert.match(text, /Project files\s+-\s+Read \/ write/);
+        assert.match(text, /Project files\s+-\s+Write & delete/);
         key("Space"); wait(/Sandbox\s+On\s+On/);
-        key("Down"); key("Space"); wait(/Project files\s+Off\s+Read \/ write/);
-        key("Up"); key("Space"); wait(/Project files\s+-\s+Read \/ write/);
+        key("Down"); key("Space"); wait(/Project files\s+Off\s+Write & delete/);
+        key("Up"); key("Space"); wait(/Project files\s+-\s+Write & delete/);
         key("Down"); key("Space"); // Inactive cell must not change the retained Off.
-        key("Up"); key("Space"); wait(/Project files\s+Off\s+Read \/ write/);
+        key("Up"); key("Space"); wait(/Project files\s+Off\s+Write & delete/);
         key("Space"); wait(/Sandbox\s+Off\s+On/);
-        key("Right"); key("Down"); key("Down"); key("Space");
-        wait(/Outside project\s+-\s+Read \/ write/);
+        key("Right"); key("Down"); key("Down");
+        // Subagents default to Outside project = Write; its hint names the trade-off.
+        wait(/Outside project\s+-\s+Write\s/);
+        wait(/rename-based saves fail outside the project/);
+        key("Space");
+        wait(/Outside project\s+-\s+Write & delete/);
         for (let i = 0; i < 4; i++) key("Down");
+        // Saving a looser default asks first.
+        key("Enter"); wait(/Looser defaults \(Subagents: outsideProject write → read-write\)\. Press Enter again/);
         key("Enter"); wait(/Defaults saved/);
         const saved = JSON.parse(readFileSync(join(fixture, "agent/extensions/pi-better-sandbox-permissions.json"), "utf8"));
         assert.equal(saved.permissions.main.enabled, false);
@@ -54,8 +60,8 @@ test("sandbox permission table edits both profiles and saves inactive values in 
         wait(/^(?![\s\S]*Save as defaults)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
         literal("/sandbox"); key("Enter");
-        wait(/Outside project\s+-\s+Read \/ write/);
-        key("Space"); wait(/Project files\s+Off\s+Read \/ write/);
+        wait(/Outside project\s+-\s+Write & delete/);
+        key("Space"); wait(/Project files\s+Off\s+Write & delete/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
         rmSync(fixture, { recursive: true, force: true });

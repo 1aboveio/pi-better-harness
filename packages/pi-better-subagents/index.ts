@@ -55,7 +55,7 @@ import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODE_REQUEST, delegationPrompt, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime } from "./task-policy.ts";
-import { canonicalizePath } from "./shared-sandbox-core.ts";
+import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
 import { TASK_BUILTINS } from "./shared-task-sandbox.ts";
 import { observeSandboxPermissions, resolveSubagentPermissions } from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
@@ -1669,6 +1669,9 @@ export default function (pi: ExtensionAPI) {
         if (sandboxEnabled && !taskRuntime) throw new Error("Task sandbox has no workspace; refusing an unconfined child.");
         // Parent-authored trust record, written before the child can run (#325).
         if (taskRuntime) recordTaskRuntimeProvenance(id);
+        // Outside project = Write & delete lets the run remove files outside its
+        // workspace: take an APFS local snapshot first (macOS, best effort, never blocks).
+        const snapshot = taskRuntime ? takeRecoverySnapshot(taskRuntime.policy.permissions) : undefined;
         const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: piBin, fileArgs: args };
         const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
@@ -1722,7 +1725,9 @@ export default function (pi: ExtensionAPI) {
             : resolution.specs.length
                 ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
                 : `Runtime: isolated · built-in tools only\n`;
-        const warn = (unavailableTools.length ? `Task sandbox: unavailable adapters for ${unavailableTools.join(", ")}; these tools are disabled.\n` : "") + (resolution.unmapped.length
+        const warn = (unavailableTools.length ? `Task sandbox: unavailable adapters for ${unavailableTools.join(", ")}; these tools are disabled.\n` : "") +
+            (snapshot?.taken === false && snapshot.reason === "failed" ? `Recovery snapshot failed (run continues): ${snapshot.detail ?? "unknown error"}\n` : "") +
+            (resolution.unmapped.length
             ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
               `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
               `Add a toolExtensions entry in config.json.\n`

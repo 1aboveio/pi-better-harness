@@ -1,13 +1,15 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import { defaultSandboxPermissions, type FileAccess, type SandboxPermissionProfile as PermissionProfile, type SandboxPermissionSettings as PermissionSettings } from "./permissions.ts";
+import { defaultSandboxPermissions, type CredentialAccess, type FileAccess, type SandboxPermissionProfile as PermissionProfile, type SandboxPermissionSettings as PermissionSettings } from "./permissions.ts";
 export type { PermissionProfile, PermissionSettings };
 
 export interface PermissionPageHandlers {
     getConfig(): PermissionSettings;
     change(settings: PermissionSettings): void | Promise<void>;
     save(settings: PermissionSettings): void | Promise<void>;
+    /** What saving `settings` would loosen versus the saved defaults; non-empty requires a confirming second Enter. */
+    loosening?(settings: PermissionSettings): string[];
 }
 
 export const DEFAULT_PERMISSION_SETTINGS = defaultSandboxPermissions();
@@ -20,7 +22,24 @@ const rows = [
     { label: "Run commands & applications", key: "commands" },
     { label: "Network access", key: "network" },
 ] as const;
-const fileValues: readonly FileAccess[] = ["off", "read", "read-write"];
+const fileValues: readonly FileAccess[] = ["off", "read", "write", "read-write"];
+const credentialValues: readonly CredentialAccess[] = ["off", "read", "read-write"];
+const FILE_LABELS: Record<FileAccess, string> = { off: "Off", read: "Read", write: "Write", "read-write": "Write & delete" };
+const CREDENTIAL_LABELS: Record<CredentialAccess, string> = { off: "Off", read: "Read", "read-write": "Read / write" };
+const FIXED_CREDENTIALS = "Outside project = Write always hides credential files; change Outside project to edit this row.";
+
+/** The context line for the highlighted cell, or undefined. */
+function cellHint(key: string, profile: PermissionProfile | undefined): string | undefined {
+    if (key === "projectFiles" || key === "outsideProject") {
+        const level = profile?.[key];
+        const where = key === "projectFiles" ? "in the project" : "outside the project";
+        return level === "write"
+            ? `Write: git and rename-based saves fail ${where} except in worktree folders; set Write & delete if needed.`
+            : "Always deletable: temp, hidden ~/.directories and worktree folders (.worktrees/, *-worktrees/).";
+    }
+    if (key === "storedCredentials" && profile?.outsideProject === "write") return FIXED_CREDENTIALS;
+    return undefined;
+}
 const columns = ["main", "subagents"] as const;
 
 function snapshot(settings: PermissionSettings): PermissionSettings {
@@ -56,6 +75,7 @@ export function createPermissionsPage(
     let row = 0;
     let column = 0;
     let busy = false;
+    let pendingConfirmation: string | undefined;
 
     function report(error: unknown): void {
         message = errorText(error);
@@ -71,6 +91,15 @@ export function createPermissionsPage(
         const next = snapshot(settings);
         if (key === "enabled" || key === "commands" || key === "network") {
             next[profile][key] = !next[profile][key];
+        } else if (key === "storedCredentials") {
+            if (next[profile].outsideProject === "write") {
+                message = FIXED_CREDENTIALS;
+                isError = false;
+                requestRender();
+                return;
+            }
+            const current = next[profile][key];
+            next[profile][key] = credentialValues[(credentialValues.indexOf(current) + 1) % credentialValues.length]!;
         } else {
             const current = next[profile][key];
             next[profile][key] = fileValues[(fileValues.indexOf(current) + 1) % fileValues.length]!;
@@ -91,6 +120,22 @@ export function createPermissionsPage(
 
     async function save(): Promise<void> {
         if (!settings || busy) return;
+        let loosened: string[];
+        try {
+            loosened = handlers.loosening?.(snapshot(settings)) ?? [];
+        } catch (error) {
+            report(error);
+            return;
+        }
+        const key = JSON.stringify(settings);
+        if (loosened.length && pendingConfirmation !== key) {
+            pendingConfirmation = key;
+            message = `Looser defaults (${loosened.join("; ")}). Press Enter again to save.`;
+            isError = false;
+            requestRender();
+            return;
+        }
+        pendingConfirmation = undefined;
         busy = true;
         try {
             await handlers.save(snapshot(settings));
@@ -107,6 +152,7 @@ export function createPermissionsPage(
     return {
         invalidate() {},
         handleInput(data: string) {
+            if (!matchesKey(data, Key.enter)) pendingConfirmation = undefined;
             if (matchesKey(data, Key.escape)) {
                 close();
             } else if (matchesKey(data, Key.up)) {
@@ -150,19 +196,24 @@ export function createPermissionsPage(
                 const entry = rows[i]!;
                 const value = (profile: PermissionProfile): string => {
                     if (entry.key !== "enabled" && !profile.enabled) return "-";
+                    if (entry.key === "storedCredentials") {
+                        return profile.outsideProject === "write" ? "Off (fixed)" : CREDENTIAL_LABELS[profile.storedCredentials];
+                    }
                     const current = profile[entry.key];
-                    return typeof current === "boolean" ? (current ? "On" : "Off") :
-                        current === "read-write" ? "Read / write" : current === "read" ? "Read" : "Off";
+                    return typeof current === "boolean" ? (current ? "On" : "Off") : FILE_LABELS[current];
                 };
                 output.push(line(entry.label, settings ? value(settings.main) : "-", settings ? value(settings.subagents) : "-",
                     row === i, !settings || (i > 0 && !settings.main.enabled), !settings || (i > 0 && !settings.subagents.enabled)));
                 if (i === 0) output.push("");
             }
             output.push("", line("Save as defaults", "", "", row === rows.length));
+            const selected = row < rows.length ? rows[row]!.key : undefined;
+            const contextual = selected && settings ? cellHint(selected, settings[columns[column]!]) : undefined;
             for (const hint of [
                 "↑↓ Select row · ←→ Select column · Space Change · Enter Save · Esc Back",
                 "Changes apply to new launches. Background tasks follow their launcher.",
                 "Stored credentials: known files only; excludes OS vaults and environment tokens.",
+                ...(contextual ? [contextual] : []),
             ]) output.push(theme.fg("dim", truncateToWidth(hint, w, "")));
             if (message) output.push(theme.fg(isError ? "error" : "muted", truncateToWidth(message.replace(/[\r\n]+/g, " "), w, "")));
             return output;

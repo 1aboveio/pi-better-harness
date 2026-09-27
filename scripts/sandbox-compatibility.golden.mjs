@@ -13,7 +13,7 @@ import { describeSandboxSupport } from '../packages/pi-better-subagents/shared-s
 import { writableRuntimeAlias } from '../packages/pi-better-subagents/shared-task-sandbox.ts';
 import taskGuard from '../packages/pi-better-subagents/task-guard.ts';
 
-const ids = ['workspace-temp', 'protected-paths', 'runtime-identity', 'outside-off', 'credential-service'];
+const ids = ['workspace-temp', 'protected-paths', 'runtime-identity', 'outside-off', 'credential-service', 'outside-write'];
 const evidenceDir = resolve(process.env.PI_SANDBOX_EVIDENCE_DIR ?? mkdtempSync(join(tmpdir(), 'pi-sandbox-evidence-')));
 const paths = [], cleanups = [];
 let currentPathId;
@@ -276,6 +276,29 @@ async function run() {
         async () => {
             const f = fixture(), session = await sessionFor(f);
             return process.platform === 'darwin' ? macCredential(session) : linuxCredential(session, f);
+        },
+        async () => {
+            // The Subagents default. The fixture home sits outside every temp
+            // root (temp is always removable), inside this checkout.
+            const f = fixture({ outsideProject: 'write' }, fileURLToPath(new URL('.', import.meta.url)));
+            const home = f.policy.home, sibling = join(home, 'projects', 'other-repo'), cache = join(home, '.gradle');
+            mkdirSync(sibling, { recursive: true }); mkdirSync(cache);
+            writeFileSync(join(sibling, 'README.md'), 'keep me');
+            const session = await sessionFor(f);
+            await bash(session, `const fs=require('node:fs'),assert=require('node:assert/strict');
+                const lock=${JSON.stringify(join(cache, 'dists', 'gradle.zip.lck'))};
+                fs.mkdirSync(require('node:path').dirname(lock),{recursive:true}); fs.writeFileSync(lock,'lock'); fs.rmSync(lock);
+                assert.throws(()=>fs.rmSync(${JSON.stringify(sibling)},{recursive:true}));
+                assert.throws(()=>fs.renameSync(${JSON.stringify(sibling)},${JSON.stringify(join(home, '.cache-moved'))}));
+                assert.throws(()=>fs.writeFileSync(${JSON.stringify(join(f.control, 'task.sb'))},'bad'));
+                ${process.platform === 'darwin'
+                    ? `fs.writeFileSync(${JSON.stringify(join(sibling, 'README.md'))},'edited in place');`
+                    : `assert.throws(()=>fs.writeFileSync(${JSON.stringify(join(sibling, 'README.md'))},'bad'));`}
+                fs.writeFileSync('built','ok'); fs.rmSync('built'); console.log('WRITE_OK');`, 'WRITE_OK');
+            assert.equal(readFileSync(join(sibling, 'README.md'), 'utf8'), process.platform === 'darwin' ? 'edited in place' : 'keep me');
+            return process.platform === 'darwin'
+                ? 'user cache written and cleaned; sibling repo edited in place but not removed or moved; controls denied'
+                : 'user cache written and cleaned; sibling repo read-only (bubblewrap fallback) and not removed; controls denied';
         },
     ];
     for (let i = 0; i < ids.length; i++) {
