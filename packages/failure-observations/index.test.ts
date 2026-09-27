@@ -575,9 +575,25 @@ test("#325 one command-intent validator for subagents and background tasks, with
   const names = { operationId: "operation_id", expectedExitCodes: "expected_exit_codes" };
   assert.match(readCommandIntent({ expectedExitCodes: [1, 1] }, names).error!, /^expected_exit_codes must be 1-16 distinct integers/);
   assert.match(readCommandIntent({ operationId: "has space" }, names).error!, /^operation_id must match/);
-  for (const bad of [[0], [256], [], [1.5], Array.from({ length: 17 }, (_, i) => i + 1)]) {
+  for (const bad of [[256], [-1], [], [1.5], ["x"], [0, 1, 1], 1, Array.from({ length: 17 }, (_, i) => i + 1)]) {
     assert.ok(readCommandIntent({ expectedExitCodes: bad }).error, JSON.stringify(bad));
   }
+});
+
+test("#332 a declared exit code 0 is a no-op, not a refusal: it is dropped, and a zero-only list declares nothing", () => {
+  assert.deepEqual(readCommandIntent({ expectedExitCodes: [0, 1] }), { intent: { expectedExitCodes: [1] } });
+  assert.deepEqual(readCommandIntent({ expectedExitCodes: [0] }), { intent: {} });
+  assert.deepEqual(readCommandIntent({ expectedExitCodes: [0, 0] }), { intent: {} });
+  // Sixteen real codes plus a 0 still fit: the cap counts declared codes.
+  const sixteen = Array.from({ length: 16 }, (_, i) => i + 1);
+  assert.deepEqual(readCommandIntent({ expectedExitCodes: [0, ...sixteen] }).intent.expectedExitCodes, sixteen);
+  assert.match(readCommandIntent({ expectedExitCodes: [] }).error!, /0 is allowed and ignored/);
+});
+
+test("#332 the validator mirrors Pi's argument coercion, so the raw logged arguments read as the executed ones", () => {
+  assert.deepEqual(readCommandIntent({ expectedExitCodes: ["1", " 2 "] }).intent, { expectedExitCodes: [1, 2] });
+  assert.deepEqual(readCommandIntent({ operationId: 42 }).intent, { operationId: "42" });
+  assert.ok(readCommandIntent({ expectedExitCodes: ["one"] }).error, "what Pi cannot coerce is still refused");
 });
 
 // ---- quiet history: only what needs action is active; history is explicit --------------

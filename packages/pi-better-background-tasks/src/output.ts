@@ -548,13 +548,16 @@ export function formatStatus(
   if (pageKind === "f") return formatLog(meta.id, { ...options, raw: true });
   if (pageKind === "t") return formatVerbose(meta, options);
   if (options.verbose) return formatVerbose(meta, options);
+  // A bg_task_list page cursor pages the list, not this task: say so rather than report it as a
+  // stale status cursor (#332).
+  const listCursor = pageKind === "l";
   const state = failureStateFor(meta.id);
   const resource = `status:${scopeKey(options)}:${meta.id}`;
   const revision = inspectStatusRevision({
     resource,
     contentRevision: contentRevision(meta),
     failureRevision: failureRevision(state),
-    cursor: options.cursor,
+    cursor: listCursor ? undefined : options.cursor,
   });
   if (options.cursor && revision.change === "none") {
     return assembleBackgroundContent({
@@ -574,6 +577,7 @@ export function formatStatus(
   // Change/reset and read-gap facts are short and decision-relevant: they are
   // budgeted with the decision section, ahead of long incident rows.
   const changeFacts = [
+    ...(listCursor ? ["cursor ignored: it is a bg_task_list page cursor; pass it to bg_task_list, or pass this status's statusCursor here."] : []),
     ...(revision.change === "failure" ? ["change=failure"] : []),
     ...(revision.reset ? [`reset=${revision.reset}`] : []),
     ...(log.error ? [`log unreadable: ${oneLine(log.error, 200)}; cannot treat this as an empty healthy log.`] : []),

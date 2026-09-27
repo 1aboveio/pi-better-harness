@@ -5,6 +5,7 @@ import {
     mkdirSync,
     mkdtempSync,
     rmSync,
+    symlinkSync,
     utimesSync,
     writeFileSync,
 } from "node:fs";
@@ -26,6 +27,7 @@ const {
 const {
     baseDir,
     logPathFor,
+    orphanedTaskRuntimeProvenance,
     recordTaskRuntimeProvenance,
     runDir,
     sessionsDir,
@@ -258,6 +260,16 @@ describe("enforceRegistrySizeCapOnce", () => {
         assert.equal(existsSync(runDir(id)), false);
         assert.equal(existsSync(taskRuntimeProvenancePath(id)), false, "no provenance outlives its run");
         assert.equal(existsSync(taskRuntimeProvenancePath("sa_gone_1")), false, "orphaned records are swept");
+    });
+
+    it("#332 only a run directory that is definitely gone (ENOENT) orphans its provenance record", () => {
+        rmSync(baseDir(), { recursive: true, force: true });
+        recordTaskRuntimeProvenance("sa_gone_2");
+        // A run directory that exists but cannot be stat'ed (here ELOOP; in practice EACCES or EIO).
+        mkdirSync(join(baseDir(), "runs"), { recursive: true });
+        symlinkSync(runDir("sa_unstatable"), runDir("sa_unstatable"));
+        recordTaskRuntimeProvenance("sa_unstatable");
+        assert.deepEqual(orphanedTaskRuntimeProvenance(), ["sa_gone_2"]);
     });
 
     it("defaults to a 2 GiB budget — tighter than a single observed log", () => {

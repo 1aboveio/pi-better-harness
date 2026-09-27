@@ -202,7 +202,9 @@ export function foldToolStart(model: IncidentModel, row: any, cwd: string, sink:
     const seq = ++model.sequence;
     if (!model.structuredIntent) {
         // Unconfined: intent-looking fields are ordinary arguments; exact identity only.
-        model.open.set(toolCallId, { toolCallId, toolName, operation: toolOperation(toolName, row.args, cwd), intent: {}, startSequence: seq });
+        // An explicit-null intent-named field is still normalized away, as on the confined path, so
+        // `{command, expectedExitCodes: null}` and `{command}` are one command (#332).
+        model.open.set(toolCallId, { toolCallId, toolName, operation: toolOperation(toolName, withoutAbsentIntent(row.args), cwd), intent: {}, startSequence: seq });
         return;
     }
     const parsed = toolName === "bash" ? readCommandIntent(row.args) : { intent: {} as CommandIntent };
@@ -238,8 +240,11 @@ export function foldToolStart(model: IncidentModel, row: any, cwd: string, sink:
 
 /** The confined intent bash's own pre-run refusal (child-incidents.ts), matched as the whole result text. */
 const INTENT_REFUSAL = /^Invalid command intent: ([\s\S]+)\. The command was not run\.$/;
-/** Pi's pre-execution schema rejection; it names the tool, and nothing ran. */
-const SCHEMA_REFUSAL = /^Validation failed for tool "/;
+/**
+ * Pi's pre-execution schema rejection of the bash call (pi-ai `validateToolArguments`), matched as its
+ * whole shape: the header, one or more `  - path: message` lines, and the received arguments. Nothing ran.
+ */
+const SCHEMA_REFUSAL = /^Validation failed for tool "bash":\n(?:  - [^\n]*\n)+\nReceived arguments:\n[\s\S]*$/;
 
 /**
  * Why the child refused this bash call before running it, read from the end row the child
@@ -266,7 +271,7 @@ export function foldToolEnd(model: IncidentModel, row: any, cwd: string, evidenc
     const attempt = model.open.get(toolCallId);
     if (attempt) model.open.delete(toolCallId);
     const intent = attempt?.intent ?? {};
-    const operation = attempt?.operation ?? toolOperation(toolName, row.args, cwd);
+    const operation = attempt?.operation ?? toolOperation(toolName, withoutAbsentIntent(row.args), cwd);
     const details = row.result?.details;
     const declaredExit = row.isError === false && details?.expectedExit === true && typeof details.exitCode === "number" &&
         (intent.expectedExitCodes ?? []).includes(details.exitCode) ? details.exitCode as number : undefined;

@@ -12,7 +12,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { writeFileSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
@@ -66,7 +66,7 @@ import {
     sessionsDir,
     runDir,
     recordTaskRuntimeProvenance,
-    removeRunDirectory,
+    discardFailedLaunch,
     logPathFor,
     promptPathFor,
     nextRunId,
@@ -115,7 +115,7 @@ import {
 import { buildHealthCallbackDelivery } from "./completion.ts";
 import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
 import { completionCallbackFields, failureAttentionFields, healthCallbackFields } from "./callback-fields.ts";
-import { collectRunFailures, failurePath, failureSummary, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
+import { collectRunFailures, failurePath, failureView, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
 import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
 import {
     text,
@@ -1132,8 +1132,9 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
         if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
         if (row.tool) bits.push(row.tool);
         if (row.spend) bits.push(row.spend);
-        const failure = failureSummary(row.id, metaById.get(row.id)?.cwd ?? "", row.status !== "running" && row.status !== "orphaned");
-        const firstFailure = failure.split("\n")[0] || "";
+        const failure = failureView(row.id, metaById.get(row.id)?.cwd ?? "", row.status !== "running" && row.status !== "orphaned");
+        // Only a failure that needs action replaces the row's columns; history stays in the detail view.
+        const firstFailure = failure.actionable ? failure.text.split("\n")[0] || "" : "";
         return {
             providerId: "subagents",
             id: row.id,
@@ -1197,7 +1198,8 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
     if (!detail) return null;
     void options;
     const transcript = readRunTranscript(id);
-    const failure = failureSummary(id, readMeta(id)?.cwd ?? "", detail.status !== "running" && detail.status !== "orphaned");
+    const view = failureView(id, readMeta(id)?.cwd ?? "", detail.status !== "running" && detail.status !== "orphaned");
+    const failure = view.text;
     const metadata = [
         ...(failure ? [{ label: "failure", value: failure.split("\n")[0]! }] : []),
         { label: "provider", value: "Subagents" },
@@ -1216,7 +1218,7 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         title: detail.name || detail.id,
         status: detail.status,
         statusTone: statusTone(detail.status),
-        subtitle: failure.split("\n")[0] || (detail.currentTool ? `current tool ${detail.currentTool}` : undefined),
+        subtitle: (view.actionable && failure.split("\n")[0]) || (detail.currentTool ? `current tool ${detail.currentTool}` : undefined),
         metadata,
         evidence: { label: "transcript", text: prependFailureSummary(detail.output || "(no transcript yet)", failure) },
         transcript: transcript.entries,
@@ -1587,13 +1589,15 @@ export default function (pi: ExtensionAPI) {
 
         const id = nextRunId();
         const childSessionDir = sandboxEnabled ? join(sessionsDir(), id) : sessionsDir();
+        // The disposable clone this launch owns (removed if the spawn fails); a caller's sandbox_dir is not ours.
+        const ownedCloneWorkspace = !p.sandbox_dir && sandboxEnabled && p.git_clone_workspace ? taskWorkspaceDir(id) : undefined;
         mkdirSync(childSessionDir, { recursive: true });
         mkdirSync(runDir(id), { recursive: true });
 
         const workspace = resolveSubagentWorkspace({
             ctxCwd: ctx.cwd,
             cwd: p.cwd,
-            sandboxDir: p.sandbox_dir ?? (sandboxEnabled && p.git_clone_workspace ? taskWorkspaceDir(id) : undefined),
+            sandboxDir: p.sandbox_dir ?? ownedCloneWorkspace,
             gitCloneWorkspace: p.git_clone_workspace,
             runId: id,
             runDirPath: runDir(id),
@@ -1686,10 +1690,10 @@ export default function (pi: ExtensionAPI) {
             spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
                 env: { [STEER_FILE_ENV]: steerPathFor(id) } });
         } catch (error) {
-            // Nothing references the run yet (no metadata): drop its directory (prompt, control/),
-            // its provenance record, and the task scratch, so a failed launch leaves nothing behind (#325).
-            try { removeRunDirectory(id); } catch { /* best effort */ }
-            if (taskRuntime?.policy.scratch) rmSync(taskRuntime.policy.scratch, { recursive: true, force: true });
+            // Nothing references the run yet (no metadata): drop its directory (prompt, control/), its
+            // provenance record, its session directory, its clone workspace, and the task scratch, so a
+            // failed launch leaves nothing behind (#325, #332).
+            discardFailedLaunch(id, { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: taskRuntime?.policy.scratch });
             throw error;
         }
         // Record process identity (pgid, start-time token) so health

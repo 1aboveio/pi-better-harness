@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-  activeFailures, failureAttentionHandled, failureIdentity, formatFailureSummary, markFailureAttentionDelivered,
+  actionableFailures, activeFailures, failureAttentionHandled, failureIdentity, formatFailureSummary, markFailureAttentionDelivered,
   observeFailures, pendingAttentionNote, pendingAttentionRows, pendingFailureAttention, readCommandIntent, readFailureState,
   type FailureEvent, type FailureState,
 } from "./shared-failure-observations.js";
@@ -12,6 +12,14 @@ import type { BackgroundTaskMeta } from "./types.js";
 
 export const failurePath = (id: string): string => join(taskDir(id), "failures.jsonl");
 export const failureSummary = (id: string): string => formatFailureSummary(readFailureState(failurePath(id)));
+/**
+ * The failure summary plus whether anything needs action. A navigator row leads with failure text
+ * only when something does; the quiet history line never displaces the command (#332).
+ */
+export function failureView(id: string): { text: string; actionable: boolean } {
+  const state = readFailureState(failurePath(id));
+  return { text: formatFailureSummary(state), actionable: actionableFailures(state).length > 0 };
+}
 
 export function recordFailure(meta: BackgroundTaskMeta, operation: string, summary: string, eventKey: unknown,
   options: { category?: string; expected?: boolean; incomplete?: boolean; evidence?: string; at?: number } = {}): void {

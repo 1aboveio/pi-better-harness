@@ -120,7 +120,7 @@ test("the child and parent share one intent validator", () => {
     assert.deepEqual(readCommandIntent({ expectedExitCodes: null, operationId: "tests", attemptId: null }), { intent: { operationId: "tests" } },
         "an explicit null is an undeclared field, not a malformed one");
     assert.deepEqual(readCommandIntent({ expectedExitCodes: undefined, operationId: null }), { intent: {} });
-    for (const bad of [{ expectedExitCodes: [0] }, { expectedExitCodes: [] }, { expectedExitCodes: [1, 1] }, { expectedExitCodes: "1" }, { operationId: "has space" }, { attemptId: "" }]) {
+    for (const bad of [{ expectedExitCodes: [256] }, { expectedExitCodes: [] }, { expectedExitCodes: [1, 1] }, { expectedExitCodes: "1" }, { operationId: "has space" }, { attemptId: "" }]) {
         assert.ok(readCommandIntent(bad).error, JSON.stringify(bad));
     }
 });
@@ -136,7 +136,7 @@ test("declared exit codes are validated before execution and classify only the f
     const mismatch = await child.call("mismatch", "bash", { command: "exit 2", expectedExitCodes: [1] });
     assert.equal(mismatch.isError, true, "an undeclared code stays an ordinary failure");
     const marker = join(f.project, "should-not-exist");
-    const invalid = await child.call("invalid", "bash", { command: `touch '${marker}'`, expectedExitCodes: [0] });
+    const invalid = await child.call("invalid", "bash", { command: `touch '${marker}'`, expectedExitCodes: [1, 1] });
     assert.equal(invalid.isError, true);
     assert.match(invalid.text, /Invalid command intent.*not run/);
     assert.equal(existsSync(marker), false, "invalid intent is rejected before the command runs");
@@ -231,7 +231,7 @@ test("explicit-null intent: Pi hands the child the raw nulls, the command runs, 
     assert.equal(ran, 1, "an explicit-null intent is no intent: the command runs");
     // Pi still refuses a genuinely malformed intent before execute.
     assert.throws(() => validateToolArguments({ name: "bash", parameters: bash.parameters },
-        { type: "toolCall", id: "bad", name: "bash", arguments: { command: "true", expectedExitCodes: [0] } }), /Validation failed for tool "bash"/);
+        { type: "toolCall", id: "bad", name: "bash", arguments: { command: "true", expectedExitCodes: [256] } }), /Validation failed for tool "bash"/);
     const id = `sa_child_incidents_${randomUUID()}`;
     mkdirSync(runDir(id), { recursive: true });
     writeFileSync(join(runDir(id), "meta.json"), JSON.stringify({ id, status: "running", cwd: process.cwd(), taskRuntime: true, startedAt: 1 }));
@@ -244,4 +244,18 @@ test("explicit-null intent: Pi hands the child the raw nulls, the command runs, 
     appendFileSync(logPathFor(id), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
     const failures = activeFailures(collectRunFailures(id, process.cwd()));
     assert.deepEqual(failures.map((x) => [x.category, x.count]), [["tool", 3]], "one declared operation, three real failures, no rejected intents");
+});
+
+test("#332 a declared exit code 0 passes Pi's schema and the intent bash: it is dropped, and the command runs", async () => {
+    const bash = intentBashDefinition(process.cwd(), { exec: async () => ({ exitCode: 1 }) });
+    const ctx = { sessionManager: SessionManager.inMemory(process.cwd()) };
+    const declared = validateToolArguments({ name: "bash", parameters: bash.parameters },
+        { type: "toolCall", id: "zero-one", name: "bash", arguments: { command: "rg missing", expectedExitCodes: [0, 1] } });
+    const result = await bash.execute("zero-one", declared, undefined, undefined, ctx);
+    assert.deepEqual(result.details, { exitCode: 1, expectedExit: true }, "the 1 is still declared");
+    const zeroOnly = validateToolArguments({ name: "bash", parameters: bash.parameters },
+        { type: "toolCall", id: "zero", name: "bash", arguments: { command: "npm test", expectedExitCodes: [0] } });
+    await assert.rejects(bash.execute("zero", zeroOnly, undefined, undefined, ctx), (error) => !/Invalid command intent/.test(error.message) && /code 1/i.test(error.message),
+        "a zero-only list declares nothing: the command runs and its exit 1 is an ordinary failure");
+    assert.match(bash.parameters.properties.expectedExitCodes.description, /0 is allowed and ignored/);
 });

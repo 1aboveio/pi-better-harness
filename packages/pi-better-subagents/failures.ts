@@ -1,7 +1,7 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { logPathFor, runDir, taskRuntimeTrust } from "./registry.ts";
-import { activeFailures, disposeIncidents, failureIdentity, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
+import { activeFailures, actionableFailures, disposeIncidents, failureIdentity, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
     observeFailures, pendingFailureAttention, readFailureState, type FailureState } from "./shared-failure-observations.ts";
 import { evidenceText, foldToolEnd, foldToolStart, newIncidentModel, toolOperation, type IncidentModel, type IncidentSink } from "./incident-model.ts";
 
@@ -127,8 +127,14 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
             } else {
                 trustUnknownSince.delete(id);
                 scan = { offset: 0, head, identity, model: newIncidentModel(trust === "trusted") };
-                const deferred = readRunFailures(id).observations[failureIdentity("run-metadata")];
-                if (deferred && deferred.status === "unresolved") observeFailures(path, [{ id: `run-metadata-readable:${deferred.id}`,
+                // The gap closes only if the earlier exact-rule scan left no open tool incident. Those
+                // incidents are keyed by the exact rule and their event ids are already consumed, so this
+                // trusted rescan cannot re-key them and a declared operationId retry can never recover
+                // them; the gap stays to say so (#332).
+                const prior = readRunFailures(id);
+                const deferred = prior.observations[failureIdentity("run-metadata")];
+                const exactRuleLeftovers = Object.values(prior.observations).some((x) => x.category === "tool" && x.status === "unresolved");
+                if (deferred && deferred.status === "unresolved" && !exactRuleLeftovers) observeFailures(path, [{ id: `run-metadata-readable:${deferred.id}`,
                     operation: "run-metadata", kind: "recovered", incidents: [deferred.id] }]);
             }
         }
@@ -200,7 +206,16 @@ export function runFailureFacts(state: FailureState, terminal: boolean): string 
     return formatTerminalFailureFacts(state, activeFailures(state).map((x) => x.id));
 }
 export function failureSummary(id: string, cwd: string, terminal = false): string {
-    return runFailureFacts(collectRunFailures(id, cwd, terminal), terminal);
+    return failureView(id, cwd, terminal).text;
+}
+/**
+ * The failure facts plus whether anything needs action. A navigator row leads with failure text only
+ * when something does; a quiet "No failures need action · … (history)" line never displaces the
+ * row's model, tool, and spend columns (#332).
+ */
+export function failureView(id: string, cwd: string, terminal = false): { text: string; actionable: boolean } {
+    const state = collectRunFailures(id, cwd, terminal);
+    return { text: runFailureFacts(state, terminal), actionable: actionableFailures(state).length > 0 };
 }
 export function prependFailureSummary(body: string, summary: string): string {
     if (!summary) return body;

@@ -235,16 +235,33 @@ export function removeRunDirectory(id: string): void {
     rmSync(runDir(id), { recursive: true, force: true });
     removeTaskRuntimeProvenance(id);
 }
+/**
+ * Undo everything a launch prepared before its child failed to spawn (#325, #332). Nothing references
+ * the run yet (no metadata), so its run directory and provenance go, plus the per-run session
+ * directory and disposable clone workspace of a sandboxed launch and the task scratch. Only the
+ * run's own paths are removed: a shared sessions directory or a caller-chosen sandbox_dir is kept.
+ */
+export function discardFailedLaunch(id: string, prepared: { sessionDir?: string; workspaceDir?: string; scratch?: string } = {}): void {
+    try { removeRunDirectory(id); } catch { /* best effort */ }
+    const remove = (path: string) => { try { rmSync(path, { recursive: true, force: true }); } catch { /* best effort */ } };
+    if (prepared.sessionDir && prepared.sessionDir === join(sessionsDir(), id)) remove(prepared.sessionDir);
+    if (prepared.workspaceDir && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id) && prepared.workspaceDir === taskWorkspaceDir(id)) remove(prepared.workspaceDir);
+    if (prepared.scratch) remove(prepared.scratch);
+}
 /** Best-effort removal of a run's provenance record (e.g. after a failed launch). */
 export function removeTaskRuntimeProvenance(id: string): void {
     try { rmSync(taskRuntimeProvenancePath(id), { force: true }); } catch { /* invalid id or already gone */ }
 }
-/** Provenance records whose run directory no longer exists (e.g. removed by an older version). */
+/**
+ * Provenance records whose run directory no longer exists (e.g. removed by an older version). Only a
+ * definite ENOENT counts as gone: any other stat error (permissions, I/O) keeps the record, since
+ * deleting a live run's provenance would silently drop it to the exact-retry rule (#332).
+ */
 export function orphanedTaskRuntimeProvenance(): string[] {
     let names: string[];
     try { names = readdirSync(join(baseDir(), "task-runtime")); } catch { return []; }
     return names.filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5))
-        .filter((id) => { try { statSync(runDir(id)); return false; } catch { return true; } });
+        .filter((id) => { try { statSync(runDir(id)); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; } });
 }
 /**
  * Whether the parent may honour structured intent for this run. `unknown` means the answer could

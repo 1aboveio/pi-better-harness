@@ -118,28 +118,48 @@ export function withoutAbsentIntent<T>(args: T): T {
   return out as T;
 }
 /**
+ * Pi's own argument coercion for these fields (pi-ai `validateToolArguments`): a string or boolean
+ * that reads as an integer becomes one, and a number or boolean becomes a string id. Pi applies it
+ * before execute, but the process log and session record keep the raw arguments; mirroring it here
+ * lets the parent's replay read the same declaration the child executed with (#332).
+ */
+function coerceInteger(value: unknown): unknown {
+  if (value === null) return 0;
+  if (typeof value === "string" && value.trim() !== "" && Number.isInteger(Number(value))) return Number(value);
+  if (typeof value === "boolean") return value ? 1 : 0;
+  return value;
+}
+function coerceId(value: unknown): unknown {
+  return typeof value === "number" || typeof value === "boolean" ? String(value) : value;
+}
+/**
  * Validate structured intent fields. Absent fields (omitted, undefined, or null) are fine; malformed
  * ones are an error, and the caller must not run the command. `names` renames fields in the error
  * (e.g. snake_case parameters).
+ *
+ * `0` in `expectedExitCodes` is accepted and dropped: exit 0 is already success, so declaring it is a
+ * no-op. A list that holds only zeros declares nothing (#332).
  */
 export function readCommandIntent(args: unknown, names: Partial<Record<CommandIntentField, string>> = {}): { intent: CommandIntent; error?: string } {
   const input = withoutAbsentIntent((args && typeof args === "object" ? args : {}) as Record<string, unknown>);
   const intent: CommandIntent = {};
   for (const key of ["operationId", "attemptId"] as const) {
-    const value = input[key];
+    const value = coerceId(input[key]);
     if (value === undefined) continue;
     if (typeof value !== "string" || !INTENT_ID.test(value)) {
       return { intent: {}, error: `${names[key] ?? key} must match ${INTENT_ID_PATTERN}` };
     }
     intent[key] = value;
   }
-  const codes = input.expectedExitCodes;
-  if (codes !== undefined) {
-    if (!Array.isArray(codes) || codes.length === 0 || codes.length > MAX_EXPECTED_EXIT_CODES ||
-      !codes.every((code) => Number.isInteger(code) && code >= 1 && code <= 255) || new Set(codes).size !== codes.length) {
-      return { intent: {}, error: `${names.expectedExitCodes ?? "expectedExitCodes"} must be 1-${MAX_EXPECTED_EXIT_CODES} distinct integers from 1 to 255` };
+  const raw = input.expectedExitCodes;
+  if (raw !== undefined) {
+    const all = Array.isArray(raw) ? raw.map(coerceInteger) : undefined;
+    const codes = all?.filter((code) => code !== 0);
+    if (!all || !codes || all.length === 0 || codes.length > MAX_EXPECTED_EXIT_CODES ||
+      !codes.every((code) => Number.isInteger(code) && (code as number) >= 1 && (code as number) <= 255) || new Set(codes).size !== codes.length) {
+      return { intent: {}, error: `${names.expectedExitCodes ?? "expectedExitCodes"} must be 1-${MAX_EXPECTED_EXIT_CODES} distinct integers from 1 to 255 (0 is allowed and ignored)` };
     }
-    intent.expectedExitCodes = [...codes] as number[];
+    if (codes.length) intent.expectedExitCodes = codes as number[];
   }
   return { intent };
 }
