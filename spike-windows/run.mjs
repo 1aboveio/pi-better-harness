@@ -5,6 +5,7 @@ import os from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomInt } from "node:crypto";
+import { setAce, MODE, INHERIT, MASK } from "./acl.mjs";
 
 process.on("uncaughtException", (e) => { console.error("UNCAUGHT", e?.stack ?? e); process.exit(3); });
 console.error("run.mjs start", process.version);
@@ -54,30 +55,25 @@ function buildTree() {
 
 function applyAcls() {
     const t0 = Date.now();
-    icacls(home, "/grant", `*${R}:(OI)(CI)(RX)`, `*${W}:(OI)(CI)(W)`);
-    for (const dir of [".cache", ".config", "tmp"]) icacls(join(home, dir), "/grant", `*${D}:(OI)(CI)(D)`);
-    icacls(join(home, "projects", "ws"), "/grant", `*${P}:(OI)(CI)(D)`);
-    icacls(join(home, ".ssh"), "/deny", `*${C}:(OI)(CI)(F)`);
-    icacls(join(home, ".config", "gh"), "/deny", `*${C}:(OI)(CI)(F)`);
-    icacls(join(home, ".bashrc"), "/deny", `*${N}:(W,D,WDAC,WO)`);
-    for (const anchor of [home, join(home, ".config"), join(home, "projects")]) icacls(anchor, "/deny", `*${A}:(D)`);
+    setAce(home, R, MASK.rx, MODE.grant, INHERIT.tree);
+    setAce(home, W, MASK.w, MODE.grant, INHERIT.tree);
+    for (const dir of [".cache", ".config", "tmp"]) setAce(join(home, dir), D, MASK.d, MODE.grant, INHERIT.tree);
+    setAce(join(home, "projects", "ws"), P, MASK.d, MODE.grant, INHERIT.tree);
+    setAce(join(home, ".ssh"), C, MASK.all, MODE.deny, INHERIT.tree);
+    setAce(join(home, ".config", "gh"), C, MASK.all, MODE.deny, INHERIT.tree);
+    setAce(join(home, ".bashrc"), N, MASK.denyWrite, MODE.deny, INHERIT.none);
+    for (const anchor of [home, join(home, ".config"), join(home, "projects")]) setAce(anchor, A, MASK.d, MODE.deny, INHERIT.none);
     return Date.now() - t0;
 }
 
 function registrySetup() {
-    // A granted subkey: tests "grant a harness SID write on part of HKCU".
-    const ps = [
-        "$k = 'HKCU:\\Software\\PiSpikeGranted'",
-        "if (-not (Test-Path $k)) { New-Item $k | Out-Null }",
-        "$acl = Get-Acl $k",
-        `$sid = New-Object System.Security.Principal.SecurityIdentifier('${W}')`,
-        "$rule = New-Object System.Security.AccessControl.RegistryAccessRule($sid, 'SetValue,CreateSubKey,QueryValues,EnumerateSubKeys', 'ContainerInherit', 'None', 'Allow')",
-        "$acl.AddAccessRule($rule); Set-Acl $k $acl",
-        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name PiSpike -ErrorAction SilentlyContinue",
-        "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name PiSpike -ErrorAction SilentlyContinue",
-        "Remove-Item 'HKCU:\\Software\\PiSpike' -ErrorAction SilentlyContinue",
-    ].join("; ");
-    return sh("pwsh", ["-NoProfile", "-Command", ps]);
+    sh("reg", ["add", "HKCU\\Software\\PiSpikeGranted", "/f"]);
+    setAce("CURRENT_USER\\Software\\PiSpikeGranted", W, MASK.regWrite, MODE.grant, INHERIT.tree, 4);
+    for (const key of ["Run", "RunOnce"]) {
+        try { sh("reg", ["delete", `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\${key}`, "/v", "PiSpike", "/f"]); } catch { /* absent */ }
+    }
+    try { sh("reg", ["delete", "HKCU\\Software\\PiSpike", "/f"]); } catch { /* absent */ }
+    return "ok";
 }
 
 function hkcuRootAcl() {
@@ -145,10 +141,10 @@ for (const [name, cfg] of Object.entries(variants)) {
         for (let f = 0; f < 100; f++) fs.writeFileSync(join(dir, `f${f}.txt`), "x");
     }
     const t0 = Date.now();
-    icacls(bench, "/grant", `*${R}:(OI)(CI)(RX)`, `*${W}:(OI)(CI)(W)`);
+    setAce(bench, R, MASK.rx, MODE.grant, INHERIT.tree);
     report.propagate20kFilesMs = Date.now() - t0;
     const t1 = Date.now();
-    icacls(bench, "/remove", `*${R}`, `*${W}`);
+    setAce(bench, R, 0, MODE.revoke, INHERIT.none);
     report.revoke20kFilesMs = Date.now() - t1;
     report.benchSampleAcl = icacls(join(bench, "d7", "nested", "f3.txt"));
     fs.rmSync(bench, { recursive: true, force: true });
