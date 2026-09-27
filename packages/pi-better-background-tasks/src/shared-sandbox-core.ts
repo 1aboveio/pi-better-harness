@@ -525,9 +525,8 @@ export function executableFromPath(name: string): string | undefined {
  * afterwards because a resumed task re-runs the launch vector it captured and
  * its `--ro-bind` sources have to still be there.
  *
- * Returns false when the placeholder could not be created. That is not a hole:
- * the confined process runs as this same user, so a path this process cannot
- * create is a path that process cannot create either.
+ * Returns false when the placeholder could not be created. Callers must fail
+ * closed for writable regions: a task may replace or chmod the blocking parent.
  */
 function materializeDenyPath(path: string): boolean {
     if (existsSync(path)) return true;
@@ -570,8 +569,9 @@ function buildLinuxSandboxCommand(
     if (policy.permissions) return buildLinuxPermissionCommand(bwrap, args, policy, seams);
     const materialize = seams.materializeDenyPath ?? materializeDenyPath;
     const denyBinds = policy.denyWrite.flatMap((path) => {
-        const mountable = writableInsideLinuxSandbox(path, policy.writableRoot) && materialize(path);
-        return [mountable ? "--ro-bind" : "--ro-bind-try", path, path];
+        const writable = writableInsideLinuxSandbox(path, policy.writableRoot);
+        if (writable && !materialize(path)) throw new Error(`Cannot protect denied path: ${path}`);
+        return [writable ? "--ro-bind" : "--ro-bind-try", path, path];
     });
     return {
         file: bwrap,
@@ -583,8 +583,8 @@ function buildLinuxSandboxCommand(
             // Layered last so a denied path wins over every writable bind above.
             // A denied path need not exist yet, so one inside a writable region
             // is materialized first; `-try` remains for the paths that are
-            // read-only regardless and for the ones that could not be created,
-            // which are paths the confined process cannot create either.
+            // read-only regardless. A writable region whose guard cannot be
+            // materialized must fail before launching the task.
             ...denyBinds,
             "--",
             args.execPath, ...args.execArgs,
@@ -738,7 +738,10 @@ function buildLinuxPermissionCommand(
     for (const writableRoot of [...(writableProject ? [project] : []),
         ...(policy.runtimeWrite ?? []).filter((path) => !compatibility.includes(path))]) {
         const materialize = seams.materializeDenyPath ?? materializeDenyPath;
-        const leaves = protectedPaths.filter((path) => contains(writableRoot, path) && materialize(path));
+        const leaves = protectedPaths.filter((path) => contains(writableRoot, path));
+        for (const path of leaves) {
+            if (!materialize(path)) throw new Error(`Cannot protect denied path: ${path}`);
+        }
         for (const parent of protectedAncestors(leaves).filter((path) => contains(writableRoot, path) && path !== writableRoot)) {
             writableAncestors.add(parent);
         }
