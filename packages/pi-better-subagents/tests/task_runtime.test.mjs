@@ -390,19 +390,23 @@ test('trusted-tool admission checks name, canonical package root and network', (
 });
 
 test('SDK-loaded apply_patch follows the task file rules in a confined session', { skip: !supported }, async (t) => {
-    const f = fixture(t, { projectFiles: 'write', outsideProject: 'read' });
+    const f = fixture(t, { projectFiles: 'read-write', outsideProject: 'read' });
     f.policy.applyPatch = true;
     f.policy.tools = ['read', 'write', 'edit', 'bash', 'apply_patch'];
     writeFileSync(join(f.project, 'a.txt'), 'one\n');
+    writeFileSync(join(f.project, 'gone.txt'), 'bye\n');
+    writeFileSync(join(f.base, 'outside.txt'), 'keep\n');
     const session = await sessionFixture(t, f);
     const patch = (...body) => ['*** Begin Patch', ...body, '*** End Patch'].join('\n');
-    await execute(session, 'apply_patch', { input: patch('*** Update File: a.txt', '-one', '+two', '*** Add File: b.txt', '+new') });
+    await execute(session, 'apply_patch', { input: patch('*** Update File: a.txt', '-one', '+two', '*** Add File: b.txt', '+new', '*** Delete File: gone.txt') });
     assert.equal(readFileSync(join(f.project, 'a.txt'), 'utf8'), 'two\n');
     assert.equal(readFileSync(join(f.project, 'b.txt'), 'utf8'), 'new\n');
-    await assert.rejects(execute(session, 'apply_patch', { input: patch('*** Delete File: a.txt') }), /delete-denied/);
-    await assert.rejects(execute(session, 'apply_patch', { input: patch(`*** Add File: ${join(f.base, 'outside.txt')}`, '+no') }), /permission-denied/);
+    assert.equal(existsSync(join(f.project, 'gone.txt')), false);
+    // Outside project = Read: no write, no delete outside the workspace.
+    await assert.rejects(execute(session, 'apply_patch', { input: patch(`*** Delete File: ${join(f.base, 'outside.txt')}`) }), /permission-denied/);
+    await assert.rejects(execute(session, 'apply_patch', { input: patch(`*** Add File: ${join(f.base, 'new-outside.txt')}`, '+no') }), /permission-denied/);
     await assert.rejects(execute(session, 'apply_patch', { input: patch(`*** Update File: ${join(f.agent, 'settings.json')}`, '-{}', '+{"x":1}') }), /write-denied|permission-denied/);
-    assert.equal(existsSync(join(f.project, 'a.txt')), true);
-    assert.equal(existsSync(join(f.base, 'outside.txt')), false);
+    assert.equal(readFileSync(join(f.base, 'outside.txt'), 'utf8'), 'keep\n');
+    assert.equal(existsSync(join(f.base, 'new-outside.txt')), false);
     assert.equal(readFileSync(join(f.agent, 'settings.json'), 'utf8'), '{}');
 });

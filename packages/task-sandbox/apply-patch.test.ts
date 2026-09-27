@@ -190,6 +190,12 @@ function kernelFixture(permissions: Partial<SandboxPermissions>, parent = tmpdir
 test("Project files = Write: edits apply, deletes and moves are refused outside worktree folders", { skip: !kernel }, async () => {
     const f = kernelFixture({ projectFiles: "write" });
     try {
+        if (process.platform === "linux") {
+            // Bubblewrap cannot separate removal from writing, so Linux refuses Project files = Write (ADR 0008).
+            await assert.rejects(applyPatch(patch("*** Update File: edit.txt", "-old", "+new"), f.root, f.ops), /cannot separate removal from writing/);
+            assert.equal(readFileSync(join(f.root, "edit.txt"), "utf8"), "old\n");
+            return;
+        }
         await applyPatch(patch("*** Update File: edit.txt", "-old", "+new", "*** Add File: added.txt", "+added"), f.root, f.ops);
         assert.equal(readFileSync(join(f.root, "edit.txt"), "utf8"), "new\n");
         assert.equal(readFileSync(join(f.root, "added.txt"), "utf8"), "added\n");
@@ -215,7 +221,11 @@ test("Outside project = Write: delete in temp is allowed, delete elsewhere in ho
         writeFileSync(join(temporary, "junk.txt"), "junk\n");
         await applyPatch(patch(`*** Delete File: ${join(temporary, "junk.txt")}`), f.root, f.ops);
         assert.equal(existsSync(join(temporary, "junk.txt")), false);
-        await assert.rejects(applyPatch(patch(`*** Delete File: ${join(f.home, "projects", "other", "README.md")}`), f.root, f.ops), /delete-denied/);
+        // Linux's fallback keeps ordinary home folders read-only instead (ADR 0008).
+        await assert.rejects(applyPatch(patch(`*** Delete File: ${join(f.home, "projects", "other", "README.md")}`), f.root, f.ops),
+            process.platform === "linux" ? /permission-denied/ : /delete-denied/);
+        assert.equal(readFileSync(join(f.home, "projects", "other", "README.md"), "utf8"), "keep me\n");
+        if (process.platform === "linux") return;
         await applyPatch(patch(`*** Update File: ${join(f.home, "projects", "other", "README.md")}`, "-keep me", "+edited in place"), f.root, f.ops);
         assert.equal(readFileSync(join(f.home, "projects", "other", "README.md"), "utf8"), "edited in place\n");
     } finally { f.cleanup(); rmSync(temporary, { recursive: true, force: true }); }
