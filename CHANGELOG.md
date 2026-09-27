@@ -6,9 +6,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.6.1] - 2026-09-27
+
 ### Fixed
 
-- **subagents**: confined children's `bash` schema no longer uses `uniqueItems` on `expectedExitCodes`. OpenAI rejects that keyword (`400 invalid_function_parameters`), so every OpenAI-backed confined subagent failed on its first request in 0.5.0. Distinct codes are still enforced when the intent is validated, and a test now checks every child-facing tool schema for provider-rejected keywords.
+- Bundle subagents 0.5.1, which fixes OpenAI-backed confined subagents failing on their first request.
+
+## [pi-better-subagents@0.5.1] - 2026-09-27
+
+### Fixed
+
+- Confined children's `bash` schema no longer uses `uniqueItems` on `expectedExitCodes`. OpenAI rejects that keyword (`400 invalid_function_parameters`), so every OpenAI-backed confined subagent failed on its first request in 0.5.0. Distinct codes are still enforced when the intent is validated, and a test now checks every child-facing tool schema for provider-rejected keywords (#327).
 
 ## [pi-better-harness@0.6.0] - 2026-09-27
 
