@@ -137,6 +137,20 @@ jobs:
       - name: Require the macOS Seatbelt backend
         run: node --import tsx scripts/require-sandbox-backend.mjs macos-seatbelt
 
+      - name: Run macOS compatibility golden paths
+        timeout-minutes: 5
+        env:
+          PI_SANDBOX_EVIDENCE_DIR: ${{ runner.temp }}/sandbox-golden-macos
+        run: npm run test:golden:sandbox
+
+      - name: Upload macOS compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-golden-macos
+          path: ${{ runner.temp }}/sandbox-golden-macos
+          if-no-files-found: error
+
       - name: Run sandbox-core macOS seatbelt confinement checks
         run: npm test -w packages/sandbox-core
 
@@ -181,7 +195,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap
+          sudo apt-get install --yes bubblewrap dbus-x11 gnome-keyring libsecret-tools
           command -v bwrap
           bwrap --version
 
@@ -199,6 +213,20 @@ jobs:
         # Reads the same backend selection the suites below gate on, so the probe
         # and the suites cannot disagree about whether this lane proved anything.
         run: node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
+
+      - name: Run Linux compatibility golden paths
+        timeout-minutes: 5
+        env:
+          PI_SANDBOX_EVIDENCE_DIR: ${{ runner.temp }}/sandbox-golden-linux
+        run: npm run test:golden:sandbox
+
+      - name: Upload Linux compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-golden-linux
+          path: ${{ runner.temp }}/sandbox-golden-linux
+          if-no-files-found: error
 
       - name: Run sandbox-core backend checks
         run: npm test -w packages/sandbox-core

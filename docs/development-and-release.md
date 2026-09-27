@@ -109,6 +109,28 @@ edge cases remain in `packages/navigator/index.test.ts`; the background process
 lifecycle golden test owns spawning/status/log API behavior. Neither substitutes
 for this terminal journey.
 
+### Sandbox compatibility golden paths
+
+`docs/tests/sandbox-compatibility.smoke.manifest.json` curates five release-blocking
+journeys: workspace/temp operations, protected paths, runtime identity,
+Outside Off isolation, and synthetic credential-service retrieval. Run:
+
+```sh
+npm run test:golden:sandbox
+```
+
+This is a strict real-backend gate, not a platform-skipping unit suite. macOS
+requires Seatbelt and `security`; Linux requires Bubblewrap with working user
+namespaces plus `dbus-x11`, `gnome-keyring`, and `libsecret-tools`. The credential
+journey uses disposable state, never a real account, login keychain, or user bus.
+
+Both platform CI lanes run the gate and upload `sandbox-golden-macos` or
+`sandbox-golden-linux`, including failures. `PI_SANDBOX_EVIDENCE_DIR` selects the
+evidence directory. `smoke-results.json` records each path; `smoke-verdict.json`
+records ALIVE/DEAD, revision, platform, and timestamps. Missing prerequisites,
+missing paths, or a driver failure produce DEAD. Old results are removed before
+a new run, so a failed launch cannot reuse a previous ALIVE verdict.
+
 ### Sandbox confinement lanes
 
 The real-kernel sandbox suites skip themselves when the platform backend is

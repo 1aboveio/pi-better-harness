@@ -1,0 +1,92 @@
+{
+  "profiles": {
+    "pr-local": {
+      "gate": "pull-request",
+      "environment": "local",
+      "endpoint": "local",
+      "prerequisites": [
+        "real-platform-backend",
+        "synthetic-credential-service"
+      ],
+      "evidencePolicy": "fresh per-platform results at tested commit",
+      "mutationPolicy": "isolated-writes"
+    }
+  },
+  "setup": {
+    "boot": "npm ci && npm run test:golden:sandbox",
+    "env": [],
+    "fixtures": "Disposable project/control/scratch directories; macOS isolated Keychain; Linux private D-Bus and gnome-keyring-daemon. Never use user secrets.",
+    "tenants": [
+      "e2e-sandbox-compatibility"
+    ],
+    "platforms": {
+      "darwin": [
+        "/usr/bin/sandbox-exec",
+        "/usr/bin/security"
+      ],
+      "linux": [
+        "bubblewrap",
+        "dbus-x11",
+        "gnome-keyring",
+        "libsecret-tools"
+      ]
+    }
+  },
+  "paths": [
+    {
+      "id": "workspace-temp",
+      "surface": "cli",
+      "command": "npm run test:golden:sandbox",
+      "observable": "Guarded SDK read/write/edit and bash work in the project, private scratch and literal /tmp; ordinary outside writes stay denied.",
+      "mutates": true,
+      "tenant": "e2e-sandbox-compatibility",
+      "profiles": [
+        "pr-local"
+      ]
+    },
+    {
+      "id": "protected-paths",
+      "surface": "cli",
+      "command": "npm run test:golden:sandbox",
+      "observable": "Sibling runtime and credential controls inside writable temp remain protected; an unmaterializable denied path refuses launch.",
+      "mutates": true,
+      "tenant": "e2e-sandbox-compatibility",
+      "profiles": [
+        "pr-local"
+      ]
+    },
+    {
+      "id": "runtime-identity",
+      "surface": "cli",
+      "command": "npm run test:golden:sandbox",
+      "observable": "Direct and indirect writable runtime aliases are rejected; project ancestors cannot be replaced between launches.",
+      "mutates": true,
+      "tenant": "e2e-sandbox-compatibility",
+      "profiles": [
+        "pr-local"
+      ]
+    },
+    {
+      "id": "outside-off",
+      "surface": "cli",
+      "command": "npm run test:golden:sandbox",
+      "observable": "Host temporary files remain inaccessible with Outside Off while assigned project and private scratch work.",
+      "mutates": true,
+      "tenant": "e2e-sandbox-compatibility",
+      "profiles": [
+        "pr-local"
+      ]
+    },
+    {
+      "id": "credential-service",
+      "surface": "cli",
+      "command": "npm run test:golden:sandbox",
+      "observable": "A guarded command retrieves a synthetic item through macOS Keychain or a disposable Linux Secret Service without changing real credentials.",
+      "mutates": true,
+      "tenant": "e2e-sandbox-compatibility",
+      "profiles": [
+        "pr-local"
+      ]
+    }
+  ]
+}
