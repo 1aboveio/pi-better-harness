@@ -36,6 +36,7 @@ const GetCurrentProcess = kernel32.func("void * __stdcall GetCurrentProcess()");
 const GetLastError = kernel32.func("uint32 __stdcall GetLastError()");
 const GetStdHandle = kernel32.func("void * __stdcall GetStdHandle(int32)");
 const CloseHandle = kernel32.func("bool __stdcall CloseHandle(void *)");
+const SetHandleInformation = kernel32.func("bool __stdcall SetHandleInformation(void *, uint32, uint32)");
 const CreateJobObjectW = kernel32.func("void * __stdcall CreateJobObjectW(void *, void *)");
 const SetInformationJobObject = kernel32.func("bool __stdcall SetInformationJobObject(void *, int, void *, uint32)");
 const AssignProcessToJobObject = kernel32.func("bool __stdcall AssignProcessToJobObject(void *, void *)");
@@ -111,6 +112,8 @@ const limits = Buffer.alloc(144); // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (x64)
 limits.writeUInt32LE(0x2000, 16); // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 if (!SetInformationJobObject(job, 9, limits, 144)) fail("SetInformationJobObject");
 
+// Node marks its std handles non-inheritable at startup (uv_disable_stdio_inheritance).
+for (const n of [-10, -11, -12]) { const h = GetStdHandle(n); if (h && !SetHandleInformation(h, 1, 1)) console.error(`launch: SetHandleInformation ${n} err ${GetLastError()}`); }
 const si = {
     cb: koffi.sizeof(STARTUPINFOW), lpReserved: null, lpDesktop: null, lpTitle: null,
     dwX: 0, dwY: 0, dwXSize: 0, dwYSize: 0, dwXCountChars: 0, dwYCountChars: 0, dwFillAttribute: 0,
