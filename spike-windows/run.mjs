@@ -77,11 +77,11 @@ function registrySetup() {
         "Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce' -Name PiSpike -ErrorAction SilentlyContinue",
         "Remove-Item 'HKCU:\\Software\\PiSpike' -ErrorAction SilentlyContinue",
     ].join("; ");
-    return sh("powershell", ["-NoProfile", "-Command", ps]);
+    return sh("pwsh", ["-NoProfile", "-Command", ps]);
 }
 
 function hkcuRootAcl() {
-    return sh("powershell", ["-NoProfile", "-Command",
+    return sh("pwsh", ["-NoProfile", "-Command",
         "(Get-Acl 'HKCU:\\Software').Access | ForEach-Object { \"$($_.IdentityReference) $($_.AccessControlType) $($_.RegistryRights)\" }"]);
 }
 
@@ -120,7 +120,7 @@ for (const [name, cfg] of Object.entries(variants)) {
     console.error("variant", name, "status", r.status, r.error?.message ?? "", (r.stderr ?? "").slice(0, 300));
     // Post-run registry check (did Run/RunOnce really get written?).
     try {
-        report.results[name]._runKeyPresent = sh("powershell", ["-NoProfile", "-Command",
+        report.results[name]._runKeyPresent = sh("pwsh", ["-NoProfile", "-Command",
             "[bool](Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name PiSpike -ErrorAction SilentlyContinue)"]);
     } catch (e) { report.results[name]._runKeyPresent = `ERR ${e.message}`; }
 }
