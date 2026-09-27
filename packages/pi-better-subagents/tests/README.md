@@ -35,8 +35,15 @@ tests/test_sandbox_applied.sh                         # one test (macOS)
 tests/test_sandbox_deny_outside.sh                    # one test (macOS)
 tests/test_sandbox_wrapper_argv.sh                    # one test (macOS)
 node --test tests/linux_bubblewrap.integration.mjs    # required Linux bwrap boundary proof
-node --test tests/*.test.mjs                          # unit (incl. sandbox profile)
+npm test                                              # unit (incl. sandbox profile), private registry
 ```
+
+`npm test` preloads `tests/isolate-registry.mjs`, which points `TMPDIR` at a
+fresh directory per test file, so the unit suite never scans the machine's real
+`$TMPDIR/pi-better-subagents` registry or sees a live session's runs
+([#324](https://github.com/1aboveio/pi-better-harness/issues/324)). Running a
+file directly needs the same flag:
+`node --import tsx --import ./tests/isolate-registry.mjs --test tests/<file>.test.mjs`.
 
 Default model is `minimax-cn/MiniMax-M3` (same as local `~/.pi/agent/models.json`).
 Needs `MINIMAX_API_KEY` in the environment.
