@@ -336,6 +336,11 @@ export const COMPACT_EXCERPT_BYTES = 120;
 const TOOL_RESULT_WRAPPER = /\{"content":\[\{"type":"text","text":"/;
 const JSON_ESCAPES: Record<string, string> = { '"': '"', "\\": "\\", "/": "/", b: " ", f: " ", n: " ", r: " ", t: " " };
 
+/** Remove unpaired UTF-16 surrogates, which would otherwise encode as U+FFFD. */
+function dropLoneSurrogates(value: string): string {
+  return value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+}
+
 /**
  * A tool error recorded as its raw result JSON (`{"content":[{"type":"text","text":"…"}]}`, often
  * already cut mid-string) rendered as the text it carries. Decoding is tolerant of the cut; text
@@ -362,7 +367,10 @@ export function unwrapToolResultText(value: string): string {
     out += JSON_ESCAPES[next];
     i += 2;
   }
-  return `${value.slice(0, match.index)}${out}`.replace(/\s+/g, " ").trim();
+  // A wrapper cut inside a surrogate pair, or an escape of one half, leaves a lone surrogate
+  // (rendered as U+FFFD); decoded control characters (e.g. an escaped NUL) are not shown either.
+  const decoded = dropLoneSurrogates(out).replace(/[\x00-\x1f\x7f]/g, " ");
+  return `${value.slice(0, match.index)}${decoded}`.replace(/\s+/g, " ").trim();
 }
 
 /** At most `max` UTF-8 bytes of `value`, whole code points, ending in `…` when cut. */
@@ -387,7 +395,8 @@ export function shortEvidence(evidence: string): string {
 function failureRow(x: FailureObservation, detail: IncidentDetail = "compact"): string {
   const time = x.at === undefined ? `observed ${new Date(x.firstObservedAt).toISOString()}` : new Date(x.at).toISOString();
   const compact = detail !== "full";
-  const summary = compact ? capUtf8(unwrapToolResultText(x.summary).replace(/\s+/g, " ").trim(), COMPACT_EXCERPT_BYTES) : unwrapToolResultText(x.summary);
+  // Full rows (raw evidence) show the journal summary verbatim; compact rows unwrap and cap it.
+  const summary = compact ? capUtf8(dropLoneSurrogates(unwrapToolResultText(x.summary)).replace(/\s+/g, " ").trim(), COMPACT_EXCERPT_BYTES) : x.summary;
   const reason = x.disposition ? text(x.disposition.reason, "") : "";
   const disposition = x.disposition ? ` · ${x.disposition.disposition}: ${compact ? capUtf8(reason, COMPACT_EXCERPT_BYTES) : reason}` : "";
   const evidence = x.evidence ? text(x.evidence, "") : "";
@@ -510,8 +519,9 @@ export function failureRevision(state: FailureState): string {
     .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 
-function incidentRevision(state: FailureState, scope: IncidentScope = "actionable"): string {
-  return failureIdentity(scopedFailures(state, scope).map((item) => [item.id, item.status, item.count, item.summary, item.evidence ?? ""])).slice(0, 16);
+/** Digest of the rows a cursor pages. Scope and detail are part of it: the same incidents render different bytes. */
+function incidentRevision(state: FailureState, scope: IncidentScope = "actionable", detail: IncidentDetail = "compact"): string {
+  return failureIdentity(scope, detail, scopedFailures(state, scope).map((item) => [item.id, item.status, item.count, item.summary, item.evidence ?? ""])).slice(0, 16);
 }
 
 /** Cursors carry a digest of their resource/scope, not the scope text. */
@@ -519,11 +529,16 @@ function resourceTag(resource: string | undefined): string | undefined {
   return resource === undefined ? undefined : createHash("sha256").update(resource).digest("base64url").slice(0, 16);
 }
 
-/** `h`: the cursor pages the explicit history view (`scope: "all"`); `f`: full rows. Both default off. */
+/**
+ * Incident cursor format. `x` is the format version: cursors minted before scope and row detail
+ * existed (no `x`) carry byte offsets into full-detail rows of every active incident, so they reset
+ * as stale instead of resuming inside a compact row. `h`: the explicit history view; `f`: full rows.
+ */
+const INCIDENT_CURSOR_FORMAT = 2;
 interface IncidentCursor { o: number; b: number; v: string; n: number; r?: string; h?: 1; f?: 1 }
 
 function encodeIncidentCursor(cursor: IncidentCursor): string {
-  return INCIDENT_CURSOR_PREFIX + Buffer.from(JSON.stringify({ k: "i", o: cursor.o, ...(cursor.b ? { b: cursor.b } : {}),
+  return INCIDENT_CURSOR_PREFIX + Buffer.from(JSON.stringify({ k: "i", x: INCIDENT_CURSOR_FORMAT, o: cursor.o, ...(cursor.b ? { b: cursor.b } : {}),
     v: cursor.v, n: cursor.n, ...(cursor.r !== undefined ? { r: cursor.r } : {}), ...(cursor.h ? { h: 1 } : {}),
     ...(cursor.f ? { f: 1 } : {}) }), "utf8").toString("base64url");
 }
@@ -531,8 +546,8 @@ function encodeIncidentCursor(cursor: IncidentCursor): string {
 function decodeIncidentCursor(cursor: string | undefined): IncidentCursor | undefined {
   if (!cursor || !cursor.startsWith(INCIDENT_CURSOR_PREFIX)) return undefined;
   try {
-    const parsed = JSON.parse(Buffer.from(cursor.slice(INCIDENT_CURSOR_PREFIX.length), "base64url").toString("utf8")) as { k?: string; o?: number; b?: number; v?: string; n?: number; r?: string; h?: number; f?: number };
-    if (parsed?.k === "i" && typeof parsed.v === "string") {
+    const parsed = JSON.parse(Buffer.from(cursor.slice(INCIDENT_CURSOR_PREFIX.length), "base64url").toString("utf8")) as { k?: string; x?: number; o?: number; b?: number; v?: string; n?: number; r?: string; h?: number; f?: number };
+    if (parsed?.k === "i" && parsed.x === INCIDENT_CURSOR_FORMAT && typeof parsed.v === "string") {
       return { o: Math.max(0, Math.floor(parsed.o ?? 0)), b: Math.max(0, Math.floor(parsed.b ?? 0)), v: parsed.v,
         n: Math.max(0, Math.floor(parsed.n ?? 0)), ...(typeof parsed.r === "string" ? { r: parsed.r } : {}),
         ...(parsed.h === 1 ? { h: 1 as const } : {}), ...(parsed.f === 1 ? { f: 1 as const } : {}) };
@@ -583,7 +598,7 @@ export function pageFailureIncidents(state: FailureState, request: IncidentPageR
   const scope: IncidentScope = request.scope ?? (parsed?.h ? "all" : "actionable");
   const detail: IncidentDetail = request.detail ?? (parsed?.f ? "full" : "compact");
   const lines = formatFailureLines(state, { scope, detail });
-  const revision = incidentRevision(state, scope);
+  const revision = incidentRevision(state, scope, detail);
   const total = lines.length;
   const resource = resourceTag(request.resource);
   let offset = 0;
@@ -705,9 +720,10 @@ export function failureJournalFingerprint(path: string): string {
 
 export function incidentCursorAt(state: FailureState, offset: number, resource?: string, options: IncidentRowOptions = {}): string {
   const scope = options.scope ?? "actionable";
-  const lines = formatFailureLines(state, { scope });
+  const detail = options.detail ?? "compact";
+  const lines = formatFailureLines(state, { scope, detail });
   const tag = resourceTag(resource);
-  return encodeIncidentCursor({ o: Math.max(0, Math.floor(offset)), b: 0, v: incidentRevision(state, scope), n: lines.length,
+  return encodeIncidentCursor({ o: Math.max(0, Math.floor(offset)), b: 0, v: incidentRevision(state, scope, detail), n: lines.length,
     ...(tag !== undefined ? { r: tag } : {}), ...(scope === "all" ? { h: 1 as const } : {}), ...(options.detail === "full" ? { f: 1 as const } : {}) });
 }
 

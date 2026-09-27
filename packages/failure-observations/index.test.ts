@@ -670,8 +670,41 @@ test("compact rows unwrap tool-result JSON, cap the excerpt at whole UTF-8, and 
   assert.match(excerpt, /^bash failed: 界+…$/);
   const [full] = formatFailureLines(state, { detail: "full" });
   assert.match(full!, /evidence: \/private\/var\/folders\/x\/T\/pi-subagents\/runs\/sa_1\/output\.log#byte=2575$/, "full rows keep the whole path");
-  assert.equal(full!.split(" · ")[2], `bash failed: ${"界".repeat(100)}`, "full rows keep the whole excerpt");
+  assert.equal(full!.split(" · ")[2], `bash failed: {"content":[{"type":"text","text":"${"界".repeat(100)}"}]}`, "full rows show the journal summary verbatim");
   const page = pageFailureIncidents(state, { detail: "full", maxBytes: 50 });
   assert.match(pageFailureIncidents(state, { cursor: page.nextCursor, maxBytes: 4_096 }).text, /runs\/sa_1/, "a full-row cursor keeps full rows");
   assert.equal(pageFailureIncidents(state, { cursor: page.nextCursor, detail: "compact", maxBytes: 4_096 }).reset, "stale-cursor");
+});
+
+test("unwrapping never leaves a lone surrogate or a decoded control character", () => {
+  const cut = `bash failed: {"content":[{"type":"text","text":"ab${"😀".slice(0, 1)}`;
+  assert.equal(unwrapToolResultText(cut), "bash failed: ab", "a wrapper cut inside a surrogate pair drops the lone half");
+  assert.equal(unwrapToolResultText(`x: {"content":[{"type":"text","text":"a\\u0000b\\ud83dc\\u0007"}]}`), "x: a bc", "NUL and BEL become spaces; an escaped lone high surrogate is dropped");
+  assert.equal(unwrapToolResultText(`x: {"content":[{"type":"text","text":"\\ud83d\\ude00 ok"}]}`), "x: 😀 ok", "an escaped pair still decodes");
+  const state = reduceFailure(emptyFailureState(), { id: "s", operation: "s", kind: "failure", category: "exit",
+    summary: `read failed: {"content":[{"type":"text","text":"${"😀".repeat(20)}${"😀".slice(0, 1)}` }, 1000);
+  const [row] = formatFailureLines(state);
+  assert.doesNotMatch(row!, /\uFFFD|[\x00-\x1f]/);
+  assert.equal(Buffer.from(row!, "utf8").toString("utf8"), row, "the row is well-formed UTF-8");
+});
+
+test("an incident cursor from before scope and detail existed resets instead of resuming inside a compact row", () => {
+  // Minted by the 0.6.x module (origin/main before this change) for this exact state: page 1 of
+  // full rows at maxBytes 200, so it points 200 bytes into the first row.
+  const legacy = "i1.eyJrIjoiaSIsIm8iOjAsImIiOjIwMCwidiI6IjE4Yzk0NTA2NjE0NzNlMDAiLCJuIjozLCJyIjoibUFhbmh3aXBDejAtZ1h5QyJ9";
+  let state = emptyFailureState();
+  for (let i = 0; i < 3; i++) state = reduceFailure(state, { id: `x${i}`, operation: `exit-${i}`, kind: "failure", category: "exit",
+    summary: `Child check ${i} exited 1 ${"z".repeat(200)}`, evidence: `/private/var/folders/x/T/pi-subagents/runs/sa_1/output.log#byte=${100 * i}` }, 1000 + i);
+  const resource = "incidents:s:sa_1";
+  const page = pageFailureIncidents(state, { cursor: legacy, maxBytes: 4_096, resource });
+  assert.equal(page.reset, "stale-cursor");
+  assert.equal(page.text, formatFailureLines(state).join("\n"), "the page restarts at the first row; nothing is skipped");
+  assert.equal(page.represented, 3);
+  assert.equal(incidentVerbatimPage(state, { cursor: legacy, maxBytes: 4_096, resource }).reset, "stale-cursor");
+  // Current cursors are bound to their scope and row detail through the revision as well.
+  const compact = pageFailureIncidents(state, { maxBytes: 150, resource });
+  const full = pageFailureIncidents(state, { maxBytes: 150, resource, detail: "full" });
+  const v = (cursor: string) => JSON.parse(Buffer.from(cursor.slice(3), "base64url").toString("utf8")).v;
+  assert.notEqual(v(compact.nextCursor), v(full.nextCursor));
+  assert.notEqual(v(compact.nextCursor), v(pageFailureIncidents(state, { maxBytes: 150, resource, scope: "all" }).nextCursor));
 });

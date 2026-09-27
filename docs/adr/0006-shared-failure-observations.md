@@ -66,7 +66,8 @@ A completed run with no incident needing action still printed `10 active failure
 - **Active means needs action.** Active incidents are unresolved `Action required` incidents and observation gaps. Counts, `shown`/`omitted`, and the incident cursor cover only those, with #312's exactness.
 - **History is counted, and listed only on request.** Unclassified and expected failures (and closed incidents) are a count line. When nothing needs action, surfaces say so in one line with no cursor. `history: true` on the result, output, and status tools returns an incident page of every incident; the cursor records its view, so following it stays in history.
 - **Compact rows.** Rows unwrap tool-result JSON to its text, cap the excerpt at 120 UTF-8 bytes on a code-point boundary, and show evidence as the file name and fragment. Raw evidence pages keep full rows. The journal is unchanged.
-- Delivery (#315) is unchanged: callbacks still report each incident once and count history.
+- **Cursor format.** Incident cursors carry a format version, and their revision digest includes scope and row detail. A cursor minted before this change points into a full-detail row, so it resets with `stale-cursor` rather than resuming inside a compact row.
+- Delivery (#315) is unchanged: callbacks still report each incident once and count history. Background-task completion callbacks add the same history line, so a declared expected exit is not read as a plain failure.
 
 ## Scope and limits
 

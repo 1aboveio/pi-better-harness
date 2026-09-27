@@ -413,11 +413,22 @@ describe("quiet failure history", () => {
     const status = formatStatus(meta, { origin });
     expect(status).toContain("No failures need action · 1 expected (history)");
     expect(status).not.toMatch(/incidentCursor=|Expected failure ·/);
-    expect(formatCallbackFacts(meta).failureRows).toBeUndefined();
+    const facts = formatCallbackFacts(meta);
+    expect(facts.failureRows).toBeUndefined();
+    expect(facts.decision).toContain("No failures need action · 1 expected (history)");
     const tools = register();
     const history = textOf(await tools.bg_task_status.execute("x", { id: meta.id, history: true }, undefined, undefined, { cwd: origin.cwd, sessionManager: { getSessionId: () => origin.sessionId } }));
     expect(history).toMatch(/History page of 1 failure observation/);
     expect(history).toMatch(/^Expected failure · .*declared expected\) · evidence: output\.log#exit$/m);
+  });
+
+  it("completion callback facts count history beside actionable rows", () => {
+    const meta = fixture({ status: "failed", lastExitCode: 7, callbackOrigin: origin });
+    recordFailure(meta, "probe", "probe exited with code 1 (declared expected)", "probe", { category: "exit", expected: true });
+    recordFailure(meta, "poll", "evaluator failed", "poll-1", { category: "condition" });
+    const facts = formatCallbackFacts(meta);
+    expect(facts.failureRows).toHaveLength(1);
+    expect(facts.decision).toContain("Also in history: 1 expected");
   });
 
   it("renders compact rows on status and keeps full evidence paths on the raw log", () => {

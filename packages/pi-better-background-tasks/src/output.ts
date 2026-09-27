@@ -4,11 +4,13 @@ import {
   formatFailureLines,
   formatFailureSummary,
   formatIncidentSummary,
+  historyTailLine,
   incidentCursorScope,
   incidentPageHeading,
   incidentResource,
   incidentVerbatimPage,
   isIncidentCursor,
+  quietFailureLine,
   readFailureState,
   scopedFailures,
   type FailureState,
@@ -237,7 +239,10 @@ export function formatCallbackFacts(meta: BackgroundTaskMeta): {
     meta.logDiscardedBytes ? `retention discarded ${meta.logDiscardedBytes} bytes; not recoverable` : undefined,
     meta.captureDiscardedBytes ? `capture overflow discarded ${meta.captureDiscardedBytes} bytes; not full history` : undefined,
   ].filter((line): line is string => Boolean(line));
-  const decision = [formatDecision(meta), ...gapLines].filter(Boolean).join("\n") || undefined;
+  // History (expected and closed incidents) is not a row, but the callback still says it exists, so a
+  // declared expected exit is not read as a plain failure.
+  const history = rows.length ? historyTailLine(state) : quietFailureLine(state);
+  const decision = [formatDecision(meta), ...gapLines, history].filter(Boolean).join("\n") || undefined;
   return {
     outcome: meta.status,
     ...(rows.length ? { failureRows: rows, incidentCount: rows.length } : {}),
