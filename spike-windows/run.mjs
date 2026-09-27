@@ -24,7 +24,7 @@ report.integrity = (sh("whoami", ["/groups", "/fo", "csv", "/nh"]).match(/Mandat
 const elevated = /High/.test(report.integrity ?? "");
 report.elevated = elevated;
 
-const cap = () => `S-1-15-3-1024-${Array.from({ length: 8 }, () => randomInt(1, 2 ** 31)).join("-")}`;
+const cap = () => `S-1-5-21-${Array.from({ length: 4 }, () => randomInt(1, 2 ** 31)).join("-")}`;
 const R = cap(), W = cap(), D = cap(), C = cap(), N = cap(), A = cap(), P = cap();
 report.sids = { R, W, D, C, N, A, P };
 
