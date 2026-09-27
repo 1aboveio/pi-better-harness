@@ -6,29 +6,65 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.6.0] - 2026-09-27
+
 ### Changed
 
-- **subagents, background-tasks** (#312): model-facing tool output is bounded by UTF-8 byte budgets that cover the whole response: status, log excerpts, and lists 1 KiB (10 rows/lines); subagent answer pages and callback batches 2 KiB; explicit raw evidence pages 16 KiB. Callers can ask for larger pages up to hard caps (status 2 KiB, log/list 4 KiB, answer/callback 8 KiB, raw 64 KiB) with `maxBytes` (subagents) or `max_bytes` (background tasks).
-- **subagents, background-tasks** (#312): long answers, logs, lists, incidents, and verbose metadata are paged instead of truncated. Responses carry `nextCursor` to continue, `statusCursor` for a small "no new evidence" reply until something changes (failure-only changes are reported), and `incidentCursor` for omitted failure incidents; pass any of them back as `cursor`. Raw pages end with an append-ready cursor. New parameters: `cursor` and `maxBytes` on `subagent_list`/`subagent_output`/`subagent_result`, `lines` on `subagent_output`, `mode: "raw"` on `subagent_output`/`subagent_result`; `cursor`, `max_bytes`, `all`, `raw` on the background list/status/log tools and wrappers.
-- **subagents, background-tasks** (#312): list, status, output, result, and log default to the current session. Pass `all:true` to read another session's runs or tasks. When ownership cannot be verified (session identity unreadable, or a legacy record without an origin) the response is an ownership gap, never evidence and never "not found".
-- **subagents, background-tasks** (#312): ordinary results, lists, and callbacks no longer include ordered tool-name histories or default token/cost lines. `subagent_list` defaults to 10 rows (was 20); `bg_task_log` defaults to a 10-row tail (was 5) and `tail_lines: 0` now pages raw bytes instead of returning up to 512 KiB.
-- **subagents** (#315): a live child's individual tool errors no longer wake the parent. Running attention is limited to non-tool failures, an operation that failed three times with no recovery, and incidents the child marks `open`, each delivered once; observation gaps ride the completion or health callback. Unresolved incidents are reported once in the completion callback, with unclassified tool failures as a count and lifecycle stated separately
-- **subagents, background-tasks** (#315): failure notifications render only their pending incidents; earlier deliveries are counted, not repeated
-- **subagents, background-tasks** (#315): shared failure observations use distinct labels: `Action required`, `Unclassified failure observation`, `Expected failure`, and `Observation incomplete`. Recovered and superseded incidents stay in history and leave active summaries
+- Bundle subagents 0.5.0, background-tasks 0.3.0, goal 0.4.1, and sandbox 0.5.3: bounded, paged tool output scoped to the current session (#312); failure incidents separated from history, with child tool errors no longer waking the parent (#315); goals resuming after an interrupt and alias-started workflows binding their coordinator (#317, #318).
+
+## [pi-better-subagents@0.5.0] - 2026-09-27
 
 ### Added
 
-- **subagents, background-tasks** (#315): append-only incident dispositions (`recovered`, `superseded`, `expected`, `open`) that name incidents, a reason, and evidence, and fail closed on unknown, already-disposed, or evidence-free requests
-- **subagents** (#315): sandboxed children's `bash` accepts `operationId`, `attemptId`, and `expectedExitCodes`, validated before the command runs, and children get a `failure_disposition` tool. The parent re-validates each disposition from the child's log before journaling it
+- Append-only incident dispositions (`recovered`, `superseded`, `expected`, `open`) that name incidents, a reason, and evidence, and fail closed on unknown, already-disposed, or evidence-free requests. (#315)
+- Sandboxed children's `bash` accepts `operationId`, `attemptId`, and `expectedExitCodes`, validated before the command runs, and children get a `failure_disposition` tool. The parent re-validates each disposition from the child's log before journaling it. (#315)
+
+### Changed
+
+- Model-facing tool output is bounded by UTF-8 byte budgets that cover the whole response: status, log excerpts, and lists 1 KiB (10 rows/lines); subagent answer pages and callback batches 2 KiB; explicit raw evidence pages 16 KiB. Callers can ask for larger pages up to hard caps (status 2 KiB, log/list 4 KiB, answer/callback 8 KiB, raw 64 KiB) with `maxBytes` (subagents) or `max_bytes` (background tasks). (#312)
+- Long answers, logs, lists, incidents, and verbose metadata are paged instead of truncated. Responses carry `nextCursor` to continue, `statusCursor` for a small "no new evidence" reply until something changes (failure-only changes are reported), and `incidentCursor` for omitted failure incidents; pass any of them back as `cursor`. Raw pages end with an append-ready cursor. New parameters: `cursor` and `maxBytes` on `subagent_list`/`subagent_output`/`subagent_result`, `lines` on `subagent_output`, `mode: "raw"` on `subagent_output`/`subagent_result`; `cursor`, `max_bytes`, `all`, `raw` on the background list/status/log tools and wrappers. (#312)
+- List, status, output, result, and log default to the current session. Pass `all:true` to read another session's runs or tasks. When ownership cannot be verified (session identity unreadable, or a legacy record without an origin) the response is an ownership gap, never evidence and never "not found". (#312)
+- Ordinary results, lists, and callbacks no longer include ordered tool-name histories or default token/cost lines. `subagent_list` defaults to 10 rows (was 20); `bg_task_log` defaults to a 10-row tail (was 5) and `tail_lines: 0` now pages raw bytes instead of returning up to 512 KiB. (#312)
+- A live child's individual tool errors no longer wake the parent. Running attention is limited to non-tool failures, an operation that failed three times with no recovery, and incidents the child marks `open`, each delivered once; observation gaps ride the completion or health callback. Unresolved incidents are reported once in the completion callback, with unclassified tool failures as a count and lifecycle stated separately. (#315)
+- Failure notifications render only their pending incidents; earlier deliveries are counted, not repeated. (#315)
+- Shared failure observations use distinct labels: `Action required`, `Unclassified failure observation`, `Expected failure`, and `Observation incomplete`. Recovered and superseded incidents stay in history and leave active summaries. (#315)
 
 ### Fixed
 
-- **subagents, background-tasks** (#312): missing or corrupt metadata, missing logs, capture overflow, and log retention are reported as explicit gaps instead of empty or healthy results; final answers keep their whitespace; completion and urgent callbacks count exactly which failure incidents they show.
+- Missing or corrupt metadata, missing logs, capture overflow, and log retention are reported as explicit gaps instead of empty or healthy results; final answers keep their whitespace; completion and urgent callbacks count exactly which failure incidents they show. (#312)
 
-- **goal**: an `escape` interrupt no longer leaves an active goal paused indefinitely. It is now a soft pause (`pauseReason: "interrupt"`): the next conversational message reactivates the goal, and automatic continuation resumes once that exchange settles. `/goal pause` and pauses for an unavailable command or workflow stay sticky until `/goal resume`; completed and budget-limited goals are unaffected. Previously a long orchestrator run sat idle after the user interrupted to ask a question, until the skill was re-invoked.
-- **goal**: background work that finishes while a blocking `ask_user_question` is pending is now steered to the agent right after the answer, instead of waiting behind the follow-up callback batch until the whole run ends. The prompt context also warns the agent, while background work runs, that a blocking question holds completions.
+## [pi-better-background-tasks@0.3.0] - 2026-09-27
 
-- **goal**: a skill alias declaring `metadata.workflow-alias-of: <coordinator>` now binds its target coordinator as the workflow owner. Previously `/skill:resolve-issues` (an alias of `rush-issues`) recorded no owner, so `sync_workflow_plan` refused with "Only an active rush-issues workflow can sync its plan."
+### Added
+
+- Append-only incident dispositions (`recovered`, `superseded`, `expected`, `open`) that name incidents, a reason, and evidence, and fail closed on unknown, already-disposed, or evidence-free requests. (#315)
+
+### Changed
+
+- Model-facing tool output is bounded by UTF-8 byte budgets that cover the whole response: status, log excerpts, and lists 1 KiB (10 rows/lines); subagent answer pages and callback batches 2 KiB; explicit raw evidence pages 16 KiB. Callers can ask for larger pages up to hard caps (status 2 KiB, log/list 4 KiB, answer/callback 8 KiB, raw 64 KiB) with `maxBytes` (subagents) or `max_bytes` (background tasks). (#312)
+- Long answers, logs, lists, incidents, and verbose metadata are paged instead of truncated. Responses carry `nextCursor` to continue, `statusCursor` for a small "no new evidence" reply until something changes (failure-only changes are reported), and `incidentCursor` for omitted failure incidents; pass any of them back as `cursor`. Raw pages end with an append-ready cursor. New parameters: `cursor` and `maxBytes` on `subagent_list`/`subagent_output`/`subagent_result`, `lines` on `subagent_output`, `mode: "raw"` on `subagent_output`/`subagent_result`; `cursor`, `max_bytes`, `all`, `raw` on the background list/status/log tools and wrappers. (#312)
+- List, status, output, result, and log default to the current session. Pass `all:true` to read another session's runs or tasks. When ownership cannot be verified (session identity unreadable, or a legacy record without an origin) the response is an ownership gap, never evidence and never "not found". (#312)
+- Ordinary results, lists, and callbacks no longer include ordered tool-name histories or default token/cost lines. `subagent_list` defaults to 10 rows (was 20); `bg_task_log` defaults to a 10-row tail (was 5) and `tail_lines: 0` now pages raw bytes instead of returning up to 512 KiB. (#312)
+- Failure notifications render only their pending incidents; earlier deliveries are counted, not repeated. (#315)
+- Shared failure observations use distinct labels: `Action required`, `Unclassified failure observation`, `Expected failure`, and `Observation incomplete`. Recovered and superseded incidents stay in history and leave active summaries. (#315)
+
+### Fixed
+
+- Missing or corrupt metadata, missing logs, capture overflow, and log retention are reported as explicit gaps instead of empty or healthy results; final answers keep their whitespace; completion and urgent callbacks count exactly which failure incidents they show. (#312)
+
+## [pi-better-goal@0.4.1] - 2026-09-27
+
+### Fixed
+
+- An `escape` interrupt no longer leaves an active goal paused indefinitely. It is now a soft pause (`pauseReason: "interrupt"`): the next conversational message reactivates the goal, and automatic continuation resumes once that exchange settles. `/goal pause` and pauses for an unavailable command or workflow stay sticky until `/goal resume`; completed and budget-limited goals are unaffected. Previously a long orchestrator run sat idle after the user interrupted to ask a question, until the skill was re-invoked.
+- Background work that finishes while a blocking `ask_user_question` is pending is now steered to the agent right after the answer, instead of waiting behind the follow-up callback batch until the whole run ends. The prompt context also warns the agent, while background work runs, that a blocking question holds completions.
+- A skill alias declaring `metadata.workflow-alias-of: <coordinator>` now binds its target coordinator as the workflow owner. Previously `/skill:resolve-issues` (an alias of `rush-issues`) recorded no owner, so `sync_workflow_plan` refused with "Only an active rush-issues workflow can sync its plan.".
+
+## [pi-better-sandbox@0.5.3] - 2026-09-27
+
+### Changed
+
+- Synchronize the shared task-sandbox core, which adds an optional `bashDefinition` hook used by subagents for structured command intent (#315).
 
 ## [pi-better-harness@0.5.2] - 2026-09-27
 
