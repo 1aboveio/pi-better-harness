@@ -14,8 +14,9 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { SELF_SPEC } from "./extensions.ts";
 import type { DelegationMode } from "./delegation.ts";
+import type { TimingSettings } from "./timing.ts";
 
-export interface SubagentConfig {
+export interface SubagentConfig extends TimingSettings {
     /** Foreground delegation policy; /subagents mode overrides this for the current session. */
     delegationMode?: DelegationMode | null;
     defaultModel?: string | null;

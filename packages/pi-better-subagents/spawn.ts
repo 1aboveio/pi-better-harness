@@ -23,6 +23,8 @@ export function spawnDetached(args: {
     fileArgs: string[];
     cwd: string;
     logPath: string;
+    /** Extra environment for the child, layered over this process's environment. */
+    env?: Record<string, string>;
 }): SpawnResult {
     mkdirSync(dirname(args.logPath), { recursive: true });
     const outFd = openSync(args.logPath, "w");
@@ -33,7 +35,7 @@ export function spawnDetached(args: {
             stdio: ["ignore", outFd, outFd],
             cwd: args.cwd,
             detached: true,
-            env: { ...process.env },
+            env: { ...process.env, ...(args.env ?? {}) },
         });
     } finally {
         closeSync(outFd);

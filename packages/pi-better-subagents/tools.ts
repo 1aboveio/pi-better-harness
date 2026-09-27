@@ -43,6 +43,7 @@ import {
     type SubagentToolSession,
 } from "./output-payload.ts";
 import { readOutputControls } from "./shared-log-utils.ts";
+import { describeTiming } from "./timing.ts";
 import {
     extractChildEventFactsFromLog,
     loadHealthThresholdsFromConfig,
@@ -70,6 +71,13 @@ function observeMetaHealth(meta: RunMeta, now: number = Date.now()): HealthObser
         thresholds: loadHealthThresholdsFromConfig(),
         startedAt: meta.startedAt,
     });
+}
+
+/** Health diagnostics plus the harness timing reason (deadline / ceiling / stuck), one line each. */
+function diagnosticLines(meta: RunMeta): string {
+    const status = String(effectiveStatus(meta));
+    return [formatHealthDiagnosticLine(observeMetaHealth(meta)), describeTiming({ ...meta, status: status === "exited" ? meta.status : status })?.line]
+        .filter(Boolean).join("\n");
 }
 
 /** The slice of `@earendil-works/pi-ai`'s Type the tool schemas use. */
@@ -400,7 +408,7 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
             if (access.kind === "unreadable") return text(assembleUnreadableMetadata(p.id, access.detail, p));
             if (access.kind === "denied") return text(access.payload);
             const scopeKey = requestScopeKey(p, session);
-            const healthLine = formatHealthDiagnosticLine(observeMetaHealth(access.meta));
+            const healthLine = diagnosticLines(access.meta);
             return text(assembleSubagentOutput(p.id, access.meta, p, healthLine, scopeKey));
         },
     } as ToolDefinition;
@@ -445,16 +453,16 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             const meta = access.meta;
             const scopeKey = requestScopeKey(p, session);
             const st = effectiveStatus(meta);
-            const healthLine = formatHealthDiagnosticLine(observeMetaHealth(meta));
+            const healthLine = diagnosticLines(meta);
             if (!isFinalResultStatus(st)) {
                 if (st === "orphaned") {
                     return subagentResultText(assembleOrphanedResult(p.id, meta, healthLine, p, scopeKey));
                 }
-                return subagentResultText(assembleRunningResult(p.id, meta, p, scopeKey));
+                return subagentResultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
             }
             const body = buildSubagentResultPayload(p.id, p, healthLine, scopeKey);
             if (body === null) {
-                return subagentResultText(assembleRunningResult(p.id, meta, p, scopeKey));
+                return subagentResultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
             }
             return subagentResultText(body);
         },

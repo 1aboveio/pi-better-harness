@@ -10,6 +10,7 @@
 import { BUILTIN_TOOLS } from "./extensions.mjs";
 import { SAFE_CLEAN_TOOLS } from "./config.ts";
 import { assertThinkingLevel } from "./thinking.ts";
+import { assertTimingParams } from "./timing.ts";
 
 const VALID_CAPACITY_MODES = new Set(["reject", "launch-available"]);
 
@@ -35,6 +36,11 @@ export function mergeJobOptions(shared, job) {
         git_clone_workspace: job.git_clone_workspace ?? shared?.git_clone_workspace,
         approve: job.approve ?? shared?.approve,
         allow_nested: job.allow_nested ?? shared?.allow_nested,
+        // Harness timing; an explicit null means "not set", so it falls through to shared.
+        deadline_minutes: job.deadline_minutes ?? shared?.deadline_minutes,
+        grace_minutes: job.grace_minutes ?? shared?.grace_minutes,
+        max_minutes: job.max_minutes ?? shared?.max_minutes,
+        stuck_minutes: job.stuck_minutes ?? shared?.stuck_minutes,
         // A per-job agent or role replaces the shared selector pair. Mixing
         // shared.agent with job.role would invent an ambiguous run.
         ...catalogSelector(shared, job),
@@ -97,6 +103,7 @@ export function validateBatchPlan({ shared, jobs, onCapacity, config }) {
 
         const merged = mergeJobOptions(shared, job);
         assertThinkingLevel(merged.thinking, `job ${i + 1} thinking`);
+        assertTimingParams(merged, `job ${i + 1} `);
         if (merged.clean === true) {
             // Validate the effective tool allowlist, which resolves in this order:
             // per-job tools → shared tools → config.defaultTools → clean-safe built-ins.

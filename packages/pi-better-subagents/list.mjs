@@ -1,3 +1,4 @@
+import { describeTiming } from "./timing.ts";
 import { fmtElapsed } from "./widget.mjs";
 import { formatListHealthSuffix } from "./health-surface.mjs";
 
@@ -81,10 +82,12 @@ export function formatSubagentListRow(meta, p) {
     const name = meta.name ? `${bounded(meta.name, 60)} ` : "";
     const health = formatListHealthSuffix(p.health);
     const failure = p.failure ? ` · ${bounded(p.failure, 60)}` : "";
+    const timingNote = describeTiming({ ...meta, status: meta.status });
+    const timing = timingNote ? ` · ${timingNote.short}` : "";
     const batch = meta.batchId
         ? `  [batch: ${meta.batchName ? `${bounded(meta.batchName, 40)} ` : ""}${bounded(meta.batchId, 60)}]`
         : "";
-    return `• ${name}${meta.id}  [${status}]  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${batch}${failure}\n    ${promptPreview(meta)}`;
+    return `• ${name}${meta.id}  [${status}]  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${timing}${batch}${failure}\n    ${promptPreview(meta)}`;
 }
 
 export function collectSubagentList(p) {

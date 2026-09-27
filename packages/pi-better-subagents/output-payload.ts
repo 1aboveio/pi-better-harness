@@ -505,6 +505,7 @@ export function assembleRunningResult(
     meta: RunMeta,
     request: PayloadRequest = {},
     scopeKey = defaultScope(),
+    timingLine?: string,
 ): string {
     const st = String(effectiveStatus(meta));
     const terminal = st !== "running" && st !== "orphaned";
@@ -520,7 +521,7 @@ export function assembleRunningResult(
         decision: `Run ${id} is still running — no result yet. You'll be notified when it finishes; don't poll.`,
         diagnostics: (() => {
             const run = parseRun(id);
-            return joinSections([changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]);
+            return joinSections([changeDiagnostics(ctx), optInFacts(run, request), timingLine || undefined, parserDiagnostics(run)]);
         })(),
         gaps: logGaps(id),
         statusCursor: ctx.statusCursor,

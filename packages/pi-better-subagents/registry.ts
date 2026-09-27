@@ -12,6 +12,7 @@
  * run directory does not delete them.
  */
 
+import type { RunTiming } from "./timing.ts";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -175,6 +176,12 @@ export interface RunMeta {
      * that whole snapshot and must not fill a missing catalog.
      */
     catalog?: CatalogLaunchSnapshot;
+    /**
+     * Harness-owned timing policy and one-shot markers (soft deadline, grace,
+     * hard ceiling, stuck window). Written at launch so /reload keeps it.
+     * Additive: runs launched before it have none and are never timed.
+     */
+    timing?: RunTiming;
 }
 
 /** Root runtime dir, deliberately OUTSIDE any repo. */
