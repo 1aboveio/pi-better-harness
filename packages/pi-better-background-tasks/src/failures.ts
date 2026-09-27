@@ -96,6 +96,16 @@ export function recoverDeclaredOperation(meta: BackgroundTaskMeta, at = Date.now
 }
 
 const attentionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let attentionSuspended = false;
+/** Session shutdown: stop this instance's attention timers; the next session_start reschedules (#324). */
+export function suspendFailureAttention(): void {
+  attentionSuspended = true;
+  for (const timer of attentionTimers.values()) clearTimeout(timer);
+  attentionTimers.clear();
+}
+export function resumeFailureAttention(): void {
+  attentionSuspended = false;
+}
 export function stopFailureAttention(id: string): void {
   const timer = attentionTimers.get(id);
   if (timer) clearTimeout(timer);
@@ -128,6 +138,7 @@ export function failureAttentionFields(meta: BackgroundTaskMeta, state: FailureS
 /** Running incidents get one grace wake. Terminal incidents ride the completion callback. */
 export function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): void {
   stopFailureAttention(id);
+  if (attentionSuspended) return;
   const meta = readMeta(id);
   if (!meta) {
     const timer = setTimeout(() => scheduleFailureAttention(pi, id, getActiveSession), 1_000);

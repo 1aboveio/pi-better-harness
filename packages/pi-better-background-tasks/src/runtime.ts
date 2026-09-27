@@ -8,7 +8,7 @@ import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
 import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
-import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, scheduleFailureAttention, stopFailureAttention, terminalFailureAttention } from "./failures.js";
+import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { formatCallbackFacts } from "./output.js";
@@ -33,9 +33,39 @@ const remoteSessionStarts = new Map<string, Promise<CommandResult>>();
 const activePolls = new Set<string>();
 const logRetentionTimers = new Map<string, ReturnType<typeof setInterval>>();
 const LOG_RETENTION_CHECK_MS = 1000;
+let scheduledWorkSuspended = false;
 const REMOTE_SESSION_POLL_MS = 100;
 
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
+
+/**
+ * Stop this extension instance's timers when its session shuts down (#324).
+ *
+ * Pi's /reload, session switch, and quit all end with session_shutdown, and the
+ * next session loads a fresh extension instance. A watch or poll timer left in the
+ * old instance keeps running with no active session, so when its task finishes
+ * the completion callback is durably suppressed ("active session identity is
+ * unavailable") and the reloaded session never hears about it. Processes and
+ * metadata are untouched: the next session_start resumes running tasks from disk.
+ */
+export function suspendScheduledWork(): void {
+  scheduledWorkSuspended = true;
+  for (const timer of watcherTimers.values()) clearTimeout(timer);
+  for (const timer of remoteSessionTimers.values()) clearTimeout(timer);
+  for (const timer of processTimeoutTimers.values()) clearTimeout(timer);
+  for (const timer of logRetentionTimers.values()) clearInterval(timer);
+  watcherTimers.clear();
+  remoteSessionTimers.clear();
+  processTimeoutTimers.clear();
+  logRetentionTimers.clear();
+  suspendFailureAttention();
+}
+
+/** Allow scheduling again; called at session_start before running tasks are resumed. */
+export function resumeScheduledWork(): void {
+  scheduledWorkSuspended = false;
+  resumeFailureAttention();
+}
 
 
 
@@ -240,6 +270,7 @@ function scheduleRemoteSessionPoll(
   getActiveSession?: ActiveSessionProvider,
 ): void {
   clearRemoteSessionTimer(id);
+  if (scheduledWorkSuspended) return;
   const timer = setTimeout(() => void pollRemoteSession(pi, id, getActiveSession), delayMs);
   timer.unref();
   remoteSessionTimers.set(id, timer);
@@ -263,6 +294,7 @@ async function pollRemoteSession(
     const remoteTask = activeRemoteTasks.get(id);
     if (!meta || meta.status !== "running" || meta.remote?.session !== "tmux" || !remoteTask) return;
     const poll = await remoteTask.pollTmuxSession(meta.remote.logOffset ?? 0, remainingDeadlineMs(meta.deadlineAt));
+    if (scheduledWorkSuspended) return;
     appendTaskOutput(meta.logPath, poll.output);
     if (poll.status === "timed_out") {
       clearProcessTimeout(id);
@@ -565,6 +597,7 @@ function scheduleWatch(
   runOnce?: WatchPollRunner,
 ): void {
   clearWatchTimer(id);
+  if (scheduledWorkSuspended) return;
   const timer = setTimeout(() => void pollWatch(pi, id, getActiveSession, runOnce), delayMs);
   timer.unref();
   watcherTimers.set(id, timer);
@@ -596,6 +629,8 @@ async function pollWatch(
     const result = runOnce
       ? await runOnce(timeoutMs)
       : await runCommandOnce(commandSpecFromMeta(meta), undefined, timeoutMs);
+    // A poll that was in flight when the session shut down belongs to a stale instance.
+    if (scheduledWorkSuspended) return;
     appendWatchResult(meta.logPath, result);
     const latest = readMeta(id);
     if (!latest || latest.status !== "running") return;
@@ -766,6 +801,7 @@ function scheduleProcessTimeout(
   getActiveSession?: ActiveSessionProvider,
 ): void {
   clearProcessTimeout(id);
+  if (scheduledWorkSuspended) return;
   const delay = Math.max(0, deadlineAt - Date.now());
   const timer = setTimeout(() => void timeoutProcess(pi, id, getActiveSession), delay);
   timer.unref();
@@ -959,6 +995,7 @@ function launchArgvOf(commandSpec: CommandSpec, launchSpec: CommandSpec): string
 
 function scheduleLogRetention(id: string): void {
   stopLogRetention(id);
+  if (scheduledWorkSuspended) return;
   const timer = setInterval(() => {
     const meta = readMeta(id);
     if (!meta || meta.status !== "running" || meta.kind !== "process") {

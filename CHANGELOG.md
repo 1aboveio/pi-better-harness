@@ -38,6 +38,7 @@ All notable changes to this project are documented in this file. The format is b
 
 - **subagents** (#325): a transient failure reading a run's metadata no longer pins its failure scan to the exact-retry rule. The scan waits for trust to be readable, for at most 30 seconds or until the run ends; after that the log is scanned under the exact-retry rule so real failures stay visible, with an `Observation incomplete` note that the metadata could not be read
 - **subagents, background-tasks** (#325): the terminal failure summary never exceeds its byte budget and is made of whole lines. Under a tight budget incident rows are dropped first, then lower-priority notes and the count line; the "Work correctness was not inferred from lifecycle alone." note is kept whenever it fits and never cut mid-sentence
+- **background-tasks**: after `/reload` (or a session switch), a running watch or remote poll no longer keeps ticking in the unloaded extension instance, where finishing the task durably suppressed its completion callback as "active session identity is unavailable". Session shutdown now stops that instance's timers and the next session resumes the task from disk. (#324)
 
 ## [pi-better-harness@0.6.1] - 2026-09-27
 
