@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **subagents**, **background-tasks**: pressing `x` twice in the navigator detail view no longer leaves a hidden list overlay that swallows every key. The view moves to the next row's detail (or the previous one); when nothing is left, it closes and typing reaches the editor again. (#332)
+- **subagents**, **background-tasks**: if the navigator detail view loses focus while it is open, moving through the work list reuses it instead of stacking a second overlay, and Esc closes the navigator rather than revealing an older one underneath. (#332)
+- **subagents**, **background-tasks**: an expanded output section in the navigator detail view fits the terminal, and its `showing N/M rows` count matches what is on screen. A terminal shorter than the work list plus the editor no longer gets more lines than it has rows; the input frame stays at the bottom. (#332)
+- **background-tasks**: after `/reload`, the check on a task still run by the earlier instance backs off from 250 ms to 4 s instead of reading the task's metadata four times a second for as long as it runs. (#332)
+- **background-tasks**: the README's "Reloads and session switches" now says an exit during a session switch is recorded only while the same Pi process stays open; after Pi quits, a resumed task whose process is gone is marked lost. (#332)
+- **release**: the publish workflow waits up to 10 minutes (backing off 5 s to 60 s) for the new version and checks the registry's version document, not only `npm view`, so a slow but successful publish still gets its tag and GitHub release. A rerun skips a version that is already on npm. (#332)
+- **tests**: the navigator TUI e2e and the other root script suites run against a private registry, so they no longer leave `by-parent-active/<pid>/sa_navigator_e2e_*` markers or tasks in the real `$TMPDIR` registries. The background-tasks suite no longer leaks an empty temp directory for each fully skipped test file, and its macOS process-tree stop test counts zombies and a vanished process group as stopped. (#332)
+
 ## [pi-better-harness@0.7.0] - 2026-09-27
 
 ### Changed
@@ -38,7 +48,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Changed
 
 - The default Subagents profile is Outside project = Write, so tool caches such as `~/.gradle` work with no per-tool configuration while sibling repositories cannot be removed or moved. Set Outside project to Read (strict) or Write & delete in `/sandbox` to opt out. (#341)
-- The navigator detail view opens showing up to the latest 25 transcript rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the transcript shows as many newest rows as fit below them (previously metadata gave way to the transcript). `subagent_result` and `subagent_output` defaults are unchanged.
+- The navigator detail view opens showing up to the latest 25 transcript rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the transcript shows as many newest rows as fit below them (previously metadata gave way to the transcript). `subagent_result` and `subagent_output` defaults are unchanged. (#340)
 - Only failures that need action are "active": `Action required` incidents (non-tool failures, a tool operation failing three times, incidents disposed `open`) and observation gaps. Unclassified tool errors and expected failures are history: counted, never listed or paged by default. When nothing needs action, result, output, and status say so in one line (`No failures need action · 8 unclassified tool errors · 2 expected (history)`) with no `incidentCursor`; the active count, `shown`/`omitted`, and the incident cursor cover actionable incidents only. List rows and list lead-ins count only what needs action. Completion callbacks keep their once-only counts.
 - Incident rows are compact on every surface (result, output, list, callbacks, status, log). A tool error stored as its result JSON (`{"content":[{"type":"text","text":…`) is shown as its text, the excerpt is capped at 120 UTF-8 bytes on a code-point boundary, and evidence is shortened to the log name and offset (`output.log#byte=N`). `mode: "raw"` (`subagent_output`/`subagent_result`) and raw background logs show the journal summary verbatim with the full evidence path; the failure journal is unchanged. Incident cursors issued before this change reset once with `reset=stale-cursor`. Background-task completion callbacks carry the same history count line.
 - New child tool errors are recorded with the tool's text instead of its JSON result wrapper.
@@ -72,7 +82,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
-- The navigator detail view opens showing up to the latest 25 log rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the log shows as many newest rows as fit below them. `bg_task_log` and `bg_task_status` defaults are unchanged.
+- The navigator detail view opens showing up to the latest 25 log rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the log shows as many newest rows as fit below them. `bg_task_log` and `bg_task_status` defaults are unchanged. (#340)
 - Only failures that need action are "active": `Action required` incidents (non-tool failures, a tool operation failing three times, incidents disposed `open`) and observation gaps. Unclassified tool errors and expected failures are history: counted, never listed or paged by default. When nothing needs action, result, output, and status say so in one line (`No failures need action · 8 unclassified tool errors · 2 expected (history)`) with no `incidentCursor`; the active count, `shown`/`omitted`, and the incident cursor cover actionable incidents only. List rows and list lead-ins count only what needs action. Completion callbacks keep their once-only counts.
 - Incident rows are compact on every surface (result, output, list, callbacks, status, log). A tool error stored as its result JSON (`{"content":[{"type":"text","text":…`) is shown as its text, the excerpt is capped at 120 UTF-8 bytes on a code-point boundary, and evidence is shortened to the log name and offset (`output.log#byte=N`). `mode: "raw"` (`subagent_output`/`subagent_result`) and raw background logs show the journal summary verbatim with the full evidence path; the failure journal is unchanged. Incident cursors issued before this change reset once with `reset=stale-cursor`. Background-task completion callbacks carry the same history count line.
 - Output-control parameters use one spelling across both tool families: `max_bytes` and `lines`. Byte budgets, hard caps, and defaults are unchanged. (#321)
@@ -89,7 +99,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
-- A navigator log tail taller than the terminal now drops its oldest rows instead of cutting off the newest ones.
+- A navigator log tail taller than the terminal now drops its oldest rows instead of cutting off the newest ones. (#340)
 - The terminal failure summary never exceeds its byte budget and is made of whole lines. Under a tight budget incident rows are dropped first, then lower-priority notes and the count line; the "Work correctness was not inferred from lifecycle alone." note is kept whenever it fits and never cut mid-sentence (#325)
 - Completion callbacks are no longer lost across `/reload`. Before, the unloaded extension instance kept running watch and poll timers and child exit handlers with no active session; when a task finished there, its callback was durably suppressed as "active session identity is unavailable". Session shutdown now stops that instance's timers and it never notifies; work already in flight (a child exit, a remote tmux start, a timeout kill) only records its result, and the resuming instance delivers the callback once. A same-process task whose exit nobody records is marked lost after a 5 s grace period instead of immediately. (#324)
 - `bg_task_spawn`, `bg_task_watch`, and `bg_task` accept `operation_id: null` and `expected_exit_codes: null` as "not declared" and launch the task normally, instead of refusing it as a malformed intent (or, on Pi 0.82, failing schema validation)
