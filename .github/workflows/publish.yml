@@ -142,6 +142,7 @@ jobs:
               check_pack_file /tmp/package-pack.json src/shared-navigator.ts
               check_pack_file /tmp/package-pack.json src/shared-sandbox-core.ts
               check_pack_file /tmp/package-pack.json src/shared-failure-observations.ts
+              check_pack_file /tmp/package-pack.json src/shared-callback-batcher.ts
               ;;
             pi-better-sandbox)
               check_pack_file /tmp/package-pack.json index.ts
@@ -164,6 +165,7 @@ jobs:
               check_pack_file /tmp/package-pack.json task-guard.ts
               check_pack_file /tmp/package-pack.json task-policy.ts
               check_pack_file /tmp/package-pack.json shared-failure-observations.ts
+              check_pack_file /tmp/package-pack.json shared-callback-batcher.ts
               ;;
             pi-better-goal)
               check_pack_file /tmp/package-pack.json src/index.ts
@@ -193,9 +195,11 @@ jobs:
                 node_modules/pi-better-subagents/task-guard.ts \
                 node_modules/pi-better-subagents/task-policy.ts \
                 node_modules/pi-better-subagents/shared-failure-observations.ts \
+                node_modules/pi-better-subagents/shared-callback-batcher.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
                 node_modules/pi-better-background-tasks/src/shared-failure-observations.ts \
+                node_modules/pi-better-background-tasks/src/shared-callback-batcher.ts \
                 node_modules/pi-better-ssh/src/index.ts \
                 node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
                 node_modules/pi-better-goal/src/index.ts \
