@@ -294,7 +294,7 @@ describe("subagent_spawn_batch end-to-end", () => {
     it("coordinates single and batch delegation with the parent plan", () => {
         const { tools } = loadExtension(mod);
         for (const tool of [tools.subagent_spawn, tools.subagent_spawn_batch]) {
-            assert.ok(tool.promptGuidelines.some((line) => line.includes("parent-owned coordinator ledger")));
+            assert.ok(tool.promptGuidelines.some((line) => line.includes("current delegation mode")));
             assert.ok(tool.promptGuidelines.some((line) => line.includes("continue unblocked foreground work")));
             assert.ok(tool.promptGuidelines.some((line) => line.includes("terminal results must be inspected")));
         }

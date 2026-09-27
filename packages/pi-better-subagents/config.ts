@@ -13,8 +13,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { SELF_SPEC } from "./extensions.ts";
+import type { DelegationMode } from "./delegation.ts";
 
 export interface SubagentConfig {
+    /** Foreground delegation policy; /subagents mode overrides this for the current session. */
+    delegationMode?: DelegationMode | null;
     defaultModel?: string | null;
     defaultTools?: string | null;
     /** Max subagents allowed to run at once. */

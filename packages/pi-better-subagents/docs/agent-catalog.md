@@ -105,6 +105,15 @@ Model availability, same-tier fallback, and nearest-effort adjustment are not de
 | `role.reviewer` | Reviewer | `openai/gpt-6-astra` | medium | frontier |
 | `role.architect` | Architect | `openai/gpt-6-astra` | high | frontier |
 
+Bundled descriptions are routing boundaries for coordinator mode. Researcher owns
+external and documentary evidence; Explorer maps repository code paths; Product
+Manager owns user-visible requirements; Architect owns technical boundaries;
+Developer owns implementation and focused tests; Reviewer owns independent change
+review. Each role's instruction body names excluded work and the neighboring role
+that owns it. Project and personal definitions may replace these bundled roles, so
+coordinators inspect the current effective descriptions rather than assuming this
+table is unchanged.
+
 The product table's short model names are the model ids. The provider prefix is `openai`, matching explicit `provider/model` ids already used at launch. No cross-provider substitute is implied. Tier candidate lists are not invented here.
 
 ## Parser

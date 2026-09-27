@@ -12,6 +12,30 @@ back-channel for it to stall on, no unbounded blast radius.
 launch is the result · completion triggers fetch · the foreground never blocks
 ```
 
+## Delegation Mode
+
+Set `delegationMode` in this package's `config.json` to `manual`, `adaptive`, or
+`coordinator` (default `adaptive`). This controls foreground delegation guidance,
+not child permissions or catalog definitions. `/subagents` reports the active
+mode; `/subagents mode manual|adaptive|coordinator` overrides it for the current
+session without editing config. Other arguments show usage. `/reload` retains
+this override; new sessions use config, while resuming a session restores that
+session's override.
+
+- **Manual:** no proactive delegation, including in plan mode. A user request or
+  explicit workflow requirement may still delegate.
+- **Adaptive:** delegate useful, substantial independent work while continuing
+  foreground work; keep small or coupled tasks local.
+- **Coordinator:** use `agents_catalog` to discover current roles and delegate
+  every nontrivial task owned by an available role. The foreground owns
+  orchestration, cross-role decisions, unowned or ambiguous work, integration,
+  and final verification. Current role descriptions, including custom catalog
+  overrides, determine ownership.
+
+All modes retain the no-polling rule and require inspection of delegated results
+before final verification. `pi-better-plan` follows the active mode when a plan
+is present; without this extension it uses adaptive guidance.
+
 ## Principles
 
 - **The foreground never blocks.** Launching a subagent *is* the deliverable —
@@ -182,6 +206,8 @@ top.
 
 - `defaultModel` — model for spawns that don't specify one (`null` = inherit the
   foreground model).
+- `delegationMode` — foreground policy (`manual`, `adaptive`, or `coordinator`;
+  default `adaptive`). `/subagents mode ...` changes only the current session.
 - `maxConcurrent` — how many subagents may run at once (**default 4**). A spawn
   past the cap is rejected until a running one finishes.
 

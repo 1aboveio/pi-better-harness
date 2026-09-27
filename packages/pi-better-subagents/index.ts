@@ -36,6 +36,7 @@ import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
+import { DELEGATION_MODE_REQUEST, delegationPrompt, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime } from "./task-policy.ts";
 import { canonicalizePath } from "./shared-sandbox-core.ts";
@@ -163,7 +164,7 @@ const CATALOG_GUIDELINES = [
 ];
 
 const SUBAGENT_ORCHESTRATION_GUIDELINES = [
-    "When a structured plan is active, keep it as the parent-owned coordinator ledger: mark distinct delegated and foreground deliverables in_progress concurrently, continue unblocked foreground work, and update the plan after integrating each result or failure.",
+    "When a structured plan is active, follow the current delegation mode. Track delegated and foreground deliverables only when delegation is permitted and actually underway; continue unblocked foreground work and integrate results before marking work complete.",
     "Do not treat launching a subagent as completion of the parent milestone; relevant terminal results must be inspected and integrated before verification or completion.",
 ];
 
@@ -1214,6 +1215,21 @@ function catalogRoleSchema(purpose: string) {
 }
 
 export default function (pi: ExtensionAPI) {
+    let delegationOverride: DelegationMode | undefined;
+    const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
+    const restoreDelegationMode = (ctx: ExtensionContext): void => {
+        delegationOverride = undefined;
+        const branch = ctx.sessionManager?.getBranch?.();
+        if (!Array.isArray(branch)) return;
+        for (const entry of branch) {
+            if (entry.type !== "custom" || entry.customType !== "pi-better-subagents-delegation") continue;
+            const data = entry.data as { version?: unknown; mode?: unknown } | null;
+            if (data?.version === 1 && isDelegationMode(data.mode)) delegationOverride = data.mode;
+        }
+    };
+    const unsubscribeDelegationRequest = pi.events?.on?.(DELEGATION_MODE_REQUEST, (data: unknown) => {
+        if (data && typeof data === "object") (data as { mode?: DelegationMode }).mode = activeDelegationMode();
+    });
     // Capture for the health ticker (module-level); needed for orphaned/lost
     // coordinator follow-ups that fire outside a tool-call stack (#65).
     healthPi = pi;
@@ -1502,7 +1518,7 @@ export default function (pi: ExtensionAPI) {
             "later on the user's next turn — never wait or poll for it.",
         promptSnippet: "Delegate a task to a background subagent that runs without blocking you",
         promptGuidelines: [
-            "Use subagent_spawn for independent work the user should not have to wait on. It returns at once with a run id; that return IS the deliverable — report the id to the user and continue.",
+            "When delegation is permitted by the active mode, use subagent_spawn for assigned work that can run independently. It returns at once with a run id; report the id and continue.",
             "After subagent_spawn, do NOT call subagent_output or subagent_result in a loop to wait for the result, and do NOT sleep. The run completes on its own and reports back on the next turn.",
             "Call subagent_result after a completion or attention callback, or when the user explicitly asks for the result. Use subagent_output only when the user explicitly asks how a run is progressing; never use either tool to poll.",
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
@@ -1604,7 +1620,7 @@ export default function (pi: ExtensionAPI) {
             "'shared' options are applied to every job; per-job options override them.",
         promptSnippet: "Launch a batch of background subagents at once",
         promptGuidelines: [
-            "Use subagent_spawn_batch when you have several independent tasks to delegate. It returns immediately with a batch id and one run id per launched job.",
+            "When delegation is permitted by the active mode, use subagent_spawn_batch for several independent assigned tasks. It returns immediately with a batch id and one run id per launched job.",
             "Each job is a normal subagent run; use subagent_result / subagent_output / subagent_stop with the individual run ids just like subagent_spawn.",
             "Do NOT poll for results. Each job reports back on its own when it finishes.",
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
@@ -1839,9 +1855,33 @@ export default function (pi: ExtensionAPI) {
         },
         enrich: createLaunchEnricher(),
     });
-    if (typeof pi.registerCommand === "function") agentOperations.registerCommands(pi);
+    if (typeof pi.registerCommand === "function") {
+        agentOperations.registerCommands(pi);
+        pi.registerCommand("subagents", {
+            description: "Show or change the current-session delegation mode",
+            async handler(args, ctx) {
+                const tokens = args.trim().split(/\s+/).filter(Boolean);
+                if (tokens.length === 0) {
+                    ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}.`, "info");
+                    return;
+                }
+                const requested = tokens[1];
+                if (tokens.length === 2 && tokens[0] === "mode" && isDelegationMode(requested)) {
+                    delegationOverride = requested;
+                    pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: delegationOverride });
+                    ctx.ui.notify(`Delegation mode: ${delegationOverride} (current session).`, "info");
+                } else {
+                    ctx.ui.notify("Usage: /subagents [mode manual|adaptive|coordinator]", "warning");
+                }
+            },
+        });
+    }
     const discoveryTool = agentOperations.createDiscoveryTool(Type as never);
     pi.registerTool(discoveryTool as Parameters<ExtensionAPI["registerTool"]>[0]);
+
+    pi.on("before_agent_start", (event) => ({
+        systemPrompt: `${event.systemPrompt}\n\n${delegationPrompt(activeDelegationMode())}`,
+    }));
 
     // ---- live-status lifecycle -----------------------------------------
     pi.on("agent_start", async (_event, ctx) => {
@@ -1882,10 +1922,15 @@ export default function (pi: ExtensionAPI) {
         refreshBackgroundWorkNavigator(ctx);
     });
 
+    pi.on("session_tree", async (_event, ctx) => {
+        restoreDelegationMode(ctx);
+    });
+
     // Capture a UI-bearing context and, if runs from a prior session are still
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
+        restoreDelegationMode(ctx);
         uiCtx = ctx;
         try { noteCatalogHost(catalogHostFrom(ctx)); } catch { /* catalog inspection stays undecided */ }
         try { mainAgentStartedAt = ctx.isIdle() ? undefined : Date.now(); }
@@ -1938,6 +1983,7 @@ export default function (pi: ExtensionAPI) {
         // cannot become live process groups with no coordinator.
         stopCurrentSessionSubagents(ctx);
         activeCallbackOrigin = undefined;
+        if (typeof unsubscribeDelegationRequest === "function") unsubscribeDelegationRequest();
         cancelCallbackBatch(pi);
         mainAgentStartedAt = undefined;
         mainAgentTools.clear();

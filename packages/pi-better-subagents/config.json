@@ -2,6 +2,7 @@
   "defaultModel": null,
   "defaultTools": "read, bash, edit, write, web_search, web_fetch",
   "maxConcurrent": 4,
+  "delegationMode": "adaptive",
 
   "toolExtensions": {
     "web_search": "npm:@juicesharp/rpiv-web-tools",

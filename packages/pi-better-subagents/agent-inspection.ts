@@ -207,7 +207,10 @@ export function presentCatalog(snapshot: CatalogSnapshot, enrich?: LaunchEnriche
         `Catalog revision ${snapshot.digest}.`,
         "Definition validity is not launchability. Model availability is decided only by the injected resolver.",
         ...snapshot.diagnostics.map((diagnostic) => formatDiagnostic(diagnostic)),
-        ...entries.map((entry) => entry.text.split("\n")[0] ?? entry.id),
+        ...entries.flatMap((entry) => [
+            entry.text.split("\n")[0] ?? entry.id,
+            `  description: ${JSON.stringify(entry.identity.description ?? "")}`,
+        ]),
     ];
     return { revision: snapshot.digest, entries, diagnostics: [...snapshot.diagnostics], text: lines.join("\n") };
 }

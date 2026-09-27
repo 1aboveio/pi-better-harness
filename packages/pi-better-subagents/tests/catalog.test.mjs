@@ -21,6 +21,7 @@ import {
     saveDefinition,
 } from "../catalog-store.ts";
 import { inspectCatalog, listCatalog, resolveSelection } from "../catalog-resolver.ts";
+import { presentCatalog } from "../agent-inspection.ts";
 import { prepareCatalogJob } from "../catalog-runtime.ts";
 
 function fixture(bundled = "empty") {
@@ -492,6 +493,34 @@ describe("catalog discovery and inheritance", () => {
                 listCatalog(snapshot).map((entry) => entry.id),
                 APPROVED_ROLE_DEFAULTS.map((entry) => entry.id).sort(),
             );
+            const presented = presentCatalog(snapshot);
+            for (const entry of snapshot.roles.values()) {
+                assert.match(presented.text, new RegExp(`description: ${JSON.stringify(entry.definition.description).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+            }
+        } finally {
+            ctx.cleanup();
+        }
+    });
+
+    it("bundled role scopes route excluded work to the owning neighbor", () => {
+        const ctx = fixture("real");
+        try {
+            const roles = load(ctx).roles;
+            const cases = [
+                ["role.architect", /architecture choices/, /implementation to Developer/, /Product Manager/],
+                ["role.developer", /implementation/, /Product Manager or Architect/, /Reviewer/],
+                ["role.explorer", /repository/, /Developer/, /Researcher/],
+                ["role.product-manager", /user-visible/, /Architect/, /Developer/],
+                ["role.researcher", /evidence/, /Explorer/, /Developer/],
+                ["role.reviewer", /independent review/, /Developer/, /Product Manager/],
+            ];
+            for (const [id, ownership, exclusion, neighbor] of cases) {
+                const definition = roles.get(id).definition;
+                assert.match(definition.description, ownership, id);
+                assert.match(definition.body, /Do not/, id);
+                assert.match(definition.body, exclusion, id);
+                assert.match(definition.body, neighbor, id);
+            }
         } finally {
             ctx.cleanup();
         }
