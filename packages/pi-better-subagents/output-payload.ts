@@ -15,16 +15,19 @@ import {
     cursorKind,
     formatUnchangedEvidence,
     inspectStatusRevision,
+    lifecycleContentRevision,
     OUTPUT_PAGE_DEFAULTS,
     pageRetainedFile,
     pageRows,
     pageVerbatimText,
+    readOutputInclude,
     revisionOf,
+    sessionScopeKey,
     type EnvelopeFailure,
     type EvidenceGap,
     type VerbatimPage,
 } from "./shared-log-utils.ts";
-import { collectRunFailures } from "./failures.ts";
+import { collectRunFailures, failurePath } from "./failures.ts";
 import {
     formatLifecycleDiagnostics,
     formatLostResult,
@@ -38,23 +41,30 @@ import {
     effectiveStatus,
     inspectRunMeta,
     logPathFor,
-    originKey,
     originOf,
     type RunCallbackOrigin,
     type RunMeta,
 } from "./registry.ts";
 import {
     activeFailures,
+    failureJournalFingerprint,
     failureRevision,
     formatIncidentSummary,
     formatTerminalIncidentSummary,
+    incidentPageHeading,
+    incidentResource as sharedIncidentResource,
+    incidentVerbatimPage,
     isIncidentCursor,
     requiresAction,
-    pageFailureIncidents,
     type FailureState,
 } from "./shared-failure-observations.ts";
-import { fmtElapsed } from "./widget.ts";
+import { fmtElapsed, fmtSpend } from "./widget.ts";
 
+/**
+ * Normalized request. Tool handlers resolve the public parameter names
+ * (canonical `max_bytes` / `lines`, deprecated `maxBytes` / `tail_lines`)
+ * with log-utils `readOutputControls` before building one of these.
+ */
 export interface PayloadRequest {
     cursor?: string;
     maxBytes?: unknown;
@@ -63,6 +73,8 @@ export interface PayloadRequest {
     lines?: unknown;
     tail_lines?: unknown;
     limit?: unknown;
+    /** Explicit opt-in facts: `cost` (token/cost spend) and/or `tools` (tool-call count). */
+    include?: unknown;
 }
 
 export type LoadedRun =
@@ -107,10 +119,9 @@ export function listScopeKey(
     parentPid: number,
     sessionAvailable = true,
 ): string {
-    if (all) return "all";
-    if (origin) return `session:${originKey(origin)}`;
-    if (!sessionAvailable) return "session:unavailable";
-    return `parent:${parentPid}`;
+    // Shared with background tasks (log-utils): an origin exists only when the
+    // session is available, so the shared precedence yields the same keys.
+    return sessionScopeKey({ all, unavailable: !sessionAvailable && !origin, origin, fallback: `parent:${parentPid}` });
 }
 
 export function resolveActiveOrigin(session: SubagentToolSession | undefined): {
@@ -164,26 +175,16 @@ export function ownership(meta: RunMeta, origin: RunCallbackOrigin, parentPid = 
     return recorded ? "foreign" : "unavailable";
 }
 
-function logFacts(id: string): unknown {
-    try {
-        const stats = statSync(logPathFor(id));
-        return [stats.dev, stats.ino, stats.size, Math.trunc(stats.mtimeMs)];
-    } catch (error) {
-        return ["unreadable", (error as NodeJS.ErrnoException).code ?? String(error)];
-    }
-}
-
 /** Lifecycle metadata and log identity. A metadata-only transition is a change. */
 function contentRevisionFor(id: string, meta: RunMeta): string {
-    return revisionOf([
+    return lifecycleContentRevision([
         meta.status,
         String(effectiveStatus(meta)),
         meta.exitCode ?? null,
         meta.endedAt ?? null,
         meta.lifecycleClassification ?? null,
         meta.failureReason ?? null,
-        logFacts(id),
-    ]);
+    ], logPathFor(id));
 }
 
 function elapsedFor(meta: RunMeta, now = Date.now()): string {
@@ -264,7 +265,7 @@ function callContext(id: string, meta: RunMeta, request: PayloadRequest, scopeKe
 }
 
 function incidentResource(ctx: CallContext): string {
-    return `incidents:${ctx.scopeKey}:${ctx.id}`;
+    return sharedIncidentResource(ctx.scopeKey, ctx.id);
 }
 
 /**
@@ -311,23 +312,10 @@ function envelopeText(input: {
 }
 
 function assembleIncidentPage(ctx: CallContext, identity: string): string {
-    const maxBytes = budgetFor("answer", ctx.request.maxBytes);
-    const total = activeFailures(ctx.state).length;
     return envelopeText({
-        maxBytes,
-        identity: `${identity} incident page of ${total} active failure observation${total === 1 ? "" : "s"}`,
-        verbatim: (budget) => {
-            const page = pageFailureIncidents(ctx.state, { cursor: ctx.request.cursor, maxBytes: budget, resource: incidentResource(ctx) });
-            return {
-                text: page.text || (page.total === 0 ? "No active failure observations." : ""),
-                hasMore: page.hasMore,
-                cursor: page.cursor,
-                nextCursor: page.nextCursor,
-                omittedBytes: 0,
-                omittedRows: page.omitted,
-                reset: page.reset,
-            };
-        },
+        maxBytes: budgetFor("answer", ctx.request.maxBytes),
+        identity: `${identity} ${incidentPageHeading(activeFailures(ctx.state).length)}`,
+        verbatim: (budget) => incidentVerbatimPage(ctx.state, { cursor: ctx.request.cursor, maxBytes: budget, resource: incidentResource(ctx) }),
         statusCursor: ctx.statusCursor,
     });
 }
@@ -402,6 +390,33 @@ function answerReserve(maxBytes: number, cursor: string | undefined): number {
 
 function outputLineCap(request: PayloadRequest): number {
     return positiveInt(request.lines) ?? positiveInt(request.tail_lines) ?? OUTPUT_PAGE_DEFAULTS.logLines;
+}
+
+/** Answer-page line cap for subagent_result: only an explicit `lines` request caps it. */
+function answerLineCap(request: PayloadRequest): number | undefined {
+    return positiveInt(request.lines) ?? positiveInt(request.tail_lines);
+}
+
+/**
+ * Explicit opt-in facts (#321). Ordinary payloads omit spend and tool
+ * activity; `include: ["cost"]` adds one spend line and `include: ["tools"]`
+ * one tool-call count line (with the distinct tool names), both computed from
+ * the same parse as the rest of the payload.
+ */
+function optInFacts(run: ParsedRun, request: PayloadRequest): string | undefined {
+    const { include, unknown } = readOutputInclude(request.include);
+    const lines: string[] = [];
+    if (include.has("cost")) {
+        const spend = fmtSpend(run.usage);
+        lines.push(`spend: ${spend || "none recorded"}`);
+    }
+    if (include.has("tools")) {
+        const calls = run.toolCallCount ?? run.toolCalls.length;
+        const distinct = [...new Set(run.toolCalls)];
+        lines.push(`tools: ${calls} call${calls === 1 ? "" : "s"}${distinct.length ? ` · distinct: ${distinct.join(", ")}` : ""}`);
+    }
+    if (unknown.length) lines.push(`include: ignored unknown value(s) ${unknown.join(", ")}; supported: cost, tools`);
+    return lines.length ? lines.join("\n") : undefined;
 }
 
 export function assembleUnreadableMetadata(id: string, detail: string, request: PayloadRequest = {}): string {
@@ -483,7 +498,10 @@ export function assembleRunningResult(
         identity,
         failure: failureSection(ctx),
         decision: `Run ${id} is still running — no result yet. You'll be notified when it finishes; don't poll.`,
-        diagnostics: joinSections([changeDiagnostics(ctx), parserDiagnostics(parseRun(id))]),
+        diagnostics: (() => {
+            const run = parseRun(id);
+            return joinSections([changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]);
+        })(),
         gaps: logGaps(id),
         statusCursor: ctx.statusCursor,
     });
@@ -509,7 +527,7 @@ function assembleRaw(
         maxBytes,
         identity: `${identity} raw retained log`,
         failure: failureSection(ctx, continuing ? CONTINUATION_FAILURE_BYTES : 1024),
-        diagnostics: joinSections([changeDiagnostics(ctx), parserDiagnostics(run)]),
+        diagnostics: joinSections([changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]),
         gaps: logGaps(id),
         verbatim: (remaining) => rawPage(ctx, pageCursorFor(request.cursor), remaining),
         verbatimReserve: Math.floor(maxBytes / 2),
@@ -542,6 +560,7 @@ export function assembleSubagentOutput(
         : undefined;
     const diagnostics = joinSections([
         changeDiagnostics(ctx),
+        optInFacts(run, request),
         healthLine || undefined,
         parserDiagnostics(run),
         emptyLog && !decision ? "(no output yet)" : undefined,
@@ -594,6 +613,7 @@ export function assembleOrphanedResult(
         decision: "Run is orphaned — non-final. Supervision was lost; related processes may still be alive. There is no final result yet.",
         diagnostics: joinSections([
             changeDiagnostics(ctx),
+            optInFacts(run, request),
             healthLine || undefined,
             parserDiagnostics(run),
             gaps.length ? "Child log is missing or unreadable; this is not an empty healthy result." : undefined,
@@ -603,7 +623,7 @@ export function assembleOrphanedResult(
         ]),
         gaps,
         verbatim: parsed
-            ? (remaining) => answerPage(ctx, parsed, pageCursor, remaining)
+            ? (remaining) => answerPage(ctx, parsed, pageCursor, remaining, answerLineCap(request))
             : gaps.length === 0
                 ? (remaining) => rawPage(ctx, pageCursor, remaining)
                 : undefined,
@@ -644,6 +664,7 @@ export function assembleSubagentResult(
             decision: "Run ended unexpectedly before producing a coherent final result.",
             diagnostics: joinSections([
                 changeDiagnostics(ctx),
+                optInFacts(run, request),
                 healthLine || undefined,
                 formatLifecycleDiagnostics(lifecycle),
                 streamEvidence(run),
@@ -653,7 +674,7 @@ export function assembleSubagentResult(
                 retrievalHint(id),
             ]),
             gaps,
-            verbatim: parsed ? (remaining) => answerPage(ctx, parsed, pageCursor, remaining) : undefined,
+            verbatim: parsed ? (remaining) => answerPage(ctx, parsed, pageCursor, remaining, answerLineCap(request)) : undefined,
             verbatimReserve: reserve,
             statusCursor: ctx.statusCursor,
         });
@@ -668,6 +689,7 @@ export function assembleSubagentResult(
             decision: "Run is lost: no related process remains and no coherent terminal completion was observed. This is a terminal unknown outcome, not a normal failure.",
             diagnostics: joinSections([
                 changeDiagnostics(ctx),
+                optInFacts(run, request),
                 healthLine || undefined,
                 formatLifecycleDiagnostics(lifecycle),
                 parserDiagnostics(run),
@@ -677,7 +699,7 @@ export function assembleSubagentResult(
             ]),
             gaps,
             verbatim: parsed
-                ? (remaining) => answerPage(ctx, parsed, pageCursor, remaining)
+                ? (remaining) => answerPage(ctx, parsed, pageCursor, remaining, answerLineCap(request))
                 : gaps.length === 0
                     ? (remaining) => rawPage(ctx, pageCursor, remaining)
                     : undefined,
@@ -699,6 +721,7 @@ export function assembleSubagentResult(
         failure,
         diagnostics: joinSections([
             changeDiagnostics(ctx),
+            optInFacts(run, request),
             healthLine || undefined,
             exceptional,
             parserDiagnostics(run),
@@ -706,7 +729,7 @@ export function assembleSubagentResult(
             !answer ? retrievalHint(id) : undefined,
         ]),
         gaps,
-        verbatim: (remaining) => answerPage(ctx, answer || fallback || "(no final answer parsed)", pageCursor, remaining),
+        verbatim: (remaining) => answerPage(ctx, answer || fallback || "(no final answer parsed)", pageCursor, remaining, answerLineCap(request)),
         verbatimReserve: reserve,
         statusCursor: ctx.statusCursor,
     });
@@ -719,10 +742,59 @@ export interface SubagentListItem {
     status: string;
 }
 
-export function listIncidentCount(id: string, cwd: string, terminal: boolean): { count: number; actionRequired: number; revision: string } {
+export interface ListIncidentCount { count: number; actionRequired: number; revision: string }
+
+/**
+ * Per-run incident counts for list rows, cached by a fingerprint of everything
+ * they derive from: the child log's identity (a scan source), the failure
+ * journal's fingerprint (appends, truncation, deletion, pending in-process
+ * records), and the terminal flag. A list call recomputes only runs whose log
+ * or journal changed, so an idle registry is not rescanned on every call.
+ */
+const listIncidentCache = new Map<string, { key: string; value: ListIncidentCount }>();
+const LIST_INCIDENT_CACHE_MAX = 4096;
+let listIncidentComputations = 0;
+
+function listIncidentKey(id: string, terminal: boolean): string {
+    return JSON.stringify([terminal, logIdentityKey(logPathFor(id)), failureJournalFingerprint(failurePath(id))]);
+}
+
+function logIdentityKey(path: string): string {
+    try {
+        const stats = statSync(path, { bigint: true });
+        return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+    } catch (error) {
+        return `unreadable:${(error as NodeJS.ErrnoException).code ?? "error"}`;
+    }
+}
+
+export function listIncidentCount(id: string, cwd: string, terminal: boolean): ListIncidentCount {
+    const cacheId = `${id}\0${cwd}`;
+    const before = listIncidentKey(id, terminal);
+    const hit = listIncidentCache.get(cacheId);
+    if (hit && hit.key === before) return hit.value;
     const state = collectRunFailures(id, cwd, terminal);
+    listIncidentComputations += 1;
     const active = activeFailures(state);
-    return { count: active.length, actionRequired: active.filter(requiresAction).length, revision: failureRevision(state) };
+    const value = { count: active.length, actionRequired: active.filter(requiresAction).length, revision: failureRevision(state) };
+    // Cache only a stable read: when the scan (or a concurrent writer) changed
+    // the log or journal meanwhile, the next call recomputes and caches then.
+    listIncidentCache.delete(cacheId);
+    if (listIncidentKey(id, terminal) !== before) return value;
+    listIncidentCache.set(cacheId, { key: before, value });
+    while (listIncidentCache.size > LIST_INCIDENT_CACHE_MAX) listIncidentCache.delete(listIncidentCache.keys().next().value!);
+    return value;
+}
+
+/** Test seam: how many list incident counts were computed rather than served from cache. */
+export function listIncidentComputationCount(): number {
+    return listIncidentComputations;
+}
+
+/** Drop cached list incident counts (all, or one run). */
+export function resetListIncidentCache(id?: string): void {
+    if (id === undefined) listIncidentCache.clear();
+    else for (const key of [...listIncidentCache.keys()]) if (key.startsWith(`${id}\0`)) listIncidentCache.delete(key);
 }
 
 export function formatIncidentLabel(count: number, actionRequired = 0): string {

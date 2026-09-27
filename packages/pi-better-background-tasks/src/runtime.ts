@@ -858,7 +858,11 @@ async function notifyTerminal(
     source: "background-task",
     id: latest.id,
     label,
-    status: pending ? `${latest.status}: ${pending.summary}` : latest.status,
+    // Lifecycle plus an attention count; the incident text rides failureRows
+    // with exact counts, so the status field is never a clipped summary (#323).
+    status: pending
+      ? `${latest.status}; ${pending.incidents.length} incident${pending.incidents.length === 1 ? "" : "s"} need${pending.incidents.length === 1 ? "s" : ""} attention`
+      : latest.status,
     detailTool: "bg_task_status",
     outcome: facts.outcome,
     failureRows: facts.failureRows,

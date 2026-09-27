@@ -17,3 +17,16 @@ test("vendored log-utils copies match packages/log-utils/index.ts", () => {
     assert.equal(readFileSync(resolve(root, target), "utf8"), expected, target);
   }
 });
+
+// #321/#323: both tool families resolve output controls and cursor scopes
+// through the vendored copy, so the copies must behave identically.
+for (const target of targets) {
+  test(`${target}: shared output controls and scope keys`, async () => {
+    const utils = await import(resolve(root, target));
+    assert.deepEqual(utils.readOutputControls({ max_bytes: 512, maxBytes: 64, tail_lines: 4 }), { maxBytes: 512, lines: 4, deprecated: ["maxBytes", "tail_lines"] });
+    const origin = { cwd: "/w", sessionId: "s" };
+    assert.equal(utils.sessionScopeKey({ origin }), `session:${utils.originScopeDigest(origin)}`);
+    assert.equal(utils.sessionScopeKey({ unavailable: true, origin }), "session:unavailable");
+    assert.deepEqual([...utils.readOutputInclude(["cost", "tools", "x"]).include], ["cost", "tools"]);
+  });
+}

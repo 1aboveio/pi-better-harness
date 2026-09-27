@@ -899,6 +899,10 @@ describe("runtime", () => {
     expect(messages[0]).toContain(failed.id);
     expect(messages[0]).toContain("status=succeeded");
     expect(messages[0]).toContain("status=failed");
+    // #323: the status field is lifecycle plus an attention count, never a clipped summary.
+    const failedRow = messages[0]!.split("\n").find((line) => line.includes(`id=${failed.id}`));
+    expect(failedRow).toMatch(/status=failed; \d+ incidents? needs? attention \| inspect:/);
+    expect(failedRow).not.toMatch(/\.\.\.|…/);
   });
 
   it("retains bounded output from a noisy spawned process", async () => {

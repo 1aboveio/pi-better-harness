@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyFailureState, reduceFailure, activeFailures, formatFailureSummary, formatFailureLines, pageFailureIncidents, isIncidentCursor, incidentCursorAt, pendingFailureAttention,
-  formatIncidentSummary, failureRevision,
+  formatIncidentSummary, failureRevision, incidentVerbatimPage, incidentPageHeading, incidentResource, failureJournalFingerprint,
   observeFailures, readFailureState, markFailureAttentionDelivered, failureAttentionHandled, type FailureEvent,
   disposeIncidents, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, validateDisposition } from "./index.ts";
 
@@ -466,4 +466,47 @@ test("rejected command intents are agent-owned, visible, and never actionable on
     summary: "bash not run: invalid command intent" }, 1000);
   assert.match(formatFailureSummary(state), /^Unclassified failure observation · .*not run/);
   assert.equal(pendingFailureAttention(state, 999_999), undefined);
+});
+
+test("shared incident pages keep row counts, resume by cursor, and bind their scope (#323)", () => {
+  let state = emptyFailureState();
+  for (let i = 0; i < 6; i += 1) {
+    state = reduceFailure(state, { id: `op-${i}`, operation: `op-${i}`, kind: "failure", category: "operation", summary: `failure ${i} ${"x".repeat(60)}` }, 1000 + i);
+  }
+  assert.equal(incidentPageHeading(6), "Incident page of 6 active failure observations.");
+  assert.equal(incidentPageHeading(1), "Incident page of 1 active failure observation.");
+  const resource = incidentResource("session:abc", "task-1");
+  assert.equal(resource, "incidents:session:abc:task-1");
+  const lines: string[] = [];
+  let cursor: string | undefined;
+  for (let pages = 0; pages < 20; pages += 1) {
+    const page = incidentVerbatimPage(state, { cursor, maxBytes: 200, resource });
+    assert.equal(page.omittedBytes, 0);
+    assert.ok(Buffer.byteLength(page.text) <= 200);
+    lines.push(page.text);
+    if (!page.hasMore) { assert.equal(page.omittedRows, 0); break; }
+    assert.ok(page.omittedRows > 0);
+    cursor = page.nextCursor;
+  }
+  assert.equal(lines.join("\n").split("\n").filter(Boolean).length >= 6, true);
+  const crossed = incidentVerbatimPage(state, { cursor, maxBytes: 200, resource: incidentResource("all", "task-1") });
+  assert.equal(crossed.reset, "stale-cursor");
+  assert.equal(incidentVerbatimPage(emptyFailureState(), { resource }).text, "No active failure observations.");
+});
+
+test("the journal fingerprint changes on every append, deletion, and marker change (#323)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "failure-fingerprint-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "failures.jsonl");
+  const missing = failureJournalFingerprint(path);
+  assert.match(missing, /^unreadable:ENOENT\|0\|0$/);
+  observeFailures(path, [failed], 1000);
+  const once = failureJournalFingerprint(path);
+  assert.notEqual(once, missing);
+  assert.equal(failureJournalFingerprint(path), once, "stable while unchanged");
+  observeFailures(path, [{ ...failed, id: "second", operation: "other" }], 2000);
+  const twice = failureJournalFingerprint(path);
+  assert.notEqual(twice, once);
+  rmSync(path);
+  assert.match(failureJournalFingerprint(path), /^unreadable:ENOENT\|1\|0$/, "a lost journal keeps its marker");
 });

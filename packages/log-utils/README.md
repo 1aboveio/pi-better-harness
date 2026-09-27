@@ -78,6 +78,16 @@ unread ranges in the current snapshot.
 - `discardedBytes` and `captureGaps` are disclosed on every page. They are not
   recoverable. Empty readable files have no gaps; missing or unreadable files
   return a `read` gap and never look like a healthy empty log.
+- **Accepted heuristic (identical prefix).** When the platform reports no
+  fine-grained birth time and a file is deleted and recreated on a reused inode
+  (or rewritten in place) so that its head sample and the 256 bytes before the
+  cursor are byte-identical, the cursor continues from its offset. Every byte
+  after the cursor is still returned, so nothing unread is skipped; what cannot
+  be detected is a change *inside* the already-read prefix outside the sampled
+  head and window. Closing it would mean hashing the whole prefix on every page
+  (quadratic over a paged log), so it is documented and accepted rather than
+  closed. Consumers that replace or compact a log should bump `generation`,
+  which always resets.
 - `reset` is `stale-cursor` (other resource/scope or garbage),
   `source-replaced` (different file object), or `compacted` (same file object,
   but generation/head/pre-offset bytes/size no longer match).
@@ -143,6 +153,24 @@ as background surfaces do). Continuation lines: `reset=`,
 Lifecycle success is not semantic correctness. This module never infers
 structured failures from prose and never delivers callbacks.
 
+## Shared tool-surface helpers
+
+Both tool families (subagents and background tasks) use these so their
+parameters and cursors cannot drift:
+
+- `readOutputControls(params)` resolves the public output-control names:
+  canonical `max_bytes` and `lines`, deprecated aliases `maxBytes` and
+  `tail_lines`. The canonical name wins when both are given; values are
+  returned unvalidated so each surface keeps its own defaults and caps.
+- `readOutputInclude(value)` parses the explicit `include` opt-in
+  (`cost`, `tools`) and names unknown values.
+- `sessionScopeKey({ all, unavailable, origin, fallback })` is the cursor scope
+  every page/revision cursor binds (`all`, `session:unavailable`,
+  `session:<digest>`, or the fallback).
+- `lifecycleContentRevision(facts, logPath)` hashes consumer lifecycle facts
+  plus the retained log's identity (`logIdentityFacts`), so a deleted,
+  replaced, or appended log is a content change.
+
 ## Incident pages and callbacks
 
 Incidents are rendered and paged by `failure-observations`:
@@ -150,7 +178,10 @@ Incidents are rendered and paged by `failure-observations`:
 `N active failure observations · K shown · M omitted · incidentCursor=…`) and
 `pageFailureIncidents` (`i1.` cursors that resume at the first unshown byte,
 including inside a row larger than one page). Consumers accept the incident
-cursor on their status/result tools.
+cursor on their status/result tools and render the explicit page with the
+shared `incidentVerbatimPage`, `incidentPageHeading`, and `incidentResource`.
+`failureJournalFingerprint(path)` is a cheap change key for caching counts
+derived from a journal.
 
 `callback-batcher` counts incident rows per completion row
 (`incidents=N shown=K omittedIncidents=M retrieve: …`) and formats urgent

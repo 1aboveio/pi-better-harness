@@ -53,7 +53,7 @@ describe("extension e2e", () => {
     expect(harness.tools.get("bg_task_status")?.description).toContain("compact model-facing summary");
     expect(harness.tools.get("bg_task_status")?.description).toContain("verbose:true only");
     expect(harness.tools.get("bg_task_log")?.description).toContain("compact 10-line terminal-aware tail");
-    expect(harness.tools.get("bg_task_log")?.description).toContain("tail_lines:0 pages the retained raw log");
+    expect(harness.tools.get("bg_task_log")?.description).toContain("lines:0 pages the retained raw log");
     expect(harness.tools.get("bg_task")?.description).toContain("action:status");
     expect(harness.tools.get("bg_status")?.description).toContain("explicit full-data recovery");
   });
@@ -487,6 +487,30 @@ describe("extension e2e", () => {
       expect(readMeta(otherSessionId)?.dismissedAt).toBeUndefined();
     } finally {
       await harness.execute("bg_task_stop", { id: runningId });
+    }
+  });
+
+  it("stops another session's running task only with all:true (#322)", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bg-stop-owner-"));
+    const owner = createHarness({ cwd, sessionId: "owner-session" });
+    const other = createHarness({ cwd, sessionId: "other-session" });
+    const launch = await owner.execute("bg_task_spawn", {
+      name: "owned-sleeper",
+      shell: false,
+      argv: [process.execPath, "-e", "setTimeout(() => {}, 30_000)"],
+      callback: false,
+    });
+    const id = extractTaskId(launch);
+    try {
+      const refused = await other.execute("bg_task_stop", { id });
+      expect(refused).toContain("not stopped");
+      expect(readMeta(id)?.status).toBe("running");
+      expect(readMeta(id)?.stopRequestedAt).toBeUndefined();
+      const stopped = await other.execute("bg_task_stop", { id, all: true });
+      expect(stopped).toContain("cancelled");
+      await waitForMeta(id, (meta) => meta?.status === "cancelled");
+    } finally {
+      await owner.execute("bg_task_stop", { id });
     }
   });
 });

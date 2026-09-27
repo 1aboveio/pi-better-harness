@@ -18,6 +18,7 @@ import { observeFailures } from "../shared-failure-observations.ts";
 import { failurePath } from "../failures.ts";
 import { logPathFor, readMeta, runDir, writeMeta } from "../registry.ts";
 import { subagentListTool, subagentOutputTool, subagentResultTool } from "../tools.ts";
+import { listIncidentComputationCount } from "../output-payload.ts";
 import {
     OUTPUT_BUDGET_BYTES,
     utf8ByteLength,
@@ -739,5 +740,132 @@ describe("registered subagent payloads", () => {
             }
             assert.equal(seen.size, 21);
         });
+    });
+});
+
+describe("output-control aliases and opt-in facts (#321)", () => {
+    it("accepts max_bytes and deprecated maxBytes on list/output/result; max_bytes wins", async () => {
+        const id = trackDisk(`sa_alias_bytes_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        writeEvents(id, completedLog(`ANSWER ${"a".repeat(6000)}`));
+        for (const tool of [resultTool, outputTool]) {
+            const canonical = textOf(await tool.execute("tc", { id, max_bytes: 700 }));
+            assert.ok(utf8ByteLength(canonical) <= 700, canonical);
+            assert.equal(stripEnvelope(textOf(await tool.execute("tc", { id, maxBytes: 700 }))), stripEnvelope(canonical));
+            assert.equal(stripEnvelope(textOf(await tool.execute("tc", { id, max_bytes: 700, maxBytes: 4096 }))), stripEnvelope(canonical));
+        }
+        const list = textOf(await listTool.execute("tc", { maxBytes: 300 }));
+        assert.ok(utf8ByteLength(list) <= 300, list);
+        const listCanonical = textOf(await listTool.execute("tc", { max_bytes: 300, maxBytes: 4096 }));
+        assert.ok(utf8ByteLength(listCanonical) <= 300, listCanonical);
+    });
+
+    it("declares canonical names and deprecated aliases in the schemas", () => {
+        for (const tool of [resultTool, outputTool, listTool]) {
+            const properties = tool.parameters;
+            assert.ok(properties.max_bytes, tool.name);
+            assert.match(properties.maxBytes.description, /Deprecated alias for max_bytes/, tool.name);
+        }
+        for (const tool of [resultTool, outputTool]) {
+            assert.ok(tool.parameters.lines, tool.name);
+            assert.match(tool.parameters.tail_lines.description, /Deprecated alias for lines/, tool.name);
+            assert.ok("include" in tool.parameters, tool.name);
+        }
+    });
+
+    it("subagent_output takes lines, with tail_lines as an alias that lines overrides", async () => {
+        const id = trackDisk(`sa_alias_lines_${Date.now()}`);
+        const answer = Array.from({ length: 40 }, (_, i) => `row-${String(i).padStart(2, "0")}`).join("\n");
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        writeEvents(id, completedLog(answer));
+        const canonical = textOf(await outputTool.execute("tc", { id, lines: 3 }));
+        assert.equal(textOf(await outputTool.execute("tc", { id, tail_lines: 3 })), canonical);
+        const both = textOf(await outputTool.execute("tc", { id, lines: 2, tail_lines: 9 }));
+        assert.match(both, /row-01/);
+        assert.doesNotMatch(both, /row-02/);
+    });
+
+    it("subagent_result pages the answer by lines when asked, and still reconstructs it", async () => {
+        const id = trackDisk(`sa_result_lines_${Date.now()}`);
+        const answer = Array.from({ length: 12 }, (_, i) => `answer-line-${String(i).padStart(2, "0")}`).join("\n") + "\n";
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        writeEvents(id, completedLog(answer));
+        const unlimited = textOf(await resultTool.execute("tc", { id }));
+        assert.match(unlimited, /answer-line-11/);
+        let cursor;
+        let rebuilt = "";
+        let pages = 0;
+        for (; pages < 20; pages += 1) {
+            const page = textOf(await resultTool.execute("tc", { id, lines: 5, cursor }));
+            const body = stripEnvelope(page);
+            assert.ok(body.split("\n").filter(Boolean).length <= 5, page);
+            rebuilt += body;
+            if (!/hasMore=true/.test(page)) break;
+            cursor = nextCursorOf(page);
+            assert.ok(cursor, page);
+        }
+        assert.equal(rebuilt, answer);
+        assert.equal(pages + 1, 3);
+        assert.equal(stripEnvelope(textOf(await resultTool.execute("tc", { id, tail_lines: 5 }))), stripEnvelope(textOf(await resultTool.execute("tc", { id, lines: 5 }))));
+    });
+
+    it("adds spend and tool-count lines only on explicit include", async () => {
+        const id = trackDisk(`sa_include_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        writeEvents(id, completedLog("the findings are ready"));
+        for (const tool of [resultTool, outputTool]) {
+            const plain = textOf(await tool.execute("tc", { id }));
+            assert.doesNotMatch(plain, /spend:|tools: \d+ call/);
+            const cost = textOf(await tool.execute("tc", { id, include: ["cost"] }));
+            assert.match(cost, /spend: 1\.2k tok \(↑400 ↓800\) · \$0\.0034/);
+            assert.doesNotMatch(cost, /tools: \d+ call/);
+            const tools = textOf(await tool.execute("tc", { id, include: ["tools"] }));
+            assert.match(tools, /tools: 2 calls · distinct: bash, read/);
+            assert.doesNotMatch(tools, /spend:/);
+            const both = textOf(await tool.execute("tc", { id, include: ["cost", "tools", "bogus"] }));
+            assert.match(both, /spend: /);
+            assert.match(both, /tools: 2 calls/);
+            assert.match(both, /include: ignored unknown value\(s\) bogus; supported: cost, tools/);
+            assert.match(both, /the findings are ready/);
+            assert.ok(utf8ByteLength(both) <= OUTPUT_BUDGET_BYTES.answer);
+        }
+        const raw = textOf(await outputTool.execute("tc", { id, mode: "raw", include: ["tools"] }));
+        assert.match(raw, /tools: 2 calls/);
+        const nothing = trackDisk(`sa_include_empty_${Date.now()}`);
+        seedMeta(nothing, { status: "completed", exitCode: 0 });
+        writeEvents(nothing, [{ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }] }]);
+        const empty = textOf(await resultTool.execute("tc", { id: nothing, include: ["cost", "tools"] }));
+        assert.match(empty, /spend: none recorded/);
+        assert.match(empty, /tools: 0 calls/);
+    });
+});
+
+describe("subagent_list incident cache (#323)", () => {
+    it("does not rescan unchanged runs and recomputes only a run whose journal or log changed", async () => {
+        const stamp = Date.now() + 90_000_000;
+        const ids = [];
+        for (let i = 0; i < 6; i += 1) {
+            const id = trackDisk(`sa_list_cache_${stamp}_${i}`);
+            ids.push(id);
+            seedMeta(id, { status: "completed", exitCode: 0, startedAt: stamp + i });
+            writeEvents(id, completedLog(`answer ${i}`));
+        }
+        await listTool.execute("tc", { limit: 100 });
+        await listTool.execute("tc", { limit: 100 });
+        const settled = listIncidentComputationCount();
+        await listTool.execute("tc", { limit: 100 });
+        assert.equal(listIncidentComputationCount() - settled, 0, "an unchanged registry is served from cache");
+
+        observeFailures(failurePath(ids[2]), [{ id: "cache-probe", operation: "cache-op", kind: "failure", category: "operation", summary: "journal changed" }]);
+        const before = listIncidentComputationCount();
+        const changed = textOf(await listTool.execute("tc", { limit: 100, max_bytes: 4096 }));
+        assert.equal(listIncidentComputationCount() - before, 1, "only the run whose journal changed is recomputed");
+        const row = changed.split("\n").find((line) => line.includes(ids[2]));
+        assert.match(row ?? "", /1 incident/, changed);
+
+        appendFileSync(logPathFor(ids[4]), `${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x" } })}\n`);
+        const beforeLog = listIncidentComputationCount();
+        await listTool.execute("tc", { limit: 100 });
+        assert.ok(listIncidentComputationCount() - beforeLog >= 1, "a changed log is rescanned");
     });
 });

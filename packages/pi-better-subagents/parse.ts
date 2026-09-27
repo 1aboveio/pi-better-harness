@@ -127,6 +127,8 @@ export interface ParsedRun {
     lastActivity: string;
     /** Names of tools the child invoked, in order (deduped-adjacent). */
     toolCalls: string[];
+    /** Every tool execution start seen, including adjacent repeats (opt-in `include: ["tools"]`). */
+    toolCallCount?: number;
     /** Tool starts that were not matched by a tool end before parsing stopped. */
     unmatchedToolCalls: UnmatchedToolCall[];
     /** True if we saw the terminal `agent_end`/`agent_settled` event. */
@@ -1095,6 +1097,7 @@ interface ParseState {
     finalText: string;
     lastActivity: string;
     toolCalls: string[];
+    toolCallCount: number;
     openToolCalls: Map<string, UnmatchedToolCall>;
     anonymousToolCall: number;
     sawEnd: boolean;
@@ -1125,6 +1128,7 @@ function freshState(cursor: LogCursor): ParseState {
         finalText: "",
         lastActivity: "",
         toolCalls: [],
+        toolCallCount: 0,
         openToolCalls: new Map(),
         anonymousToolCall: 0,
         sawEnd: false,
@@ -1270,6 +1274,7 @@ function foldParseEvent(state: ParseState, e: Record<string, unknown>): void {
     if (type === "tool_execution_start") {
         const toolName = typeof e.toolName === "string" ? e.toolName : "unknown";
         if (state.toolCalls[state.toolCalls.length - 1] !== toolName) state.toolCalls.push(toolName);
+        state.toolCallCount += 1;
         state.openToolCalls.set(toolCallId ?? `anonymous:${state.anonymousToolCall++}`, { id: toolCallId, toolName });
     }
     if (type === "tool_execution_end") {
@@ -1342,6 +1347,7 @@ export function parseRun(id: string): ParsedRun {
         finalText: view.finalText,
         lastActivity: view.lastActivity,
         toolCalls: [...view.toolCalls],
+        toolCallCount: view.toolCallCount,
         unmatchedToolCalls: [...view.openToolCalls.values()],
         sawEnd: view.sawEnd,
         usage,

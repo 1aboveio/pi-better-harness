@@ -1,5 +1,5 @@
 // Generated from packages/failure-observations/index.ts. Do not edit directly.
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -458,6 +458,60 @@ export function pageFailureIncidents(state: FailureState, request: IncidentPageR
     startsPartial,
     endsPartial,
   };
+}
+
+/** Cursor resource for one task/run's incidents in one session scope. */
+export function incidentResource(scopeKey: string, id: string): string {
+  return `incidents:${scopeKey}:${id}`;
+}
+
+/** Heading for an explicit incident page. */
+export function incidentPageHeading(total: number): string {
+  return `Incident page of ${total} active failure observation${total === 1 ? "" : "s"}.`;
+}
+
+/**
+ * One explicit incident page shaped as an envelope verbatim page (log-utils
+ * `VerbatimPage`): the shared body of every consumer's `incidentCursor`
+ * response. Omitted counts are rows, never bytes.
+ */
+export function incidentVerbatimPage(state: FailureState, request: IncidentPageRequest = {}): {
+  text: string;
+  hasMore: boolean;
+  cursor: string;
+  nextCursor: string;
+  omittedBytes: number;
+  omittedRows: number;
+  reset?: "stale-cursor" | "source-replaced";
+} {
+  const page = pageFailureIncidents(state, request);
+  return {
+    text: page.text || (page.total === 0 ? "No active failure observations." : ""),
+    hasMore: page.hasMore,
+    cursor: page.cursor,
+    nextCursor: page.nextCursor,
+    omittedBytes: 0,
+    omittedRows: page.omitted,
+    ...(page.reset ? { reset: page.reset } : {}),
+  };
+}
+
+/**
+ * Cheap change fingerprint of a failure journal: the file's identity and size
+ * (or its read error), whether the durable existence marker is present, and
+ * how many records are still awaiting persistence in this process. Every
+ * journal append, truncation, deletion, or pending in-memory record changes
+ * it, so a cache keyed by it never serves stale incident counts.
+ */
+export function failureJournalFingerprint(path: string): string {
+  let file: string;
+  try {
+    const stats = statSync(path, { bigint: true });
+    file = `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+  } catch (error) {
+    file = `unreadable:${(error as NodeJS.ErrnoException).code ?? "error"}`;
+  }
+  return `${file}|${existsSync(`${path}.observed`) ? 1 : 0}|${pendingWrites.get(path)?.length ?? 0}`;
 }
 
 export function incidentCursorAt(state: FailureState, offset: number, resource?: string): string {

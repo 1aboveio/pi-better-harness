@@ -21,6 +21,12 @@ import {
   clampBudgetBytes,
   formatUnchangedEvidence,
   inspectStatusRevision,
+  lifecycleContentRevision,
+  logIdentityFacts,
+  originScopeDigest,
+  readOutputControls,
+  readOutputInclude,
+  sessionScopeKey,
   pageRetainedFile,
   pageRows,
   pageVerbatimText,
@@ -750,5 +756,81 @@ describe("pageRows", () => {
     assert.equal(page.clippedRows, 1);
     const next = pageRows(items, { ...request(page.nextCursor), maxBytes: 64, render: (row: Row) => `${row.id} ${"n".repeat(500)}` });
     assert.equal(next.text.startsWith("task_small "), true);
+  });
+});
+
+describe("shared output controls and scope keys (#321/#323)", () => {
+  it("resolves canonical output-control names over deprecated aliases", () => {
+    assert.deepEqual(readOutputControls({ max_bytes: 512, lines: 3 }), { maxBytes: 512, lines: 3, deprecated: [] });
+    assert.deepEqual(readOutputControls({ maxBytes: 256, tail_lines: 4 }), { maxBytes: 256, lines: 4, deprecated: ["maxBytes", "tail_lines"] });
+    assert.deepEqual(readOutputControls({ max_bytes: 512, maxBytes: 256, lines: 0, tail_lines: 9 }), { maxBytes: 512, lines: 0, deprecated: ["maxBytes", "tail_lines"] });
+    assert.deepEqual(readOutputControls(undefined), { deprecated: [] });
+  });
+
+  it("parses include opt-ins, deduplicating known values and naming unknown ones", () => {
+    const parsed = readOutputInclude(["tools", "COST", "tools", "bogus", "", "bogus"]);
+    assert.deepEqual([...parsed.include].sort(), ["cost", "tools"]);
+    assert.deepEqual(parsed.unknown, ["bogus"]);
+    assert.deepEqual([...readOutputInclude("cost, tools").include].sort(), ["cost", "tools"]);
+    assert.equal(readOutputInclude(undefined).include.size, 0);
+  });
+
+  it("keys cursor scopes by session, never letting an unavailable identity match a readable one", () => {
+    const origin = { cwd: "/w", sessionId: "s1" };
+    assert.equal(sessionScopeKey({ all: true, origin }), "all");
+    assert.equal(sessionScopeKey({ origin }), `session:${originScopeDigest(origin)}`);
+    assert.notEqual(sessionScopeKey({ origin }), sessionScopeKey({ origin: { cwd: "/w", sessionId: "s2" } }));
+    assert.equal(sessionScopeKey({ unavailable: true, origin }), "session:unavailable");
+    assert.equal(sessionScopeKey({ fallback: "parent:1" }), "parent:1");
+    assert.equal(sessionScopeKey({}), "none");
+    assert.match(originScopeDigest(origin), /^[0-9a-f]{24}$/);
+  });
+
+  it("makes a deleted, replaced, or appended log a content change", () => {
+    const dir = mkdtempSync(join(tmpdir(), "log-identity-"));
+    try {
+      const path = join(dir, "task.log");
+      writeFileSync(path, "one\n");
+      const first = lifecycleContentRevision(["running", 1], path);
+      assert.equal(lifecycleContentRevision(["running", 1], path), first);
+      assert.notEqual(lifecycleContentRevision(["failed", 1], path), first);
+      appendFileSync(path, "two\n");
+      const appended = lifecycleContentRevision(["running", 1], path);
+      assert.notEqual(appended, first);
+      rmSync(path);
+      assert.deepEqual(logIdentityFacts(path), ["unreadable", "ENOENT"]);
+      assert.notEqual(lifecycleContentRevision(["running", 1], path), appended);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("documents the accepted identical-prefix heuristic: a rewrite that keeps the sampled bytes continues and skips nothing after the cursor", () => {
+    // A same-identity rewrite whose head sample and pre-cursor window match is
+    // indistinguishable by stat and samples (the same case as delete + recreate
+    // on a reused inode with coarse birth times). The cursor continues; every
+    // byte after it is still returned. Accepted in the log-utils README.
+    const dir = mkdtempSync(join(tmpdir(), "log-identical-prefix-"));
+    try {
+      const path = join(dir, "task.log");
+      const prefix = "p".repeat(600);
+      writeFileSync(path, `${prefix}OLD-TAIL\n`);
+      const first = pageRetainedFile(path, { maxBytes: 600, resource: "run" });
+      assert.equal(first.text, prefix);
+      writeFileSync(path, `${prefix}NEW-TAIL-AND-MORE\n`);
+      let cursor = first.nextCursor;
+      let rest = "";
+      for (let pages = 0; pages < 5; pages += 1) {
+        const next = pageRetainedFile(path, { cursor, maxBytes: 600, resource: "run" });
+        assert.equal(next.reset, undefined);
+        if (pages === 0) assert.equal(next.startByte, 600);
+        rest += next.text;
+        if (next.nextCursor === cursor) break;
+        cursor = next.nextCursor;
+      }
+      assert.equal(rest, "NEW-TAIL-AND-MORE\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

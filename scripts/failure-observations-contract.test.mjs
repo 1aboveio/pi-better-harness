@@ -34,3 +34,21 @@ for (const target of targets) {
     assert.deepEqual(core.reduceFailure(state, failure, 100_005), state, "replay cannot undo recovery");
   });
 }
+
+for (const target of targets) {
+  test(`${target}: the shared incident page is the one both tools render (#323)`, async () => {
+    const core = await import(resolve(root, target));
+    let state = core.emptyFailureState();
+    for (let i = 0; i < 4; i += 1) {
+      state = core.reduceFailure(state, { id: `op-${i}`, operation: `op-${i}`, kind: "failure", category: "operation", summary: `failure ${i}` }, 1000 + i);
+    }
+    const resource = core.incidentResource("session:x", "id-1");
+    const page = core.incidentVerbatimPage(state, { maxBytes: 4096, resource });
+    assert.equal(page.hasMore, false);
+    assert.equal(page.omittedRows, 0);
+    assert.equal(page.text, core.formatFailureLines(state).join("\n"));
+    assert.equal(core.incidentPageHeading(4), "Incident page of 4 active failure observations.");
+    assert.equal(core.incidentVerbatimPage(state, { cursor: page.cursor, resource: core.incidentResource("all", "id-1") }).reset, "stale-cursor");
+    assert.equal(typeof core.failureJournalFingerprint("/nonexistent/failures.jsonl"), "string");
+  });
+}

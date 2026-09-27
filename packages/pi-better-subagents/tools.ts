@@ -42,6 +42,7 @@ import {
     unknownRunError,
     type SubagentToolSession,
 } from "./output-payload.ts";
+import { readOutputControls } from "./shared-log-utils.ts";
 import {
     extractChildEventFactsFromLog,
     loadHealthThresholdsFromConfig,
@@ -80,6 +81,24 @@ type TypeModule = {
     Array: (v: unknown, o?: unknown) => unknown;
     Optional: (v: unknown) => unknown;
 };
+
+/**
+ * Resolve public output-control names (#321): canonical `max_bytes` / `lines`,
+ * deprecated `maxBytes` / `tail_lines`; the canonical name wins when both are
+ * given. The payload assemblers only see the normalized `maxBytes` / `lines`.
+ */
+function normalizeOutputRequest<T extends Record<string, unknown>>(params: T): T & { maxBytes?: unknown; lines?: unknown } {
+    const controls = readOutputControls(params);
+    const { max_bytes: _canonicalBytes, tail_lines: _aliasLines, ...rest } = params as Record<string, unknown>;
+    return {
+        ...(rest as T),
+        maxBytes: controls.maxBytes,
+        lines: controls.lines,
+    };
+}
+
+const MAX_BYTES_ALIAS_DESCRIPTION = "Deprecated alias for max_bytes. max_bytes wins when both are given.";
+const INCLUDE_DESCRIPTION = "Explicit opt-in facts omitted by default: \"cost\" adds one token/cost spend line, \"tools\" adds one tool-call count line with the distinct tool names.";
 
 /** pi's tool-result text shape. */
 export const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
@@ -259,12 +278,13 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
             limit: Type.Optional(Type.Number({ description: `Maximum rows to display (default ${SUBAGENT_LIST_DEFAULT_LIMIT}, max ${SUBAGENT_LIST_MAX_LIMIT}; larger values are clamped).` })),
             status: Type.Optional(Type.Array(Type.String(), { description: `Effective statuses to include: ${SUBAGENT_LIST_STATUSES.join(", ")}.` })),
             cursor: Type.Optional(Type.String({ description: "Caller-owned page or status cursor from a previous list response." })),
-            maxBytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 1 KiB, max 4 KiB)." })),
+            max_bytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 1 KiB, max 4 KiB)." })),
+            maxBytes: Type.Optional(Type.Number({ description: MAX_BYTES_ALIAS_DESCRIPTION })),
         }),
         async execute(_toolCallId: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
             const session = forCall(baseSession, ctx);
-            const p = (params ?? {}) as {
-                all?: boolean; limit?: number; status?: string[] | string; cursor?: string; maxBytes?: number;
+            const p = normalizeOutputRequest((params ?? {}) as Record<string, unknown>) as {
+                all?: boolean; limit?: number; status?: string[] | string; cursor?: string; maxBytes?: unknown;
             };
             const now = Date.now();
             const index = listRunRecords();
@@ -352,7 +372,8 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
         description:
             "Read a subagent run's current output without waiting. Default is a 1 KiB / 10-line excerpt of the current session. " +
             "Pass all:true to read a foreign-session id. Pass mode=raw for retained-log pages (16 KiB default, 64 KiB cap). " +
-            "Pass cursor to continue or to poll for failure-only changes. Missing or unreadable logs are reported as gaps, not as empty healthy output.",
+            "Pass cursor to continue or to poll for failure-only changes. Missing or unreadable logs are reported as gaps, not as empty healthy output. " +
+            "Spend and tool counts are omitted unless include:[\"cost\",\"tools\"] asks for them.",
         promptSnippet: "Peek at a subagent's current output without waiting",
         promptGuidelines: [
             "Use subagent_output only when the user explicitly asks how a run is progressing. It never waits — do not call it in a loop.",
@@ -360,16 +381,18 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
         ],
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
-            tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines." })),
             lines: Type.Optional(Type.Number({ description: "Max lines in the default excerpt (default 10)." })),
+            tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines. lines wins when both are given." })),
             cursor: Type.Optional(Type.String({ description: "Caller-owned page or status cursor from a previous response." })),
-            maxBytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 1 KiB, max 4 KiB; raw default 16 KiB, max 64 KiB)." })),
+            max_bytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 1 KiB, max 4 KiB; raw default 16 KiB, max 64 KiB)." })),
+            maxBytes: Type.Optional(Type.Number({ description: MAX_BYTES_ALIAS_DESCRIPTION })),
             mode: Type.Optional(Type.String({ description: "raw = page retained log bytes. Default is the bounded assembled excerpt." })),
+            include: Type.Optional(Type.Array(Type.String(), { description: INCLUDE_DESCRIPTION })),
             all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
         }),
         async execute(_id: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
             const session = forCall(baseSession, ctx);
-            const p = params as { id: string; cursor?: string; maxBytes?: number; mode?: string; all?: boolean; lines?: number; tail_lines?: number };
+            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown };
             const access = resolveRunAccess(p.id, p, session);
             if (access.kind === "missing") throw unknownRunError(p.id);
             if (access.kind === "unreadable") return text(assembleUnreadableMetadata(p.id, access.detail, p));
@@ -387,7 +410,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         name: "subagent_result",
         label: "Subagent Result",
         description:
-            "Read a subagent's final output if it has finished. NEVER waits. Default current session. Ordinary answers are preserved verbatim in a 2 KiB UTF-8 page (max 8 KiB); pass cursor to reconstruct the rest. Pass all:true for a foreign-session id. mode=raw pages retained log bytes (16 KiB default, 64 KiB cap). Failures and exceptional lifecycle facts come before progress. No tool-name histories or default cost lines.",
+            "Read a subagent's final output if it has finished. NEVER waits. Default current session. Ordinary answers are preserved verbatim in a 2 KiB UTF-8 page (max_bytes up to 8 KiB, optional lines cap); pass cursor to reconstruct the rest. Pass all:true for a foreign-session id. mode=raw pages retained log bytes (16 KiB default, 64 KiB cap). Failures and exceptional lifecycle facts come before progress. No tool-name histories or default cost lines; pass include:[\"cost\",\"tools\"] to opt in.",
         promptSnippet: "Read a finished subagent's final result (never waits)",
         promptGuidelines: [
             "Use subagent_result to collect a finished run's output. If it reports the run is still going, stop — do not poll; you'll be notified when it finishes.",
@@ -396,8 +419,12 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
             cursor: Type.Optional(Type.String({ description: "Caller-owned answer page or status cursor from a previous response." })),
-            maxBytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 2 KiB, max 8 KiB)." })),
+            max_bytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 2 KiB, max 8 KiB)." })),
+            maxBytes: Type.Optional(Type.Number({ description: MAX_BYTES_ALIAS_DESCRIPTION })),
+            lines: Type.Optional(Type.Number({ description: "Optional line cap for each answer page (default: bytes only). nextCursor continues after the last line shown." })),
+            tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines. lines wins when both are given." })),
             mode: Type.Optional(Type.String({ description: "raw = page retained log bytes (16 KiB default, 64 KiB cap). Default is the bounded assembled result." })),
+            include: Type.Optional(Type.Array(Type.String(), { description: INCLUDE_DESCRIPTION })),
             all: Type.Optional(Type.Boolean({ description: "If true, allow a foreign-session id. Default is current session only." })),
         }),
         renderResult(result: unknown, options: unknown, theme: unknown) {
@@ -405,7 +432,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         },
         async execute(_id: string, params: unknown, _signal?: unknown, _onUpdate?: unknown, ctx?: unknown) {
             const session = forCall(baseSession, ctx);
-            const p = params as { id: string; cursor?: string; maxBytes?: number; mode?: string; all?: boolean };
+            const p = normalizeOutputRequest(params as Record<string, unknown>) as { id: string; cursor?: string; maxBytes?: unknown; mode?: string; all?: boolean; lines?: unknown; include?: unknown };
             const access = resolveRunAccess(p.id, p, session);
             if (access.kind === "missing") throw unknownRunError(p.id);
             if (access.kind === "unreadable") {

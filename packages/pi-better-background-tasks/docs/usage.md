@@ -16,15 +16,58 @@ not special cases in the runtime.
 | `bg_task_spawn` | Start a long-running process and return immediately. |
 | `bg_task_watch` | Poll a command until success/failure/timeout. |
 | `bg_task_list` | List tasks, newest first (1 KiB / 10 rows by default). Params: `status`, `limit` (max 100), `cursor` (a returned `nextCursor` pages on; a `statusCursor` asks for changes only), `max_bytes` (max 4 KiB), `all` (every session). |
-| `bg_task_status` | Inspect one task (1 KiB compact summary). Params: `id`, `cursor` (a `statusCursor`, or an `incidentCursor` to page incidents), `max_bytes` (max 2 KiB; verbose up to 64 KiB), `verbose` (metadata JSON, environment omitted, paged when large), `all` (foreign session). |
-| `bg_task_log` | Read a bounded, terminal-aware tail (10 rows / 1 KiB). Params: `id`, `tail_lines` (`0` = raw pages), `raw`, `cursor` (a raw `nextCursor`), `max_bytes` (log max 4 KiB; raw 16 KiB default, 64 KiB max), `all`. |
-| `bg_task_stop` | Cancel a watcher or terminate a process task. |
+| `bg_task_status` | Inspect one task (1 KiB compact summary). Params: `id`, `cursor` (a `statusCursor`; an `incidentCursor` to page incidents; a raw log `nextCursor` continues the raw log page; a verbose `nextCursor` continues verbose metadata), `max_bytes` (max 2 KiB; verbose up to 64 KiB), `verbose` (metadata JSON, environment omitted, paged when large), `all` (foreign session). |
+| `bg_task_log` | Read a bounded, terminal-aware tail (10 rows / 1 KiB). Params: `id`, `lines` (`0` = raw pages), `raw`, `cursor` (a raw `nextCursor`), `max_bytes` (log max 4 KiB; raw 16 KiB default, 64 KiB max), `all`. |
+| `bg_task_stop` | Cancel a watcher or terminate a process task owned by the current session. Params: `id`, `all` (stop another session's task, or one whose ownership cannot be verified). |
 | `bg_task` | Action-based wrapper for `spawn`, `watch`, `list`, `status`, `log`, `stop`, `clear`. |
 | `bg_status` | Small action wrapper for `list`, `status`, `log`, `stop`, `clear`. |
 
-`clear` dismisses terminal tasks for the active cwd/session so they no longer
-count as foreground attention. It keeps metadata and logs on disk for explicit
-inspection.
+Output-control parameters are spelled the same across background tasks and
+subagents: `max_bytes` and `lines`. The older spellings `maxBytes` and
+`tail_lines` are deprecated aliases; both work, and the canonical name wins when
+both are given.
+
+`clear` dismisses terminal tasks so they no longer count as foreground
+attention. It keeps metadata and logs on disk for explicit inspection. Without
+`id` it dismisses every terminal task the current session owns (optionally
+filtered by `status`) and never crosses sessions, even with `all:true`. With
+`id` it dismisses that one terminal task.
+
+### Session ownership for reads and mutations
+
+Reads (`list`, `status`, `log`) and mutations (`stop`, `clear`) share one
+ownership rule:
+
+| Task | Read | Stop / clear by id | Bulk clear |
+| ---- | ---- | ------------------ | ---------- |
+| Owned by the current session | shown | allowed | dismissed |
+| Owned by another session | ownership gap; `all:true` reads it | refused; `all:true` allows it | left alone |
+| Ownership unavailable (legacy task with no recorded origin, a sessionless task from another Pi process, or the current session identity cannot be read) | ownership gap; `all:true` reads it | refused; `all:true` allows it | left alone (see below) |
+
+Bulk clear only looks at tasks indexed under the caller's own cwd and session,
+so it never touches another session's tasks. What it reports about skipped
+tasks depends on the caller:
+
+- **With a session id**, legacy no-origin tasks are outside that index. They
+  are neither dismissed nor counted. `bg_task_list` still counts them as hidden.
+- **Without a session id**, same-cwd sessionless and legacy tasks that this Pi
+  process did not launch are skipped, and the reply counts them
+  (`N terminal tasks with unverifiable ownership were not dismissed`).
+- **When the session identity cannot be read**, nothing is dismissed and the
+  reply says so, without a count.
+
+In every case, clear one such task with `id` and `all:true`.
+
+A refusal names the task and says it was not stopped or dismissed; it never
+reveals the task's evidence.
+
+**Sessionless ownership does not survive a Pi restart.** When Pi reports no
+session id, a task counts as yours only if this Pi process launched it (same
+cwd, no session id, same process id). After Pi restarts, your earlier
+sessionless tasks become an ownership gap: `list` hides and counts them,
+`status`/`log` report a gap, and `stop`/`clear` refuse them. Pass `all:true` to
+read, stop, or clear one of them by id. Tasks launched with a session id do not
+have this gap.
 
 ## Remote SSH
 
@@ -164,6 +207,11 @@ accumulation window; invalid values use 100 ms. A single event flushes when that
 bounded window expires. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 
+Each row's `status` is the lifecycle status, plus an attention count when
+incidents are pending (for example `failed; 2 incidents need attention`); the
+incident text is on its own rows with exact counts. A status longer than 160
+bytes keeps whole `; `-separated notes and says how many were left out.
+
 Callbacks point to `bg_task_status` first. The aggregate never contains result
 objects or raw logs and is bounded to 2 KiB UTF-8 (urgent callbacks included).
 Omitted completion rows stay queued and unreceipted. Omitted incidents are
@@ -171,7 +219,7 @@ counted; pass the returned `incidentCursor` value as the `cursor` parameter of
 `bg_task_status` to page them. The default
 status response is a compact 1 KiB model-facing summary; use `verbose:true` only
 when full metadata is required (environment values stay omitted). `bg_task_log`
-defaults to a 10-line terminal-aware tail under 1 KiB. `tail_lines: 0` pages
+defaults to a 10-line terminal-aware tail under 1 KiB. `lines: 0` pages
 retained raw bytes (16 KiB default, 64 KiB hard cap) from the oldest retained
 offset. Capture and retention loss are disclosed; this is not a full-history
 archive. `bg_task_list` pages every task newest first with a `nextCursor`;
