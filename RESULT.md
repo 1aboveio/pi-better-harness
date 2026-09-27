@@ -10,7 +10,7 @@
 ## Branch / SHA
 
 - Branch: `rush/312-baseline`
-- Unit commit: recorded after commit via `git rev-parse HEAD`
+- Unit commit: `fdf1a1a8ead5a172e10b0467b463dfacf82f9816`
 - Product revision measured: `0f1f84c18d6df76cce7a4dcdfc2a276a4015abb9` (this unit added harness/docs only; no production or shared-package edits)
 
 ## Changed paths
