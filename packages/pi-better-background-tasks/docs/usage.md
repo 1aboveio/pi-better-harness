@@ -173,7 +173,10 @@ when full metadata is required (environment values stay omitted). `bg_task_log`
 defaults to a 10-line terminal-aware tail under 1 KiB. `tail_lines: 0` pages
 retained raw bytes (16 KiB default, 64 KiB hard cap) from the oldest retained
 offset. Capture and retention loss are disclosed; this is not a full-history
-archive. See `docs/issue-312-output.md`.
+archive. `bg_task_list` pages every task newest first with a `nextCursor`;
+status and list responses also carry a `statusCursor` that returns a small
+no-change response until lifecycle, log, or failure facts change. See
+`docs/issue-312-output.md`.
 
 Pi's optional `followUpMode: all` still helps when a later completion arrives
 after an earlier 100 ms aggregate has already flushed: Pi can consume queued

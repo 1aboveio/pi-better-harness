@@ -82,7 +82,7 @@ const CursorFields = {
 
 const IdParams = Type.Object({
   id: Type.String({ description: "Background task id." }),
-  verbose: Type.Optional(Type.Boolean({ description: "Return full raw metadata JSON with environment values omitted. Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
+  verbose: Type.Optional(Type.Boolean({ description: "Return raw metadata JSON with environment values omitted, bounded like raw evidence (16 KiB default, max_bytes up to 64 KiB, paged with cursor when larger). Default false returns the compact model-facing summary. Use true only for debugging or explicit recovery." })),
   ...CursorFields,
 });
 const ListParams = Type.Object({
@@ -190,7 +190,7 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_list",
     label: "BG List",
-    description: "List durable background tasks as compact rows under a 1 KiB UTF-8 budget (10 entries default). Current-session only unless all:true. Nonblocking. Pass cursor to detect unchanged or failure-only updates, or a higher limit/max_bytes for a larger explicit page.",
+    description: "List durable background tasks as compact rows under a 1 KiB UTF-8 budget (10 entries default), newest first. Current-session only unless all:true. Nonblocking. Pass the returned nextCursor as cursor to page further (every task is reachable), or statusCursor to get a small no-change response or failure-only updates; a higher limit/max_bytes gives a larger explicit page.",
     parameters: ListParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
@@ -276,7 +276,7 @@ function statusOptions(params: Record<string, unknown>, origin?: BackgroundTaskC
     cursor: typeof params.cursor === "string" ? params.cursor : undefined,
     maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
     all: params.all === true,
-    origin,
+    ...scopeOptions(origin),
   };
 }
 
@@ -287,7 +287,7 @@ function logOptions(params: Record<string, unknown>, origin?: BackgroundTaskCall
     cursor: typeof params.cursor === "string" ? params.cursor : undefined,
     maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
     all: params.all === true,
-    origin,
+    ...scopeOptions(origin),
   };
 }
 
@@ -298,7 +298,7 @@ function listOptions(params: Record<string, unknown>, origin?: BackgroundTaskCal
     cursor: typeof params.cursor === "string" ? params.cursor : undefined,
     maxBytes: typeof params.max_bytes === "number" ? params.max_bytes : undefined,
     all: params.all === true,
-    origin,
+    ...scopeOptions(origin),
   };
 }
 
@@ -366,14 +366,28 @@ function withNavigatorRefresh(ctx: ExtensionContext, result: string): string {
   return result;
 }
 
+/** Origins whose session identity could not be read (the host threw). */
+const unavailableSessionOrigins = new WeakSet<BackgroundTaskCallbackOrigin>();
+
 function getCallbackOrigin(ctx: ExtensionContext | undefined): BackgroundTaskCallbackOrigin {
   let sessionId: string | undefined;
+  let unavailable = false;
   try {
     sessionId = ctx?.sessionManager?.getSessionId();
   } catch {
     sessionId = undefined;
+    unavailable = true;
   }
-  return { cwd: ctx?.cwd ?? "", sessionId };
+  const origin = { cwd: ctx?.cwd ?? "", sessionId };
+  if (unavailable) unavailableSessionOrigins.add(origin);
+  return origin;
+}
+
+function scopeOptions(origin?: BackgroundTaskCallbackOrigin): Pick<OutputOptions, "origin" | "sessionUnavailable"> {
+  return {
+    origin,
+    ...(origin && unavailableSessionOrigins.has(origin) ? { sessionUnavailable: true } : {}),
+  };
 }
 
 function logText(id: string, options: OutputOptions) {

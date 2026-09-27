@@ -49,6 +49,23 @@ describe("runtime", () => {
     const terminal = await waitForMeta(meta.id, (m) => m?.status === "succeeded");
     expect(terminal?.error).toBeUndefined();
   });
+  it("counts a terminal poll's capture overflow once", async () => {
+    const meta = startWatchTask(fakePi, {
+      command: `${JSON.stringify(process.execPath)} -e "process.stdout.write('x'.repeat(1200012))"`,
+      interval_seconds: 60,
+      callback: false,
+      success_when: { type: "exit_code", equals: 0 },
+    }, process.cwd());
+    try {
+      const terminal = await waitForMeta(meta.id, (m) => m?.status === "succeeded", 15_000);
+      expect(terminal?.captureDiscardedBytes).toBe(1_200_012 - 1024 * 1024);
+      expect(terminal?.stdoutDiscardedBytes).toBe(1_200_012 - 1024 * 1024);
+      expect(terminal?.captureOverflowEvents).toBe(1);
+    } finally {
+      rmSync(taskDir(meta.id), { recursive: true, force: true });
+    }
+  });
+
   it("defaults command watchers to a 15 minute timeout", () => {
     const before = Date.now();
     const meta = startWatchTask(fakePi, {

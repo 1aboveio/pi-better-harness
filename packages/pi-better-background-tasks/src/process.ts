@@ -311,10 +311,31 @@ function captureChunk(target: CaptureBuffer, chunk: Buffer | string, maxBytes: n
   target.truncated = true;
 }
 
+/**
+ * Length of `buffer` without a trailing UTF-8 sequence that the cap cut short.
+ * Chunk boundaries can split a code point; once capture overflows, the bytes
+ * that would have completed it were discarded, so the dangling lead bytes are
+ * discarded too instead of decoding to U+FFFD.
+ */
+export function completeUtf8Length(buffer: Buffer): number {
+  let start = buffer.length - 1;
+  while (start >= 0 && buffer.length - start < 4 && (buffer[start]! & 0xc0) === 0x80) start -= 1;
+  if (start < 0) return buffer.length;
+  const lead = buffer[start]!;
+  const need = lead <= 0x7f ? 1
+    : (lead & 0xe0) === 0xc0 ? 2
+    : (lead & 0xf0) === 0xe0 ? 3
+    : (lead & 0xf8) === 0xf0 ? 4
+    : 1;
+  return start + need > buffer.length ? start : buffer.length;
+}
+
 function finishCapture(target: CaptureBuffer): { text: string; discardedBytes: number } {
+  const stored = Buffer.concat(target.chunks, target.storedBytes);
+  const keep = target.truncated ? completeUtf8Length(stored) : stored.length;
   return {
-    text: Buffer.concat(target.chunks, target.storedBytes).toString("utf8"),
-    discardedBytes: target.discardedBytes,
+    text: stored.subarray(0, keep).toString("utf8"),
+    discardedBytes: target.discardedBytes + (stored.length - keep),
   };
 }
 

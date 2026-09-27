@@ -1,11 +1,24 @@
-import { createHash } from "node:crypto";
-import { activeFailures, formatFailureSummary, incidentCursorAt, isIncidentCursor, pageFailureIncidents, readFailureState } from "./shared-failure-observations.js";
+import { statSync } from "node:fs";
+import {
+  activeFailures,
+  failureRevision,
+  formatFailureLines,
+  formatFailureSummary,
+  formatIncidentSummary,
+  isIncidentCursor,
+  pageFailureIncidents,
+  readFailureState,
+  type FailureState,
+} from "./shared-failure-observations.js";
 import {
   assemblePriorityEnvelope,
   clampBudgetBytes,
+  cursorKind,
   formatUnchangedEvidence,
   inspectStatusRevision,
+  pageRows,
   pageVerbatimText,
+  revisionOf,
   sliceUtf8Bytes,
   utf8ByteLength,
   OUTPUT_BUDGET_BYTES,
@@ -16,16 +29,15 @@ import {
   type VerbatimPage,
 } from "./shared-log-utils.js";
 import { failurePath } from "./failures.js";
-import { captureGapsFor, pageTaskLog, readLog } from "./logs.js";
+import { captureGapsFor, pageTaskLog, readLog, type LogRead } from "./logs.js";
 import { belongsToOrigin, inspectMeta, listTaskRecords, originOf, type MetaInspection } from "./registry.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition } from "./types.js";
 
 /**
  * Issue #312 consumer budgets. Defaults follow OUTPUT-POLICY / shared
  * `OUTPUT_BUDGET_BYTES`. Explicit larger pages clamp to `OUTPUT_BUDGET_MAX_BYTES`
- * (hard caps), not the new smaller defaults. Totals are UTF-8 bytes of the
- * whole model-facing `content`, including headers, failures, gaps, and
- * continuation.
+ * (hard caps). Totals are UTF-8 bytes of the whole model-facing `content`,
+ * including headers, failures, gaps, and continuation.
  */
 export const BACKGROUND_OUTPUT_BUDGET_BYTES = {
   status: OUTPUT_BUDGET_BYTES.status,
@@ -44,6 +56,7 @@ export const BACKGROUND_OUTPUT_HARD_CAP_BYTES = {
 export const DEFAULT_LOG_TAIL_ROWS = OUTPUT_PAGE_DEFAULTS.logLines;
 export const DEFAULT_LIST_ENTRIES = OUTPUT_PAGE_DEFAULTS.listEntries;
 const MAX_LIST_ENTRIES = 100;
+const STATUS_EXCERPT_ROWS = 3;
 
 export type BackgroundOutputSurface = keyof typeof BACKGROUND_OUTPUT_BUDGET_BYTES;
 
@@ -57,37 +70,18 @@ export interface OutputOptions {
   limit?: number;
   origin?: BackgroundTaskCallbackOrigin;
   all?: boolean;
+  /**
+   * The current session's identity could not be read. Without `all`, every
+   * task's ownership is then unverifiable: reads report an ownership gap and
+   * lists hide rows while counting them.
+   */
+  sessionUnavailable?: boolean;
 }
 
 export function backgroundBudget(surface: BackgroundOutputSurface, requested?: number): number {
   const fallback = BACKGROUND_OUTPUT_BUDGET_BYTES[surface];
   const hard = BACKGROUND_OUTPUT_HARD_CAP_BYTES[surface];
   return Math.min(clampBudgetBytes(requested, fallback), hard);
-}
-
-
-function newestVerbatim(text: string, maxBytes: number): VerbatimPage {
-  const fromStart = pageVerbatimText(text, { maxBytes });
-  const total = utf8ByteLength(text);
-  if (total <= maxBytes) return fromStart;
-  const start = Math.max(0, total - maxBytes);
-  const slice = sliceUtf8Bytes(text, start, maxBytes, false);
-  let body = slice.text;
-  if (slice.startByte > 0) {
-    const newline = body.indexOf("\n");
-    if (newline >= 0 && newline < body.length - 1) body = body.slice(newline + 1);
-  }
-  return {
-    text: body,
-    hasMore: true,
-    omittedBytes: total - utf8ByteLength(body),
-    nextCursor: fromStart.cursor,
-    revision: fromStart.revision,
-  };
-}
-
-function revisionToken(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("base64url").slice(0, 32);
 }
 
 function oneLine(value: unknown, maxLength: number): string {
@@ -114,11 +108,13 @@ function stringifyObserved(value: unknown): string {
   }
 }
 
+/** Cursor scope: pagination and revision cursors never cross session scopes. */
 function scopeKey(options: OutputOptions): string {
   if (options.all) return "all";
+  if (options.sessionUnavailable) return "unavailable";
   const origin = options.origin;
   if (!origin) return "none";
-  return revisionToken([origin.cwd, origin.sessionId ?? ""]);
+  return revisionOf([origin.cwd, origin.sessionId ?? ""]);
 }
 
 function taskGaps(meta: BackgroundTaskMeta): EvidenceGap[] {
@@ -136,57 +132,49 @@ function taskGaps(meta: BackgroundTaskMeta): EvidenceGap[] {
   return gaps;
 }
 
-function failureSummaryText(id: string): string | undefined {
-  const state = readFailureState(failurePath(id));
-  const summary = formatFailureSummary(state);
-  if (!summary) return undefined;
-  const active = activeFailures(state);
-  if (active.length <= 5) return summary;
-  const omitted = active.length - 5;
-  const cursor = incidentCursorAt(state, 5);
-  return `omittedIncidents=${omitted} incidentCursor=${cursor}\n${summary}`;
+function failureStateFor(id: string): FailureState {
+  return readFailureState(failurePath(id));
 }
 
-function failureCountLine(id: string): string | undefined {
-  const state = readFailureState(failurePath(id));
-  const active = activeFailures(state);
-  if (active.length <= 5) return undefined;
-  const omitted = active.length - 5;
-  const cursor = incidentCursorAt(state, 5);
-  return `${active.length} unresolved incidents · ${omitted} omitted from this summary · incidentCursor=${cursor} (bg_task_status cursor pages remaining incidents; journal is retained evidence)`;
+/**
+ * Failure section computed for the exact bytes the envelope grants it: whole
+ * incident rows when they fit, otherwise a count line (total / shown /
+ * omitted) with an incident cursor that resumes at the first byte not shown.
+ */
+function incidentSection(id: string, options: OutputOptions, state = failureStateFor(id)): ((budget: number) => string | undefined) | undefined {
+  if (activeFailures(state).length === 0) return undefined;
+  const resource = `incidents:${scopeKey(options)}:${id}`;
+  return (budget) => formatIncidentSummary(state, {
+    maxBytes: budget,
+    resource,
+    retrieval: `pass as cursor to bg_task_status id=${id}`,
+  }).text || undefined;
 }
 
-function assembleIncidentPage(id: string, options: OutputOptions): string {
-  const state = readFailureState(failurePath(id));
-  const maxBytes = backgroundBudget("status", options.maxBytes);
-  // Incident pages still use the status surface cap so the total response stays bounded.
-  const page = pageFailureIncidents(state, { cursor: options.cursor, maxBytes: Math.max(256, maxBytes - 400) });
+function assembleIncidentPage(meta: BackgroundTaskMeta, options: OutputOptions): string {
+  const state = failureStateFor(meta.id);
+  const resource = `incidents:${scopeKey(options)}:${meta.id}`;
+  const total = activeFailures(state).length;
   return assembleBackgroundContent({
     surface: "status",
     maxBytes: options.maxBytes,
     sections: {
-      identity: `Background task ${id} incidents ${page.represented}/${page.total}`,
-      failure: page.text || "No unresolved incidents.",
-      diagnostics: [
-        page.reset ? `reset=${page.reset}` : undefined,
-        page.omitted > 0
-          ? `${page.omitted} omitted incidents remain; pass nextCursor to continue. Failure journal is retained evidence.`
-          : "All retained incidents are included on this page.",
-      ].filter((line): line is string => Boolean(line)).join("\n"),
+      identity: `${identityLine(meta)} Incident page of ${total} active failure observation${total === 1 ? "" : "s"}.`,
+      decision: formatDecision(meta),
     },
-    verbatim: () => ({
-      text: "",
-      hasMore: page.hasMore,
-      nextCursor: page.nextCursor,
-      omittedBytes: page.omitted,
-      reset: page.reset,
-    }),
+    verbatim: (budget) => {
+      const page = pageFailureIncidents(state, { cursor: options.cursor, maxBytes: budget, resource });
+      return {
+        text: page.text || (page.total === 0 ? "No active failure observations." : ""),
+        hasMore: page.hasMore,
+        cursor: page.cursor,
+        nextCursor: page.nextCursor,
+        omittedBytes: 0,
+        omittedRows: page.omitted,
+        reset: page.reset,
+      };
+    },
   });
-}
-
-function leadIdentity(id: string, identity: string): string {
-  const summary = failureSummaryText(id);
-  return summary ? `${summary}\n${identity}` : identity;
 }
 
 function formatCondition(condition: Condition, observed: unknown): string {
@@ -213,10 +201,11 @@ function resultFields(meta: BackgroundTaskMeta): {
   return meta.result as { reason?: string; matchedCondition?: Condition; matchedValue?: unknown };
 }
 
+/** Decision facts: stop error, matched condition and observed value, exit/signal, recorded error. */
 function formatDecision(meta: BackgroundTaskMeta): string | undefined {
   const lines: string[] = [];
   if (meta.status === "running" && meta.stopError) {
-    lines.push(meta.stopError);
+    lines.push(`stop failed: ${oneLine(meta.stopError, 300)}`);
     lines.push("The task may still be executing.");
   }
   const result = resultFields(meta);
@@ -227,20 +216,24 @@ function formatDecision(meta: BackgroundTaskMeta): string | undefined {
     lines.push(`exit=${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}`);
   }
   if (result.reason && !result.matchedCondition) lines.push(oneLine(result.reason, 240));
+  if (meta.error && meta.error !== meta.stopError && meta.error !== result.reason) {
+    lines.push(`error: ${oneLine(meta.error, 300)}`);
+  }
   return lines.length ? lines.join("\n") : undefined;
 }
 
-/** Compact decision/gap facts for completion callbacks (no env/command dump). */
+/**
+ * Completion-callback facts (no env/command dump). Incident rows are passed
+ * whole so the batch can count exactly which it shows.
+ */
 export function formatCallbackFacts(meta: BackgroundTaskMeta): {
   outcome: string;
-  failure?: string;
+  failureRows?: string[];
   decision?: string;
   incidentCount?: number;
-  omittedIncidents?: number;
 } {
-  const state = readFailureState(failurePath(meta.id));
-  const active = activeFailures(state);
-  const failure = formatFailureSummary(state) || undefined;
+  const state = failureStateFor(meta.id);
+  const rows = formatFailureLines(state);
   const gapLines = [
     meta.logDiscardedBytes ? `retention discarded ${meta.logDiscardedBytes} bytes; not recoverable` : undefined,
     meta.captureDiscardedBytes ? `capture overflow discarded ${meta.captureDiscardedBytes} bytes; not full history` : undefined,
@@ -248,10 +241,8 @@ export function formatCallbackFacts(meta: BackgroundTaskMeta): {
   const decision = [formatDecision(meta), ...gapLines].filter(Boolean).join("\n") || undefined;
   return {
     outcome: meta.status,
-    failure,
-    decision: decision || undefined,
-    incidentCount: active.length || undefined,
-    omittedIncidents: active.length > 5 ? active.length - 5 : undefined,
+    ...(rows.length ? { failureRows: rows, incidentCount: rows.length } : {}),
+    decision,
   };
 }
 
@@ -289,8 +280,16 @@ function identityLine(meta: BackgroundTaskMeta): string {
   return `Background task ${meta.id} is ${meta.status}${stop}.`;
 }
 
+/** Lifecycle, result, and retained-log facts. A deleted or rewritten log is a change. */
 function contentRevision(meta: BackgroundTaskMeta): string {
-  return revisionToken([
+  let log: unknown;
+  try {
+    const stats = statSync(meta.logPath);
+    log = [stats.dev, stats.ino, stats.size, Math.trunc(stats.mtimeMs)];
+  } catch (error) {
+    log = ["unreadable", (error as NodeJS.ErrnoException).code ?? String(error)];
+  }
+  return revisionOf([
     meta.status,
     meta.endedAt ?? null,
     meta.lastCheckedAt ?? null,
@@ -306,17 +305,8 @@ function contentRevision(meta: BackgroundTaskMeta): string {
     meta.lastState ?? null,
     meta.remote?.bootstrapStatus ?? null,
     meta.remote?.stopMessage ?? null,
+    log,
   ]);
-}
-
-function failureRevision(id: string): string {
-  const state = readFailureState(failurePath(id));
-  return revisionToken({
-    seen: state.seen.length,
-    observations: Object.values(state.observations).map((item) => [
-      item.id, item.status, item.count, item.lastSequence ?? 0, item.summary,
-    ]),
-  });
 }
 
 export function assembleBackgroundContent(input: {
@@ -325,19 +315,27 @@ export function assembleBackgroundContent(input: {
   sections?: EnvelopeSections;
   verbatim?: (budget: number) => VerbatimPage;
   gaps?: EvidenceGap[];
+  statusCursor?: string;
 }): string {
+  const maxBytes = backgroundBudget(input.surface, input.maxBytes);
   return assemblePriorityEnvelope({
-    maxBytes: backgroundBudget(input.surface, input.maxBytes),
+    maxBytes,
     sections: input.sections,
     verbatim: input.verbatim,
+    // Explicit evidence pages always advance: half the page is held for bytes.
+    verbatimReserve: input.surface === "rawPage" ? Math.floor(maxBytes / 2) : undefined,
     gaps: input.gaps,
+    statusCursor: input.statusCursor,
+    // ADR 0006 surface contract: background summaries lead with failures.
+    failureFirst: true,
   }).text;
 }
 
-export function formatMissingTask(inspection: MetaInspection): string {
+export function formatMissingTask(inspection: MetaInspection, options: OutputOptions = {}): string {
   if (inspection.found || inspection.error) {
     return assembleBackgroundContent({
       surface: "status",
+      maxBytes: options.maxBytes,
       sections: {
         identity: `Background task ${inspection.id} metadata is unreadable.`,
         diagnostics: [
@@ -350,30 +348,37 @@ export function formatMissingTask(inspection: MetaInspection): string {
   }
   return assembleBackgroundContent({
     surface: "status",
+    maxBytes: options.maxBytes,
     sections: {
       identity: `No background task found for id ${inspection.id}.`,
     },
   });
 }
 
-function formatOwnershipGap(id: string, kind: "foreign" | "unknown"): string {
+function formatOwnershipGap(id: string, kind: "foreign" | "unknown", options: OutputOptions): string {
   const detail = kind === "foreign"
     ? "This task belongs to another session. Pass all:true to inspect it."
-    : "Task ownership is unavailable or unreadable. Cannot treat this as nonexistent or healthy. Pass all:true to inspect.";
+    : options.sessionUnavailable
+      ? "The current session identity is unavailable, so ownership cannot be verified. Cannot treat this as nonexistent or healthy. Pass all:true to inspect."
+      : "Task ownership is unavailable or unreadable. Cannot treat this as nonexistent or healthy. Pass all:true to inspect.";
   return assembleBackgroundContent({
     surface: "status",
+    maxBytes: options.maxBytes,
     sections: {
       identity: `Background task ${id} is outside the current session scope.`,
       diagnostics: detail,
     },
-    gaps: [{ kind: "read", detail }],
+    gaps: [{ kind: "read", detail: kind === "foreign" ? "foreign-session" : "ownership-unavailable" }],
   });
 }
 
 type Ownership = "allow" | "foreign" | "unknown";
 
-function classifyOwnership(meta: BackgroundTaskMeta, origin: BackgroundTaskCallbackOrigin | undefined, all: boolean): Ownership {
-  if (all || !origin) return "allow";
+function classifyOwnership(meta: BackgroundTaskMeta, options: OutputOptions): Ownership {
+  if (options.all === true) return "allow";
+  if (options.sessionUnavailable) return "unknown";
+  const origin = options.origin;
+  if (!origin) return "allow";
   if (belongsToOrigin(meta, origin)) return "allow";
   const taskOrigin = originOf(meta);
   if (!meta.callbackOrigin || (!taskOrigin.sessionId && origin.sessionId)) return "unknown";
@@ -401,8 +406,8 @@ export function formatLaunch(meta: BackgroundTaskMeta): string {
   return assembleBackgroundContent({
     surface: "status",
     sections: {
-      identity: leadIdentity(meta.id, `Started background ${meta.kind} ${label}. Status: ${meta.status}.`),
-      failure: failureCountLine(meta.id),
+      identity: `Started background ${meta.kind} ${label}. Status: ${meta.status}.`,
+      failure: incidentSection(meta.id, {}),
       decision: formatDecision(meta),
       diagnostics: remoteLines.join("\n") || undefined,
       progress: `Log: ${meta.logPath}`,
@@ -413,7 +418,7 @@ export function formatLaunch(meta: BackgroundTaskMeta): string {
 
 function redactedVerbose(meta: BackgroundTaskMeta): unknown {
   const { env, ...rest } = meta;
-  const state = readFailureState(failurePath(meta.id));
+  const state = failureStateFor(meta.id);
   const observations = Object.values(state.observations);
   const body = {
     ...rest,
@@ -431,6 +436,61 @@ function redactedVerbose(meta: BackgroundTaskMeta): unknown {
   };
 }
 
+/**
+ * Verbose metadata is explicit evidence under the raw-page budget. When the
+ * whole document fits it is returned as plain JSON; otherwise it is paged
+ * with a caller cursor like any other retained evidence.
+ */
+function formatVerbose(meta: BackgroundTaskMeta, options: OutputOptions): string {
+  const json = JSON.stringify(redactedVerbose(meta), null, 2);
+  const resource = `verbose:${scopeKey(options)}:${meta.id}`;
+  if (!options.cursor && utf8ByteLength(json) <= backgroundBudget("rawPage", options.maxBytes)) return json;
+  return assembleBackgroundContent({
+    surface: "rawPage",
+    maxBytes: options.maxBytes,
+    sections: {
+      identity: `Background task ${meta.id} metadata (environment values omitted).`,
+    },
+    verbatim: (budget) => pageVerbatimText(json, { cursor: options.cursor, maxBytes: budget, resource }),
+  });
+}
+
+/** Retained raw log pages for this task in this scope. */
+function rawLogPage(meta: BackgroundTaskMeta, options: OutputOptions, cursor: string | undefined, budget: number): VerbatimPage {
+  return pageTaskLog(meta, { cursor, maxBytes: budget, resource: `log:${scopeKey(options)}:${meta.id}` });
+}
+
+/**
+ * A compact newest-rows excerpt. When earlier rows, older bytes, or a long
+ * line's prefix are not shown, the page says so and its cursor starts a raw
+ * page at the oldest retained byte (bg_task_log), so nothing is hidden.
+ */
+function excerptPage(meta: BackgroundTaskMeta, options: OutputOptions, log: LogRead, budget: number): VerbatimPage {
+  const text = log.text || "(log is empty)";
+  const encoded = utf8ByteLength(text);
+  let body = text;
+  if (encoded > budget) {
+    const slice = sliceUtf8Bytes(text, encoded - budget, budget, false);
+    body = slice.bytes <= budget ? slice.text : "";
+    if (slice.startByte > 0) {
+      const newline = body.indexOf("\n");
+      if (newline >= 0 && newline < body.length - 1) body = body.slice(newline + 1);
+    }
+  }
+  const shownBytes = log.text ? utf8ByteLength(body) : 0;
+  const omittedSomething = Boolean(log.truncated) || shownBytes < utf8ByteLength(log.text);
+  if (!omittedSomething) return { text: body, hasMore: false, omittedBytes: 0 };
+  const start = rawLogPage(meta, options, undefined, 0);
+  const rows = log.omittedRows ? `; ${log.omittedRows} earlier display row(s)` : "";
+  return {
+    text: body,
+    hasMore: true,
+    omittedBytes: Math.max(0, (log.totalBytes ?? 0) - shownBytes),
+    nextCursor: start.nextCursor,
+    via: `pass to bg_task_log id=${meta.id}: raw pages from the oldest retained byte${rows}`,
+  };
+}
+
 export function formatStatus(
   inspection: MetaInspection | BackgroundTaskMeta | undefined,
   idOrOptions?: string | OutputOptions,
@@ -438,19 +498,18 @@ export function formatStatus(
 ): string {
   const inspectionValue = asInspection(inspection, idOrOptions);
   const options = (typeof idOrOptions === "string" ? maybeOptions : idOrOptions) ?? {};
-  if (!inspectionValue.meta) return formatMissingTask(inspectionValue);
+  if (!inspectionValue.meta) return formatMissingTask(inspectionValue, options);
   const meta = inspectionValue.meta;
-  const ownership = classifyOwnership(meta, options.origin, options.all === true);
-  if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership);
-  if (isIncidentCursor(options.cursor)) return assembleIncidentPage(meta.id, options);
-  if (options.verbose) {
-    return JSON.stringify(redactedVerbose(meta), null, 2);
-  }
+  const ownership = classifyOwnership(meta, options);
+  if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership, options);
+  if (isIncidentCursor(options.cursor)) return assembleIncidentPage(meta, options);
+  if (options.verbose) return formatVerbose(meta, options);
+  const state = failureStateFor(meta.id);
   const resource = `status:${scopeKey(options)}:${meta.id}`;
   const revision = inspectStatusRevision({
     resource,
     contentRevision: contentRevision(meta),
-    failureRevision: failureRevision(meta.id),
+    failureRevision: failureRevision(state),
     cursor: options.cursor,
   });
   if (options.cursor && revision.change === "none") {
@@ -458,104 +517,99 @@ export function formatStatus(
       surface: "status",
       maxBytes: options.maxBytes,
       sections: {
-        identity: leadIdentity(meta.id, `${identityLine(meta)} · unchanged`),
+        identity: `${identityLine(meta)} · unchanged`,
+        failure: activeFailures(state).length
+          ? `${activeFailures(state).length} active failure observation(s), unchanged.`
+          : undefined,
+        decision: formatUnchangedEvidence(options.cursor),
       },
-      verbatim: () => ({
-        text: formatUnchangedEvidence(options.cursor!),
-        hasMore: false,
-        omittedBytes: 0,
-        nextCursor: revision.nextCursor,
-      }),
+      statusCursor: revision.nextCursor,
     });
   }
-  const log = readLog(meta.logPath, 3);
+  const log = readLog(meta.logPath, STATUS_EXCERPT_ROWS);
   const extraDiagnostics = [
-    `cursor=${revision.nextCursor}`,
     ...(revision.change === "failure" ? ["change=failure"] : []),
     ...(revision.reset ? [`reset=${revision.reset}`] : []),
-    ...(log.error ? [`log unreadable: ${log.error}`] : []),
+    ...(log.error ? [`log unreadable: ${log.error}`, "Cannot treat this as an empty healthy log."] : []),
   ];
   return assembleBackgroundContent({
     surface: "status",
     maxBytes: options.maxBytes,
     sections: {
-      identity: leadIdentity(meta.id, identityLine(meta)),
-      failure: failureCountLine(meta.id),
+      identity: identityLine(meta),
+      failure: incidentSection(meta.id, options, state),
       decision: formatDecision(meta),
       diagnostics: formatDiagnostics(meta, extraDiagnostics),
       progress: formatProgress(meta),
     },
-    verbatim: log.error || !log.text
-      ? undefined
-      : (remaining) => newestVerbatim(log.text, remaining),
+    verbatim: log.error ? undefined : (budget) => excerptPage(meta, options, log, budget),
     gaps: [
       ...taskGaps(meta),
       ...(log.error ? [{ kind: "read" as const, detail: log.error }] : []),
     ],
+    statusCursor: revision.nextCursor,
   });
 }
 
 export function formatLog(id: string, options: OutputOptions = {}): string {
   const inspection = inspectMeta(id);
-  if (!inspection.meta) return formatMissingTask(inspection);
+  if (!inspection.meta) return formatMissingTask(inspection, options);
   const meta = inspection.meta;
-  const ownership = classifyOwnership(meta, options.origin, options.all === true);
-  if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership);
-  const raw = options.raw === true || options.tailLines === 0;
-  const failure = failureCountLine(id);
+  const ownership = classifyOwnership(meta, options);
+  if (ownership !== "allow") return formatOwnershipGap(meta.id, ownership, options);
+  const fileCursor = cursorKind(options.cursor) === "f";
+  const raw = options.raw === true || options.tailLines === 0 || fileCursor;
+  const failure = incidentSection(id, options);
   if (raw) {
     return assembleBackgroundContent({
       surface: "rawPage",
       maxBytes: options.maxBytes,
       sections: {
-        identity: leadIdentity(meta.id, `${meta.id} raw log`),
+        identity: `${meta.id} raw log (${meta.status})`,
         failure,
         decision: formatDecision(meta),
         diagnostics: formatDiagnostics(meta, [
           "Raw retained bytes; capture/retention loss is not recoverable as full history.",
         ]),
       },
-      verbatim: (remaining) => pageTaskLog(meta, { cursor: options.cursor, maxBytes: remaining }),
+      verbatim: (budget) => rawLogPage(meta, options, options.cursor, budget),
     });
   }
   const tailLines = options.tailLines && options.tailLines > 0 ? Math.floor(options.tailLines) : DEFAULT_LOG_TAIL_ROWS;
   const log = readLog(meta.logPath, tailLines);
+  const staleCursor = options.cursor ? ["reset=stale-cursor (compact tails have no cursor; pass a raw nextCursor or tail_lines:0)"] : [];
   if (log.error) {
     return assembleBackgroundContent({
       surface: "log",
       maxBytes: options.maxBytes,
       sections: {
-        identity: leadIdentity(meta.id, `${meta.id} log`),
+        identity: `${meta.id} log (${meta.status})`,
         failure,
-        diagnostics: `log unreadable: ${log.error}\nCannot treat this as an empty healthy log.`,
+        diagnostics: [...staleCursor, `log unreadable: ${log.error}`, "Cannot treat this as an empty healthy log."].join("\n"),
       },
       gaps: [{ kind: "read", detail: log.error }, ...taskGaps(meta)],
     });
   }
-  const excerpt = log.text || "(log is empty)";
   return assembleBackgroundContent({
     surface: "log",
     maxBytes: options.maxBytes,
     sections: {
-      identity: leadIdentity(meta.id, `${meta.id} log`),
+      identity: `${meta.id} log (${meta.status}) · newest ${tailLines} display row${tailLines === 1 ? "" : "s"}`,
       failure,
       decision: formatDecision(meta),
-      diagnostics: formatDiagnostics(meta),
+      diagnostics: formatDiagnostics(meta, staleCursor),
     },
-    verbatim: (remaining) => options.cursor
-      ? pageVerbatimText(excerpt, { cursor: options.cursor, maxBytes: remaining })
-      : newestVerbatim(excerpt, remaining),
+    verbatim: (budget) => excerptPage(meta, options, log, budget),
     gaps: taskGaps(meta),
   });
 }
 
-function compactRow(meta: BackgroundTaskMeta): string {
+function compactRow(meta: BackgroundTaskMeta, incidents: number): string {
   const age = formatDuration((meta.endedAt ?? Date.now()) - meta.startedAt);
-  const label = meta.name ? `${meta.name} ` : "";
-  const remote = meta.ssh ? ` ${meta.ssh.target}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : "";
-  const incidents = activeFailures(readFailureState(failurePath(meta.id))).length;
+  const remote = meta.ssh ? ` ${oneLine(meta.ssh.target, 60)}${meta.remote?.session ? ` ${meta.remote.session}` : ""}` : "";
   const incident = incidents > 0 ? ` · ${incidents} incident${incidents === 1 ? "" : "s"}` : "";
-  return `${meta.id} ${label}${meta.kind} ${meta.status} ${age}${remote}${incident}`;
+  const label = meta.name ? ` ${oneLine(meta.name, 60)}` : "";
+  return `${meta.id} ${meta.status} ${meta.kind} ${age}${incident}${remote}${label}`;
 }
 
 export function formatList(options: OutputOptions = {}): string {
@@ -583,103 +637,96 @@ export function formatList(options: OutputOptions = {}): string {
     });
   }
   const wanted = options.statuses && options.statuses.length > 0 ? new Set(options.statuses) : undefined;
-  const unreadable: MetaInspection[] = [];
-  const unknown: MetaInspection[] = [];
-  const allowed: Array<MetaInspection & { meta: BackgroundTaskMeta }> = [];
+  let unreadable = 0;
+  let unknown = 0;
+  const allowed: BackgroundTaskMeta[] = [];
   for (const record of index.records) {
     if (!record.meta) {
-      unreadable.push(record);
+      if (record.found) unreadable += 1;
       continue;
     }
-    const ownership = classifyOwnership(record.meta, options.origin, options.all === true);
+    const ownership = classifyOwnership(record.meta, options);
     if (ownership === "allow") {
-      if (!wanted || wanted.has(record.meta.status)) allowed.push(record as MetaInspection & { meta: BackgroundTaskMeta });
+      if (!wanted || wanted.has(record.meta.status)) allowed.push(record.meta);
     } else if (ownership === "unknown") {
-      unknown.push(record);
+      unknown += 1;
     }
   }
   const scope = scopeKey(options);
-  const statusesKey = (options.statuses ?? []).join(",");
-  const limit = Math.max(1, Math.min(options.limit ?? DEFAULT_LIST_ENTRIES, MAX_LIST_ENTRIES));
-  const pageRows = allowed.slice(0, limit);
-  const remainingEntries = Math.max(0, allowed.length - pageRows.length);
-  const contentRev = revisionToken(allowed.map((record) => [record.meta.id, record.meta.status, record.meta.lastCheckedAt ?? null]));
-  const failRev = revisionToken(allowed.map((record) => [
-    record.meta.id,
-    activeFailures(readFailureState(failurePath(record.meta.id))).map((item) => [item.id, item.status, item.count]),
-  ]));
-  const resource = `list:${scope}:${statusesKey}:${limit}`;
+  const statusesKey = [...(options.statuses ?? [])].sort().join(",");
+  const resource = `list:${scope}:${statusesKey}`;
+  const limit = Math.max(1, Math.min(Math.floor(options.limit ?? DEFAULT_LIST_ENTRIES), MAX_LIST_ENTRIES));
+  const states = new Map(allowed.map((meta) => [meta.id, failureStateFor(meta.id)] as const));
+  const incidentsOf = (id: string) => activeFailures(states.get(id)!).length;
   const revision = inspectStatusRevision({
     resource,
-    contentRevision: contentRev,
-    failureRevision: failRev,
-    cursor: options.cursor,
+    contentRevision: revisionOf(allowed.map((meta) => [meta.id, meta.status, meta.endedAt ?? null])),
+    failureRevision: revisionOf(allowed.map((meta) => [meta.id, failureRevision(states.get(meta.id)!)])),
+    cursor: cursorKind(options.cursor) === "s" ? options.cursor : undefined,
   });
-  if (options.cursor && revision.change === "none") {
+  const scopeLabel = options.all ? "all sessions" : "current session";
+  if (options.cursor && cursorKind(options.cursor) === "s" && revision.change === "none") {
     return assembleBackgroundContent({
       surface: "list",
       maxBytes: options.maxBytes,
       sections: {
-        identity: `${pageRows.length} background task${pageRows.length === 1 ? "" : "s"} · unchanged`,
+        identity: `${allowed.length} background task${allowed.length === 1 ? "" : "s"} (${scopeLabel}) · unchanged`,
+        decision: formatUnchangedEvidence(options.cursor),
       },
-      verbatim: () => ({
-        text: formatUnchangedEvidence(options.cursor!),
-        hasMore: false,
-        omittedBytes: 0,
-        nextCursor: revision.nextCursor,
-      }),
+      statusCursor: revision.nextCursor,
     });
   }
-  const pagingBody = Boolean(options.cursor && revision.reset === "stale-cursor");
-  if (pageRows.length === 0 && unreadable.length === 0 && unknown.length === 0) {
-    return assembleBackgroundContent({
-      surface: "list",
-      maxBytes: options.maxBytes,
-      sections: { identity: "No background tasks found." },
-    });
-  }
-  const incidentTasks = pageRows.filter((record) => activeFailures(readFailureState(failurePath(record.meta.id))).length > 0);
-  const leadingFailure = pageRows.map((record) => failureSummaryText(record.meta.id)).find(Boolean);
-  const body = pageRows.map((record) => compactRow(record.meta)).join("\n") + (pageRows.length ? "\n" : "");
-  const unreadLines = [
-    ...(unreadable.length ? [`${unreadable.length} unreadable metadata file(s); cannot treat as empty or healthy`] : []),
-    ...(unknown.length ? [`${unknown.length} task(s) with unavailable ownership; pass all:true to inspect`] : []),
-    ...(remainingEntries > 0 ? [`${remainingEntries} more task${remainingEntries === 1 ? "" : "s"} not in this page; pass a higher limit`] : []),
-    `cursor=${revision.nextCursor}`,
+  const failing = allowed.filter((meta) => incidentsOf(meta.id) > 0);
+  const withIncidents = failing.length;
+  // One leading incident (the newest failing task's top row), then a count:
+  // failures lead the surface without repeating a paragraph per task.
+  const listFailure = (budget: number): string | undefined => {
+    const newest = failing[0];
+    if (!newest) return undefined;
+    const count = `${withIncidents} task${withIncidents === 1 ? "" : "s"} with unresolved incidents; newest ${newest.id} has ${incidentsOf(newest.id)}. Inspect with bg_task_status.`;
+    const top = formatFailureLines(states.get(newest.id)!)[0] ?? "";
+    const room = budget - utf8ByteLength(count) - 1;
+    if (room < 48 || !top) return count;
+    const shown = utf8ByteLength(top) <= room ? top : `${sliceUtf8Bytes(top, 0, room - 12, false).text} (clipped)`;
+    return `${shown}\n${count}`;
+  };
+  const notes = [
+    ...(unreadable ? [`${unreadable} task record(s) with unreadable metadata; cannot treat as empty or healthy`] : []),
+    ...(unknown ? [`${unknown} task(s) with unavailable ownership hidden; pass all:true to inspect`] : []),
     ...(revision.change === "failure" ? ["change=failure"] : []),
-    ...(revision.reset ? [`reset=${revision.reset}`] : []),
   ];
   const gaps: EvidenceGap[] = [
-    ...(unreadable.length ? [{ kind: "read" as const, bytes: unreadable.length, detail: `${unreadable.length} unreadable metadata file(s)` }] : []),
-    ...(unknown.length ? [{ kind: "read" as const, bytes: unknown.length, detail: `${unknown.length} task(s) with unavailable ownership` }] : []),
+    ...(unreadable ? [{ kind: "read" as const, detail: `${unreadable} unreadable metadata file(s)` }] : []),
+    ...(unknown ? [{ kind: "read" as const, detail: `${unknown} task(s) with unverifiable ownership` }] : []),
   ];
+  const pageCursor = options.cursor && cursorKind(options.cursor) !== "s" ? options.cursor : undefined;
   return assembleBackgroundContent({
     surface: "list",
     maxBytes: options.maxBytes,
     sections: {
-      identity: leadingFailure
-        ? `${leadingFailure}\n${pageRows.length} background task${pageRows.length === 1 ? "" : "s"}`
-        : `${pageRows.length} background task${pageRows.length === 1 ? "" : "s"}`,
-      failure: incidentTasks.length
-        ? `${incidentTasks.length} listed task${incidentTasks.length === 1 ? "" : "s"} with unresolved incidents`
-        : undefined,
-      diagnostics: unreadLines.join("\n") || undefined,
+      identity: allowed.length === 0
+        ? `No background tasks found (${scopeLabel}).`
+        : `${allowed.length} background task${allowed.length === 1 ? "" : "s"} (${scopeLabel}), newest first`,
+      failure: withIncidents ? listFailure : undefined,
+      diagnostics: notes.join("\n") || undefined,
     },
-    verbatim: (remaining) => {
-      const page = pageVerbatimText(body, { cursor: pagingBody ? options.cursor : undefined, maxBytes: remaining });
-      if (remainingEntries <= 0) return page;
-      return {
-        ...page,
-        hasMore: true,
-        omittedBytes: page.omittedBytes + utf8ByteLength(allowed.slice(limit).map((record) => compactRow(record.meta)).join("\n")),
-      };
-    },
+    verbatim: allowed.length === 0 && !pageCursor
+      ? undefined
+      : (budget) => pageRows(allowed, {
+        cursor: pageCursor,
+        resource,
+        limit,
+        maxBytes: budget,
+        keyOf: (meta) => ({ time: meta.startedAt, id: meta.id }),
+        render: (meta) => compactRow(meta, incidentsOf(meta.id)),
+      }),
     gaps,
+    statusCursor: revision.nextCursor,
   });
 }
 
 export function formatStopResult(inspection: MetaInspection, options: OutputOptions = {}): string {
-  if (!inspection.meta) return formatMissingTask(inspection);
+  if (!inspection.meta) return formatMissingTask(inspection, options);
   return formatStatus(inspection, options);
 }
 

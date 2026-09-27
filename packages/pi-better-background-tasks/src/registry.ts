@@ -107,6 +107,17 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Parsed JSON that lacks the identifying fields is corrupt, not a task. */
+function metaShapeProblem(meta: unknown, id: string): string | undefined {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return "not an object";
+  const value = meta as Partial<BackgroundTaskMeta>;
+  if (value.id !== id) return `id ${JSON.stringify(value.id ?? null)} does not match ${JSON.stringify(id)}`;
+  if (typeof value.status !== "string" || !value.status) return "missing status";
+  if (typeof value.logPath !== "string" || !value.logPath) return "missing logPath";
+  if (typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt)) return "missing startedAt";
+  return undefined;
+}
+
 /**
  * Distinguish missing, unreadable, and healthy metadata. Callers must not treat
  * an unreadable file as proof that a task does not exist.
@@ -118,6 +129,11 @@ export function inspectMeta(id: string): MetaInspection {
     const raw = readFileSync(path, "utf8");
     try {
       const meta = JSON.parse(raw) as BackgroundTaskMeta;
+      const invalid = metaShapeProblem(meta, id);
+      if (invalid) {
+        metaCache.delete(id);
+        return { id, found: true, readable: false, error: `invalid metadata: ${invalid}` };
+      }
       metaCache.set(id, meta);
       return { id, meta, found: true, readable: true };
     } catch (error) {

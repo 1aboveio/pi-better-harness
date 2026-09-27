@@ -36,6 +36,8 @@ export interface LogRead {
   truncated: boolean;
   totalBytes?: number;
   error?: string;
+  /** Display rows before the returned tail within the bounded read window. */
+  omittedRows?: number;
 }
 
 export function readLog(logPath: string, tailLines?: number): LogRead {
@@ -47,10 +49,12 @@ export function readLog(logPath: string, tailLines?: number): LogRead {
   if (!tail.text) return { text: "", truncated: false, totalBytes: tail.totalBytes };
   if (!requestedRows) return { text: tail.text, truncated: tail.truncated, totalBytes: tail.totalBytes };
   const rows = terminalDisplayRows(tail.text);
+  const omittedRows = Math.max(0, rows.length - requestedRows);
   return {
     text: tailTerminalDisplay(tail.text, requestedRows),
-    truncated: tail.truncated || rows.length > requestedRows,
+    truncated: tail.truncated || omittedRows > 0,
     totalBytes: tail.totalBytes,
+    ...(omittedRows > 0 ? { omittedRows } : {}),
   };
 }
 

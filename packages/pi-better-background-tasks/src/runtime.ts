@@ -815,8 +815,8 @@ async function finalizeProcessTimeout(
         stopProcessGroup(meta.pid, meta.pgid);
       } catch (error) {
         reason = `timeout; could not terminate local process tree: ${readableError(error)}`;
-        meta.error = reason;
-        writeMeta(meta);
+        // The task is still running: this is a stop failure, reported as such.
+        recordStopError(meta, reason);
         return;
       }
     }
@@ -861,10 +861,9 @@ async function notifyTerminal(
     status: pending ? `${latest.status}: ${pending.summary}` : latest.status,
     detailTool: "bg_task_status",
     outcome: facts.outcome,
-    failure: facts.failure,
+    failureRows: facts.failureRows,
     decision: facts.decision,
     incidentCount: facts.incidentCount,
-    omittedIncidents: facts.omittedIncidents,
     callback: true,
     isDelivered: () => {
       const current = readMeta(latest.id);
@@ -976,10 +975,17 @@ function enforceLogRetention(meta: BackgroundTaskMeta): void {
   writeMeta(meta);
 }
 
+/** Results whose capture loss is already counted; one poll result is counted once. */
+const countedCaptureResults = new WeakSet<CommandResult>();
+
 function applyCaptureOverflow(meta: BackgroundTaskMeta, result: CommandResult): void {
   const stdout = result.stdoutDiscardedBytes ?? 0;
   const stderr = result.stderrDiscardedBytes ?? 0;
   if (!result.captureTruncated && stdout === 0 && stderr === 0) return;
+  // pollWatch counts a result before evaluating conditions, and finalize sees
+  // the same result again when that poll ends the watch.
+  if (countedCaptureResults.has(result)) return;
+  countedCaptureResults.add(result);
   meta.stdoutDiscardedBytes = (meta.stdoutDiscardedBytes ?? 0) + stdout;
   meta.stderrDiscardedBytes = (meta.stderrDiscardedBytes ?? 0) + stderr;
   meta.captureDiscardedBytes = (meta.captureDiscardedBytes ?? 0) + stdout + stderr;

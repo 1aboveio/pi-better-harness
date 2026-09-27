@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { recordFailure } from "./failures.js";
 import { pageTaskLog, readLog, retainLogTail } from "./logs.js";
@@ -206,7 +206,7 @@ describe("session scope", () => {
   it("binds status cursors to the selected session scope", () => {
     const meta = fixture();
     const scoped = formatStatus(inspectMeta(meta.id), { origin });
-    const cursor = scoped.match(/cursor=(\S+)/)?.[1];
+    const cursor = scoped.match(/statusCursor=(\S+)/)?.[1];
     expect(cursor).toBeTruthy();
     const replay = formatStatus(inspectMeta(meta.id), { origin, cursor });
     expect(replay).toContain("No new evidence since cursor");
@@ -220,7 +220,7 @@ describe("failure-only revisions and wrapper identity", () => {
   it("returns failure-only updates when log bytes are unchanged", () => {
     const meta = fixture({ logLines: ["same"] });
     const first = formatStatus(inspectMeta(meta.id), { origin });
-    const cursor = first.match(/cursor=(\S+)/)?.[1];
+    const cursor = first.match(/statusCursor=(\S+)/)?.[1];
     expect(cursor).toBeTruthy();
     recordFailure(meta, "poll", "poll failed", "1", { category: "operation" });
     const second = formatStatus(inspectMeta(meta.id), { origin, cursor });
@@ -317,14 +317,24 @@ describe("retained log paging and capture/retention disclosure", () => {
     expect(utf8ByteLength(status)).toBeLessThanOrEqual(1024);
     expect(status).not.toContain("\uFFFD");
     expect(status).toMatch(/incidentCursor=i1\./);
-    const cursor = status.match(/incidentCursor=(i1\.\S+)/)?.[1];
+    const shownCount = Number(status.match(/(\d+) shown/)?.[1]);
+    expect(status).toMatch(new RegExp(`12 active failure observations · ${shownCount} shown · ${12 - shownCount} omitted`));
+    let cursor = status.match(/incidentCursor=(i1\.\S+)/)?.[1];
     expect(cursor).toBeTruthy();
-    const page = formatStatus(inspectMeta(meta.id), { origin, cursor });
-    expect(page).toMatch(/incidents \d+\/\d+/);
-    const combined = `${status}\n${page}`;
-    for (let i = 0; i < 12; i += 1) {
-      expect(combined).toContain(`bg-incident-${i}`);
+    const seen = new Set<string>();
+    for (const match of status.matchAll(/bg-incident-(\d+)/g)) seen.add(match[1]!);
+    expect(seen.size).toBe(shownCount);
+    for (let pages = 0; pages < 20 && cursor; pages += 1) {
+      const page = formatStatus(inspectMeta(meta.id), { origin, cursor });
+      expect(utf8ByteLength(page)).toBeLessThanOrEqual(1024);
+      expect(page).toContain("Incident page of 12 active failure observations");
+      for (const match of page.matchAll(/bg-incident-(\d+)/g)) {
+        expect(seen.has(match[1]!), `incident ${match[1]} repeated`).toBe(false);
+        seen.add(match[1]!);
+      }
+      cursor = page.includes("hasMore=true") ? page.match(/nextCursor=(i1\.\S+)/)?.[1] : undefined;
     }
+    expect([...seen].sort()).toEqual(Array.from({ length: 12 }, (_, i) => String(i)).sort());
     const log = formatLog(meta.id, { origin });
     expect(utf8ByteLength(log)).toBeLessThanOrEqual(1024);
     expect(log).not.toContain("\uFFFD");
@@ -349,11 +359,17 @@ describe("list defaults", () => {
       startedAt: 1000 - index,
     }).id);
     const listed = formatList({ origin });
-    expect(listed).toContain("10 background tasks");
-    expect(listed).toContain("2 more task");
+    expect(utf8ByteLength(listed)).toBeLessThanOrEqual(1024);
+    expect(listed).toContain("12 background tasks (current session)");
+    expect(listed).toContain("hasMore=true omittedRows=2");
     expect(listed).toContain(ids[0]);
     expect(listed).not.toContain(ids[11]);
     expect(listed).not.toMatch(/Unresolved failure[\s\S]*Unresolved failure/);
+    const next = formatList({ origin, cursor: listed.match(/nextCursor=(\S+)/)?.[1] });
+    expect(next).toContain(ids[10]);
+    expect(next).toContain(ids[11]);
+    expect(next).not.toContain(ids[9]);
+    expect(next).not.toContain("hasMore=true");
     const wider = formatList({ origin, limit: 20, maxBytes: 4096 });
     expect(wider).toContain(ids[11]);
   });
@@ -378,8 +394,165 @@ describe("callback facts", () => {
     expect(facts.outcome).toBe("failed");
     expect(facts.decision).toContain("Condition matched: $.terminalFailure = true");
     expect(facts.decision).toContain("capture overflow discarded 1200 bytes");
-    expect(facts.failure).toMatch(/Unresolved failure/);
+    expect(facts.failureRows?.[0]).toMatch(/Unresolved failure/);
+    expect(facts.incidentCount).toBe(1);
     expect(JSON.stringify(facts)).not.toContain("SECRET");
     expect(JSON.stringify(facts)).not.toMatch(/tools used:/);
+  });
+});
+
+describe("review regressions (#312)", () => {
+  it("reports a deleted log after a status cursor instead of 'no new evidence'", () => {
+    const meta = fixture({ logLines: ["ok"] });
+    const first = formatStatus(inspectMeta(meta.id), { origin });
+    const cursor = first.match(/statusCursor=(\S+)/)?.[1];
+    expect(formatStatus(inspectMeta(meta.id), { origin, cursor })).toContain("No new evidence since cursor");
+    rmSync(meta.logPath);
+    const after = formatStatus(inspectMeta(meta.id), { origin, cursor });
+    expect(after).not.toContain("No new evidence since cursor");
+    expect(after).toContain("log unreadable");
+    expect(after).toContain("gap read");
+  });
+
+  it("returns a repeated failure of the same operation as a failure-only change", () => {
+    const meta = fixture({ logLines: ["same"] });
+    recordFailure(meta, "poll", "poll failed once", "1", { category: "operation" });
+    const first = formatStatus(inspectMeta(meta.id), { origin });
+    const cursor = first.match(/statusCursor=(\S+)/)?.[1];
+    recordFailure(meta, "poll", "poll failed again", "2", { category: "operation" });
+    const second = formatStatus(inspectMeta(meta.id), { origin, cursor });
+    expect(second).toContain("change=failure");
+    expect(second).toContain("poll failed again");
+  });
+
+  it("pages lists past 100 tasks and across the standalone tool and the action wrapper", async () => {
+    const base = Date.now() + 1_000_000;
+    const ids = Array.from({ length: 105 }, (_, index) => fixture({ id: `bg_page_${String(index).padStart(3, "0")}_${base}`, startedAt: base + index }).id);
+    const tools = register();
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 30; page += 1) {
+      const tool = page % 2 === 0 ? tools.bg_task_list : tools.bg_status;
+      const params = page % 2 === 0 ? { cursor, limit: 25, max_bytes: 4096 } : { action: "list", cursor, limit: 25, max_bytes: 4096 };
+      const text = textOf(await tool.execute("tc", params, undefined, undefined, ctx));
+      expect(utf8ByteLength(text)).toBeLessThanOrEqual(4096);
+      for (const match of text.matchAll(/^(bg_page_\d+_\d+) /gm)) {
+        expect(seen.includes(match[1]!), `${match[1]} repeated`).toBe(false);
+        seen.push(match[1]!);
+      }
+      if (!text.includes("hasMore=true")) break;
+      cursor = text.match(/nextCursor=(\S+)/)?.[1];
+    }
+    expect(seen.length).toBe(105);
+    expect(seen[0]).toBe(ids[104]);
+    expect(seen.at(-1)).toBe(ids[0]);
+  });
+
+  it("resets a raw cursor when the session scope changes", () => {
+    const meta = fixture({ logLines: ["0123456789".repeat(4_000)] });
+    const own = formatLog(meta.id, { origin, raw: true });
+    const cursor = own.match(/nextCursor=(\S+)/)?.[1];
+    expect(cursor).toBeTruthy();
+    const crossed = formatLog(meta.id, { origin, all: true, raw: true, cursor });
+    expect(crossed).toContain("reset=stale-cursor");
+    const continued = formatLog(meta.id, { origin, raw: true, cursor });
+    expect(continued).not.toContain("reset=");
+  });
+
+  it("discloses rows omitted from the compact tail and pages them from the oldest retained byte", () => {
+    const lines = Array.from({ length: 50 }, (_, index) => `line-${String(index).padStart(2, "0")}`);
+    const meta = fixture({ logLines: lines });
+    const compact = formatLog(meta.id, { origin });
+    expect(compact).toContain("line-49");
+    expect(compact).not.toContain("line-39");
+    expect(compact).toMatch(/hasMore=true omittedBytes=\d+ nextCursor=\S+ \(pass to bg_task_log/);
+    expect(compact).toContain("40 earlier display row(s)");
+    let cursor = compact.match(/nextCursor=(\S+)/)?.[1];
+    let rebuilt = "";
+    for (let page = 0; page < 20 && cursor; page += 1) {
+      const text = formatLog(meta.id, { origin, cursor, maxBytes: 1024 });
+      expect(utf8ByteLength(text)).toBeLessThanOrEqual(1024);
+      const [head] = text.split("\n---\n");
+      const marker = "Raw retained bytes; capture/retention loss is not recoverable as full history.\n";
+      rebuilt += head!.slice(head!.indexOf(marker) + marker.length);
+      cursor = text.includes("hasMore=true") ? text.match(/nextCursor=(\S+)/)?.[1] : undefined;
+    }
+    expect(rebuilt).toBe(`${lines.join("\n")}\n`);
+  });
+
+  it("bounds verbose metadata to the requested page and pages the rest", async () => {
+    const meta = fixture({ command: `echo ${"c".repeat(100_000)}`, env: { SECRET: "hidden" } });
+    const tools = register();
+    for (const [tool, extra] of [[tools.bg_task_status, {}], [tools.bg_status, { action: "status" }]] as const) {
+      const pages: string[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 200; page += 1) {
+        const text = textOf(await tool.execute("tc", { ...extra, id: meta.id, verbose: true, max_bytes: 2048, cursor }, undefined, undefined, ctx));
+        expect(utf8ByteLength(text)).toBeLessThanOrEqual(2048);
+        pages.push(text.split("\n---\n")[0]!.split("\n").slice(1).join("\n"));
+        if (!text.includes("hasMore=true")) break;
+        cursor = text.match(/nextCursor=(\S+)/)?.[1];
+      }
+      const json = JSON.parse(pages.join("")) as { command: string; env: unknown };
+      expect(json.command.length).toBe(100_005);
+      expect(JSON.stringify(json.env)).not.toContain("hidden");
+    }
+  });
+
+  it("shows a recorded runtime error (timeout stop EPERM) in the compact status", () => {
+    const meta = fixture({
+      status: "running",
+      endedAt: undefined,
+      kind: "process",
+      error: "timeout; could not terminate local process tree: EPERM",
+      stopError: "timeout; could not terminate local process tree: EPERM",
+    });
+    expect(formatStatus(inspectMeta(meta.id), { origin })).toContain("stop failed: timeout; could not terminate local process tree: EPERM");
+    const failed = fixture({ status: "failed", error: "poll transport failed: EPERM", result: { reason: "failure" } });
+    expect(formatStatus(inspectMeta(failed.id), { origin })).toContain("error: poll transport failed: EPERM");
+  });
+
+  it("treats metadata without identifying fields as corrupt, not as a task", () => {
+    const meta = fixture();
+    writeFileSync(metaPathFor(meta.id), "{}");
+    const text = formatStatus(inspectMeta(meta.id), { origin });
+    expect(text).toContain(`Background task ${meta.id} metadata is unreadable`);
+    expect(text).toContain("invalid metadata");
+    expect(text).not.toContain("undefined");
+    const list = formatList({ origin, all: true, limit: 100, maxBytes: 4096 });
+    expect(list).toMatch(/\d+ task record\(s\) with unreadable metadata/);
+  });
+
+  it("does not expose tasks when the current session identity is unavailable", async () => {
+    const meta = fixture({ logLines: ["LEGACY_EVIDENCE"], callbackOrigin: undefined, cwd: origin.cwd });
+    const tools = register();
+    const broken = { cwd: origin.cwd, sessionManager: { getSessionId: () => { throw new Error("session store offline"); } } };
+    const status = textOf(await tools.bg_task_status.execute("tc", { id: meta.id }, undefined, undefined, broken));
+    expect(status).toContain("current session identity is unavailable");
+    expect(status).not.toContain("LEGACY_EVIDENCE");
+    const log = textOf(await tools.bg_task_log.execute("tc", { id: meta.id }, undefined, undefined, broken));
+    expect(log).not.toContain("LEGACY_EVIDENCE");
+    const list = textOf(await tools.bg_task_list.execute("tc", {}, undefined, undefined, broken));
+    expect(list).not.toContain(`${meta.id} `);
+    expect(list).toMatch(/task\(s\) with unavailable ownership hidden/);
+    const override = textOf(await tools.bg_task_log.execute("tc", { id: meta.id, all: true }, undefined, undefined, broken));
+    expect(override).toContain("LEGACY_EVIDENCE");
+  });
+
+  it("keeps the matched condition and stop error visible beside many long incidents", () => {
+    const meta = fixture({
+      status: "running",
+      endedAt: undefined,
+      stopError: "Permission denied while terminating process tree.",
+      result: { matchedCondition: { type: "json_path_equals", path: "$.terminalFailure", value: true }, matchedValue: true },
+    });
+    for (let i = 0; i < 8; i += 1) {
+      recordFailure(meta, `op-${i}`, `incident-${i} ${"界".repeat(150)}`, `e-${i}`, { category: "operation", evidence: `evidence-${i}` });
+    }
+    const status = formatStatus(inspectMeta(meta.id), { origin });
+    expect(utf8ByteLength(status)).toBeLessThanOrEqual(1024);
+    expect(status).toContain("Condition matched: $.terminalFailure = true");
+    expect(status).toContain("stop failed: Permission denied");
+    expect(status).toMatch(/8 active failure observations · \d+ shown · \d+ omitted · incidentCursor=/);
   });
 });

@@ -75,6 +75,18 @@ describe("process shell execution", () => {
     expect(result.stdout.startsWith("x")).toBe(true);
   });
 
+  it("discards a code point split across chunks at the cap instead of decoding U+FFFD", async () => {
+    const script = [
+      "process.stdout.write(Buffer.from([0x61, 0xf0, 0x9f]));",
+      "setTimeout(() => process.stdout.write(Buffer.from([0x98, 0x80, 0x62])), 60);",
+    ].join("");
+    const result = await runCommandOnce({ argv: [process.execPath, "-e", script], shell: false }, 4);
+    expect(result.stdout).toBe("a");
+    expect(result.stdout).not.toContain("\uFFFD");
+    expect(result.stdoutDiscardedBytes).toBe(5);
+    expect(result.captureTruncated).toBe(true);
+  });
+
   it("does not split a multibyte UTF-8 character at the capture cap", async () => {
     const { utf8PrefixLength } = await import("./process.js");
     const buffer = Buffer.from("é");
