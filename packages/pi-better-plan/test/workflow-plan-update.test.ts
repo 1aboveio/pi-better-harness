@@ -204,7 +204,7 @@ test("rejected updates leave the plan and profiling log untouched", async () => 
       [{ event: "x", changes: [{ id: "review", set: { stage: "done" } }] }, /stage applies to units only/],
       [{ event: "x", changes: [{ id: "1201", set: { id: "1300" } }] }, /id cannot be changed/],
       [{ event: "x", changes: [{ set: { planRevision: 99 } }] }, /planRevision cannot be changed/],
-      [{ event: "x", changes: [{ id: "1201", set: {} }] }, /must list at least one field/],
+      [{ event: "x", changes: [{ id: "1201", set: {} }] }, /needs set \(fields to change\) or add/],
       [{ event: "x", changes: [{ id: "1201", set: { note: "a" } }, { id: "1201", set: { status: "blocked" } }] }, /repeats unit 1201/],
       [{ event: "x", revision: 11, changes: [{ id: "1201", set: { note: "a" } }] }, /revision mismatch: expected 11, found 12/],
       [{ event: " ", changes: [{ id: "1201", set: { note: "a" } }] }, /workflow.event must name the transition/],
@@ -212,6 +212,30 @@ test("rejected updates leave the plan and profiling log untouched", async () => 
       [{ event: "x", decision: { id: "d-1", humanWords: "again", changes: "none" } }, /Decision d-1 already exists/],
       [{ event: "x", decision: { id: "d-9", humanWords: "w", changes: "c", supersedes: "d-404" } }, /supersedes names unknown decision/],
       [{ event: "x", changes: [{ id: "1201", set: { note: "a" } }], profiling: { planRevision: 1 } }, /profiling cannot set planRevision/],
+      [{ event: "x", changes: [{ id: "review", set: { status: "OK" } }] }, /invalid status "OK"; use one of pending, in-flight, diagnosing, succeeded, failed, blocked, cancelled, not-applicable, merged/],
+      [{ event: "x", changes: [{ id: "review", set: { status: "completed" } }] }, /invalid status "completed"/],
+      [{ event: "x", changes: [{ id: "C1", set: { status: "n/a" } }] }, /invalid status "n\/a"; use one of building/],
+      [{ event: "x", changes: [{ id: "1201", set: { title: "  " } }] }, /title must be non-empty text/],
+      [{ event: "x", changes: [{ id: "1202", set: { dependsOn: ["9999"] } }] }, /dependsOn names unknown unit "9999"/],
+      [{ event: "x", changes: [{ id: "1202", set: { dependsOn: "1201" } }] }, /dependsOn must be a list of unit ids/],
+      [{ event: "x", changes: [{ id: "1202", set: { dependsOn: ["1202"] } }] }, /cannot name the row itself/],
+      [{ event: "x", changes: [{ id: "1201", set: { worker: 5 } }] }, /worker must be a slot 1-4/],
+      [{ event: "x", changes: [{ id: "1201", set: { worker: "1" } }] }, /worker must be a slot 1-4/],
+      [{ event: "x", changes: [{ id: "1201", set: { component: "C9" } }] }, /component "C9" is not a component in this plan/],
+      [{ event: "x", changes: [{ id: "C1", set: { units: ["1201", "404"] } }] }, /units names unknown unit "404"/],
+      ...["scope", "unit", "component", "stage", "logAheadRevision"].map((key): [unknown, RegExp] =>
+        [{ event: "x", changes: [{ id: "1201", set: { note: "a" } }], profiling: { [key]: "other" } }, new RegExp(`profiling cannot set ${key}`)]),
+      // Adding rows.
+      [{ event: "x", changes: [{ add: { id: "1203", title: "t", stage: "pending", status: "pending" } }] }, /add needs target unit or component/],
+      [{ event: "x", changes: [{ target: "fleet", add: { id: "deploy", status: "pending" } }] }, /add needs target unit or component/],
+      [{ event: "x", changes: [{ target: "unit", add: { id: "1201", title: "dup", stage: "pending", status: "pending" } }] }, /id "1201" is already used/],
+      [{ event: "x", changes: [{ target: "unit", add: { id: "C1", title: "dup", stage: "pending", status: "pending" } }] }, /id "C1" is already used/],
+      [{ event: "x", changes: [{ target: "unit", add: { id: "1203", stage: "pending", status: "pending" } }] }, /title is required/],
+      [{ event: "x", changes: [{ target: "unit", add: { id: "1203", title: "t", stage: "queued", status: "pending" } }] }, /invalid stage "queued"/],
+      [{ event: "x", changes: [{ target: "unit", add: { id: "1203", title: "t", stage: "pending", status: "pending", dependsOn: ["404"] } }] }, /dependsOn names unknown unit "404"/],
+      [{ event: "x", changes: [{ target: "component", add: { id: "C2", status: "combining", dependsOn: ["C7"] } }] }, /dependsOn names unknown component "C7"/],
+      [{ event: "x", changes: [{ target: "unit", add: { title: "t", stage: "pending", status: "pending" } }] }, /add.id is required/],
+      [{ event: "x", changes: [{ target: "unit", id: "1201", set: { note: "a" }, add: { id: "1203" } }] }, /either set or add, not both/],
       // A valid change followed by an invalid one: nothing is saved.
       [{ event: "x", changes: [{ id: "1201", set: { status: "succeeded" } }, { id: "1202", set: { status: "nope" } }] }, /changes\[1\].*invalid status/],
     ];
@@ -220,6 +244,87 @@ test("rejected updates leave the plan and profiling log untouched", async () => 
       assert.equal(readFileSync(h.path, "utf8"), planBefore, `plan unchanged after ${JSON.stringify(workflow)}`);
       assert.equal(readFileSync(logPath, "utf8"), logBefore, `profiling unchanged after ${JSON.stringify(workflow)}`);
     }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("fleet statuses follow the contract set and n/a is saved as not-applicable", async () => {
+  const h = await boundHarness();
+  try {
+    const result = await h.update({ workflow: { event: "fleet", changes: [
+      { id: "canary", set: { status: "n/a" } },
+      { id: "cicd", set: { status: "merged" } },
+      { id: "review", set: { status: "failed", note: "timed out" } },
+    ] } });
+    const plan = h.plan();
+    assert.equal(plan.fleet.canary, "not-applicable", "the alias is normalized and a string stage stays a string");
+    assert.equal(plan.fleet.cicd.status, "merged");
+    assert.deepEqual(plan.fleet.review, { status: "failed", note: "timed out" });
+    const event = readEvents(result.details.profilingPath).at(-1);
+    assert.deepEqual(event.changes[0].set, { status: "not-applicable" }, "the profiling event carries the saved value, not the alias");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a scope change adds unit and component rows in one revision without touching existing rows", async () => {
+  const h = await boundHarness();
+  try {
+    const before = h.plan();
+    const result = await h.update({ workflow: {
+      event: "scope-added",
+      changes: [
+        { target: "component", add: { id: "C2", status: "building", dependsOn: ["C1"] } },
+        { target: "unit", add: { id: "1203", title: "Handle empty queue", stage: "pending", status: "pending", dependsOn: ["1201"], component: "C2", source: "#1203" } },
+        { target: "unit", add: { id: "1204", title: "Doc the queue", stage: "pending", status: "pending", dependsOn: ["1203"], component: "C2" } },
+        { id: "C2", set: { units: ["1203", "1204"] } },
+      ],
+      decision: { id: "d-3", humanWords: "Also cover the empty queue.", changes: "adds 1203 and 1204 in C2" },
+    } });
+    const after = h.plan();
+    assert.equal(after.planRevision, before.planRevision + 1);
+    assert.deepEqual(after.units.slice(0, 2), before.units, "existing rows are unchanged");
+    assert.deepEqual(after.units.map((u: any) => u.id), ["1201", "1202", "1203", "1204"]);
+    assert.deepEqual(after.units[2], { id: "1203", title: "Handle empty queue", stage: "pending", status: "pending", dependsOn: ["1201"], component: "C2", source: "#1203" });
+    assert.deepEqual(after.components[1], { id: "C2", status: "building", dependsOn: ["C1"], units: ["1203", "1204"] });
+    assert.match(result.content[0].text, /\+C2, \+#1203, \+#1204, C2; decision d-3/);
+    const event = readEvents(result.details.profilingPath).at(-1);
+    assert.deepEqual(event.changes.map((c: any) => [c.scope, c.id, "add" in c]), [
+      ["component", "C2", true], ["unit", "1203", true], ["unit", "1204", true], ["component", "C2", false],
+    ]);
+    assert.match(h.widget(), /#1204\s+Doc the queue/, "the widget shows the added units");
+
+    const legacy = await boundHarness({ plan: planFixture({ units: undefined, issues: planFixture().units, components: undefined }) });
+    try {
+      await legacy.update({ workflow: { event: "scope-added", changes: [
+        { target: "component", add: { id: "C1", status: "building" } },
+        { target: "unit", add: { id: "1203", title: "t", stage: "pending", status: "pending" } },
+      ] } });
+      const saved = legacy.plan();
+      assert.deepEqual(saved.issues.map((u: any) => u.id), ["1201", "1202", "1203"], "a plan that stores issues gets the unit there");
+      assert.equal(saved.units, undefined);
+      assert.deepEqual(saved.components, [{ id: "C1", status: "building", dependsOn: [], units: [] }]);
+    } finally {
+      legacy.cleanup();
+    }
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("a profiling log left ahead of the plan by an interrupted write is named in the next event", async () => {
+  const h = await boundHarness({ profiling: { "profiling/run.jsonl": `{"planRevision":12}\n{"planRevision":13,"event":"lost"}\n` } });
+  try {
+    const result = await h.update({ workflow: { event: "retry", changes: [{ id: "1201", set: { note: "again" } }] } });
+    assert.equal(result.details.revision, 13);
+    assert.equal(result.details.logAheadRevision, 13);
+    assert.match(result.content[0].text, /already held rev 13 .*supersedes it/);
+    const events = readEvents(result.details.profilingPath);
+    assert.deepEqual(events.map((e) => e.planRevision), [12, 13, 13]);
+    assert.equal(events.at(-1).logAheadRevision, 13);
+    const next = await h.update({ workflow: { event: "next", changes: [{ id: "1201", set: { note: "n" } }] } });
+    assert.equal(next.details.logAheadRevision, undefined, "once the plan catches up, events carry no warning");
   } finally {
     h.cleanup();
   }

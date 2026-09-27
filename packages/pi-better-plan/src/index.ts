@@ -41,11 +41,15 @@ const PlanStepSchema = Type.Object({
 
 const WorkflowRowChangeSchema = Type.Object({
   id: Type.Optional(Type.String({ description: "Unit id, component id (e.g. C1), or fleet stage (explore, combine, canary, review, cicd). Omit for run-level fields." })),
-  target: Type.Optional(StringEnum(["unit", "component", "fleet", "run"] as const, { description: "Only needed when the same id names two kinds of row." })),
-  set: Type.Object({}, {
+  target: Type.Optional(StringEnum(["unit", "component", "fleet", "run"] as const, { description: "Required with add. Otherwise only needed when the same id names two kinds of row." })),
+  set: Type.Optional(Type.Object({}, {
     additionalProperties: true,
     description: "Fields to set on that row, e.g. status, stage, attempt, retries, diagnoses, worker, clock, note, headSha, pr. Each value replaces the old one; null clears it.",
-  }),
+  })),
+  add: Type.Optional(Type.Object({}, {
+    additionalProperties: true,
+    description: "A new unit or component row for a scope change, with target unit or component. A unit needs id, title, stage, status; a component needs id and status. Send set or add, not both.",
+  })),
 });
 
 const WorkflowUpdateSchema = Type.Object({
@@ -310,10 +314,16 @@ export default function planExtension(pi: ExtensionAPI): void {
         rushPlan = result.plan;
         rushError = null;
         refresh(true);
-        const rows = result.changed.map(({ target, id }) => id === null ? "run" : target === "unit" ? `#${id}` : id);
+        const rows = result.changed.map(({ target, id, added }) =>
+          `${added ? "+" : ""}${id === null ? "run" : target === "unit" ? `#${id}` : id}`);
+        const logNote = result.logAheadRevision === undefined ? ""
+          : ` The profiling log already held rev ${result.logAheadRevision} (an earlier write stopped after logging); this event supersedes it.`;
         return {
-          content: [{ type: "text", text: `Saved rush-issues rev ${result.revision} (${input.workflow.event.trim()})${rows.length ? `: ${rows.join(", ")}` : ""}${input.workflow.decision ? `${rows.length ? ";" : ":"} decision ${input.workflow.decision.id}` : ""}. Profiling: ${result.profilingPath}` }],
-          details: { ok: true, runId: result.plan.runId, revision: result.revision, changed: result.changed, profilingPath: result.profilingPath },
+          content: [{ type: "text", text: `Saved rush-issues rev ${result.revision} (${input.workflow.event.trim()})${rows.length ? `: ${rows.join(", ")}` : ""}${input.workflow.decision ? `${rows.length ? ";" : ":"} decision ${input.workflow.decision.id}` : ""}. Profiling: ${result.profilingPath}.${logNote}` }],
+          details: {
+            ok: true, runId: result.plan.runId, revision: result.revision, changed: result.changed, profilingPath: result.profilingPath,
+            ...(result.logAheadRevision === undefined ? {} : { logAheadRevision: result.logAheadRevision }),
+          },
         };
       }
       if (owner) {
