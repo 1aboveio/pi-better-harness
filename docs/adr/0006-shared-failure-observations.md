@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amended 2026-09-27 by the incident lifecycle decision below (#315): explicit dispositions, separate actionability, and pending-only notifications.
+Accepted. Amended 2026-09-27 by the incident lifecycle decision below (#315): explicit dispositions, separate actionability, and pending-only notifications. Follow-ups in the #325 amendment: background-task intent, parent-authored trust provenance, orphaned-run gap delivery, and budget-safe terminal notes.
 
 ## Problem
 
@@ -43,7 +43,17 @@ Failure history and current actionability are separate facts derived from the sa
 
 ### Consequences
 
-Replaying the session from issue #315 (29 children, 181 tool failures) yields 171 retained unresolved observations, of which 1 is actionable while running. History and journal events are unchanged. Background tasks share the reducer, labels, and pending-only rendering; their structured intent is not yet exposed through `bg_task_spawn` or `bg_task_watch`.
+Replaying the session from issue #315 (29 children, 181 tool failures) yields 171 retained unresolved observations, of which 1 is actionable while running. History and journal events are unchanged. Background tasks share the reducer, labels, and pending-only rendering; their structured intent was added in #325 (below).
+
+## Amendment: follow-ups (#325)
+
+- **Unconfined subagents keep the exact rule, by design.** A child that is not on the trusted task runtime can rewrite its own log and metadata, so the parent cannot trust intent fields or dispositions it reports. Structured intent and `failure_disposition` stay gated on the trusted task runtime; this is intentional, not a gap to close later.
+- **Trust is parent-authored provenance.** `meta.taskRuntime` alone lives in the run directory. The parent also writes a provenance record before the child starts, outside every run directory, under the registry root the task runtime's policy denies to the child. Structured intent is honoured only when both agree. A child that could write its run directory still cannot forge trust.
+- **Trust is read, not assumed.** While metadata or provenance cannot be read, the scan is deferred rather than folded under the exact rule and cached; a terminal read records an observation gap until trust can be read, then the gap is recovered.
+- **One view of attempt reuse.** The parent scans the child's whole process log; the child checks `attemptId` reuse and validates dispositions against its whole session record, not one branch. Session entries are a superset of the log's tool starts, so a reuse the parent predicts is always one the child refused, and a command that ran is never filed as `rejected-intent`.
+- **Orphaned runs.** Subagents defer running observation gaps only while the run is `running`. After an orphaned run's health callback, later gaps are delivered promptly, because a lost or completion callback may never follow.
+- **Background-task intent.** `bg_task_spawn`, `bg_task_watch`, and `bg_task` accept `operation_id` and `expected_exit_codes`. The parent agent launches these commands itself, so the declaration is trusted. They are validated before launch with the shared validator. A declared exit code is recorded as expected. A later task that succeeds with the same `operation_id` (same kind, cwd, SSH target, and session), and that started after the failure, recovers the earlier task's unresolved failures; observation gaps and expected failures are left alone.
+- **Budget-safe terminal notes.** The terminal summary never exceeds its budget and is made of whole lines: incident rows go first, then lower-priority notes and the count line; the correctness note is kept whenever it fits.
 
 ## Scope and limits
 

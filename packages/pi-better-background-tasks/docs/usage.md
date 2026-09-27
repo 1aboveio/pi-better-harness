@@ -278,6 +278,26 @@ Command watchers default to a 15 minute timeout when `timeout_seconds` is
 omitted. Pass `timeout_seconds: 0` to disable the watcher timeout explicitly.
 Spawned processes do not get a default timeout.
 
+## Declared intent: retries and expected exits
+
+`bg_task_spawn`, `bg_task_watch`, and `bg_task` accept two optional fields,
+validated before launch (a malformed value starts nothing):
+
+- `operation_id`: a stable name (letters, digits, `. _ : / -`, up to 64
+  characters) for one logical operation. When a later task with the same
+  `operation_id`, kind, cwd, SSH target, and session succeeds, the unresolved
+  failures of earlier tasks that failed before it started are recovered. Use it
+  when a retry changes the command, scope, or timeout.
+- `expected_exit_codes`: distinct non-zero exit codes (1-255) that are
+  intentional, such as `[1]` for a `grep`/`rg` no-match or `git diff
+  --exit-code` probe. A matching process exit or watch poll is recorded as an
+  expected failure, not one needing action. The task's status still reports the
+  exit; signals and timeouts are never expected.
+
+```json
+{ "command": "npm test -- src/scoped.test.ts", "operation_id": "unit-tests", "timeout_seconds": 600 }
+```
+
 ## Observable Progress
 
 Running tasks are classified as `healthy`, `quiet`, or `stalled` from observable

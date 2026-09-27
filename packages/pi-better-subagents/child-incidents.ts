@@ -28,8 +28,16 @@ const intentProperties = {
         description: "Optional distinct non-zero exit codes that are intentional for this command (for example [1] for an rg/grep no-match or git diff --exit-code probe). Declared before the command runs; the final shell exit code is what is classified." },
 };
 
+/**
+ * Every tool call the child session has recorded, in append order, across all branches (#325).
+ * The parent scans the child's whole process log, not one session branch, so the child reads the
+ * whole session too: after a branch switch or compaction the two views still agree. Session
+ * entries are a superset of the log's tool starts (an assistant message is recorded before its
+ * tools run), so a reuse the parent sees is always one the child also saw and refused.
+ */
 function sessionToolCalls(ctx: ExtensionContext | undefined): Array<{ type: string; [key: string]: unknown }> {
-    const branch = (ctx?.sessionManager?.getBranch?.() ?? []) as any[];
+    const manager = ctx?.sessionManager;
+    const branch = (manager?.getEntries?.() ?? manager?.getBranch?.() ?? []) as any[];
     const rows: Array<{ type: string; [key: string]: unknown }> = [];
     let pendingEnds: any[] = [];
     const flush = () => { rows.push(...pendingEnds); pendingEnds = []; };
@@ -52,7 +60,7 @@ function sessionToolCalls(ctx: ExtensionContext | undefined): Array<{ type: stri
     return rows;
 }
 
-/** Rebuild the child's view of its own incidents from the durable session branch. */
+/** Rebuild the child's view of its own incidents from the durable session record (every branch). */
 export function childIncidentView(ctx: ExtensionContext | undefined, cwd: string): { model: IncidentModel; state: FailureState } {
     let state = emptyFailureState();
     let at = 0;

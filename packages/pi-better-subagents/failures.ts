@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
-import { logPathFor, readMeta, runDir } from "./registry.ts";
+import { logPathFor, runDir, taskRuntimeTrust } from "./registry.ts";
 import { activeFailures, disposeIncidents, failureIdentity, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
     observeFailures, pendingFailureAttention, readFailureState, type FailureState } from "./shared-failure-observations.ts";
 import { evidenceText, foldToolEnd, foldToolStart, newIncidentModel, toolOperation, type IncidentModel, type IncidentSink } from "./incident-model.ts";
@@ -97,8 +97,25 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
             scan = undefined;
         }
         // Structured intent and dispositions are honoured only for runs launched on the trusted task
-        // runtime, whose bash and failure_disposition tools are the guarded ones (parent-written metadata).
-        if (!scan) scan = { offset: 0, head, identity, model: newIncidentModel(readMeta(id)?.taskRuntime === true) };
+        // runtime, whose bash and failure_disposition tools are the guarded ones. Trust needs the
+        // parent-authored provenance record as well as `meta.taskRuntime` (#325). It is decided once
+        // per scan model, and only from a definite answer: while metadata or provenance cannot be read
+        // the scan is deferred (nothing is folded, so nothing is pinned to the exact rule), and a
+        // terminal read records the gap instead of claiming a complete scan.
+        if (!scan) {
+            const trust = taskRuntimeTrust(id);
+            if (trust === "unknown") {
+                const prior = readRunFailures(id);
+                const gap = prior.observations[failureIdentity("run-metadata")];
+                if (!terminal || (gap && gap.status === "unresolved")) return prior;
+                return observeFailures(path, [{ id: failureIdentity("run-metadata-unreadable", gap?.id ?? "initial"), operation: "run-metadata", kind: "incomplete",
+                    summary: "Run metadata could not be read; failure observations are deferred until it can" }]);
+            }
+            scan = { offset: 0, head, identity, model: newIncidentModel(trust === "trusted") };
+            const deferred = readRunFailures(id).observations[failureIdentity("run-metadata")];
+            if (deferred && deferred.status === "unresolved") observeFailures(path, [{ id: `run-metadata-readable:${deferred.id}`,
+                operation: "run-metadata", kind: "recovered", incidents: [deferred.id] }]);
+        }
         scan.head = head;
         let position = scan.offset;
         let start = position;

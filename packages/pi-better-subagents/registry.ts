@@ -203,6 +203,41 @@ function metaPathFor(id: string): string {
 }
 
 /**
+ * Parent-authored provenance for a run launched on the trusted task runtime (#325).
+ *
+ * `meta.taskRuntime` alone lives in the run directory. The parent only honours a child's
+ * structured intent and `failure_disposition` calls when this separate record, written by the
+ * parent before the child starts, also exists. It sits outside every run directory, under the
+ * registry root that the task runtime's policy denies to the child (`runtimeRoots`), so a future
+ * child-writable run directory cannot forge trust by rewriting its own metadata.
+ */
+export function taskRuntimeProvenancePath(id: string): string {
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid run ID.");
+    return join(baseDir(), "task-runtime", `${id}.json`);
+}
+export function recordTaskRuntimeProvenance(id: string): void {
+    const path = taskRuntimeProvenancePath(id);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, JSON.stringify({ version: 1, id }), { mode: 0o600 });
+}
+/**
+ * Whether the parent may honour structured intent for this run. `unknown` means the answer could
+ * not be read right now (unreadable metadata or provenance); callers retry instead of caching it.
+ * A missing or mismatched provenance record is a definite `unconfined` (the exact-retry rule).
+ */
+export function taskRuntimeTrust(id: string): "trusted" | "unconfined" | "unknown" {
+    let raw: string;
+    try { raw = readFileSync(taskRuntimeProvenancePath(id), "utf-8"); }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "unconfined" : "unknown"; }
+    let record: unknown;
+    try { record = JSON.parse(raw); } catch { return "unconfined"; }
+    if (!record || typeof record !== "object" || (record as { id?: unknown }).id !== id) return "unconfined";
+    const inspected = inspectRunMeta(id);
+    if (inspected.kind !== "ok") return "unknown";
+    return inspected.meta.taskRuntime === true ? "trusted" : "unconfined";
+}
+
+/**
  * Name and catalog from a single launch publication.
  * `catalogKnown` is false when the winning snapshot omitted `catalog`.
  * Explicit null is known and must not be replaced by a later object.
@@ -845,6 +880,7 @@ export function readMeta(id: string): RunMeta | undefined {
 export function removeMetaArtifacts(meta: RunMeta): boolean {
     try {
         rmSync(runDir(meta.id), { recursive: true, force: true });
+        rmSync(taskRuntimeProvenancePath(meta.id), { force: true });
         if (meta.taskRuntime && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(meta.id) && meta.cwd === taskWorkspaceDir(meta.id)) {
             rmSync(taskWorkspaceDir(meta.id), { recursive: true, force: true });
         }

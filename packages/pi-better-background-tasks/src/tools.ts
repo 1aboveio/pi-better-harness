@@ -64,6 +64,12 @@ const RemoteSchema = Type.Object({
   description: "Remote execution controls used with ssh. Omit session for SSH spawn to get the durable tmux default; SSH watch runs direct one-shot polls regardless of session and does not install tmux.",
 });
 
+// Structured intent (#325). Validated in code before launch (no uniqueItems/pattern: some providers reject them).
+const IntentFields = {
+  operation_id: Type.Optional(Type.String({ description: "Optional stable id (letters, digits, . _ : / -; up to 64) for one logical operation. Reuse it when you retry with a changed command, scope, or timeout: when a later task with the same operation_id succeeds, earlier failures of that operation in this session are recovered." })),
+  expected_exit_codes: Type.Optional(Type.Array(Type.Integer({ minimum: 1, maximum: 255 }), { minItems: 1, maxItems: 16, description: "Optional distinct non-zero exit codes that are intentional for this command (e.g. [1] for a no-match probe). Declared before launch; recorded as expected failures, not incidents needing action. Signals and timeouts are never expected." })),
+};
+
 const CommandFields = {
   name: Type.Optional(Type.String({ description: "Human-readable task label." })),
   command: Type.Optional(Type.String({ description: "Shell command to run, or the remote command when ssh is set. Required unless shell:false with argv is used." })),
@@ -76,6 +82,7 @@ const CommandFields = {
   timeout_seconds: Type.Optional(Type.Number({ description: "Optional timeout in seconds. Command watchers default to 900 seconds when omitted; pass 0 to disable. Spawned processes have no default timeout." })),
   ssh: Type.Optional(SshSchema),
   remote: Type.Optional(RemoteSchema),
+  ...IntentFields,
 };
 
 const SpawnParams = Type.Object(CommandFields);

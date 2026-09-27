@@ -352,6 +352,49 @@ describe("#315 child tool failures and parent wakes", () => {
     });
 });
 
+describe("#325 orphaned runs", () => {
+    it("observation gaps found after the orphaned health callback are delivered promptly, not held for lost/completion", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            const id = nextRunId();
+            dirOnly.push(id);
+            const log = join(runDir(id), "output.log");
+            try {
+                // An orphaned run whose health callback (and its supervision incident) was already handed off.
+                // pid is this live process without a start token, so reconciliation keeps it orphaned.
+                writeMeta({ id, status: "orphaned", pid: process.pid, spawnPid: process.pid, cwd: h.ctx.cwd,
+                    callbackOrigin: { cwd: h.ctx.cwd, sessionId: "test-session" }, promptPreview: "orphaned gaps",
+                    startedAt: Date.now() - 60_000, orphanedAt: Date.now() - 30_000, orphanedCallbackSentAt: Date.now() - 30_000,
+                    logPath: log, sessionId: id, callback: true });
+                writeFileSync(log, "");
+                observeFailures(failurePath(id), [
+                    { id: "supervision:orphaned", operation: "supervision:orphaned", kind: "incomplete", summary: "Child supervision interrupted; related work may still be alive" },
+                    { id: "delivered:orphaned", operation: "attention-delivery", kind: "delivered", incidents: ["supervision:orphaned"] },
+                ]);
+                await h.handlers.get("session_start")({}, h.ctx);
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+                assert.equal(readMeta(id).status, "orphaned");
+                assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 0, "nothing new to report yet");
+                // Evidence breaks after the health callback: there may never be a lost or completion callback.
+                appendFileSync(log, '{"type":"tool_execution_end","toolCallId":"broken"}\n');
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+                const wakes = h.sent.filter((x) => x.message.customType === "subagent-failure");
+                assert.equal(wakes.length, 1);
+                assert.match(wakes[0].message.content, /Observation incomplete · .*malformed structured events/);
+                assert.doesNotMatch(wakes[0].message.content, /Observation incomplete · .*supervision interrupted/i, "the delivered supervision incident is not repeated");
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+                assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 1, "delivered once");
+            } finally {
+                writeMeta({ ...readMeta(id), status: "lost", endedAt: Date.now(), lostCallbackSentAt: Date.now() });
+                h.shutdown();
+            }
+        });
+    });
+});
+
 describe("AC1 — subagent_spawn persists process identity into meta.json", () => {
     it("persists every captured identity field through the production spawn path (fake probe)", async () => {
         const h = makeHarness();

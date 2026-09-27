@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file. The format is b
 - **subagents**: `subagent_result` accepts `lines`, an optional per-page line cap for the answer; `nextCursor` continues after the last line shown. (#321)
 - **subagents**: `subagent_output` and `subagent_result` accept `include: ["cost", "tools"]` to add one token/cost spend line and one tool-call count line (with the distinct tool names). Ordinary payloads still omit both. (#321)
 - **background-tasks**: `bg_task`/`bg_status` `action:clear` with `id` dismisses that one terminal task. (#322)
+- **background-tasks** (#325): `bg_task_spawn`, `bg_task_watch`, and the `bg_task` wrapper accept `operation_id` and `expected_exit_codes`, validated before launch by the same validator as the subagent task runtime's `bash` (a malformed declaration starts nothing). A declared exit code is recorded as an `Expected failure`, not an incident needing action; signals and timeouts never are. A later task with the same `operation_id` (same kind, cwd, SSH target, and session) that succeeds recovers the earlier task's unresolved failures, so a retry with a changed command or timeout closes the original incident
 
 ### Changed
 
@@ -23,11 +24,19 @@ All notable changes to this project are documented in this file. The format is b
 - **background-tasks**: the `env` and `ssh.options` parameters of `bg_task_spawn`, `bg_task_watch`, and `bg_task` are declared as plain string maps (`additionalProperties`) instead of `Type.Record`; accepted values are unchanged. A test runs the provider-schema check over every background-task tool schema and the subagent list/output/result/stop schemas.
 - The provider-schema check lists only keywords a provider has been observed to reject (today `uniqueItems`); new entries need an observed rejection.
 - Incident pages, cursor scope keys, and lifecycle content revisions for both tool families now come from the shared `failure-observations` and `log-utils` modules instead of per-package copies. (#323)
+- **subagents** (#325): structured intent and `failure_disposition` are honoured only when a parent-authored provenance record exists alongside `meta.taskRuntime`. The record is written before the child starts, outside every run directory, under the registry root the task runtime denies to the child, so a child that could rewrite its own metadata cannot claim the trusted runtime. Unconfined children keep the exact-retry rule by design: the parent cannot trust anything an unconfined child can rewrite
+- **subagents** (#325): the confined child checks `attemptId` reuse and validates dispositions against its whole session record (every branch), matching the parent's whole-log scan. After a branch switch or compaction a reuse the parent sees is always one the child refused, so a command that really ran and failed is never filed as a non-escalating `rejected-intent`
+- **subagents** (#325): after an orphaned run's health callback, observation gaps are delivered promptly instead of waiting for a lost or completion callback that may never come
 
 ### Deprecated
 
 - **subagents**: `maxBytes` is deprecated in favor of `max_bytes` on `subagent_list`, `subagent_output`, and `subagent_result`; it still works, and `max_bytes` wins when both are given. (#321)
 - **background-tasks**, **subagents**: `tail_lines` is deprecated in favor of `lines` on `bg_task_log`, `bg_task`, `bg_status`, `subagent_output`, and `subagent_result`; `maxBytes` is likewise accepted on the background tools as an alias of `max_bytes`. Both still work, and the canonical name wins when both are given. (#321)
+
+### Fixed
+
+- **subagents** (#325): a transient failure reading a run's metadata no longer pins its failure scan to the exact-retry rule. The scan is deferred until trust can be read; a terminal read in the meantime reports `Observation incomplete` rather than a complete scan
+- **subagents, background-tasks** (#325): the terminal failure summary never exceeds its byte budget and is made of whole lines. Under a tight budget incident rows are dropped first, then lower-priority notes and the count line; the "Work correctness was not inferred from lifecycle alone." note is kept whenever it fits and never cut mid-sentence
 
 ## [pi-better-harness@0.6.1] - 2026-09-27
 

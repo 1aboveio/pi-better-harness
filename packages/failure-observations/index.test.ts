@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { emptyFailureState, reduceFailure, activeFailures, formatFailureSummary, formatFailureLines, pageFailureIncidents, isIncidentCursor, incidentCursorAt, pendingFailureAttention,
   formatIncidentSummary, failureRevision, incidentVerbatimPage, incidentPageHeading, incidentResource, failureJournalFingerprint,
   observeFailures, readFailureState, markFailureAttentionDelivered, failureAttentionHandled, type FailureEvent,
-  disposeIncidents, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, validateDisposition } from "./index.ts";
+  disposeIncidents, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, validateDisposition,
+  formatTerminalIncidentSummary, CORRECTNESS_NOTE, readCommandIntent } from "./index.ts";
 
 const failed: FailureEvent = { id: "call-1:end", operation: "cwd:project:tsc", kind: "failure",
   summary: "TypeScript exited 2", category: "exit", evidence: "output.log#call-1" };
@@ -509,4 +510,54 @@ test("the journal fingerprint changes on every append, deletion, and marker chan
   assert.notEqual(twice, once);
   rmSync(path);
   assert.match(failureJournalFingerprint(path), /^unreadable:ENOENT\|1\|0$/, "a lost journal keeps its marker");
+
+test("#325 terminal summary under a budget sweep: rows drop first, output never exceeds the budget, notes are never cut", () => {
+  let state = emptyFailureState();
+  for (let i = 0; i < 6; i++) state = reduceFailure(state, toolFailure(`t${i}`, `op-${i}`, `bash failed: probe ${i}`), 1000 + i);
+  for (let i = 0; i < 3; i++) {
+    state = reduceFailure(state, { id: `exit-${i}`, operation: `child-exit-${i}`, kind: "failure", category: "exit",
+      summary: `Child exited with code ${i + 1}: ${"x".repeat(120)}` }, 2000 + i);
+  }
+  state = reduceFailure(state, toolFailure("e", "probe-e", "bash exited with declared expected code 1"), 3000);
+  state = reduceFailure(state, { id: "ex", operation: "incident-disposition", kind: "disposition", disposition: "expected", incidents: ["e"], reason: "probe" }, 3001);
+  state = reduceFailure(state, toolFailure("r", "op-r"), 3002);
+  state = reduceFailure(state, { id: "rr", operation: "op-r", kind: "recovered", incidents: ["r"] }, 3003);
+  for (const retrieval of [undefined, `pass as cursor to subagent_result id="sa_sweep"`]) {
+  const whole = formatTerminalIncidentSummary(state, { maxBytes: Number.MAX_SAFE_INTEGER, resource: "sweep", retrieval });
+  const allLines = new Set(whole.text.split("\n"));
+  const correctness = Buffer.byteLength(CORRECTNESS_NOTE);
+  let sawRowsWithCorrectness = false;
+  let sawCorrectnessOnly = false;
+  for (let maxBytes = 0; maxBytes <= Buffer.byteLength(whole.text) + 10; maxBytes += 1) {
+    const out = formatTerminalIncidentSummary(state, { maxBytes, resource: "sweep", retrieval });
+    assert.ok(Buffer.byteLength(out.text) <= maxBytes, `budget ${maxBytes}: ${Buffer.byteLength(out.text)} bytes`);
+    const lines = out.text ? out.text.split("\n") : [];
+    for (const line of lines) {
+      // Every line is whole: either a line of the unbounded summary, or a count line.
+      assert.ok(allLines.has(line) || /^\d+ active failure observations · \d+ shown · \d+ omitted · /.test(line), `budget ${maxBytes}: clipped line ${JSON.stringify(line)}`);
+    }
+    if (maxBytes >= correctness) assert.ok(lines.includes(CORRECTNESS_NOTE), `budget ${maxBytes}: the correctness note is kept whenever it fits`);
+    else assert.ok(!out.text.includes("Work correctness"), "the note is never cut mid-sentence");
+    const rows = lines.filter((line) => line.startsWith("Action required"));
+    if (rows.length && lines.includes(CORRECTNESS_NOTE)) sawRowsWithCorrectness = true;
+    if (lines.length === 1 && lines[0] === CORRECTNESS_NOTE) sawCorrectnessOnly = true;
+    // Rows are dropped before any note: a row is only present when every note is.
+    if (rows.length) for (const note of whole.text.split("\n").filter((x) => !x.startsWith("Action required") && !/active failure observations/.test(x))) {
+      assert.ok(lines.includes(note), `budget ${maxBytes}: note ${JSON.stringify(note)} dropped while a row was kept`);
+    }
+    assert.equal(out.represented + out.omitted, out.total);
+    if (out.nextCursor) assert.ok(out.text.includes(`incidentCursor=${out.nextCursor}`), "a returned cursor is always shown whole");
+  }
+  assert.ok(sawRowsWithCorrectness && sawCorrectnessOnly);
+  }
+});
+
+test("#325 one command-intent validator for subagents and background tasks, with caller field names", () => {
+  assert.deepEqual(readCommandIntent({ operationId: "unit-tests", expectedExitCodes: [1, 2] }).intent, { operationId: "unit-tests", expectedExitCodes: [1, 2] });
+  const names = { operationId: "operation_id", expectedExitCodes: "expected_exit_codes" };
+  assert.match(readCommandIntent({ expectedExitCodes: [1, 1] }, names).error!, /^expected_exit_codes must be 1-16 distinct integers/);
+  assert.match(readCommandIntent({ operationId: "has space" }, names).error!, /^operation_id must match/);
+  for (const bad of [[0], [256], [], [1.5], Array.from({ length: 17 }, (_, i) => i + 1)]) {
+    assert.ok(readCommandIntent({ expectedExitCodes: bad }).error, JSON.stringify(bad));
+  }
 });

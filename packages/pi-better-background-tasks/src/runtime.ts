@@ -8,7 +8,7 @@ import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
 import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
-import { failurePath, recordFailure, recoverFailure, scheduleFailureAttention, stopFailureAttention, terminalFailureAttention } from "./failures.js";
+import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, scheduleFailureAttention, stopFailureAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { formatCallbackFacts } from "./output.js";
@@ -43,6 +43,10 @@ export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefin
 
 export interface SpawnTaskParams extends CommandSpec {
   name?: string;
+  /** Structured intent (#325): stable id shared by modified retries of one operation. */
+  operation_id?: string;
+  /** Structured intent (#325): non-zero exit codes declared intentional before launch. */
+  expected_exit_codes?: number[];
   callback?: boolean;
   timeout_seconds?: number;
   max_log_bytes?: number;
@@ -52,6 +56,10 @@ export interface SpawnTaskParams extends CommandSpec {
 
 export interface WatchTaskParams extends CommandSpec {
   name?: string;
+  /** Structured intent (#325): stable id shared by modified retries of one operation. */
+  operation_id?: string;
+  /** Structured intent (#325): non-zero exit codes declared intentional before launch. */
+  expected_exit_codes?: number[];
   callback?: boolean;
   interval_seconds?: number;
   timeout_seconds?: number;
@@ -78,6 +86,7 @@ export function spawnTask(
 ): BackgroundTaskMeta {
   // Resolved before any task directory, log, or metadata exists so a blocked
   // launch leaves nothing behind. Structured SSH must also honor launch restrictions.
+  const intent = readTaskIntent(params);
   const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
@@ -130,6 +139,7 @@ export function spawnTask(
     spawnPidStartTime: currentProcessStartToken(),
     ssh: remoteTask?.metadata.ssh,
     remote: remoteTask?.metadata.remote,
+    ...intent,
   };
   writeMeta(meta);
   scheduleLogRetention(id);
@@ -146,8 +156,11 @@ export function spawnTask(
       if (!latest) return;
       enforceLogRetention(latest);
       if (isTerminalStatus(latest.status)) return;
-      if (exitCode !== 0) recordFailure(latest, "execution", `Process exited with code ${exitCode ?? "unknown"}${signal ? ` (${signal})` : ""}`, "close", { category: "exit", at: Date.now() });
-      else recoverFailure(latest, "execution", "close");
+      if (exitCode !== 0) recordExitFailure(latest, "execution", `Process exited with code ${exitCode ?? "unknown"}${signal ? ` (${signal})` : ""}`, exitCode, "close", { at: Date.now() });
+      else {
+        recoverFailure(latest, "execution", "close");
+        recoverDeclaredOperation(latest);
+      }
       latest.status = exitCode === 0 ? "succeeded" : "failed";
       latest.endedAt = Date.now();
       latest.lastExitCode = exitCode;
@@ -280,7 +293,7 @@ async function pollRemoteSession(
     }
     const commandResult = { ...poll.commandResult, exitCode: poll.status, stdout: poll.output };
     latest.lastExitCode = poll.status;
-    if (poll.status !== 0) recordFailure(latest, "execution", `Remote command exited with code ${poll.status}`, "exit", { category: "exit" });
+    if (poll.status !== 0) recordExitFailure(latest, "execution", `Remote command exited with code ${poll.status}`, poll.status, "exit");
     else recoverFailure(latest, "execution", "exit");
     finalize(latest, {
       status: poll.status === 0 ? "succeeded" : "failed",
@@ -326,6 +339,7 @@ export function startWatchTask(
     const error = condition && validateCondition(condition);
     if (error) throw new Error(`${name}: ${error}`);
   }
+  const intent = readTaskIntent(params);
   const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
@@ -371,6 +385,7 @@ export function startWatchTask(
     notifyOn: "terminal",
     ssh: remoteTask?.metadata.ssh,
     remote: remoteTask?.metadata.remote,
+    ...intent,
   };
   ensureTaskDir(id);
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
@@ -604,8 +619,8 @@ async function pollWatch(
       const error = condition && validateCondition(condition);
       if (error) {
         latest.error = `${name}: ${error}`;
-        if (result.exitCode !== 0) recordFailure(latest, "watch-poll", `Watch poll exited with code ${result.exitCode ?? "unknown"}`, pollKey,
-          { category: "exit", at: result.endedAt });
+        if (result.exitCode !== 0) recordExitFailure(latest, "watch-poll", `Watch poll exited with code ${result.exitCode ?? "unknown"}`, result.exitCode, pollKey,
+          { at: result.endedAt });
         recordFailure(latest, name, latest.error, pollKey, { incomplete: true, at: result.endedAt });
         finalize(latest, { status: "failed", reason: latest.error, commandResult: result }, pi, getActiveSession);
         return;
@@ -628,8 +643,8 @@ async function pollWatch(
       success?.matched === true && latest.successWhen?.type === "exit_code";
     if (expectedPollExit) recoverFailure(latest, "watch-poll", pollKey, result.endedAt);
     if (transportFailure) recordFailure(latest, "watch-poll", transportFailure, pollKey, { category: "ssh", at: result.endedAt });
-    else if (result.exitCode !== 0) recordFailure(latest, "watch-poll", `Watch poll exited with code ${result.exitCode ?? "unknown"}`, pollKey,
-      { category: "exit", expected: expectedPollExit, at: result.endedAt });
+    else if (result.exitCode !== 0) recordExitFailure(latest, "watch-poll", `Watch poll exited with code ${result.exitCode ?? "unknown"}`, result.exitCode, pollKey,
+      { expected: expectedPollExit, at: result.endedAt });
     else recoverFailure(latest, "watch-poll", pollKey, result.endedAt);
     if (conditionErrors.length) latest.error = conditionErrors.join("; ");
     if (failure?.matched) {
@@ -692,6 +707,7 @@ function finalize(
 ): void {
   stopFailureAttention(meta.id);
   if (terminal.status === "timed_out") recordFailure(meta, "timeout", terminal.reason, "deadline", { category: "timeout" });
+  if (terminal.status === "succeeded") recoverDeclaredOperation(meta);
   meta.status = terminal.status;
   meta.endedAt = Date.now();
   meta.result = {
