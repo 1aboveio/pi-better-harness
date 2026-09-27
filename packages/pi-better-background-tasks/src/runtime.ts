@@ -92,9 +92,9 @@ export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefin
 export interface SpawnTaskParams extends CommandSpec {
   name?: string;
   /** Structured intent (#325): stable id shared by modified retries of one operation. */
-  operation_id?: string;
+  operation_id?: string | null;
   /** Structured intent (#325): non-zero exit codes declared intentional before launch. */
-  expected_exit_codes?: number[];
+  expected_exit_codes?: number[] | null;
   callback?: boolean;
   timeout_seconds?: number;
   max_log_bytes?: number;
@@ -105,9 +105,9 @@ export interface SpawnTaskParams extends CommandSpec {
 export interface WatchTaskParams extends CommandSpec {
   name?: string;
   /** Structured intent (#325): stable id shared by modified retries of one operation. */
-  operation_id?: string;
+  operation_id?: string | null;
   /** Structured intent (#325): non-zero exit codes declared intentional before launch. */
-  expected_exit_codes?: number[];
+  expected_exit_codes?: number[] | null;
   callback?: boolean;
   interval_seconds?: number;
   timeout_seconds?: number;

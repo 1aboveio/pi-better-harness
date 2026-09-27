@@ -309,6 +309,70 @@ test("#315 review: rejected intents are visible but never grouped with, or escal
     assert.equal(active315(collectRunFailures(f.id, "/repo")).find((x) => x.id === "tool:real")?.count, 1);
 });
 
+test("explicit-null intent fields are undeclared: a command that ran and failed is an ordinary failure that escalates", (t) => {
+    // Provenance: the two bash calls of production child run sa_mujnmedf_4 (harness 0.6.1,
+    // openai/gpt-5.6-sol) that 0.6.x misfiled as "bash not run: invalid command intent". The model
+    // sent `expectedExitCodes: null`; Pi dropped the null before execute and the command ran and
+    // failed for real (a Gradle lock EPERM, then a 1200 s timeout). Paths are placeholders; the
+    // arguments, isError, and each output's head and tail are verbatim.
+    const rows = readFileSync(new URL("./fixtures/null-intent/sa_mujnmedf_4-bash-rows.jsonl", import.meta.url), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(rows.filter((row) => row.type === "tool_execution_start").every((row) => row.args.expectedExitCodes === null));
+    const f = confinedFixture(t);
+    f.append(...rows);
+    let state = collectRunFailures(f.id, "/repo");
+    let active = active315(state);
+    assert.deepEqual(active.map((x) => [x.category, x.count]), [["tool", 2]], "both runs are failures of the one declared operation, not rejected intents");
+    assert.doesNotMatch(active[0].summary, /not run/);
+    assert.match(active[0].summary, /bash failed: /);
+    assert.equal(requiresAction(active[0]), false, "two failures are still below the repeated-failure threshold");
+    // A third failure of the same operation escalates, exactly as it would without the nulls.
+    f.append(bashStart("build-3", { attemptId: "android-apk-build-3", command: "pnpm build:android", expectedExitCodes: null, operationId: "android-apk-build", timeout: 1200 }),
+        bashFail("build-3", "Exit status 1\n\nCommand exited with code 1"));
+    state = collectRunFailures(f.id, "/repo");
+    active = active315(state);
+    assert.deepEqual(active.map((x) => [x.category, x.count]), [["tool", 3]]);
+    assert.equal(requiresAction(active[0]), true);
+    assert.ok(pendingFailureAttention(state, Date.now() + 3_600_000), "a repeated real failure wakes the parent");
+});
+
+test("explicit-null intent fields do not change exact identity: null-only retries group and recover like omitted ones", (t) => {
+    const f = confinedFixture(t);
+    const nulls = { operationId: null, attemptId: null, expectedExitCodes: null };
+    f.append(bashStart("n1", { command: "npm test", ...nulls }), bashFail("n1", "1 failing\n\nCommand exited with code 1"),
+        bashStart("n2", { command: "npm test" }), bashFail("n2", "1 failing\n\nCommand exited with code 1"),
+        bashStart("n3", { command: "npm test", expectedExitCodes: null }), bashFail("n3", "1 failing\n\nCommand exited with code 1"));
+    let active = active315(collectRunFailures(f.id, "/repo"));
+    assert.deepEqual(active.map((x) => [x.category, x.count]), [["tool", 3]]);
+    assert.equal(requiresAction(active[0]), true);
+    f.append(bashStart("n4", { command: "npm test", ...nulls }), bashOk("n4"));
+    active = active315(collectRunFailures(f.id, "/repo"));
+    assert.equal(active.length, 0, "the exact retry recovers it, nulls or not");
+});
+
+test("rejected-intent is filed only from the child's own pre-run refusal, never re-derived from arguments", (t) => {
+    const f = confinedFixture(t);
+    // Pi's schema check refuses expectedExitCodes [0] before execute; nothing ran.
+    f.append(bashStart("schema", { command: "npm test", expectedExitCodes: [0] }),
+        bashFail("schema", "Validation failed for tool \"bash\":\n  - expectedExitCodes.0: must be >= 1\n\nReceived arguments:\n{}"));
+    // The intent bash's own refusal of a duplicate code the schema cannot express.
+    f.append(bashStart("dup", { command: "npm test", expectedExitCodes: [1, 1] }),
+        bashFail("dup", "Invalid command intent: expectedExitCodes must be 1-16 distinct integers from 1 to 255. The command was not run."));
+    // Pi coerced operationId 42 to "42" and the command ran and failed: the parent's own validator
+    // disagrees with the raw argument, but the end row is a real run, so it is a real failure.
+    f.append(bashStart("coerced", { command: "npm run lint", operationId: 42 }), bashFail("coerced", "lint error\n\nCommand exited with code 1"));
+    // A command whose output merely contains the refusal wording still ran.
+    f.append(bashStart("echo", { command: "cat notes.txt; exit 1" }),
+        bashFail("echo", "Invalid command intent: x. The command was not run.\n\nCommand exited with code 1"));
+    const byId = Object.fromEntries(active315(collectRunFailures(f.id, "/repo")).map((x) => [x.id, x]));
+    assert.equal(byId["tool:schema"].category, "rejected-intent");
+    assert.match(byId["tool:schema"].summary, /not run: invalid command intent \(expectedExitCodes must be/);
+    assert.equal(byId["tool:dup"].category, "rejected-intent");
+    assert.match(byId["tool:dup"].summary, /not run: invalid command intent \(expectedExitCodes must be 1-16 distinct/);
+    assert.equal(byId["tool:coerced"].category, "tool");
+    assert.match(byId["tool:coerced"].summary, /^bash failed: .*lint error/);
+    assert.equal(byId["tool:echo"].category, "tool");
+});
+
 test("#315 review: a later exact-retry success does not erase an expected classification", (t) => {
     const f = confinedFixture(t);
     f.append(bashStart("probe", { command: "git diff --exit-code", expectedExitCodes: [1] }), bashOk("probe", "diff", { exitCode: 1, expectedExit: true }),

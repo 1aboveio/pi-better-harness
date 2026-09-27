@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, validateToolArguments } from "@earendil-works/pi-ai";
 import { describeSandboxSupport } from "../shared-sandbox-core.ts";
 import taskGuard from "../task-guard.ts";
 import { collectRunFailures, failurePath } from "../failures.ts";
@@ -117,6 +117,9 @@ function childRun(t, session) {
 
 test("the child and parent share one intent validator", () => {
     assert.deepEqual(readCommandIntent({ expectedExitCodes: [1, 2], operationId: "tests", attemptId: "a-1" }).intent, { expectedExitCodes: [1, 2], operationId: "tests", attemptId: "a-1" });
+    assert.deepEqual(readCommandIntent({ expectedExitCodes: null, operationId: "tests", attemptId: null }), { intent: { operationId: "tests" } },
+        "an explicit null is an undeclared field, not a malformed one");
+    assert.deepEqual(readCommandIntent({ expectedExitCodes: undefined, operationId: null }), { intent: {} });
     for (const bad of [{ expectedExitCodes: [0] }, { expectedExitCodes: [] }, { expectedExitCodes: [1, 1] }, { expectedExitCodes: "1" }, { operationId: "has space" }, { attemptId: "" }]) {
         assert.ok(readCommandIntent(bad).error, JSON.stringify(bad));
     }
@@ -213,4 +216,32 @@ test("#325 after a branch switch the child still refuses a reused attemptId, so 
     const ctx2 = sessionView(fresh, [...earlier, ...current, ...fresh]);
     await assert.rejects(bash.execute("b-2", { command: "npm test -- scoped", attemptId: "a2" }, undefined, undefined, ctx2), /exit code 1|code 1/i);
     assert.equal(ran, 1, "an unused attemptId runs");
+});
+
+test("explicit-null intent: Pi hands the child the raw nulls, the command runs, and the parent's replay of the same rows agrees", async (t) => {
+    // sa_mujnmedf_4: the model sent every optional intent field as null. The child ran the command;
+    // 0.6.x's parent re-validated the logged arguments and filed a real failure as "not run".
+    const raw = { attemptId: "android-apk-build", command: "pnpm build:android", expectedExitCodes: null, operationId: "android-apk-build", timeout: 1200 };
+    let ran = 0;
+    const bash = intentBashDefinition(process.cwd(), { exec: async () => { ran += 1; return { exitCode: 1 }; } });
+    const args = validateToolArguments({ name: "bash", parameters: bash.parameters }, { type: "toolCall", id: "build", name: "bash", arguments: structuredClone(raw) });
+    assert.deepEqual(args, raw, "the intent schema admits null, so execute sees exactly what the log records");
+    const ctx = { sessionManager: SessionManager.inMemory(process.cwd()) };
+    await assert.rejects(bash.execute("build", args, undefined, undefined, ctx), /code 1/i);
+    assert.equal(ran, 1, "an explicit-null intent is no intent: the command runs");
+    // Pi still refuses a genuinely malformed intent before execute.
+    assert.throws(() => validateToolArguments({ name: "bash", parameters: bash.parameters },
+        { type: "toolCall", id: "bad", name: "bash", arguments: { command: "true", expectedExitCodes: [0] } }), /Validation failed for tool "bash"/);
+    const id = `sa_child_incidents_${randomUUID()}`;
+    mkdirSync(runDir(id), { recursive: true });
+    writeFileSync(join(runDir(id), "meta.json"), JSON.stringify({ id, status: "running", cwd: process.cwd(), taskRuntime: true, startedAt: 1 }));
+    recordTaskRuntimeProvenance(id);
+    t.after(() => { rmSync(runDir(id), { recursive: true, force: true }); rmSync(taskRuntimeProvenancePath(id), { force: true }); });
+    const rows = [1, 2, 3].flatMap((n) => [
+        { type: "tool_execution_start", toolCallId: `build-${n}`, toolName: "bash", args: { ...raw, attemptId: `android-apk-build-${n}` } },
+        { type: "tool_execution_end", toolCallId: `build-${n}`, toolName: "bash", isError: true, result: { content: [{ type: "text", text: "BUILD FAILED\n\nCommand exited with code 1" }] } },
+    ]);
+    appendFileSync(logPathFor(id), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const failures = activeFailures(collectRunFailures(id, process.cwd()));
+    assert.deepEqual(failures.map((x) => [x.category, x.count]), [["tool", 3]], "one declared operation, three real failures, no rejected intents");
 });
