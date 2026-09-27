@@ -37,8 +37,9 @@ const ConditionSchema = Type.Union([
 ]);
 
 /**
- * String-to-string map. Uses additionalProperties rather than Type.Record,
- * whose patternProperties keyword OpenAI rejects in tool schemas (#327).
+ * String-to-string map declared with additionalProperties. Equivalent to
+ * Type.Record(Type.String(), Type.String()) for accepted values; kept as the
+ * plainer JSON Schema form.
  */
 function StringMap(description: string) {
   return Type.Unsafe<Record<string, string>>({ type: "object", additionalProperties: { type: "string" }, description });

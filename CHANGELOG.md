@@ -20,12 +20,10 @@ All notable changes to this project are documented in this file. The format is b
 - **background-tasks**, **subagents**: completion callback rows no longer clip the `status` field to 80 bytes with an ellipsis. Background-task rows carry the lifecycle status plus an attention count (`failed; 2 incidents need attention`); the incident text stays on its own rows with exact counts. Any status longer than 160 bytes keeps whole `; `-separated notes and says how many it left out. (#323)
 - **subagents**: `subagent_list` caches each run's incident counts and recomputes only runs whose child log or failure journal changed, so a list call no longer rescans every matching run. (#323)
 
-### Fixed
-
-- **background-tasks**: the `env` and `ssh.options` parameters of `bg_task_spawn`, `bg_task_watch`, and `bg_task` no longer use `patternProperties` (from `Type.Record`), a keyword OpenAI rejects in tool schemas; they are plain string maps. A test now checks every background-task tool schema and the subagent list/output/result/stop schemas for provider-rejected keywords.
-
 ### Internal
 
+- **background-tasks**: the `env` and `ssh.options` parameters of `bg_task_spawn`, `bg_task_watch`, and `bg_task` are declared as plain string maps (`additionalProperties`) instead of `Type.Record`; accepted values are unchanged. A test runs the provider-schema check over every background-task tool schema and the subagent list/output/result/stop schemas.
+- The provider-schema check lists only keywords a provider has been observed to reject (today `uniqueItems`); new entries need an observed rejection.
 - Incident pages, cursor scope keys, and lifecycle content revisions for both tool families now come from the shared `failure-observations` and `log-utils` modules instead of per-package copies. (#323)
 
 ## [pi-better-harness@0.6.1] - 2026-09-27

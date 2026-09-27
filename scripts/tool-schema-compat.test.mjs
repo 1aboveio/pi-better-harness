@@ -1,6 +1,6 @@
 // Every model-facing output tool schema this repo registers or changed in
-// #321/#322/#323 must be accepted by model providers: OpenAI rejects keywords
-// such as `uniqueItems` with 400 invalid_function_parameters (see #327).
+// #321/#322/#323 must avoid keywords a provider has been observed to reject
+// (see PROVIDER_REJECTED_KEYWORDS; `uniqueItems` returned 400 in #327).
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Type } from "typebox";

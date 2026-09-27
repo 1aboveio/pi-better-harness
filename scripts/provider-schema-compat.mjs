@@ -1,9 +1,14 @@
-// JSON Schema keywords that model providers reject in tool/function parameter schemas.
-// OpenAI returns 400 invalid_function_parameters for these (observed: `uniqueItems` in
-// the #315 intent bash schema failed every confined child's first request).
+// JSON Schema keywords that model providers have been OBSERVED to reject in
+// tool/function parameter schemas. Verified entries only:
+// - `uniqueItems`: OpenAI returned 400 invalid_function_parameters for the #315
+//   intent bash schema, failing every confined child's first request (#327).
+// Not rejected: `patternProperties` (typebox Type.Record). A live headless Pi run
+// on openai/gpt-6-luna with the full harness loaded, including Type.Record
+// schemas, succeeded; OpenAI rejects the whole request if any tool schema is
+// invalid, so that run shows `patternProperties` is accepted.
+// Add a keyword here only with an observed provider rejection, cited like above.
 export const PROVIDER_REJECTED_KEYWORDS = Object.freeze([
-    "uniqueItems", "patternProperties", "unevaluatedProperties", "unevaluatedItems", "propertyNames",
-    "dependentRequired", "dependentSchemas", "contains", "minContains", "maxContains", "if", "then", "else", "not",
+    "uniqueItems",
 ]);
 
 /** Paths (like `properties.expectedExitCodes.uniqueItems`) of rejected keywords anywhere in a schema. */
