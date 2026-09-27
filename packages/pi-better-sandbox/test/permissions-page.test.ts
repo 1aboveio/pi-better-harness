@@ -51,6 +51,9 @@ function harness(overrides: Partial<PermissionPageHandlers> = {}) {
     return { page, press, changes, saved, initial, get current() { return current; }, get renders() { return renders; }, get closes() { return closes; } };
 }
 
+/** Down is clamped at the Save row, so enough presses always land there. */
+const toSave: string[] = Array(30).fill(Key.down);
+
 async function settle() {
     await new Promise<void>((resolve) => setImmediate(resolve));
 }
@@ -58,7 +61,7 @@ async function settle() {
 test("default table has the locked rows and independent Main/Subagents values", () => {
     const h = harness();
     const lines = table(h.page, 84).map(plain);
-    assert.equal(lines.length, 8);
+    assert.equal(lines.length, 14);
     assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents/);
     assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
     assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
@@ -67,7 +70,13 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[4]!, /Stored credentials\s+-\s+Off \(fixed\)/);
     assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
     assert.match(lines[6]!, /Network access\s+-\s+On/);
-    assert.match(lines[7]!, /Save as defaults/);
+    assert.match(lines[7]!, /Subagents · Tools/);
+    assert.match(lines[8]!, /Guarded \(follows the file rules\)/);
+    assert.match(lines[9]!, /\[x\] apply_patch\s+harness adapter/);
+    assert.match(lines[10]!, /Trusted \(runs outside the file rules\)/);
+    assert.match(lines[11]!, /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/);
+    assert.match(lines[12]!, /\[x\] web_search\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/);
+    assert.match(lines[13]!, /Save as defaults/);
 });
 
 test("disabled details are dimmed and inactive but survive off/on toggles", async () => {
@@ -110,7 +119,7 @@ test("arrows select rows and columns, Space cycles, Enter saves only on action, 
     h.press(Key.down, Key.down, Key.down, Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagents.network, false);
-    h.press(Key.enter, Key.down, Key.space);
+    h.press(Key.enter, ...toSave, Key.space);
     await settle();
     assert.equal(h.saved.length, 0);
     h.press(Key.enter);
@@ -168,7 +177,7 @@ test("saving looser defaults needs a second Enter; any other key cancels it", as
     h.press(Key.right, ...Array(5).fill(Key.down), Key.space);
     await settle();
     assert.equal(h.current.subagents.network, false);
-    h.press(Key.down, Key.enter);
+    h.press(...toSave, Key.enter);
     await settle();
     assert.equal(h.saved.length, 0);
     assert.match(plain(h.page.render(120).at(-1)!), /Looser defaults \(Subagents: network on\)\. Press Enter again to save/);
@@ -196,7 +205,7 @@ test("change and save failures stay inline without optimistic state or closing",
     h.press(Key.space, Key.space);
     await settle();
     assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
-    h.press(...Array(6).fill(Key.down));
+    h.press(...toSave);
     h.press(Key.enter);
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /save failed/);
@@ -222,7 +231,7 @@ test("getConfig failures are inline and prevent mutation or save", async () => {
 
 test("render obeys cell widths including narrow terminals, Unicode and long errors", async () => {
     const h = harness({ save: () => { throw new Error("保存失敗: very long message 🧪".repeat(8)); } });
-    h.press(...Array(6).fill(Key.down), Key.enter);
+    h.press(...toSave, Key.enter);
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /保存失敗/);
     for (const width of [0, 1, 2, 7, 8, 12, 20, 32, 40, 80]) {
@@ -251,4 +260,52 @@ test("open uses custom only for interactive TUI and resolves on Escape", async (
         getConfig: () => structuredClone(DEFAULT_PERMISSION_SETTINGS), change() {}, save() {},
     });
     assert.equal(factory, undefined);
+});
+
+test("Tools section lists guarded and discovered trusted tools; ticking a trusted tool needs a second Space", async () => {
+    const discovered = [
+        { name: "web_fetch", package: "npm:@juicesharp/rpiv-web-tools" },
+        { name: "web_search", package: "npm:@juicesharp/rpiv-web-tools" },
+        { name: "ask_user_question", package: "npm:@juicesharp/rpiv-ask-user-question" },
+    ];
+    const h = harness({ discoverTools: () => discovered });
+    const lines = h.page.render(120).map(plain);
+    const at = (pattern: RegExp) => lines.findIndex((line) => pattern.test(line));
+    assert.ok(at(/Subagents · Tools/) > at(/Network access/));
+    assert.ok(at(/Guarded \(follows the file rules\)/) < at(/\[x\] apply_patch\s+harness adapter/));
+    assert.ok(at(/Trusted \(runs outside the file rules\)/) < at(/\[ \] ask_user_question\s+@juicesharp\/rpiv-ask-user-question$/));
+    assert.match(lines[at(/web_fetch/)]!, /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On$/);
+    assert.ok(lines.some((line) => /Trusted tools run outside the file rules/.test(line)));
+    // Rows after Network access: apply_patch, ask_user_question, web_fetch, web_search.
+    h.press(Key.right, ...Array(7).fill(Key.down), Key.space);
+    await settle();
+    assert.equal(h.changes.length, 0, "ticking a trusted tool waits for confirmation");
+    assert.match(plain(h.page.render(160).at(-1)!), /Looser \(Subagents: trusted tool ask_user_question \(@juicesharp\/rpiv-ask-user-question\) runs outside the file rules\)\. Press Space again/);
+    assert.ok(h.page.render(160).map(plain).some((line) => /Trusted tools run in the subagent's Pi process, outside the file rules/.test(line)));
+    h.press(Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted.at(-1), { name: "ask_user_question", package: "npm:@juicesharp/rpiv-ask-user-question" });
+    // Unticking a trusted tool and the guarded adapter are tighter: they apply at once.
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted.map((tool) => tool.name), ["web_search", "ask_user_question"]);
+    h.press(Key.up, Key.up, Key.space);
+    await settle();
+    assert.equal(h.current.subagentTools.applyPatch, false);
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.subagentTools.applyPatch, true);
+    h.press(...toSave, Key.enter);
+    await settle();
+    assert.deepEqual(h.saved.at(-1)!.subagentTools, h.current.subagentTools);
+});
+
+test("a ticked tool that is not loaded stays listed so it can be unticked", async () => {
+    const h = harness({ discoverTools: () => [] });
+    const lines = h.page.render(120).map(plain);
+    assert.ok(lines.some((line) => /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/.test(line)));
+    h.press(...Array(7).fill(Key.down), Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted.map((tool) => tool.name), ["web_search"]);
+    assert.ok(!h.page.render(120).map(plain).some((line) => /web_fetch/.test(line)), "an unticked, unloaded tool disappears");
 });

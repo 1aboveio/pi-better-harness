@@ -1,13 +1,34 @@
 /** Installed as the final inline extension by the trusted native launcher. */
 import { SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { describeSandboxSupport } from "./shared-sandbox-core.ts";
-import { installTaskTools, TASK_BUILTINS } from "./shared-task-sandbox.ts";
-import { parseTaskPolicy } from "./task-policy.ts";
+import { canonicalizePath, describeSandboxSupport } from "./shared-sandbox-core.ts";
+import { GUARDED_TASK_TOOLS, installTaskTools, TASK_BUILTINS } from "./shared-task-sandbox.ts";
+import { parseTaskPolicy, type TaskPolicy } from "./task-policy.ts";
 import { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } from "./permission-policy.ts";
 import { failureDispositionTool, intentBashDefinition } from "./child-incidents.ts";
 import { DISPOSITION_TOOL } from "./incident-model.ts";
 
 const TRUSTED_INLINE_SOURCE = "<inline:task-sandbox>";
+
+function inside(root: string, path: string): boolean {
+    return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
+/**
+ * A trusted extension tool is admitted only when its name AND its canonical
+ * source lie inside the package root the parent recorded, and a network tool
+ * only while Network access is On. Another package registering the same name
+ * is refused.
+ */
+export function trustedToolRefusal(policy: TaskPolicy, name: string, sourcePath: string | undefined): string | undefined {
+    const entry = policy.extensionTools.find((tool) => tool.name === name);
+    if (!entry) return `${name} is not a trusted tool for this run`;
+    if (entry.network && !policy.permissions.network) return `${name} needs Network access, which is Off`;
+    if (!sourcePath || sourcePath.startsWith("<")) return `${name} has no package source`;
+    let canonical: string;
+    try { canonical = canonicalizePath(sourcePath); } catch { return `${name} source cannot be resolved`; }
+    if (!inside(entry.root, canonical)) return `${name} comes from ${sourcePath}, not the trusted package ${entry.package}`;
+    return undefined;
+}
 
 export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (error: unknown) => never): void {
     const policy = parseTaskPolicy(input);
@@ -25,8 +46,11 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
         trustedSources: [TRUSTED_INLINE_SOURCE],
         // Structured command intent (#315): validated before the confined command runs.
         bashDefinition: (cwd, operations) => intentBashDefinition(cwd, operations) as any,
+        applyPatch: policy.applyPatch,
         // The disposition tool performs no file or command I/O; only this inline registration is admitted.
-        admitExtensionTool: (name, _input, sourcePath) => name === DISPOSITION_TOOL && sourcePath === TRUSTED_INLINE_SOURCE,
+        // Trusted tools are admitted by name and package (ADR 0009).
+        admitExtensionTool: (name, _input, sourcePath) => (name === DISPOSITION_TOOL && sourcePath === TRUSTED_INLINE_SOURCE) ||
+            trustedToolRefusal(policy, name, sourcePath) === undefined,
     });
     pi.registerTool(failureDispositionTool(() => currentCwd) as any);
     const profile = Object.freeze({ enabled: true, ...policy.permissions });
@@ -43,9 +67,19 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
             shellPath = SettingsManager.create(ctx.cwd, policy.agentDir, { projectTrusted: false }).getShellPath();
             currentCwd = ctx.cwd;
             boundary.register(ctx.cwd);
-            const selected = policy.tools.filter((name) => (TASK_BUILTINS as readonly string[]).includes(name));
+            const builtins: readonly string[] = policy.applyPatch ? [...TASK_BUILTINS, ...GUARDED_TASK_TOOLS] : TASK_BUILTINS;
+            const selected = policy.tools.filter((name) => builtins.includes(name));
             boundary.assertInstalled(selected);
-            const activated = selected.length ? [...selected, DISPOSITION_TOOL] : selected;
+            const inventory = pi.getAllTools();
+            const trusted: string[] = [];
+            const refused: { name: string; reason: string }[] = [];
+            for (const name of policy.tools) {
+                if (builtins.includes(name) || !policy.extensionTools.some((tool) => tool.name === name)) continue;
+                const registered = inventory.find((tool) => tool.name === name);
+                const reason = registered ? trustedToolRefusal(policy, name, registered.sourceInfo?.path) : `${name} was not registered by its package`;
+                if (reason) refused.push({ name, reason }); else trusted.push(name);
+            }
+            const activated = selected.length || trusted.length ? [...selected, ...trusted, DISPOSITION_TOOL] : selected;
             pi.setActiveTools(activated);
             const active = new Set(pi.getActiveTools());
             if (active.size !== activated.length || activated.some((name) => !active.has(name))) {
@@ -53,7 +87,8 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
             }
             pi.events.emit(SANDBOX_POLICY_CHANNEL, status);
             // A typed lifecycle marker, never inferred from assistant prose.
-            process.stdout.write(`${JSON.stringify({ type: "task_sandbox_ready", root: policy.root, tools: selected })}\n`);
+            process.stdout.write(`${JSON.stringify({ type: "task_sandbox_ready", root: policy.root, tools: selected,
+                ...(trusted.length ? { trusted } : {}), ...(refused.length ? { refused } : {}) })}\n`);
         } catch (error) { fatal(error); }
     });
 }

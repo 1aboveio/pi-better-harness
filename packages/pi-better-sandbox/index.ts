@@ -33,6 +33,7 @@ import {
     publishForegroundSandboxPolicy,
 } from "./events.ts";
 import { installTaskTools, runtimeCodeRoot } from "./shared-task-sandbox.ts";
+import { discoverTrustedTools } from "./shared-task-tools.ts";
 import { writeSandboxDefault } from "./preferences.ts";
 import { readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
 import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSettings } from "./permissions.ts";
@@ -118,6 +119,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             settings.main.enabled = true;
             settings.main.commands = false;
             settings.subagents.commands = false;
+            settings.subagentTools = { applyPatch: true, trusted: [] };
             controller.setPermissionSettings(settings);
             announce(controller.block(message));
             ctx.ui.notify(message, "error");
@@ -175,6 +177,8 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             openPermissions: async (ctx) => {
                 await openPermissionsPage(ctx, {
                     getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
+                    // Trusted-tool candidates: what this Pi has actually registered, by owning package.
+                    discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
                     change: (settings) => announce(controller.setPermissionSettings(settings)),
                     save: (settings) => writePermissionSettings(settings),
                     // Persisting a looser default needs a second, explicit Enter.

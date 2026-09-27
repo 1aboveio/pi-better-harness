@@ -1,4 +1,6 @@
 /** Permission values are intent; launch backends must validate support before enforcement. */
+import { defaultSubagentTools, packageLabel, parseSubagentTools, type SubagentToolSettings } from "./shared-task-tools.ts";
+export type { SubagentToolSettings } from "./shared-task-tools.ts";
 /**
  * Project files / Outside project levels: Off, Read, Write (read, create and
  * overwrite in place; nothing removed or renamed away outside temp, hidden home
@@ -19,6 +21,8 @@ export interface SandboxPermissionProfile {
 export interface SandboxPermissionSettings {
     main: SandboxPermissionProfile;
     subagents: SandboxPermissionProfile;
+    /** Extension tools a confined subagent may use (ADR 0009). */
+    subagentTools: SubagentToolSettings;
 }
 
 /**
@@ -34,7 +38,7 @@ export function defaultSandboxPermissions(): SandboxPermissionSettings {
         commands: true,
         network: true,
     });
-    return { main: profile(), subagents: { ...profile(), enabled: true, outsideProject: "write" } };
+    return { main: profile(), subagents: { ...profile(), enabled: true, outsideProject: "write" }, subagentTools: defaultSubagentTools() };
 }
 
 function isProfile(value: unknown): value is SandboxPermissionProfile {
@@ -68,6 +72,12 @@ export function describeLoosening(previous: SandboxPermissionSettings, next: San
             if (b[key] && !a[key]) changes.push(`${label}: ${key} on`);
         }
     }
+    // A trusted tool runs outside the file rules: ticking one loosens the profile.
+    for (const tool of next.subagentTools.trusted) {
+        if (!previous.subagentTools.trusted.some((t) => t.name === tool.name && t.package === tool.package)) {
+            changes.push(`Subagents: trusted tool ${tool.name} (${packageLabel(tool.package)}) runs outside the file rules`);
+        }
+    }
     return changes;
 }
 
@@ -82,5 +92,6 @@ export function parseSandboxPermissions(value: unknown): SandboxPermissionSettin
         enabled: p.enabled, projectFiles: p.projectFiles, outsideProject: p.outsideProject,
         storedCredentials: p.storedCredentials, commands: p.commands, network: p.network,
     });
-    return { main: copy(settings.main), subagents: copy(settings.subagents) };
+    // Files written before the Tools section existed get the default tool set.
+    return { main: copy(settings.main), subagents: copy(settings.subagents), subagentTools: parseSubagentTools(settings.subagentTools) };
 }

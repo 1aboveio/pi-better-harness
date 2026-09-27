@@ -50,7 +50,9 @@ test("sandbox permission table edits both profiles and saves inactive values in 
         key("Space"); wait(/Looser \(Subagents: outsideProject write → read-write\)/);
         key("Space");
         wait(/Outside project\s+-\s+Write & delete/);
-        for (let i = 0; i < 4; i++) key("Down");
+        // The Subagents · Tools rows sit between Network access and Save.
+        wait(/Subagents · Tools[\s\S]*\[x\] apply_patch\s+harness adapter[\s\S]*Trusted \(runs outside the file rules\)/);
+        for (let i = 0; i < 12; i++) key("Down");
         // Saving a looser default asks first.
         key("Enter"); wait(/Looser defaults \(Subagents: outsideProject write → read-write\)\. Press Enter again/);
         key("Enter"); wait(/Defaults saved/);
@@ -58,6 +60,7 @@ test("sandbox permission table edits both profiles and saves inactive values in 
         assert.equal(saved.permissions.main.enabled, false);
         assert.equal(saved.permissions.main.projectFiles, "off");
         assert.equal(saved.permissions.subagents.outsideProject, "read-write");
+        assert.equal(saved.permissions.subagentTools.applyPatch, true);
         key("Escape");
         wait(/^(?![\s\S]*Save as defaults)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);

@@ -24,9 +24,32 @@ Stored credentials                -                Off (fixed)
 Run commands & applications       -                On
 Network access                    -                On
 
+  Subagents · Tools
+    Guarded (follows the file rules)
+    [x] apply_patch  harness adapter
+    Trusted (runs outside the file rules)
+    [x] web_fetch    @juicesharp/rpiv-web-tools · needs Network On
+    [x] web_search   @juicesharp/rpiv-web-tools · needs Network On
+    [ ] <other installed tool>  <its package>
+
 ↑↓ Select row   ←→ Select column   Space Change
 Save as defaults
 ```
+
+**Subagents · Tools** picks the extension tools a confined subagent may use:
+
+- **Guarded** tools go through the same guarded file operations as `write` and
+  `edit`, so the rows above govern them. `apply_patch` applies Codex-style
+  patches; deletes and moves follow the removal rules, and a patch is checked in
+  full before any file changes.
+- **Trusted** tools are the other tools your Pi has loaded, listed with their
+  package. A ticked one is loaded into the subagent and runs in its Pi process,
+  **outside the file rules**. Ticking one needs a second Space. It is admitted
+  only from the package you ticked, and network tools are refused while Network
+  access is Off.
+
+Defaults: `apply_patch`, `web_fetch`, and `web_search` on; everything else off.
+See [ADR 0009](../../docs/adr/0009-guarded-and-trusted-subagent-tools.md).
 
 Project files and Outside project cycle through four levels:
 
@@ -157,10 +180,12 @@ are not writable. Credential-file and Pi control-path protections still win.
 Outside Off does not expose these host runtime directories.
 
 The currently admitted model-tool implementations are `read`, `write`, `edit`,
-and `bash`. User-entered `!` and `!!` commands use the same shell policy. Other
-model-callable tools require a verified execution adapter and are refused while
-that actor's sandbox is enabled; enabling network alone does not admit them.
-Subagent launch output identifies requested tools that are unavailable. Main
+and `bash`, plus, for Subagents, the guarded `apply_patch` and the trusted tools
+ticked under Subagents · Tools. User-entered `!` and `!!` commands use the same
+shell policy. Other model-callable tools require a verified execution adapter
+and are refused while that actor's sandbox is enabled; enabling network alone
+does not admit them. Subagent launch output identifies requested tools that are
+unavailable, with the reason. Main
 remains Off by default, so its ordinary orchestration tools remain available
 unless the user enables Main confinement.
 
