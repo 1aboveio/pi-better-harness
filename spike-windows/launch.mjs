@@ -45,7 +45,7 @@ const GetExitCodeProcess = kernel32.func("bool __stdcall GetExitCodeProcess(void
 const OpenProcessToken = advapi32.func("bool __stdcall OpenProcessToken(void *, uint32, _Out_ void **)");
 const ConvertStringSidToSidW = advapi32.func("bool __stdcall ConvertStringSidToSidW(str16, _Out_ void **)");
 const CreateRestrictedToken = advapi32.func(
-    "bool __stdcall CreateRestrictedToken(void *, uint32, uint32, SID_AND_ATTRIBUTES *, uint32, void *, uint32, SID_AND_ATTRIBUTES *, _Out_ void **)");
+    "bool __stdcall CreateRestrictedToken(void *, uint32, uint32, void *, uint32, void *, uint32, void *, _Out_ void **)");
 const SetEntriesInAclW = advapi32.func("uint32 __stdcall SetEntriesInAclW(uint32, EXPLICIT_ACCESS_W *, void *, _Out_ void **)");
 const SetTokenInformation = advapi32.func("bool __stdcall SetTokenInformation(void *, int, void *, uint32)");
 const CreateProcessAsUserW = advapi32.func(
@@ -69,11 +69,18 @@ if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ALL, token)) fail("OpenProcessT
 
 const DISABLE_MAX_PRIVILEGE = 0x1, LUA_TOKEN = 0x4, WRITE_RESTRICTED = 0x8;
 const flags = DISABLE_MAX_PRIVILEGE | LUA_TOKEN | (config.writeRestricted ? WRITE_RESTRICTED : 0);
-const disable = config.disableSids.map((s) => ({ Sid: sid(s), Attributes: 0 }));
-const restrict = config.restrictingSids.map((s) => ({ Sid: sid(s), Attributes: 0 }));
+// SID_AND_ATTRIBUTES[] packed by hand: { PSID Sid; DWORD Attributes; } = 16 bytes on x64.
+function sidArray(list) {
+    if (!list.length) return null;
+    const buf = Buffer.alloc(16 * list.length);
+    list.forEach((text, i) => buf.writeBigUInt64LE(BigInt(koffi.address(sid(text))), i * 16));
+    return buf;
+}
+const disable = sidArray(config.disableSids);
+const restrict = sidArray(config.restrictingSids);
 const restricted = [null];
-if (!CreateRestrictedToken(token[0], flags, disable.length, disable.length ? disable : null, 0, null,
-    restrict.length, restrict, restricted)) fail("CreateRestrictedToken");
+if (!CreateRestrictedToken(token[0], flags, config.disableSids.length, disable, 0, null,
+    config.restrictingSids.length, restrict, restricted)) fail("CreateRestrictedToken");
 
 if (config.defaultDacl) {
     // Default DACL for objects the child creates: user, logon session, SYSTEM.

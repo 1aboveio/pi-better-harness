@@ -107,7 +107,7 @@ for (const [name, cfg] of Object.entries(variants)) {
     if (!cfg) continue;
     buildTree();
     report.aclMs = applyAcls();
-    try { report.registrySetup = registrySetup() || "ok"; } catch (e) { report.registrySetup = `ERR ${e.message}`; }
+    try { report.registrySetup = registrySetup() || "ok"; } catch (e) { report.registrySetup = `ERR ${e.stderr ?? e.message}`; }
     const cfgPath = join(here, `cfg-${name}.json`);
     fs.writeFileSync(cfgPath, JSON.stringify(cfg));
     const env = { ...process.env, SPIKE_HOME: home, SPIKE_NOGRANT: nogrant, TEMP: join(home, "tmp"), TMP: join(home, "tmp") };
