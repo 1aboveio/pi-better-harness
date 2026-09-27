@@ -106,12 +106,27 @@ async function macCredential(session) {
 async function serviceChild() {
     const daemon = spawn(executable('gnome-keyring-daemon'), ['--foreground', '--components=secrets', '--unlock'],
         { stdio: ['pipe', 'ignore', 'pipe'] });
+    let daemonErrors = '';
+    daemon.stderr.on('data', chunk => { daemonErrors = (daemonErrors + chunk.toString()).slice(-1000); });
+    daemon.on('error', error => { daemonErrors = error.message; });
     daemon.stdin.end('synthetic-password\n');
-    const store = spawnSync(executable('secret-tool'), ['store', '--label=Sandbox golden fixture', 'pi-sandbox-golden', 'isolated'],
-        { input: 'synthetic-value\n', encoding: 'utf8', timeout: 8000 });
+    // Do not let secret-tool auto-activate a second daemon before the unlocked
+    // fixture owns the service name on this private bus.
+    let ready = false;
+    for (let attempt = 0; attempt < 80; attempt++) {
+        const owner = spawnSync(executable('dbus-send'), ['--session', '--dest=org.freedesktop.DBus',
+            '--type=method_call', '--print-reply', '/org/freedesktop/DBus',
+            'org.freedesktop.DBus.NameHasOwner', 'string:org.freedesktop.secrets'],
+            { encoding: 'utf8', timeout: 1000 });
+        if (owner.status === 0 && /boolean true/.test(owner.stdout)) { ready = true; break; }
+        if (daemon.exitCode !== null) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    const store = ready ? spawnSync(executable('secret-tool'), ['store', '--label=Sandbox golden fixture', 'pi-sandbox-golden', 'isolated'],
+        { input: 'synthetic-value\n', encoding: 'utf8', timeout: 8000 }) : { status: null, stderr: 'private service name not acquired' };
     if (store.status !== 0) {
         daemon.kill('SIGKILL');
-        process.stdout.write(JSON.stringify({ ready: false, error: `secret-tool store failed (${store.status ?? store.error?.code})` }) + '\n');
+        process.stdout.write(JSON.stringify({ ready: false, error: `secret-tool store failed (${store.status ?? store.error?.code}): ${store.stderr?.slice(-500)}; daemon: ${daemonErrors}` }) + '\n');
         return;
     }
     process.stdout.write(JSON.stringify({ ready: true, address: process.env.DBUS_SESSION_BUS_ADDRESS }) + '\n');
