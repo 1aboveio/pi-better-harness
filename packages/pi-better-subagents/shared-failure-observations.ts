@@ -104,25 +104,13 @@ export interface CommandIntent {
 export type CommandIntentField = keyof CommandIntent;
 const INTENT_FIELDS: readonly CommandIntentField[] = ["operationId", "attemptId", "expectedExitCodes"];
 /**
- * The one normalization of intent-bearing arguments: an explicit `null` intent field means
- * "not declared", exactly like an omitted one. Models routinely send optional fields as null, and
- * Pi's argument validation (0.87+) drops optional nulls before a tool runs, while the process log
- * and session record keep the raw arguments. Every reader of intent, the executing tool and the
- * replay alike, goes through this so both sides see the same declaration from the same input.
- */
-export function withoutAbsentIntent<T>(args: T): T {
-  if (!args || typeof args !== "object" || Array.isArray(args)) return args;
-  const input = args as Record<string, unknown>;
-  if (!INTENT_FIELDS.some((key) => key in input && input[key] == null)) return args;
-  const out = { ...input };
-  for (const key of INTENT_FIELDS) if (key in out && out[key] == null) delete out[key];
-  return out as T;
-}
-/**
- * Pi's own argument coercion for these fields (pi-ai `validateToolArguments`): a string or boolean
- * that reads as an integer becomes one, and a number or boolean becomes a string id. Pi applies it
- * before execute, but the process log and session record keep the raw arguments; mirroring it here
- * lets the parent's replay read the same declaration the child executed with (#332).
+ * Pi's own argument coercion for the intent fields (pi-ai `validateToolArguments` against the confined
+ * bash schema, where each field is `anyOf: [field schema, null]`). Pi applies it before execute, but the
+ * process log and session record keep the raw arguments; mirroring it lets the parent's replay read
+ * the declaration the child executed with (#332).
+ * - ids: a number or boolean becomes its string; `""` fails the pattern and falls through to null.
+ * - exit codes: array items that read as integers become integers (null -> 0, true -> 1);
+ *   a scalar `0`, `""`, or `false` falls through to null.
  */
 function coerceInteger(value: unknown): unknown {
   if (value === null) return 0;
@@ -130,37 +118,65 @@ function coerceInteger(value: unknown): unknown {
   if (typeof value === "boolean") return value ? 1 : 0;
   return value;
 }
-function coerceId(value: unknown): unknown {
+function normalizeIntentField(key: CommandIntentField, value: unknown): unknown {
+  if (value == null) return undefined;
+  if (key === "expectedExitCodes") {
+    if (value === 0 || value === "" || value === false) return undefined;
+    if (!Array.isArray(value)) return value;
+    // 0 is a no-op declaration: exit 0 is already success. A list of only zeros declares nothing.
+    const codes = value.map(coerceInteger).filter((code) => code !== 0);
+    if (codes.length === 0 && value.length > 0) return undefined;
+    return codes.length === value.length && codes.every((code, index) => code === value[index]) ? value : codes;
+  }
+  if (value === "") return undefined;
   return typeof value === "number" || typeof value === "boolean" ? String(value) : value;
 }
 /**
- * Validate structured intent fields. Absent fields (omitted, undefined, or null) are fine; malformed
+ * The one normalization of intent-bearing arguments. An explicit `null` intent field means "not
+ * declared", exactly like an omitted one: models routinely send optional fields as null, and Pi's
+ * argument validation drops or nulls them before a tool runs, while the process log and session
+ * record keep the raw arguments. Values Pi would coerce are coerced the same way, and `0` is dropped
+ * from `expectedExitCodes`. Every reader of intent, the executing tool and the replay alike, and the
+ * exact operation identity go through this, so all see the same declaration from the same input.
+ * Malformed values are kept as they are for the validator to refuse.
+ */
+export function withoutAbsentIntent<T>(args: T): T {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+  const input = args as Record<string, unknown>;
+  let out: Record<string, unknown> | undefined;
+  for (const key of INTENT_FIELDS) {
+    if (!(key in input)) continue;
+    const value = normalizeIntentField(key, input[key]);
+    if (value === input[key]) continue;
+    out ??= { ...input };
+    if (value === undefined) delete out[key];
+    else out[key] = value;
+  }
+  return (out ?? args) as T;
+}
+/**
+ * Validate structured intent fields after `withoutAbsentIntent`. Absent fields are fine; malformed
  * ones are an error, and the caller must not run the command. `names` renames fields in the error
- * (e.g. snake_case parameters).
- *
- * `0` in `expectedExitCodes` is accepted and dropped: exit 0 is already success, so declaring it is a
- * no-op. A list that holds only zeros declares nothing (#332).
+ * (e.g. snake_case parameters). `0` in `expectedExitCodes` is accepted and dropped (#332).
  */
 export function readCommandIntent(args: unknown, names: Partial<Record<CommandIntentField, string>> = {}): { intent: CommandIntent; error?: string } {
   const input = withoutAbsentIntent((args && typeof args === "object" ? args : {}) as Record<string, unknown>);
   const intent: CommandIntent = {};
   for (const key of ["operationId", "attemptId"] as const) {
-    const value = coerceId(input[key]);
+    const value = input[key];
     if (value === undefined) continue;
     if (typeof value !== "string" || !INTENT_ID.test(value)) {
       return { intent: {}, error: `${names[key] ?? key} must match ${INTENT_ID_PATTERN}` };
     }
     intent[key] = value;
   }
-  const raw = input.expectedExitCodes;
-  if (raw !== undefined) {
-    const all = Array.isArray(raw) ? raw.map(coerceInteger) : undefined;
-    const codes = all?.filter((code) => code !== 0);
-    if (!all || !codes || all.length === 0 || codes.length > MAX_EXPECTED_EXIT_CODES ||
-      !codes.every((code) => Number.isInteger(code) && (code as number) >= 1 && (code as number) <= 255) || new Set(codes).size !== codes.length) {
+  const codes = input.expectedExitCodes;
+  if (codes !== undefined) {
+    if (!Array.isArray(codes) || codes.length === 0 || codes.length > MAX_EXPECTED_EXIT_CODES ||
+      !codes.every((code) => Number.isInteger(code) && code >= 1 && code <= 255) || new Set(codes).size !== codes.length) {
       return { intent: {}, error: `${names.expectedExitCodes ?? "expectedExitCodes"} must be 1-${MAX_EXPECTED_EXIT_CODES} distinct integers from 1 to 255 (0 is allowed and ignored)` };
     }
-    if (codes.length) intent.expectedExitCodes = codes as number[];
+    intent.expectedExitCodes = [...codes] as number[];
   }
   return { intent };
 }

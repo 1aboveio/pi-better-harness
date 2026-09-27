@@ -242,9 +242,11 @@ export function foldToolStart(model: IncidentModel, row: any, cwd: string, sink:
 const INTENT_REFUSAL = /^Invalid command intent: ([\s\S]+)\. The command was not run\.$/;
 /**
  * Pi's pre-execution schema rejection of the bash call (pi-ai `validateToolArguments`), matched as its
- * whole shape: the header, one or more `  - path: message` lines, and the received arguments. Nothing ran.
+ * whole shape: the header, one or more `  - path: message` lines, and the received arguments as
+ * pretty-printed JSON ending the text, so a command that ran (and ends "Command exited with code N")
+ * can never match. Nothing ran.
  */
-const SCHEMA_REFUSAL = /^Validation failed for tool "bash":\n(?:  - [^\n]*\n)+\nReceived arguments:\n[\s\S]*$/;
+const SCHEMA_REFUSAL = /^Validation failed for tool "bash":\n(?:  - [^\n]*\n)+\nReceived arguments:\n(?:\{\}|\{(?:\n {2,}[^\n]*)*\n\})$/;
 
 /**
  * Why the child refused this bash call before running it, read from the end row the child

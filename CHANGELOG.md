@@ -13,11 +13,11 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - Navigator rows for subagents and background tasks show their normal columns (model, effort, tool, tokens, or the command) again when a run only has failure history. Failure text leads a row only when something needs action; the "No failures need action · … (history)" line stays in the detail view. (#332)
-- After an exact-rule scan (run metadata unreadable), a later trusted rescan no longer closes the "run metadata could not be read" gap while exact-rule tool incidents it cannot re-key are still open. (#332)
+- After an exact-rule scan (run metadata unreadable), a later trusted rescan no longer closes the "run metadata could not be read" gap while a leftover it cannot re-key (a failure whose call declared intent) is unresolved. The gap is re-checked on every scan and closes once those leftovers are resolved; a plain failure never holds it. (#332)
 - The provenance sweep deletes a run's trust record only when the run directory is definitely gone (ENOENT), not on any stat error. (#332)
 - A sandboxed subagent that fails to spawn no longer leaves its `sessions/<id>` directory or its `git_clone_workspace` clone behind. (#332)
 - Only Pi's exact schema-refusal format (`Validation failed for tool "bash":`, `  - path: message` lines, `Received arguments:`) files a bash call as a rejected intent; a command that ran and printed that prefix is an ordinary failure. (#332)
-- The parent reads intent the way Pi coerced it before execute, so `expectedExitCodes: ["1"]` with a declared exit 1 records an expected failure instead of nothing. (#332)
+- The parent reads intent the way Pi coerced it before execute, so `expectedExitCodes: ["1"]` with a declared exit 1 records an expected failure instead of nothing, and a scalar `0`, `""`, or `false` exit-code value or an empty id counts as undeclared. Exact operation identity uses the same normalized intent, so a `[0]` declaration and its plain retry are one operation. (#332)
 - Unconfined runs treat an explicit-null intent field like an absent one, so `{command, expectedExitCodes: null}` and `{command}` are the same operation. (#332)
 - A `null` canonical output control no longer hides its deprecated alias (`{max_bytes: null, maxBytes: 300}` uses 300); `include: 42` gets an unknown-value note; a `bg_task_list` page cursor passed to `bg_task_status` gets a clear note instead of a stale-cursor reset. (#332)
 - Docs: the subagent run-timing notes now cover three limits of the deadline hold: `max_minutes: 0` means a steer stuck behind a hung tool call is never stopped, `/reload` on a child log over 32 MiB can lose the hold, and the steer receipt matches the steer by exact text. (#332)

@@ -113,7 +113,7 @@ test("truncation is incomplete without erasing prior incident", (t) => {
 
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { activeFailures as active315, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, requiresAction } from "../shared-failure-observations.ts";
+import { activeFailures as active315, actionableFailures, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, requiresAction } from "../shared-failure-observations.ts";
 import { runFailureFacts } from "../failures.ts";
 
 /** A run launched on the trusted task runtime: parent-written metadata is what enables structured intent. */
@@ -500,31 +500,76 @@ test("#332 unconfined runs: an explicit-null intent field does not change exact 
     assert.equal(active315(collectRunFailures(f.id, "/repo")).length, 0, "the exact retry recovers the null-carrying failure");
 });
 
-test("#332 a trusted rescan keeps the metadata gap open while exact-rule incidents it cannot re-key remain", (t) => {
+/** A confined run whose metadata is unreadable at a terminal (exact-rule) scan, then readable again for a fresh scan. */
+function exactRuleThenTrusted(t, rows) {
     const f = confinedFixture(t);
     const meta = join(runDir(f.id), "meta.json");
     const good = readFileSync(meta, "utf8");
     writeFileSync(meta, "{corrupt");
-    appendIntentRun(f);
-    let state = collectRunFailures(f.id, "/repo", true);
-    const gap = () => Object.values(readRunFailures(f.id).observations).find((x) => x.operation === "run-metadata");
-    assert.equal(gap()?.status, "unresolved");
-    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "unresolved", "exact rule: the declared retry did not recover t1");
-    // Metadata becomes readable and a fresh scan replays the log under the trusted runtime.
+    f.append(...rows);
+    collectRunFailures(f.id, "/repo", true);
     writeFileSync(meta, good);
     resetFailureScanCursor(f.id);
-    state = collectRunFailures(f.id, "/repo");
-    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "unresolved", "t1's event id is consumed; the trusted replay cannot recover it");
+    const gap = () => Object.values(readRunFailures(f.id).observations).find((x) => x.operation === "run-metadata");
+    return { f, gap };
+}
+
+test("#332 a trusted rescan keeps the metadata gap open only while a leftover it cannot re-key is unresolved", (t) => {
+    const { f, gap } = exactRuleThenTrusted(t, [bashStart("t1", { command: "npm test", operationId: "t" }), bashFail("t1", "1 failing"),
+        bashStart("t2", { command: "npm test -- scoped", operationId: "t" }), bashOk("t2")]);
+    assert.equal(gap()?.status, "unresolved");
+    let state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "unresolved", "t1's event id is consumed; the declared retry cannot recover it");
     assert.equal(gap()?.status, "unresolved", "so the gap stays open instead of implying the view is complete");
-    // With nothing left over from the exact-rule scan, the same rescan closes the gap.
-    const clean = confinedFixture(t);
-    const cleanMeta = join(runDir(clean.id), "meta.json");
-    const cleanGood = readFileSync(cleanMeta, "utf8");
-    writeFileSync(cleanMeta, "{corrupt");
-    clean.append(bashStart("ok", { command: "npm test", operationId: "t" }), bashOk("ok"));
-    collectRunFailures(clean.id, "/repo", true);
-    writeFileSync(cleanMeta, cleanGood);
-    resetFailureScanCursor(clean.id);
-    collectRunFailures(clean.id, "/repo");
-    assert.equal(Object.values(readRunFailures(clean.id).observations).find((x) => x.operation === "run-metadata")?.status, "resolved");
+    // The child classifies the leftover; the next scan of the same cursor closes the gap.
+    f.append(...dispose("d1", { disposition: "expected", targets: ["tool:t1"], reason: "known flaky suite" }));
+    state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "expected");
+    assert.equal(gap()?.status, "resolved", "re-checked on every scan, not only when the rescan began");
+    assert.equal(actionableFailures(state).length, 0);
+});
+
+test("#332 a gap kept open by a leftover closes once an exact retry recovers it", (t) => {
+    const probe = { command: "rg needle src", expectedExitCodes: [1] };
+    const { f, gap } = exactRuleThenTrusted(t, [bashStart("t1", probe), bashFail("t1", "rg: src: No such file\n\nCommand exited with code 2")]);
+    collectRunFailures(f.id, "/repo");
+    assert.equal(gap()?.status, "unresolved", "held while the declared attempt's failure is unresolved");
+    f.append(bashStart("t2", probe), bashOk("t2", "src/a.ts: needle"));
+    const state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1"), undefined, "the exact retry recovered t1");
+    assert.equal(gap()?.status, "resolved");
+    assert.equal(actionableFailures(state).length, 0, "no stuck observation gap");
+});
+
+test("#332 a plain failure with no intent never keeps the gap open: trust reads it the same way", (t) => {
+    // The reviewer's repro: the exact retry recovers the plain failure, and nothing actionable remains.
+    const { f, gap } = exactRuleThenTrusted(t, [bashStart("t1", { command: "npm test" }), bashFail("t1", "1 failing")]);
+    let state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "unresolved");
+    assert.equal(gap()?.status, "resolved");
+    f.append(bashStart("t2", { command: "npm test" }), bashOk("t2"));
+    state = collectRunFailures(f.id, "/repo");
+    assert.deepEqual(actionableFailures(state), []);
+});
+
+test("#332 exact identity uses the normalized intent: a [0] or [\"1\"] declaration and its plain retry are one operation", (t) => {
+    const f = fixture(t);
+    f.append(bashStart("z1", { command: "npm test", expectedExitCodes: [0] }), bashFail("z1", "1 failing"),
+        bashStart("z2", { command: "npm test" }), bashOk("z2"),
+        bashStart("c1", { command: "npm run lint", expectedExitCodes: ["1", 0] }), bashFail("c1", "lint error\n\nCommand exited with code 2"),
+        bashStart("c2", { command: "npm run lint", expectedExitCodes: [1] }), bashOk("c2"));
+    assert.deepEqual(active315(collectRunFailures(f.id, "/repo")), []);
+});
+
+test("#332 Pi's scalar null coercion runs the command: a 0/\"\"/false exit-code value is no intent, and a ran command never matches the schema refusal", (t) => {
+    const f = confinedFixture(t);
+    f.append(bashStart("s0", { command: "npm test", expectedExitCodes: 0 }), bashFail("s0", "1 failing\n\nCommand exited with code 1"),
+        bashStart("sq", { command: "npm test", operationId: "" }), bashFail("sq", "1 failing\n\nCommand exited with code 1"),
+        // Output that starts like Pi's refusal, with a JSON-looking block, and then the ran command's exit line.
+        bashStart("ran", { command: "cat pi.log; exit 1", expectedExitCodes: ["x"] }),
+        bashFail("ran", "Validation failed for tool \"bash\":\n  - x: y\n\nReceived arguments:\n{}\n\nCommand exited with code 1"));
+    const byId = Object.fromEntries(active315(collectRunFailures(f.id, "/repo")).map((x) => [x.id, x]));
+    assert.equal(byId["tool:s0"].category, "tool");
+    assert.equal(byId["tool:s0"].count, 2, "both ran as the same plain npm test");
+    assert.equal(byId["tool:ran"].category, "tool");
 });

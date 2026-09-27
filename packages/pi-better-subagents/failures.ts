@@ -1,14 +1,21 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { logPathFor, runDir, taskRuntimeTrust } from "./registry.ts";
-import { activeFailures, actionableFailures, disposeIncidents, failureIdentity, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
+import { activeFailures, actionableFailures, disposeIncidents, failureIdentity, findIncident, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
     observeFailures, pendingFailureAttention, readFailureState, type FailureState } from "./shared-failure-observations.ts";
 import { evidenceText, foldToolEnd, foldToolStart, newIncidentModel, toolOperation, type IncidentModel, type IncidentSink } from "./incident-model.ts";
 
 export { formatFailureSummary, pendingFailureAttention, markFailureAttentionDelivered, toolOperation };
 export const failurePath = (id: string) => join(runDir(id), "failures.jsonl");
 export const readRunFailures = (id: string): FailureState => readFailureState(failurePath(id));
-interface Scan { offset: number; head: string; identity: string; model: IncidentModel; retry?: number }
+interface Scan {
+    offset: number; head: string; identity: string; model: IncidentModel; retry?: number;
+    /**
+     * A "run metadata could not be read" gap this trusted rescan inherited, with the tool incidents
+     * that were unresolved when it began (the earlier exact-rule scan's). Re-checked after every scan.
+     */
+    gap?: { id: string; before: Set<string> };
+}
 const scans = new Map<string, Scan>();
 /** When each run's trust first could not be read, for the bounded wait (#325). */
 const trustUnknownSince = new Map<string, number>();
@@ -74,6 +81,27 @@ function fold(id: string, scan: Scan, row: any, offset: number, cwd: string): vo
         ++model.sequence;
     }
 }
+/**
+ * Close an inherited metadata gap unless an exact-rule leftover still needs it. A leftover counts only
+ * when its attempt declared intent (operationId, attemptId, or expectedExitCodes): its event id is
+ * already consumed under the exact rule, so this trusted scan cannot re-key it, and a declared retry
+ * or expected exit cannot resolve it. A plain failure reads the same under either rule and never
+ * holds the gap. Once the leftover is resolved (an exact retry or a disposition), the gap closes.
+ */
+function settleMetadataGap(id: string, scan: Scan): void {
+    const gap = scan.gap!;
+    const state = readRunFailures(id);
+    const current = state.observations[failureIdentity("run-metadata")];
+    if (!current || current.id !== gap.id || current.status !== "unresolved") { scan.gap = undefined; return; }
+    const intentBearing = new Set<string>();
+    for (const attempt of scan.model.finished.values()) {
+        if (attempt.incident && gap.before.has(attempt.incident) && Object.keys(attempt.intent).length) intentBearing.add(attempt.incident);
+    }
+    const held = [...intentBearing].some((incident) => findIncident(state, incident)?.status === "unresolved");
+    if (held) return;
+    observeFailures(failurePath(id), [{ id: `run-metadata-readable:${gap.id}`, operation: "run-metadata", kind: "recovered", incidents: [gap.id] }]);
+    scan.gap = undefined;
+}
 /** Scan complete source records, independent of the finite progress/transcript tail. */
 export function collectRunFailures(id: string, cwd: string, terminal = false): FailureState {
     const path = failurePath(id);
@@ -127,15 +155,13 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
             } else {
                 trustUnknownSince.delete(id);
                 scan = { offset: 0, head, identity, model: newIncidentModel(trust === "trusted") };
-                // The gap closes only if the earlier exact-rule scan left no open tool incident. Those
-                // incidents are keyed by the exact rule and their event ids are already consumed, so this
-                // trusted rescan cannot re-key them and a declared operationId retry can never recover
-                // them; the gap stays to say so (#332).
+                // The gap is settled after this scan has folded the log (settleMetadataGap), and again after
+                // every later scan, once no leftover of the exact-rule scan that trust would have read
+                // differently is still unresolved (#332).
                 const prior = readRunFailures(id);
                 const deferred = prior.observations[failureIdentity("run-metadata")];
-                const exactRuleLeftovers = Object.values(prior.observations).some((x) => x.category === "tool" && x.status === "unresolved");
-                if (deferred && deferred.status === "unresolved" && !exactRuleLeftovers) observeFailures(path, [{ id: `run-metadata-readable:${deferred.id}`,
-                    operation: "run-metadata", kind: "recovered", incidents: [deferred.id] }]);
+                if (deferred && deferred.status === "unresolved") scan.gap = { id: deferred.id,
+                    before: new Set(Object.values(prior.observations).filter((x) => x.category === "tool" && x.status === "unresolved").map((x) => x.id)) };
             }
         }
         scan.head = head;
@@ -184,6 +210,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
             position += count;
         }
         scan.offset = start;
+        if (scan.gap) settleMetadataGap(id, scan);
         scans.delete(id);
         scans.set(id, scan);
         while (scans.size > 64) scans.delete(scans.keys().next().value!);

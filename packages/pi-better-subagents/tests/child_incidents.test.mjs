@@ -120,9 +120,11 @@ test("the child and parent share one intent validator", () => {
     assert.deepEqual(readCommandIntent({ expectedExitCodes: null, operationId: "tests", attemptId: null }), { intent: { operationId: "tests" } },
         "an explicit null is an undeclared field, not a malformed one");
     assert.deepEqual(readCommandIntent({ expectedExitCodes: undefined, operationId: null }), { intent: {} });
-    for (const bad of [{ expectedExitCodes: [256] }, { expectedExitCodes: [] }, { expectedExitCodes: [1, 1] }, { expectedExitCodes: "1" }, { operationId: "has space" }, { attemptId: "" }]) {
+    for (const bad of [{ expectedExitCodes: [256] }, { expectedExitCodes: [] }, { expectedExitCodes: [1, 1] }, { expectedExitCodes: "1" }, { operationId: "has space" }]) {
         assert.ok(readCommandIntent(bad).error, JSON.stringify(bad));
     }
+    // #332: Pi turns an empty id into null before execute, so it is undeclared, not malformed.
+    assert.deepEqual(readCommandIntent({ attemptId: "" }), { intent: {} });
 });
 
 test("declared exit codes are validated before execution and classify only the final structured exit", { skip: backendSkip }, async (t) => {

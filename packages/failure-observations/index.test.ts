@@ -8,7 +8,7 @@ import { emptyFailureState, reduceFailure, activeFailures, formatFailureSummary,
   formatIncidentSummary, failureRevision, incidentVerbatimPage, incidentPageHeading, incidentResource, failureJournalFingerprint,
   observeFailures, readFailureState, markFailureAttentionDelivered, failureAttentionHandled, type FailureEvent,
   disposeIncidents, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, validateDisposition,
-  formatTerminalIncidentSummary, CORRECTNESS_NOTE, readCommandIntent, COMPACT_EXCERPT_BYTES, unwrapToolResultText, shortEvidence,
+  formatTerminalIncidentSummary, CORRECTNESS_NOTE, readCommandIntent, withoutAbsentIntent, COMPACT_EXCERPT_BYTES, unwrapToolResultText, shortEvidence,
   incidentCursorScope, scopedFailures } from "./index.ts";
 
 const failed: FailureEvent = { id: "call-1:end", operation: "cwd:project:tsc", kind: "failure",
@@ -594,6 +594,18 @@ test("#332 the validator mirrors Pi's argument coercion, so the raw logged argum
   assert.deepEqual(readCommandIntent({ expectedExitCodes: ["1", " 2 "] }).intent, { expectedExitCodes: [1, 2] });
   assert.deepEqual(readCommandIntent({ operationId: 42 }).intent, { operationId: "42" });
   assert.ok(readCommandIntent({ expectedExitCodes: ["one"] }).error, "what Pi cannot coerce is still refused");
+  // Pi turns a scalar 0 / "" / false exit-code value and an empty id into null, and the command runs.
+  for (const absent of [0, "", false]) assert.deepEqual(readCommandIntent({ expectedExitCodes: absent }), { intent: {} }, JSON.stringify(absent));
+  assert.deepEqual(readCommandIntent({ operationId: "", attemptId: "" }), { intent: {} });
+  assert.ok(readCommandIntent({ expectedExitCodes: 5 }).error, "a non-zero scalar is still refused");
+});
+
+test("#332 withoutAbsentIntent normalizes what the validator accepts, so exact identity matches it", () => {
+  assert.deepEqual(withoutAbsentIntent({ command: "x", expectedExitCodes: [0] }), { command: "x" });
+  assert.deepEqual(withoutAbsentIntent({ command: "x", expectedExitCodes: [0, "1"], operationId: 7 }), { command: "x", expectedExitCodes: [1], operationId: "7" });
+  assert.deepEqual(withoutAbsentIntent({ command: "x", expectedExitCodes: null, attemptId: "" }), { command: "x" });
+  const untouched = { command: "x", expectedExitCodes: [1] };
+  assert.equal(withoutAbsentIntent(untouched), untouched);
 });
 
 // ---- quiet history: only what needs action is active; history is explicit --------------
