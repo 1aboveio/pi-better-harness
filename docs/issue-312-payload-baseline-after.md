@@ -1,9 +1,9 @@
 # Issue #312 model-facing payload baseline (after)
 
-Measured at 2026-09-27T04:58:14.545Z from rush/312-validation @ `bc01dcb76a2f9746e78536c28b5e2b33ce3a412c`.
+Measured at 2026-09-27T06:31:48.182Z from rush/issue-312-fix @ `06254d591856674fa9c61510d3660bdebb8112db`.
 Accounting: **UTF-8 bytes** (`Buffer.byteLength(text, "utf8")`). Tokenizer counts are not included.
 
-Runtime model for this capture session: `xai/grok-4.6` effort `high`.
+Runtime model for this capture session: `unknown/unknown` effort `unknown`.
 No model calls were made to seed the payloads.
 
 ## How to rerun (BEFORE and AFTER)
@@ -31,49 +31,48 @@ After the integration lands, rerun with `--phase after` and compare `utf8Bytes`,
 
 | id | family | tool | UTF-8 bytes | UTF-16 units | longest line (UTF-8) | exceeds proposed | ordered tool sequence |
 |---|---|---|---:|---:|---:|---|---|
-| `subagent.success.result` | success | subagent_result | 426 | 422 | 211 | no / 2048 | no |
-| `subagent.success.output` | success | subagent_output | 394 | 392 | 211 | no / 1024 | no |
-| `subagent.success.callback` | success | finalizeRun.sendMessage | 281 | 276 | 135 | no / 2048 | no |
-| `subagent.failed.result` | failed | subagent_result | 548 | 542 | 210 | no / 2048 | no |
-| `subagent.failed.callback` | failed | finalizeRun.sendMessage | 287 | 282 | 134 | no / 2048 | no |
-| `subagent.incomplete.result` | incomplete | subagent_result | 909 | 903 | 215 | no / 2048 | no |
-| `subagent.incomplete.callback` | incomplete | finalizeRun.sendMessage | 341 | 338 | 140 | no / 2048 | no |
-| `subagent.orphaned.result` | orphaned | subagent_result | 813 | 807 | 212 | no / 2048 | no |
-| `subagent.orphaned.callback` | orphaned | formatHealthCallbackTrigger | 437 | 436 | 196 | no / 2048 | no |
-| `subagent.unicode.result` | unicode-long-line-json | subagent_result | 2041 | 900 | 1813 | no / 2048 | no |
-| `subagent.many_failures.result` | many-failures | subagent_result | 1795 | 1779 | 359 | no / 2048 | no |
-| `subagent.list` | many-failures | subagent_list | 904 | 887 | 80 | no / 1024 | no |
-| `subagent.foreign.result` | success | subagent_result | 262 | 261 | 96 | no / 2048 | no |
-| `subagent.ownership.unavailable` | success | subagent_result | 346 | 345 | 160 | no / 2048 | no |
-| `background.success.status` | success | bg_task_status | 360 | 360 | 214 | no / 1024 | no |
-| `background.success.status.wrapper` | success | bg_status | 360 | 360 | 214 | no / 1024 | no |
-| `background.success.log` | success | bg_task_log | 119 | 119 | 33 | no / 1024 | no |
-| `background.failed.status` | failed | bg_task_status | 905 | 902 | 302 | no / 1024 | no |
-| `background.repeated_poll.status` | repeated-poll | bg_task_status | 606 | 606 | 222 | no / 1024 | no |
-| `background.repeated_poll.log.default` | repeated-poll | bg_task_log | 661 | 661 | 72 | no / 1024 | no |
-| `background.repeated_poll.log.full` | repeated-poll | bg_task_log | 10200 | 10200 | 78 | no / 16384 | no |
-| `background.unicode.status` | unicode-long-line-json | bg_task_status | 1017 | 633 | 578 | no / 1024 | no |
-| `background.unicode.log` | unicode-long-line-json | bg_task_log | 7779 | 2754 | 7647 | no / 16384 | no |
-| `background.many_failures.status` | many-failures | bg_task_status | 999 | 993 | 330 | no / 1024 | no |
-| `background.many_failures.list` | many-failures | bg_task_list | 922 | 917 | 302 | no / 1024 | no |
+| `subagent.success.result` | success | subagent_result | 339 | 335 | 120 | no / 2048 | no |
+| `subagent.success.output` | success | subagent_output | 307 | 305 | 120 | no / 1024 | no |
+| `subagent.success.callback` | success | createCallbackBatcher.flush | 320 | 320 | 163 | no / 2048 | no |
+| `subagent.failed.result` | failed | subagent_result | 462 | 456 | 120 | no / 2048 | no |
+| `subagent.failed.callback` | failed | createCallbackBatcher.flush | 480 | 478 | 189 | no / 2048 | no |
+| `subagent.incomplete.result` | incomplete | subagent_result | 818 | 812 | 133 | no / 2048 | no |
+| `subagent.incomplete.callback` | incomplete | createCallbackBatcher.flush | 500 | 498 | 196 | no / 2048 | no |
+| `subagent.orphaned.result` | orphaned | subagent_result | 725 | 719 | 131 | no / 2048 | no |
+| `subagent.orphaned.callback` | orphaned | createCallbackBatcher.deliverUrgent | 587 | 586 | 196 | no / 2048 | no |
+| `subagent.unicode.result` | unicode-long-line-json | subagent_result | 2047 | 984 | 1696 | no / 2048 | no |
+| `subagent.many_failures.result` | many-failures | subagent_result | 1202 | 1189 | 336 | no / 2048 | no |
+| `subagent.list` | many-failures | subagent_list | 928 | 916 | 151 | no / 1024 | no |
+| `subagent.foreign.result` | success | subagent_result | 165 | 164 | 88 | no / 2048 | no |
+| `subagent.ownership.unavailable` | success | subagent_result | 293 | 292 | 204 | no / 2048 | no |
+| `background.success.status` | success | bg_task_status | 589 | 589 | 318 | no / 1024 | no |
+| `background.success.status.wrapper` | success | bg_status | 589 | 589 | 318 | no / 1024 | no |
+| `background.success.log` | success | bg_task_log | 157 | 156 | 61 | no / 1024 | no |
+| `background.failed.status` | failed | bg_task_status | 821 | 818 | 279 | no / 1024 | no |
+| `background.repeated_poll.status` | repeated-poll | bg_task_status | 842 | 842 | 333 | no / 1024 | no |
+| `background.repeated_poll.log.default` | repeated-poll | bg_task_log | 962 | 961 | 333 | no / 1024 | no |
+| `background.repeated_poll.log.full` | repeated-poll | bg_task_log | 10495 | 10495 | 280 | no / 16384 | no |
+| `background.unicode.status` | unicode-long-line-json | bg_task_status | 1024 | 694 | 497 | no / 1024 | no |
+| `background.unicode.log` | unicode-long-line-json | bg_task_log | 8074 | 3049 | 7647 | no / 16384 | no |
+| `background.many_failures.status` | many-failures | bg_task_status | 887 | 881 | 307 | no / 1024 | no |
+| `background.many_failures.list` | many-failures | bg_task_list | 920 | 915 | 279 | no / 1024 | no |
 | `callback.many_completions.batch` | many-completions | createCallbackBatcher.sendMessage | 1949 | 1469 | 288 | no / 2048 | no |
 
 ## Facts worth carrying into AFTER
 
 These are observations about the current producer, not blessed behavior.
 
-- `subagent.success.result`: TUI compact 415 B vs model 426 B
-- `subagent.failed.result`: TUI compact 531 B vs model 548 B
-- `subagent.incomplete.result`: contains Observation incomplete; TUI compact 755 B vs model 909 B
-- `subagent.orphaned.result`: TUI compact 699 B vs model 813 B
-- `subagent.unicode.result`: TUI compact 413 B vs model 2041 B; UTF-8 2041 B > UTF-16 900
-- `subagent.many_failures.result`: TUI compact 751 B vs model 1795 B
-- `background.success.status.wrapper`: wrapper matches standalone: true; TUI compact 226 B vs model 360 B
+- `subagent.incomplete.result`: contains Observation incomplete; TUI compact 755 B vs model 818 B
+- `subagent.incomplete.callback`: contains Observation incomplete
+- `subagent.orphaned.result`: TUI compact 653 B vs model 725 B
+- `subagent.unicode.result`: TUI compact 464 B vs model 2047 B; UTF-8 2047 B > UTF-16 984
+- `subagent.many_failures.result`: TUI compact 612 B vs model 1202 B
+- `background.success.status.wrapper`: wrapper matches standalone: true; TUI compact 311 B vs model 589 B
 - `background.failed.status`: matched-condition path present: true; compact "Condition matched:" line present: true; compact result field currently shows `failure_when`
-- `background.repeated_poll.log.default`: TUI compact 588 B vs model 661 B
-- `background.repeated_poll.log.full`: TUI compact 601 B vs model 10200 B
-- `background.unicode.status`: UTF-8 1017 B > UTF-16 633
-- `background.unicode.log`: TUI compact 338 B vs model 7779 B; UTF-8 7779 B > UTF-16 2754; longest line 7647 B
+- `background.repeated_poll.log.default`: TUI compact 603 B vs model 962 B
+- `background.repeated_poll.log.full`: TUI compact 611 B vs model 10495 B
+- `background.unicode.status`: UTF-8 1024 B > UTF-16 694
+- `background.unicode.log`: TUI compact 435 B vs model 8074 B; UTF-8 8074 B > UTF-16 3049; longest line 7647 B
 - `background.many_failures.status`: contains Observation incomplete
 
 ## Limitations
