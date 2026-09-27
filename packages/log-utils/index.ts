@@ -107,14 +107,29 @@ export function tailTerminalDisplay(text: string, rows: number, maxRowChars?: nu
 // UTF-8 total-output budgets, verbatim paging, retained-file cursors, envelope
 // ---------------------------------------------------------------------------
 
-/** Issue #312 defaults: whole model-facing `content`, UTF-8 bytes. */
+/** Issue #312 / OUTPUT-POLICY defaults: whole model-facing `content`, UTF-8 bytes. */
 export const OUTPUT_BUDGET_BYTES = {
+  status: 1 * 1024,
+  answer: 2 * 1024,
+  log: 1 * 1024,
+  list: 1 * 1024,
+  callbackBatch: 2 * 1024,
+  rawPage: 16 * 1024,
+} as const;
+
+/** Documented hard caps. Explicit larger pages are allowed up to these values. */
+export const OUTPUT_BUDGET_MAX_BYTES = {
   status: 2 * 1024,
   answer: 8 * 1024,
   log: 4 * 1024,
   list: 4 * 1024,
   callbackBatch: 8 * 1024,
   rawPage: 64 * 1024,
+} as const;
+
+export const OUTPUT_PAGE_DEFAULTS = {
+  logLines: 10,
+  listEntries: 10,
 } as const;
 
 export type OutputBudgetSurface = keyof typeof OUTPUT_BUDGET_BYTES;
@@ -140,6 +155,8 @@ export interface PageRequest {
   cursor?: string;
   /** UTF-8 byte budget for this page. Nonpositive/NaN fall back to the API default. */
   maxBytes?: number;
+  /** Optional line cap. Pages still make forward progress on a single huge line. */
+  maxLines?: number;
 }
 
 export interface PageResult {
@@ -257,8 +274,13 @@ export function clampBudgetBytes(value: unknown, fallback: number): number {
   return positiveInt(value) ?? positiveInt(fallback) ?? 1;
 }
 
+/** Surface default, or a caller request clamped to the documented hard cap. */
 export function budgetFor(surface: OutputBudgetSurface, requested?: unknown): number {
-  return clampBudgetBytes(requested, OUTPUT_BUDGET_BYTES[surface]);
+  const fallback = OUTPUT_BUDGET_BYTES[surface];
+  const cap = OUTPUT_BUDGET_MAX_BYTES[surface];
+  const n = positiveInt(requested);
+  if (n === undefined) return fallback;
+  return Math.min(n, cap);
 }
 
 export function utf8ByteLength(text: string): number {
@@ -310,7 +332,10 @@ function sliceUtf8Range(
   const budget = Math.max(0, Math.floor(maxBytes));
   let to = completeEnd(bytes, from, Math.min(bytes.length, from + budget));
   if (to <= from) to = nextCodepointEnd(bytes, from);
-  if (preferNewline && to > from) {
+  // Prefer a newline only when this slice is truncated. If the remainder fits,
+  // keep a final line that has no trailing newline — otherwise a one-page
+  // answer is missing its last line and reconstruction needs a second page.
+  if (preferNewline && to > from && to < bytes.length) {
     for (let i = to - 1; i >= from; i -= 1) {
       if (bytes[i] === NEWLINE) {
         to = i + 1;
@@ -356,6 +381,10 @@ function decodeCursor(cursor: string | undefined): CursorPayload | undefined {
   return undefined;
 }
 
+export function cursorKind(cursor: string | undefined): "t" | "f" | "s" | undefined {
+  return decodeCursor(cursor)?.k;
+}
+
 function headMatches(previousHash: string | undefined, previousLength: number | undefined, current: string): boolean {
   if (!previousHash) return true;
   const length = Math.max(0, previousLength ?? 0);
@@ -397,7 +426,7 @@ function emptyPage(overrides: Partial<PageResult> & Pick<PageResult, "revision" 
  * same page, and two callers do not share consumption.
  */
 export function pageVerbatimText(text: string, request: PageRequest = {}): PageResult {
-  const maxBytes = clampBudgetBytes(request.maxBytes, OUTPUT_BUDGET_BYTES.answer);
+  const maxBytes = budgetFor("answer", request.maxBytes);
   const encoded = encoder.encode(text);
   const revision = hashBytes(encoded);
   let offset = 0;
@@ -436,7 +465,21 @@ export function pageVerbatimText(text: string, request: PageRequest = {}): PageR
   };
   if (offset >= encoded.length) return make(encoded.length, encoded.length, false);
   const range = sliceUtf8Range(encoded, offset, maxBytes, true);
-  return make(range.start, range.end, range.end < encoded.length);
+  let end = range.end;
+  const maxLines = positiveInt(request.maxLines);
+  if (maxLines !== undefined) {
+    let seen = 0;
+    for (let i = range.start; i < end; i += 1) {
+      if (encoded[i] === NEWLINE) {
+        seen += 1;
+        if (seen >= maxLines) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+  }
+  return make(range.start, end, end < encoded.length);
 }
 
 function fileGaps(request: FilePageRequest): EvidenceGap[] {
@@ -487,7 +530,7 @@ function fileReadError(
  * inode/head checks disclose replacement and same-inode compaction.
  */
 export function pageRetainedFile(path: string, request: FilePageRequest = {}): PageResult {
-  const maxBytes = clampBudgetBytes(request.maxBytes, OUTPUT_BUDGET_BYTES.rawPage);
+  const maxBytes = budgetFor("rawPage", request.maxBytes);
   const resource = request.resource ?? path;
   const generation = request.generation === undefined ? undefined : String(request.generation);
   const suppliedGaps = fileGaps(request);

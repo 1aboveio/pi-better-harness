@@ -1359,7 +1359,9 @@ export function formatSubagentOutputBody(
             : `(no parsed output yet)\n\n--- raw log tail ---\n${rawTail}`;
     }
     const diag = diagnostics.length ? `\n[parser: ${diagnostics.join("; ")}]` : "";
-    return `${head}${tools}${diag}\n${body}`;
+    // Ordinary ordered tool histories are omitted from default output (#312).
+    void tools;
+    return `${head}${diag}\n${body}`;
 }
 
 /** Build the human-readable body for subagent_result. Exported for unit testing. */

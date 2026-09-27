@@ -19,7 +19,7 @@ describe("parent ownership", () => {
     const ownedRunning = metas.filter((meta) => ownedByThisParent(meta, thisParentPid) && meta.status === "running");
     assert.deepEqual(ownedRunning.map((m) => m.id), ["sa_owned"]);
   });
-  it("does not scope explicit id lookups, which remain global for recovery", () => {
+  it("registry lookup by id remains possible; registered tools still require an explicit all:true override", () => {
     const metasById = new Map([[ownRunningMeta.id, ownRunningMeta], [foreignRunningMeta.id, foreignRunningMeta]]);
     assert.equal(metasById.get("sa_foreign"), foreignRunningMeta);
   });

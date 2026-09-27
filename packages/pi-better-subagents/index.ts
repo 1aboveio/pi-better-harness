@@ -1785,9 +1785,10 @@ export default function (pi: ExtensionAPI) {
     // the factories return, so tests invoke the same execute handlers the
     // model reaches (no drift-prone second copy). Stop's only UI side effect
     // (widget redraw after a kill) is injected as onStopped.
-    pi.registerTool(subagentListTool(Type));
-    pi.registerTool(subagentOutputTool(Type));
-    const acceptanceResultTool = subagentResultTool(Type);
+    const toolSession = { getActiveOrigin: () => activeCallbackOrigin };
+    pi.registerTool(subagentListTool(Type, toolSession));
+    pi.registerTool(subagentOutputTool(Type, toolSession));
+    const acceptanceResultTool = subagentResultTool(Type, toolSession);
     pi.registerTool(acceptanceResultTool);
     publishAcceptanceHooks(acceptanceResultTool);
     const acceptanceStopTool = subagentStopTool(Type, { onStopped: renderWidget });

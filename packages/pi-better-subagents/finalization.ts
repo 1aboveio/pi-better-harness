@@ -10,11 +10,10 @@ import { collectRunFailures, failurePath } from "./failures.ts";
 import { observeFailures } from "./shared-failure-observations.ts";
 import {
     classifyChildExit,
-    formatSubagentResult,
-    resolveLifecycle,
     type ChildExitOutcome,
 } from "./lifecycle.ts";
-import { parseRunForLifecycle, tailLog } from "./parse.ts";
+import { assembleSubagentResult } from "./output-payload.ts";
+import { parseRunForLifecycle } from "./parse.ts";
 import {
     canExitFinalize,
     effectiveStatus,
@@ -138,28 +137,19 @@ export function finalizeRun(
  * Returns null when the run is still live so the tool can emit its running message.
  */
 export function buildSubagentResultText(id: string): string | null {
+    return buildSubagentResultPayload(id);
+}
+
+/** Optional paging/raw evidence for the registered result tool. */
+export function buildSubagentResultPayload(
+    id: string,
+    request?: { cursor?: string; maxBytes?: unknown; mode?: unknown; all?: unknown },
+    healthLine = "",
+    scopeKey = `parent:${process.pid}`,
+): string | null {
     const meta = readMeta(id);
     if (!meta) throw new Error(`Unknown run id: ${id}`);
     const st = effectiveStatus(meta);
-    // Non-final statuses (running / orphaned) have no final result body.
     if (!isFinalResultStatus(st)) return null;
-
-    const exit = meta.exitCode === undefined ? "?" : String(meta.exitCode);
-    // Re-derive lifecycle diagnostics from the complete stream even when meta is stale.
-    const r = parseRunForLifecycle(id);
-    const el = fmtElapsed((meta.endedAt ?? Date.now()) - meta.startedAt);
-    const spend = fmtSpend(r.usage);
-    const statSeg = ` · ${el}${spend ? ` · ${spend}` : ""}`;
-    const tools = r.toolCalls.length ? ` · tools: ${r.toolCalls.join(", ")}` : "";
-    const lifecycle = resolveLifecycle(meta, r);
-    return formatSubagentResult({
-        id,
-        status: st,
-        exitCode: exit,
-        statSeg,
-        toolsSeg: tools,
-        run: r,
-        rawLogTail: tailLog(id, 40),
-        lifecycle,
-    });
+    return assembleSubagentResult(id, meta, request ?? {}, healthLine, scopeKey);
 }
