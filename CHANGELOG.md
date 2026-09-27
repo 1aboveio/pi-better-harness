@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **sandbox**: on Linux, a protected symlink inside a writable dot directory (a stow link such as `~/.config/git -> ../dotfiles/.config/git`, or mise's `~/.local/bin -> ~/.local/share/mise/shims`) no longer makes that whole directory read-only. The directory stays read-only so the link can't be replaced, but every existing entry in it is bound writable again; only creating new top-level entries there is refused. Symlink entries and protected entries are never re-bound. A symlink loop among those links no longer fails every launch with "Cannot protect denied path": the looping links are protected and the loop is left unresolvable. The subagents and background-tasks copies of the sandbox core carry the same fix. (#345)
+
 ## [pi-better-harness@0.7.0] - 2026-09-27
 
 ### Changed
