@@ -89,25 +89,28 @@ defaults.
 | Soft deadline (`deadline_minutes`) | 30 | The child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
 | Grace (`grace_minutes`) | 5 | If the child has not finished this long after the deadline, the harness stops it. The ordinary completion callback reports `killed; stopped: deadline`. A child that finishes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
 | Hard ceiling (`max_minutes`) | 90 | The run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. |
-| Stuck window (`stuck_minutes`) | 10 | No progress for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. |
+| Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. |
 
 `0` turns a control off; `null` or an omitted value means "use the default".
 Values are minutes and may be fractional. `subagent_spawn_batch` accepts the
 same four fields in `shared` and in each job (a job value wins).
 
-**Progress**, defined simply: a successful `edit` or `write`, a successful `bash`
-call that runs `git commit`, or any successful tool call that directly follows a
-failed one. Reads, searches, and green test runs on their own are not progress.
-Time the child spends waiting on a running tool call does not count toward the
+**Progress**, defined simply: any successful tool call that is not an exact
+repeat of an earlier call in the same run. "Exact repeat" means the same tool
+name and the same arguments, with null and absent optional fields treated alike
+(as in #336) and key order ignored. A successful `edit` or `write`, a `git
+commit`, and a success directly after a failed call always count, even when
+repeated. Re-reading the same file or re-running the same command with the same
+arguments does not reset the stuck window, so a read-only research child making
+distinct calls is never flagged, while one looping on the same read is. The
+harness remembers up to 4096 distinct calls per run as fixed-size hashes of the
+name and normalized arguments; past that the oldest is forgotten, so a call from
+long ago counts again. Time the child spends waiting on a running tool call does not count toward the
 stuck window, so a child in the middle of a 20-minute test run is waiting, not
 stuck; a command that hangs is bounded by the deadline and the ceiling instead.
 The other stuck signal is the existing escalation: the same operation failing
 three times wakes the parent once as an `Action required` incident
 ([failure observations](failure-observations.md)).
-
-Read-only runs (review, research) make no edits, so a long one can trip the
-stuck wake while working normally; the wake says so. Raise `stuck_minutes` or
-set it to `0` for such runs.
 
 **Where the reason shows.** `subagent_list` rows, `subagent_output`,
 `subagent_result`, and completion callbacks carry `stopped: deadline`,

@@ -793,8 +793,8 @@ function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number)
     if (actions.stuckWake) {
         const { anchorAt, ageMs } = actions.stuckWake;
         deliverTimingWake(pi, meta, "stuck", `stuck:${anchorAt}`,
-            `Subagent ${timingLabel(meta)} looks stuck: no progress for ${fmtWindow(ageMs)} (no file edit or write, git commit, ` +
-            `or success after a failure, not counting time inside running tool calls). Read-only work such as review or research can look like this. ` +
+            `Subagent ${timingLabel(meta)} looks stuck: no progress for ${fmtWindow(ageMs)}. Its successful tool calls, if any, only repeated earlier calls ` +
+            `(same tool, same arguments), for example re-reading the same file or re-running the same command; time inside running tool calls is not counted. ` +
             `It is still running and will not be stopped for this; this is reported once. Inspect it with subagent_output before deciding to stop it.`,
             (current) => current.timing?.stuckWakeSentAt !== undefined && (current.timing.stuckAnchorAt ?? 0) >= anchorAt,
             (at) => { patchTiming(meta.id, { stuckWakeSentAt: at, stuckAnchorAt: anchorAt }); });

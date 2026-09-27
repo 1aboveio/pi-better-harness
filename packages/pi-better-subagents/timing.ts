@@ -17,12 +17,17 @@
  * The host (index.ts) performs the side effects: writing the steer request the
  * child's control extension delivers, the urgent parent wake, and the stop.
  *
- * Progress, defined simply: a successful `edit` or `write`, a successful `bash`
- * that runs `git commit`, or any successful tool call that directly follows a
- * failed one. Time spent waiting on a running tool call does not count toward
+ * Progress, defined simply: any successful tool call that is not an exact
+ * repeat of an earlier call in this run (same tool name and same arguments,
+ * with null/absent optional fields treated alike as in #336). A successful
+ * `edit`/`write`, a `git commit`, and a success directly after a failure always
+ * count, even when repeated. Re-reading the same file or re-running the same
+ * command with the same arguments does not. Time spent waiting on a running tool call does not count toward
  * the stuck window, so a child in the middle of a 20-minute test run is not
  * stuck; a hung command is bounded by the deadline and the ceiling instead.
  */
+
+import { createHash } from "node:crypto";
 
 export type TimingStopReason = "deadline" | "ceiling";
 export type TimingReason = TimingStopReason | "stuck";
@@ -147,7 +152,7 @@ const TIMING_DESCRIPTIONS = {
     deadline_minutes: "Soft deadline in minutes (default 30; 0 = none; null = default). At the deadline the child is told to stop starting new work, commit what is done, and report, and you get one wake. If it has not finished after grace_minutes, the harness stops it with reason deadline.",
     grace_minutes: "Minutes after the soft deadline before the run is stopped (default 5; null = default).",
     max_minutes: "Hard ceiling in minutes (default 90; 0 = none; null = default). The run is stopped at once, without grace, with reason ceiling.",
-    stuck_minutes: "No-progress window in minutes (default 10; 0 = off; null = default). Progress is a successful edit or write, a git commit, or a success after a failed tool call; time inside a running tool call does not count. Wakes you once per stuck spell; never stops the run.",
+    stuck_minutes: "No-progress window in minutes (default 10; 0 = off; null = default). Progress is any successful tool call that is not an exact repeat of an earlier one (same tool, same arguments); edits, writes, commits, and a success after a failure always count. Time inside a running tool call does not count. Wakes you once per stuck spell; never stops the run.",
 } as const;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the host's TypeBox builder types its own schemas
@@ -181,7 +186,9 @@ export interface ProgressState {
     /** Latest event timestamp seen (message provenance only). */
     lastEventAt?: number;
     /** Tool calls started and not yet finished. */
-    open: Map<string, { name: string; command?: string }>;
+    open: Map<string, { name: string; command?: string; novel: boolean }>;
+    /** Hashes of tool name + normalized arguments already seen in this run (bounded, oldest evicted). */
+    seen: Set<string>;
     /** When the open set last went from empty to non-empty. */
     inFlightSince?: number;
     /** Tool-call time since the last progress (closed intervals). */
@@ -192,7 +199,7 @@ export interface ProgressState {
 }
 
 export function emptyProgress(startedAt: number): ProgressState {
-    return { startedAt, open: new Map(), pausedMs: 0, lastToolFailed: false, steerDelivered: false };
+    return { startedAt, open: new Map(), seen: new Set(), pausedMs: 0, lastToolFailed: false, steerDelivered: false };
 }
 
 /** Typed marker the child's control extension writes after delivering a steer. */
@@ -200,8 +207,41 @@ export const STEER_DELIVERED_EVENT = "subagent_steer_delivered";
 
 const GIT_COMMIT = /(^|[\s;&|(])git(\s+-[cC]\s+\S+)*\s+commit\b/;
 
-function isProgressResult(name: string, command: string | undefined, afterFailure: boolean): boolean {
-    if (afterFailure) return true;
+/** Most distinct calls remembered per run. Past the cap the oldest is forgotten, so a very old call repeated counts again. */
+export const MAX_SEEN_CALLS = 4096;
+
+/** Drop null/absent fields (recursively in objects), sort keys: one spelling per logical call (#336). */
+function normalizeArgs(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(normalizeArgs);
+    if (value && typeof value === "object") {
+        const out: Record<string, unknown> = {};
+        for (const key of Object.keys(value).sort()) {
+            const v = (value as Record<string, unknown>)[key];
+            if (v === null || v === undefined) continue;
+            out[key] = normalizeArgs(v);
+        }
+        return out;
+    }
+    return value;
+}
+
+/** Stable identity of one tool call: hash of the tool name and its normalized arguments. */
+export function callKey(name: string, args: unknown): string {
+    return createHash("sha256").update(name).update("\u0000").update(JSON.stringify(normalizeArgs(args ?? {})) ?? "").digest("base64url").slice(0, 22);
+}
+
+function remember(state: ProgressState, key: string): boolean {
+    if (state.seen.has(key)) return false;
+    state.seen.add(key);
+    if (state.seen.size > MAX_SEEN_CALLS) {
+        const oldest = state.seen.values().next().value;
+        if (oldest !== undefined) state.seen.delete(oldest);
+    }
+    return true;
+}
+
+function isProgressResult(name: string, command: string | undefined, afterFailure: boolean, novel: boolean): boolean {
+    if (afterFailure || novel) return true;
     if (name === "edit" || name === "write") return true;
     return name === "bash" && typeof command === "string" && GIT_COMMIT.test(command);
 }
@@ -221,7 +261,8 @@ export function foldProgress(state: ProgressState, event: Record<string, unknown
         if (!id) return;
         const args = event.args as { command?: unknown } | undefined;
         if (state.open.size === 0) state.inFlightSince = state.lastEventAt ?? state.startedAt;
-        state.open.set(id, { name: String(event.toolName ?? ""), command: typeof args?.command === "string" ? args.command : undefined });
+        const name = String(event.toolName ?? "");
+        state.open.set(id, { name, command: typeof args?.command === "string" ? args.command : undefined, novel: remember(state, callKey(name, event.args)) });
         return;
     }
     if (type !== "message_end") return;
@@ -239,7 +280,7 @@ export function foldProgress(state: ProgressState, event: Record<string, unknown
     }
     const failed = message.isError === true;
     const name = String(message.toolName ?? started?.name ?? "");
-    if (!failed && isProgressResult(name, started?.command, state.lastToolFailed)) {
+    if (!failed && isProgressResult(name, started?.command, state.lastToolFailed, started?.novel === true)) {
         state.lastProgressAt = Math.max(state.lastProgressAt ?? at, at);
         state.pausedMs = 0;
         if (state.open.size > 0) state.inFlightSince = at;
@@ -348,7 +389,7 @@ export function describeTiming(meta: { timing?: RunTiming; startedAt: number; st
             : { reason, short: "deadline: finished in grace", line: `Timing: deadline — passed its ${deadline} soft deadline and finished within the ${grace} grace.` };
     }
     const window = t.stuckMs !== undefined ? fmtMinutes(t.stuckMs) : "?";
-    return { reason, short: "stuck", line: `Timing: stuck — no progress (file edit/write, git commit, or a success after a failure) for ${window} outside running tool calls.` };
+    return { reason, short: "stuck", line: `Timing: stuck — no progress (a successful tool call that is not an exact repeat of an earlier one) for ${window} outside running tool calls.` };
 }
 
 /** Short spawn-response line describing the limits in force. */

@@ -21,6 +21,8 @@ import {
     resolveRunTiming,
     stuckAge,
     timingParameterSchemas,
+    MAX_SEEN_CALLS,
+    callKey,
 } from "../timing.ts";
 import childSteer, { STEER_FILE_ENV } from "../child-steer.ts";
 import { findProviderRejectedKeywords } from "../../../scripts/provider-schema-compat.mjs";
@@ -80,26 +82,52 @@ describe("progress", () => {
         return state;
     }
 
-    it("counts a successful edit/write, a git commit, and a success after a failure — nothing else", () => {
-        assert.equal(fold([start("a", "read"), result("a", "read", 10)]).lastProgressAt, undefined, "a read is not progress");
-        assert.equal(fold([start("a", "bash", { command: "npm test" }), result("a", "bash", 10)]).lastProgressAt, undefined, "a green command is not progress");
-        assert.equal(fold([start("a", "edit"), result("a", "edit", 10, true)]).lastProgressAt, undefined, "a failed edit is not progress");
-        assert.equal(fold([start("a", "edit"), result("a", "edit", 10)]).lastProgressAt, 10);
-        assert.equal(fold([start("a", "write"), result("a", "write", 11)]).lastProgressAt, 11);
-        assert.equal(fold([start("a", "bash", { command: "git add -A && git commit -m wip" }), result("a", "bash", 12)]).lastProgressAt, 12);
-        assert.equal(fold([start("a", "bash", { command: "git -C repo commit -m x" }), result("a", "bash", 13)]).lastProgressAt, 13);
-        assert.equal(fold([start("a", "bash", { command: "git log --grep commit" }), result("a", "bash", 13)]).lastProgressAt, undefined);
+    it("counts any successful call that is not an exact repeat; edits, commits, and a success after a failure always count", () => {
+        assert.equal(fold([start("a", "read", { path: "x" }), result("a", "read", 10)]).lastProgressAt, 10, "a first read is progress");
+        assert.equal(fold([start("a", "bash", { command: "npm test" }), result("a", "bash", 10, true)]).lastProgressAt, undefined, "a failure is not progress");
+        assert.equal(fold([
+            start("a", "read", { path: "x", offset: null }), result("a", "read", 10),
+            start("b", "read", { path: "x" }), result("b", "read", 20),
+            start("c", "read", { offset: undefined, path: "x" }), result("c", "read", 30),
+        ]).lastProgressAt, 10, "the same read again (null/absent/key order normalized) is not progress");
+        assert.equal(fold([
+            start("a", "read", { path: "x" }), result("a", "read", 10),
+            start("b", "read", { path: "y" }), result("b", "read", 20),
+            start("c", "bash", { command: "rg foo" }), result("c", "bash", 30),
+        ]).lastProgressAt, 30, "distinct calls keep counting");
+        assert.equal(fold([start("a", "read", { path: "x" }), result("a", "read", 10), start("b", "grep", { path: "x" }), result("b", "grep", 20)]).lastProgressAt, 20, "the tool name is part of the identity");
+        assert.equal(fold([start("a", "edit", { path: "a" }), result("a", "edit", 10), start("b", "edit", { path: "a" }), result("b", "edit", 20)]).lastProgressAt, 20, "a repeated edit still counts");
+        assert.equal(fold([start("a", "bash", { command: "git commit -m x" }), result("a", "bash", 10), start("b", "bash", { command: "git commit -m x" }), result("b", "bash", 20)]).lastProgressAt, 20, "a repeated commit still counts");
         assert.equal(fold([
             start("a", "bash", { command: "npm test" }), result("a", "bash", 20, true),
             start("b", "bash", { command: "npm test" }), result("b", "bash", 30),
-        ]).lastProgressAt, 30, "a success after a failure is progress");
+        ]).lastProgressAt, 30, "a success after a failure counts even when the call repeats");
+        assert.equal(fold([
+            start("a", "bash", { command: "npm test" }), result("a", "bash", 20),
+            start("b", "bash", { command: "npm test" }), result("b", "bash", 30),
+        ]).lastProgressAt, 20, "re-running the same green command is not progress");
+    });
+
+    it("bounds remembered calls per run, forgetting the oldest", () => {
+        const state = emptyProgress(0);
+        for (let i = 0; i <= MAX_SEEN_CALLS; i++) {
+            foldProgress(state, start(`c${i}`, "read", { path: `f${i}` }));
+            foldProgress(state, result(`c${i}`, "read", i + 1));
+        }
+        assert.equal(state.seen.size, MAX_SEEN_CALLS);
+        assert.equal(callKey("read", { path: "f0" }).length, 22, "a fixed-size hash, not the arguments");
+        foldProgress(state, start("again", "read", { path: "f0" }));
+        foldProgress(state, result("again", "read", 999_999));
+        assert.equal(state.lastProgressAt, 999_999, "the evicted oldest call counts again");
     });
 
     it("pauses the stuck clock while a tool call runs", () => {
-        const state = fold([assistant(100), start("t", "bash", { command: "npm test" })], 0);
+        // An earlier identical run, so the long one's success is a repeat, not progress.
+        const state = fold([start("p", "bash", { command: "npm test" }), result("p", "bash", 50), assistant(100), start("t", "bash", { command: "npm test" })], 0);
         assert.equal(stuckAge(state, 50_000), undefined, "waiting on a running command is not stuck");
         foldProgress(state, result("t", "bash", 40_100));
-        assert.equal(stuckAge(state, 41_000), 41_000 - 40_000, "only time outside the tool call counts");
+        assert.equal(state.lastProgressAt, 50);
+        assert.equal(stuckAge(state, 41_000), 41_000 - 50 - 40_000, "only time outside the tool call counts");
     });
 });
 

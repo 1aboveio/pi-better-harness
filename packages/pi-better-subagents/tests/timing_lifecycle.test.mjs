@@ -66,7 +66,7 @@ function makeHarness(options = {}) {
     return { pi, tools, handlers, sent, notes, ctx, shutdown };
 }
 
-async function spawnRun(h, overrides = {}) {
+async function spawnRun(h, { noWaitForLaunch, ...overrides } = {}) {
     const res = await h.tools.get("subagent_spawn").execute(
         "tc", { prompt: "timing test task", clean: true, sandbox: false, cwd: tmpdir(), ...overrides },
         undefined, undefined, h.ctx,
@@ -75,6 +75,11 @@ async function spawnRun(h, overrides = {}) {
     const id = out.match(/id=(\S+)/)[1];
     const pid = Number(out.match(/\(pid (\d+)\)/)[1]);
     liveRuns.push({ id, pid });
+    // The fake child writes its launch lines through a non-append fd; appending test
+    // events before it has written would let those lines overwrite them.
+    if (!noWaitForLaunch) {
+        await waitFor(() => { try { return readFileSync(join(runDir(id), "output.log"), "utf8").includes("--extension"); } catch { return false; } });
+    }
     return { id, pid, out };
 }
 
@@ -246,7 +251,7 @@ describe("harness timing: soft deadline", () => {
             writeFakePi("#!/bin/sh\nsleep 0.4\nexit 0\n");
             const h = makeHarness();
             try {
-                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
+                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0, noWaitForLaunch: true });
                 await sleep(80);
                 await tick();
                 assert.ok(existsSync(steerPath(run.id)));
@@ -347,6 +352,38 @@ describe("harness timing: stuck wake", () => {
                 assert.match(output, /Timing: stuck/);
                 await reap(idle);
                 await reap(busy);
+            } finally { h.shutdown(); }
+        });
+    });
+
+    it("a read-only research child making distinct successful calls is never stuck; one looping the same read is", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const research = await spawnRun(h, { name: "research", deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.005 });
+                const looping = await spawnRun(h, { name: "looping", deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.005 });
+                // As a real child logs it: the assistant turn that asks for the call, the call, its result.
+                const call = (id, callId, args) => [
+                    { type: "message_end", message: { role: "assistant", timestamp: Date.now(), content: [] } },
+                    { type: "tool_execution_start", toolCallId: callId, toolName: "read", args },
+                    { type: "message_end", message: { role: "toolResult", toolCallId: callId, toolName: "read", isError: false, timestamp: Date.now(), content: [] } },
+                ];
+                // 300 ms window, a call every ~70 ms, for ~700 ms: margin for a slow event loop either way.
+                for (let i = 0; i < 10; i++) {
+                    appendEvents(research.id, call(research.id, `r${i}`, { path: `src/file-${i}.ts` }));
+                    // Same read every time; null optional fields are the same call (#336).
+                    appendEvents(looping.id, call(looping.id, `l${i}`, i % 2 ? { path: "README.md", offset: null } : { path: "README.md" }));
+                    await sleep(70);
+                    await tick();
+                }
+                await waitFor(() => wakes(h, "stuck").length >= 1);
+                const stuck = wakes(h, "stuck");
+                assert.equal(stuck.length, 1);
+                assert.match(stuck[0].message.content, new RegExp(looping.id));
+                assert.match(stuck[0].message.content, /only repeated earlier calls/);
+                assert.equal(stuck.filter((w) => w.message.content.includes(research.id)).length, 0, "distinct reads are progress");
+                await reap(research);
+                await reap(looping);
             } finally { h.shutdown(); }
         });
     });
