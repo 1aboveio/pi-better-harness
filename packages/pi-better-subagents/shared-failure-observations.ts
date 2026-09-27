@@ -102,12 +102,29 @@ export interface CommandIntent {
   expectedExitCodes?: number[];
 }
 export type CommandIntentField = keyof CommandIntent;
+const INTENT_FIELDS: readonly CommandIntentField[] = ["operationId", "attemptId", "expectedExitCodes"];
 /**
- * Validate structured intent fields. Absent fields are fine; malformed ones are an error, and the
- * caller must not run the command. `names` renames fields in the error (e.g. snake_case parameters).
+ * The one normalization of intent-bearing arguments: an explicit `null` intent field means
+ * "not declared", exactly like an omitted one. Models routinely send optional fields as null, and
+ * Pi's argument validation (0.87+) drops optional nulls before a tool runs, while the process log
+ * and session record keep the raw arguments. Every reader of intent, the executing tool and the
+ * replay alike, goes through this so both sides see the same declaration from the same input.
+ */
+export function withoutAbsentIntent<T>(args: T): T {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+  const input = args as Record<string, unknown>;
+  if (!INTENT_FIELDS.some((key) => key in input && input[key] == null)) return args;
+  const out = { ...input };
+  for (const key of INTENT_FIELDS) if (key in out && out[key] == null) delete out[key];
+  return out as T;
+}
+/**
+ * Validate structured intent fields. Absent fields (omitted, undefined, or null) are fine; malformed
+ * ones are an error, and the caller must not run the command. `names` renames fields in the error
+ * (e.g. snake_case parameters).
  */
 export function readCommandIntent(args: unknown, names: Partial<Record<CommandIntentField, string>> = {}): { intent: CommandIntent; error?: string } {
-  const input = (args && typeof args === "object" ? args : {}) as Record<string, unknown>;
+  const input = withoutAbsentIntent((args && typeof args === "object" ? args : {}) as Record<string, unknown>);
   const intent: CommandIntent = {};
   for (const key of ["operationId", "attemptId"] as const) {
     const value = input[key];

@@ -17,12 +17,18 @@ import { DISPOSITION_TOOL, INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES, describeO
 
 const { createBashToolDefinition } = PiCodingAgent;
 
+// Each intent field also admits `null`, which means "not declared" (withoutAbsentIntent). Models send
+// optional fields as explicit null; accepting it in the schema means Pi hands execute the same raw
+// arguments the process log and session record keep, on every Pi version (0.82 rejected a null
+// before execute, 0.87 silently drops it), so the child and the parent's replay read one input.
+// `anyOf` rather than a `type` array: Pi 0.82's TypeBox compiler crashes on `["array", "null"]` + `items`.
+const nullable = (schema: Record<string, unknown>) => ({ anyOf: [schema, { type: "null" }] });
 const intentProperties = {
-    operationId: { type: "string", pattern: INTENT_ID_PATTERN,
+    operationId: { ...nullable({ type: "string", pattern: INTENT_ID_PATTERN }),
         description: "Optional stable id for one logical operation. Reuse it on a modified retry (changed scope, timeout, or flags) so a later success recovers the earlier failure." },
-    attemptId: { type: "string", pattern: INTENT_ID_PATTERN,
+    attemptId: { ...nullable({ type: "string", pattern: INTENT_ID_PATTERN }),
         description: "Optional unique id for this execution, for use as evidence in failure_disposition." },
-    expectedExitCodes: { type: "array", items: { type: "integer", minimum: 1, maximum: 255 }, minItems: 1, maxItems: MAX_EXPECTED_EXIT_CODES,
+    expectedExitCodes: { ...nullable({ type: "array", items: { type: "integer", minimum: 1, maximum: 255 }, minItems: 1, maxItems: MAX_EXPECTED_EXIT_CODES }),
         // Distinctness is enforced by readCommandIntent, not `uniqueItems`: OpenAI rejects that keyword
         // in function schemas, which failed every confined child's first request.
         description: "Optional distinct non-zero exit codes that are intentional for this command (for example [1] for an rg/grep no-match or git diff --exit-code probe). Declared before the command runs; the final shell exit code is what is classified." },
