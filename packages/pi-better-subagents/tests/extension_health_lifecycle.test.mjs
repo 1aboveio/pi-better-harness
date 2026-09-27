@@ -64,7 +64,7 @@ const { readMeta, writeMeta, nextRunId, runDir } = await import("../registry.ts"
 const { realProcessProbe, OLD_METADATA_LOST_CONFIRM_TICKS } = await import("../health.ts");
 const { killProcessTree } = await import("../spawn.ts");
 const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
-const { failurePath, readRunFailures, toolOperation } = await import("../failures.ts");
+const { failurePath, readRunFailures, toolOperation, failureSummary: failureSummaryFor } = await import("../failures.ts");
 const { observeFailures, pendingFailureAttention } = await import("../shared-failure-observations.ts");
 
 /** Above the Linux/macOS pid max: guaranteed dead, never a live group. */
@@ -221,13 +221,13 @@ describe("structured failure attention", () => {
                 const output = (await h.tools.get("subagent_output").execute("x", { id }, undefined, undefined, h.ctx)).content[0].text;
                 const result = (await h.tools.get("subagent_result").execute("x", { id }, undefined, undefined, h.ctx)).content[0].text;
                 const list = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
-                assert.ok(output.indexOf("Unresolved failure") < output.indexOf("still working"));
-                assert.match(result, /Unresolved failure/);
-                assert.ok(result.indexOf("Unresolved failure") < result.indexOf("still running") || result.indexOf("Unresolved failure") < result.indexOf("still working"));
+                assert.ok(output.indexOf("Action required") < output.indexOf("still working"));
+                assert.match(result, /Action required/);
+                assert.ok(result.indexOf("Action required") < result.indexOf("still running") || result.indexOf("Action required") < result.indexOf("still working"));
                 assert.match(list, /incident/i);
                 assert.doesNotMatch(list, /assertion failed/);
                 const detail = renderRegisteredWorkDetail("subagents", id, 120);
-                assert.match(detail.lines.join("\n"), /Unresolved failure/);
+                assert.match(detail.lines.join("\n"), /Action required/);
                 mock.timers.tick(HEALTH_TICK_MS);
                 await new Promise((resolve) => setImmediate(resolve));
                 assert.equal(pendingFailureAttention(readRunFailures(id), Date.now())?.incidents.length, 1);
@@ -241,6 +241,114 @@ describe("structured failure attention", () => {
                 await reapRun({ id, pid });
             } finally { h.shutdown(); }
         });
+    });
+});
+
+describe("#315 child tool failures and parent wakes", () => {
+    const toolEvents = (id, command, error, extra = {}) => [
+        { type: "tool_execution_start", toolCallId: id, toolName: extra.toolName ?? "bash", args: extra.args ?? { command } },
+        { type: "tool_execution_end", toolCallId: id, toolName: extra.toolName ?? "bash", isError: true, result: { content: [{ type: "text", text: error }] } },
+    ];
+    /** Write child log rows and age their observations past the running grace period, as the scanner would record them. */
+    function appendAgedFailures(id, rows) {
+        appendFileSync(join(runDir(id), "output.log"), rows.map((e) => JSON.stringify(e)).join("\n") + "\n");
+        const cwd = readMeta(id).cwd;
+        const ends = rows.filter((row) => row.type === "tool_execution_end" && row.isError);
+        for (const end of ends) {
+            const start = rows.find((row) => row.type === "tool_execution_start" && row.toolCallId === end.toolCallId);
+            observeFailures(failurePath(id), [{ id: `tool:${end.toolCallId}`, operation: toolOperation(end.toolName, start.args, cwd), kind: "failure",
+                category: "tool", summary: `${end.toolName} failed: ${end.result.content[0].text}` }], Date.now() - 120_000);
+        }
+    }
+    const failureWakes = (h) => h.sent.filter((x) => x.message.customType === "subagent-failure");
+    const failureSummary = (id) => failureSummaryFor(id, readMeta(id).cwd);
+
+    it("benign and one-off child tool errors never wake the parent; a stuck operation escalates exactly once with only its own incident", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const { id, pid } = await spawnRun(h);
+                appendAgedFailures(id, [
+                    ...toolEvents("grep-miss", "rg -n 'nope' src", "(no output)\n\nCommand exited with code 1"),
+                    ...toolEvents("read-missing", undefined, "ENOENT: no such file or directory, access 'FINDINGS.md'", { toolName: "read", args: { path: "FINDINGS.md" } }),
+                    ...toolEvents("edit-dup", undefined, "Found 2 occurrences of the text in a.ts. The text must be unique.", { toolName: "edit", args: { path: "a.ts", edits: [] } }),
+                    ...toolEvents("syntax", "python3 - <<'PY'\nprint(\nPY", "SyntaxError: '(' was never closed\n\nCommand exited with code 1"),
+                    ...toolEvents("red-test", "npm test", "1 failing\n\nCommand exited with code 1"),
+                ]);
+                for (let i = 0; i < 4; i++) {
+                    mock.timers.tick(HEALTH_TICK_MS);
+                    await new Promise((resolve) => setImmediate(resolve));
+                }
+                assert.equal(failureWakes(h).length, 0, "the child owns its individual tool errors while it is alive");
+                // An evidence gap the parent cannot act on mid-run is deferred to the terminal callback.
+                appendFileSync(join(runDir(id), "output.log"), '{"type":"tool_execution_end","toolCallId":"broken"}\n');
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+                assert.equal(failureWakes(h).length, 0);
+                assert.match(failureSummary(id), /Observation incomplete/);
+                const output = (await h.tools.get("subagent_output").execute("x", { id }, undefined, undefined, h.ctx)).content[0].text;
+                assert.match(output, /Unclassified failure observation|\d+ active failure observations · \d+ shown/, "the observations stay visible to inspection");
+                // The same operation failing again with no recovery: now stuck.
+                appendAgedFailures(id, [...toolEvents("red-test-2", "npm test", "1 failing\n\nCommand exited with code 1"),
+                    ...toolEvents("red-test-3", "npm test", "1 failing\n\nCommand exited with code 1")]);
+                for (let i = 0; i < 2; i++) {
+                    mock.timers.tick(HEALTH_TICK_MS);
+                    await new Promise((resolve) => setImmediate(resolve));
+                }
+                assert.equal(failureWakes(h).length, 1);
+                const wake = failureWakes(h)[0].message.content;
+                assert.match(wake, /Action required · .*1 failing.*\(3 occurrences\)/);
+                assert.doesNotMatch(wake, /ENOENT|Found 2 occurrences|SyntaxError|no output/, "only the pending incident is rendered");
+                assert.match(wake, /5 other active failure observations were reported earlier or not actionable; not repeated here/);
+                appendAgedFailures(id, toolEvents("red-test-4", "npm test", "1 failing\n\nCommand exited with code 1"));
+                for (let i = 0; i < 3; i++) {
+                    mock.timers.tick(HEALTH_TICK_MS);
+                    await new Promise((resolve) => setImmediate(resolve));
+                }
+                assert.equal(failureWakes(h).length, 1, "a stuck incident escalates once");
+                await reapRun({ id, pid });
+            } finally { h.shutdown(); }
+        });
+    });
+
+    it("unresolved failures are reported once in the completion callback, lifecycle kept separate, earlier deliveries not re-listed", async () => {
+        const h = makeHarness();
+        const id = nextRunId();
+        dirOnly.push(id);
+        try {
+            writeMeta({ id, status: "completed", pid: DEAD_PID, spawnPid: process.pid, cwd: h.ctx.cwd,
+                callbackOrigin: { cwd: h.ctx.cwd, sessionId: "test-session" },
+                promptPreview: "terminal failures", startedAt: Date.now() - 1_000, endedAt: Date.now(), exitCode: 0,
+                logPath: join(runDir(id), "output.log"), sessionId: id, callback: true,
+                completionCallbackPendingAt: Date.now() });
+            const rows = [
+                ...toolEvents("miss-1", "rg one", "(no output)\n\nCommand exited with code 1"),
+                ...toolEvents("miss-2", "rg two", "(no output)\n\nCommand exited with code 1"),
+                ...toolEvents("auth", "gh pr view 1", "HTTP 401: Requires authentication"),
+                { type: "agent_end", messages: [] },
+            ];
+            writeFileSync(join(runDir(id), "output.log"), rows.map((e) => JSON.stringify(e)).join("\n") + "\n");
+            // An actionable incident that a running notification already delivered.
+            observeFailures(failurePath(id), [{ id: "watch:earlier", operation: "earlier-check", kind: "failure", category: "exit", summary: "EARLIER_DELIVERED_SUMMARY" },
+                { id: "delivered:earlier", operation: "attention-delivery", kind: "delivered", incidents: ["watch:earlier"] },
+                { id: "exit:1", operation: "child-exit", kind: "failure", category: "exit", summary: "Child exited with code 1" }]);
+            await h.handlers.get("session_start")({}, h.ctx);
+            const batcher = getCallbackBatcher(h.pi);
+            assert.equal(await batcher.flush(), true);
+            const batches = h.sent.filter((x) => x.message.customType === "background-completion-batch");
+            assert.equal(batches.length, 1);
+            const text = batches[0].message.content;
+            assert.match(text, /status=completed; action required/);
+            assert.match(text, /Child exited with code 1/);
+            assert.match(text, /3 earlier tool failures remain unclassified\./);
+            assert.match(text, /Work correctness was not inferred from lifecycle alone\./);
+            assert.doesNotMatch(text, /EARLIER_DELIVERED_SUMMARY|HTTP 401|no output/, "delivered and unclassified incidents are not re-listed");
+            assert.equal(pendingFailureAttention(readRunFailures(id), Date.now(), { terminal: true }), undefined, "every incident is receipted once");
+            await h.handlers.get("session_start")({}, h.ctx);
+            await batcher.flush();
+            assert.equal(h.sent.filter((x) => x.message.customType === "background-completion-batch").length, 1);
+            assert.equal(failureWakes(h).length, 0);
+        } finally { h.shutdown(); }
     });
 });
 
@@ -580,7 +688,7 @@ describe("completion callback batching", () => {
             await h.handlers.get("session_start")({}, h.ctx);
             assert.equal(batcher.pendingCount(), 0);
             assert.equal(h.sent.filter((x) => x.message.customType === "background-completion-batch").length, 1);
-            assert.match(h.sent.find((x) => x.message.customType === "background-completion-batch").message.content, /unresolved failure observations/);
+            assert.match(h.sent.find((x) => x.message.customType === "background-completion-batch").message.content, /status=completed; action required/);
             assert.equal(h.sent.filter((x) => x.message.customType === "subagent-failure").length, 0);
         } finally { h.shutdown(); }
     });
@@ -906,7 +1014,7 @@ describe("callback session isolation", () => {
                 const counts = content.match(/incidents=(\d+) shown=(\d+) omittedIncidents=(\d+) retrieve: subagent_result id=/);
                 assert.ok(counts, content);
                 assert.equal(Number(counts[2]) + Number(counts[3]), Number(counts[1]));
-                assert.equal((content.match(/^(Unresolved failure|Observation incomplete|Expected failure) · /gm) ?? []).length, Number(counts[2]));
+                assert.equal((content.match(/^(Action required|Unclassified failure observation|Observation incomplete|Expected failure) · /gm) ?? []).length, Number(counts[2]));
                 assert.equal(Number(counts[1]), 13, "12 tool incidents plus the supervision-lost observation");
                 assert.equal((content.match(/^Inspect: subagent_result/gm) ?? []).length, 1);
             } finally {

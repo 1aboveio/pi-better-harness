@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended 2026-09-27 by the incident lifecycle decision below (#315): explicit dispositions, separate actionability, and pending-only notifications.
 
 ## Problem
 
@@ -20,9 +20,30 @@ Expected failures require explicit structured producer metadata. They remain vis
 
 All reporting surfaces put the common failure summary before ordinary progress text. Bounded summaries prioritize unexpected failures and explicitly count additional retained observations. Missing, unreadable, or truncated evidence cannot be reported as proof of health.
 
-Notification receipts are separate from observation and recovery. A successful handoff records which incidents were delivered; merely preparing or attempting a callback does not. Temporary errors reading delivery or ownership state defer the handoff rather than recording permanent suppression; an explicit ownership mismatch still suppresses delivery to the wrong session. Running unresolved incidents become eligible after a grace period; terminal failures and broken observation can be eligible immediately. Existing callback batching and origin routing are reused. `callback:false` disables unsolicited delivery, not failure visibility. Reload must recover pending observations/receipts. Delivery is at least once: a crash between successful handoff and receipt persistence can cause a duplicate; it must not cause silent loss.
+Notification receipts are separate from observation and recovery. A successful handoff records which incidents were delivered; merely preparing or attempting a callback does not. Temporary errors reading delivery or ownership state defer the handoff rather than recording permanent suppression; an explicit ownership mismatch still suppresses delivery to the wrong session. Running actionable incidents become eligible after a grace period (see the amendment for which incidents are actionable); terminal failures and broken observation can be eligible immediately. Existing callback batching and origin routing are reused. `callback:false` disables unsolicited delivery, not failure visibility. Reload must recover pending observations/receipts. Delivery is at least once: a crash between successful handoff and receipt persistence can cause a duplicate; it must not cause silent loss.
 
 Failed writes retain every pending event and receipt in process memory and retry on subsequent reads. Pending receipts prevent repeated handoffs within that process; a visible observation-incomplete state remains until persistence succeeds. While storage is unavailable, this memory-only backlog cannot survive process loss. The existence marker can still report that evidence is missing when it was written successfully. Journals and markers follow existing run/task retention and explicit cleanup.
+
+## Amendment: incident lifecycle (#315)
+
+### Problem
+
+Agents adapt: they change a command's scope or timeout, remediate a merge conflict with different commands, or run probes whose non-zero exit is the answer. Exact-retry recovery cannot close those incidents, so completed runs kept dozens of stale unresolved incidents. Every new due incident also re-rendered up to five older ones. In production sessions this woke an orchestrator for about 60% of its turns (for example 271 alerts drove 644 of 1,028 turns), and the typical reaction was to inspect the log and do nothing.
+
+### Decision
+
+Failure history and current actionability are separate facts derived from the same reduced state.
+
+- **Actionability.** An agent tool failure (category `tool`) belongs to the agent that made the call. It is *unclassified* until disposed, and it becomes actionable only when the same operation has failed three times with no recovery, or when the agent disposes it as `open`. Other producers' failures (exit, model, supervision, watch) stay actionable at once. Lifecycle is still not an input.
+- **Labels.** `Action required`, `Unclassified failure observation`, `Expected failure`, and `Observation incomplete`. Recovered and superseded incidents leave active summaries and remain in history, counted.
+- **Delivery.** Running attention covers actionable incidents and observation gaps only, once each; a consumer may defer running observation gaps to its terminal or health callback, and subagents do, because the parent cannot act on a malformed or oversized child log record mid-run. Terminal delivery reports every still-unresolved incident once, in the completion or health callback, with unclassified tool failures as a count and a statement that work correctness was not inferred from lifecycle. A notification renders exactly its pending incidents; earlier deliveries are counted, never repeated. Receipts keep their meaning.
+- **Explicit dispositions.** An append-only `disposition` event names incident ids, a reason, and (for `recovered` and `superseded`) evidence: `recovered` (the same operation later passed), `superseded` (a different verification or remediation established the outcome), `expected` (intentional), `open` (still needs action; makes it actionable). An incident receives at most one closing disposition; `open` does not reopen a closed incident. Invalid, unknown, already-disposed, evidence-free, or partially invalid requests are rejected whole and are neither journaled nor marked seen. A later failure of a closed operation opens a new incident; the old one moves to history.
+- **Structured intent.** Adapters may accept `operationId` (stable across modified retries; a later success of the same declared operation recovers it), `attemptId` (evidence identity only), and `expectedExitCodes` (declared before execution and matched only against a structured exit code). Without an `operationId` the exact identity rule stands. No command, output, or prose is pattern-matched.
+- **Subagent adapter.** Structured intent and dispositions are honoured only for runs the parent recorded as launched on the trusted task runtime (`taskRuntime` metadata); elsewhere the exact rule applies. The trusted task runtime's bash accepts the intent fields and validates them before the command runs (a rejected intent never runs and is recorded as its own non-escalating observation); a declared code returns a non-error result whose details carry the exit code. The guard admits one additional inline tool, `failure_disposition`, which performs no file or command I/O. It validates against the same incident model the parent replays from the child's log, and the parent re-validates at the request's log position before journaling. Unconfined children keep the exact rule.
+
+### Consequences
+
+Replaying the session from issue #315 (29 children, 181 tool failures) yields 171 retained unresolved observations, of which 1 is actionable while running. History and journal events are unchanged. Background tasks share the reducer, labels, and pending-only rendering; their structured intent is not yet exposed through `bg_task_spawn` or `bg_task_watch`.
 
 ## Scope and limits
 

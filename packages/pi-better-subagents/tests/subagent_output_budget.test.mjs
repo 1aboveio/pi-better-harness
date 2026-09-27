@@ -95,7 +95,7 @@ function rawBody(content) {
     const cont = body.indexOf("\n---\n");
     if (cont !== -1) body = body.slice(0, cont);
     const lines = body.split("\n").slice(1);
-    const header = /^(Observation incomplete|Unresolved failure|Expected failure|\d+ active failure observation|\[parser:|change=|reset=)/;
+    const header = /^(Observation incomplete|Action required|Unclassified failure observation|Expected failure|\d+ active failure observation|\[parser:|change=|reset=)/;
     while (lines.length && header.test(lines[0])) lines.shift();
     return lines.join("\n");
 }
@@ -274,13 +274,17 @@ describe("registered subagent payloads", () => {
 
         const result = textOf(await resultTool.execute("tc", { id }));
         assert.ok(utf8ByteLength(result) <= OUTPUT_BUDGET_BYTES.answer);
-        const failureAt = result.indexOf("Unresolved failure");
+        // #315: a completed run counts unclassified tool failures instead of presenting them as its outcome.
+        const failureAt = result.indexOf("12 earlier tool failures remain unclassified.");
         const progressAt = result.indexOf("PROGRESS_TEXT");
         assert.ok(failureAt >= 0, result);
         assert.ok(progressAt > failureAt, "failures must precede progress");
         const counts = result.match(/12 active failure observations · (\d+) shown · (\d+) omitted · incidentCursor=i1\./);
         assert.ok(counts, result);
         assert.equal(Number(counts[1]) + Number(counts[2]), 12);
+        assert.equal(Number(counts[1]), 0, "unclassified rows are paged, not re-listed");
+        assert.match(result, /Work correctness was not inferred from lifecycle alone\./);
+        assert.doesNotMatch(result.slice(0, progressAt), /incident-\d+-failed/);
         assert.doesNotMatch(result, /tools used:/i);
         assert.doesNotMatch(result, /do-0.*do-1.*do-2/);
         const incidentCursor = result.match(/incidentCursor=(i1\.\S+)/)?.[1];

@@ -1,14 +1,14 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
-import { logPathFor, runDir } from "./registry.ts";
-import { failureIdentity, formatFailureSummary, markFailureAttentionDelivered,
+import { logPathFor, readMeta, runDir } from "./registry.ts";
+import { activeFailures, disposeIncidents, failureIdentity, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
     observeFailures, pendingFailureAttention, readFailureState, type FailureState } from "./shared-failure-observations.ts";
+import { evidenceText, foldToolEnd, foldToolStart, newIncidentModel, toolOperation, type IncidentModel, type IncidentSink } from "./incident-model.ts";
 
-export { formatFailureSummary, pendingFailureAttention, markFailureAttentionDelivered };
+export { formatFailureSummary, pendingFailureAttention, markFailureAttentionDelivered, toolOperation };
 export const failurePath = (id: string) => join(runDir(id), "failures.jsonl");
 export const readRunFailures = (id: string): FailureState => readFailureState(failurePath(id));
-interface Attempt { operation: string; sequence: number }
-interface Scan { offset: number; head: string; identity: string; attempts: Map<string, Attempt>; failed: Map<string, { id: string; sequence: number }>; sequence: number; retry?: number }
+interface Scan { offset: number; head: string; identity: string; model: IncidentModel; retry?: number }
 const scans = new Map<string, Scan>();
 /** Drop an in-memory scan cursor (e.g. on reload); the journal remains authoritative. */
 export function resetFailureScanCursor(id?: string): void {
@@ -17,79 +17,57 @@ export function resetFailureScanCursor(id?: string): void {
 }
 const CHUNK = 64 * 1024;
 const MAX_LINE = 2 * 1024 * 1024;
-function stable(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map(stable);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, stable(v)]));
-    return value;
-}
-export function toolOperation(name: string, args: unknown, cwd: string): string {
-    return failureIdentity("tool", name, stable(args ?? {}), cwd);
-}
-function evidence(value: unknown): string | undefined {
-    if (value == null) return undefined;
-    const raw = typeof value === "string" ? value : JSON.stringify(value);
-    return raw?.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 300);
-}
-function resultError(result: any): string | undefined {
-    if (result?.isError === true || (typeof result?.exitCode === "number" && result.exitCode !== 0)) {
-        return evidence(result?.content?.find?.((x: any) => x?.type === "text")?.text ?? result?.stderr ?? result?.error ?? result);
-    }
-    return undefined;
-}
 function time(event: any): number | undefined {
     return typeof event.at === "number" && Number.isFinite(event.at) ? event.at :
         typeof event.message?.timestamp === "number" && Number.isFinite(event.message.timestamp) ? event.message.timestamp : undefined;
 }
-function fold(id: string, scan: Scan, row: any, offset: number, cwd: string): void {
-    const eventId = typeof row.toolCallId === "string" ? row.toolCallId : `offset:${offset}`;
-    const seq = ++scan.sequence;
+function sinkFor(id: string): IncidentSink {
     const path = failurePath(id);
+    return {
+        observe: (events) => observeFailures(path, events),
+        dispose: (event) => { disposeIncidents(path, event); },
+        state: () => readFailureState(path),
+    };
+}
+function fold(id: string, scan: Scan, row: any, offset: number, cwd: string): void {
+    const path = failurePath(id);
+    const model = scan.model;
     if (row.type === "tool_execution_start") {
-        scan.attempts.set(eventId, { operation: toolOperation(String(row.toolName ?? "unknown"), row.args, cwd), sequence: seq });
+        foldToolStart(model, row, cwd, sinkFor(id));
     } else if (row.type === "tool_execution_end") {
-        const attempt = scan.attempts.get(eventId);
-        if (attempt) scan.attempts.delete(eventId);
-        const operation = attempt?.operation ?? toolOperation(String(row.toolName ?? "unknown"), row.args, cwd);
-        const error = row.isError === true ? evidence(row.result) ?? "Tool returned an error" : resultError(row.result);
-        if (error) {
-            const failureId = `tool:${eventId}`;
-            const state = observeFailures(path, [{ id: failureId, operation, kind: "failure", at: time(row), category: "tool",
-                summary: `${row.toolName ?? "Tool"} failed: ${error.slice(0, 180)}`, evidence: `${logPathFor(id)}#byte=${offset}`,
-                expected: row.expected === true || row.result?.expected === true }]);
-            scan.failed.set(operation, { id: state.observations[failureIdentity(operation)]?.id ?? failureId, sequence: seq });
-        } else if (attempt) {
-            const failed = scan.failed.get(operation);
-            if (failed && attempt.sequence > failed.sequence) {
-                observeFailures(path, [{ id: `recovered:${eventId}`, operation, kind: "recovered", at: time(row), incidents: [failed.id] }]);
-                scan.failed.delete(operation);
-            }
-        }
+        foldToolEnd(model, row, cwd, `${logPathFor(id)}#byte=${offset}`, sinkFor(id));
     } else if (row.type === "message_end" && row.message?.role === "assistant" &&
         (row.message.stopReason === "error" || typeof row.message.errorMessage === "string")) {
-        const message = evidence(row.message.errorMessage) ?? "Model response failed";
+        const seq = ++model.sequence;
+        const message = evidenceText(row.message.errorMessage) ?? "Model response failed";
         const failureId = `model:${offset}`;
         const state = observeFailures(path, [{ id: failureId, operation: "model-call", kind: "failure", at: time(row), category: "model", summary: message }]);
-        scan.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq });
+        model.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq });
     } else if (row.type === "auto_retry_start") {
+        const seq = ++model.sequence;
         if (typeof row.errorMessage === "string") {
             const failureId = `model-retry:${offset}`;
             const state = observeFailures(path, [{ id: failureId, operation: "model-call", kind: "failure", at: time(row), category: "model", summary: row.errorMessage }]);
-            scan.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq - 1 });
+            model.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq - 1 });
         }
         scan.retry = seq;
     } else if (row.type === "auto_retry_end" && row.success === false) {
+        const seq = ++model.sequence;
         const failureId = `model-exhausted:${offset}`;
         const state = observeFailures(path, [{ id: failureId, operation: "model-call", kind: "failure", at: time(row), category: "model",
-            summary: evidence(row.finalError) ?? "Model retry exhausted" }]);
-        scan.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq });
+            summary: evidenceText(row.finalError) ?? "Model retry exhausted" }]);
+        model.failed.set("model-call", { id: state.observations[failureIdentity("model-call")]?.id ?? failureId, sequence: seq });
         scan.retry = undefined;
     } else if (row.type === "auto_retry_end" && row.success === true && scan.retry !== undefined) {
-        const failed = scan.failed.get("model-call");
+        ++model.sequence;
+        const failed = model.failed.get("model-call");
         if (failed && scan.retry > failed.sequence) {
             observeFailures(path, [{ id: `model-recovered:${offset}`, operation: "model-call", kind: "recovered", at: time(row), incidents: [failed.id] }]);
-            scan.failed.delete("model-call");
+            model.failed.delete("model-call");
         }
         scan.retry = undefined;
+    } else {
+        ++model.sequence;
     }
 }
 /** Scan complete source records, independent of the finite progress/transcript tail. */
@@ -118,7 +96,9 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
             observeFailures(path, [{ id: failureIdentity("log-rewritten", scan.head, scan.offset), operation: "child-log", kind: "incomplete", summary: "Child log was truncated or rewritten; observations may be incomplete" }]);
             scan = undefined;
         }
-        if (!scan) scan = { offset: 0, head, identity, attempts: new Map(), failed: new Map(), sequence: 0 };
+        // Structured intent and dispositions are honoured only for runs launched on the trusted task
+        // runtime, whose bash and failure_disposition tools are the guarded ones (parent-written metadata).
+        if (!scan) scan = { offset: 0, head, identity, model: newIncidentModel(readMeta(id)?.taskRuntime === true) };
         scan.head = head;
         let position = scan.offset;
         let start = position;
@@ -177,8 +157,17 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
     } finally { closeSync(fd); }
     return readRunFailures(id);
 }
+/**
+ * The one presentation of a run's reduced incident state for the navigator. Running: prioritized
+ * active rows. Terminal: actionable and incomplete rows, with unclassified agent tool failures
+ * counted rather than presented as the run's outcome (#315).
+ */
+export function runFailureFacts(state: FailureState, terminal: boolean): string {
+    if (!terminal) return formatFailureSummary(state);
+    return formatTerminalFailureFacts(state, activeFailures(state).map((x) => x.id));
+}
 export function failureSummary(id: string, cwd: string, terminal = false): string {
-    return formatFailureSummary(collectRunFailures(id, cwd, terminal));
+    return runFailureFacts(collectRunFailures(id, cwd, terminal), terminal);
 }
 export function prependFailureSummary(body: string, summary: string): string {
     if (!summary) return body;

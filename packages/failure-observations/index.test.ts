@@ -6,10 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyFailureState, reduceFailure, activeFailures, formatFailureSummary, formatFailureLines, pageFailureIncidents, isIncidentCursor, incidentCursorAt, pendingFailureAttention,
   formatIncidentSummary, failureRevision,
-  observeFailures, readFailureState, markFailureAttentionDelivered, failureAttentionHandled, type FailureEvent } from "./index.ts";
+  observeFailures, readFailureState, markFailureAttentionDelivered, failureAttentionHandled, type FailureEvent,
+  disposeIncidents, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, validateDisposition } from "./index.ts";
 
 const failed: FailureEvent = { id: "call-1:end", operation: "cwd:project:tsc", kind: "failure",
-  summary: "TypeScript exited 2", category: "tool", evidence: "output.log#call-1" };
+  summary: "TypeScript exited 2", category: "exit", evidence: "output.log#call-1" };
 
 test("failed writes retain all evidence and receipts, retry persistence, and avoid repeat attention", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "failure-write-retry-"));
@@ -20,7 +21,7 @@ test("failed writes retain all evidence and receipts, retry persistence, and avo
   observeFailures(path, [failed, { ...failed, id: "second", operation: "another-check" }], 1000);
   const state = readFailureState(path);
   assert.match(formatFailureSummary(state), /could not be persisted/);
-  assert.equal(activeFailures(state).filter((x) => x.category === "tool").length, 2);
+  assert.equal(activeFailures(state).filter((x) => x.category === "exit").length, 2);
   const pending = pendingFailureAttention(state, 61_000, { terminal: true })!;
   markFailureAttentionDelivered(path, pending, 61_000);
   assert.equal(pendingFailureAttention(readFailureState(path), 62_000, { terminal: true }), undefined);
@@ -66,7 +67,7 @@ test("unknown incident evidence defers delivery, while explicit old recovery rem
 
 test("failure evidence is visible independently of lifecycle and prose", () => {
   const state = reduceFailure(emptyFailureState(), failed, 1000);
-  assert.match(formatFailureSummary(state), /Unresolved failure.*TypeScript exited 2.*output.log#call-1/);
+  assert.match(formatFailureSummary(state), /^Action required.*TypeScript exited 2.*output.log#call-1/);
   assert.equal(activeFailures(state).length, 1);
   assert.equal(pendingFailureAttention(state, 1001), undefined);
   assert.ok(pendingFailureAttention(state, 61_000));
@@ -308,4 +309,161 @@ test("failure revision changes on a repeated failure of the same operation, not 
 test("special event IDs cannot suppress delivery through Object.prototype", () => {
   const state = reduceFailure(emptyFailureState(), { ...failed, id: "constructor" }, 1);
   assert.ok(pendingFailureAttention(state, 2, { terminal: true }));
+});
+
+// ---- #315: incident lifecycle, explicit disposition, pending-only attention -------------
+
+const toolFailure = (id: string, operation = "bash:npm test", summary = "bash failed: tests failed"): FailureEvent =>
+  ({ id, operation, kind: "failure", category: "tool", summary, evidence: `output.log#${id}` });
+
+test("a single agent tool failure is retained but is not running attention; the same operation failing three times is", () => {
+  let state = reduceFailure(emptyFailureState(), toolFailure("t1"), 1000);
+  assert.match(formatFailureSummary(state), /^Unclassified failure observation · .*tests failed/);
+  assert.equal(pendingFailureAttention(state, 999_999), undefined, "the child owns its own tool errors while alive");
+  assert.deepEqual(pendingFailureAttention(state, 1001, { terminal: true })?.incidents, ["t1"], "terminal delivery still reports it once");
+  state = reduceFailure(state, toolFailure("t2"), 2000);
+  assert.equal(pendingFailureAttention(state, 999_999), undefined);
+  state = reduceFailure(state, toolFailure("t3"), 3000);
+  assert.match(formatFailureSummary(state), /^Action required · .*\(3 occurrences\)/);
+  const stuck = pendingFailureAttention(state, 999_999)!;
+  assert.deepEqual(stuck.incidents, ["t1"]);
+  state = reduceFailure(state, { id: "d1", operation: "notification", kind: "delivered", incidents: stuck.incidents }, 999_999);
+  state = reduceFailure(state, toolFailure("t4"), 1_000_000);
+  assert.equal(pendingFailureAttention(state, 2_000_000), undefined, "a stuck incident escalates once");
+  assert.equal(pendingFailureAttention(state, 2_000_000, { terminal: true }), undefined, "and is not re-reported at completion");
+});
+
+test("attention renders only pending incidents and counts earlier ones without repeating them", () => {
+  let state = emptyFailureState();
+  for (const id of ["old-1", "old-2"]) state = reduceFailure(state, { ...failed, id, operation: id, summary: `summary of ${id}` }, 1000);
+  const first = pendingFailureAttention(state, 100_000)!;
+  state = reduceFailure(state, { id: "receipt-1", operation: "notification", kind: "delivered", incidents: first.incidents }, 100_000);
+  state = reduceFailure(state, { ...failed, id: "new", operation: "new", summary: "summary of new" }, 100_001);
+  const second = pendingFailureAttention(state, 200_000)!;
+  assert.deepEqual(second.incidents, ["new"]);
+  const text = formatPendingAttention(state, second.incidents);
+  assert.match(text, /summary of new/);
+  assert.doesNotMatch(text, /summary of old/);
+  assert.match(text, /2 other active failure observations were reported earlier or not actionable; not repeated here/);
+  assert.throws(() => formatPendingAttention(state, ["missing"]), /unavailable/);
+});
+
+test("explicit supersession closes a modified-retry incident with evidence and keeps its history", () => fixture((path) => {
+  observeFailures(path, [toolFailure("full-timeout", "bash:npm test (timeout 60)", "bash failed: Command timed out after 60 seconds")], 1000);
+  const request: FailureEvent = { id: "disp-1", operation: "incident-disposition", kind: "disposition", disposition: "superseded",
+    incidents: ["full-timeout"], reason: "scoped retry passed", evidence: "attempt scoped-tests (output.log#byte=900)" };
+  const result = disposeIncidents(path, request, 2000);
+  assert.equal(result.accepted, true);
+  const state = readFailureState(path);
+  assert.equal(activeFailures(state).length, 0);
+  assert.equal(formatFailureSummary(state), "", "closed incidents leave active summaries");
+  assert.equal(failureCounts(state).superseded, 1);
+  assert.equal(failureHistory(state).length, 1);
+  assert.equal(failureHistory(state)[0]!.disposition?.evidence, "attempt scoped-tests (output.log#byte=900)");
+  assert.equal(failureAttentionHandled(state, ["full-timeout"]), true);
+  assert.deepEqual(disposeIncidents(path, request, 3000).accepted, true, "replaying the accepted event is idempotent");
+  assert.match(disposeIncidents(path, { ...request, id: "disp-2" }, 3000).error!, /already disposed/);
+  // Reload in a fresh process: the disposition is append-only and replayed.
+  const restored = freshState(path);
+  assert.equal(activeFailures(restored).length, 0);
+  assert.equal(restored.dispositions.length, 1);
+  // A later failure of the same operation is a new incident; the old one stays in history.
+  observeFailures(path, [toolFailure("full-timeout-again", "bash:npm test (timeout 60)", "bash failed: timed out again")], 4000);
+  const reopened = readFailureState(path);
+  assert.deepEqual(activeFailures(reopened).map((x) => x.id), ["full-timeout-again"]);
+  assert.equal(reopened.history?.["full-timeout"]?.status, "superseded");
+}));
+
+test("invalid, unknown, evidence-free, or partially invalid dispositions fail closed and are not journaled", () => fixture((path) => {
+  observeFailures(path, [toolFailure("a", "op-a"), toolFailure("b", "op-b")], 1000);
+  const before = readFileSync(path, "utf8");
+  const base: FailureEvent = { id: "x", operation: "incident-disposition", kind: "disposition", disposition: "superseded",
+    incidents: ["a"], reason: "verified elsewhere", evidence: "attempt z" };
+  const rejected: Array<[Partial<FailureEvent>, RegExp]> = [
+    [{ incidents: ["nope"] }, /Unknown incident nope/],
+    [{ incidents: [] }, /at least one incident/],
+    [{ incidents: ["a", "a"] }, /more than once/],
+    [{ reason: "  " }, /requires a reason/],
+    [{ evidence: undefined }, /requires evidence/],
+    [{ disposition: "recovered", evidence: "" }, /requires evidence/],
+    [{ disposition: "fixed" as never }, /Unknown disposition/],
+    [{ incidents: ["a", "nope"] }, /Unknown incident nope/],
+  ];
+  for (const [patch, message] of rejected) {
+    const outcome = disposeIncidents(path, { ...base, ...patch }, 2000);
+    assert.equal(outcome.accepted, false);
+    assert.match(outcome.error!, message);
+  }
+  assert.equal(readFileSync(path, "utf8"), before, "rejected requests write nothing");
+  assert.equal(activeFailures(readFailureState(path)).length, 2, "a partially invalid request disposes nothing");
+  // The pure reducer is also closed: an invalid event neither changes state nor consumes its id.
+  const state = readFailureState(path);
+  assert.equal(reduceFailure(state, { ...base, incidents: ["nope"] }, 3000), state);
+  assert.ok(validateDisposition(state, { ...base, kind: "failure" }));
+}));
+
+test("expected and open dispositions: expected leaves attention, open makes an agent failure actionable", () => {
+  let state = reduceFailure(emptyFailureState(), toolFailure("probe", "rg"), 1000);
+  state = reduceFailure(state, { id: "e", operation: "incident-disposition", kind: "disposition", disposition: "expected",
+    incidents: ["probe"], reason: "rg exit 1 means no match" }, 2000);
+  assert.match(formatFailureSummary(state), /^Expected failure · .*expected: rg exit 1 means no match/);
+  assert.equal(pendingFailureAttention(state, 999_999, { terminal: true }), undefined);
+  state = reduceFailure(state, toolFailure("blocked", "gh auth", "bash failed: HTTP 401"), 3000);
+  assert.equal(pendingFailureAttention(state, 999_999), undefined);
+  state = reduceFailure(state, { id: "o", operation: "incident-disposition", kind: "disposition", disposition: "open",
+    incidents: ["blocked"], reason: "needs parent credentials" }, 4000);
+  assert.match(formatFailureSummary(state), /^Action required · .*HTTP 401.*open: needs parent credentials/);
+  assert.deepEqual(pendingFailureAttention(state, 999_999)?.incidents, ["blocked"]);
+  assert.equal(reduceFailure(state, { id: "o2", operation: "incident-disposition", kind: "disposition", disposition: "open",
+    incidents: ["blocked"], reason: "again" }, 5000), state, "an incident is opened once");
+});
+
+test("terminal facts separate actionable incidents, unclassified history, and lifecycle-independent correctness", () => {
+  let state = emptyFailureState();
+  for (let i = 0; i < 8; i++) state = reduceFailure(state, toolFailure(`t${i}`, `op-${i}`, `bash failed: probe ${i}`), 1000 + i);
+  state = reduceFailure(state, { id: "exit", operation: "child-exit", kind: "failure", category: "exit", summary: "Child exited with code 1" }, 2000);
+  const due = pendingFailureAttention(state, 3000, { terminal: true })!;
+  assert.equal(due.incidents.length, 9, "every unresolved incident is receipted once at completion");
+  const facts = formatTerminalFailureFacts(state, due.incidents);
+  assert.match(facts, /^Action required · .*Child exited with code 1/);
+  assert.match(facts, /8 earlier tool failures remain unclassified\./);
+  assert.match(facts, /Work correctness was not inferred from lifecycle alone\./);
+  assert.doesNotMatch(facts, /probe \d/, "unclassified tool failures are counted, not re-listed");
+});
+
+test("exit zero or a success claim never resolves an unrelated incident; only named recovery of the same operation does", () => {
+  let state = reduceFailure(emptyFailureState(), toolFailure("t", "op"), 1000);
+  state = reduceFailure(state, { id: "unrelated", operation: "other-op", kind: "recovered", incidents: ["t"] }, 2000);
+  state = reduceFailure(state, { id: "claim", operation: "op", kind: "recovered" }, 2000);
+  assert.equal(activeFailures(state).length, 1);
+  state = reduceFailure(state, { id: "retry", operation: "op", kind: "recovered", incidents: ["t"] }, 3000);
+  assert.equal(activeFailures(state).length, 0);
+  assert.equal(failureCounts(state).recovered, 1);
+  assert.match(formatFailureSummary(reduceFailure(state, toolFailure("n", "op2"), 4000)), /Closed incidents retained in history: 1 recovered\./);
+});
+
+test("a consumer can defer running observation gaps to its terminal callback without losing them", () => {
+  const gap: FailureEvent = { id: "gap", operation: "child-log", kind: "incomplete", summary: "Child log contains an oversized event" };
+  const state = reduceFailure(emptyFailureState(), gap, 1000);
+  assert.deepEqual(pendingFailureAttention(state, 1000)?.incidents, ["gap"], "default: gaps are due at once");
+  assert.equal(pendingFailureAttention(state, 999_999, { deferObservationGaps: true }), undefined);
+  assert.deepEqual(pendingFailureAttention(state, 1000, { terminal: true, deferObservationGaps: true })?.incidents, ["gap"]);
+  assert.match(formatTerminalFailureFacts(state, ["gap"]), /^Observation incomplete · .*oversized event/);
+});
+
+test("an expected-disposed incident keeps its classification when a later exact retry succeeds", () => {
+  let state = reduceFailure(emptyFailureState(), toolFailure("p", "probe"), 1000);
+  state = reduceFailure(state, { id: "e", operation: "incident-disposition", kind: "disposition", disposition: "expected",
+    incidents: ["p"], reason: "intentional probe" }, 2000);
+  state = reduceFailure(state, { id: "retry", operation: "probe", kind: "recovered", incidents: ["p"] }, 3000);
+  assert.equal(failureCounts(state).expected, 1);
+  assert.equal(failureCounts(state).recovered, 0);
+  assert.equal(activeFailures(state)[0]!.disposition?.disposition, "expected");
+});
+
+test("rejected command intents are agent-owned, visible, and never actionable on their own", () => {
+  const state = reduceFailure(emptyFailureState(), { id: "r", operation: "rejected-intent:r", kind: "failure", category: "rejected-intent",
+    summary: "bash not run: invalid command intent" }, 1000);
+  assert.match(formatFailureSummary(state), /^Unclassified failure observation · .*not run/);
+  assert.equal(pendingFailureAttention(state, 999_999), undefined);
 });

@@ -47,7 +47,9 @@ import {
     activeFailures,
     failureRevision,
     formatIncidentSummary,
+    formatTerminalIncidentSummary,
     isIncidentCursor,
+    requiresAction,
     pageFailureIncidents,
     type FailureState,
 } from "./shared-failure-observations.ts";
@@ -246,6 +248,8 @@ interface CallContext {
     state: FailureState;
     statusResource: string;
     statusCursor: string;
+    /** Terminal runs present lifecycle-independent facts; running runs show prioritized rows (#315). */
+    terminal: boolean;
 }
 
 function callContext(id: string, meta: RunMeta, request: PayloadRequest, scopeKey: string, surface: string, terminal: boolean): CallContext {
@@ -256,17 +260,22 @@ function callContext(id: string, meta: RunMeta, request: PayloadRequest, scopeKe
         contentRevision: contentRevisionFor(id, meta),
         failureRevision: failureRevision(state),
     }).nextCursor;
-    return { id, meta, request, scopeKey, state, statusResource, statusCursor };
+    return { id, meta, request, scopeKey, state, statusResource, statusCursor, terminal };
 }
 
 function incidentResource(ctx: CallContext): string {
     return `incidents:${ctx.scopeKey}:${ctx.id}`;
 }
 
-/** Shared failure section: whole rows when they fit, otherwise exact counts plus a resuming cursor. */
+/**
+ * Shared failure section: whole rows when they fit, otherwise exact counts plus a resuming cursor.
+ * Terminal runs list only actionable/incomplete rows and count unclassified history (#315).
+ */
 function failureSection(ctx: CallContext, cap?: number): EnvelopeFailure | undefined {
-    if (activeFailures(ctx.state).length === 0) return undefined;
-    return (budget) => formatIncidentSummary(ctx.state, {
+    if (activeFailures(ctx.state).length === 0 && !ctx.terminal) return undefined;
+    const summarize = ctx.terminal ? formatTerminalIncidentSummary : formatIncidentSummary;
+    if (ctx.terminal && !summarize(ctx.state, { maxBytes: Number.MAX_SAFE_INTEGER }).text) return undefined;
+    return (budget) => summarize(ctx.state, {
         maxBytes: cap === undefined ? budget : Math.min(budget, cap),
         resource: incidentResource(ctx),
         retrieval: `pass as cursor to subagent_result/subagent_output id="${ctx.id}"`,
@@ -710,15 +719,20 @@ export interface SubagentListItem {
     status: string;
 }
 
-export function listIncidentCount(id: string, cwd: string, terminal: boolean): { count: number; revision: string } {
+export function listIncidentCount(id: string, cwd: string, terminal: boolean): { count: number; actionRequired: number; revision: string } {
     const state = collectRunFailures(id, cwd, terminal);
-    return { count: activeFailures(state).length, revision: failureRevision(state) };
+    const active = activeFailures(state);
+    return { count: active.length, actionRequired: active.filter(requiresAction).length, revision: failureRevision(state) };
+}
+
+export function formatIncidentLabel(count: number, actionRequired = 0): string {
+    if (count <= 0) return "";
+    return `${count} incident${count === 1 ? "" : "s"}${actionRequired ? ` · ${actionRequired} action required` : ""}`;
 }
 
 export function listIncidentLabel(id: string, cwd: string, terminal: boolean): string {
-    const { count } = listIncidentCount(id, cwd, terminal);
-    if (count <= 0) return "";
-    return `${count} incident${count === 1 ? "" : "s"}`;
+    const { count, actionRequired } = listIncidentCount(id, cwd, terminal);
+    return formatIncidentLabel(count, actionRequired);
 }
 
 /**

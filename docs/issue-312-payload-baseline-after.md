@@ -1,6 +1,6 @@
 # Issue #312 model-facing payload baseline (after)
 
-Measured at 2026-09-27T07:14:07.994Z from rush/issue-312-fix @ `3e8e28cdbbd3da8ca6f9940183ed4af0f3dd0b57`.
+Measured at 2026-09-27T07:16:00.168Z from HEAD @ `880b99f084ace71cff9de9462815b29c6ffb3c7c`.
 Accounting: **UTF-8 bytes** (`Buffer.byteLength(text, "utf8")`). Tokenizer counts are not included.
 
 Runtime model for this capture session: `unknown/unknown` effort `unknown`.
@@ -34,21 +34,21 @@ This AFTER capture measures the shipped OUTPUT-POLICY defaults. Compare it with 
 | `subagent.success.result` | success | subagent_result | 339 | 335 | 120 | no / 2048 | no |
 | `subagent.success.output` | success | subagent_output | 307 | 305 | 120 | no / 1024 | no |
 | `subagent.success.callback` | success | createCallbackBatcher.flush | 320 | 320 | 163 | no / 2048 | no |
-| `subagent.failed.result` | failed | subagent_result | 462 | 456 | 120 | no / 2048 | no |
-| `subagent.failed.callback` | failed | createCallbackBatcher.flush | 480 | 478 | 189 | no / 2048 | no |
+| `subagent.failed.result` | failed | subagent_result | 515 | 509 | 120 | no / 2048 | no |
+| `subagent.failed.callback` | failed | createCallbackBatcher.flush | 529 | 527 | 173 | no / 2048 | no |
 | `subagent.incomplete.result` | incomplete | subagent_result | 818 | 812 | 133 | no / 2048 | no |
 | `subagent.incomplete.callback` | incomplete | createCallbackBatcher.flush | 500 | 498 | 196 | no / 2048 | no |
 | `subagent.orphaned.result` | orphaned | subagent_result | 725 | 719 | 131 | no / 2048 | no |
 | `subagent.orphaned.callback` | orphaned | createCallbackBatcher.deliverUrgent | 587 | 586 | 196 | no / 2048 | no |
 | `subagent.unicode.result` | unicode-long-line-json | subagent_result | 2047 | 984 | 1696 | no / 2048 | no |
-| `subagent.many_failures.result` | many-failures | subagent_result | 1202 | 1189 | 336 | no / 2048 | no |
+| `subagent.many_failures.result` | many-failures | subagent_result | 630 | 623 | 251 | no / 2048 | no |
 | `subagent.list` | many-failures | subagent_list | 928 | 916 | 151 | no / 1024 | no |
 | `subagent.foreign.result` | success | subagent_result | 165 | 164 | 88 | no / 2048 | no |
 | `subagent.ownership.unavailable` | success | subagent_result | 293 | 292 | 204 | no / 2048 | no |
 | `background.success.status` | success | bg_task_status | 589 | 589 | 318 | no / 1024 | no |
 | `background.success.status.wrapper` | success | bg_status | 589 | 589 | 318 | no / 1024 | no |
 | `background.success.log` | success | bg_task_log | 157 | 156 | 61 | no / 1024 | no |
-| `background.failed.status` | failed | bg_task_status | 821 | 818 | 279 | no / 1024 | no |
+| `background.failed.status` | failed | bg_task_status | 818 | 815 | 276 | no / 1024 | no |
 | `background.repeated_poll.status` | repeated-poll | bg_task_status | 842 | 842 | 333 | no / 1024 | no |
 | `background.repeated_poll.log.default` | repeated-poll | bg_task_log | 962 | 961 | 333 | no / 1024 | no |
 | `background.repeated_poll.log.full` | repeated-poll | bg_task_log | 10495 | 10495 | 280 | no / 16384 | no |
@@ -66,7 +66,7 @@ These are observations about the current producer, not blessed behavior.
 - `subagent.incomplete.callback`: contains Observation incomplete
 - `subagent.orphaned.result`: TUI compact 653 B vs model 725 B
 - `subagent.unicode.result`: TUI compact 464 B vs model 2047 B; UTF-8 2047 B > UTF-16 984
-- `subagent.many_failures.result`: TUI compact 612 B vs model 1202 B
+- `subagent.many_failures.result`: TUI compact 548 B vs model 630 B
 - `background.success.status.wrapper`: wrapper matches standalone: true; TUI compact 311 B vs model 589 B
 - `background.failed.status`: matched-condition path present: true; compact "Condition matched:" line present: true; compact result field currently shows `failure_when`
 - `background.repeated_poll.log.default`: TUI compact 603 B vs model 962 B

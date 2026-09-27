@@ -32,6 +32,7 @@ import {
     assembleSubagentOutput,
     assembleUnreadableMetadata,
     listIncidentCount,
+    formatIncidentLabel,
     listRevisions,
     listScopeKey,
     requestScopeKey,
@@ -319,12 +320,12 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 warnings: collected.warnings,
                 items,
                 render: (row) => {
-                    const count = incidents.get(row.meta.id)?.count ?? 0;
+                    const incident = incidents.get(row.meta.id);
                     return formatSubagentListRow(row.meta, {
                         status: row.status,
                         now,
                         health: healthById(row.meta.id),
-                        failure: count > 0 ? `${count} incident${count === 1 ? "" : "s"}` : "",
+                        failure: formatIncidentLabel(incident?.count ?? 0, incident?.actionRequired ?? 0),
                     });
                 },
                 limit: Math.max(1, collected.limit),

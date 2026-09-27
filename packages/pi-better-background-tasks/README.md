@@ -125,8 +125,11 @@ an explicitly configured nonzero success exit is treated as expected. Verbose
 status includes observation details and the journal path. Corrupt or unreadable
 evidence is reported as **observation incomplete**.
 
-Unresolved running failures become eligible for attention after 60 seconds;
-observation gaps are eligible immediately. Terminal failures use the normal
+Task failures are labeled **Action required**; the shared labels also include
+**Expected failure** and **Observation incomplete**. Unresolved running failures
+become eligible for attention after 60 seconds; observation gaps are eligible
+immediately. Each notification lists only the incidents it is delivering;
+earlier ones are counted, not repeated. Terminal failures use the normal
 completion notification. A delivery receipt is stored only after handoff;
 notification delivery does not clear the failure. `callback:false` stays quiet
 while all inspection surfaces retain the evidence. Journals follow the task's

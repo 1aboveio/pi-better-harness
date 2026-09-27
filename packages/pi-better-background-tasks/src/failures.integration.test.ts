@@ -95,7 +95,7 @@ describe("background failure observations", () => {
     const meta = spawnTask(pi, { command: "exit 9", callback: false }, process.cwd());
     ids.push(meta.id);
     const terminal = await until(meta.id, (m) => m.status === "failed");
-    expect(formatLaunch(terminal)).toMatch(/^Unresolved failure.*Process exited with code 9/);
+    expect(formatLaunch(terminal)).toMatch(/^Action required.*Process exited with code 9/);
     expect(Object.values(readFailureState(failurePath(meta.id)).observations)).toEqual([
       expect.objectContaining({ status: "unresolved", category: "exit" }),
     ]);

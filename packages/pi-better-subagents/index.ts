@@ -96,7 +96,7 @@ import {
 import { buildHealthCallbackDelivery } from "./completion.ts";
 import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
 import { completionCallbackFields, failureAttentionFields, healthCallbackFields } from "./callback-fields.ts";
-import { collectRunFailures, failurePath, failureSummary, formatFailureSummary, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
+import { collectRunFailures, failurePath, failureSummary, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
 import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
 import {
     text,
@@ -352,8 +352,10 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
         || meta.completionCallbackSentAt !== undefined
         || meta.completionCallbackSuppressedAt !== undefined) return;
     const state = collectRunFailures(id, meta.cwd, true);
+    // Lifecycle, current actionability, and retained history are separate facts (#315).
+    const due = pendingFailureAttention(state, Date.now(), { terminal: true });
     getCallbackBatcher(pi).enqueue({
-        ...completionCallbackFields(meta, state),
+        ...completionCallbackFields(meta, state, due?.incidents ?? []),
         callback: true,
         isDelivered: () => {
             const current = readMeta(id);
@@ -390,8 +392,11 @@ function deliverFailureAttention(pi: ExtensionAPI | undefined, meta: RunMeta, no
     if (!pi || meta.callback === false || callbackSuppressionReason(meta)) return;
     if ((meta.status === "orphaned" || meta.status === "lost") && !isHealthCallbackHandled(meta, meta.status)) return;
     const state = collectRunFailures(meta.id, meta.cwd, meta.status !== "running" && meta.status !== "orphaned");
-    const pending = pendingFailureAttention(state, now);
+    // Evidence gaps (oversized or malformed log records) are not something the parent can act on
+    // while the child runs; they ride the completion or health callback instead (#315).
+    const pending = pendingFailureAttention(state, now, { deferObservationGaps: true });
     if (!pending || (meta.status !== "running" && meta.status !== "orphaned" && meta.completionCallbackPendingAt !== undefined)) return;
+    // Only the pending incidents are rendered; earlier deliveries are counted, not repeated (#315).
     void getCallbackBatcher(pi).deliverUrgent({
         ...failureAttentionFields(meta, state, pending),
         isDelivered: () => failureAttentionHandled(collectRunFailures(meta.id, meta.cwd), pending.incidents),
@@ -584,7 +589,7 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
         return;
     }
     void getCallbackBatcher(pi).deliverUrgent({
-        ...healthCallbackFields(meta, status, failureState, delivery.content),
+        ...healthCallbackFields(meta, status, failureState, delivery.content, attention?.incidents ?? []),
         isDelivered: () => {
             const current = readMeta(meta.id);
             if (!current) throw new Error("Subagent metadata is unavailable; defer health notification");

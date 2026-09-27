@@ -159,6 +159,8 @@ export function installTaskTools(pi: ExtensionAPI, options: {
     shellPath?: () => string | undefined;
     trustedSources: readonly string[];
     admitExtensionTool?: (name: string, input: unknown, sourcePath: string | undefined) => boolean;
+    /** Build the admitted bash definition from the confined operations (default: the SDK bash tool). */
+    bashDefinition?: (cwd: string, operations: BashOperations) => ReturnType<typeof createBashToolDefinition>;
 }) {
     const { controller } = options;
     const sourceKey = (path: string) => path.startsWith("<") ? path : canonicalizePath(path);
@@ -179,7 +181,7 @@ export function installTaskTools(pi: ExtensionAPI, options: {
         pi.registerTool(own(createReadToolDefinition(cwd, { operations: files.read })));
         pi.registerTool(own(createWriteToolDefinition(cwd, { operations: files.write })));
         pi.registerTool(own(createEditToolDefinition(cwd, { operations: files.edit })));
-        pi.registerTool(own(createBashToolDefinition(cwd, { operations: bash })));
+        pi.registerTool(own(options.bashDefinition ? options.bashDefinition(cwd, bash) : createBashToolDefinition(cwd, { operations: bash })));
     };
     register(options.cwd);
     pi.on("user_bash", () => ({ operations: bash }));

@@ -12,6 +12,14 @@ All notable changes to this project are documented in this file. The format is b
 - **subagents, background-tasks** (#312): long answers, logs, lists, incidents, and verbose metadata are paged instead of truncated. Responses carry `nextCursor` to continue, `statusCursor` for a small "no new evidence" reply until something changes (failure-only changes are reported), and `incidentCursor` for omitted failure incidents; pass any of them back as `cursor`. Raw pages end with an append-ready cursor. New parameters: `cursor` and `maxBytes` on `subagent_list`/`subagent_output`/`subagent_result`, `lines` on `subagent_output`, `mode: "raw"` on `subagent_output`/`subagent_result`; `cursor`, `max_bytes`, `all`, `raw` on the background list/status/log tools and wrappers.
 - **subagents, background-tasks** (#312): list, status, output, result, and log default to the current session. Pass `all:true` to read another session's runs or tasks. When ownership cannot be verified (session identity unreadable, or a legacy record without an origin) the response is an ownership gap, never evidence and never "not found".
 - **subagents, background-tasks** (#312): ordinary results, lists, and callbacks no longer include ordered tool-name histories or default token/cost lines. `subagent_list` defaults to 10 rows (was 20); `bg_task_log` defaults to a 10-row tail (was 5) and `tail_lines: 0` now pages raw bytes instead of returning up to 512 KiB.
+- **subagents** (#315): a live child's individual tool errors no longer wake the parent. Running attention is limited to non-tool failures, an operation that failed three times with no recovery, and incidents the child marks `open`, each delivered once; observation gaps ride the completion or health callback. Unresolved incidents are reported once in the completion callback, with unclassified tool failures as a count and lifecycle stated separately
+- **subagents, background-tasks** (#315): failure notifications render only their pending incidents; earlier deliveries are counted, not repeated
+- **subagents, background-tasks** (#315): shared failure observations use distinct labels: `Action required`, `Unclassified failure observation`, `Expected failure`, and `Observation incomplete`. Recovered and superseded incidents stay in history and leave active summaries
+
+### Added
+
+- **subagents, background-tasks** (#315): append-only incident dispositions (`recovered`, `superseded`, `expected`, `open`) that name incidents, a reason, and evidence, and fail closed on unknown, already-disposed, or evidence-free requests
+- **subagents** (#315): sandboxed children's `bash` accepts `operationId`, `attemptId`, and `expectedExitCodes`, validated before the command runs, and children get a `failure_disposition` tool. The parent re-validates each disposition from the child's log before journaling it
 
 ### Fixed
 
