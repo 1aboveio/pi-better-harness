@@ -938,7 +938,7 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             elapsed: row.elapsed,
             primary: firstFailure || bits.join(" · ") || "subagent run",
             secondary: firstFailure ? bits.join(" · ") : undefined,
-            facts: row.healthFacts,
+            facts: [firstFailure, ...row.healthFacts].filter(Boolean).slice(0, 2),
             sortStartedAt: metaById.get(row.id)?.startedAt ?? now,
             expiresAt: (() => {
                 const meta = metaById.get(row.id);

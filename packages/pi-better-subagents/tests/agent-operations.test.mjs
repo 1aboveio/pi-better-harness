@@ -99,6 +99,31 @@ function filesUnder(directory) {
 }
 
 describe("agent operations", () => {
+    it("uses a focused catalog overlay for TUI list without leaving a transcript-sized widget", async () => {
+        const ctx = fixture();
+        try {
+            const ui = scripted([]);
+            let rendered;
+            ui.custom = async (factory, options) => {
+                assert.deepEqual(options, { overlay: true });
+                rendered = factory({ requestRender() {} }, { fg: (_tone, text) => text }, {}, () => {});
+            };
+            ui.setWidget = (key, value) => {
+                assert.equal(key, "agents-catalog");
+                assert.equal(value, undefined);
+            };
+            const listed = await executeAgentsCommand("list", host(ctx, ui), deps(ctx));
+            assert.equal(listed.status, "ok");
+            assert.match(rendered.render(80).join("\n"), /Agents/);
+            const inspected = await executeAgentsCommand("show", host(ctx, ui), deps(ctx));
+            assert.equal(inspected.status, "ok");
+            assert.match(rendered.render(80).join("\n"), /Enter inspect/);
+            assert.equal(ui.calls.some((call) => call.type === "notify"), false);
+        } finally {
+            ctx.cleanup();
+        }
+    });
+
     it("T18 lists precedence, duplicate diagnostics, and fresh edits for humans and the tool", async () => {
         const ctx = fixture();
         try {

@@ -10,6 +10,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node
 import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { presentCatalog, presentCatalogEntry, type LaunchEnricher, type OperationView } from "./agent-inspection.ts";
+import { createCatalogComponent } from "./catalog-ui.ts";
 import {
     CATALOG_SCHEMA_VERSION,
     DiagnosticCodes,
@@ -80,6 +81,7 @@ export interface AgentCommandUi {
     editor(title: string, prefill?: string): Promise<string | undefined>;
     notify(message: string, type?: "info" | "warning" | "error"): void;
     setWidget?(key: string, content: string[] | undefined): void;
+    custom?<T>(factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: unknown, done: (value: T) => void) => unknown, options?: { overlay: boolean }): Promise<T>;
 }
 
 export interface AgentCommandHost {
@@ -157,8 +159,8 @@ export async function executeAgentsCommand(args: string, host: AgentCommandHost,
     }
     const command = parsed.positionals[0]!;
     const loc = location(host, deps);
-    if (command === "list") return finish(host, await runList(parsed, loc, deps));
-    if (command === "show" || command === "inspect") return finish(host, await runShow(command, parsed, host, loc, deps));
+    if (command === "list") return finishInspection(host, await runList(parsed, loc, deps));
+    if (command === "show" || command === "inspect") return finishInspection(host, await runShow(command, parsed, host, loc, deps));
     if (command === "reload") return finish(host, await runReload(parsed, loc, deps));
     if (command === "create") return finish(host, await runCreate(parsed, host, loc, deps));
     if (command === "import-codex") return finish(host, await runImport(parsed, host, loc, deps));
@@ -231,6 +233,10 @@ async function runShow(
     if (!id) {
         if (!host.hasUI) {
             return clarification(command, `${command} needs an id. UI is unavailable, so none was selected. Run /agents list and pass the id. Nothing was written.`);
+        }
+        if (host.mode === "tui" && host.ui.custom) {
+            const listed = presentCatalog(readCatalog(loc), deps.enrich);
+            return { ...result("ok", command, false, listed.text), diagnostics: listed.diagnostics, data: listed };
         }
         const ids = listCatalog(readCatalog(loc)).map((entry) => entry.id);
         if (ids.length === 0) return result("error", command, false, "The catalog has no definitions to inspect.");
@@ -696,12 +702,25 @@ function finish(host: AgentCommandHost, commandResult: AgentCommandResult): Agen
     } catch {
         /* Notification is not a write. */
     }
-    try {
-        host.ui.setWidget?.("agents-catalog", commandResult.message.split("\n").slice(0, 40));
-    } catch {
-        /* Widget rendering is TUI-only. */
-    }
     return commandResult;
+}
+
+async function finishInspection(host: AgentCommandHost, commandResult: AgentCommandResult): Promise<AgentCommandResult> {
+    if (commandResult.ok && host.mode === "tui" && host.hasUI && host.ui.custom) {
+        const catalog = commandResult.data && typeof commandResult.data === "object" && "entries" in commandResult.data
+            ? commandResult.data as ReturnType<typeof presentCatalog> : undefined;
+        const view = catalog ? undefined : commandResult.data as OperationView;
+        const entries = catalog ?? { entries: [view], diagnostics: commandResult.diagnostics, revision: "", text: "" };
+        try {
+            host.ui.setWidget?.("agents-catalog", undefined);
+            await host.ui.custom<void>((tui, theme, _keys, done) =>
+                createCatalogComponent(entries, theme, () => tui.requestRender(), () => done(), view?.id), { overlay: true });
+            return commandResult;
+        } catch {
+            // A non-interactive host may expose custom() without supporting overlays.
+        }
+    }
+    return finish(host, commandResult);
 }
 
 function tokenize(input: string): string[] {

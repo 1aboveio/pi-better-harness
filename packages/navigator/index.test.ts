@@ -521,6 +521,37 @@ describe("shared background work navigator", () => {
     }
   });
 
+  it("puts unhealthy subagent evidence ahead of model and spend in the work rail", () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      listRows: () => [{
+        providerId: "subagents", id: "sa-failed", name: "reviewer", model: "grok-4.5",
+        tokens: "$0.08", status: "failed", statusTone: "failed", kind: "subagent",
+        elapsed: "2m", primary: "grok-4.5 · $0.08", facts: ["tool bash exited 1"], sortStartedAt: 100,
+      }],
+    });
+    const widgets: unknown[] = [];
+    const ui = {
+      theme: { fg: (_color: string, text: string) => text },
+      setStatus() {}, setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return undefined; }, setEditorComponent() {},
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: () => false, matchKey: (data, key) => data === key,
+        truncate: (text, width) => text.slice(0, width),
+      });
+      const text = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
+      assert.match(text, /reviewer\s+failed · tool bash exited 1/);
+      assert.doesNotMatch(text, /reviewer\s+grok-4\.5 · \$0\.08/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
   it("moves focus in the same order as the rendered provider sections", () => {
     const unregisterSubagents = registerBackgroundWorkProvider({
       ...provider("subagents", "Subagents", 10, 100, () => undefined),

@@ -1,8 +1,10 @@
 # Product
 
-## Register
+<!-- impeccable:product-schema 1 -->
 
-product
+## Platform
+
+terminal (Pi TUI extension; not a web or native mobile app)
 
 ## Users
 
@@ -10,23 +12,37 @@ Agent operators running Pi in a terminal. They delegate work to autonomous subag
 
 ## Product Purpose
 
-pi-better-subagents makes subagent work autonomous, observable, and safe by default. The interface should make background work feel controllable: users can see what is running, spot unhealthy states, inspect detail, and take action without blocking the main agent flow.
+pi-better-subagents makes subagent work autonomous, observable, and safe by default. Success means operators can see what is running, spot unhealthy states, inspect evidence, and take action without blocking the foreground session.
 
-## Brand Personality
+## Positioning
 
-Quiet, precise, operational. The product should feel like a focused command surface for expert users: calm under load, direct about state, and careful with attention.
+Detached subagent runs share a durable lifecycle with logs and results, while a reusable role and named-agent catalog resolves live inheritance into a launch snapshot. The catalog does not grant tools or permissions; those remain explicit spawn controls.
 
-## Anti-references
+## Operating Context
 
-Do not let tool surfaces blend into chat transcript content. Avoid decorative terminal chrome, app-like ornament that fights the host TUI, and bare text dumps where selection, status, and detail sections are hard to scan.
+Operators work inside Pi's terminal conversation. `/agents` discovers and inspects reusable definitions, then `subagent_spawn` or `subagent_spawn_batch` launches work. The shared background-work navigator surfaces live runs, detail, health, and stop or dismiss actions alongside other work providers. Print, JSON, and RPC callers also use the command and tool results without the TUI overlay.
 
-## Design Principles
+## Capabilities and Constraints
 
-1. Preserve foreground flow. Navigation and inspection must support the running conversation, not interrupt it.
-2. Separate tool surface from transcript. Subagent overlays should be immediately recognizable as operational UI, distinct from assistant output.
-3. Make state legible without noise. Status, health, selection, and available actions should be scannable, with color as reinforcement rather than the only signal.
-4. Prefer compact command-surface clarity. Use Raycast-like density: strong focus state, concise metadata, and restrained hierarchy.
-5. Keep diagnostics actionable. Detail views should expose enough evidence to decide whether to wait, inspect, stop, or dismiss.
+- A named agent has one base role; its effective instructions combine role and agent text in add mode or use the agent text in replace mode. Model, effort, and tier can inherit or be overridden.
+- Project, personal, and bundled definitions have explicit precedence. A fresh catalog read precedes launch; each batch uses one snapshot.
+- Definition validity is not launchability. Model availability, unsupported restrictions, and sandbox or tool controls must be reported without implying permissions the catalog does not grant.
+- The run navigator is shared with other background-work providers. Catalog UI must preserve headless results and avoid persistent transcript-sized widgets.
+
+## Brand Commitments
+
+Quiet, precise, operational language. The command surface must remain distinct from chat transcript content and respect the host terminal theme. Avoid ornamental terminal chrome or status conveyed only by color.
+
+## Evidence on Hand
+
+The implemented command and run surfaces, catalog schema and operations documentation, accepted catalog ADR, and test fixtures in this package are the source of product behavior. No customer claims, performance benchmarks, or external visual assets are supplied.
+
+## Product Principles
+
+1. Preserve foreground flow while background work remains inspectable and controllable.
+2. Make identity, inheritance, launchability, and run health legible before deeper diagnostics.
+3. Separate reusable agent definitions from individual run identity and evidence.
+4. Keep actions explicit and consequential stop or replace paths confirmable.
 
 ## Accessibility & Inclusion
 
