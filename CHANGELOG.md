@@ -6,6 +6,34 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.5.2] - 2026-09-27
+
+### Fixed
+
+- Bundle sandbox 0.5.2, subagents 0.4.2, and background-tasks 0.2.20 with Linux fail-closed protection for denied paths that cannot be materialized.
+
+### Tests
+
+- Require five real SDK compatibility golden paths on macOS and Linux, including isolated Keychain and Secret Service retrieval, with uploaded ALIVE/DEAD evidence.
+
+## [pi-better-sandbox@0.5.2] - 2026-09-27
+
+### Fixed
+
+- Refuse Linux task launch when a required guard cannot be established, including denied children beneath replaceable regular files.
+
+## [pi-better-subagents@0.4.2] - 2026-09-27
+
+### Fixed
+
+- Synchronize Linux fail-closed guard handling in the shared sandbox core.
+
+## [pi-better-background-tasks@0.2.20] - 2026-09-27
+
+### Fixed
+
+- Synchronize Linux fail-closed guard handling for both legacy and permission-profile launches.
+
 ## [pi-better-harness@0.5.1] - 2026-09-27
 
 ### Fixed

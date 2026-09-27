@@ -538,22 +538,25 @@ describe("sandbox-core write policy compilation and containment", () => {
 
     // @covers sandbox.command-wrapper
     // @level unit
-    it("falls back to a try-bind for a denied path this user cannot create", async () => {
+    it("fails closed for an unmaterializable deny path in either Linux policy", async () => {
         const base = realpathSync(mkdtempSync(join(tmpdir(), "sbxcore-linux-uncreatable-")));
         const root = join(base, "project");
         mkdirSync(root, { recursive: true });
-        // The parent is a regular file, so nothing can exist beneath it — and a
-        // confined process running as this same user cannot create it either.
+        // A task can replace this regular file with a directory; omitting the
+        // guard would let it create the denied child on a later operation.
         writeFileSync(join(root, "blocked"), "not a directory\n");
         const denied = join(root, "blocked", "secret");
         try {
-            const cmd = buildSandboxCommand({
-                profilePath: join(base, "unused.sb"),
-                policy: { writableRoot: root, home: base, denyWrite: [denied] },
-                execPath: "/usr/bin/true",
-                execArgs: [],
-            }, { platform: () => "linux", lookupExecutable: () => "/test/bwrap" });
-            assert.deepEqual(cmd.fileArgs.slice(-5, -2), ["--ro-bind-try", denied, denied]);
+            for (const permissions of [undefined, {
+                projectFiles: "read-write", outsideProject: "read", storedCredentials: "read",
+                commands: true, network: true,
+            }] as const) {
+                assert.throws(() => buildSandboxCommand({
+                    profilePath: join(base, "unused.sb"),
+                    policy: { writableRoot: root, home: base, denyWrite: [denied], permissions },
+                    execPath: "/usr/bin/true", execArgs: [],
+                }, { platform: () => "linux", lookupExecutable: () => "/test/bwrap" }), /Cannot protect denied path/);
+            }
         } finally {
             rmSync(base, { recursive: true, force: true });
         }
