@@ -83,6 +83,9 @@ t("spawn.ignoreStdio", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "exit
 t("spawn.detached", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "exit 7"], { stdio: "ignore", detached: true }); return r.error ? `ERR:${r.error.code}` : `status ${r.status}`; });
 t("spawn.pipes", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "echo piped"], { encoding: "utf8" }); return r.error ? `ERR:${r.error.code}` : r.stdout.trim(); });
 
+t("pipes.native", () => { const r = spawnSync(process.execPath, [join(import.meta.dirname, "pipes.mjs")], { stdio: ["ignore", "pipe", "ignore"], encoding: "utf8" }); return r.error ? `spawn ERR:${r.error.code}` : r.stdout.trim(); });
+t("pipes.nativeViaFile", () => { const f = join(process.env.TEMP, "pipes.json"); const r = spawnSync("cmd.exe", ["/d", "/c", `"${process.execPath}" "${join(import.meta.dirname, "pipes.mjs")}" > "${f}"`], { stdio: "ignore" }); return fs.readFileSync(f, "utf8").trim() + ` (status ${r.status})`; });
+
 // Token facts.
 t("whoami.priv", () => sh("whoami", ["/priv", "/fo", "csv", "/nh"]).split(/\r?\n/).map((l) => l.split(",")[0].replace(/"/g, "")).join(" "));
 t("whoami.integrity", () => (sh("whoami", ["/groups", "/fo", "csv", "/nh"]).match(/Mandatory Label\\([^"]+)"/) ?? [])[1] ?? "?");

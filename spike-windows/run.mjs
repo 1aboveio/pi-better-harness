@@ -11,8 +11,9 @@ process.on("uncaughtException", (e) => { console.error("UNCAUGHT", e?.stack ?? e
 console.error("run.mjs start", process.version);
 const outPath = process.argv[2] ?? join(import.meta.dirname, "out.json");
 const here = import.meta.dirname;
-const home = join(os.homedir(), "spikehome");
-const nogrant = join(os.homedir(), "spike-nogrant");
+const userHome = process.env.SPIKE_USER_HOME ?? os.homedir();
+const home = join(userHome, "spikehome");
+const nogrant = join(userHome, "spike-nogrant");
 const sh = (file, args, opts = {}) => execFileSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
 const icacls = (...args) => { try { return sh("icacls", args); } catch (e) { return `ERR ${(e.stdout ?? "") + (e.stderr ?? e.message)}`.slice(0, 300); } };
 const report = { user: os.userInfo().username, home: os.homedir() };
@@ -141,7 +142,7 @@ for (const [name, cfg] of Object.entries(variants)) {
 
 // Propagation cost: 20k files in 200 folders, one inherited grant.
 {
-    const bench = join(os.homedir(), "spike-bench");
+    const bench = join(userHome, "spike-bench");
     fs.rmSync(bench, { recursive: true, force: true });
     for (let d = 0; d < 200; d++) {
         const dir = join(bench, `d${d}`, "nested");

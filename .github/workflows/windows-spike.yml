@@ -36,6 +36,10 @@ jobs:
           net user spikeuser $pw /add | Out-Null
           $cred = New-Object System.Management.Automation.PSCredential('spikeuser', (ConvertTo-SecureString $pw -AsPlainText -Force))
           $node = (Get-Command node).Source
+          $h = 'C:\Users\spikeuser'
+          $env:SPIKE_USER_HOME = $h; $env:USERPROFILE = $h; $env:HOMEPATH = '\Users\spikeuser'
+          $env:APPDATA = "$h\AppData\Roaming"; $env:LOCALAPPDATA = "$h\AppData\Local"
+          $env:TEMP = "$h\AppData\Local\Temp"; $env:TMP = $env:TEMP
           Write-Host "node: $node"
           icacls (Split-Path $node) | Select-Object -First 4
           $p = Start-Process -FilePath $node -ArgumentList 'C:\spike\run.mjs','C:\spike\out-standard.json' -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory C:\spike -RedirectStandardOutput C:\spike\std.out -RedirectStandardError C:\spike\std.err
