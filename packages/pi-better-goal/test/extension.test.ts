@@ -592,11 +592,215 @@ test("an aborted run without an active goal creates no goal", async (t) => {
   assert.equal(latestGoal(entries), undefined, "an abort without a goal creates nothing");
 });
 
+test("an interrupt pause resumes after the user's next message is handled", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  messages.length = 0;
+
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
+  assert.equal(latestGoal(entries)?.status, "paused");
+  assert.equal(latestGoal(entries)?.pauseReason, "interrupt");
+
+  await handlers.get("input")?.({ source: "interactive", text: "what is recipient-test?" }, ctx);
+  assert.equal(latestGoal(entries)?.status, "active", "conversational input reactivates an interrupted goal");
+  assert.equal(latestGoal(entries)?.pauseReason, undefined);
+  assert.equal(messages.length, 0, "the user's exchange runs first; nothing is injected into it");
+
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_end")?.(answeredOutcome, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(messages.length, 1, "continuation resumes once the exchange settles");
+  assert.match(String((messages[0] as { content?: unknown }).content), /Continue working toward the active thread goal/);
+});
+
+test("an interrupt pause is persisted and resumes on input after a session reload", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const first = createContinuationHarness();
+  await first.handlers.get("session_start")?.({}, first.ctx);
+  await first.commands.get("goal")?.handler("keep watching", first.ctx);
+  await first.handlers.get("agent_end")?.(abortedOutcome, first.ctx);
+  await first.handlers.get("session_shutdown")?.({}, first.ctx);
+
+  const second = createContinuationHarness();
+  second.entries.push(...first.entries);
+  await second.handlers.get("session_start")?.({}, second.ctx);
+  assert.equal(latestGoal(second.entries)?.status, "paused");
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(second.messages.length, 0, "a reloaded interrupted goal is not poked on its own");
+
+  await second.handlers.get("input")?.({ source: "interactive", text: "continue" }, second.ctx);
+  assert.equal(latestGoal(second.entries)?.status, "active");
+});
+
+test("an explicit /goal pause is not undone by later user messages", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await commands.get("goal")?.handler("pause", ctx);
+  messages.length = 0;
+  assert.equal(latestGoal(entries)?.status, "paused");
+  assert.equal(latestGoal(entries)?.pauseReason, undefined, "an explicit pause is sticky");
+
+  await handlers.get("input")?.({ source: "interactive", text: "quick question" }, ctx);
+  assert.equal(latestGoal(entries)?.status, "paused");
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_end")?.(answeredOutcome, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(messages.length, 0, "an explicitly paused goal is never poked");
+
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
+  await handlers.get("input")?.({ source: "interactive", text: "and another" }, ctx);
+  assert.equal(latestGoal(entries)?.status, "paused", "an interrupt does not soften an explicit pause");
+
+  await commands.get("goal")?.handler("resume", ctx);
+  assert.equal(latestGoal(entries)?.status, "active");
+});
+
+test("extension-originated input does not resume an interrupted goal", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, ctx, entries } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
+
+  await handlers.get("input")?.({ source: "extension", text: "automated nudge" }, ctx);
+  assert.equal(latestGoal(entries)?.status, "paused");
+});
+
+test("a completed goal stays complete after user messages and interrupts", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await commands.get("goal")?.handler("complete", ctx);
+  messages.length = 0;
+
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
+  await handlers.get("input")?.({ source: "interactive", text: "thanks" }, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(latestGoal(entries)?.status, "complete");
+  assert.equal(messages.length, 0);
+});
+
+test("non-conversational commands leave an active goal and its continuation untouched", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_end")?.(answeredOutcome, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  messages.length = 0;
+
+  // Pi runs its built-ins (/settings, /model, /session) without an input event
+  // or agent turn; extension commands likewise bypass input handlers.
+  await commands.get("better-activity")?.handler("", ctx);
+  await commands.get("workflow")?.handler("", ctx);
+  await commands.get("goal")?.handler("", ctx);
+  assert.equal(latestGoal(entries)?.status, "active");
+
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  assert.equal(messages.length, 1, "the scheduled continuation still fires");
+});
+
+test("background work that finishes during a pending question is harvested right after the answer", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, sendOptions, ctx, events } = createContinuationHarness();
+  let workerStatus = "running";
+  events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => ({
+      providerId: "fixture",
+      items: [
+        { id: "sa_1", label: "developer", status: workerStatus, active: workerStatus === "running" },
+        { id: "sa_2", label: "reviewer", status: "running", active: true },
+      ],
+    }),
+  });
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  messages.length = 0;
+  sendOptions.length = 0;
+
+  await handlers.get("tool_execution_start")?.({ toolCallId: "q1", toolName: "ask_user_question", args: {} }, ctx);
+  workerStatus = "completed";
+  await handlers.get("tool_execution_end")?.({ toolCallId: "q1", toolName: "ask_user_question", result: {}, isError: false }, ctx);
+
+  assert.equal(messages.length, 1, "one harvest message follows the answer");
+  const harvest = messages[0] as { content: string; details: { kind: string; finished: Array<{ id: string }> } };
+  assert.equal(harvest.details.kind, "question-harvest");
+  assert.deepEqual(harvest.details.finished.map((item) => item.id), ["sa_1"], "only work that finished during the question is listed");
+  assert.match(harvest.content, /developer \(sa_1\): completed/);
+  assert.equal((sendOptions[0] as { deliverAs?: string }).deliverAs, "steer", "steering drains right after the tool batch, not after the run");
+});
+
+test("a question with no background completions, or a non-question tool, adds nothing", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, events } = createContinuationHarness();
+  let status = "running";
+  events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => ({ providerId: "fixture", items: [{ id: "sa_1", status, active: status === "running" }] }),
+  });
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  messages.length = 0;
+
+  await handlers.get("tool_execution_start")?.({ toolCallId: "q1", toolName: "ask_user_question", args: {} }, ctx);
+  await handlers.get("tool_execution_end")?.({ toolCallId: "q1", toolName: "ask_user_question", result: {}, isError: false }, ctx);
+  assert.equal(messages.length, 0, "nothing finished while the question was pending");
+
+  await handlers.get("tool_execution_start")?.({ toolCallId: "b1", toolName: "bash", args: {} }, ctx);
+  status = "completed";
+  await handlers.get("tool_execution_end")?.({ toolCallId: "b1", toolName: "bash", result: {}, isError: false }, ctx);
+  assert.equal(messages.length, 0, "ordinary tools are left to the normal callback batch");
+});
+
+test("running background work warns the agent that a blocking question holds completions", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, ctx, events } = createContinuationHarness();
+  events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => ({ providerId: "fixture", items: [{ id: "sa_1", status: "running", active: true }] }),
+  });
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+
+  const update = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt?: string };
+  assert.match(update.systemPrompt ?? "", /ask_user_question\) holds this whole turn/);
+  assert.match(update.systemPrompt ?? "", /Harvest finished background results before asking/);
+});
+
+const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] };
+const answeredOutcome = { messages: [{ role: "assistant", content: [{ type: "text", text: "Here is the answer." }], stopReason: "stop" }] };
+
 function createContinuationHarness(signal?: AbortSignal) {
   const entries: SessionEntry[] = [];
   const commands = new Map<string, CommandDefinition>();
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const messages: unknown[] = [];
+  const sendOptions: unknown[] = [];
   const events = new EventEmitter();
   const shortcuts = new Map<string, { handler(ctx: ExtensionContext): Promise<void> | void }>();
   let idle = true;
@@ -623,8 +827,9 @@ function createContinuationHarness(signal?: AbortSignal) {
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data });
     },
-    sendMessage(message: unknown) {
+    sendMessage(message: unknown, options?: unknown) {
       messages.push(message);
+      sendOptions.push(options);
     },
     registerCommand(name: string, command: CommandDefinition) {
       commands.set(name, command);
@@ -645,6 +850,7 @@ function createContinuationHarness(signal?: AbortSignal) {
     commands,
     handlers,
     messages,
+    sendOptions,
     ctx,
     entries,
     events,
@@ -657,14 +863,14 @@ function createContinuationHarness(signal?: AbortSignal) {
 }
 
 function latestGoal(entries: SessionEntry[]) {
-  let goal: { status?: string; objective?: string } | undefined;
+  let goal: { status?: string; objective?: string; pauseReason?: string } | undefined;
   for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== "pi-better-goal" || !entry.data || typeof entry.data !== "object") {
       continue;
     }
     const data = entry.data as { kind?: unknown; goal?: unknown };
     if (data.kind === "set" && data.goal && typeof data.goal === "object") {
-      goal = data.goal as { status?: string; objective?: string };
+      goal = data.goal as { status?: string; objective?: string; pauseReason?: string };
     }
   }
   return goal;

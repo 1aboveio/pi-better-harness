@@ -8,7 +8,8 @@ It ships one extension that:
 - treats current-parent `running` and `orphaned` subagents as active background work
 - owns `/goal` plus the `get_goal` and `update_goal` tools; only `/goal <objective>` can create a goal
 - shows the current goal with active and elapsed clocks in a right-aligned widget above custom footers such as `pi-observability`
-- pauses the active goal on `escape` (while still interrupting a running agent turn) and never pokes a paused goal
+- pauses the active goal on `escape` (while still interrupting a running agent turn), resumes it after your next message, and never pokes a paused goal
+- tells the agent, right after a blocking `ask_user_question` is answered, which background work finished while the question was pending
 - publishes a typed activity snapshot on `pi.events`
 - adds goal-aware prompt context while background work is active, so foreground idleness is not confused with goal completion
 - sends a hidden follow-up when active background work drains to zero, including `callback:false` subagent runs
@@ -42,8 +43,36 @@ Press `escape` to pause the active goal. The goal moves to `paused`, its
 active clock stops, and any pending or future automatic continuation pokes
 are cancelled: a paused goal is never poked. While the agent is still
 streaming, `escape` also interrupts the turn, preserving its built-in
-meaning. `escape` without an active goal does nothing; use `/goal resume`
-to reopen the autonomous loop.
+meaning. `escape` without an active goal does nothing.
+
+An `escape` pause is an interruption, not a stop. The next message you send
+(a question, a correction, or `continue`) reactivates the goal, and automatic
+continuation resumes once that exchange settles. Anything else that aborts the
+running turn, such as `/compact` while streaming or switching sessions, pauses
+the same way. Until you send a message, the goal stays paused.
+
+To stop the loop until you say otherwise, use `/goal pause`: an explicit pause
+is only undone by `/goal resume`, never by an ordinary message or a later
+`escape`. A goal paused because its bound command or workflow is unavailable
+also stays paused. Pi's built-in commands (`/settings`, `/model`, `/session`,
+and so on) and extension commands never change goal state; note that Pi only
+recognizes a built-in by its exact text, so `/settings session` is sent to the
+model as an ordinary message.
+
+## Blocking Questions And Background Work
+
+A blocking question tool such as `ask_user_question` holds the whole turn until
+the user answers. Background completions that arrive meanwhile cannot reach the
+agent: Pi drains steering messages only after the tool batch, and subagent
+callback batches are follow-ups that wait for the entire run. When a question
+that started while background work was running is answered, the extension
+steers one hidden message into the same turn listing the work that finished
+while the question was pending, so the agent harvests it together with the
+answer instead of after the rest of the run. While the question is open the
+status area shows `N background done; waiting on your answer`. When background
+work is running at the start of a turn, the prompt context also tells the
+agent to harvest finished results before asking and to ask only when the
+answer is needed.
 
 ## Goal Clock
 
