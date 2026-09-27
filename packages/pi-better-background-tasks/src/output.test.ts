@@ -535,6 +535,8 @@ describe("review regressions (#312)", () => {
     const list = textOf(await tools.bg_task_list.execute("tc", {}, undefined, undefined, broken));
     expect(list).not.toContain(`${meta.id} `);
     expect(list).toMatch(/task\(s\) with unavailable ownership hidden/);
+    expect(list).toContain("Current session identity is unavailable");
+    expect(list).not.toContain("No background tasks found");
     const override = textOf(await tools.bg_task_log.execute("tc", { id: meta.id, all: true }, undefined, undefined, broken));
     expect(override).toContain("LEGACY_EVIDENCE");
   });

@@ -704,9 +704,11 @@ export function formatList(options: OutputOptions = {}): string {
     surface: "list",
     maxBytes: options.maxBytes,
     sections: {
-      identity: allowed.length === 0
-        ? `No background tasks found (${scopeLabel}).`
-        : `${allowed.length} background task${allowed.length === 1 ? "" : "s"} (${scopeLabel}), newest first`,
+      identity: options.sessionUnavailable && !options.all
+        ? "Current session identity is unavailable; task ownership cannot be verified."
+        : allowed.length === 0
+          ? `No background tasks found (${scopeLabel}).`
+          : `${allowed.length} background task${allowed.length === 1 ? "" : "s"} (${scopeLabel}), newest first`,
       failure: withIncidents ? listFailure : undefined,
       diagnostics: notes.join("\n") || undefined,
     },
