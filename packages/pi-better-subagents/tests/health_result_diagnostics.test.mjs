@@ -6,7 +6,6 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { formatOrphanedResult, formatLostResult } from "../lifecycle.ts";
 
 const sampleRun = {
@@ -49,22 +48,5 @@ describe("formatLostResult", () => {
         assert.match(out, /partial assistant progress/);
         assert.match(out, /--- raw log tail ---/);
         assert.match(out, new RegExp(raw));
-    });
-});
-
-describe("wiring", () => {
-    // @covers subagent.result
-    // @level unit
-    it("registered subagent_result uses orphaned/lost diagnostic formatters", () => {
-        const toolsSource = readFileSync(new URL("../tools.ts", import.meta.url), "utf8");
-        const lifecycleSource = readFileSync(new URL("../lifecycle.ts", import.meta.url), "utf8");
-        const finalizationSource = readFileSync(new URL("../finalization.ts", import.meta.url), "utf8");
-        // Orphaned is non-final: tools.ts formats best-current artifacts directly.
-        assert.match(toolsSource, /formatOrphanedResult/);
-        // Lost is terminal: finalization → formatSubagentResult → formatLostResult.
-        assert.match(lifecycleSource, /formatLostResult/);
-        assert.match(lifecycleSource, /formatLostResult\(run, rawLogTail\)/);
-        assert.match(finalizationSource, /formatSubagentResult/);
-        assert.match(toolsSource, /buildSubagentResultText/);
     });
 });

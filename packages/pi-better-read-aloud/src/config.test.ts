@@ -18,6 +18,7 @@ describe("read-aloud config", () => {
       body_format: "form",
       max_chars: 123,
     }, {
+      PI_TTS_URL: "https://env.example.com/v1",
       PI_TTS_API_KEY: "env-key",
       PI_TTS_MODEL: "tts-env",
     } as NodeJS.ProcessEnv);

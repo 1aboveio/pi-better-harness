@@ -121,7 +121,9 @@ test("Rush plan reader rejects unrelated paths and invalid run identity", () => 
     const path = join(runDir, "task-plan.json");
     writeFileSync(path, JSON.stringify({ runId: "another-run", planRevision: 1, fleet: {}, issues: [] }));
     assert.throws(() => readRushPlan(path, cwd), /identity or revision/);
-    assert.throws(() => readRushPlan(join(cwd, "task-plan.json"), cwd), /ENOENT|inside/);
+    const unrelated = join(cwd, "task-plan.json");
+    writeFileSync(unrelated, JSON.stringify({ runId: "run-2", planRevision: 1, fleet: {}, issues: [] }));
+    assert.throws(() => readRushPlan(unrelated, cwd), /must be inside this project's/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

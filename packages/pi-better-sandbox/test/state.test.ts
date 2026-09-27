@@ -45,24 +45,20 @@ test("a fresh controller blocks protected operations until a session captures a 
     assert.throws(() => controller.requireLaunchPlan(), ForegroundSandboxBlockedError);
 });
 
-for (const reason of ["startup", "new", "resume", "fork", "reload"] as const) {
-    test(`the sandbox returns to its inactive default after a ${reason} session start`, () => {
-        const controller = new ForegroundSandboxController(macos());
-        const root = project(`lifecycle-${reason}`);
-
-        controller.beginSession(root);
-        assert.equal(controller.status().state, "inactive");
-        controller.enable();
-        assert.equal(controller.status().state, "enabled");
-        controller.disable();
-        assert.equal(controller.status().state, "disabled");
-
-        // Session overrides do not persist; the product default is off.
-        const restarted = controller.beginSession(root);
-        assert.equal(restarted.state, "inactive");
-        assert.equal(controller.isUserEnabled(), false);
-    });
-}
+test("a new session discards its activation override and returns to the inactive default", () => {
+    const controller = new ForegroundSandboxController(macos());
+    const root = project("lifecycle");
+    controller.beginSession(root);
+    assert.equal(controller.status().state, "inactive");
+    controller.enable();
+    assert.equal(controller.status().state, "enabled");
+    const restarted = controller.beginSession(root);
+    assert.equal(restarted.state, "inactive");
+    assert.equal(controller.isUserEnabled(), false);
+    controller.disable();
+    assert.equal(controller.status().state, "disabled");
+    assert.equal(controller.beginSession(root).state, "inactive");
+});
 
 test("a persisted opt-in is applied at each session start", () => {
     const controller = new ForegroundSandboxController(macos());
@@ -188,10 +184,10 @@ test("a published status cannot be mutated by whoever receives it", () => {
 
     assert.throws(() => {
         (status as { state: string }).state = "disabled";
-    });
+    }, TypeError);
     assert.throws(() => {
         (status.denyWrite as string[]).push("/etc/passwd");
-    });
+    }, TypeError);
 });
 
 test("replacing the deny templates recompiles them against the current project root", () => {

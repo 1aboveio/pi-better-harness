@@ -43,11 +43,15 @@ describe("background failure observations", () => {
     const meta = watch(pi, runner, { type: "stdout_contains", value: "ready" },
       { type: "json_path_equals", path: "$.ready", value: false });
     await until(meta.id, (m) => m.status === "running" && Boolean(m.error));
-    expect(Object.values(readFailureState(failurePath(meta.id)).observations).some((x) => x.operation === "failure_when" && x.category === "observation-incomplete")).toBe(true);
+    const incomplete = Object.values(readFailureState(failurePath(meta.id)).observations)
+      .find((x) => x.operation === "failure_when");
+    expect(incomplete).toMatchObject({ status: "unresolved", category: "observation-incomplete" });
     expect(formatLaunch(readMeta(meta.id)!)).toMatch(/^Observation incomplete/);
     const terminal = await until(meta.id, (m) => m.status === "succeeded");
     expect(terminal.error).toBeUndefined();
-    expect(Object.values(readFailureState(failurePath(meta.id)).observations).every((x) => x.status === "resolved")).toBe(true);
+    expect(Object.values(readFailureState(failurePath(meta.id)).observations)).toEqual([
+      expect.objectContaining({ id: incomplete!.id, operation: "failure_when", status: "resolved" }),
+    ]);
   });
 
   it("a matched failure remains terminal even when the success evaluator is broken", async () => {
@@ -142,7 +146,8 @@ describe("background failure observations", () => {
     const quiet = make(false);
     scheduleFailureAttention(host, loud.id, () => origin);
     scheduleFailureAttention(host, quiet.id, () => origin);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect.poll(() => readFailureState(failurePath(loud.id)).delivered)
+      .toEqual({ [loud.id + ":failure"]: expect.any(Number) });
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain(loud.id);
     expect(readFailureState(failurePath(loud.id)).delivered).toEqual({ [loud.id + ":failure"]: expect.any(Number) });
@@ -167,10 +172,11 @@ describe("background failure observations", () => {
     writeMeta(meta);
     observeFailures(failurePath(id), [{ id: `${id}:failure`, operation: "poll", kind: "failure", summary: "poll failed" }], Date.now() - 61_000);
     scheduleFailureAttention(host, id, () => origin);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect.poll(() => fail).toBe(false);
+    expect(messages).toHaveLength(0);
     expect(readFailureState(failurePath(id)).delivered).toEqual({});
     scheduleFailureAttention(host, id, () => origin);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect.poll(() => readFailureState(failurePath(id)).delivered[`${id}:failure`]).toBeTypeOf("number");
     expect(messages).toHaveLength(1);
     expect(readFailureState(failurePath(id)).delivered[`${id}:failure`]).toBeTypeOf("number");
     await stopTask(host, id, () => origin);

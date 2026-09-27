@@ -27,7 +27,9 @@ test("failed writes retain all evidence and receipts, retry persistence, and avo
   const persisted = readFailureState(path);
   assert.equal(activeFailures(persisted).length, 2);
   assert.equal(pendingFailureAttention(persisted, 63_000, { terminal: true }), undefined);
-  assert.match(readFileSync(path, "utf8"), /delivered:/);
+  const restarted = freshState(path);
+  assert.equal(activeFailures(restarted).length, 2);
+  assert.equal(pendingFailureAttention(restarted, 63_000, { terminal: true }), undefined);
 });
 
 test("a fresh process recognizes a missing journal that previously held evidence", (t) => {
@@ -79,7 +81,8 @@ test("unrelated successes and unreferenced recoveries cannot erase failure", () 
   assert.equal(activeFailures(state).length, 0);
   assert.equal(formatFailureSummary(state), "");
   assert.equal(Object.values(state.observations)[0]!.resolvedAt, 4000);
-  assert.strictEqual(reduceFailure(state, failed, 5000), state, "replayed old failure does not reopen the incident");
+  const beforeReplay = structuredClone(state);
+  assert.deepEqual(reduceFailure(state, failed, 5000), beforeReplay, "replayed old failure does not reopen the incident");
 });
 
 test("repeated failures group into one incident; recovery then failure starts a new one", () => {
@@ -107,6 +110,11 @@ test("explicitly expected errors stay visible without attention; expected label 
   assert.ok(pendingFailureAttention(unexpected, 999_999));
 });
 
+function freshState(path: string) {
+  const program = `import {readFailureState} from ${JSON.stringify(new URL("./index.ts", import.meta.url).href)}; console.log(JSON.stringify(readFailureState(process.argv[1])));`;
+  return JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", program, path], { encoding: "utf8" }));
+}
+
 function fixture(run: (path: string) => void) {
   const dir = mkdtempSync(join(tmpdir(), "failure-contract-"));
   try { run(join(dir, "failures.jsonl")); } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -117,9 +125,13 @@ test("restart preserves observations, failed delivery remains pending, and succe
   const pending = pendingFailureAttention(readFailureState(path), 100_000)!;
   assert.ok(pending);
   // No delivery receipt: a thrown/rejected handoff or reload must retry.
-  assert.deepEqual(pendingFailureAttention(readFailureState(path), 100_000), pending);
+  const restored = freshState(path);
+  assert.deepEqual(activeFailures(restored).map(({ id, summary }) => ({ id, summary })), [
+    { id: failed.id, summary: failed.summary },
+  ]);
+  assert.deepEqual(pendingFailureAttention(restored, 100_000), pending);
   markFailureAttentionDelivered(path, pending, 100_001);
-  assert.equal(pendingFailureAttention(readFailureState(path), 100_002), undefined);
+  assert.equal(pendingFailureAttention(freshState(path), 100_002), undefined);
   const before = readFileSync(path, "utf8");
   observeFailures(path, [failed], 200_000);
   assert.equal(readFileSync(path, "utf8"), before, "replay must not grow the journal");

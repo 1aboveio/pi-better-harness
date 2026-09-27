@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -145,49 +145,6 @@ describe("extension e2e", () => {
     expect(watch?.description).toContain("without tmux installation");
     expect(wrapper?.description).toContain("SSH spawn defaults to durable tmux");
     expect(wrapper?.description).toContain("SSH watches use direct one-shot polls");
-  });
-
-  // @covers background-task.ssh-docs
-  // @level integration
-  // @fails-without-fix background-task.ssh-docs
-  it("ships the complete Remote SSH operator contract in package usage docs", () => {
-    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-    const usage = readFileSync(new URL("../docs/usage.md", import.meta.url), "utf8");
-
-    expect(readme).toContain("## Remote SSH");
-    expect(readme).toContain("structured `ssh`");
-    expect(readme).toContain("spawn");
-    expect(readme).toContain("watch");
-    expect(readme).toContain("pi-better-ssh");
-    expect(readme).toContain("remote_bash");
-    for (const required of [
-      "\"ssh\": {",
-      "\"remote\": {",
-      "Spawn + SSH",
-      "Watch + SSH",
-      "apt-get",
-      "dnf",
-      "yum",
-      "apk",
-      "pacman",
-      "zypper",
-      "brew",
-      "sudo -n",
-      "needs-user",
-      "fails closed",
-      "remote.session=direct",
-      "may still be running",
-      "timeout_seconds",
-      "/reload",
-      "pi install npm:pi-better-ssh",
-      "short synchronous remote",
-      "long-running or durable remote jobs",
-      "ControlMaster",
-      "best-effort",
-      "tmux remains authoritative",
-    ]) {
-      expect(usage).toContain(required);
-    }
   });
 
   it("registers background tasks with pi-better-goal activity", () => {

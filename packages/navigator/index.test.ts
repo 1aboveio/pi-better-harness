@@ -87,7 +87,6 @@ describe("shared background work navigator", () => {
 
       assert.equal(statuses.at(-1)?.[0], NAVIGATOR_STATUS_KEY);
       assert.equal(statuses.at(-1)?.[1], "← work · 2");
-      assert.equal(ui.factory.__piBetterHarnessNavigatorFactory, true);
 
       let list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
       assert.doesNotMatch(list, /background work/);
@@ -115,6 +114,13 @@ describe("shared background work navigator", () => {
 
       component.handleInput("x");
       assert.deepEqual(closed, ["subagents:subagents-1"]);
+      // Reopen, select the other provider, and verify routing independently.
+      editor.handleInput("down");
+      assert.match(component.render(100).join("\n"), /Background Tasks detail/);
+      component.handleInput("x");
+      assert.deepEqual(closed, ["subagents:subagents-1"]);
+      component.handleInput("x");
+      assert.deepEqual(closed, ["subagents:subagents-1", "tasks:background-tasks-1"]);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
@@ -300,7 +306,11 @@ describe("shared background work navigator", () => {
           sortStartedAt: 100,
         },
       ],
-      detail: () => null,
+      detail: (id) => ({
+        providerId: "background-tasks", id, title: "Failed task detail",
+        status: "failed", statusTone: "failed", metadata: [],
+        evidence: { label: "log", text: "command exited 1" },
+      }),
       armCloseLabel: () => "x again to dismiss",
       close: (id) => ({ action: "dismissed", providerId: "background-tasks", id }),
     });
@@ -346,7 +356,10 @@ describe("shared background work navigator", () => {
       editor.handleInput("left");
       editor.handleInput("enter");
 
-      assert.doesNotThrow(() => component.render(100));
+      seenColors.length = 0;
+      const detail = component.render(100).join("\n");
+      assert.match(detail, /status\s+<error>failed<\/>/);
+      assert.match(detail, /command exited 1/);
       assert.ok(seenColors.includes("error"), "failed statuses use Pi's error color");
       assert.equal(seenColors.includes("danger"), false, "danger is not a Pi theme color");
     } finally {

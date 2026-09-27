@@ -92,7 +92,7 @@ async function execute(session, name, params) {
     return tool.execute('boundary-test', params, new AbortController().signal);
 }
 
-test('actual SDK dispatch confines writes and rejects unclassified extension execution', { skip: !supported }, async (t) => {
+test('SDK-loaded guarded tools confine writes and reject unclassified extension execution', { skip: !supported }, async (t) => {
     const f = fixture(t, { commands: false, storedCredentials: 'off', outsideProject: 'off' });
     let escaped = false;
     const session = await sessionFixture(t, f, [(pi) => pi.registerTool({ ...createWriteToolDefinition(f.project), name: 'escape',
@@ -101,9 +101,9 @@ test('actual SDK dispatch confines writes and rejects unclassified extension exe
     await execute(session, 'write', { path: 'inside.txt', content: 'inside' });
     assert.equal(readFileSync(join(f.project, 'inside.txt'), 'utf8'), 'inside');
     f.policy.permissions.outsideProject = 'read-write';
-    await assert.rejects(execute(session, 'write', { path: join(f.base, 'outside.txt'), content: 'no' }));
-    await assert.rejects(execute(session, 'write', { path: join(f.agent, 'settings.json.lock'), content: 'no' }));
-    await assert.rejects(execute(session, 'read', { path: join(f.agent, 'auth.json') }));
+    await assert.rejects(execute(session, 'write', { path: join(f.base, 'outside.txt'), content: 'no' }), /Task sandbox refused to write .*: permission-denied/);
+    await assert.rejects(execute(session, 'write', { path: join(f.agent, 'settings.json.lock'), content: 'no' }), /Task sandbox refused to write .*: write-denied/);
+    await assert.rejects(execute(session, 'read', { path: join(f.agent, 'auth.json') }), /Task sandbox refused to read .*: read-denied/);
     await assert.rejects(execute(session, 'bash', { command: 'true' }), /commands.*Off/i);
     await assert.rejects(execute(session, 'escape', { path: 'unused', content: 'unused' }), /verified task execution adapter/);
     assert.equal(escaped, false);
@@ -130,9 +130,9 @@ test('task commands retain private scratch and deny ordinary outside writes', { 
       const scratch=${JSON.stringify(f.policy.scratch)};
       assert.equal(os.tmpdir(),scratch);
       fs.writeFileSync(scratch+'/created-by-command','scratch');
-      assert.throws(()=>fs.renameSync(scratch,scratch+'-moved'));
-      assert.throws(()=>fs.writeFileSync(scratch+'/.sandbox-anchor','no'));
-      assert.throws(()=>fs.writeFileSync(${JSON.stringify(join(f.base, 'outside-temp'))},'no'));
+      assert.throws(()=>fs.renameSync(scratch,scratch+'-moved'), { code: /^(EPERM|EACCES|EROFS)$/ });
+      assert.throws(()=>fs.writeFileSync(scratch+'/.sandbox-anchor','no'), { code: /^(EPERM|EACCES|EROFS)$/ });
+      assert.throws(()=>fs.writeFileSync(${JSON.stringify(join(f.base, 'outside-temp'))},'no'), { code: /^(EPERM|EACCES|EROFS)$/ });
       console.log('scratch-ok');
     `;
     const quote = (text) => `'${text.replaceAll("'", `'\\''`)}'`;
@@ -187,7 +187,7 @@ test('default task tools retain literal /tmp writes without opening outside file
     const command = await execute(session, 'bash', { command: `printf shell > '${temporary}/shell.log'` });
     assert.equal(readFileSync(join(temporary, 'shell.log'), 'utf8'), 'shell', JSON.stringify(command));
     assert.equal(readFileSync(join(temporary, 'tool.log'), 'utf8'), 'temporary file tool');
-    await assert.rejects(execute(session, 'write', { path: join(f.base, 'unrelated.lock'), content: 'denied' }));
+    await assert.rejects(execute(session, 'write', { path: join(f.base, 'unrelated.lock'), content: 'denied' }), /Task sandbox refused to write .*: permission-denied/);
     assert.equal(existsSync(join(f.base, 'unrelated.lock')), false);
 });
 
@@ -199,10 +199,10 @@ test('compatibility temp cannot retarget project ancestors or sibling runtime co
     const script = `
       const fs=require('node:fs'),assert=require('node:assert/strict');
       for(const path of ${JSON.stringify([join(f.agent, 'settings.json'), join(f.control, 'policy')])}) {
-        assert.throws(()=>fs.writeFileSync(path,'forbidden'));
+        assert.throws(()=>fs.writeFileSync(path,'forbidden'), { code: /^(EPERM|EACCES|EROFS)$/ });
       }
-      assert.throws(()=>fs.renameSync(${JSON.stringify(f.base)},${JSON.stringify(f.base + '-moved')}));
-      assert.throws(()=>fs.rmSync(${JSON.stringify(f.agent)},{recursive:true}));
+      assert.throws(()=>fs.renameSync(${JSON.stringify(f.base)},${JSON.stringify(f.base + '-moved')}), { code: /^(EPERM|EACCES|EROFS)$/ });
+      assert.throws(()=>fs.rmSync(${JSON.stringify(f.agent)},{recursive:true}), { code: /^(EPERM|EACCES|EROFS)$/ });
       fs.writeFileSync(${JSON.stringify(join(f.project, 'ordinary.txt'))},'allowed');
     `;
     const quote = (text) => `'${text.replaceAll("'", `'\\''`)}'`;
@@ -211,7 +211,7 @@ test('compatibility temp cannot retarget project ancestors or sibling runtime co
     // A separate launch must still refer to the same captured project.
     await execute(session, 'write', { path: 'second-launch.txt', content: 'same root' });
     assert.equal(readFileSync(join(f.project, 'second-launch.txt'), 'utf8'), 'same root');
-    await assert.rejects(execute(session, 'write', { path: join(outside, 'denied.lock'), content: 'no' }));
+    await assert.rejects(execute(session, 'write', { path: join(outside, 'denied.lock'), content: 'no' }), /Task sandbox refused to write .*: permission-denied/);
 });
 
 test('default SDK task can retrieve a synthetic macOS Keychain item', { skip: !supported || process.platform !== 'darwin' }, async (t) => {
@@ -232,7 +232,7 @@ test('default SDK task can retrieve a synthetic macOS Keychain item', { skip: !s
     const session = await sessionFixture(t, f);
     const result = await execute(session, 'bash', { command: `/usr/bin/security find-generic-password -a sandbox-fixture -s pi-runtime-compatibility -w '${keychain}'` });
     assert.match(JSON.stringify(result), /synthetic-value/);
-    await assert.rejects(execute(session, 'write', { path: join(f.agent, 'settings.json'), content: 'denied' }));
+    await assert.rejects(execute(session, 'write', { path: join(f.agent, 'settings.json'), content: 'denied' }), /Task sandbox refused to write .*: write-denied/);
 });
 
 test('policy snapshots validate and detach their mutable input', (t) => {

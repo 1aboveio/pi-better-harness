@@ -138,7 +138,9 @@ describe("background task log folded display", () => {
       details: { kind: "background-task-log-display", head: "[log]", fullLineCount: 2, compactLines: [`${"x".repeat(96)}-end`], foldedLineCount: 0 },
     };
     const component = renderBackgroundTaskLogDisplay(result, { expanded: false }, theme);
-    for (const line of component.render(32)) {
+    const lines = component.render(32);
+    expect(plain(lines)).toContain("x".repeat(32));
+    for (const line of lines) {
       expect(plain([line]).length).toBeLessThanOrEqual(32);
     }
   });

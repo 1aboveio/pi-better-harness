@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -65,8 +65,9 @@ test("running subagent with dead pid is reported as exited", () => {
   assert.equal(effectiveSubagentStatus(meta({ status: "running" }), () => false), "exited");
 });
 
-test("running and orphaned subagents are active background work", () => {
-  const dir = join(tmpdir(), `pi-better-goal-${process.pid}-${Date.now()}`);
+test("running and orphaned subagents are active background work", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-better-goal-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const runsDir = join(dir, "runs");
   const metas = [
     meta({ id: "running", status: "running", pid: 1, spawnPid: 42, startedAt: 3 }),

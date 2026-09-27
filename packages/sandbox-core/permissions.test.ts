@@ -50,6 +50,12 @@ const macRuntime = {
         `/var/folders/ab/current-user/${name === "DARWIN_USER_TEMP_DIR" ? "T" : "C"}/`,
 };
 
+function ruleIndex(profile: string, rule: string): number {
+    const index = profile.indexOf(rule);
+    assert.ok(index >= 0, `missing profile rule: ${rule}`);
+    return index;
+}
+
 function mountIndex(argv: readonly string[], option: string, path: string): number {
     return argv.findIndex((arg, index) => arg === option && argv[index + 1] === path && argv[index + 2] === path);
 }
@@ -96,7 +102,15 @@ describe("shared capability decisions", () => {
         const paths = credentialFilePaths(home);
         assert.ok(paths.includes(secret));
         assert.ok(paths.includes(join(home, ".ssh")));
-        assert.ok(paths.length >= 11);
+        // ADR 0005 names these credential stores independently of the implementation.
+        for (const credential of [".ssh", ".aws", ".config/gh", ".config/gcloud", ".azure", ".kube",
+            ".docker/config.json", ".netrc", ".git-credentials", ".pi/agent/auth.json"]) {
+            assert.ok(paths.includes(join(home, credential)), credential);
+            const denied = compileWritePolicy({ writableRoot: project, home,
+                permissions: { ...modes, outsideProject: "read-write" } });
+            assert.equal(evaluateReadAccess(join(home, credential), denied).allowed, false, credential);
+            assert.equal(evaluateWriteAccess(join(home, credential), denied).allowed, false, credential);
+        }
         for (const storedCredentials of ["off", "read", "read-write"] as const) {
             const policy = compileWritePolicy({ writableRoot: project, home,
                 permissions: { ...modes, storedCredentials } });
@@ -119,12 +133,11 @@ describe("shared capability decisions", () => {
         }
     }));
 
-    it("normalizes macOS Data-volume aliases before credential and project decisions", () => fixture((base, project, home) => {
-        if (process.platform !== "darwin") return;
+    it("normalizes macOS Data-volume aliases before credential and project decisions", { skip: process.platform !== "darwin" }, () => fixture((base, project, home) => {
         const credential = join(home, ".npmrc");
         writeFileSync(credential, "synthetic-only");
         const alias = `/System/Volumes/Data${credential}`;
-        if (!existsSync(alias)) return;
+        assert.ok(existsSync(alias), "the macOS fixture must be reachable through its Data-volume alias");
         const policy = compileWritePolicy({ writableRoot: project, home,
             permissions: { ...modes, outsideProject: "read-write" } });
         assert.equal(evaluateReadAccess(alias, policy).allowed, false);
@@ -166,11 +179,11 @@ describe("backend permission construction", () => {
         command.policy.denyWrite = [denied];
         buildSandboxCommand(command, mac);
         const profile = readFileSync(command.profilePath, "utf8");
-        assert.ok(profile.indexOf("(deny file-read*)") < profile.indexOf(`(deny file-read* (subpath "${project}"))`));
-        assert.ok(profile.indexOf(`(deny file-read* (subpath "${project}"))`) <
-            profile.indexOf(`(allow file-read* (subpath "${denied}"))`));
-        assert.ok(profile.indexOf(`(deny file-write* (subpath "${denied}"))`) >
-            profile.indexOf(`(allow file-write* (subpath "${denied}"))`));
+        assert.ok(ruleIndex(profile, "(deny file-read*)") < ruleIndex(profile, `(deny file-read* (subpath "${project}"))`));
+        assert.ok(ruleIndex(profile, `(deny file-read* (subpath "${project}"))`) <
+            ruleIndex(profile, `(allow file-read* (subpath "${denied}"))`));
+        assert.ok(ruleIndex(profile, `(deny file-write* (subpath "${denied}"))`) >
+            ruleIndex(profile, `(allow file-write* (subpath "${denied}"))`));
         assert.match(profile, /\(deny network\*\)/);
     }));
 
@@ -188,7 +201,7 @@ describe("backend permission construction", () => {
             outsideProject: "read-write", storedCredentials: "read-write", network: true });
         buildSandboxCommand(command, mac);
         const profile = readFileSync(command.profilePath, "utf8");
-        assert.ok(profile.indexOf("(allow file-write*)") < profile.indexOf(`(allow file-write* (subpath "${project}"))`));
+        assert.ok(ruleIndex(profile, "(allow file-write*)") < ruleIndex(profile, `(allow file-write* (subpath "${project}"))`));
         assert.equal(profile.includes("(deny network*)"), false);
     }));
 
@@ -237,7 +250,7 @@ describe("backend permission construction", () => {
         request.policy.runtimeWrite = [scratch];
         request.policy.denyWrite = [anchor];
         const command = buildSandboxCommand(request, linux);
-        const writable = command.fileArgs.indexOf("--bind", command.fileArgs.indexOf(scratch) - 1);
+        const writable = mountIndex(command.fileArgs, "--bind", scratch);
         assert.ok(writable >= 0);
         assert.ok(command.fileArgs.join(" ").includes(`--ro-bind ${anchor} ${anchor}`));
         request.policy.denyWrite = [base];
@@ -302,7 +315,7 @@ describe("bounded default runtime compatibility", () => {
         assert.equal(evaluateWriteAccess(join(tmp, "control/state"), protectedPolicy, macRuntime).allowed, false);
         buildSandboxCommand(protectedRequest, macRuntime);
         const protectedProfile = readFileSync(protectedRequest.profilePath, "utf8");
-        const tmpAllow = protectedProfile.indexOf(`(allow file-write* (subpath "${tmp}"))`);
+        const tmpAllow = ruleIndex(protectedProfile, `(allow file-write* (subpath "${tmp}"))`);
         assert.ok(protectedProfile.indexOf(`(deny file-write* (subpath "${join(tmp, "synthetic-home/.npmrc")}"))`) > tmpAllow);
         assert.ok(protectedProfile.indexOf(`(deny file-write* (subpath "${join(tmp, "control")}"))`) > tmpAllow);
         assert.ok(protectedProfile.includes(`(deny file-write-unlink (literal "${tmp}"))`));
@@ -380,7 +393,8 @@ describe("bounded default runtime compatibility", () => {
         assert.ok(argv.includes(`--ro-bind ${home} ${home}`));
         assert.ok(argv.includes(`--ro-bind ${control} ${control}`));
         assert.ok(argv.includes(`--bind ${base} ${base}`));
-        assert.ok(argv.indexOf(`--bind ${project} ${project}`) < argv.indexOf(`--ro-bind ${home} ${home}`));
+        assert.ok(mountIndex(wrapper.fileArgs, "--bind", project) >= 0);
+        assert.ok(mountIndex(wrapper.fileArgs, "--bind", project) < mountIndex(wrapper.fileArgs, "--ro-bind", home));
     }));
 
     it("orders every writable ancestor before sibling read-only guards and anchors a nested project", () => linuxTempFixture((base, _project, home) => {
@@ -407,12 +421,14 @@ describe("bounded default runtime compatibility", () => {
         }
         const firstGuard = mountIndex(argv, "--ro-bind", first);
         assert.ok(firstGuard >= 0);
+        assert.ok(mountIndex(argv, "--bind", runtime) >= 0);
         assert.ok(mountIndex(argv, "--bind", runtime) < firstGuard);
         assert.equal(argv.slice(firstGuard + 3).includes("--bind"), false, "no writable bind after the first guard");
         assert.ok(mountIndex(argv, "--ro-bind", home) > mountIndex(argv, "--bind", base));
 
         request.policy.permissions = { ...request.policy.permissions!, projectFiles: "read" };
         const readArgv = buildSandboxCommand(request, linux).fileArgs;
+        assert.ok(mountIndex(readArgv, "--bind", container) >= 0);
         assert.ok(mountIndex(readArgv, "--bind", container) < mountIndex(readArgv, "--ro-bind", project));
         request.policy.permissions = { ...request.policy.permissions!, outsideProject: "off", projectFiles: "off" };
         const offArgv = buildSandboxCommand(request, linux).fileArgs;
@@ -427,6 +443,7 @@ describe("bounded default runtime compatibility", () => {
         const request = args(base, project, home, { ...modes, outsideProject: "read", storedCredentials: "read" });
         request.policy.runtimeCompatibility = true;
         const argv = buildSandboxCommand(request, linux).fileArgs;
+        assert.ok(mountIndex(argv, "--ro-bind", home) >= 0);
         assert.ok(mountIndex(argv, "--ro-bind", home) < mountIndex(argv, "--ro-bind", join(home, "work")));
         assert.ok(mountIndex(argv, "--ro-bind", join(home, "work")) < mountIndex(argv, "--bind", project));
     }));

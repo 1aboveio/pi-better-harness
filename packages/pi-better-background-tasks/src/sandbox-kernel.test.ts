@@ -282,12 +282,14 @@ describe.skipIf(!support.supported)(
       // Published after the extension loaded: the other load order.
       harness.announce(enabledPolicy());
 
+      const pollMarker = join(project, "first-poll");
+      const command = `${probeCommand()}; if test -f "${pollMarker}"; then printf 'SECOND-POLL\\n'; else touch "${pollMarker}"; fi`;
       const id = taskIdIn(await harness.execute("bg_task_watch", {
-        command: probeCommand(),
+        command,
         interval_seconds: 1,
         timeout_seconds: 10,
         callback: false,
-        success_when: { type: "stdout_contains", value: "PROBE-COMPLETE" },
+        success_when: { type: "stdout_contains", value: "SECOND-POLL" },
       }));
       const meta = await waitForMeta(id, (current) => current?.status === "succeeded");
 
@@ -297,7 +299,8 @@ describe.skipIf(!support.supported)(
       expect(meta.launchArgv?.[0]).toBe(support.executable);
       // The operator's own command stays the recorded one; only the launch
       // vector carries the wrapper.
-      expect(meta.command).toBe(probeCommand());
+      expect(readFileSync(meta.logPath, "utf8").match(/PROBE-COMPLETE/g)).toHaveLength(2);
+      expect(meta.command).toBe(command);
       expect(meta.shell).toBe(true);
     });
 
@@ -318,10 +321,8 @@ describe.skipIf(!support.supported)(
       expect(launchArgv?.[0]).toBe(support.executable);
 
       harness.announce(disabledPolicy());
-      // Long enough for several more polls under the new policy.
-      await sleep(2_500);
-
       try {
+        await waitForMeta(runningId, (current) => (current?.lastCheckedAt ?? 0) > launched.lastCheckedAt!);
         expect(readMeta(runningId)?.lastCheckedAt).toBeGreaterThan(launched.lastCheckedAt!);
         expect(readMeta(runningId)?.launchArgv).toEqual(launchArgv);
         expect(existsSync(outsideProbe)).toBe(false);
@@ -552,7 +553,6 @@ describe("local background tasks with no usable sandbox backend", () => {
       expect(result).not.toContain("Started background");
     }
     // Nothing ran, and no half-built task was left in the registry.
-    await sleep(200);
     expect(existsSync(outsideProbe)).toBe(false);
     expect(await harness.execute("bg_task_list", {})).toBe(before);
   });

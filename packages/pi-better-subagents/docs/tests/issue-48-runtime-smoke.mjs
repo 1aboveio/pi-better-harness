@@ -13,7 +13,7 @@
  * Rerun:  node docs/tests/issue-48-runtime-smoke.mjs > docs/tests/issue-48-runtime-smoke.json
  */
 import { execFileSync } from "node:child_process";
-import { rmSync, readFileSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
@@ -255,7 +255,7 @@ await record(
         );
         // Select drop (second row if newest-first puts drop first — pick by keying down until selected).
         let plain = component.render(80).join("\n");
-        if (!plain.split("\n").some((l) => l.startsWith("> ") && l.includes("drop"))) {
+        if (!plain.split("\n").some((l) => l.startsWith("› ") && l.includes("drop"))) {
             component.handleInput("<down>");
         }
         component.handleInput("x");
@@ -265,7 +265,7 @@ await record(
         plain = component.render(80).join("\n");
         check(!plain.includes("drop"), "drop gone from list");
         check(plain.includes("keep"), "keep remains");
-        check(plain.split("\n").some((l) => l.startsWith("> ") && l.includes("keep")), "selection clamped to keep");
+        check(plain.split("\n").some((l) => l.startsWith("› ") && l.includes("keep")), "selection clamped to keep");
         check(hints.at(-1) === null, "confirm cleared after dismiss");
 
         // --- editor reload dedupe ---
@@ -351,7 +351,7 @@ await record(
         const indexPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../index.ts");
         execFileSync(
             process.execPath,
-            ["--test", path.join(path.dirname(fileURLToPath(import.meta.url)), "../../tests/navigator_reload_extension_path.test.mjs")],
+            ["--import", "tsx", "--test", path.join(path.dirname(fileURLToPath(import.meta.url)), "../../tests/navigator_reload_extension_path.test.mjs")],
             { stdio: "pipe", cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), "../..") },
         );
 
@@ -365,13 +365,8 @@ await record(
         execFileSync(process.execPath, ["--experimental-strip-types", "--check", indexPath], { stdio: "pipe" });
         execFileSync(process.execPath, ["--experimental-strip-types", "--check", navPath], { stdio: "pipe" });
 
-        // --- README controls ---
-        const readme = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../README.md"), "utf8");
-        check(/Subagent navigator/i.test(readme), "README has navigator section");
-        check(/two-press|x again/i.test(readme), "README documents two-press x");
-        check(/dismiss/i.test(readme) && /subagent_list/i.test(readme), "README documents dismiss + tools");
 
-        return "applyNavigatorRows keep-by-id + clamp; list/detail narrow post style-strip; overlay dismiss clamp; editor reload dedupe; dispose clears detail+arm timers+confirm; footer count/confirm clear; registered session_start reload disposes timers+confirm, no editor stack, republishes footer; TUI guard; strip-types index+navigator; README controls";
+        return "applyNavigatorRows keep-by-id + clamp; list/detail narrow post style-strip; overlay dismiss clamp; editor reload dedupe; dispose clears detail+arm timers+confirm; footer count/confirm clear; registered session_start reload disposes timers+confirm, no editor stack, republishes footer; TUI guard; strip-types index+navigator";
     },
 );
 

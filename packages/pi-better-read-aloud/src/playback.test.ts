@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -31,6 +31,8 @@ describe("read-aloud playback", () => {
       expect(child.killed).toBe(true);
       expect(stopPlayback()).toBe(false);
     } finally {
+      stopPlayback();
+      await rm(tmpRoot, { recursive: true, force: true });
       if (previousPlayer === undefined) delete process.env.PI_TTS_PLAYER;
       else process.env.PI_TTS_PLAYER = previousPlayer;
     }

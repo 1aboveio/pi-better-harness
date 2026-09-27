@@ -1,9 +1,9 @@
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
-import { DEFAULT_WATCH_TIMEOUT_SECONDS, resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
+import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import { formatLaunch } from "./tools.js";
 import { failedResult, FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
 
@@ -60,8 +60,8 @@ describe("runtime", () => {
     }, process.cwd());
     const after = Date.now();
 
-    expect(meta.deadlineAt).toBeGreaterThanOrEqual(before + DEFAULT_WATCH_TIMEOUT_SECONDS * 1000);
-    expect(meta.deadlineAt).toBeLessThanOrEqual(after + DEFAULT_WATCH_TIMEOUT_SECONDS * 1000);
+    expect(meta.deadlineAt).toBeGreaterThanOrEqual(before + 15 * 60 * 1000);
+    expect(meta.deadlineAt).toBeLessThanOrEqual(after + 15 * 60 * 1000);
   });
 
   it("keeps explicit watcher timeouts and lets zero disable the default", () => {
@@ -332,6 +332,8 @@ describe("runtime", () => {
       const deliveredAt = readMeta(watch.meta.id)?.callbackSentAt;
       expect(deliveredAt).toBeTypeOf("number");
 
+      expect(watch.messages).toHaveLength(1);
+      expect(watch.messages[0]).toContain(watch.meta.id);
       const deliveryCount = watch.messages.length;
       resumeRunningTask(watch.pi, readMeta(watch.meta.id)!, () => watch.origin);
       await batcher.flush();
@@ -581,7 +583,7 @@ describe("runtime", () => {
       status: "timed_out",
       result: { reason: "timeout waiting for SSH watch condition on watch-timeout.example" },
     });
-    expect(Math.round(((defaulted.deadlineAt ?? 0) - defaulted.startedAt) / 1000)).toBe(DEFAULT_WATCH_TIMEOUT_SECONDS);
+    expect(Math.round(((defaulted.deadlineAt ?? 0) - defaulted.startedAt) / 1000)).toBe(900);
   });
 
   // @covers background-task.ssh-timeout
@@ -799,7 +801,7 @@ describe("runtime", () => {
         stopMessage: `Killed remote tmux session pi-bg-${meta.id} on deploy@stop.example.`,
       },
     });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await getCallbackBatcher(pi).flush();
     expect(messages).toHaveLength(0);
     expect(readMeta(meta.id)?.callbackSuppressedReason).toContain("cancelled");
   });
@@ -895,6 +897,8 @@ describe("runtime", () => {
 
     expect(terminal?.maxLogBytes).toBe(64 * 1024);
     expect(terminal?.logDiscardedBytes).toBeGreaterThan(0);
+    expect(statSync(meta.logPath).size).toBeLessThanOrEqual(64 * 1024);
+    expect(readFileSync(meta.logPath, "utf8")).toContain("x".repeat(100));
     expect(terminal?.logRetentionEvents).toBe(1);
   }, 30_000);
 
@@ -1032,8 +1036,8 @@ describe("runtime", () => {
     const stopped = await stopTask(pi, meta.id);
     expect(stopped?.status).toBe("cancelled");
 
-    // If a callback had been enqueued it would flush within the 100 ms batch window.
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    // Flush any queued callback so silence does not depend on the batch timer.
+    await getCallbackBatcher(pi).flush();
     expect(messages).toHaveLength(0);
 
     const terminal = readMeta(meta.id);
@@ -1102,7 +1106,7 @@ async function waitForMeta(
     if (done(meta)) return meta;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  return readMeta(id);
+  throw new Error(`task ${id} did not reach the expected state: ${JSON.stringify(readMeta(id))}`);
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
