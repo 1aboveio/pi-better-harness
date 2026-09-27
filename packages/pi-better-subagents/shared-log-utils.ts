@@ -154,10 +154,22 @@ export interface EvidenceGap {
 
 export interface PageRequest {
   cursor?: string;
-  /** UTF-8 byte budget for this page. Nonpositive/NaN fall back to the API default. */
+  /**
+   * UTF-8 byte budget for this page. Exactly `0` yields an empty page that is
+   * positioned at the cursor (nothing is skipped). Other nonpositive, NaN, or
+   * non-numeric values fall back to the API default. Values above the raw-page
+   * hard cap are clamped. A page never exceeds this budget: if the next code
+   * point does not fit, the page is empty and `nextCursor` does not advance.
+   */
   maxBytes?: number;
-  /** Optional line cap. Pages still make forward progress on a single huge line. */
+  /** Optional line cap. */
   maxLines?: number;
+  /**
+   * Resource/scope bound into the cursor (for example `scope:runId`). A cursor
+   * minted for another resource, including another session scope, resets
+   * with `stale-cursor` instead of silently continuing.
+   */
+  resource?: string;
 }
 
 export interface PageResult {
@@ -165,7 +177,7 @@ export interface PageResult {
   revision: string;
   /** Caller-owned cursor that reproduces this page with the same maxBytes. */
   cursor: string;
-  /** Start of the following page, or the snapshot end (append-ready when hasMore is false). */
+  /** Start of the following page. At the end of a file it is append-ready. */
   nextCursor: string;
   hasMore: boolean;
   /** Readable bytes after this page within the current snapshot. */
@@ -175,11 +187,13 @@ export interface PageResult {
   endByte: number;
   reset?: PageReset;
   gaps: EvidenceGap[];
+  /** True when this page reached the current end: `nextCursor` returns only bytes appended later. */
+  appendReady?: boolean;
+  /** Bytes of a trailing, still-incomplete UTF-8 sequence withheld until the writer completes it. */
+  pendingBytes?: number;
 }
 
 export interface FilePageRequest extends PageRequest {
-  /** Stable resource id bound into the cursor (task/run id). Defaults to path. */
-  resource?: string;
   /**
    * Consumer-owned generation. Increment on replacement or same-inode
    * compaction so a compatible head cannot hide a rewrite.
@@ -196,19 +210,30 @@ export interface FilePageRequest extends PageRequest {
 export interface VerbatimPage {
   text: string;
   hasMore: boolean;
+  /** Start cursor of this page. */
+  cursor?: string;
   nextCursor?: string;
   omittedBytes: number;
+  /** Row-oriented pages (lists, incidents) count omitted rows instead of bytes. */
+  omittedRows?: number;
   revision?: string;
   reset?: PageReset;
   gaps?: EvidenceGap[];
   totalBytes?: number;
   startByte?: number;
   endByte?: number;
+  appendReady?: boolean;
+  pendingBytes?: number;
+  /** Where `nextCursor` is accepted when that is not the tool that returned it. */
+  via?: string;
 }
+
+/** A failure section may be computed for the exact bytes the envelope can give it. */
+export type EnvelopeFailure = string | ((budget: number) => string | undefined);
 
 export interface EnvelopeSections {
   identity?: string;
-  failure?: string;
+  failure?: EnvelopeFailure;
   decision?: string;
   diagnostics?: string;
   progress?: string;
@@ -246,7 +271,9 @@ export interface StatusRevisionResult {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: false });
 const CURSOR_PREFIX = "p1.";
+const ROW_CURSOR_PREFIX = "l1.";
 const HEAD_SAMPLE_BYTES = 256;
+const WINDOW_SAMPLE_BYTES = 256;
 const NEWLINE = 0x0a;
 
 interface CursorPayload {
@@ -259,6 +286,7 @@ interface CursorPayload {
   i?: string;
   h?: string;
   hl?: number;
+  w?: string;
   c?: string;
   f?: string;
   a?: 1;
@@ -284,6 +312,14 @@ export function budgetFor(surface: OutputBudgetSurface, requested?: unknown): nu
   return Math.min(n, cap);
 }
 
+/** Pager budget: exact zero is an explicit empty page; garbage falls back. */
+function pagerBudget(value: unknown, fallback: number): number {
+  if (value === 0) return 0;
+  const n = positiveInt(value);
+  if (n === undefined) return fallback;
+  return Math.min(n, OUTPUT_BUDGET_MAX_BYTES.rawPage);
+}
+
 export function utf8ByteLength(text: string): number {
   return encoder.encode(text).byteLength;
 }
@@ -300,20 +336,28 @@ function sequenceLength(lead: number): number {
   return 1;
 }
 
-function completeEnd(bytes: Uint8Array, from: number, to: number): number {
-  const length = bytes.length;
+/**
+ * Largest end <= `to` that does not split a UTF-8 sequence, given that bytes
+ * after `to` are available in `bytes`. A sequence cut by the end of `bytes`
+ * itself is reported through `incompleteAtEnd` when `atEnd` is set.
+ */
+function utf8SafeEnd(bytes: Uint8Array, from: number, to: number): number {
   if (to <= from) return from;
-  if (to >= length) return length;
-  let seqStart = to - 1;
-  while (seqStart > from && isContinuation(bytes[seqStart]!)) seqStart -= 1;
-  if (isContinuation(bytes[seqStart]!)) return to;
-  const needed = sequenceLength(bytes[seqStart]!);
-  return seqStart + needed > to ? seqStart : to;
-}
-
-function nextCodepointEnd(bytes: Uint8Array, from: number): number {
-  if (from >= bytes.length) return from;
-  return Math.min(bytes.length, from + sequenceLength(bytes[from]!));
+  const limit = Math.min(to, bytes.length);
+  let seqStart = limit - 1;
+  while (seqStart > from && isContinuation(bytes[seqStart]!) && limit - seqStart < 4) seqStart -= 1;
+  const lead = bytes[seqStart]!;
+  if (isContinuation(lead)) return limit;
+  const needed = sequenceLength(lead);
+  if (needed === 1 || seqStart + needed <= limit) return limit;
+  if (seqStart + needed <= bytes.length) return seqStart;
+  // The sequence runs past the available bytes. When every following byte is
+  // a continuation it is a genuine, still-incomplete write; otherwise the
+  // source itself is malformed and is passed through rather than stalling.
+  for (let i = seqStart + 1; i < bytes.length; i += 1) {
+    if (!isContinuation(bytes[i]!)) return limit;
+  }
+  return seqStart;
 }
 
 function alignStart(bytes: Uint8Array, start: number): number {
@@ -324,31 +368,40 @@ function alignStart(bytes: Uint8Array, start: number): number {
   return i;
 }
 
+function preferNewlineEnd(bytes: Uint8Array, from: number, to: number): number {
+  for (let i = to - 1; i >= from; i -= 1) {
+    if (bytes[i] === NEWLINE) return i + 1;
+  }
+  return to;
+}
+
+/**
+ * Byte range for one text page. With `forceProgress` a budget smaller than
+ * the next code point still returns that code point (display clipping only);
+ * pagers pass `false` so a page never exceeds its budget.
+ */
 function sliceUtf8Range(
   bytes: Uint8Array,
   start: number,
   maxBytes: number,
   preferNewline: boolean,
+  forceProgress = true,
 ): { start: number; end: number } {
   const from = alignStart(bytes, start);
   if (from >= bytes.length) return { start: from, end: from };
   const budget = Math.max(0, Math.floor(maxBytes));
-  let to = completeEnd(bytes, from, Math.min(bytes.length, from + budget));
-  if (to <= from) to = nextCodepointEnd(bytes, from);
-  // Prefer a newline only when this slice is truncated. If the remainder fits,
-  // keep a final line that has no trailing newline — otherwise a one-page
-  // answer is missing its last line and reconstruction needs a second page.
-  if (preferNewline && to > from && to < bytes.length) {
-    for (let i = to - 1; i >= from; i -= 1) {
-      if (bytes[i] === NEWLINE) {
-        to = i + 1;
-        break;
-      }
-    }
+  let to = utf8SafeEnd(bytes, from, Math.min(bytes.length, from + budget));
+  if (to <= from) {
+    if (!forceProgress) return { start: from, end: from };
+    to = Math.min(bytes.length, from + sequenceLength(bytes[from]!));
   }
+  // Prefer a newline only when this slice is truncated. If the remainder fits,
+  // keep a final line that has no trailing newline.
+  if (preferNewline && to > from && to < bytes.length) to = preferNewlineEnd(bytes, from, to);
   return { start: from, end: to };
 }
 
+/** Display clipping helper. It may exceed `maxBytes` by one code point to make progress. */
 export function sliceUtf8Bytes(
   text: string,
   startByte: number,
@@ -369,6 +422,16 @@ function hashBytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("base64url");
 }
 
+/** Short digest stored in cursors (128 bits): cursors stay small in the model-facing budget. */
+function shortHash(bytes: Uint8Array): string {
+  return hashBytes(bytes).slice(0, 22);
+}
+
+/** Cursors carry a digest of their resource/scope, never the scope text itself. */
+function resourceTag(resource: string): string {
+  return hashBytes(encoder.encode(resource)).slice(0, 16);
+}
+
 function encodeCursor(payload: CursorPayload): string {
   return CURSOR_PREFIX + Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 }
@@ -384,18 +447,13 @@ function decodeCursor(cursor: string | undefined): CursorPayload | undefined {
   return undefined;
 }
 
-export function cursorKind(cursor: string | undefined): "t" | "f" | "s" | undefined {
+export function cursorKind(cursor: string | undefined): "t" | "f" | "s" | "l" | undefined {
+  if (cursor?.startsWith(ROW_CURSOR_PREFIX)) return decodeRowCursor(cursor) ? "l" : undefined;
   return decodeCursor(cursor)?.k;
 }
 
-function headMatches(previousHash: string | undefined, previousLength: number | undefined, current: string): boolean {
-  if (!previousHash) return true;
-  const length = Math.max(0, previousLength ?? 0);
-  const prefix = current.slice(0, length);
-  return hashBytes(Buffer.from(prefix, "latin1")) === previousHash;
-}
-
 function readAt(fd: number, position: number, length: number): Buffer {
+  if (length <= 0) return Buffer.alloc(0);
   const buffer = Buffer.allocUnsafe(length);
   let filled = 0;
   while (filled < length) {
@@ -429,45 +487,44 @@ function emptyPage(overrides: Partial<PageResult> & Pick<PageResult, "revision" 
  * same page, and two callers do not share consumption.
  */
 export function pageVerbatimText(text: string, request: PageRequest = {}): PageResult {
-  const maxBytes = budgetFor("answer", request.maxBytes);
+  const maxBytes = pagerBudget(request.maxBytes, OUTPUT_BUDGET_BYTES.answer);
   const encoded = encoder.encode(text);
-  const revision = hashBytes(encoded);
+  const revision = shortHash(encoded);
+  const resource = request.resource === undefined ? undefined : resourceTag(request.resource);
   let offset = 0;
   let reset: PageReset | undefined;
   const parsed = decodeCursor(request.cursor);
   if (request.cursor) {
-    if (!parsed || parsed.k !== "t") {
+    if (!parsed || parsed.k !== "t" || (parsed.r ?? undefined) !== resource) {
       reset = "stale-cursor";
     } else if (parsed.v !== revision) {
       reset = "source-replaced";
     } else {
-      offset = Math.max(0, Math.floor(parsed.o ?? 0));
+      offset = Math.min(encoded.length, Math.max(0, Math.floor(parsed.o ?? 0)));
     }
   }
-  const make = (start: number, end: number, more: boolean): PageResult => {
-    const payload = (o: number, append: boolean): CursorPayload => ({
-      k: "t",
-      v: revision,
-      o,
-      n: encoded.length,
-      ...(append ? { a: 1 } : {}),
-    });
-    return {
-      text: decoder.decode(encoded.subarray(start, end)),
-      revision,
-      cursor: encodeCursor(payload(start, false)),
-      nextCursor: encodeCursor(payload(end, end >= encoded.length)),
-      hasMore: more,
-      omittedBytes: Math.max(0, encoded.length - end),
-      totalBytes: encoded.length,
-      startByte: start,
-      endByte: end,
-      ...(reset ? { reset } : {}),
-      gaps: [],
-    };
-  };
-  if (offset >= encoded.length) return make(encoded.length, encoded.length, false);
-  const range = sliceUtf8Range(encoded, offset, maxBytes, true);
+  const mint = (o: number): string => encodeCursor({
+    k: "t",
+    ...(resource !== undefined ? { r: resource } : {}),
+    v: revision,
+    o,
+    n: encoded.length,
+  });
+  const make = (start: number, end: number): PageResult => ({
+    text: decoder.decode(encoded.subarray(start, end)),
+    revision,
+    cursor: mint(start),
+    nextCursor: mint(end),
+    hasMore: end < encoded.length,
+    omittedBytes: Math.max(0, encoded.length - end),
+    totalBytes: encoded.length,
+    startByte: start,
+    endByte: end,
+    ...(reset ? { reset } : {}),
+    gaps: [],
+  });
+  if (offset >= encoded.length) return make(encoded.length, encoded.length);
+  const range = sliceUtf8Range(encoded, offset, maxBytes, true, false);
   let end = range.end;
   const maxLines = positiveInt(request.maxLines);
   if (maxLines !== undefined) {
@@ -482,7 +539,7 @@ export function pageVerbatimText(text: string, request: PageRequest = {}): PageR
       }
     }
   }
-  return make(range.start, end, end < encoded.length);
+  return make(range.start, end);
 }
 
 function fileGaps(request: FilePageRequest): EvidenceGap[] {
@@ -502,12 +559,20 @@ function fileGaps(request: FilePageRequest): EvidenceGap[] {
   return gaps;
 }
 
-function inodeKey(dev: number, ino: number): string {
-  return `${dev}:${ino}`;
+/**
+ * Identity of the file object, not just its path. Linux filesystems reuse a
+ * freed inode number immediately, so a delete + recreate can keep `dev:ino`;
+ * the birth time tells the files apart where the platform reports it at fine
+ * granularity. With coarse timestamps the two are indistinguishable by stat,
+ * and the head/pre-offset byte checks classify the change instead.
+ */
+function fileIdentity(stats: { dev: bigint; ino: bigint; birthtimeNs: bigint }): string {
+  const birth = stats.birthtimeNs > 0n ? `:${stats.birthtimeNs.toString(36)}` : "";
+  return `${stats.dev.toString(36)}:${stats.ino.toString(36)}${birth}`;
 }
 
-function fileRevision(generation: string | undefined, inode: string, snapshot: number): string {
-  return `${generation ?? ""}|${inode}|${snapshot}`;
+function fileRevision(generation: string | undefined, identity: string, snapshot: number): string {
+  return `${generation ?? ""}|${identity}|${snapshot}`;
 }
 
 function fileReadError(
@@ -516,12 +581,12 @@ function fileReadError(
   error: unknown,
   reset?: PageReset,
 ): PageResult {
-  const resource = request.resource ?? path;
+  const resource = resourceTag(request.resource ?? path);
   const cursor = encodeCursor({ k: "f", r: resource, o: 0, n: 0 });
   return emptyPage({
     revision: "unreadable",
     cursor,
-    nextCursor: encodeCursor({ k: "f", r: resource, o: 0, n: 0, a: 1 }),
+    nextCursor: cursor,
     gaps: [...fileGaps(request), { kind: "read", detail: errorText(error) }],
     ...(reset ? { reset } : {}),
   });
@@ -529,12 +594,16 @@ function fileReadError(
 
 /**
  * Page retained file bytes without skipping unread ranges. Snapshot high-water
- * marks keep a page stable while the file appends; consumer `generation` plus
- * inode/head checks disclose replacement and same-inode compaction.
+ * marks keep a page stable while the file appends. Cursors bind the resource
+ * (task/run plus session scope), the file object's identity, the consumer
+ * generation, the head, and the bytes just before the offset, so replacement,
+ * same-inode compaction, and in-place rewrites reset instead of resuming at a
+ * meaningless offset. A trailing, still-incomplete UTF-8 sequence is withheld
+ * (`pendingBytes`) and returned whole once the writer completes it.
  */
 export function pageRetainedFile(path: string, request: FilePageRequest = {}): PageResult {
-  const maxBytes = budgetFor("rawPage", request.maxBytes);
-  const resource = request.resource ?? path;
+  const maxBytes = pagerBudget(request.maxBytes, OUTPUT_BUDGET_BYTES.rawPage);
+  const resource = resourceTag(request.resource ?? path);
   const generation = request.generation === undefined ? undefined : String(request.generation);
   const suppliedGaps = fileGaps(request);
   let fd: number | undefined;
@@ -545,113 +614,138 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
   }
   const opened = fd;
   try {
-    const stats = fstatSync(opened);
-    const size = stats.size;
-    const inode = inodeKey(stats.dev, stats.ino);
-    const head = readAt(opened, 0, Math.min(HEAD_SAMPLE_BYTES, size)).toString("latin1");
+    const stats = fstatSync(opened, { bigint: true });
+    const size = Number(stats.size);
+    const identity = fileIdentity(stats);
+    const head = readAt(opened, 0, Math.min(HEAD_SAMPLE_BYTES, size));
+    const headHash = shortHash(head);
+    const windowHash = (o: number): string | undefined => {
+      if (o <= 0) return undefined;
+      const from = Math.max(0, o - WINDOW_SAMPLE_BYTES);
+      return shortHash(readAt(opened, from, o - from));
+    };
+    const initialSnapshot = (): number => Math.min(size, request.snapshotBytes !== undefined
+      ? clampBudgetBytes(request.snapshotBytes, size)
+      : size);
     const parsed = decodeCursor(request.cursor);
     let reset: PageReset | undefined;
     let offset = 0;
-    let snapshot = Math.min(size, request.snapshotBytes !== undefined
-      ? clampBudgetBytes(request.snapshotBytes, size)
-      : size);
+    let snapshot = initialSnapshot();
     let appendReady = false;
 
     if (request.cursor) {
-      const identityOk = parsed?.k === "f"
-        && parsed.r === resource
-        && (generation === undefined || parsed.g === generation)
-        && parsed.i === inode
-        && headMatches(parsed.h, parsed.hl, head)
-        && (parsed.n ?? 0) <= size
-        && (parsed.o ?? 0) <= size;
       if (!parsed || parsed.k !== "f" || parsed.r !== resource) {
         reset = "stale-cursor";
-      } else if (!identityOk) {
-        reset = parsed.i !== inode ? "source-replaced" : "compacted";
+      } else if (parsed.i !== identity) {
+        reset = "source-replaced";
       } else {
-        offset = Math.max(0, Math.floor(parsed.o ?? 0));
-        snapshot = Math.max(0, Math.floor(parsed.n ?? snapshot));
-        appendReady = parsed.a === 1;
+        const o = Math.max(0, Math.floor(parsed.o ?? 0));
+        const n = Math.max(0, Math.floor(parsed.n ?? 0));
+        const headLength = Math.max(0, Math.floor(parsed.hl ?? 0));
+        const generationChanged = generation !== undefined && parsed.g !== generation;
+        const bytesIntact = o <= n
+          && n <= size
+          && headLength <= size
+          && (!parsed.h || shortHash(head.subarray(0, headLength)) === parsed.h)
+          && (o === 0 || windowHash(o) === parsed.w);
+        if (generationChanged) {
+          // The consumer declared a compaction/replacement of this file.
+          reset = "compacted";
+        } else if (!bytesIntact) {
+          // Same file object as far as stat can tell, but the bytes behind the
+          // cursor changed without a declared compaction: rewritten in place,
+          // or deleted and recreated on a reused inode with coarse timestamps.
+          reset = "source-replaced";
+        } else {
+          offset = o;
+          snapshot = n;
+          appendReady = parsed.a === 1;
+        }
       }
     }
 
-    if (reset) {
-      offset = 0;
-      snapshot = Math.min(size, request.snapshotBytes !== undefined
-        ? clampBudgetBytes(request.snapshotBytes, size)
-        : size);
-      appendReady = false;
-    }
-
     if (appendReady && offset >= snapshot && size > snapshot) {
-      snapshot = Math.min(size, request.snapshotBytes !== undefined
-        ? clampBudgetBytes(request.snapshotBytes, size)
-        : size);
-      appendReady = false;
+      snapshot = Math.max(snapshot, initialSnapshot());
     }
 
-    const revision = fileRevision(generation, inode, snapshot);
-    const payload = (o: number, n: number, append: boolean): CursorPayload => ({
-      k: "f",
-      r: resource,
-      o,
-      n,
-      g: generation,
-      i: inode,
-      h: hashBytes(Buffer.from(head, "latin1")),
-      hl: head.length,
-      ...(append ? { a: 1 } : {}),
-    });
-
-    if (size === 0) {
-      return emptyPage({
-        revision,
-        cursor: encodeCursor(payload(0, 0, false)),
-        nextCursor: encodeCursor(payload(0, 0, true)),
-        totalBytes: 0,
-        gaps: suppliedGaps,
-        ...(reset ? { reset } : {}),
+    const mint = (o: number, n: number, append: boolean): string => {
+      const window = windowHash(o);
+      return encodeCursor({
+        k: "f",
+        r: resource,
+        o,
+        n,
+        ...(generation !== undefined ? { g: generation } : {}),
+        i: identity,
+        h: headHash,
+        hl: head.length,
+        ...(window ? { w: window } : {}),
+        ...(append ? { a: 1 } : {}),
       });
-    }
+    };
+    const base = {
+      gaps: suppliedGaps,
+      ...(reset ? { reset } : {}),
+    };
 
     if (offset > snapshot) offset = snapshot;
-    if (appendReady || offset >= snapshot) {
+    if (offset >= snapshot) {
       return emptyPage({
-        revision,
-        cursor: encodeCursor(payload(snapshot, snapshot, false)),
-        nextCursor: encodeCursor(payload(snapshot, snapshot, true)),
+        revision: fileRevision(generation, identity, snapshot),
+        cursor: mint(offset, snapshot, true),
+        nextCursor: mint(snapshot, snapshot, true),
         totalBytes: snapshot,
         startByte: snapshot,
         endByte: snapshot,
-        gaps: suppliedGaps,
-        ...(reset ? { reset } : {}),
+        appendReady: true,
+        ...base,
       });
     }
 
-    const length = Math.min(maxBytes + 4, snapshot - offset);
-    const buffer = readAt(opened, offset, length);
-    const range = sliceUtf8Range(buffer, 0, Math.min(maxBytes, snapshot - offset), true);
-    let end = offset + range.end;
-    if (end > snapshot) end = snapshot;
-    if (end <= offset && offset < snapshot) {
-      const forced = Math.min(snapshot, offset + sequenceLength(buffer[0] ?? 0));
-      end = Math.max(offset + 1, forced);
+    const available = snapshot - offset;
+    const limit = Math.min(maxBytes, available);
+    const atSnapshotEnd = limit === available;
+    const buffer = readAt(opened, offset, Math.min(available, limit + 4));
+    let end = utf8SafeEnd(buffer, 0, limit);
+    let pendingBytes = 0;
+    if (atSnapshotEnd && end < limit) {
+      // The retained bytes stop inside a sequence that is still being written.
+      pendingBytes = available - end;
+      snapshot = offset + end;
+    } else if (!atSnapshotEnd && end > 0) {
+      end = preferNewlineEnd(buffer, 0, end);
     }
-    const slice = readAt(opened, offset, end - offset);
-    const atEnd = end >= snapshot;
+    const endByte = offset + end;
+    const revision = fileRevision(generation, identity, snapshot);
+    if (end === 0 && pendingBytes === 0) {
+      // Budget is smaller than the next code point: stay put, skip nothing.
+      const here = mint(offset, snapshot, false);
+      return emptyPage({
+        revision,
+        cursor: here,
+        nextCursor: here,
+        hasMore: true,
+        omittedBytes: available,
+        totalBytes: snapshot,
+        startByte: offset,
+        endByte: offset,
+        ...base,
+      });
+    }
+    const atEnd = endByte >= snapshot;
     return {
-      text: decoder.decode(slice),
+      text: decoder.decode(buffer.subarray(0, end)),
       revision,
-      cursor: encodeCursor(payload(offset, snapshot, false)),
-      nextCursor: encodeCursor(payload(end, snapshot, atEnd)),
-      hasMore: end < snapshot,
-      omittedBytes: Math.max(0, snapshot - end),
+      cursor: mint(offset, snapshot, false),
+      nextCursor: mint(endByte, snapshot, atEnd),
+      hasMore: !atEnd,
+      omittedBytes: Math.max(0, snapshot - endByte),
       totalBytes: snapshot,
       startByte: offset,
-      endByte: end,
-      gaps: suppliedGaps,
-      ...(reset ? { reset } : {}),
+      endByte,
+      ...(atEnd ? { appendReady: true } : {}),
+      ...(pendingBytes > 0 ? { pendingBytes } : {}),
+      ...base,
     };
   } catch (error) {
     return fileReadError(request, path, error, request.cursor ? "source-replaced" : undefined);
@@ -673,19 +767,17 @@ function statusRevisionToken(contentRevision: string, failureRevision: string): 
  */
 export function inspectStatusRevision(input: StatusRevisionInput): StatusRevisionResult {
   const revision = statusRevisionToken(input.contentRevision, input.failureRevision);
-  const nextCursor = encodeCursor({
-    k: "s",
-    r: input.resource,
-    c: input.contentRevision,
-    f: input.failureRevision,
-  });
+  const resource = resourceTag(input.resource);
+  const content = shortHash(encoder.encode(input.contentRevision)).slice(0, 16);
+  const failure = shortHash(encoder.encode(input.failureRevision)).slice(0, 16);
+  const nextCursor = encodeCursor({ k: "s", r: resource, c: content, f: failure });
   const parsed = decodeCursor(input.cursor);
   if (!input.cursor) return { change: "content", revision, nextCursor };
-  if (!parsed || parsed.k !== "s" || parsed.r !== input.resource) {
+  if (!parsed || parsed.k !== "s" || parsed.r !== resource) {
     return { change: "reset", reset: "stale-cursor", revision, nextCursor };
   }
-  const contentSame = parsed.c === input.contentRevision;
-  const failureSame = parsed.f === input.failureRevision;
+  const contentSame = parsed.c === content;
+  const failureSame = parsed.f === failure;
   if (contentSame && failureSame) return { change: "none", revision, nextCursor };
   if (contentSame && !failureSame) return { change: "failure", revision, nextCursor };
   return { change: "content", revision, nextCursor };
@@ -695,6 +787,161 @@ export function formatUnchangedEvidence(cursor: string): string {
   return `No new evidence since cursor ${cursor}.`;
 }
 
+/** Stable short revision of arbitrary JSON-serialisable status facts. */
+export function revisionOf(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value) ?? "undefined").digest("base64url").slice(0, 32);
+}
+
+// ---------------------------------------------------------------------------
+// Row pages (lists). Keyset cursors keep paging stable while new rows arrive.
+// ---------------------------------------------------------------------------
+
+export interface RowKey {
+  /** Primary sort key, newest (largest) first. */
+  time: number;
+  /** Tie-break, descending. */
+  id: string;
+}
+
+interface RowCursorPayload {
+  k: "l";
+  r: string;
+  t: number;
+  i: string;
+}
+
+export interface RowPageRequest<T> {
+  cursor?: string;
+  /** Scope/filter identity bound into the cursor. */
+  resource: string;
+  limit: number;
+  maxBytes: number;
+  keyOf: (item: T) => RowKey;
+  render: (item: T) => string;
+}
+
+export interface RowPage extends VerbatimPage {
+  shown: number;
+  total: number;
+  /** Rows before this page in the current ordering. */
+  before: number;
+  /** Rows after this page. */
+  remaining: number;
+  /** Rows whose display text was clipped to fit (their id prefix stays visible). */
+  clippedRows: number;
+}
+
+function encodeRowCursor(payload: RowCursorPayload): string {
+  return ROW_CURSOR_PREFIX + Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+function decodeRowCursor(cursor: string | undefined): RowCursorPayload | undefined {
+  if (!cursor || !cursor.startsWith(ROW_CURSOR_PREFIX)) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor.slice(ROW_CURSOR_PREFIX.length), "base64url").toString("utf8")) as RowCursorPayload;
+    if (parsed?.k === "l" && typeof parsed.r === "string" && typeof parsed.t === "number" && typeof parsed.i === "string") return parsed;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+export function isRowCursor(cursor: string | undefined): boolean {
+  return decodeRowCursor(cursor) !== undefined;
+}
+
+function rowOrder(a: RowKey, b: RowKey): number {
+  if (a.time !== b.time) return b.time - a.time;
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+}
+
+function clipRow(row: string, maxBytes: number): string {
+  if (utf8ByteLength(row) <= maxBytes) return row;
+  const marker = "…";
+  const room = maxBytes - utf8ByteLength(marker);
+  if (room <= 0) return "";
+  const encoded = encoder.encode(row);
+  const end = utf8SafeEnd(encoded, 0, room);
+  return `${decoder.decode(encoded.subarray(0, end))}${marker}`;
+}
+
+/**
+ * Page compact rows newest-first. The cursor records the last row shown, so
+ * rows inserted ahead of it (new tasks) never shift later pages and rows are
+ * neither repeated nor skipped. Only whole rows are counted as shown; a single
+ * row larger than the page is clipped (callers put the id first).
+ */
+export function pageRows<T>(items: readonly T[], request: RowPageRequest<T>): RowPage {
+  const keyed = items.map((item) => ({ item, key: request.keyOf(item) }))
+    .sort((a, b) => rowOrder(a.key, b.key));
+  const total = keyed.length;
+  const limit = Math.max(1, Math.floor(request.limit));
+  const maxBytes = Math.max(0, Math.floor(request.maxBytes));
+  let start = 0;
+  let reset: PageReset | undefined;
+  const resource = resourceTag(request.resource);
+  if (request.cursor) {
+    const parsed = decodeRowCursor(request.cursor);
+    if (!parsed || parsed.r !== resource) {
+      reset = "stale-cursor";
+    } else {
+      const anchor: RowKey = { time: parsed.t, id: parsed.i };
+      start = keyed.findIndex((row) => rowOrder(row.key, anchor) > 0);
+      if (start < 0) start = total;
+    }
+  }
+  const lines: string[] = [];
+  let used = 0;
+  let clippedRows = 0;
+  let index = start;
+  for (; index < total && lines.length < limit; index += 1) {
+    const row = request.render(keyed[index]!.item);
+    const sep = lines.length ? 1 : 0;
+    const size = utf8ByteLength(row);
+    if (used + sep + size <= maxBytes) {
+      lines.push(row);
+      used += sep + size;
+      continue;
+    }
+    if (lines.length === 0) {
+      const clipped = clipRow(row, maxBytes);
+      if (clipped) {
+        lines.push(clipped);
+        used += utf8ByteLength(clipped);
+        clippedRows += 1;
+        index += 1;
+      }
+    }
+    break;
+  }
+  const shown = lines.length;
+  const remaining = Math.max(0, total - index);
+  const current = request.cursor && !reset ? request.cursor : undefined;
+  const last = shown > 0 ? keyed[index - 1]!.key : undefined;
+  const nextCursor = remaining > 0
+    ? (last ? encodeRowCursor({ k: "l", r: resource, t: last.time, i: last.id }) : current)
+    : undefined;
+  return {
+    text: lines.join("\n"),
+    hasMore: remaining > 0,
+    ...(current ? { cursor: current } : {}),
+    ...(nextCursor ? { nextCursor } : {}),
+    omittedBytes: 0,
+    omittedRows: remaining,
+    ...(reset ? { reset } : {}),
+    gaps: [],
+    shown,
+    total,
+    before: start,
+    remaining,
+    clippedRows,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Priority envelope
+// ---------------------------------------------------------------------------
+
 function joinParts(parts: Array<string | undefined>): string {
   return parts.filter((part): part is string => Boolean(part && part.length > 0)).join("\n");
 }
@@ -702,60 +949,32 @@ function joinParts(parts: Array<string | undefined>): string {
 function clipPrefix(text: string, maxBytes: number): { text: string; omittedBytes: number } {
   const total = utf8ByteLength(text);
   if (total <= maxBytes) return { text, omittedBytes: 0 };
-  const slice = sliceUtf8Bytes(text, 0, maxBytes, true);
-  return { text: slice.text, omittedBytes: total - slice.bytes };
-}
-
-function fitSections(
-  items: Array<{ name: EnvelopeSectionName; text: string | undefined }>,
-  budget: number,
-): { text: string; omitted: EnvelopeOmission[] } {
-  const omitted: EnvelopeOmission[] = [];
-  const included: string[] = [];
-  let used = 0;
-  let clipping = false;
-  for (const item of items) {
-    if (!item.text) continue;
-    const size = utf8ByteLength(item.text);
-    if (clipping) {
-      omitted.push({ section: item.name, omittedBytes: size });
-      continue;
-    }
-    const sep = included.length > 0 ? 1 : 0;
-    if (used + sep + size <= budget) {
-      included.push(item.text);
-      used += sep + size;
-      continue;
-    }
-    const room = budget - used - sep;
-    if (room > 0) {
-      const clipped = clipPrefix(item.text, room);
-      if (clipped.text) {
-        included.push(clipped.text);
-        used += sep + utf8ByteLength(clipped.text);
-      }
-      if (clipped.omittedBytes > 0) omitted.push({ section: item.name, omittedBytes: clipped.omittedBytes });
-    } else {
-      omitted.push({ section: item.name, omittedBytes: size });
-    }
-    clipping = true;
-  }
-  return { text: included.join("\n"), omitted };
+  if (maxBytes <= 0) return { text: "", omittedBytes: total };
+  const encoded = encoder.encode(text);
+  const range = sliceUtf8Range(encoded, 0, maxBytes, true, false);
+  return { text: decoder.decode(encoded.subarray(0, range.end)), omittedBytes: total - range.end };
 }
 
 function formatContinuation(info: {
-  hasMore: boolean;
-  omittedBytes: number;
-  nextCursor?: string;
-  reset?: PageReset;
+  page?: VerbatimPage;
   gaps: EvidenceGap[];
   omitted: EnvelopeOmission[];
+  statusCursor?: string;
 }): string | undefined {
   const lines: string[] = [];
-  if (info.reset) lines.push(`reset=${info.reset}`);
-  if (info.hasMore || info.omittedBytes > 0) {
-    const cursor = info.nextCursor ? ` nextCursor=${info.nextCursor}` : "";
-    lines.push(`hasMore=${info.hasMore} omittedBytes=${info.omittedBytes}${cursor}`);
+  const page = info.page;
+  if (page?.reset) lines.push(`reset=${page.reset}`);
+  if (page && (page.hasMore || page.omittedBytes > 0 || (page.omittedRows ?? 0) > 0)) {
+    const amount = page.omittedRows !== undefined
+      ? `omittedRows=${page.omittedRows}`
+      : `omittedBytes=${page.omittedBytes}`;
+    const cursor = page.nextCursor ? ` nextCursor=${page.nextCursor}${page.via ? ` (${page.via})` : ""}` : "";
+    lines.push(`hasMore=${page.hasMore} ${amount}${cursor}`);
+  } else if (page?.appendReady && page.nextCursor) {
+    lines.push(`end nextCursor=${page.nextCursor} (reuse to read only bytes appended later)`);
+  }
+  if (page?.pendingBytes) {
+    lines.push(`pendingBytes=${page.pendingBytes} (incomplete UTF-8 sequence withheld until the writer completes it)`);
   }
   for (const gap of info.gaps) {
     const bytes = gap.bytes !== undefined ? ` bytes=${gap.bytes}` : "";
@@ -765,107 +984,101 @@ function formatContinuation(info: {
   for (const item of info.omitted) {
     lines.push(`omitted ${item.section} bytes=${item.omittedBytes}`);
   }
+  if (info.statusCursor) lines.push(`statusCursor=${info.statusCursor}`);
   if (lines.length === 0) return undefined;
   return ["---", ...lines].join("\n");
 }
 
+/** Bytes always left for a function-valued failure section so its counts survive. */
+const FAILURE_SECTION_FLOOR = 256;
+
 /**
  * Assemble one model-facing payload under a total UTF-8 byte cap.
  *
- * Consumers must page verbatim answers/logs from the budget passed to
- * `verbatim` rather than from the surface cap. The assembler measures
- * identity/failure/decision/diagnostics first, reserves continuation
- * metadata, then hands the remainder to `verbatim`, so headers never clip
- * already-sliced answer bytes. Reconstructing those pages still concatenates
- * to the original source; pages are merely smaller.
+ * Budget priority: identity, decision facts (matched condition, stop error,
+ * exit), continuation/gap metadata, then failures, diagnostics, the verbatim
+ * page, and finally routine progress. `verbatimReserve` holds bytes back from
+ * failures/diagnostics so an answer page always advances. The verbatim pager
+ * receives the exact remaining budget and is never clipped afterwards, so
+ * `nextCursor` always points at the first byte not shown (a zero budget yields
+ * an empty page positioned at its start). Text order: identity (or failure
+ * first with `failureFirst`), failure, decision, diagnostics, verbatim,
+ * progress, continuation.
  */
 export function assemblePriorityEnvelope(input: {
   maxBytes: number;
   sections?: EnvelopeSections;
   verbatim?: (budget: number) => VerbatimPage;
+  verbatimReserve?: number;
   gaps?: EvidenceGap[];
+  /** Change-detection cursor, rendered with the continuation metadata. */
+  statusCursor?: string;
+  /** Render the failure section ahead of the identity line (background-task surfaces). */
+  failureFirst?: boolean;
 }): AssembledEnvelope {
   const maxBytes = clampBudgetBytes(input.maxBytes, OUTPUT_BUDGET_BYTES.status);
   const sections = input.sections ?? {};
   const extraGaps = input.gaps ?? [];
-  const requiredItems: Array<{ name: EnvelopeSectionName; text: string | undefined }> = [
-    { name: "identity", text: sections.identity },
-    { name: "failure", text: sections.failure },
-    { name: "decision", text: sections.decision },
-    { name: "diagnostics", text: sections.diagnostics },
-  ];
-
-  const clipVerbatim = (page: VerbatimPage | undefined, budget: number, omitted: EnvelopeOmission[]): VerbatimPage | undefined => {
-    if (!page) return undefined;
-    const pageBytes = utf8ByteLength(page.text);
-    if (pageBytes <= budget) return page;
-    if (budget <= 0) {
-      omitted.push({ section: "verbatim", omittedBytes: pageBytes + page.omittedBytes });
-      return { ...page, text: "", hasMore: true, omittedBytes: pageBytes + page.omittedBytes };
-    }
-    const clipped = clipPrefix(page.text, budget);
-    return {
-      ...page,
-      text: clipped.text,
-      hasMore: true,
-      omittedBytes: page.omittedBytes + clipped.omittedBytes,
-    };
-  };
-
   let continuationReserve = 0;
-  let includeProgress = true;
-  let page: VerbatimPage | undefined;
-  let continuation: string | undefined;
-  let omitted: EnvelopeOmission[] = [];
-  let text = "";
-  let gaps: EvidenceGap[] = extraGaps;
+  let last: { text: string; omitted: EnvelopeOmission[]; page?: VerbatimPage; continuation?: string; gaps: EvidenceGap[] } | undefined;
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const fitted = fitSections(requiredItems, Math.max(1, maxBytes - continuationReserve));
-    omitted = [...fitted.omitted];
-    const requiredBytes = utf8ByteLength(fitted.text);
-    const verbatimBudget = Math.max(0, maxBytes - requiredBytes - (requiredBytes > 0 ? 1 : 0) - continuationReserve);
-    page = clipVerbatim(input.verbatim?.(verbatimBudget), verbatimBudget, omitted);
-    gaps = [...extraGaps, ...(page?.gaps ?? [])];
-    const body = joinParts([fitted.text, page?.text]);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const omitted: EnvelopeOmission[] = [];
+    const avail = Math.max(0, maxBytes - continuationReserve);
+    let used = 0;
+    let count = 0;
+    const place = (name: EnvelopeSectionName, text: string | undefined, room: number): string | undefined => {
+      if (!text) return undefined;
+      const sep = count > 0 ? 1 : 0;
+      const clipped = clipPrefix(text, room - sep);
+      if (clipped.omittedBytes > 0) omitted.push({ section: name, omittedBytes: clipped.omittedBytes });
+      if (!clipped.text) return undefined;
+      used += sep + utf8ByteLength(clipped.text);
+      count += 1;
+      return clipped.text;
+    };
+    const identity = place("identity", sections.identity, avail - used);
+    const decision = place("decision", sections.decision, avail - used);
+    const failureInput = sections.failure;
+    const failureFloor = failureInput ? Math.min(FAILURE_SECTION_FLOOR, Math.max(0, avail - used)) : 0;
+    const reserve = input.verbatim
+      ? Math.max(0, Math.min(Math.floor(input.verbatimReserve ?? 0), avail - used - failureFloor - 1))
+      : 0;
+    const failureRoom = avail - used - reserve;
+    const failureText = typeof failureInput === "function"
+      ? failureInput(Math.max(0, failureRoom - (count > 0 ? 1 : 0)))
+      : failureInput;
+    const failure = place("failure", failureText, failureRoom);
+    const diagnostics = place("diagnostics", sections.diagnostics, avail - used - reserve);
+    const verbatimBudget = Math.max(0, avail - used - (count > 0 ? 1 : 0));
+    let page = input.verbatim?.(verbatimBudget);
+    if (page && utf8ByteLength(page.text) > verbatimBudget) page = input.verbatim?.(0);
+    const pageText = page?.text ? page.text : undefined;
+    const gaps = [...extraGaps, ...(page?.gaps ?? [])];
+    const body = input.failureFirst
+      ? joinParts([failure, identity, decision, diagnostics, pageText])
+      : joinParts([identity, failure, decision, diagnostics, pageText]);
     const bodyBytes = utf8ByteLength(body);
-    continuation = formatContinuation({
-      hasMore: Boolean(page?.hasMore),
-      omittedBytes: page?.omittedBytes ?? 0,
-      nextCursor: page?.nextCursor,
-      reset: page?.reset,
-      gaps,
-      omitted,
-    });
-    const withoutProgress = joinParts([body, continuation]);
-    const withoutProgressBytes = utf8ByteLength(withoutProgress);
-    if (withoutProgressBytes > maxBytes) {
-      continuationReserve += withoutProgressBytes - maxBytes + 8;
-      includeProgress = false;
-      continue;
-    }
 
-    let progressText: string | undefined;
+    let progress: string | undefined;
     if (sections.progress) {
-      const leftover = maxBytes - withoutProgressBytes;
-      if (includeProgress && leftover > 1) {
-        const clipped = clipPrefix(sections.progress, leftover - 1);
-        if (clipped.text) progressText = clipped.text;
-        if (clipped.omittedBytes > 0) omitted.push({ section: "progress", omittedBytes: clipped.omittedBytes });
-      } else {
-        omitted.push({ section: "progress", omittedBytes: utf8ByteLength(sections.progress) });
-      }
+      // Size the continuation as if progress were clipped, so the omission
+      // line it may add is already paid for.
+      const worst = formatContinuation({
+        page,
+        gaps,
+        omitted: [...omitted, { section: "progress", omittedBytes: utf8ByteLength(sections.progress) }],
+        statusCursor: input.statusCursor,
+      });
+      const leftover = maxBytes - bodyBytes - (body ? 1 : 0) - (worst ? utf8ByteLength(worst) + 1 : 0);
+      const clipped = clipPrefix(sections.progress, leftover);
+      if (clipped.omittedBytes > 0) omitted.push({ section: "progress", omittedBytes: clipped.omittedBytes });
+      progress = clipped.text || undefined;
     }
-    continuation = formatContinuation({
-      hasMore: Boolean(page?.hasMore),
-      omittedBytes: page?.omittedBytes ?? 0,
-      nextCursor: page?.nextCursor,
-      reset: page?.reset,
-      gaps,
-      omitted,
-    });
-    text = joinParts([body, progressText, continuation]);
+    const continuation = formatContinuation({ page, gaps, omitted, statusCursor: input.statusCursor });
+    const text = joinParts([body, progress, continuation]);
     const size = utf8ByteLength(text);
+    last = { text, omitted, page, continuation, gaps };
     if (size <= maxBytes) {
       return {
         text,
@@ -877,18 +1090,27 @@ export function assemblePriorityEnvelope(input: {
         gaps,
       };
     }
-    includeProgress = false;
+    // Reserve at least the whole continuation block; grow further if the body
+    // still overflows (for example when a smaller page changes the cursor).
+    continuationReserve = Math.max(
+      continuationReserve + (size - maxBytes),
+      (continuation ? utf8ByteLength(continuation) + 1 : 0) + (progress ? utf8ByteLength(progress) + 1 : 0),
+    );
   }
 
-  const clipped = clipPrefix(text || joinParts([fitSections(requiredItems, maxBytes).text, continuation]), maxBytes);
-  if (clipped.omittedBytes > 0) omitted.push({ section: "verbatim", omittedBytes: clipped.omittedBytes });
+  // Budgets smaller than the metadata itself: keep the continuation (the way
+  // back to the evidence) ahead of any body text.
+  const fallback = last ?? { text: "", omitted: [], gaps: extraGaps };
+  const tail = fallback.continuation ?? "";
+  const head = clipPrefix(sections.identity ?? "", Math.max(0, maxBytes - utf8ByteLength(tail) - 1)).text;
+  const combined = clipPrefix(joinParts([head, tail]), maxBytes);
   return {
-    text: clipped.text,
-    byteLength: utf8ByteLength(clipped.text),
+    text: combined.text,
+    byteLength: utf8ByteLength(combined.text),
     truncated: true,
-    omitted,
-    verbatim: page,
-    continuation,
-    gaps,
+    omitted: [...fallback.omitted, ...(combined.omittedBytes > 0 ? [{ section: "continuation", omittedBytes: combined.omittedBytes }] : [])],
+    verbatim: fallback.page,
+    continuation: fallback.continuation,
+    gaps: fallback.gaps,
   };
 }

@@ -3,6 +3,7 @@ import {
   appendFileSync,
   chmodSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   statSync,
   truncateSync,
@@ -21,6 +22,7 @@ import {
   formatUnchangedEvidence,
   inspectStatusRevision,
   pageRetainedFile,
+  pageRows,
   pageVerbatimText,
   readBoundedTail,
   sliceUtf8Bytes,
@@ -144,8 +146,7 @@ describe("pageVerbatimText", () => {
     const first = pageVerbatimText(source, { maxBytes: 40 });
     assert.equal(first.hasMore, true);
     assert.equal(first.text.includes("\n"), false);
-    assert.ok(utf8ByteLength(first.text) <= 40 || utf8ByteLength(first.text) <= 4);
-    assert.ok(first.text.length > 0);
+    assert.equal(utf8ByteLength(first.text), 40);
     assert.equal(reconstructText(source, 40).text, source);
   });
 
@@ -197,6 +198,27 @@ describe("pageVerbatimText", () => {
     assert.equal(page.text, "hello");
   });
 
+  it("never exceeds maxBytes: a code point larger than the budget is not returned", () => {
+    const page = pageVerbatimText("你好", { maxBytes: 1 });
+    assert.equal(page.text, "");
+    assert.equal(page.hasMore, true);
+    assert.equal(page.nextCursor, page.cursor);
+    const zero = pageVerbatimText("abc", { maxBytes: 0 });
+    assert.equal(zero.text, "");
+    assert.equal(zero.hasMore, true);
+    assert.equal(zero.nextCursor, zero.cursor);
+  });
+
+  it("binds text cursors to the resource so a scope change resets", () => {
+    const source = "answer ".repeat(100);
+    const first = pageVerbatimText(source, { maxBytes: 20, resource: "answer:session-a:sa_1" });
+    const crossed = pageVerbatimText(source, { cursor: first.nextCursor, maxBytes: 20, resource: "answer:all:sa_1" });
+    assert.equal(crossed.reset, "stale-cursor");
+    assert.equal(crossed.startByte, 0);
+    const otherRun = pageVerbatimText(source, { cursor: first.nextCursor, maxBytes: 20, resource: "answer:session-a:sa_2" });
+    assert.equal(otherRun.reset, "stale-cursor");
+  });
+
   it("keeps a final line with no trailing newline when the remainder fits", () => {
     const source = Array.from({ length: 18 }, (_, i) => `result-line-${String(i + 1).padStart(2, "0")}`).join("\n");
     const page = pageVerbatimText(source, { maxBytes: 8 * 1024 });
@@ -223,7 +245,86 @@ describe("pageRetainedFile", () => {
     const path = join(tempDir(), "retained.log");
     const source = "a€b你好😀\nend";
     writeFileSync(path, source);
-    assert.equal(reconstructFile(path, 3, { resource: "task-1", generation: 1 }), source);
+    assert.equal(reconstructFile(path, 4, { resource: "task-1", generation: 1 }), source);
+    assert.equal(reconstructFile(path, 5, { resource: "task-1", generation: 1 }), source);
+  });
+
+  it("never exceeds maxBytes: a budget smaller than the next code point stays put", () => {
+    const path = join(tempDir(), "emoji.log");
+    writeFileSync(path, "😀tail");
+    const page = pageRetainedFile(path, { maxBytes: 3, resource: "task" });
+    assert.equal(page.text, "");
+    assert.equal(page.hasMore, true);
+    assert.equal(page.startByte, 0);
+    assert.equal(page.endByte, 0);
+    assert.equal(page.nextCursor, page.cursor);
+    const wider = pageRetainedFile(path, { cursor: page.nextCursor, maxBytes: 4, resource: "task" });
+    assert.equal(wider.text, "😀");
+  });
+
+  it("withholds a trailing incomplete UTF-8 sequence until the writer completes it", () => {
+    const path = join(tempDir(), "split.log");
+    const emoji = Buffer.from("😀", "utf8");
+    writeFileSync(path, Buffer.concat([Buffer.from("a"), emoji.subarray(0, 2)]));
+    const first = pageRetainedFile(path, { maxBytes: 64, resource: "task" });
+    assert.equal(first.text, "a");
+    assert.equal(first.pendingBytes, 2);
+    assert.equal(first.hasMore, false);
+    assert.equal(first.appendReady, true);
+    appendFileSync(path, Buffer.concat([emoji.subarray(2), Buffer.from("b")]));
+    const second = pageRetainedFile(path, { cursor: first.nextCursor, maxBytes: 64, resource: "task" });
+    assert.equal(second.reset, undefined);
+    assert.equal(second.text, "😀b");
+    assert.equal(first.text + second.text, "a😀b");
+    assert.equal(second.pendingBytes, undefined);
+  });
+
+  it("passes malformed bytes through instead of withholding them forever", () => {
+    const path = join(tempDir(), "malformed.log");
+    writeFileSync(path, Buffer.from([0x61, 0xf0, 0x41, 0x42]));
+    const page = pageRetainedFile(path, { maxBytes: 64, resource: "task" });
+    assert.equal(page.endByte, 4);
+    assert.equal(page.pendingBytes, undefined);
+  });
+
+  it("detects an in-place rewrite that keeps the head, size, and inode", () => {
+    const path = join(tempDir(), "rewrite.log");
+    writeFileSync(path, `${"a".repeat(300)}${"b".repeat(30_000)}`);
+    const inode = statSync(path).ino;
+    const first = pageRetainedFile(path, { maxBytes: 16 * 1024, resource: "run" });
+    assert.equal(first.text.endsWith("b"), true);
+    writeFileSync(path, `${"a".repeat(300)}${"c".repeat(30_000)}`);
+    assert.equal(statSync(path).ino, inode, "fixture must keep the inode");
+    const after = pageRetainedFile(path, { cursor: first.nextCursor, maxBytes: 16 * 1024, resource: "run" });
+    assert.equal(after.reset, "source-replaced");
+    assert.equal(after.startByte, 0);
+    assert.equal(after.text.startsWith("a".repeat(300) + "c"), true);
+  });
+
+  it("binds file cursors to the resource and session scope", () => {
+    const path = join(tempDir(), "scoped.log");
+    writeFileSync(path, "x".repeat(100));
+    const own = pageRetainedFile(path, { maxBytes: 10, resource: "raw:session-a:bg_1" });
+    const other = pageRetainedFile(path, { cursor: own.nextCursor, maxBytes: 10, resource: "raw:all:bg_1" });
+    assert.equal(other.reset, "stale-cursor");
+    assert.equal(other.startByte, 0);
+    const same = pageRetainedFile(path, { cursor: own.nextCursor, maxBytes: 10, resource: "raw:session-a:bg_1" });
+    assert.equal(same.reset, undefined);
+    assert.equal(same.startByte, 10);
+  });
+
+  it("returns an append-ready cursor at the end that reads only appended bytes", () => {
+    const path = join(tempDir(), "eof.log");
+    writeFileSync(path, "first\n");
+    const end = pageRetainedFile(path, { maxBytes: 64, resource: "r" });
+    assert.equal(end.hasMore, false);
+    assert.equal(end.appendReady, true);
+    const idle = pageRetainedFile(path, { cursor: end.nextCursor, maxBytes: 64, resource: "r" });
+    assert.equal(idle.text, "");
+    assert.equal(idle.appendReady, true);
+    appendFileSync(path, "second\n");
+    const appended = pageRetainedFile(path, { cursor: end.nextCursor, maxBytes: 64, resource: "r" });
+    assert.equal(appended.text, "second\n");
   });
 
   it("keeps a snapshot stable across appends and only returns new bytes from the end cursor", () => {
@@ -276,8 +377,12 @@ describe("pageRetainedFile", () => {
     const path = join(tempDir(), "replaced.log");
     writeFileSync(path, "old-bytes\n");
     const first = pageRetainedFile(path, { maxBytes: 8, resource: "bg", generation: 1 });
-    rmSync(path);
+    // Rotate the old file away (it stays allocated), so the new file at this
+    // path is guaranteed a different inode on every platform. Deleting it
+    // instead lets Linux hand the same inode number to the new file.
+    renameSync(path, `${path}.1`);
     writeFileSync(path, "new-bytes-here\n");
+    assert.notEqual(statSync(path).ino, statSync(`${path}.1`).ino);
     const after = pageRetainedFile(path, {
       cursor: first.nextCursor,
       maxBytes: 8,
@@ -287,6 +392,18 @@ describe("pageRetainedFile", () => {
     assert.equal(after.reset, "source-replaced");
     assert.equal(after.startByte, 0);
     assert.equal(after.text.startsWith("new-byte"), true);
+  });
+
+  it("resets from byte zero when a deleted file is recreated, even on a reused inode", () => {
+    const path = join(tempDir(), "recreated.log");
+    writeFileSync(path, "old-bytes-old-bytes\n");
+    const first = pageRetainedFile(path, { maxBytes: 8, resource: "run" });
+    rmSync(path);
+    writeFileSync(path, "new-bytes-here-and-more\n");
+    const after = pageRetainedFile(path, { cursor: first.nextCursor, maxBytes: 8, resource: "run" });
+    assert.equal(after.reset, "source-replaced");
+    assert.equal(after.startByte, 0);
+    assert.equal(after.text, "new-byte");
   });
 
   it("distinguishes missing, empty, and unreadable files from a healthy empty result", () => {
@@ -440,5 +557,171 @@ describe("assemblePriorityEnvelope", () => {
     assert.equal(envelope.verbatim?.hasMore, true);
     assert.ok((envelope.verbatim?.omittedBytes ?? 0) > 0);
     assert.match(envelope.text, /hasMore=true/);
+  });
+
+  it("does not advance the cursor past answer bytes it could not show", () => {
+    const answer = `BEGIN${"x".repeat(5_000)}END`;
+    const envelope = assemblePriorityEnvelope({
+      maxBytes: OUTPUT_BUDGET_BYTES.answer,
+      sections: { identity: "sa_1 completed", failure: "F".repeat(4_000) },
+      verbatim: (budget) => pageVerbatimText(answer, { maxBytes: budget }),
+    });
+    assert.ok(envelope.byteLength <= OUTPUT_BUDGET_BYTES.answer);
+    const page = envelope.verbatim!;
+    const shown = page.text;
+    const next = pageVerbatimText(answer, { cursor: page.nextCursor, maxBytes: 100 });
+    assert.equal(next.startByte, utf8ByteLength(shown), "the next page starts at the first unshown byte");
+  });
+
+  it("reconstructs an answer exactly through envelope pages while failures take priority", () => {
+    const answer = `${"answer 你好 😀\n".repeat(400)}END`;
+    let cursor: string | undefined;
+    let rebuilt = "";
+    for (let i = 0; i < 200; i += 1) {
+      const envelope = assemblePriorityEnvelope({
+        maxBytes: OUTPUT_BUDGET_BYTES.answer,
+        sections: {
+          identity: "sa_1 completed",
+          failure: (budget) => "incident ".repeat(1_000).slice(0, Math.max(0, budget)),
+          decision: "Condition matched: exit_code = 0",
+        },
+        verbatimReserve: OUTPUT_BUDGET_BYTES.answer / 2,
+        verbatim: (budget) => pageVerbatimText(answer, { cursor, maxBytes: budget }),
+      });
+      assert.ok(envelope.byteLength <= OUTPUT_BUDGET_BYTES.answer);
+      assert.match(envelope.text, /Condition matched/);
+      assert.match(envelope.text, /incident/);
+      if (envelope.verbatim!.hasMore) {
+        assert.ok(utf8ByteLength(envelope.verbatim!.text) >= 900, "the reserve keeps answer pages advancing");
+      }
+      rebuilt += envelope.verbatim!.text;
+      if (!envelope.verbatim!.hasMore) break;
+      cursor = envelope.verbatim!.nextCursor;
+    }
+    assert.equal(rebuilt, answer);
+  });
+
+  it("gives a function failure section the exact remaining bytes and keeps decision facts", () => {
+    let granted = -1;
+    const envelope = assemblePriorityEnvelope({
+      maxBytes: 512,
+      sections: {
+        identity: "bg_1 failed",
+        decision: "stop failed: EPERM\nCondition matched: $.x = true",
+        failure: (budget) => {
+          granted = budget;
+          return "R".repeat(budget);
+        },
+        progress: "elapsed: 1s",
+      },
+      statusCursor: "p1.status",
+    });
+    assert.ok(envelope.byteLength <= 512);
+    assert.ok(granted > 0);
+    assert.match(envelope.text, /stop failed: EPERM/);
+    assert.match(envelope.text, /Condition matched/);
+    assert.match(envelope.text, /statusCursor=p1\.status/);
+    assert.equal(envelope.omitted.some((item) => item.section === "failure"), false);
+  });
+
+  it("prints an append-ready cursor for a retained file read to its end", () => {
+    const path = join(tempDir(), "raw.log");
+    writeFileSync(path, "complete\n");
+    const envelope = assemblePriorityEnvelope({
+      maxBytes: OUTPUT_BUDGET_BYTES.rawPage,
+      sections: { identity: "raw" },
+      verbatim: (budget) => pageRetainedFile(path, { maxBytes: budget, resource: "r" }),
+    });
+    const match = envelope.text.match(/end nextCursor=(\S+)/);
+    assert.ok(match, envelope.text);
+    appendFileSync(path, "later\n");
+    assert.equal(pageRetainedFile(path, { cursor: match![1], maxBytes: 64, resource: "r" }).text, "later\n");
+  });
+});
+
+describe("envelope convergence", () => {
+  it("keeps every section and whole rows when a row page nearly fills the budget", () => {
+    const items = Array.from({ length: 200 }, (_, i) => ({ id: `run_${String(i).padStart(3, "0")}`, t: i }));
+    for (const maxBytes of [1_024, 2_048, 4_096]) {
+      const envelope = assemblePriorityEnvelope({
+        maxBytes,
+        sections: {
+          identity: "subagent_list · 200 matching",
+          failure: "150 listed runs with active failure observations",
+          diagnostics: "3 run record(s) with missing or unreadable metadata",
+        },
+        gaps: [{ kind: "read", detail: "3 unreadable run metadata record(s)" }],
+        statusCursor: `p1.${"s".repeat(120)}`,
+        verbatim: (budget) => pageRows(items, {
+          resource: "list:all:",
+          limit: 100,
+          maxBytes: budget,
+          keyOf: (row) => ({ time: row.t, id: row.id }),
+          render: (row) => `• ${row.id}  [completed]  model  1m 00s · 3 incidents`,
+        }),
+      });
+      assert.ok(envelope.byteLength <= maxBytes, `${envelope.byteLength} > ${maxBytes}`);
+      assert.match(envelope.text, /150 listed runs/);
+      assert.match(envelope.text, /unreadable metadata/);
+      assert.match(envelope.text, /• run_199/);
+      assert.match(envelope.text, /hasMore=true omittedRows=\d+ nextCursor=l1\./);
+      assert.equal(envelope.omitted.length, 0);
+    }
+  });
+});
+
+describe("pageRows", () => {
+  interface Row { id: string; t: number }
+  const rows = (count: number, from = 0): Row[] => Array.from({ length: count }, (_, i) => ({ id: `task_${String(from + i).padStart(3, "0")}`, t: 1_000 + from + i }));
+  const request = (cursor?: string, limit = 10) => ({
+    cursor,
+    resource: "list:session-a:",
+    limit,
+    maxBytes: 4_096,
+    keyOf: (row: Row) => ({ time: row.t, id: row.id }),
+    render: (row: Row) => `${row.id} ok`,
+  });
+
+  it("pages every row newest first, beyond 100, without repeats or gaps", () => {
+    const items = rows(105);
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 50; i += 1) {
+      const page = pageRows(items, request(cursor));
+      seen.push(...page.text.split("\n").filter(Boolean).map((line) => line.split(" ")[0]!));
+      if (!page.hasMore) break;
+      assert.equal(page.omittedRows, 105 - seen.length);
+      cursor = page.nextCursor;
+    }
+    assert.equal(seen.length, 105);
+    assert.equal(new Set(seen).size, 105);
+    assert.equal(seen[0], "task_104");
+    assert.equal(seen.at(-1), "task_000");
+  });
+
+  it("keeps later pages stable when new rows arrive ahead of the cursor", () => {
+    const items = rows(30);
+    const first = pageRows(items, request());
+    const grown = [...items, ...rows(5, 30)];
+    const second = pageRows(grown, request(first.nextCursor));
+    assert.equal(second.text.split("\n")[0], "task_019 ok");
+  });
+
+  it("resets a cursor from another scope or filter", () => {
+    const items = rows(30);
+    const first = pageRows(items, request());
+    const other = pageRows(items, { ...request(first.nextCursor), resource: "list:all:" });
+    assert.equal(other.reset, "stale-cursor");
+    assert.equal(other.before, 0);
+  });
+
+  it("clips a single oversized row but keeps its leading id", () => {
+    const items = [{ id: "task_big", t: 1 }, { id: "task_small", t: 0 }];
+    const page = pageRows(items, { ...request(), maxBytes: 64, render: (row: Row) => `${row.id} ${"n".repeat(500)}` });
+    assert.ok(utf8ByteLength(page.text) <= 64);
+    assert.equal(page.text.startsWith("task_big "), true);
+    assert.equal(page.clippedRows, 1);
+    const next = pageRows(items, { ...request(page.nextCursor), maxBytes: 64, render: (row: Row) => `${row.id} ${"n".repeat(500)}` });
+    assert.equal(next.text.startsWith("task_small "), true);
   });
 });

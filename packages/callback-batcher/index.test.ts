@@ -485,7 +485,7 @@ test("urgent callback content is bounded to 2 KiB with receipts, counts, and ret
     assert.ok(utf8ByteLength(content) <= CALLBACK_BATCH_BUDGET_BYTES, `urgent was ${utf8ByteLength(content)} bytes`);
     assert.doesNotMatch(content, /\uFFFD/);
     assert.match(content, /sa_urgent_bound/);
-    assert.match(content, /omittedIncidents=7 retrieve: Inspect: subagent_result id="sa_urgent_bound"/);
+    assert.match(content, /incidents=12 omittedIncidents=7 retrieve: subagent_result id="sa_urgent_bound"/);
     assert.match(content, /Inspect: subagent_result id="sa_urgent_bound"/);
     assert.match(content, /omittedBytes=\d+/);
     assert.equal(receipts, 1);
@@ -539,4 +539,66 @@ test("callback overflow stays queued across a recreated batcher and is receipted
   } finally {
     first.cancel();
   }
+});
+
+function incidentRows(count: number, filler: string): string[] {
+  return Array.from({ length: count }, (_, i) => `Unresolved failure · observed 2026-09-27T00:00:0${i % 10}Z · incident-${i} ${filler}`);
+}
+
+test("batch rows count exactly which incident rows they show and never claim clipped ones", () => {
+  const rows = incidentRows(12, "界".repeat(150));
+  const packed = packCallbackBatch([
+    event("bg_many", { source: "background-task", detailTool: "bg_task_status", status: "failed", failureRows: rows }),
+  ]);
+  assert.ok(utf8ByteLength(packed.text) <= CALLBACK_BATCH_BUDGET_BYTES);
+  const shown = rows.filter((row) => packed.text.includes(row)).length;
+  assert.match(packed.text, new RegExp(`incidents=12 shown=${shown} omittedIncidents=${12 - shown} retrieve: bg_task_status id=bg_many`));
+  assert.doesNotMatch(packed.text, /\uFFFD/);
+});
+
+test("a single oversized row shrinks its detail but keeps its incident counts and retrieval", () => {
+  const rows = incidentRows(30, "x".repeat(380));
+  const packed = packCallbackBatch([
+    event("sa_huge", { label: "L".repeat(500), status: "failed", failureRows: rows, decision: "D".repeat(2_000) }),
+    event("sa_next"),
+  ], { maxBytes: 1_024 });
+  assert.ok(utf8ByteLength(packed.text) <= 1_024, `${utf8ByteLength(packed.text)} bytes`);
+  assert.deepEqual(packed.represented.map((item) => item.id), ["sa_huge"]);
+  assert.match(packed.text, /incidents=30 shown=0 omittedIncidents=30 retrieve: subagent_result id="sa_huge"/);
+  assert.match(packed.text, /1 more completion omitted from this batch \(not receipted; still queued\)/);
+});
+
+test("urgent callbacks keep the explanation, whole incident rows, exact counts, and one real inspect target", () => {
+  for (const filler of ["x".repeat(4_000), "界".repeat(3_000)]) {
+    const rows = incidentRows(12, filler.slice(0, 120));
+    const content = formatUrgentCallback({
+      source: "background-task",
+      id: "failure:bg_task_1:deadbeef",
+      inspectId: "bg_task_1",
+      label: "deploy",
+      status: "failure",
+      customType: "background-task-failure",
+      content: `Background task bg_task_1 needs attention. ${filler}`,
+      detailTool: "bg_task_status",
+      failureRows: rows,
+    });
+    assert.ok(utf8ByteLength(content) <= CALLBACK_BATCH_BUDGET_BYTES, `${utf8ByteLength(content)} bytes`);
+    assert.doesNotMatch(content, /failure:bg_task_1:deadbeef/);
+    assert.match(content, /^background-task id=bg_task_1 /);
+    assert.match(content, /Background task bg_task_1 needs attention/);
+    assert.match(content, /omittedBytes=\d+ retrieve: bg_task_status id=bg_task_1/);
+    const shown = rows.filter((row) => content.includes(row)).length;
+    assert.ok(shown >= 1, "at least one whole incident row fits beside the explanation");
+    assert.match(content, new RegExp(`incidents=12 shown=${shown} omittedIncidents=${12 - shown} retrieve: bg_task_status id=bg_task_1`));
+    assert.equal(content.match(/Inspect: bg_task_status id=bg_task_1/g)?.length, 1);
+  }
+});
+
+test("urgent callbacks under a tiny budget still keep the counts ahead of any body", () => {
+  const content = formatUrgentCallback({
+    source: "subagent", id: "sa_tiny", label: "w", status: "lost", customType: "subagent-health",
+    content: "ATTENTION ".repeat(200), failureRows: incidentRows(4, "y".repeat(100)),
+  }, { maxBytes: 400 });
+  assert.ok(utf8ByteLength(content) <= 400);
+  assert.match(content, /incidents=4 shown=0 omittedIncidents=4/);
 });

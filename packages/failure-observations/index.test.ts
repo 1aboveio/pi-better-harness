@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emptyFailureState, reduceFailure, activeFailures, formatFailureSummary, formatFailureLines, pageFailureIncidents, isIncidentCursor, incidentCursorAt, pendingFailureAttention,
+  formatIncidentSummary, failureRevision,
   observeFailures, readFailureState, markFailureAttentionDelivered, failureAttentionHandled, type FailureEvent } from "./index.ts";
 
 const failed: FailureEvent = { id: "call-1:end", operation: "cwd:project:tsc", kind: "failure",
@@ -207,6 +208,83 @@ test("omitted incidents reconstruct through caller-owned incident pages", () => 
   const rest = pageFailureIncidents(state, { cursor: incidentCursorAt(state, 5), maxBytes: 8 * 1024 });
   assert.equal(rest.text, lines.slice(5).join("\n"));
   assert.equal(rest.omitted, 0);
+});
+
+function manyIncidents(count: number, summary: (i: number) => string): ReturnType<typeof emptyFailureState> {
+  let state = emptyFailureState();
+  for (let i = 0; i < count; i++) {
+    state = reduceFailure(state, { ...failed, id: `incident-${i}`, operation: `op-${i}`, summary: summary(i), evidence: `evidence-${i}` }, 1000 + i);
+  }
+  return state;
+}
+
+/** Concatenate incident pages exactly: rows are newline-joined except where a row continues. */
+function reconstructIncidents(state: ReturnType<typeof emptyFailureState>, maxBytes: number, cursor?: string, resource?: string): string {
+  let rebuilt = "";
+  let previousPartial = cursor ? pageFailureIncidents(state, { cursor, maxBytes: 0, resource }).startsPartial : false;
+  for (let pages = 0; pages < 500; pages += 1) {
+    const page = pageFailureIncidents(state, { cursor, maxBytes, resource });
+    assert.equal(page.reset, undefined);
+    assert.ok(Buffer.byteLength(page.text) <= maxBytes, `page of ${Buffer.byteLength(page.text)} bytes exceeds ${maxBytes}`);
+    assert.equal(page.startsPartial, previousPartial);
+    rebuilt += (rebuilt && page.text && !previousPartial ? "\n" : "") + page.text;
+    previousPartial = page.endsPartial;
+    if (!page.hasMore) return rebuilt;
+    cursor = page.nextCursor;
+  }
+  throw new Error("incident paging did not terminate");
+}
+
+test("rows larger than the page split at a code point and resume at that byte", () => {
+  const state = manyIncidents(8, (i) => `incident-${i} ${"界".repeat(150)}`);
+  const lines = formatFailureLines(state);
+  assert.ok(Buffer.byteLength(lines[0]!) > 300);
+  assert.equal(reconstructIncidents(state, 300), lines.join("\n"));
+  const first = pageFailureIncidents(state, { maxBytes: 300 });
+  assert.equal(first.represented, 0, "a clipped row is not counted as shown");
+  assert.equal(first.omitted, 8);
+  assert.equal(first.endsPartial, true);
+  assert.doesNotMatch(first.text, /\uFFFD/);
+});
+
+test("the incident summary counts shown and omitted rows exactly and its cursor resumes at the first unshown byte", () => {
+  const state = manyIncidents(8, (i) => `incident-${i} ${"界".repeat(150)}`);
+  const lines = formatFailureLines(state);
+  for (const budget of [200, 700, 1_200, 2_000]) {
+    const summary = formatIncidentSummary(state, { maxBytes: budget, resource: "incidents:s:bg_1" });
+    assert.ok(Buffer.byteLength(summary.text) <= budget, `summary ${Buffer.byteLength(summary.text)} > ${budget}`);
+    assert.equal(summary.total, 8);
+    assert.equal(summary.represented + summary.omitted, 8);
+    assert.match(summary.text, new RegExp(`8 active failure observations · ${summary.represented} shown · ${summary.omitted} omitted`));
+    const body = summary.text.split("\n").slice(1).join("\n");
+    const rest = reconstructIncidents(state, 900, summary.nextCursor, "incidents:s:bg_1");
+    const partial = body && !lines.slice(0, summary.represented).join("\n").endsWith(body);
+    const shownPlusRest = partial ? body + rest : [body, rest].filter(Boolean).join("\n");
+    assert.equal(shownPlusRest, lines.join("\n"), `budget ${budget}`);
+  }
+  const all = formatIncidentSummary(manyIncidents(2, (i) => `small-${i}`), { maxBytes: 1_024 });
+  assert.equal(all.omitted, 0);
+  assert.doesNotMatch(all.text, /incidentCursor/);
+});
+
+test("incident cursors are bound to their resource scope", () => {
+  const state = manyIncidents(6, (i) => `incident-${i} ${"x".repeat(200)}`);
+  const first = pageFailureIncidents(state, { maxBytes: 300, resource: "incidents:session-a:bg_1" });
+  const other = pageFailureIncidents(state, { cursor: first.nextCursor, maxBytes: 300, resource: "incidents:all:bg_1" });
+  assert.equal(other.reset, "stale-cursor");
+  const same = pageFailureIncidents(state, { cursor: first.nextCursor, maxBytes: 300, resource: "incidents:session-a:bg_1" });
+  assert.equal(same.reset, undefined);
+});
+
+test("failure revision changes on a repeated failure of the same operation, not on receipts", () => {
+  let state = reduceFailure(emptyFailureState(), failed, 1000);
+  const before = failureRevision(state);
+  state = reduceFailure(state, { ...failed, id: "call-2:end", summary: "again" }, 2000);
+  assert.equal(activeFailures(state).length, 1);
+  const repeated = failureRevision(state);
+  assert.notEqual(repeated, before);
+  state = reduceFailure(state, { id: "delivered:x", operation: "attention-delivery", kind: "delivered", incidents: [activeFailures(state)[0]!.id] }, 3000);
+  assert.equal(failureRevision(state), repeated);
 });
 
 test("special event IDs cannot suppress delivery through Object.prototype", () => {
