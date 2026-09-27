@@ -22,8 +22,10 @@ const intentProperties = {
         description: "Optional stable id for one logical operation. Reuse it on a modified retry (changed scope, timeout, or flags) so a later success recovers the earlier failure." },
     attemptId: { type: "string", pattern: INTENT_ID_PATTERN,
         description: "Optional unique id for this execution, for use as evidence in failure_disposition." },
-    expectedExitCodes: { type: "array", items: { type: "integer", minimum: 1, maximum: 255 }, minItems: 1, maxItems: MAX_EXPECTED_EXIT_CODES, uniqueItems: true,
-        description: "Optional non-zero exit codes that are intentional for this command (for example [1] for an rg/grep no-match or git diff --exit-code probe). Declared before the command runs; the final shell exit code is what is classified." },
+    expectedExitCodes: { type: "array", items: { type: "integer", minimum: 1, maximum: 255 }, minItems: 1, maxItems: MAX_EXPECTED_EXIT_CODES,
+        // Distinctness is enforced by readCommandIntent, not `uniqueItems`: OpenAI rejects that keyword
+        // in function schemas, which failed every confined child's first request.
+        description: "Optional distinct non-zero exit codes that are intentional for this command (for example [1] for an rg/grep no-match or git diff --exit-code probe). Declared before the command runs; the final shell exit code is what is classified." },
 };
 
 function sessionToolCalls(ctx: ExtensionContext | undefined): Array<{ type: string; [key: string]: unknown }> {
