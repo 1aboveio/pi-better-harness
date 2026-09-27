@@ -20,6 +20,9 @@ jobs:
           Push-Location C:\spike; npm install --no-audit --no-fund; Pop-Location
           icacls C:\spike /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
           whoami /groups /fo list | Select-String "Mandatory"
+      - name: Bisect CreateRestrictedToken
+        shell: pwsh
+        run: node C:\spike\bisect.mjs 2>&1
       - name: Spike as the runner (elevated)
         shell: pwsh
         run: |
