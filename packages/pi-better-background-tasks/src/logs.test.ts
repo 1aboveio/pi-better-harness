@@ -51,3 +51,12 @@ describe("background task log retention", () => {
     expect(log.text).toContain("final diagnostic");
   });
 });
+
+describe("background task log read errors", () => {
+  it("preserves reader errors instead of looking empty", () => {
+    const missing = logPath() + "-missing";
+    const log = readLog(missing, 10);
+    expect(log.text).toBe("");
+    expect(log.error).toBeTruthy();
+  });
+});
