@@ -13,7 +13,8 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 ## Core Features
 
 - `/goal` runtime for starting, pausing, resuming, completing, and clearing the current objective.
-- `escape` pauses the active goal; paused goals are never poked.
+- `escape` pauses the active goal and your next message resumes it; `/goal pause` stays paused until `/goal resume`. Paused goals are never poked.
+- Background work that finishes while an `ask_user_question` is pending is handed to the agent right after the answer.
 - A compact goal widget that does not replace Pi's footer.
 - Background activity tracking for subagents and other registered providers.
 - A progress-aware follow-up loop that holds after repeated identical outcomes.
@@ -29,6 +30,15 @@ metadata:
 ```
 
 Invoke the skill with Pi's `/skill:name` command, or supervise it with `/goal /skill:name task`. The goal extension resolves the command against Pi's registry, persists its source, and expands the skill on kickoff and continuation (including after session resume). A bound command that disappears or changes source pauses the goal. `/goal /template task` also re-expands prompt templates on continuation; `/goal /extension-command task` dispatches the extension command once, then continues with ordinary goal supervision to avoid repeating side effects. Plain-language goals work as before. This command binding requires Pi 0.84.4 or later. Legacy slash-shaped goals without a binding pause on resume rather than running without the skill. `/workflow` shows a coordinator skill owner; call `release_workflow` after the workflow's completion audit (or use `/workflow clear` to release it manually). Completing an active goal also releases ownership.
+
+A skill that is only an alias of a coordinator declares the target instead of a role:
+
+```yaml
+metadata:
+  workflow-alias-of: rush-issues
+```
+
+Invoking the alias (`/skill:resolve-issues`, or `/goal /skill:resolve-issues task`) records the target coordinator, with the target's registered path, as the workflow owner, so its task plan, continuation instructions, and plan tools behave exactly as if the target had been invoked. The target must be a registered `workflow-role: coordinator` skill; an unregistered target, a non-coordinator target, or a chain of aliases is refused with a notice.
 
 When `pi-better-plan` is installed, it defers its prompt, checklist, and `update_plan` tool to a skill-owned task plan. Skills without this metadata retain normal goal and plan behavior. The skill itself owns its planning format and worker policy; the harness does not enumerate skills or impose a shared workflow schema. The former `pi-better-plan-workflow: coordinator` metadata remains supported for installed skills.
 

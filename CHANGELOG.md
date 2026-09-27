@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **goal**: an `escape` interrupt no longer leaves an active goal paused indefinitely. It is now a soft pause (`pauseReason: "interrupt"`): the next conversational message reactivates the goal, and automatic continuation resumes once that exchange settles. `/goal pause` and pauses for an unavailable command or workflow stay sticky until `/goal resume`; completed and budget-limited goals are unaffected. Previously a long orchestrator run sat idle after the user interrupted to ask a question, until the skill was re-invoked.
+- **goal**: background work that finishes while a blocking `ask_user_question` is pending is now steered to the agent right after the answer, instead of waiting behind the follow-up callback batch until the whole run ends. The prompt context also warns the agent, while background work runs, that a blocking question holds completions.
+
+- **goal**: a skill alias declaring `metadata.workflow-alias-of: <coordinator>` now binds its target coordinator as the workflow owner. Previously `/skill:resolve-issues` (an alias of `rush-issues`) recorded no owner, so `sync_workflow_plan` refused with "Only an active rush-issues workflow can sync its plan."
+
 ## [pi-better-harness@0.5.2] - 2026-09-27
 
 ### Fixed

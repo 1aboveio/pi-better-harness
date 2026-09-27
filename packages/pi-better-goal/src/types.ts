@@ -65,6 +65,14 @@ export interface ActivitySnapshot {
 
 export type GoalStatus = "active" | "paused" | "budgetLimited" | "complete";
 
+/**
+ * Why a paused goal is paused. `interrupt` marks a soft pause from escape (or
+ * any other abort of the running turn): the user's next conversational message
+ * resumes it. A paused goal without a reason (`/goal pause`, an unavailable
+ * command or workflow) stays paused until `/goal resume`.
+ */
+export type GoalPauseReason = "interrupt";
+
 export interface GoalUsage {
   tokensUsed: number;
   activeSeconds: number;
@@ -75,6 +83,8 @@ export interface GoalSnapshot {
   objective: string;
   command?: GoalCommandBinding;
   status: GoalStatus;
+  /** Present only while `status` is "paused". */
+  pauseReason?: GoalPauseReason;
   tokenBudget: number | null;
   usage: GoalUsage;
   createdAt: number;

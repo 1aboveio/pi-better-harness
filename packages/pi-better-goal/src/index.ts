@@ -45,6 +45,7 @@ import {
   EXTENSION_VERSION,
   type ActivitySnapshot,
   type BackgroundActivityProvider,
+  type BackgroundWorkItem,
   type GoalSnapshot,
 } from "./types.js";
 
@@ -62,6 +63,14 @@ const MAX_NO_PROGRESS_RETRIES = parseRetryLimit(
   process.env.PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES,
   DEFAULT_MAX_NO_PROGRESS_RETRIES,
 );
+
+/**
+ * Tools that block the foreground turn until the user answers. Background
+ * completions that arrive meanwhile queue behind the answer (Pi only drains
+ * steering after the whole tool batch, and callback batches are follow-ups
+ * that wait for the entire run), so the goal harvests them explicitly.
+ */
+const BLOCKING_QUESTION_TOOLS: ReadonlySet<string> = new Set(["ask_user_question"]);
 
 const GOAL_ACTIONS: readonly AutocompleteItem[] = [
   { value: "pause", label: "pause", description: "Pause the active goal" },
@@ -110,6 +119,46 @@ function wasTurnAborted(messages: readonly unknown[]): boolean {
     return candidate.stopReason === "aborted";
   }
   return false;
+}
+
+function activeItemsByKey(snapshot: ActivitySnapshot): Map<string, BackgroundWorkItem> {
+  const items = new Map<string, BackgroundWorkItem>();
+  for (const provider of snapshot.providers) {
+    for (const item of provider.items) {
+      if (item.active) items.set(`${provider.providerId}:${item.id}`, item);
+    }
+  }
+  return items;
+}
+
+/** Items that were active when a question started and are no longer active now. */
+export function finishedSinceQuestion(
+  activeAtStart: ReadonlyMap<string, BackgroundWorkItem>,
+  snapshot: ActivitySnapshot,
+): BackgroundWorkItem[] {
+  const stillActive = activeItemsByKey(snapshot);
+  const current = new Map<string, BackgroundWorkItem>();
+  for (const provider of snapshot.providers) {
+    for (const item of provider.items) current.set(`${provider.providerId}:${item.id}`, item);
+  }
+  const finished: BackgroundWorkItem[] = [];
+  for (const [key, started] of activeAtStart) {
+    if (stillActive.has(key)) continue;
+    finished.push(current.get(key) ?? { ...started, active: false, status: "unknown" });
+  }
+  return finished;
+}
+
+function questionHarvestPrompt(finished: readonly BackgroundWorkItem[]): string {
+  const rows = finished.map((item) => {
+    const label = item.label ? `${item.label} (${item.id})` : item.id;
+    return `- ${label}: ${item.status}`;
+  });
+  return [
+    `${finished.length} background item${finished.length === 1 ? "" : "s"} finished while you were waiting on the user's answer:`,
+    ...rows,
+    "Inspect and integrate these results now (for example with subagent_result or bg_task_status) before acting on the answer; their completion notices may still arrive later as a batch.",
+  ].join("\n");
 }
 
 function continuationPrompt(goal: GoalSnapshot, owner: ReturnType<typeof currentWorkflowOwner> = null): string {
@@ -188,12 +237,15 @@ export default function (pi: ExtensionAPI): void {
   let idleContinuationSignature = "";
   let refreshGoalWidget: ((force?: boolean) => void) | undefined;
   let lastAgentEvidence: ContinuationEvidence | null = null;
+  /** Background items active when each pending blocking question started, keyed by tool call id. */
+  const pendingQuestions = new Map<string, Map<string, BackgroundWorkItem>>();
 
   const getGoal = (ctx: ExtensionContext): GoalSnapshot | null => currentGoalSnapshot(ctx);
   const getWorkflow = (ctx: ExtensionContext) => currentWorkflowOwner(ctx.sessionManager.getBranch());
+  const registeredSkillPath = (name: string): string | undefined =>
+    pi.getCommands?.().find((item) => item.name === `skill:${name}` && item.source === "skill")?.sourceInfo.path;
   const workflowAvailable = (owner: NonNullable<ReturnType<typeof currentWorkflowOwner>>): boolean => {
-    const command = pi.getCommands?.().find((item) => item.name === `skill:${owner.name}` && item.source === "skill");
-    if (command?.sourceInfo.path !== owner.path) return false;
+    if (registeredSkillPath(owner.name) !== owner.path) return false;
     try {
       return workflowOwnerFromSkill(owner.name, owner.path)?.planOwner === owner.planOwner;
     } catch {
@@ -268,13 +320,30 @@ export default function (pi: ExtensionAPI): void {
     refreshGoalWidget?.(wasVisible);
   };
 
+  /**
+   * An interrupt (escape, or anything else that aborts the running turn) is a
+   * soft pause: it stops autonomous continuation now, and the user's next
+   * conversational message resumes the goal once that exchange settles. Only
+   * `/goal pause` (or an unavailable command/workflow) is a sticky pause.
+   */
   const pauseGoalOnInterrupt = (ctx: ExtensionContext): void => {
     const goal = getGoal(ctx);
     if (!isPokeable(goal)) {
       return;
     }
-    setGoal(goalWithStatus(goal, "paused"), ctx, "runtime");
-    notifyGoal(ctx, "Goal paused (interrupted).");
+    setGoal(goalWithStatus(goal, "paused", undefined, "interrupt"), ctx, "runtime");
+    notifyGoal(ctx, "Goal paused (interrupted). Send a message to resume it after that exchange, or use /goal pause to keep it paused.");
+  };
+
+  /** Why a paused goal cannot become active again, or null when it can. */
+  const resumeBlocker = (goal: GoalSnapshot): string | null => {
+    if (!goal.command && skillCommandName(goal.objective)) {
+      return "Invoke the skill directly; this legacy slash-command goal cannot resume as plain text.";
+    }
+    if (goal.command && !commandAvailable(pi, goal.command)) {
+      return `Cannot resume: /${goal.command.name} is no longer registered at its original source.`;
+    }
+    return null;
   };
 
   const boundCommandReady = (goal: GoalSnapshot, ctx: ExtensionContext): boolean => {
@@ -392,7 +461,7 @@ export default function (pi: ExtensionAPI): void {
     }
     const goal = createGoalSnapshot(objective.trim(), tokenBudget, undefined, command ?? undefined);
     const owner = command?.source === "skill"
-      ? workflowOwnerFromSkill(command.name.slice("skill:".length), command.path)
+      ? workflowOwnerFromSkill(command.name.slice("skill:".length), command.path, registeredSkillPath)
       : null;
     if (getWorkflow(ctx)) recordWorkflow(null);
     setGoal(goal, ctx, source);
@@ -441,7 +510,13 @@ export default function (pi: ExtensionAPI): void {
         foregroundRunning,
         backgroundRunning: latestSnapshot?.backgroundRunning ?? false,
       });
-      const status = snapshot.backgroundRunning
+      let waitingOnAnswer = 0;
+      for (const activeAtStart of pendingQuestions.values()) {
+        waitingOnAnswer += finishedSinceQuestion(activeAtStart, snapshot).length;
+      }
+      const status = waitingOnAnswer > 0
+        ? `${waitingOnAnswer} background done; waiting on your answer`
+        : snapshot.backgroundRunning
         ? `bg ${snapshot.activeBackgroundCount}${snapshot.unhealthyBackgroundCount ? `, ${snapshot.unhealthyBackgroundCount} unhealthy` : ""}`
         : continuation?.blocked
           ? "waiting: no progress"
@@ -604,12 +679,9 @@ export default function (pi: ExtensionAPI): void {
           notifyGoal(ctx, "Only paused goals can be resumed.", "warning");
           return;
         }
-        if (!current.command && skillCommandName(current.objective)) {
-          notifyGoal(ctx, "Invoke the skill directly; this legacy slash-command goal cannot resume as plain text.", "error");
-          return;
-        }
-        if (current.command && !commandAvailable(pi, current.command)) {
-          notifyGoal(ctx, `Cannot resume: /${current.command.name} is no longer registered at its original source.`, "error");
+        const blocker = resumeBlocker(current);
+        if (blocker) {
+          notifyGoal(ctx, blocker, "error");
           return;
         }
         const goal = goalWithStatus(current, "active");
@@ -794,7 +866,7 @@ export default function (pi: ExtensionAPI): void {
       const command = pi.getCommands?.().find((item) => item.name === `skill:${skillName}` && item.source === "skill");
       if (command) {
         try {
-          const owner = workflowOwnerFromSkill(skillName, command.sourceInfo.path);
+          const owner = workflowOwnerFromSkill(skillName, command.sourceInfo.path, registeredSkillPath);
           if (owner) recordWorkflow(owner);
         } catch (error) {
           notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -803,6 +875,22 @@ export default function (pi: ExtensionAPI): void {
       }
     }
     const goal = getGoal(ctx);
+    if (goal?.status === "paused" && goal.pauseReason === "interrupt") {
+      // Conversational input after an interrupt means the user has taken the
+      // wheel, not stopped the goal: reactivate it so continuation resumes once
+      // this exchange settles. Pi's built-in commands (/settings, /model, ...)
+      // and extension commands never reach this handler.
+      const blocker = resumeBlocker(goal);
+      if (blocker) {
+        notifyGoal(ctx, `Goal stays paused. ${blocker}`, "warning");
+        return;
+      }
+      const resumed = goalWithStatus(goal, "active");
+      setGoal(resumed, ctx, "runtime");
+      resetContinuationState(resumed);
+      notifyGoal(ctx, "Goal resumed; it continues after this exchange.");
+      return;
+    }
     if (goal?.status === "active") {
       resetContinuationState(goal);
     }
@@ -816,6 +904,10 @@ export default function (pi: ExtensionAPI): void {
     if (!isPokeable(goal) && !owner) {
       return;
     }
+
+    const questionInstruction = snapshot.backgroundRunning
+      ? " A blocking user question (ask_user_question) holds this whole turn until the user answers, and background completions wait behind it. Harvest finished background results before asking, and ask only when the answer is needed to proceed."
+      : "";
 
     if (owner) {
       if (!workflowAvailable(owner)) {
@@ -832,7 +924,8 @@ export default function (pi: ExtensionAPI): void {
       }
       return {
         systemPrompt: `${event.systemPrompt}\n\nActive workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
-          (isPokeable(goal) ? `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.` : ""),
+          (isPokeable(goal) ? `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.` : "") +
+          (questionInstruction ? `\n\n${questionInstruction.trim()}` : ""),
       };
     }
 
@@ -843,7 +936,7 @@ export default function (pi: ExtensionAPI): void {
     return {
       systemPrompt:
         `${event.systemPrompt}\n\n` +
-        `Pi Better Goal active objective: ${goal.objective}. Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit.${backgroundInstruction}`,
+        `Pi Better Goal active objective: ${goal.objective}. Keep working through clear low-risk next steps, and mark complete only after an evidence-backed completion audit.${backgroundInstruction}${questionInstruction}`,
     };
   });
 
@@ -873,6 +966,32 @@ export default function (pi: ExtensionAPI): void {
     if (wasTurnAborted(event.messages)) {
       pauseGoalOnInterrupt(ctx);
     }
+  });
+
+  pi.on("tool_execution_start", async (event, ctx) => {
+    if (!BLOCKING_QUESTION_TOOLS.has(event.toolName)) return;
+    currentCtx = ctx;
+    const snapshot = await publishSnapshot(ctx);
+    const active = activeItemsByKey(snapshot);
+    if (active.size > 0) pendingQuestions.set(event.toolCallId, active);
+  });
+
+  pi.on("tool_execution_end", async (event, ctx) => {
+    const activeAtStart = pendingQuestions.get(event.toolCallId);
+    if (!activeAtStart) return;
+    pendingQuestions.delete(event.toolCallId);
+    currentCtx = ctx;
+    const snapshot = await publishSnapshot(ctx);
+    const finished = finishedSinceQuestion(activeAtStart, snapshot);
+    if (finished.length === 0) return;
+    // Steering is drained right after this tool batch, so the model sees the
+    // finished work together with the user's answer instead of after the run.
+    pi.sendMessage({
+      customType: EXTENSION_NAME,
+      content: questionHarvestPrompt(finished),
+      display: false,
+      details: { kind: "question-harvest", toolCallId: event.toolCallId, finished: finished.map((item) => ({ id: item.id, status: item.status })) },
+    }, { deliverAs: "steer", triggerTurn: true });
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
@@ -917,6 +1036,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     stopPolling();
     foregroundRunning = false;
+    pendingQuestions.clear();
     clearIdleContinuation();
     currentCtx = undefined;
     latestSnapshot = null;

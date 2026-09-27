@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { GoalCommandBinding } from "./command-binding.js";
 
-import { EXTENSION_NAME, type GoalSnapshot, type GoalStatus } from "./types.js";
+import { EXTENSION_NAME, type GoalPauseReason, type GoalSnapshot, type GoalStatus } from "./types.js";
 
 const LEGACY_GOAL_ENTRY_TYPE = "pi-codex-goal";
 const MAX_OBJECTIVE_CHARS = 8000;
@@ -17,6 +17,7 @@ interface GoalLike {
   objective: string;
   command?: unknown;
   status: GoalStatus;
+  pauseReason?: unknown;
   tokenBudget?: number | null;
   usage?: { tokensUsed?: number; activeSeconds?: number };
   createdAt?: number;
@@ -62,6 +63,10 @@ export type GoalCustomEntry =
 
 function isGoalStatus(value: unknown): value is GoalStatus {
   return value === "active" || value === "paused" || value === "budgetLimited" || value === "complete";
+}
+
+function isPauseReason(value: unknown): value is GoalPauseReason {
+  return value === "interrupt";
 }
 
 function isGoalLike(value: unknown): value is GoalLike {
@@ -119,6 +124,7 @@ function normalizeGoal(goal: GoalLike): GoalSnapshot {
     objective: goal.objective,
     ...(isCommandBinding(goal.command) ? { command: goal.command } : {}),
     status: goal.status,
+    ...(goal.status === "paused" && isPauseReason(goal.pauseReason) ? { pauseReason: goal.pauseReason } : {}),
     tokenBudget: typeof goal.tokenBudget === "number" ? goal.tokenBudget : null,
     usage: {
       tokensUsed: typeof goal.usage?.tokensUsed === "number" ? goal.usage.tokensUsed : 0,
@@ -209,7 +215,10 @@ export function goalWithStatus(
   goal: GoalSnapshot,
   status: GoalStatus,
   now = unixSeconds(),
+  pauseReason?: GoalPauseReason,
 ): GoalSnapshot {
+  const { pauseReason: _previousReason, ...rest } = goal;
+  goal = rest;
   const accruedActiveSeconds =
     goal.status === "active" && goal.activeStartedAt !== null
       ? Math.max(0, now - goal.activeStartedAt)
@@ -233,6 +242,7 @@ export function goalWithStatus(
   return {
     ...goal,
     status,
+    ...(status === "paused" && pauseReason ? { pauseReason } : {}),
     usage,
     updatedAt: now,
     activeStartedAt: null,
