@@ -80,6 +80,21 @@ timeout can terminate the local SSH client but the remote process may still be
 running. See the detailed usage notes for bootstrap policy, watch conditions,
 timeouts, and v1 non-goals.
 
+## Reloads and session switches
+
+Tasks belong to the Pi session that started them. After `/reload`, the same
+session picks every task back up: watches keep polling, remote tmux output keeps
+being collected, and a task that finished during the reload (or exits later) gets
+its completion callback exactly once.
+
+After `/new`, `/resume`, fork, or switching to another session, the previous
+session's tasks keep running but are paused from Pi's side: watches do not poll,
+remote tmux output is not collected, and `timeout_seconds` deadlines are not
+enforced until that session is active again. An overdue deadline is enforced as
+soon as the session resumes, so a timeout can land late but is never skipped. A
+local process that exits in the meantime is recorded as finished, and its
+callback is delivered when its session resumes.
+
 ## Watch conditions
 
 JSON conditions require a root-prefixed path, such as `$.status` or

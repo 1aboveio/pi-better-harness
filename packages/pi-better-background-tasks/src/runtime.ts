@@ -33,20 +33,36 @@ const remoteSessionStarts = new Map<string, Promise<CommandResult>>();
 const activePolls = new Set<string>();
 const logRetentionTimers = new Map<string, ReturnType<typeof setInterval>>();
 const LOG_RETENTION_CHECK_MS = 1000;
+const handoffTimers = new Map<string, ReturnType<typeof setInterval>>();
+const HANDOFF_CHECK_MS = 250;
+const HANDOFF_LOST_GRACE_MS = 5_000;
 let scheduledWorkSuspended = false;
 const REMOTE_SESSION_POLL_MS = 100;
 
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
 
 /**
- * Stop this extension instance's timers when its session shuts down (#324).
+ * Stop this extension instance's scheduled work when its session shuts down (#324).
  *
- * Pi's /reload, session switch, and quit all end with session_shutdown, and the
- * next session loads a fresh extension instance. A watch or poll timer left in the
- * old instance keeps running with no active session, so when its task finishes
- * the completion callback is durably suppressed ("active session identity is
- * unavailable") and the reloaded session never hears about it. Processes and
- * metadata are untouched: the next session_start resumes running tasks from disk.
+ * Pi emits session_shutdown for /reload, /new, /resume, fork, session switch,
+ * and quit, and the next session loads a fresh extension instance. Work left in
+ * the old instance runs with no active session, so a task finishing there used to
+ * have its completion callback durably suppressed ("active session identity is
+ * unavailable") and the next session never heard about it.
+ *
+ * After suspension this instance schedules nothing and notifies nothing. Work
+ * already in flight (a child's close listener, a remote tmux bootstrap/start, a
+ * timeout kill) still records its result in metadata, but leaves the callback to
+ * the instance that resumes the task. Processes are not stopped.
+ *
+ * Resume is per callback origin: session_start resumes only tasks whose origin
+ * (cwd and session id) matches the new session. After /reload that is every task
+ * of the session. After switching to another session, the previous session's
+ * tasks keep running, but their watches do not poll, remote tmux output is not
+ * collected, and their `timeout_seconds` deadlines are not enforced until that
+ * session is active again; an overdue deadline is enforced immediately on resume.
+ * A local process that exits meanwhile is recorded as terminal and its callback
+ * is delivered when its session resumes.
  */
 export function suspendScheduledWork(): void {
   scheduledWorkSuspended = true;
@@ -54,6 +70,8 @@ export function suspendScheduledWork(): void {
   for (const timer of remoteSessionTimers.values()) clearTimeout(timer);
   for (const timer of processTimeoutTimers.values()) clearTimeout(timer);
   for (const timer of logRetentionTimers.values()) clearInterval(timer);
+  for (const timer of handoffTimers.values()) clearInterval(timer);
+  handoffTimers.clear();
   watcherTimers.clear();
   remoteSessionTimers.clear();
   processTimeoutTimers.clear();
@@ -446,6 +464,9 @@ export function resumeRunningTask(
   }
   scheduleFailureAttention(pi, meta.id, getActiveSession);
 
+  // Same Pi process: an earlier (reloaded or switched-away) extension instance may
+  // still hold this task's child or in-flight remote work and record its result.
+  const ownedByThisProcess = meta.spawnPid === process.pid && meta.spawnPidStartTime === currentProcessStartToken();
   if (meta.spawnPid !== process.pid || meta.spawnPidStartTime !== currentProcessStartToken()) {
     meta.spawnPid = process.pid;
     meta.spawnPidStartTime = currentProcessStartToken();
@@ -465,20 +486,84 @@ export function resumeRunningTask(
     activeRemoteTasks.set(meta.id, remoteTask);
     scheduleRemoteSessionPoll(pi, meta.id, 0, getActiveSession);
     if (meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt, getActiveSession);
+    // An earlier instance's in-flight timeout kill may still finalize it.
+    if (ownedByThisProcess) scheduleHandoff(pi, meta.id, getActiveSession);
     return meta;
   }
-  if (meta.pid && !processExists(meta.pid)) {
-    meta.status = "failed";
-    meta.endedAt = Date.now();
-    meta.error = "process is no longer alive; exit result was not captured by this pi session";
-    meta.result = { reason: meta.error };
-    recordFailure(meta, "execution", meta.error, "lost", { incomplete: true });
-    writeMeta(meta);
-    void notifyTerminal(pi, meta, getActiveSession);
+  if (ownedByThisProcess) {
+    // A dead pid is not yet "lost" here: the earlier instance's close listener may
+    // still record the real exit. The handoff marks it lost after a grace period.
+    scheduleHandoff(pi, meta.id, getActiveSession, remoteTask);
+  } else if (meta.pid && !processExists(meta.pid)) {
+    markProcessLost(pi, meta, getActiveSession);
     return meta;
   }
   if (meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt, getActiveSession);
   return meta;
+}
+
+/**
+ * Watch a task whose driver may still be an earlier instance in this process: a
+ * local child's close listener, or a remote tmux launch that was mid-bootstrap.
+ * Deliver the completion once it is recorded terminal, and take over remote
+ * polling once the tmux session is recorded as started (#324).
+ */
+function scheduleHandoff(
+  pi: ExtensionAPI,
+  id: string,
+  getActiveSession?: ActiveSessionProvider,
+  remoteTask?: ResolvedSshRemoteTask,
+): void {
+  stopHandoff(id);
+  if (scheduledWorkSuspended) return;
+  let deadSince: number | undefined;
+  const timer = setInterval(() => {
+    const meta = readMeta(id);
+    if (!meta) {
+      stopHandoff(id);
+      return;
+    }
+    if (meta.status !== "running") {
+      stopHandoff(id);
+      clearProcessTimeout(id);
+      stopLogRetention(id);
+      void notifyTerminal(pi, meta, getActiveSession);
+      return;
+    }
+    if (meta.remote?.session === "tmux" && meta.remote.sessionStarted === true && remoteTask && !activeRemoteTasks.has(id)) {
+      stopHandoff(id);
+      activeRemoteTasks.set(id, remoteTask);
+      scheduleRemoteSessionPoll(pi, id, 0, getActiveSession);
+      return;
+    }
+    if (meta.remote?.session !== "tmux" && meta.pid && !processExists(meta.pid)) {
+      deadSince ??= Date.now();
+      if (Date.now() - deadSince >= HANDOFF_LOST_GRACE_MS) {
+        stopHandoff(id);
+        clearProcessTimeout(id);
+        stopLogRetention(id);
+        markProcessLost(pi, meta, getActiveSession);
+      }
+    }
+  }, HANDOFF_CHECK_MS);
+  timer.unref();
+  handoffTimers.set(id, timer);
+}
+
+function stopHandoff(id: string): void {
+  const timer = handoffTimers.get(id);
+  if (timer) clearInterval(timer);
+  handoffTimers.delete(id);
+}
+
+function markProcessLost(pi: ExtensionAPI, meta: BackgroundTaskMeta, getActiveSession?: ActiveSessionProvider): void {
+  meta.status = "failed";
+  meta.endedAt = Date.now();
+  meta.error = "process is no longer alive; exit result was not captured by this pi session";
+  meta.result = { reason: meta.error };
+  recordFailure(meta, "execution", meta.error, "lost", { incomplete: true });
+  writeMeta(meta);
+  void notifyTerminal(pi, meta, getActiveSession);
 }
 
 function resolvePersistedRemoteTask(
@@ -891,6 +976,9 @@ async function notifyTerminal(
   meta: BackgroundTaskMeta,
   getActiveSession?: ActiveSessionProvider,
 ): Promise<void> {
+  // A suspended instance has no active session: delivering or suppressing here would
+  // be wrong either way. The instance that resumes the task delivers it (#324).
+  if (scheduledWorkSuspended) return;
   if (meta.callback === false || meta.callbackSentAt || meta.callbackSuppressedAt) return;
   const latest = readMeta(meta.id) ?? meta;
   if (latest.callback === false || latest.callbackSentAt || latest.callbackSuppressedAt) return;

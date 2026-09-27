@@ -229,6 +229,38 @@ test("a real /reload keeps pending callback receipts, the incident journal, and 
   host.session.dispose();
 });
 
+test("local and direct-SSH processes that exit after /reload deliver their completion once", async () => {
+  process.env.PATH = `${fakeBin}:${originalPath}`;
+  process.env.PI_BETTER_CALLBACK_BATCH_MS = "50";
+  const host = await openSession(dir("exit-after-reload-project"));
+  try {
+    await host.start();
+    // The child belongs to the pre-reload instance: its close listener fires after the reload.
+    const localId = taskId(await host.call("bg_task_spawn", { name: "local-exit", command: "sleep 1.5; echo local-done" }));
+    const directId = taskId(await host.call("bg_task_spawn", {
+      name: "direct-exit", command: "sleep 1.5; echo direct-done", ssh: { host: "fake-remote.test" }, remote: { session: "direct" },
+    }));
+    assert.ok(localId && directId);
+    await delay(200);
+    await host.session.reload();
+    for (const id of [localId, directId]) {
+      await waitFor(`${id} to finish`, () => bgRegistry.readMeta(id)?.status === "succeeded");
+      await waitFor(`${id} completion callback`, () => host.completions(id).length > 0);
+      const meta = bgRegistry.readMeta(id);
+      assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
+      assert.ok(meta.callbackSentAt > 0);
+    }
+    await host.session.reload();
+    await delay(600);
+    assert.equal(host.completions(localId).length, 1);
+    assert.equal(host.completions(directId).length, 1);
+    assert.deepEqual(host.errors, []);
+  } finally {
+    host.session.dispose();
+    process.env.PATH = originalPath;
+  }
+});
+
 /**
  * SSH transports for the background-task scenario. `fake` always runs; `live`
  * runs only with PI_LIVE_SSH_HOST and uses the system ssh against that host.
@@ -298,9 +330,10 @@ async function sshScenario(transport) {
     const polls = transport.argvLines ? countPolls(transport) : undefined;
     await delay(2_200);
     if (polls !== undefined) {
-      // One poller at a 1 s interval: a leftover pre-reload timer would roughly double this.
+      // The next poll is scheduled 1 s after the previous one finishes, so one poller
+      // makes at most 3 polls in 2.2 s; a second (stale) poller makes it at least 4.
       const extra = countPolls(transport) - polls;
-      assert.ok(extra <= 4, `expected one resumed poller, saw ${extra} polls in 2.2 s`);
+      assert.ok(extra >= 1 && extra <= 3, `expected exactly one resumed poller, saw ${extra} polls in 2.2 s`);
     }
     transport.setDone();
     await waitFor("the watch to succeed", () => bgRegistry.readMeta(watchId)?.status === "succeeded");
