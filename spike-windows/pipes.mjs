@@ -6,6 +6,7 @@ const CreatePipe = k.func("bool __stdcall CreatePipe(_Out_ void **, _Out_ void *
 const CreateNamedPipeW = k.func("void * __stdcall CreateNamedPipeW(str16, uint32, uint32, uint32, uint32, uint32, uint32, void *)");
 const CreateFileW = k.func("void * __stdcall CreateFileW(str16, uint32, uint32, void *, uint32, uint32, void *)");
 const INVALID = (h) => h === null || koffi.address(h) === 0xffffffffffffffffn;
+export function pipeProbe() {
 const out = {};
 const r = [null], w = [null];
 out.anonymousPipe = CreatePipe(r, w, null, 0) ? "ok" : `ERR ${GetLastError()}`;
@@ -21,4 +22,6 @@ for (const [name, serverAccess, clientAccess] of [
   const client = CreateFileW(pipe, clientAccess, 0, null, 3 /* OPEN_EXISTING */, 0, null);
   out[`${name}.client`] = INVALID(client) ? `ERR ${GetLastError()}` : "ok";
 }
-console.log(JSON.stringify(out));
+return out;
+}
+if (process.argv[1]?.endsWith("pipes.mjs")) console.log(JSON.stringify(pipeProbe()));

@@ -1,6 +1,7 @@
 // Runs INSIDE the restricted token. Prints one JSON object: { name: "ok" | "ERR:<code>" | detail }.
 import fs from "node:fs";
 import { join } from "node:path";
+import { pipeProbe } from "./pipes.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 
 const H = process.env.SPIKE_HOME;
@@ -83,8 +84,8 @@ t("spawn.ignoreStdio", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "exit
 t("spawn.detached", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "exit 7"], { stdio: "ignore", detached: true }); return r.error ? `ERR:${r.error.code}` : `status ${r.status}`; });
 t("spawn.pipes", () => { const r = spawnSync("cmd.exe", ["/d", "/c", "echo piped"], { encoding: "utf8" }); return r.error ? `ERR:${r.error.code}` : r.stdout.trim(); });
 
-t("pipes.native", () => { const r = spawnSync(process.execPath, [join(import.meta.dirname, "pipes.mjs")], { stdio: ["ignore", "pipe", "ignore"], encoding: "utf8" }); return r.error ? `spawn ERR:${r.error.code}` : r.stdout.trim(); });
-t("pipes.nativeViaFile", () => { const f = join(process.env.TEMP, "pipes.json"); const r = spawnSync("cmd.exe", ["/d", "/c", `"${process.execPath}" "${join(import.meta.dirname, "pipes.mjs")}" > "${f}"`], { stdio: "ignore" }); return fs.readFileSync(f, "utf8").trim() + ` (status ${r.status})`; });
+t("pipes.inProcess", () => JSON.stringify(pipeProbe()));
+t("spawn.nodeFromToolcache", () => { const r = spawnSync(process.execPath, ["-e", "0"], { stdio: "ignore" }); return r.error ? `ERR:${r.error.code}` : `status ${r.status}`; });
 
 // Token facts.
 t("whoami.priv", () => sh("whoami", ["/priv", "/fo", "csv", "/nh"]).split(/\r?\n/).map((l) => l.split(",")[0].replace(/"/g, "")).join(" "));
