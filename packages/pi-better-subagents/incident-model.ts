@@ -9,11 +9,11 @@
  * declared on the attempt before it ran and a structured exit code from the tool.
  */
 import { failureIdentity, findIncident, validateDisposition, INCIDENT_DISPOSITIONS, INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES,
-    REJECTED_INTENT_CATEGORY, readCommandIntent, type CommandIntent, type FailureEvent, type FailureState, type IncidentDisposition } from "./shared-failure-observations.ts";
+    REJECTED_INTENT_CATEGORY, readCommandIntent, withoutAbsentIntent, type CommandIntent, type FailureEvent, type FailureState, type IncidentDisposition } from "./shared-failure-observations.ts";
 
 export const DISPOSITION_TOOL = "failure_disposition";
 // The intent validator is shared with background tasks through the vendored failure-observations module (#325).
-export { INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES, readCommandIntent, type CommandIntent };
+export { INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES, readCommandIntent, withoutAbsentIntent, type CommandIntent };
 
 function stable(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(stable);
@@ -27,6 +27,8 @@ export function toolOperation(name: string, args: unknown, cwd: string): string 
 /** Declared identity when an operationId is present, otherwise the exact rule. attemptId never affects identity. */
 export function attemptOperation(name: string, args: unknown, cwd: string, intent: CommandIntent): string {
     if (intent.operationId) return failureIdentity("operation", name, intent.operationId, cwd);
+    // An explicit-null intent field is an undeclared one: `{expectedExitCodes: null}` and `{}` are the same command.
+    args = withoutAbsentIntent(args);
     if (args && typeof args === "object" && !Array.isArray(args) && "attemptId" in args) {
         const { attemptId: _attemptId, ...rest } = args as Record<string, unknown>;
         return toolOperation(name, rest, cwd);
@@ -56,8 +58,13 @@ interface Attempt {
     operation: string;
     intent: CommandIntent;
     startSequence: number;
-    /** The confined intent bash refused this attempt before running anything. */
-    rejectedIntent?: string;
+    /**
+     * Why the confined intent bash is expected to refuse this attempt. A prediction only: the
+     * attempt is filed as a rejected intent when its end row carries the child's own refusal.
+     */
+    predictedRejection?: string;
+    /** Intent names this start registered, undone if the child refused it after all. */
+    registered?: { attemptId?: string; operationId?: string };
 }
 interface Finished extends Attempt {
     ok: boolean;
@@ -202,19 +209,51 @@ export function foldToolStart(model: IncidentModel, row: any, cwd: string, sink:
     const rawAttemptId = toolName === "bash" && typeof row.args?.attemptId === "string" ? row.args.attemptId as string : undefined;
     const reused = rawAttemptId !== undefined && model.namedAttempts.has(rawAttemptId);
     if (rawAttemptId !== undefined) model.namedAttempts.add(rawAttemptId);
-    const rejectedIntent = parsed.error ?? (reused ? `attemptId ${intent.attemptId} was already used` : undefined);
-    const operation = attemptOperation(toolName, row.args, cwd, intent);
-    model.open.set(toolCallId, { toolCallId, toolName, operation, intent: rejectedIntent ? {} : intent, startSequence: seq,
-        ...(rejectedIntent ? { rejectedIntent } : {}) });
-    if (rejectedIntent) return;
-    if (intent.attemptId) model.attemptIds.set(intent.attemptId, toolCallId);
-    if (intent.operationId && !model.operationIds.has(intent.operationId)) model.operationIds.set(intent.operationId, operation);
+    const predictedRejection = parsed.error ?? (reused ? `attemptId ${intent.attemptId} was already used` : undefined);
+    // A predicted refusal falls back to exact identity: if the child ran the command after all, it is
+    // an ordinary failure of exactly that command, never a failure of the operation it named.
+    const effective = predictedRejection ? {} : intent;
+    const operation = attemptOperation(toolName, row.args, cwd, effective);
+    const attempt: Attempt = { toolCallId, toolName, operation, intent: effective, startSequence: seq,
+        ...(predictedRejection ? { predictedRejection } : {}) };
+    model.open.set(toolCallId, attempt);
+    if (predictedRejection) return;
+    if (intent.attemptId) {
+        model.attemptIds.set(intent.attemptId, toolCallId);
+        attempt.registered = { attemptId: intent.attemptId };
+    }
+    if (intent.operationId && !model.operationIds.has(intent.operationId)) {
+        model.operationIds.set(intent.operationId, operation);
+        attempt.registered = { ...attempt.registered, operationId: intent.operationId };
+    }
     if (toolName === DISPOSITION_TOOL) {
         const parsed = readDispositionRequest(row.args);
         model.pendingDispositions.set(toolCallId, parsed.request
             ? resolveDisposition(model, sink.state(), parsed.request, toolCallId)
             : { error: parsed.error });
     }
+}
+
+/** The confined intent bash's own pre-run refusal (child-incidents.ts), matched as the whole result text. */
+const INTENT_REFUSAL = /^Invalid command intent: ([\s\S]+)\. The command was not run\.$/;
+/** Pi's pre-execution schema rejection; it names the tool, and nothing ran. */
+const SCHEMA_REFUSAL = /^Validation failed for tool "/;
+
+/**
+ * Why the child refused this bash call before running it, read from the end row the child
+ * produced, never re-derived from the arguments. A command that ran and failed returns undefined.
+ */
+function preRunRefusal(model: IncidentModel, attempt: Attempt | undefined, toolName: string, row: any): string | undefined {
+    if (!model.structuredIntent || toolName !== "bash" || row.isError !== true) return undefined;
+    const content = row.result?.content;
+    const text = Array.isArray(content) && content.length === 1 && typeof content[0]?.text === "string" ? content[0].text.trim() : undefined;
+    if (text === undefined) return undefined;
+    const refused = INTENT_REFUSAL.exec(text);
+    if (refused) return refused[1];
+    // Pi validates arguments against the intent schema before execute; that refusal is ours only
+    // when the intent fields themselves are what the shared validator rejects.
+    if (attempt?.predictedRejection && !attempt.predictedRejection.includes("already used") && SCHEMA_REFUSAL.test(text)) return attempt.predictedRejection;
+    return undefined;
 }
 
 /** Fold one tool execution end: failures, declared expected exits, exact retry recovery, dispositions. */
@@ -233,11 +272,15 @@ export function foldToolEnd(model: IncidentModel, row: any, cwd: string, evidenc
     const finished: Finished = { ...(attempt ?? { toolCallId, toolName, operation, intent, startSequence: seq }),
         ok: !error && declaredExit === undefined, endSequence: seq, evidence };
     model.finished.set(toolCallId, finished);
-    if (attempt?.rejectedIntent && (row.isError === true || error)) {
+    const refusal = preRunRefusal(model, attempt, toolName, row);
+    if (refusal !== undefined) {
         // Nothing ran: visible, but never grouped with (or escalating) the operation it named.
+        if (attempt?.registered?.attemptId && model.attemptIds.get(attempt.registered.attemptId) === toolCallId) model.attemptIds.delete(attempt.registered.attemptId);
+        if (attempt?.registered?.operationId) model.operationIds.delete(attempt.registered.operationId);
+        finished.intent = {};
         const failureId = `tool:${toolCallId}`;
         sink.observe([{ id: failureId, operation: failureIdentity("rejected-intent", toolCallId), kind: "failure", at: time(row),
-            category: REJECTED_INTENT_CATEGORY, evidence, summary: `${toolName} not run: invalid command intent (${attempt.rejectedIntent})` }]);
+            category: REJECTED_INTENT_CATEGORY, evidence, summary: `${toolName} not run: invalid command intent (${refusal})` }]);
         finished.incident = failureId;
         return;
     }

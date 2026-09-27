@@ -6,6 +6,7 @@
  */
 import { rmSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { afterAll, describe, expect, it } from "vitest";
 import { failurePath, terminalFailureAttention } from "./failures.js";
 import { activeFailures, failureCounts, readFailureState } from "./shared-failure-observations.js";
@@ -47,6 +48,28 @@ describe("#325 background task structured intent", () => {
     await terminal(other.id);
     expect(activeFailures(state(other.id))).toEqual([expect.objectContaining({ status: "unresolved", category: "exit" })]);
     expect(terminalFailureAttention(other.id)?.incidents).toHaveLength(1);
+  });
+
+  it("explicit-null intent fields are undeclared: the task launches normally through Pi's own argument validation", async () => {
+    const tools: Record<string, any> = {};
+    registerTools({ on() {}, registerTool(tool: any) { tools[tool.name] = tool; } } as any);
+    const raw = { command: "exit 3", callback: false, operation_id: null, expected_exit_codes: null };
+    const args = validateToolArguments({ name: "bg_task_spawn", parameters: tools.bg_task_spawn.parameters } as any,
+      { type: "toolCall", id: "spawn", name: "bg_task_spawn", arguments: structuredClone(raw) } as any);
+    expect(args).toEqual(raw);
+    const meta = spawnTask(pi, args, origin.cwd, origin, () => origin);
+    ids.push(meta.id);
+    expect(readMeta(meta.id)).not.toHaveProperty("expectedExitCodes");
+    expect(readMeta(meta.id)).not.toHaveProperty("operationId");
+    await terminal(meta.id);
+    expect(activeFailures(state(meta.id))).toEqual([expect.objectContaining({ status: "unresolved", category: "exit" })]);
+    const watch = startWatchTask(pi, { command: "true", callback: false, success_when: { type: "exit_code", equals: 0 }, operation_id: null, expected_exit_codes: null },
+      origin.cwd, origin, () => origin);
+    ids.push(watch.id);
+    expect((await terminal(watch.id)).status).toBe("succeeded");
+    // A genuinely malformed declaration is still refused before launch, by Pi's schema check.
+    expect(() => validateToolArguments({ name: "bg_task_spawn", parameters: tools.bg_task_spawn.parameters } as any,
+      { type: "toolCall", id: "bad", name: "bg_task_spawn", arguments: { command: "true", expected_exit_codes: [0] } } as any)).toThrow(/expected_exit_codes/);
   });
 
   it("malformed intent is rejected before anything is launched", () => {
@@ -122,8 +145,9 @@ describe("#325 background task structured intent", () => {
     registerTools({ on() {}, registerTool(tool: any) { tools[tool.name] = tool; } } as any);
     for (const name of ["bg_task_spawn", "bg_task_watch", "bg_task"]) {
       const properties = tools[name].parameters.properties;
-      expect(properties.operation_id).toMatchObject({ type: "string" });
-      expect(properties.expected_exit_codes).toMatchObject({ type: "array", items: { type: "integer", minimum: 1, maximum: 255 }, maxItems: 16 });
+      // Each field admits an explicit null ("not declared"), which models routinely send.
+      expect(properties.operation_id.anyOf).toEqual([{ type: "null" }, { type: "string" }]);
+      expect(properties.expected_exit_codes.anyOf).toEqual([{ type: "array", items: { type: "integer", minimum: 1, maximum: 255 }, minItems: 1, maxItems: 16 }, { type: "null" }]);
       // Provider-rejected keywords (#327): distinctness and the id format are validated in code instead.
       const intent = JSON.parse(JSON.stringify({ properties: { operation_id: properties.operation_id, expected_exit_codes: properties.expected_exit_codes } }));
       expect(findProviderRejectedKeywords(intent)).toEqual([]);
