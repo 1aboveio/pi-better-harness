@@ -1,6 +1,6 @@
-import { writeFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
-import { baseDir, ensureTaskDir, getRegistryIoMetrics, listActiveMetasForOrigin, inspectMeta, listMetas, listMetasForOrigin, listTaskRecords, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, writeMeta } from "./registry.js";
+import { rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it } from "vitest";
+import { baseDir, ensureTaskDir, taskDir, getRegistryIoMetrics, listActiveMetasForOrigin, inspectMeta, listMetas, listMetasForOrigin, listTaskRecords, logPathFor, metaPathFor, readMeta, resetRegistryIoMetrics, writeMeta } from "./registry.js";
 import type { BackgroundTaskMeta } from "./types.js";
 
 describe("registry meta sweep cache", () => {
@@ -43,8 +43,16 @@ describe("registry meta sweep cache", () => {
   });
 });
 
+// Fixtures share the per-pool registry with other test files; a leaked record
+// (especially a corrupt one) changes their list payloads, so remove every one.
+const createdIds: string[] = [];
+afterEach(() => {
+  for (const id of createdIds.splice(0)) rmSync(taskDir(id), { recursive: true, force: true });
+});
+
 function fixtureMeta(status: BackgroundTaskMeta["status"], name: string): BackgroundTaskMeta {
   const id = `bg_registry_test_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  createdIds.push(id);
   const now = Date.now();
   return {
     id,

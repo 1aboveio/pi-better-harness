@@ -41,8 +41,22 @@ ownership rule:
 | Task | Read | Stop / clear by id | Bulk clear |
 | ---- | ---- | ------------------ | ---------- |
 | Owned by the current session | shown | allowed | dismissed |
-| Owned by another session | ownership gap; `all:true` reads it | refused; `all:true` allows it | skipped |
-| Ownership unavailable (legacy task with no recorded origin, a sessionless task from another Pi process, or the current session identity cannot be read) | ownership gap; `all:true` reads it | refused; `all:true` allows it | skipped and counted |
+| Owned by another session | ownership gap; `all:true` reads it | refused; `all:true` allows it | left alone |
+| Ownership unavailable (legacy task with no recorded origin, a sessionless task from another Pi process, or the current session identity cannot be read) | ownership gap; `all:true` reads it | refused; `all:true` allows it | left alone (see below) |
+
+Bulk clear only looks at tasks indexed under the caller's own cwd and session,
+so it never touches another session's tasks. What it reports about skipped
+tasks depends on the caller:
+
+- **With a session id**, legacy no-origin tasks are outside that index. They
+  are neither dismissed nor counted. `bg_task_list` still counts them as hidden.
+- **Without a session id**, same-cwd sessionless and legacy tasks that this Pi
+  process did not launch are skipped, and the reply counts them
+  (`N terminal tasks with unverifiable ownership were not dismissed`).
+- **When the session identity cannot be read**, nothing is dismissed and the
+  reply says so, without a count.
+
+In every case, clear one such task with `id` and `all:true`.
 
 A refusal names the task and says it was not stopped or dismissed; it never
 reveals the task's evidence.
