@@ -3,7 +3,9 @@
  *
  * Subagent factories in tools.ts are the objects index.ts registers.
  * Background tools come from registerTools(), the same function index.ts calls.
- * Callbacks are the sendMessage `content` from finalizeRun and the shared batcher.
+ * Callbacks are the `content` the real shared batcher hands to sendMessage
+ * (flush for completions, deliverUrgent for health/attention), built from the
+ * same field builders index.ts uses — not a formatter called in isolation.
  */
 import { FROZEN_NOW } from "./isolate.mjs";
 import {
@@ -71,7 +73,9 @@ export async function collectBaseline({ phase = "before" } = {}) {
     const subagentRegistry = await import("../../packages/pi-better-subagents/registry.ts");
     const subagentTools = await import("../../packages/pi-better-subagents/tools.ts");
     const { finalizeRun } = await import("../../packages/pi-better-subagents/finalization.ts");
-    const { formatHealthCallbackTrigger } = await import("../../packages/pi-better-subagents/completion.mjs");
+    const { buildHealthCallbackDelivery } = await import("../../packages/pi-better-subagents/completion.mjs");
+    const callbackFields = await import("../../packages/pi-better-subagents/callback-fields.ts");
+    const { collectRunFailures } = await import("../../packages/pi-better-subagents/failures.ts");
     const bgRegistry = await import("../../packages/pi-better-background-tasks/src/registry.ts");
     const bgLogs = await import("../../packages/pi-better-background-tasks/src/logs.ts");
     const bgFailures = await import("../../packages/pi-better-background-tasks/src/failures.ts");
@@ -118,12 +122,22 @@ export async function collectBaseline({ phase = "before" } = {}) {
     };
 
     const callbacks = {};
-    const capture = (bucket) => (message, options) => {
-        callbacks[bucket] = { content: message.content, customType: message.customType, options };
-    };
-    finalizeRun(seeded.success.id, 0, { sendMessage: capture("success"), notify() {}, renderWidget() {} });
-    finalizeRun(seeded.failed.id, 1, { sendMessage: capture("failed"), notify() {}, renderWidget() {} });
-    finalizeRun(seeded.incomplete.id, 0, { sendMessage: capture("incomplete"), notify() {}, renderWidget() {} });
+    const quiet = { sendMessage() {}, notify() {}, renderWidget() {} };
+    finalizeRun(seeded.success.id, 0, quiet);
+    finalizeRun(seeded.failed.id, 1, quiet);
+    finalizeRun(seeded.incomplete.id, 0, quiet);
+    /** Deliver one completion through the real batcher, as index.ts enqueues it. */
+    async function deliverCompletion(bucket, id) {
+        const host = { sendMessage(message, options) { callbacks[bucket] = { content: message.content, customType: message.customType, options }; } };
+        const batcher = createCallbackBatcher(host, { windowMs: 60_000, retryMs: 60_000 });
+        const meta = subagentRegistry.readMeta(id);
+        batcher.enqueue({ ...callbackFields.completionCallbackFields(meta, collectRunFailures(id, meta.cwd, true)), callback: true });
+        await batcher.flush();
+        batcher.cancel();
+    }
+    await deliverCompletion("success", seeded.success.id);
+    await deliverCompletion("failed", seeded.failed.id);
+    await deliverCompletion("incomplete", seeded.incomplete.id);
 
     const cases = [];
     const credentialFindings = [];
@@ -159,8 +173,8 @@ export async function collectBaseline({ phase = "before" } = {}) {
         id: "subagent.success.callback",
         family: "success",
         surface: "callback",
-        tool: "finalizeRun.sendMessage",
-        invokePath: "packages/pi-better-subagents/finalization.ts#finalizeRun",
+        tool: "createCallbackBatcher.flush",
+        invokePath: "packages/pi-better-subagents/callback-fields.ts#completionCallbackFields -> packages/callback-batcher/index.ts#createCallbackBatcher.flush",
         params: { id: seeded.success.id, exitCode: 0 },
         proposedBudgetBytes: budgetsFor(phase).callback_batch,
     }, callbacks.success?.content ?? "");
@@ -179,8 +193,8 @@ export async function collectBaseline({ phase = "before" } = {}) {
         id: "subagent.failed.callback",
         family: "failed",
         surface: "callback",
-        tool: "finalizeRun.sendMessage",
-        invokePath: "packages/pi-better-subagents/finalization.ts#finalizeRun",
+        tool: "createCallbackBatcher.flush",
+        invokePath: "packages/pi-better-subagents/callback-fields.ts#completionCallbackFields -> packages/callback-batcher/index.ts#createCallbackBatcher.flush",
         params: { id: seeded.failed.id, exitCode: 1 },
         proposedBudgetBytes: budgetsFor(phase).callback_batch,
     }, callbacks.failed?.content ?? "");
@@ -199,8 +213,8 @@ export async function collectBaseline({ phase = "before" } = {}) {
         id: "subagent.incomplete.callback",
         family: "incomplete",
         surface: "callback",
-        tool: "finalizeRun.sendMessage",
-        invokePath: "packages/pi-better-subagents/finalization.ts#finalizeRun",
+        tool: "createCallbackBatcher.flush",
+        invokePath: "packages/pi-better-subagents/callback-fields.ts#completionCallbackFields -> packages/callback-batcher/index.ts#createCallbackBatcher.flush",
         params: { id: seeded.incomplete.id, exitCode: 0 },
         proposedBudgetBytes: budgetsFor(phase).callback_batch,
     }, callbacks.incomplete?.content ?? "");
@@ -215,17 +229,21 @@ export async function collectBaseline({ phase = "before" } = {}) {
         proposedBudgetBytes: budgetsFor(phase).subagent_result,
     }, subagent.result, { id: seeded.orphaned.id });
 
-    const orphanedCallback = formatHealthCallbackTrigger({
-        id: seeded.orphaned.id,
-        label: `synthetic-orphaned (${seeded.orphaned.id})`,
-        status: "orphaned",
-    });
+    let orphanedCallback = "";
+    {
+        const meta = subagentRegistry.readMeta(seeded.orphaned.id);
+        const delivery = buildHealthCallbackDelivery({ id: meta.id, label: callbackFields.runLabel(meta), status: "orphaned", callback: true });
+        const host = { sendMessage(message) { orphanedCallback = message.content; } };
+        const batcher = createCallbackBatcher(host, { windowMs: 60_000, retryMs: 60_000 });
+        await batcher.deliverUrgent(callbackFields.healthCallbackFields(meta, "orphaned", collectRunFailures(meta.id, meta.cwd, false), delivery.content));
+        batcher.cancel();
+    }
     pushCase(cases, credentialFindings, {
         id: "subagent.orphaned.callback",
         family: "orphaned",
         surface: "callback",
-        tool: "formatHealthCallbackTrigger",
-        invokePath: "packages/pi-better-subagents/completion.mjs#formatHealthCallbackTrigger",
+        tool: "createCallbackBatcher.deliverUrgent",
+        invokePath: "packages/pi-better-subagents/callback-fields.ts#healthCallbackFields -> packages/callback-batcher/index.ts#createCallbackBatcher.deliverUrgent",
         params: { id: seeded.orphaned.id, status: "orphaned" },
         proposedBudgetBytes: budgetsFor(phase).callback_batch,
     }, orphanedCallback);
@@ -453,25 +471,36 @@ export async function collectBaseline({ phase = "before" } = {}) {
         if (unicodeCase) {
             let cursor;
             let rebuilt = "";
+            let pages = 0;
             for (let i = 0; i < 64; i += 1) {
                 const page = textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.unicode.id, cursor }, undefined, undefined, ctx));
+                pages += 1;
                 const body = page.split("\n---\n")[0] ?? page;
-                const lines = body.split("\n");
-                rebuilt += lines.slice(1).join("\n").replace(/\nstatusCursor=\S+\s*$/, "");
+                rebuilt += body.slice(body.indexOf("\n") + 1);
                 const next = nextCursorOf(page);
                 if (!next || !page.includes("hasMore=true")) break;
                 cursor = next;
             }
-            unicodeCase.facts.reconstructedIncludesSeed = rebuilt.includes(fixtures.UNICODE_JSON_LINE.slice(0, 40));
-            unicodeCase.facts.reconstructionPages = rebuilt.length > 0;
+            unicodeCase.facts.reconstructedExactly = rebuilt === seeded.unicode.finalText;
+            unicodeCase.facts.reconstructionPages = pages;
         }
         const many = cases.find((item) => item.id === "subagent.many_failures.result");
         if (many) {
             const cursor = incidentCursorOf(many.content);
             many.facts.incidentCursorPresent = Boolean(cursor);
             if (cursor) {
-                const page = textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.manyFailures.id, cursor }, undefined, undefined, ctx));
-                many.facts.omittedIncidentsRetrievable = /incident|incidents/i.test(page);
+                const seen = new Map();
+                const count = (text) => {
+                    for (const match of text.matchAll(/failure (\d+): synthetic-op-/g)) seen.set(match[1], (seen.get(match[1]) ?? 0) + 1);
+                };
+                count(many.content);
+                let next = cursor;
+                for (let i = 0; i < 32 && next; i += 1) {
+                    const page = textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.manyFailures.id, cursor: next }, undefined, undefined, ctx));
+                    count(page);
+                    next = page.includes("hasMore=true") ? page.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+                }
+                many.facts.omittedIncidentsRetrievable = seen.size === 12 && [...seen.values()].every((value) => value === 1);
             }
         }
         const wrapper = cases.find((item) => item.id === "background.success.status.wrapper");
