@@ -29,11 +29,12 @@ import {
     mkdirSync,
     openSync,
     readdirSync,
+    readlinkSync,
     realpathSync,
     statSync,
     writeFileSync,
 } from "node:fs";
-import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 
 /** Identifies which kernel mechanism a plan will use. */
 export type SandboxBackendId = "macos-seatbelt" | "linux-bubblewrap";
@@ -365,7 +366,7 @@ function compile(
     const lexicalDeny = isBroadWritePermissions(policy.permissions);
     const denyWrite = [
         ...new Set((policy.denyWrite ?? []).flatMap((entry) => lexicalDeny
-            ? [resolve(entry), canonicalizePath(entry, seams)] : [canonicalizePath(entry, seams)])),
+            ? [resolve(entry), ...symlinkHops(entry), canonicalizePath(entry, seams)] : [canonicalizePath(entry, seams)])),
     ].sort();
 
     const broadMode = isBroadWritePermissions(policy.permissions);
@@ -408,7 +409,46 @@ function expandHome(path: string, home: string): string {
  */
 function lexicalAndCanonical(home: string, name: string, seams: SandboxSeams): string[] {
     const lexical = join(canonicalizePath(home, seams), name);
-    return [lexical, canonicalizePath(lexical, seams)];
+    return [lexical, ...symlinkHops(lexical), canonicalizePath(lexical, seams)];
+}
+
+/**
+ * Every symlink directory entry met while resolving `path`, component by
+ * component (as `readlink` would follow them). A chain such as
+ * `~/.zshrc -> ~/.dotfiles/zshrc -> ~/dotfiles/zshrc` has an intermediate link
+ * in a removable directory; replacing it would retarget the protected entry, so
+ * each hop the user could replace is protected too. Bounded: a loop or more
+ * than 40 hops stops the walk (such a path resolves to nothing).
+ */
+function symlinkHops(path: string): string[] {
+    const hops: string[] = [];
+    const seen = new Set<string>();
+    let followed = 0;
+    const absolute = resolve(path);
+    let current = parse(absolute).root;
+    let pending = absolute.slice(current.length).split(sep);
+    while (pending.length) {
+        const component = pending.shift()!;
+        if (!component || component === ".") continue;
+        if (component === "..") { current = dirname(current); continue; }
+        const entry = join(current, component);
+        let link: boolean;
+        try { link = lstatSync(entry).isSymbolicLink(); } catch { break; }
+        if (!link) { current = entry; continue; }
+        if (++followed > 40 || seen.has(entry)) break;
+        seen.add(entry);
+        // Only a link the user can replace matters (not e.g. macOS's root-owned /tmp -> private/tmp).
+        try { accessSync(current, constants.W_OK); hops.push(entry); } catch { /* immutable entry */ }
+        let target: string;
+        try { target = readlinkSync(entry); } catch { break; }
+        if (isAbsolute(target)) {
+            current = parse(target).root;
+            pending = [...target.slice(current.length).split(sep), ...pending];
+        } else {
+            pending = [...target.split(sep), ...pending];
+        }
+    }
+    return hops;
 }
 
 function broadCredentialPaths(home: string, seams: SandboxSeams): string[] {
@@ -416,7 +456,8 @@ function broadCredentialPaths(home: string, seams: SandboxSeams): string[] {
     return [...new Set([
         ...credentialFilePaths(home, seams),
         ...[...CREDENTIAL_LOCATIONS, ...BROAD_CREDENTIAL_LOCATIONS].flatMap((name) => lexicalAndCanonical(home, name, seams)),
-        ...(configuredAgentDir ? [resolve(expandHome(configuredAgentDir, home), "auth.json")] : []),
+        ...(configuredAgentDir ? [resolve(expandHome(configuredAgentDir, home), "auth.json"),
+            ...symlinkHops(resolve(expandHome(configuredAgentDir, home), "auth.json"))] : []),
     ])].sort();
 }
 
@@ -440,6 +481,7 @@ function compileBroadWrite(
     const codePaths = [...new Set([
         ...CODE_LATER_LOCATIONS.flatMap((name) => lexicalAndCanonical(home, name, seams)),
         ...(configuredAgentDir ? [resolve(expandHome(configuredAgentDir, home)),
+            ...symlinkHops(expandHome(configuredAgentDir, home)),
             canonicalizePath(expandHome(configuredAgentDir, home), seams)] : []),
     ])].sort();
     return {
@@ -553,9 +595,6 @@ function evaluateBroadWrite(
 ): WriteAccessDecision {
     for (const denied of [...policy.denyWrite, ...broad.codePaths]) {
         if (contains(denied, path)) return { allowed: false, path, reason: "write-denied", deniedBy: denied };
-    }
-    if (contains(broad.home, path) && /\/\.git\/hooks(\/|$)/.test(path.slice(broad.home.length))) {
-        return { allowed: false, path, reason: "write-denied" };
     }
     if (isCredential(path, policy)) return { allowed: false, path, reason: "permission-denied" };
     if (policy.runtimeWrite?.some((root) => contains(root, path))) return { allowed: true, path };
@@ -845,9 +884,6 @@ function buildBroadProfile(policy: CompiledSandboxWritePolicy, seams: SandboxSea
         denyWrite(path);
     }
     for (const path of policy.denyWrite) denyWrite(path);
-    // Git hooks of any repository under home run on its next git command.
-    const hooks = `#"^${home}/(.+/)?[.]git/hooks(/|$)"`;
-    rules.push(`(deny file-write* (regex ${hooks}))`, `(deny file-write-unlink (regex ${hooks}))`);
     // Renaming an ancestor would move a protected subtree to an unprotected path,
     // and renaming the workspace's ancestors could redirect the next launch.
     const anchors = [...broadProtectedPaths(policy, broad), project];

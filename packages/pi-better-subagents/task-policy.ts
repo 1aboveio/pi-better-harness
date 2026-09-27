@@ -86,7 +86,10 @@ export function prepareTaskRuntime(options: {
         version: 1, root, home, agentDir, profilePath: join(controlDir, "task.sb"), scratch: scratch.path,
         permissions,
         denyWrite: [...new Set([
-            controlDir, scratch.anchor, agentDir, ...runtimeDirectories, ...(options.runtimeRoots ?? []), join(root, ".pi"), join(root, ".git", "hooks"), join(root, ".env"), join(root, ".env.local"),
+            controlDir, scratch.anchor, agentDir, ...runtimeDirectories, ...(options.runtimeRoots ?? []), join(root, ".pi"),
+            // Outside project = Write does not protect git hooks or config anywhere
+            // (ADR 0008): guarding the workspace's hooks would break `git init` there.
+            ...(permissions.outsideProject === "write" ? [] : [join(root, ".git", "hooks")]), join(root, ".env"), join(root, ".env.local"),
             runtimeCodeRoot(sdkEntry), runtimeCodeRoot(ownEntry), ...(options.extensionPaths ?? []).map(runtimeCodeRoot),
         ])],
         tools: options.tools,

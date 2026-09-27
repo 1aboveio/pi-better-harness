@@ -66,17 +66,24 @@ keeps one fixed deny list that is not configurable per tool:
   `~/.config/autostart`, `~/.pi` (or `$PI_CODING_AGENT_DIR`), `~/.claude`,
   `~/.agents`, `~/Library/LaunchAgents`, `~/.local/bin`, `~/bin`,
   `~/.git-templates`, `~/.oh-my-zsh/custom`, `~/.gradle/init.d`,
-  `~/.cargo/config(.toml)`, and, on macOS, the `.git/hooks` of every repository
-  under home. These stay readable, because subagents read skills from them.
+  and `~/.cargo/config(.toml)`. These stay readable, because subagents read skills from them.
   Their parent folders can't be removed or renamed either, so you can clean
   inside `~/.gradle` but not delete `~/.gradle` itself.
 - **Harness state** (the subagent and background-task registries, run and
   control directories, and task-runtime provenance) cannot be written, removed,
   or renamed.
 
-Every entry is protected both as the literal path under home and as the path
-it resolves to, so a dotfiles manager's symlinks (stow, chezmoi) can't be swapped
-for real files. Add your own paths to the deny list with `/sandbox deny add <path>`. Under
+Every entry is protected under the literal path under home, every symlink hop
+on the way to its target, and the target itself. So a dotfiles manager's links
+(stow, chezmoi), including chains of links, can't be swapped or retargeted.
+
+**Git config and hooks under home are not protected**, so git keeps working:
+`git init`, `git clone` and `git worktree add` copy hook samples into `.git/hooks`.
+A task can therefore plant code that a later git command runs, through any
+repository's `.git/hooks` or `.git/config` (`core.hooksPath`, `core.fsmonitor`,
+`diff.external`, filters, aliases), submodule hooks in `.git/modules/*/hooks`,
+`gitdir:` redirects, or files that `~/.gitconfig` pulls in with `[include]`.
+`~/.gitconfig`, `~/.config/git`, and `~/.git-templates` themselves stay protected. Add your own paths to the deny list with `/sandbox deny add <path>`. Under
 Write, those paths are also protected from removal and renaming.
 
 A looser value (a higher level, a capability switched on, or a sandbox switched

