@@ -1,9 +1,9 @@
 {
   "phase": "after",
-  "measuredAt": "2026-09-27T07:16:00.168Z",
+  "measuredAt": "2026-09-27T08:32:44.013Z",
   "git": {
-    "branch": "HEAD",
-    "sha": "880b99f084ace71cff9de9462815b29c6ffb3c7c",
+    "branch": "fix/test-packaging-hygiene",
+    "sha": "bc5599b5776be3f043d3a3c14772d516efeef5b4",
     "dirty": true
   },
   "model": {
@@ -62,7 +62,7 @@
     {
       "id": "subagent.success.result",
       "utf8Bytes": 339,
-      "sha256": "54907f4338a9b742803399205271394a3641072747bcf6fccb2f56767282cc89",
+      "sha256": "97a716586e7adf19d2d43e0a9a3dfdfa5d1bb45284acb70aff28a35a7fcc274a",
       "excerpt": "[sa_issue312_success · completed · exit 0 · 45s · lifecycle complete] issue-312-synthetic review complete. Finding: the helper returns the bounded page. Next: reconstruct unread bytes through the caller cursor. --- statusCursor=p1.eyJrIjoi…",
       "facts": {
         "utf16CodeUnits": 335,
@@ -99,7 +99,7 @@
     {
       "id": "subagent.success.output",
       "utf8Bytes": 307,
-      "sha256": "599a30dd20da91911ed863808743f2e792c0695251f5fdfa4cedb31c8ecd05a2",
+      "sha256": "07b93ca1a408ef2f663317c0407f0930dbcfffc2b944f4fbb7ea42e1075c1c1c",
       "excerpt": "[sa_issue312_success · completed · 45s] issue-312-synthetic review complete. Finding: the helper returns the bounded page. Next: reconstruct unread bytes through the caller cursor. --- statusCursor=p1.eyJrIjoicyIsInIiOiIwYzJzeFNzYmh5SW5iSn…",
       "facts": {
         "utf16CodeUnits": 305,
@@ -170,7 +170,7 @@
     {
       "id": "subagent.failed.result",
       "utf8Bytes": 515,
-      "sha256": "8e65500d0dc0b806da95dc08b09abd0caa10afce2637396de788c003b5909611",
+      "sha256": "abaa07394cde42a548000a1c42c267bdd36053e560b1c946eea6486ff5303634",
       "excerpt": "[sa_issue312_failed · failed · exit 1 · 45s · lifecycle failed_exit] Action required · observed 2023-11-14T22:13:20.000Z · Child exited with code 1 Work correctness was not inferred from lifecycle alone. Lifecycle: failed_exit Lifecycle di…",
       "facts": {
         "utf16CodeUnits": 509,
@@ -243,7 +243,7 @@
     {
       "id": "subagent.incomplete.result",
       "utf8Bytes": 818,
-      "sha256": "9cdf79c0b05533c77fb8138b07a96339416dadbbe62b5e22d22481914f20b10f",
+      "sha256": "ebe295d5d189732efa570b68dc8b0d1cc9c0a21f75fc03873d42d71ea844f6e7",
       "excerpt": "[sa_issue312_incomplete · failed · exit 0 · 45s · lifecycle incomplete_no_terminal_event] Observation incomplete · observed 2023-11-14T22:13:20.000Z · Child exit evidence is incomplete Run ended unexpectedly before producing a coherent fin…",
       "facts": {
         "utf16CodeUnits": 812,
@@ -316,7 +316,7 @@
     {
       "id": "subagent.orphaned.result",
       "utf8Bytes": 725,
-      "sha256": "5bc635fb5b5416c7a93de781f29983d6c6a1e71edfdb85ef13cfc95b69475dd9",
+      "sha256": "024beb320f7790ff43e5c415ea059687a0d6fa2d1bde92428dd25cc812e001be",
       "excerpt": "[sa_issue312_orphaned · orphaned · 45s] Run is orphaned — non-final. Supervision was lost; related processes may still be alive. There is no final result yet. [health: orphaned] Run is orphaned — non-final. Supervision was lost; related pr…",
       "facts": {
         "utf16CodeUnits": 719,
@@ -389,7 +389,7 @@
     {
       "id": "subagent.unicode.result",
       "utf8Bytes": 2047,
-      "sha256": "1ce87a25d5992264a2ddd20f85502664e6ccabdfbd20cb4e3d0725821a62c42d",
+      "sha256": "d4482e2786b0738597320b359559a82405eba7192e998fc283c4fd6fea675b55",
       "excerpt": "[sa_issue312_unicode · completed · exit 0 · 45s · lifecycle complete] {\"marker\":\"issue-312-synthetic\",\"note\":\"合成任务 ✓ 测量载荷\",\"emoji\":\"📦🧠✅\",\"combining\":\"é\",\"terminalFailure\":true,\"payload\":\"你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你…",
       "facts": {
         "utf16CodeUnits": 984,
@@ -427,9 +427,56 @@
       }
     },
     {
+      "id": "subagent.multi_page.result",
+      "utf8Bytes": 1993,
+      "sha256": "e36371ff8b5e496ba8dddedbb569fc1b6260bb895d689d801a5e1e9381e08432",
+      "excerpt": "[sa_issue312_multi_page · completed · exit 0 · 45s · lifecycle complete] issue-312-synthetic multi-page answer begins. 001 finding: 合成段落 ✓ café 📦 — keep line 1 intact across page boundaries. 002 finding: 合成段落 ✓ café 📦 — keep line 2 intac…",
+      "facts": {
+        "utf16CodeUnits": 1719,
+        "lineCount": 24,
+        "longestLineUtf8Bytes": 151,
+        "containsNonAscii": true,
+        "utf8GreaterThanUtf16": true,
+        "orderedToolSequence": null,
+        "containsOrderedToolSequence": false,
+        "containsToolsUsedHeader": false,
+        "containsMatchedConditionPath": false,
+        "containsTruncationMarker": false,
+        "containsEmptyLogMasquerade": false,
+        "additionalActiveFailuresRetained": 0,
+        "containsUnresolvedFailure": false,
+        "containsObservationIncomplete": false,
+        "compactStatusShowsMatchedCondition": false,
+        "containsSyntheticMarker": true,
+        "proposedBudgetBytes": 2048,
+        "exceedsProposedBudget": false,
+        "utf8BytesExcludingIsolatedTmpdir": 1993,
+        "isolatedTmpdirPrefixBytes": 0,
+        "answerUtf8Bytes": 5420,
+        "pageCount": 4,
+        "pageUtf8Bytes": [
+          1993,
+          2045,
+          2044,
+          601
+        ],
+        "maxPageUtf8Bytes": 2045,
+        "reconstructedUtf8Bytes": 5420,
+        "reconstructedExactly": true
+      },
+      "family": "multi-page-answer",
+      "surface": "subagent_result",
+      "tool": "subagent_result",
+      "invokePath": "packages/pi-better-subagents/tools.ts#subagentResultTool.execute (nextCursor pages)",
+      "params": {
+        "id": "sa_issue312_multi_page",
+        "followNextCursor": true
+      }
+    },
+    {
       "id": "subagent.many_failures.result",
       "utf8Bytes": 630,
-      "sha256": "4cfe4093c11f11b5a05d6d7a38c3fca4789ef6a9b2d02bebfd7a5683bf5ecedb",
+      "sha256": "83cc59b58385be1f16d9e6149f09a9dc51363fcf3398228cd647ff6cca2c9bb7",
       "excerpt": "[sa_issue312_many_failures · completed · exit 0 · 45s · lifecycle complete] 12 active failure observations · 0 shown · 12 omitted · incidentCursor=i1.eyJrIjoiaSIsIm8iOjAsInYiOiJjZmNiODQ2MGEwMzEwN2MyIiwibiI6MTIsInIiOiJoQm1uR3Y2OTVycGN6UVJfI…",
       "facts": {
         "utf16CodeUnits": 623,
@@ -467,13 +514,13 @@
     },
     {
       "id": "subagent.list",
-      "utf8Bytes": 928,
-      "sha256": "9a9c8bcf82bc2050cf37375b1b5d9c75ff1cffe21410456c1e9728b3f3f9b801",
-      "excerpt": "subagent_list · 6 matching · scope session:8b6b2a7d71b42ec1d28e3968 · newest first 3 listed runs with active failure observations; inspect with subagent_result • unicode-json sa_issue312_unicode [completed] ? 45s synthetic issue-312-synthe…",
+      "utf8Bytes": 899,
+      "sha256": "017c43023b4db55e757ca105e129cec3784078ff60a34ea22055d8c4f6af3c9f",
+      "excerpt": "subagent_list · 7 matching · scope session:8b6b2a7d71b42ec1d28e3968 · newest first 3 listed runs with active failure observations; inspect with subagent_result • unicode-json sa_issue312_unicode [completed] ? 45s synthetic issue-312-synthe…",
       "facts": {
-        "utf16CodeUnits": 916,
+        "utf16CodeUnits": 888,
         "lineCount": 13,
-        "longestLineUtf8Bytes": 151,
+        "longestLineUtf8Bytes": 147,
         "containsNonAscii": true,
         "utf8GreaterThanUtf16": true,
         "orderedToolSequence": null,
@@ -489,7 +536,7 @@
         "containsSyntheticMarker": true,
         "proposedBudgetBytes": 1024,
         "exceedsProposedBudget": false,
-        "utf8BytesExcludingIsolatedTmpdir": 928,
+        "utf8BytesExcludingIsolatedTmpdir": 899,
         "isolatedTmpdirPrefixBytes": 0
       },
       "family": "many-failures",
@@ -578,7 +625,7 @@
     {
       "id": "background.success.status",
       "utf8Bytes": 589,
-      "sha256": "13ae78ca4aa93d566b9b03e7cfee6b4dedfb49f0ec945af08fa788d7fe71a317",
+      "sha256": "2ecc6c760aa919498b61c8051ed169fa627688c7fc55c8fd5445032bd7f9f270",
       "excerpt": "Background task bg_issue312_success is succeeded. exit=0 exit_code running checks ready exit 0 kind: process name: synthetic-success elapsed: 45s --- hasMore=true omittedBytes=52 nextCursor=p1.eyJrIjoiZiIsInIiOiJjTHZDQ2wxS0FkdFVSZWh2Iiwiby…",
       "facts": {
         "utf16CodeUnits": 589,
@@ -613,7 +660,7 @@
     {
       "id": "background.success.status.wrapper",
       "utf8Bytes": 589,
-      "sha256": "13ae78ca4aa93d566b9b03e7cfee6b4dedfb49f0ec945af08fa788d7fe71a317",
+      "sha256": "2ecc6c760aa919498b61c8051ed169fa627688c7fc55c8fd5445032bd7f9f270",
       "excerpt": "Background task bg_issue312_success is succeeded. exit=0 exit_code running checks ready exit 0 kind: process name: synthetic-success elapsed: 45s --- hasMore=true omittedBytes=52 nextCursor=p1.eyJrIjoiZiIsInIiOiJjTHZDQ2wxS0FkdFVSZWh2Iiwiby…",
       "facts": {
         "utf16CodeUnits": 589,
@@ -689,7 +736,7 @@
     {
       "id": "background.failed.status",
       "utf8Bytes": 818,
-      "sha256": "c5c3266754ac04a6259951435056a53052dd88d2bb573a678a56854182771e77",
+      "sha256": "f5be751f08aba8553a0563f77ddcfed315e0f37fb95325a08b077fc117d70859",
       "excerpt": "Action required · observed 2023-11-14T22:13:20.000Z · issue-312-synthetic matched $.terminalFailure = true · evidence: /private/var/folders/hh/j9d9ym9d1n3b_lks9_4b5zx40000gn/T/issue-312-payload-baseline/pi-better-background-tasks/tasks/bg_…",
       "facts": {
         "utf16CodeUnits": 815,
@@ -724,7 +771,7 @@
     {
       "id": "background.repeated_poll.status",
       "utf8Bytes": 842,
-      "sha256": "7a3da259d9e0cbe8a83816fe649fa3d1e4f97130562f411a92b0bb5072840439",
+      "sha256": "02148764f4ca8c2a67a221277281b35f5bdb433203c5cdd0501219d9ad16ff68",
       "excerpt": "Background task bg_issue312_repeated_poll is running. exit=0 {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} --- check 2023-11-14T22:52:05.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} k…",
       "facts": {
         "utf16CodeUnits": 842,
@@ -761,7 +808,7 @@
     {
       "id": "background.repeated_poll.log.default",
       "utf8Bytes": 962,
-      "sha256": "ec07a8b4b5fdfe4b13bbab9ff258c94fdd50d002dd3665d1deebe365b946731c",
+      "sha256": "fb5c6c95ed924a4a47f28dc083ffcded8afc4921be787e9472155b800eb9db13",
       "excerpt": "bg_issue312_repeated_poll log (running) · newest 10 display rows exit=0 {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} --- check 2023-11-14T22:50:35.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-312-sy…",
       "facts": {
         "utf16CodeUnits": 961,
@@ -799,7 +846,7 @@
     {
       "id": "background.repeated_poll.log.full",
       "utf8Bytes": 10495,
-      "sha256": "06acf54466a7cad3694c6634f8e5b9ed24d699846b88619e5716e31f0ffe92bc",
+      "sha256": "2c8734aac8a7c653a369b478e8194f929bc16a87344bf6bb5a8a9f5404a32ef3",
       "excerpt": "bg_issue312_repeated_poll raw log (running) exit=0 Raw retained bytes; capture/retention loss is not recoverable as full history. --- check 2023-11-14T22:12:35.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-…",
       "facts": {
         "utf16CodeUnits": 10495,
@@ -838,7 +885,7 @@
     {
       "id": "background.unicode.status",
       "utf8Bytes": 1024,
-      "sha256": "6793bab3f80df0f802ab2226eefb00b18cf9b26d9ee9e4c2f1434e3ec273d91d",
+      "sha256": "58f3e7fdf20ab7d006df58a078e9a65be908e8b15838d63094550ae39296e505",
       "excerpt": "Background task bg_issue312_unicode is succeeded. exit=0 json_path_equals 你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你…",
       "facts": {
         "utf16CodeUnits": 694,
@@ -874,7 +921,7 @@
     {
       "id": "background.unicode.log",
       "utf8Bytes": 8074,
-      "sha256": "f18d82da0ae40d83ecc84325dec19beb497501c44fe9737eec0e7cb161529aff",
+      "sha256": "a09636251d701681e495a17ced327979d4c3293e5327c8c01f7101e6eb480fc1",
       "excerpt": "bg_issue312_unicode raw log (succeeded) exit=0 json_path_equals Raw retained bytes; capture/retention loss is not recoverable as full history. {\"marker\":\"issue-312-synthetic\",\"note\":\"合成任务 ✓ 测量载荷\",\"emoji\":\"📦🧠✅\",\"combining\":\"é\",\"terminalF…",
       "facts": {
         "utf16CodeUnits": 3049,
@@ -913,7 +960,7 @@
     {
       "id": "background.many_failures.status",
       "utf8Bytes": 887,
-      "sha256": "66937e86a90b6298ea31b674203a16fbb719d078627543cd0fd99f66b75c1468",
+      "sha256": "84949dc9c175cee5874ab2a36b7c352166f4b57c9c2d379ed4a1a8439db4f61b",
       "excerpt": "12 active failure observations · 1 shown · 11 omitted · incidentCursor=i1.eyJrIjoiaSIsIm8iOjEsInYiOiIwOWI0NGM4MWVlOGExY2NiIiwibiI6MTIsInIiOiJsbE5QZGlKVUJBTmhudUhpIn0 (pass as cursor to bg_task_status id=bg_issue312_many_failures) Observati…",
       "facts": {
         "utf16CodeUnits": 881,
@@ -1019,13 +1066,14 @@
     }
   ],
   "totals": {
-    "caseCount": 26,
+    "caseCount": 27,
     "families": [
       "success",
       "failed",
       "incomplete",
       "orphaned",
       "unicode-long-line-json",
+      "multi-page-answer",
       "many-failures",
       "repeated-poll",
       "many-completions"
@@ -1036,7 +1084,8 @@
       "incomplete": 1318,
       "orphaned": 1312,
       "unicode-long-line-json": 11145,
-      "many-failures": 3309,
+      "multi-page-answer": 1993,
+      "many-failures": 3280,
       "repeated-poll": 12299,
       "many-completions": 1949
     }

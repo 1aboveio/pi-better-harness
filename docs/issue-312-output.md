@@ -151,15 +151,17 @@ fits, otherwise paged with a cursor.
 ## Before / after measurements
 
 BEFORE capture (issue discussion budgets, historical):
-`docs/issue-312-payload-baseline.md` / `.json`.
+`docs/tests/issue-312-payload-baseline/before.md` / `.json`.
 
 AFTER capture (OUTPUT-POLICY defaults):
-`docs/issue-312-payload-baseline-after.md` / `.json`.
+`docs/tests/issue-312-payload-baseline/after.md` / `.json`. It includes
+`subagent.multi_page.result`, an answer spanning at least three default pages
+that is reconstructed byte for byte by following `nextCursor`.
 
 Rerun:
 
 ```bash
 node --import tsx scripts/issue-312-payload-baseline.mjs --phase after \
-  --json-out docs/issue-312-payload-baseline-after.json \
-  --md-out docs/issue-312-payload-baseline-after.md
+  --json-out docs/tests/issue-312-payload-baseline/after.json \
+  --md-out docs/tests/issue-312-payload-baseline/after.md
 ```

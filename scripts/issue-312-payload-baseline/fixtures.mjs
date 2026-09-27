@@ -167,6 +167,30 @@ export function seedSubagentUnicode(registry) {
     return { id, finalText: UNICODE_JSON_LINE };
 }
 
+/**
+ * A final answer several times the default answer page (2 KiB): numbered
+ * mixed ASCII/CJK/emoji lines so a dropped, duplicated, or split page shows up
+ * as a byte mismatch rather than passing by accident.
+ */
+export const MULTI_PAGE_ANSWER = [
+    `${SYNTHETIC_MARKER} multi-page answer begins.`,
+    ...Array.from({ length: 60 }, (_, i) =>
+        `${String(i + 1).padStart(3, "0")} finding: 合成段落 ✓ café 📦 — keep line ${i + 1} intact across page boundaries.`),
+    `${SYNTHETIC_MARKER} multi-page answer ends.`,
+].join("\n");
+
+export function seedSubagentMultiPage(registry) {
+    const id = "sa_issue312_multi_page";
+    writeSubagentLog(registry, id, successEvents(MULTI_PAGE_ANSWER));
+    seedSubagentMeta(registry, id, {
+        status: "completed",
+        exitCode: 0,
+        lifecycleClassification: "complete",
+        name: "multi-page",
+    });
+    return { id, finalText: MULTI_PAGE_ANSWER };
+}
+
 export function seedSubagentManyFailures(registry) {
     const id = "sa_issue312_many_failures";
     const events = [assistantText("starting checks")];
@@ -367,4 +391,5 @@ export const REQUIRED_FAMILIES = [
     "unicode-long-line-json",
     "many-failures",
     "many-completions",
+    "multi-page-answer",
 ];

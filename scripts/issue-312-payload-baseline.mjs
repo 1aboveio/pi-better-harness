@@ -5,8 +5,8 @@
  * Usage:
  *   node --import tsx scripts/issue-312-payload-baseline.mjs
  *   node --import tsx scripts/issue-312-payload-baseline.mjs --phase after \
- *     --json-out docs/issue-312-payload-baseline-after.json \
- *     --md-out docs/issue-312-payload-baseline-after.md
+ *     --json-out docs/tests/issue-312-payload-baseline/after.json \
+ *     --md-out docs/tests/issue-312-payload-baseline/after.md
  *
  * Isolates TMPDIR, freezes Date.now, seeds synthetic runs/tasks, then
  * measures registered-tool `content` and callback sendMessage payloads as
