@@ -6,45 +6,39 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.7.0] - 2026-09-27
+
+### Changed
+
+- Bundle subagents 0.6.0, background-tasks 0.4.0, sandbox 0.6.0, and plan 0.5.0: a new sandbox Write level (write broadly, delete only where disposable) that is the subagent default outside the project; harness-owned subagent run timing (soft deadline, ceiling, stuck wake); delegation modes; `update_plan` writes the bound Rush workflow plan; failure output lists only what needs action and keeps history on request; aligned output parameters; mutation ownership; completions survive `/reload`; null intent fields no longer hide real failures; navigator detail views show 25 rows.
+
+## [pi-better-sandbox@0.6.0] - 2026-09-27
+
 ### Added
 
-- **subagents**: the harness now times every run. A soft deadline (default 30 min) steers the child to stop starting new work, commit what is done, and report, and wakes the parent once; grace (default 5 min) starts when that message reaches the child, after its current tool call, so a test run started just before the deadline is not killed mid-run; an unfinished run is then stopped and its completion reports `stopped: deadline`. A hard ceiling (default 90 min) stops without grace (`stopped: ceiling`), also for orphaned runs. No progress for 10 min (progress = any successful tool call that is not an exact repeat of an earlier one, by tool name and normalized arguments; edits, writes, commits, and a success after a failure always count; time inside a running tool call does not count) wakes the parent once (`stuck`) without stopping the run. `subagent_spawn` and `subagent_spawn_batch` accept `deadline_minutes`, `grace_minutes`, `max_minutes`, and `stuck_minutes` (0 = off; null = inherit: shared in a batch, then the default); global defaults come from `PI_SUBAGENT_*_MINUTES` or `config.json`. The policy lives in run metadata, so `/reload` keeps it. The reason shows on list, output, result, and completion callbacks.
-- **sandbox**: Project files and Outside project gain a **Write** level: read, create, and overwrite in place, but nothing removed or renamed away. The former Read / write is now labelled **Write & delete**, and saved `read-write` values keep that meaning. Removal is always allowed in temp, hidden home entries, and git worktree folders (`.worktrees/`, `*-worktrees/`).
+- Project files and Outside project gain a **Write** level: read, create, and overwrite in place, but nothing removed or renamed away. The former Read / write is now labelled **Write & delete**, and saved `read-write` values keep that meaning. Removal is always allowed in temp, hidden home entries, and git worktree folders (`.worktrees/`, `*-worktrees/`).
   - Outside project = Write writes across home and temp behind one fixed deny list. Credential files, plus `~/Library/Keychains`, Claude and Codex auth, `~/.gnupg`, cargo credentials, `~/.pgpass` and rclone, are unreadable and unwritable.
   - Code that runs later can't be written, removed, or renamed: shell startup files, `~/.pi`, `~/.claude`, `~/.agents`, `~/Library/LaunchAgents`, git config and templates, `~/.local/bin`, `~/bin`, oh-my-zsh custom, gradle init scripts, and cargo config. Harness state stays protected. Git config and hooks inside repositories are deliberately not protected, so `git init`, `git clone`, and `git worktree add` work.
   - Entries are guarded under their literal path, every symlink hop, and their target, so symlinked dotfiles (including chains of links) can't be swapped out or retargeted.
   - macOS enforces this with Seatbelt `file-write-unlink`. Linux uses a Bubblewrap fallback that keeps ordinary top-level home folders read-only, and refuses Project files = Write.
   - In `/sandbox`, a looser value applies only on a second Space, and saving looser defaults needs a second Enter. See ADR 0008. (#341)
-- **sandbox**: on macOS, a confined subagent or background task launched with Outside project = Write or Write & delete starts an APFS local snapshot (`tmutil localsnapshot`) in the background, at most one per 15 minutes. A failure is reported and never blocks the run. `PI_SANDBOX_RECOVERY_SNAPSHOT=off` disables it. (#341)
-- **background-tasks**: confined local tasks accept the Write levels from Main's profile and take the macOS recovery snapshot for Outside project = Write or Write & delete. (#341)
-- **subagents**: add adjustable `manual`, `adaptive`, and `coordinator` delegation modes, session-persisted `/subagents mode ...` overrides, role-first coordinator guidance, and explicit ownership boundaries for bundled roles. Generic plans now follow the active delegation mode. (#334)
+- On macOS, a confined subagent or background task launched with Outside project = Write or Write & delete starts an APFS local snapshot (`tmutil localsnapshot`) in the background, at most one per 15 minutes. A failure is reported and never blocks the run. `PI_SANDBOX_RECOVERY_SNAPSHOT=off` disables it. (#341)
 
-### Changed
-
-- **subagents**: the default Subagents profile is Outside project = Write, so tool caches such as `~/.gradle` work with no per-tool configuration while sibling repositories cannot be removed or moved. Set Outside project to Read (strict) or Write & delete in `/sandbox` to opt out. (#341)
-- **subagents**: the navigator detail view opens showing up to the latest 25 transcript rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the transcript shows as many newest rows as fit below them (previously metadata gave way to the transcript). `subagent_result` and `subagent_output` defaults are unchanged.
-- **background-tasks**: the navigator detail view opens showing up to the latest 25 log rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the log shows as many newest rows as fit below them. `bg_task_log` and `bg_task_status` defaults are unchanged.
-
-### Fixed
-
-- **background-tasks**: a navigator log tail taller than the terminal now drops its oldest rows instead of cutting off the newest ones.
-
-## [pi-better-harness@0.7.0] - 2026-09-27
-
-### Changed
-
-- Bundle subagents 0.6.0, background-tasks 0.4.0, and plan 0.4.0: `update_plan` writes the bound Rush workflow plan; failure output lists only what needs action and keeps history on request; aligned output parameters; mutation ownership; completions survive `/reload`; null intent fields no longer hide real failures.
 
 ## [pi-better-subagents@0.6.0] - 2026-09-27
 
 ### Added
 
+- The harness now times every run. A soft deadline (default 30 min) steers the child to stop starting new work, commit what is done, and report, and wakes the parent once; grace (default 5 min) starts when that message reaches the child, after its current tool call, so a test run started just before the deadline is not killed mid-run; an unfinished run is then stopped and its completion reports `stopped: deadline`. A hard ceiling (default 90 min) stops without grace (`stopped: ceiling`), also for orphaned runs. No progress for 10 min (progress = any successful tool call that is not an exact repeat of an earlier one, by tool name and normalized arguments; edits, writes, commits, and a success after a failure always count; time inside a running tool call does not count) wakes the parent once (`stuck`) without stopping the run. `subagent_spawn` and `subagent_spawn_batch` accept `deadline_minutes`, `grace_minutes`, `max_minutes`, and `stuck_minutes` (0 = off; null = inherit: shared in a batch, then the default); global defaults come from `PI_SUBAGENT_*_MINUTES` or `config.json`. The policy lives in run metadata, so `/reload` keeps it. The reason shows on list, output, result, and completion callbacks.
+- Add adjustable `manual`, `adaptive`, and `coordinator` delegation modes, session-persisted `/subagents mode ...` overrides, role-first coordinator guidance, and explicit ownership boundaries for bundled roles. Generic plans now follow the active delegation mode. (#334)
 - `subagent_result` accepts `lines`, an optional per-page line cap for the answer; `nextCursor` continues after the last line shown. (#321)
 - `subagent_output` and `subagent_result` accept `include: ["cost", "tools"]` to add one token/cost spend line and one tool-call count line (with the distinct tool names). Ordinary payloads still omit both. (#321)
 - `subagent_result`, `subagent_output`, `bg_task_status`, and the `bg_task`/`bg_status` `action:status` wrappers accept `history: true`, which returns an incident page listing failure history (unclassified tool errors, expected failures, recovered and superseded incidents) as well as what needs action. The page's `nextCursor` stays in the history view.
 
 ### Changed
 
+- The default Subagents profile is Outside project = Write, so tool caches such as `~/.gradle` work with no per-tool configuration while sibling repositories cannot be removed or moved. Set Outside project to Read (strict) or Write & delete in `/sandbox` to opt out. (#341)
+- The navigator detail view opens showing up to the latest 25 transcript rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the transcript shows as many newest rows as fit below them (previously metadata gave way to the transcript). `subagent_result` and `subagent_output` defaults are unchanged.
 - Only failures that need action are "active": `Action required` incidents (non-tool failures, a tool operation failing three times, incidents disposed `open`) and observation gaps. Unclassified tool errors and expected failures are history: counted, never listed or paged by default. When nothing needs action, result, output, and status say so in one line (`No failures need action · 8 unclassified tool errors · 2 expected (history)`) with no `incidentCursor`; the active count, `shown`/`omitted`, and the incident cursor cover actionable incidents only. List rows and list lead-ins count only what needs action. Completion callbacks keep their once-only counts.
 - Incident rows are compact on every surface (result, output, list, callbacks, status, log). A tool error stored as its result JSON (`{"content":[{"type":"text","text":…`) is shown as its text, the excerpt is capped at 120 UTF-8 bytes on a code-point boundary, and evidence is shortened to the log name and offset (`output.log#byte=N`). `mode: "raw"` (`subagent_output`/`subagent_result`) and raw background logs show the journal summary verbatim with the full evidence path; the failure journal is unchanged. Incident cursors issued before this change reset once with `reset=stale-cursor`. Background-task completion callbacks carry the same history count line.
 - New child tool errors are recorded with the tool's text instead of its JSON result wrapper.
@@ -71,12 +65,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- Confined local tasks accept the Write levels from Main's profile and take the macOS recovery snapshot for Outside project = Write or Write & delete. (#341)
 - `bg_task`/`bg_status` `action:clear` with `id` dismisses that one terminal task. (#322)
 - `bg_task_spawn`, `bg_task_watch`, and the `bg_task` wrapper accept `operation_id` and `expected_exit_codes`, validated before launch by the same validator as the subagent task runtime's `bash` (a malformed declaration starts nothing). A declared exit code is recorded as an `Expected failure`, not an incident needing action; signals and timeouts never are. A later task with the same `operation_id` (same kind, cwd, SSH target, and owner: the same session id, or for sessionless tasks the same Pi process) that succeeds recovers the earlier task's unresolved failures, so a retry with a changed command or timeout closes the original incident (#325)
 - `subagent_result`, `subagent_output`, `bg_task_status`, and the `bg_task`/`bg_status` `action:status` wrappers accept `history: true`, which returns an incident page listing failure history (unclassified tool errors, expected failures, recovered and superseded incidents) as well as what needs action. The page's `nextCursor` stays in the history view.
 
 ### Changed
 
+- The navigator detail view opens showing up to the latest 25 log rows (was 10); `l` switches between 25 and 10. The metadata lines always stay visible, and on a short terminal the log shows as many newest rows as fit below them. `bg_task_log` and `bg_task_status` defaults are unchanged.
 - Only failures that need action are "active": `Action required` incidents (non-tool failures, a tool operation failing three times, incidents disposed `open`) and observation gaps. Unclassified tool errors and expected failures are history: counted, never listed or paged by default. When nothing needs action, result, output, and status say so in one line (`No failures need action · 8 unclassified tool errors · 2 expected (history)`) with no `incidentCursor`; the active count, `shown`/`omitted`, and the incident cursor cover actionable incidents only. List rows and list lead-ins count only what needs action. Completion callbacks keep their once-only counts.
 - Incident rows are compact on every surface (result, output, list, callbacks, status, log). A tool error stored as its result JSON (`{"content":[{"type":"text","text":…`) is shown as its text, the excerpt is capped at 120 UTF-8 bytes on a code-point boundary, and evidence is shortened to the log name and offset (`output.log#byte=N`). `mode: "raw"` (`subagent_output`/`subagent_result`) and raw background logs show the journal summary verbatim with the full evidence path; the failure journal is unchanged. Incident cursors issued before this change reset once with `reset=stale-cursor`. Background-task completion callbacks carry the same history count line.
 - Output-control parameters use one spelling across both tool families: `max_bytes` and `lines`. Byte budgets, hard caps, and defaults are unchanged. (#321)
@@ -93,9 +89,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- A navigator log tail taller than the terminal now drops its oldest rows instead of cutting off the newest ones.
 - The terminal failure summary never exceeds its byte budget and is made of whole lines. Under a tight budget incident rows are dropped first, then lower-priority notes and the count line; the "Work correctness was not inferred from lifecycle alone." note is kept whenever it fits and never cut mid-sentence (#325)
 - Completion callbacks are no longer lost across `/reload`. Before, the unloaded extension instance kept running watch and poll timers and child exit handlers with no active session; when a task finished there, its callback was durably suppressed as "active session identity is unavailable". Session shutdown now stops that instance's timers and it never notifies; work already in flight (a child exit, a remote tmux start, a timeout kill) only records its result, and the resuming instance delivers the callback once. A same-process task whose exit nobody records is marked lost after a 5 s grace period instead of immediately. (#324)
 - `bg_task_spawn`, `bg_task_watch`, and `bg_task` accept `operation_id: null` and `expected_exit_codes: null` as "not declared" and launch the task normally, instead of refusing it as a malformed intent (or, on Pi 0.82, failing schema validation)
+
+## [pi-better-plan@0.5.0] - 2026-09-27
+
+### Changed
+
+- Generic plan guidance follows the active subagents delegation mode (`manual`, `adaptive`, or `coordinator`): manual never authorizes proactive delegation, adaptive favors substantial independent work, and coordinator delegates role-owned milestones after `agents_catalog` discovery. (#334)
 
 ## [pi-better-plan@0.4.0] - 2026-09-27
 
