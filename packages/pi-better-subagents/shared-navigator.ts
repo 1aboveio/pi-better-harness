@@ -106,7 +106,7 @@ export const CLOSE_CONFIRM_STATUS_KEY = "background-work-close";
 export const MAIN_LIST_WIDGET_KEY = "background-work-list";
 export const DETAIL_TICK_MS = 10_000;
 export const CLOSE_ARM_MS = 3000;
-export const DEFAULT_LOG_TAIL_ROWS = 10;
+export const DEFAULT_LOG_TAIL_ROWS = 25;
 export const LOG_TAIL_ROW_CHOICES = [10, 25] as const;
 const MAIN_LIST_FALLBACK_WIDTH = 100;
 const DETAIL_OVERLAY_BOTTOM_MARGIN_ROWS = 0;
@@ -931,7 +931,7 @@ function createOverlayComponent(
         transcriptDetail = null;
         transcriptComponent = null;
         contentLines = mode === "detail"
-          ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, bottomFooter: false })
+          ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, maxRows: detailRows, bottomFooter: false })
           : buildListLines(overlayState, width, deps.truncate, fg);
       }
       if (mode !== "detail") return contentLines;
@@ -1123,7 +1123,7 @@ function buildDetailLines(
   width: number,
   truncate: (s: string, width: number) => string,
   fg: (color: string, value: string) => string,
-  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number; bottomFooter?: boolean } = {},
+  options: { expandedSections?: Set<string>; logTailRows?: number; minRows?: number; maxRows?: number; bottomFooter?: boolean } = {},
 ): string[] {
   if (!detail) {
     const lines = [rule("Work unavailable", width), dim("   ← back · Esc close", fg), ""];
@@ -1187,7 +1187,9 @@ function buildDetailLines(
     const wrapped = /log/i.test(detail.evidence.label)
       ? wrapLogText(body, width - 6)
       : wrapEvidenceText(body, width - 6);
-    const shown = tailEvidence ? wrapped.slice(-tailRows) : wrapped;
+    let shown = tailEvidence ? wrapped.slice(-tailRows) : wrapped;
+    // A tail that outgrows the viewport drops its oldest rows so the newest stay on screen (+1 for the trailing blank).
+    if (tailEvidence && options.maxRows !== undefined) shown = shown.slice(-Math.max(1, options.maxRows - lines.length - 1));
     for (const raw of shown) lines.push(raw ? `   ${raw}` : "   ");
   }
   lines.push("");

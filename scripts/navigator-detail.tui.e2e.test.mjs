@@ -56,17 +56,17 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     saveScreen("overview", overview);
     assertBlankRowBefore(overview, "subagents", "navigator section");
     sendKey("Down");
-    const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("provider Subagents"));
+    // At 40 rows the 25-row transcript tail takes the height budget ahead of optional metadata, so key on the transcript header.
+    const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("transcript · latest 25 rows"));
     saveScreen("subagent-detail", subagentPage);
     assertSingleInputFrame(subagentPage, "subagent detail");
     assert.match(subagentPage.split("\n")[0], /中文.*\.\.\.\s*$/, "long Unicode subagent title must fit with a visible truncation marker");
-    assert.match(subagentPage, /transcript · latest 10 rows/, "subagent detail must render its transcript section");
+    assert.match(subagentPage, /transcript · latest 25 rows/, "subagent detail must default to a 25-row transcript tail");
     assert.match(subagentPage, /← main/, "subagent detail must use the structured transcript renderer");
     assert.match(subagentPage, /transcript-row-30/);
     assert.doesNotMatch(subagentPage, /transcript-row-01/);
 
     execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-y", "48"]);
-    sendKey("l");
     const expandedPage = waitForScreen((screen) => screen.includes("transcript · latest 25 rows") && screen.includes("transcript-row-10"));
     saveScreen("expanded-subagent-detail", expandedPage);
     assertSingleInputFrame(expandedPage, "expanded subagent detail");
@@ -74,7 +74,11 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     assert.doesNotMatch(expandedPage, /transcript-row-05/);
     assert.doesNotMatch(expandedPage, /transcript-row-01/);
     sendKey("l");
-    waitForScreen((screen) => screen.includes("transcript · latest 10 rows"));
+    const shortPage = waitForScreen((screen) => screen.includes("transcript · latest 10 rows"));
+    assert.match(shortPage, /transcript-row-22/);
+    assert.doesNotMatch(shortPage, /transcript-row-21/);
+    sendKey("l");
+    waitForScreen((screen) => screen.includes("transcript · latest 25 rows") && screen.includes("transcript-row-10"));
 
     sendKey("Down");
     for (const width of [100, 80]) {
@@ -85,7 +89,7 @@ test("golden path: navigate both providers and read complete Unicode logs withou
       saveScreen(`background-detail-${width}`, taskPage);
       assertSingleInputFrame(taskPage, `background-task detail at ${width} columns`);
       assert.match(taskPage.split("\n")[0], /\.\.\.\s*$/, "long Unicode title must show truncation rather than overflow the terminal");
-      assert.match(taskPage, /log(?: tail)? · latest 10 rows/, "background-task detail must render its log tail");
+      assert.match(taskPage, /log(?: tail)? · latest 25 rows/, "background-task detail must default to a 25-row log tail");
       assert.ok(taskPage.replace(/\s/g, "").includes(unicodeLog), `wrapped log lost content at ${width} columns:\n${taskPage}`);
     }
 

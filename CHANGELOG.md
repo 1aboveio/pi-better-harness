@@ -10,6 +10,15 @@ All notable changes to this project are documented in this file. The format is b
 
 - **subagents**: add adjustable `manual`, `adaptive`, and `coordinator` delegation modes, session-persisted `/subagents mode ...` overrides, role-first coordinator guidance, and explicit ownership boundaries for bundled roles. Generic plans now follow the active delegation mode. (#334)
 
+### Changed
+
+- **subagents**: the navigator detail view opens showing the latest 25 transcript rows (was 10); `l` switches between 25 and 10. `subagent_result` and `subagent_output` defaults are unchanged.
+- **background-tasks**: the navigator detail view opens showing the latest 25 log rows (was 10); `l` switches between 25 and 10. `bg_task_log` and `bg_task_status` defaults are unchanged.
+
+### Fixed
+
+- **background-tasks**: a navigator log tail taller than the terminal now drops its oldest rows instead of cutting off the newest ones.
+
 ## [pi-better-harness@0.7.0] - 2026-09-27
 
 ### Changed

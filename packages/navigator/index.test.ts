@@ -969,7 +969,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("opens detail only as an overlay with a 10/25 rolling tail and default-expanded command", () => {
+  it("opens detail only as an overlay with a 25/10 rolling tail and default-expanded command", () => {
     const detailCalls: Array<number | undefined> = [];
     const unregister = registerBackgroundWorkProvider({
       id: "background-tasks",
@@ -1074,8 +1074,8 @@ describe("shared background work navigator", () => {
       assert.deepEqual(renderedLines.slice(-nativeEditorLines.length), nativeEditorLines, "the input box is flush with the bottom of the detail overlay");
       for (const line of renderedLines) assert.doesNotMatch(line, /[\r\n]/, "detail rows must not contain embedded newlines");
       let rendered = renderedLines.join("\n");
-      assert.equal(detailCalls.at(-1), 10);
-      assert.match(rendered, /log tail · latest 10 rows/);
+      assert.equal(detailCalls.at(-1), 25);
+      assert.match(rendered, /log tail · latest 25 rows/);
       assert.match(rendered, /command/);
       assert.match(rendered, /statusCheckRollup/);
       assert.doesNotMatch(rendered, /command.*folded/);
@@ -1083,16 +1083,96 @@ describe("shared background work navigator", () => {
       component.handleInput("l");
       renderedLines = component.render(72);
       rendered = renderedLines.join("\n");
-      assert.equal(detailCalls.at(-1), 25);
-      assert.match(rendered, /log tail · latest 25 rows/);
-      assert.match(rendered, /latest 25/);
+      assert.equal(detailCalls.at(-1), 10);
+      assert.match(rendered, /log tail · latest 10 rows/);
+      assert.match(rendered, /latest 10/);
 
       component.handleInput("enter");
       rendered = component.render(120).join("\n");
       assert.match(rendered, /command.*folded/);
 
       component.handleInput("l");
-      assert.equal(detailCalls.at(-1), 10);
+      assert.equal(detailCalls.at(-1), 25);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("keeps the newest log rows visible when the 25-row tail exceeds the terminal height", () => {
+    const log = Array.from({ length: 40 }, (_, i) => `log-row-${String(i + 1).padStart(2, "0")}`).join("\n");
+    const unregister = registerBackgroundWorkProvider({
+      id: "background-tasks",
+      label: "Background Tasks",
+      priority: 20,
+      visibleCount: () => 1,
+      listRows: () => [{
+        providerId: "background-tasks",
+        id: "bg-tall",
+        name: "tall-log",
+        status: "running",
+        statusTone: "running",
+        kind: "process",
+        elapsed: "1m",
+        primary: "npm test",
+        sortStartedAt: 300,
+      }],
+      detail: (_id, _now, options) => ({
+        providerId: "background-tasks",
+        id: "bg-tall",
+        title: "tall-log",
+        status: "running",
+        statusTone: "running",
+        metadata: ["provider", "kind", "elapsed", "cwd", "pid", "pgid"].map((label) => ({ label, value: label })),
+        foldedSections: [{ id: "command", label: "command", text: "npm test", expandedByDefault: true }],
+        evidence: { label: "log tail", text: log.split("\n").slice(-(options?.logTailLines ?? 10)).join("\n") },
+        footerActions: ["x stop"],
+      }),
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "background-tasks", id }),
+    });
+
+    let component: any;
+    let customOptions: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any, options: any) {
+        customOptions = options;
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {}, render: () => ["─".repeat(72), "", "─".repeat(72)] }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+      assert.equal(customOptions?.overlayOptions?.().visible(72, 30), true);
+
+      let renderedLines = component.render(72);
+      let rendered = renderedLines.join("\n");
+      assert.equal(renderedLines.length, 30);
+      assert.match(rendered, /log tail · latest 25 rows/);
+      assert.match(rendered, /provider/, "metadata stays visible above the log tail");
+      assert.match(rendered, /log-row-40/, "the newest log row must stay visible when the tail is height-constrained");
+      assert.doesNotMatch(rendered, /log-row-16/, "a height-constrained tail drops its oldest rows first");
+
+      assert.equal(customOptions?.overlayOptions?.().visible(72, 60), true);
+      rendered = component.render(72).join("\n");
+      for (let row = 16; row <= 40; row += 1) assert.match(rendered, new RegExp(`log-row-${row}`));
+      assert.doesNotMatch(rendered, /log-row-15/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
@@ -1185,22 +1265,22 @@ describe("shared background work navigator", () => {
       renderedLines = component.render(54);
       rendered = renderedLines.join("\n");
       assert.match(rendered, /Enter collapse/);
-      assert.match(rendered, /output · showing 10\/\d+ rows/);
+      assert.match(rendered, /output · showing (\d+)\/\1 rows/);
       assert.match(rendered, /July can only be safely\n\s+evaluated/);
-      assert.doesNotMatch(rendered, /row-11 visible after more/);
+      assert.match(rendered, /row-12 visible after more/);
       for (const line of renderedLines) assert.ok(visibleWidth(line) <= 54, `line exceeds width: ${line}`);
 
       component.handleInput("l");
       rendered = component.render(54).join("\n");
-      assert.match(rendered, /output · showing \d+\/\d+ rows/);
-      assert.match(rendered, /row-11 visible after more/);
+      assert.match(rendered, /output · showing 10\/\d+ rows/);
+      assert.doesNotMatch(rendered, /row-11 visible after more/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
     }
   });
 
-  it("renders transcript evidence as a latest-10 tail by default", () => {
+  it("renders transcript evidence as a latest-25 tail by default", () => {
     const transcript = Array.from({ length: 12 }, (_, i) => `line-${String(i + 1).padStart(2, "0")}`).join("\n");
     const unregister = registerBackgroundWorkProvider({
       id: "subagents",
@@ -1260,15 +1340,16 @@ describe("shared background work navigator", () => {
 
       let rendered = component.render(80).join("\n");
       assert.doesNotMatch(rendered, /Enter expand|transcript · folded/);
-      assert.match(rendered, /transcript · latest 10 rows/);
-      assert.doesNotMatch(rendered, /line-01|line-02/);
-      assert.match(rendered, /line-03/);
+      assert.match(rendered, /transcript · latest 25 rows/);
+      assert.match(rendered, /line-01/);
       assert.match(rendered, /line-12/);
 
       component.handleInput("l");
       rendered = component.render(80).join("\n");
-      assert.match(rendered, /transcript · latest 25 rows/);
-      assert.match(rendered, /line-01/);
+      assert.match(rendered, /transcript · latest 10 rows/);
+      assert.doesNotMatch(rendered, /line-01|line-02/);
+      assert.match(rendered, /line-03/);
+      assert.match(rendered, /line-12/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
@@ -1355,19 +1436,25 @@ describe("shared background work navigator", () => {
       assert.equal(visible(80, 24), true);
 
       let rendered = component.render(80).join("\n");
-      assert.match(rendered, /transcript · latest 10 rows/);
-      assert.doesNotMatch(rendered, /transcript-20|fallback should not render/);
-      for (let row = 21; row <= 30; row += 1) {
-        assert.match(rendered, new RegExp(`transcript-${row}`));
-      }
+      assert.match(rendered, /transcript · latest 25 rows/);
+      assert.doesNotMatch(rendered, /transcript-06|fallback should not render/, "a 24-row terminal cannot fit the full 25-row tail");
+      assert.match(rendered, /transcript-30/, "the height-constrained tail keeps the newest rows");
 
-      component.handleInput("l");
       assert.equal(visible(80, 40), true);
       rendered = component.render(80).join("\n");
       assert.match(rendered, /transcript · latest 25 rows/);
       assert.doesNotMatch(rendered, /transcript-05/);
       for (let row = 6; row <= 30; row += 1) {
         assert.match(rendered, new RegExp(`transcript-${String(row).padStart(2, "0")}`));
+      }
+
+      component.handleInput("l");
+      assert.equal(visible(80, 24), true);
+      rendered = component.render(80).join("\n");
+      assert.match(rendered, /transcript · latest 10 rows/);
+      assert.doesNotMatch(rendered, /transcript-20/);
+      for (let row = 21; row <= 30; row += 1) {
+        assert.match(rendered, new RegExp(`transcript-${row}`));
       }
     } finally {
       disposeBackgroundWorkNavigator(ctx);

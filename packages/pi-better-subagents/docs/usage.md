@@ -364,6 +364,10 @@ is unchanged in every mode.
   compaction, active tool, model call/error, last log write, thresholds, and
   callback notification timestamps. Compaction, active tool, and model state
   are separate sections. The view refreshes about once per second while open.
+- The transcript shows the latest 25 rows by default; `l` switches between 25
+  and 10 rows. On a short terminal the transcript keeps its newest rows and
+  optional metadata lines give way first. `subagent_result` and
+  `subagent_output` page sizes are unaffected.
 - Detail opened from the main-window list closes back to the main page; the
   main-window selection remains on the viewed run when it is still visible.
 - `x` arms Stop for a running run, or Dismiss for a terminal run.
