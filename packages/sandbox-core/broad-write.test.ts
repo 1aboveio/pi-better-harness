@@ -91,7 +91,7 @@ describe("broad-write policy compilation", () => {
         assert.equal(remove(join(home, "projects", "repo", ".worktrees", "feature", "file")).allowed, true);
         assert.equal(remove(join(home, "projects", "repo-worktrees")).allowed, false, "only a worktree folder's contents");
         assert.equal(remove(join(home, ".config")).allowed, false, "an ancestor of a deny-list entry cannot move");
-        assert.equal(remove(join(tmpdir(), "scratch-file")).allowed, true);
+        assert.equal(remove("/private/tmp/scratch-file").allowed, true);
         const writeAndDelete = compileWritePolicy({ writableRoot: project, home, permissions: { ...broad, outsideProject: "read-write" } }, darwin);
         assert.equal(evaluateDeleteAccess(join(sibling, "README.md"), writeAndDelete, darwin).allowed, true);
     }));
@@ -215,6 +215,9 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
     it("lets a build use a user cache dir with no per-tool configuration", () => fixture((paths) => {
         const gradle = join(paths.home, ".gradle");
         mkdirSync(gradle);
+        // Existing cache roots: the Linux fallback keeps home itself read-only,
+        // so a brand-new top-level dot directory cannot be created there.
+        mkdirSync(join(paths.home, ".cache"));
         const result = run(paths, [
             'mkdir -p "$HOME/.gradle/wrapper/dists/gradle-8.14.3-bin"',
             'cd "$HOME/.gradle/wrapper/dists/gradle-8.14.3-bin"',
@@ -260,6 +263,7 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
     it("allows removal in the workspace, temp, dot caches and worktree folders", () => fixture((paths) => {
         const worktree = join(paths.home, "projects", "other-repo-worktrees", "feature");
         mkdirSync(worktree, { recursive: true });
+        mkdirSync(join(paths.home, ".npm"));
         writeFileSync(join(worktree, "file.txt"), "old");
         const temp = realpathSync(mkdtempSync(join(tmpdir(), "broad-temp-")));
         try {
@@ -342,7 +346,8 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
     }));
 
     it("restores removal wherever writes are allowed with Write & delete", () => fixture((paths) => {
-        const result = run(paths, `rm -rf '${paths.sibling}'`, { ...broad, outsideProject: "read-write" });
+        // Stored credentials Read / write: the Linux Write & delete mount cannot mask credentials.
+        const result = run(paths, `rm -rf '${paths.sibling}'`, { ...broad, outsideProject: "read-write", storedCredentials: "read-write" });
         assert.equal(result.status, 0, output(result));
         assert.equal(existsSync(paths.sibling), false);
     }));
