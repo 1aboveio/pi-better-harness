@@ -19,6 +19,7 @@
  * masquerade as enforcement.
  */
 
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -220,26 +221,55 @@ async function waitForMeta(
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function processAlive(pid: number): boolean {
-  // A Linux zombie awaiting its reaper cannot run; it counts as gone.
+/** The kernel's view of a process: `ps` state letters, or undefined when it no longer exists. */
+function processState(pid: number): string | undefined {
   if (process.platform === "linux") {
     try {
-      if (/\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"))) return false;
+      return readFileSync(`/proc/${pid}/stat`, "utf8").match(/\) (\S) /)?.[1];
     } catch {
-      return false;
+      return undefined;
     }
   }
+  const ps = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+  const state = ps.status === 0 ? ps.stdout.trim() : "";
+  if (state) return state;
+  // ps found nothing (or could not run): fall back to a signal-0 probe.
   try {
     process.kill(pid, 0);
-    return true;
+    return "?";
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-async function waitForCondition(done: () => boolean, timeoutMs = 10_000) {
+function processGroupGone(pgid: number | undefined): boolean {
+  if (!pgid || pgid <= 1) return false;
+  try {
+    process.kill(-pgid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/**
+ * Whether a stopped task's process can still run. A zombie awaiting its reaper
+ * cannot (on macOS an orphan waits for launchd, and signal 0 still succeeds on
+ * it), and neither can anything in a process group that no longer exists.
+ */
+function processAlive(pid: number, pgid?: number): boolean {
+  if (processGroupGone(pgid)) return false;
+  const state = processState(pid);
+  return state !== undefined && !state.startsWith("Z");
+}
+
+/** Polls until done() or the deadline; throws with `describe()` so a timeout says what was still true. */
+async function waitForCondition(done: () => boolean, describe: () => string, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline && !done()) await sleep(25);
+  while (!done()) {
+    if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs} ms: ${describe()}`);
+    await sleep(25);
+  }
 }
 
 describe.skipIf(!support.supported)(
@@ -365,11 +395,14 @@ describe.skipIf(!support.supported)(
       expect(processAlive(childPid)).toBe(true);
 
       expect(await harness.execute("bg_task_stop", { id })).toContain(id);
-      await waitForMeta(id, (current) => current?.status === "cancelled");
-      await waitForCondition(() => !processAlive(childPid));
+      const stopped = await waitForMeta(id, (current) => current?.status === "cancelled");
+      await waitForCondition(
+        () => !processAlive(childPid, stopped.pgid),
+        () => `pid ${childPid} state ${processState(childPid) ?? "gone"}, pgid ${stopped.pgid} ${processGroupGone(stopped.pgid) ? "gone" : "present"}`,
+      );
 
-      expect(processAlive(childPid)).toBe(false);
-    }, 20_000);
+      expect(processAlive(childPid, stopped.pgid)).toBe(false);
+    }, 30_000);
 
     // @covers background-task.sandbox-lifecycle-compat
     // @level integration

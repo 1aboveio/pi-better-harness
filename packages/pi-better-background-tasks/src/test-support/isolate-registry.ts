@@ -8,10 +8,13 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll } from "vitest";
+import { afterAll, inject } from "vitest";
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
 
-const isolated = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "pi-bg-tasks-test-")));
+// The per-run root from isolate-registry-root.ts is removed at the end of the run,
+// which also covers files whose tests are all skipped (their afterAll never runs).
+const root = inject("isolatedTmpRoot") ?? realpathSync(tmpdir());
+const isolated = realpathSync(mkdtempSync(join(root, "pi-bg-tasks-test-")));
 process.env.TMPDIR = isolated;
 process.env.TMP = isolated;
 process.env.TEMP = isolated;

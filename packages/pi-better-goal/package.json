@@ -37,7 +37,7 @@
   "scripts": {
     "pretest": "node ../../scripts/sync-shared-log-utils.mjs",
     "prepack": "node ../../scripts/sync-shared-log-utils.mjs",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --import ../../scripts/isolate-registry.mjs --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm test"
   },

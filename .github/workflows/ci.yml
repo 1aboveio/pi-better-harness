@@ -170,7 +170,7 @@ jobs:
       # this step it skips everywhere and proves nothing. PI_SANDBOX_REQUIRE_BACKEND
       # is already set for this lane, which turns that skip into a hard failure.
       - name: Run the whole-session harness demonstration
-        run: node --import tsx --test scripts/harness-session.e2e.test.mjs
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/harness-session.e2e.test.mjs
 
       - name: Run macOS sandbox-exec confinement checks
         run: npm run test:macos-sandbox -w packages/pi-better-subagents
@@ -247,7 +247,7 @@ jobs:
       # this step it skips everywhere and proves nothing. PI_SANDBOX_REQUIRE_BACKEND
       # is already set for this lane, which turns that skip into a hard failure.
       - name: Run the whole-session harness demonstration
-        run: node --import tsx --test scripts/harness-session.e2e.test.mjs
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/harness-session.e2e.test.mjs
 
       - name: Run Linux bubblewrap confinement checks
         run: npm run test:linux-sandbox -w packages/pi-better-subagents
