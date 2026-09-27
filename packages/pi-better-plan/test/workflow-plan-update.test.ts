@@ -236,6 +236,16 @@ test("rejected updates leave the plan and profiling log untouched", async () => 
       [{ event: "x", changes: [{ target: "component", add: { id: "C2", status: "combining", dependsOn: ["C7"] } }] }, /dependsOn names unknown component "C7"/],
       [{ event: "x", changes: [{ target: "unit", add: { title: "t", stage: "pending", status: "pending" } }] }, /add.id is required/],
       [{ event: "x", changes: [{ target: "unit", id: "1201", set: { note: "a" }, add: { id: "1203" } }] }, /either set or add, not both/],
+      [{ event: "x", changes: [{ id: "1201", set: { dependsOn: ["1202"] } }] }, /unit cycle: 1201 -> 1202 -> 1201\. Nothing was saved/],
+      [{ event: "x", changes: [
+        { target: "unit", add: { id: "1203", title: "t", stage: "pending", status: "pending", dependsOn: ["1202"] } },
+        { id: "1201", set: { dependsOn: ["1203"] } },
+      ] }, /unit cycle: 1201 -> 1203 -> 1202 -> 1201/],
+      [{ event: "x", changes: [
+        { target: "component", add: { id: "C2", status: "building", dependsOn: ["C1"] } },
+        { id: "C1", set: { dependsOn: ["C2"] } },
+      ] }, /component cycle: C1 -> C2 -> C1/],
+      [{ event: "x", changes: [{ target: "unit", id: 7, add: { id: "1203", title: "t", stage: "pending", status: "pending" } }] }, /id must be text matching add.id/],
       // A valid change followed by an invalid one: nothing is saved.
       [{ event: "x", changes: [{ id: "1201", set: { status: "succeeded" } }, { id: "1202", set: { status: "nope" } }] }, /changes\[1\].*invalid status/],
     ];
@@ -290,6 +300,7 @@ test("a scope change adds unit and component rows in one revision without touchi
     assert.deepEqual(after.components[1], { id: "C2", status: "building", dependsOn: ["C1"], units: ["1203", "1204"] });
     assert.match(result.content[0].text, /\+C2, \+#1203, \+#1204, C2; decision d-3/);
     const event = readEvents(result.details.profilingPath).at(-1);
+    assert.deepEqual(event.changes[0].add.units, [], "the add event records the row as added, not after the later set");
     assert.deepEqual(event.changes.map((c: any) => [c.scope, c.id, "add" in c]), [
       ["component", "C2", true], ["unit", "1203", true], ["unit", "1204", true], ["component", "C2", false],
     ]);

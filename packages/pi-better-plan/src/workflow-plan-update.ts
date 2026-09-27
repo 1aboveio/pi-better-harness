@@ -96,7 +96,7 @@ export function applyRushPlanUpdate(
       const added = addRow(next, change, index);
       // A later change in this call may still set fields on the new row (e.g. a component's units).
       changed.push({ target: added.target, id: added.id, added: true });
-      profiledChanges.push({ scope: added.target, id: added.id, add: added.row });
+      profiledChanges.push({ scope: added.target, id: added.id, add: structuredClone(added.row) });
       continue;
     }
     const row = locateRow(next, change, index);
@@ -107,6 +107,8 @@ export function applyRushPlanUpdate(
     changed.push({ target: row.target, id: row.id });
     profiledChanges.push({ scope: row.target, ...(row.id === null ? {} : { id: row.id }), set });
   }
+
+  checkNoCycles(next);
 
   const ts = now.toISOString();
   let decisionId: string | undefined;
@@ -222,7 +224,9 @@ function addRow(plan: Record<string, unknown>, change: RushRowChange, index: num
   const row = structuredClone(change.add);
   const id = typeof row.id === "string" ? row.id.trim() : "";
   if (!id) throw new Error(`changes[${index}].add.id is required.`);
-  if (change.id !== undefined && change.id.trim() !== id) throw new Error(`changes[${index}]: id and add.id differ.`);
+  if (change.id !== undefined && (typeof change.id !== "string" || change.id.trim() !== id)) {
+    throw new Error(`changes[${index}]: id must be text matching add.id (or be left out).`);
+  }
   row.id = id;
   const where = `changes[${index}] (new ${target} ${id})`;
   const taken = [...unitIds(plan), ...componentIds(plan), ...(isRecord(plan.fleet) ? Object.keys(plan.fleet) : [])];
@@ -302,6 +306,33 @@ function checkFields(
     if ("dependsOn" in set) checkIds(where, "dependsOn", set.dependsOn, componentIds(plan), id, "component");
     if ("units" in set) checkIds(where, "units", set.units, unitIds(plan), null, "unit");
   }
+}
+
+/** Refuse the whole transition when unit or component dependsOn edges form a cycle. */
+function checkNoCycles(plan: Record<string, unknown>): void {
+  const rows = (list: unknown[]) => list.flatMap((row) => isRecord(row) && typeof row.id === "string"
+    ? [[row.id, Array.isArray(row.dependsOn) ? row.dependsOn.filter((id): id is string => typeof id === "string") : []] as const]
+    : []);
+  findCycle("unit", new Map(rows(unitList(plan))));
+  findCycle("component", new Map(rows(Array.isArray(plan.components) ? plan.components : [])));
+}
+
+function findCycle(kind: string, edges: Map<string, readonly string[]>): void {
+  const state = new Map<string, "visiting" | "done">();
+  const stack: string[] = [];
+  const visit = (id: string): void => {
+    if (state.get(id) === "done") return;
+    if (state.get(id) === "visiting") {
+      const cycle = [...stack.slice(stack.indexOf(id)), id];
+      throw new Error(`dependsOn would form a ${kind} cycle: ${cycle.join(" -> ")}. Nothing was saved.`);
+    }
+    state.set(id, "visiting");
+    stack.push(id);
+    for (const next of edges.get(id) ?? []) if (edges.has(next)) visit(next);
+    stack.pop();
+    state.set(id, "done");
+  };
+  for (const id of edges.keys()) visit(id);
 }
 
 function checkIds(where: string, field: string, value: unknown, known: Set<string>, self: string | null, kind: string): void {
