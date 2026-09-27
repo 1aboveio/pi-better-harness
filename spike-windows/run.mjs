@@ -89,11 +89,13 @@ const base = {
     defaultDaclSids: [userSid, logonSid, "S-1-5-18"],
     cwd: home,
 };
+const tokenObjectDacl = [logonSid];
 const variants = {
-    full: { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: elevated },
-    fullHighIL: elevated ? { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: false } : undefined,
-    fullNoDefaultDacl: { ...base, writeRestricted: false, defaultDacl: false, mediumIntegrity: elevated },
-    writeRestricted: { ...base, writeRestricted: true, defaultDacl: true, mediumIntegrity: elevated },
+    full: { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: elevated, tokenObjectDacl },
+    fullNoTokenDacl: { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: elevated },
+    fullHighIL: elevated ? { ...base, writeRestricted: false, defaultDacl: true, mediumIntegrity: false, tokenObjectDacl } : undefined,
+    fullNoDefaultDacl: { ...base, writeRestricted: false, defaultDacl: false, mediumIntegrity: elevated, tokenObjectDacl },
+    writeRestricted: { ...base, writeRestricted: true, defaultDacl: true, mediumIntegrity: elevated, tokenObjectDacl },
 };
 
 report.hkcuSoftwareAcl = hkcuRootAcl();

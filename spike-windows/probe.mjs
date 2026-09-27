@@ -11,7 +11,7 @@ const p = (...parts) => join(H, ...parts);
 
 function t(name, fn) {
     try { const v = fn(); out[name] = v === undefined ? "ok" : v; }
-    catch (e) { out[name] = `ERR:${e.code ?? e.status ?? e.message?.slice(0, 80)}`; }
+    catch (e) { out[name] = `ERR:${e.code ?? e.status ?? ""} ${(e.stderr ?? "").toString().trim().slice(0, 100)}`.trim(); }
 }
 function sh(file, args, opts = {}) {
     return execFileSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000, ...opts }).trim();

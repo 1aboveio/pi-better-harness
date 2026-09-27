@@ -48,6 +48,8 @@ const ConvertStringSidToSidW = advapi32.func("bool __stdcall ConvertStringSidToS
 const CreateRestrictedToken = advapi32.func(
     "bool __stdcall CreateRestrictedToken(void *, uint32, uint32, void *, uint32, void *, uint32, void *, _Out_ void **)");
 const SetEntriesInAclW = advapi32.func("uint32 __stdcall SetEntriesInAclW(uint32, EXPLICIT_ACCESS_W *, void *, _Out_ void **)");
+const GetSecurityInfo = advapi32.func("uint32 __stdcall GetSecurityInfo(void *, int, uint32, _Out_ void **, _Out_ void **, _Out_ void **, _Out_ void **, _Out_ void **)");
+const SetSecurityInfo = advapi32.func("uint32 __stdcall SetSecurityInfo(void *, int, uint32, void *, void *, void *, void *)");
 const SetTokenInformation = advapi32.func("bool __stdcall SetTokenInformation(void *, int, void *, uint32)");
 const CreateProcessAsUserW = advapi32.func(
     "bool __stdcall CreateProcessAsUserW(void *, void *, void *, void *, void *, bool, uint32, void *, str16, STARTUPINFOW *, _Out_ PROCESS_INFORMATION *)");
@@ -82,6 +84,22 @@ const restrict = sidArray(config.restrictingSids);
 const restricted = [null];
 if (!CreateRestrictedToken(token[0], flags, config.disableSids.length, disable, 0, null,
     config.restrictingSids.length, restrict, restricted)) fail("CreateRestrictedToken");
+
+if (config.tokenObjectDacl) {
+    // The restricted process must be able to open its own token (CreateProcess duplicates it).
+    const o = [null], g = [null], dacl = [null], sc = [null], sd = [null];
+    let st = GetSecurityInfo(restricted[0], 6 /* SE_KERNEL_OBJECT */, 4, o, g, dacl, sc, sd);
+    if (st) { console.error(`launch: GetSecurityInfo ${st}`); process.exit(120); }
+    const entries = config.tokenObjectDacl.map((s) => ({
+        grfAccessPermissions: 0x10000000, grfAccessMode: 1 /* GRANT */, grfInheritance: 0,
+        Trustee: { pMultipleTrustee: null, MultipleTrusteeOperation: 0, TrusteeForm: 0, TrusteeType: 0, ptstrName: sid(s) },
+    }));
+    const next = [null];
+    st = SetEntriesInAclW(entries.length, entries, dacl[0], next);
+    if (st) { console.error(`launch: SetEntriesInAclW(token) ${st}`); process.exit(120); }
+    st = SetSecurityInfo(restricted[0], 6, 4, null, null, next[0], null);
+    if (st) { console.error(`launch: SetSecurityInfo(token) ${st}`); process.exit(120); }
+}
 
 if (config.defaultDacl) {
     // Default DACL for objects the child creates: user, logon session, SYSTEM.
