@@ -414,13 +414,22 @@ function lexicalAndCanonical(home: string, name: string, seams: SandboxSeams): s
 
 /**
  * Every symlink directory entry met while resolving `path`, component by
- * component (as `readlink` would follow them). A chain such as
+ * component (as `readlink` would follow them), plus where a dangling chain
+ * would land. A chain such as
  * `~/.zshrc -> ~/.dotfiles/zshrc -> ~/dotfiles/zshrc` has an intermediate link
  * in a removable directory; replacing it would retarget the protected entry, so
- * each hop the user could replace is protected too. Bounded: a loop or more
- * than 40 hops stops the walk (such a path resolves to nothing).
+ * each hop the user could replace is protected too. When a followed link
+ * points at something missing, creating it would give the entry content, so
+ * the first missing component (which covers every missing directory below it)
+ * and the full path it would resolve to are protected as well. Bounded: a loop
+ * or more than 40 hops stops the walk (such a path resolves to nothing).
  */
 function symlinkHops(path: string): string[] {
+    const { hops, unresolved } = walkSymlinks(path);
+    return [...hops, ...unresolved];
+}
+
+function walkSymlinks(path: string): { hops: string[]; unresolved: string[] } {
     const hops: string[] = [];
     const seen = new Set<string>();
     let followed = 0;
@@ -433,7 +442,13 @@ function symlinkHops(path: string): string[] {
         if (component === "..") { current = dirname(current); continue; }
         const entry = join(current, component);
         let link: boolean;
-        try { link = lstatSync(entry).isSymbolicLink(); } catch { break; }
+        try {
+            link = lstatSync(entry).isSymbolicLink();
+        } catch {
+            // Missing. Only a followed link makes this a dangling target; a
+            // plain absent path is guarded as it is.
+            return { hops, unresolved: followed ? [...new Set([entry, resolve(entry, ...pending)])] : [] };
+        }
         if (!link) { current = entry; continue; }
         if (++followed > 40 || seen.has(entry)) break;
         seen.add(entry);
@@ -448,12 +463,12 @@ function symlinkHops(path: string): string[] {
             pending = [...target.split(sep), ...pending];
         }
     }
-    return hops;
+    return { hops, unresolved: [] };
 }
 
-/** Whether resolving `path` never ends: a symlink loop, or more than 40 hops (ELOOP). */
-function loops(path: string): boolean {
-    try { statSync(path); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ELOOP"; }
+/** Whether a symlink resolves to nothing: dangling (ENOENT), or looping or over 40 hops (ELOOP). */
+function unresolvable(path: string): boolean {
+    try { statSync(path); return false; } catch { return true; }
 }
 
 function broadCredentialPaths(home: string, seams: SandboxSeams): string[] {
@@ -1358,16 +1373,35 @@ function buildLinuxBroadCommand(
     // Directories holding a protected symlink: read-only, so the link cannot be
     // replaced, with their existing entries bound writable again below.
     const linkParents = new Set<string>();
+    const danglingTargets = new Set(protectedPaths.flatMap((path) => walkSymlinks(path).unresolved));
     const guard = (path: string, hide: boolean) => {
         let directory: boolean | undefined;
         let link = false;
         try { link = lstatSync(path).isSymbolicLink(); } catch { /* absent or intermediate link */ }
-        if (canonicalizePath(path, seams) !== path || (link && loops(path))) {
+        if (canonicalizePath(path, seams) !== path || (link && unresolvable(path))) {
             // A literal twin of a canonical deny entry: its target is guarded on
-            // its own. A looping link resolves to nothing (ELOOP), so only the
-            // link itself needs guarding. A symlink leaf inside a writable root
-            // could be replaced, so its directory is protected; home already is.
+            // its own. A looping link resolves to nothing (ELOOP), and a dangling
+            // one's missing target is guarded below, so only the link itself
+            // needs guarding here. A symlink leaf inside a writable root could be
+            // replaced, so its directory is protected; home already is.
             if (link && dirname(path) !== broad.home && writableAt(dirname(path))) linkParents.add(dirname(path));
+            return;
+        }
+        if (danglingTargets.has(path)) {
+            // Where a dangling link would land: nothing may be created there.
+            // Lock its nearest existing ancestor (entries stay writable, see
+            // below) rather than plant a placeholder in the user's files. Temp
+            // and the workspace root stay open to new entries, so a placeholder
+            // is bound there instead, failing closed if it cannot be made.
+            if (!writableAt(path)) return;
+            let ancestor = dirname(path);
+            while (!exists(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+            if (ancestor === project || broad.tempRoots.includes(ancestor)) {
+                if (!materialize(path)) throw new Error(`Cannot protect denied path: ${path}`);
+                readOnly.add(path);
+            } else if (ancestor !== broad.home) {
+                linkParents.add(ancestor);
+            }
             return;
         }
         if (!exists(path)) {

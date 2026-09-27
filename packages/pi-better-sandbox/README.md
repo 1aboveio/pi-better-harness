@@ -75,7 +75,8 @@ keeps one fixed deny list that is not configurable per tool:
 
 Every entry is protected under the literal path under home, every symlink hop
 on the way to its target, and the target itself. So a dotfiles manager's links
-(stow, chezmoi), including chains of links, can't be swapped or retargeted.
+(stow, chezmoi), including chains of links, can't be swapped or retargeted. A
+link whose target is missing protects that target too: it can't be created.
 
 **Git config and hooks under home are not protected**, so git keeps working:
 `git init`, `git clone` and `git worktree add` copy hook samples into `.git/hooks`.

