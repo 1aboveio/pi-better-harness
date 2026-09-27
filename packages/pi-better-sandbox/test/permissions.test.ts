@@ -13,9 +13,13 @@ test("permission defaults preserve independent Main and Subagents columns", () =
 });
 
 test("strict decoding rejects incomplete and invalid profiles", () => {
-    for (const value of [null, {}, { main: defaultSandboxPermissions().main }, {
-        ...defaultSandboxPermissions(), subagents: { ...defaultSandboxPermissions().subagents, storedCredentials: "all" },
-    }]) assert.throws(() => parseSandboxPermissions(value));
+    for (const [value, message] of [
+        [null, /Invalid sandbox permission settings/],
+        [{}, /require Main and Subagents/],
+        [{ main: defaultSandboxPermissions().main }, /require Main and Subagents/],
+        [{ ...defaultSandboxPermissions(), subagents: { ...defaultSandboxPermissions().subagents, storedCredentials: "all" } },
+            /explicit permission values/],
+    ] as const) assert.throws(() => parseSandboxPermissions(value), message);
 });
 
 test("decoding copies policy and preserves inactive values", () => {

@@ -60,6 +60,7 @@ test("successful handoffs retry failed receipt hooks without sending again", asy
   assert.equal(messages.length, 2);
   writable = true;
   assert.equal(await batcher.deliverUrgent(urgent), true);
+  assert.equal(receipts, 2, "the urgent receipt is persisted after storage recovers");
   assert.equal(messages.length, 2);
   batcher.cancel();
 });
@@ -82,6 +83,7 @@ test("coalesces callback-enabled completions in stable enqueue order", async () 
   assert.equal(await batcher.flush(), true);
   assert.equal(messages.length, 1);
   assert.match(messages[0]!.message.content, /^3 background completions are ready:/);
+  for (const id of ["sa_2", "bg_1", "sa_3"]) assert.match(messages[0]!.message.content, new RegExp(`id=${id} \\|`));
   assert.ok(messages[0]!.message.content.indexOf("sa_2") < messages[0]!.message.content.indexOf("bg_1"));
   assert.ok(messages[0]!.message.content.indexOf("bg_1") < messages[0]!.message.content.indexOf("sa_3"));
   assert.deepEqual(delivered, ["sa_2", "bg_1", "sa_3"]);

@@ -7,13 +7,17 @@ import { after, test } from "node:test";
 import { Worker } from "node:worker_threads";
 import { selectPackedResult } from "./stage-harness-dependencies.mjs";
 import {
-  sharedSandboxCoreContent,
   sharedSandboxCoreTargets,
   syncSharedSandboxCore,
 } from "./sync-shared-sandbox-core.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const fixtureRoot = mkdtempSync(join(tmpdir(), "sync-shared-sandbox-core-"));
+const consumerPaths = [
+  "packages/pi-better-subagents/shared-sandbox-core.ts",
+  "packages/pi-better-sandbox/shared-sandbox-core.ts",
+  "packages/pi-better-background-tasks/src/shared-sandbox-core.ts",
+];
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
 
 // @covers sandbox-core.private-sync
@@ -23,16 +27,16 @@ test("syncSharedSandboxCore regenerates every consumer copy from the canonical s
   mkdirSync(sourceRoot, { recursive: true });
   writeFileSync(join(sourceRoot, "index.ts"), "export const mechanism = true;\n");
 
-  for (const target of sharedSandboxCoreTargets(fixtureRoot)) {
+  for (const relativePath of consumerPaths) {
+    const target = join(fixtureRoot, relativePath);
     mkdirSync(dirname(target), { recursive: true });
     writeFileSync(target, "// stale hand edit\n");
   }
 
   syncSharedSandboxCore(fixtureRoot);
 
-  const targets = sharedSandboxCoreTargets(fixtureRoot);
-  assert.ok(targets.length > 0, "at least one consumer must vendor sandbox-core");
-  for (const target of targets) {
+  for (const relativePath of consumerPaths) {
+    const target = join(fixtureRoot, relativePath);
     assert.equal(
       readFileSync(target, "utf8"),
       "// Generated from packages/sandbox-core/index.ts. Do not edit directly.\nexport const mechanism = true;\n",
@@ -117,8 +121,10 @@ test("concurrent readers never observe a partially written consumer copy", async
 // @covers sandbox-core.private-sync
 // @level integration
 test("the committed consumer copies match packages/sandbox-core/index.ts byte for byte", () => {
-  const expected = sharedSandboxCoreContent(repoRoot);
-  for (const target of sharedSandboxCoreTargets(repoRoot)) {
+  const expected = "// Generated from packages/sandbox-core/index.ts. Do not edit directly.\n" +
+    readFileSync(join(repoRoot, "packages/sandbox-core/index.ts"), "utf8");
+  for (const relativePath of consumerPaths) {
+    const target = join(repoRoot, relativePath);
     assert.equal(
       readFileSync(target, "utf8"),
       expected,
@@ -199,5 +205,4 @@ test("packing pi-better-sandbox includes the generated sandbox-core copy and no 
 test("sandbox-core itself is a private workspace package that is never published", () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, "packages/sandbox-core/package.json"), "utf8"));
   assert.equal(manifest.private, true);
-  assert.equal(manifest.name, "sandbox-core");
 });

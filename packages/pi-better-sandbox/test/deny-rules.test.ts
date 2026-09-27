@@ -182,7 +182,7 @@ test("a ~ rule resolves against the home directory and is stored with its tilde"
     assert.ok(fixture.controller.status().denyWrite.includes(join(fixture.home, ".aws")));
 });
 
-test("a rule for a file that does not exist yet still resolves and is enforced", () => {
+test("a rule for a file that does not exist yet still resolves and is enforced", async () => {
     const fixture = harness("not-yet-created");
     fixture.manager.load();
 
@@ -192,6 +192,13 @@ test("a rule for a file that does not exist yet still resolves and is enforced",
     assert.equal(existsSync(expected), false);
     assert.ok(report.rules.some((rule) => rule.path === expected));
     assert.ok(fixture.controller.status().denyWrite.includes(expected));
+    mkdirSync(join(fixture.projectRoot, "config"));
+    const operations = createSandboxedWriteOperations(fixture.controller, fixture.seams);
+    await assert.rejects(() => operations.writeFile(expected, "must not land"), /is a write-denied path/);
+    assert.equal(existsSync(expected), false);
+    const sibling = join(fixture.projectRoot, "config", "ordinary");
+    await operations.writeFile(sibling, "allowed");
+    assert.equal(readFileSync(sibling, "utf8"), "allowed");
 });
 
 test("the displayed path is always canonical, even when the project is reached through a symlink", () => {
@@ -450,14 +457,21 @@ test("a global rule that would deny this project's root is held out and reported
 test("every change is applied to the controller and announced exactly once", () => {
     const fixture = harness("announce");
     fixture.manager.load();
-    const afterLoad = fixture.announced.length;
-
-    const report = fixture.manager.add("build/artifacts");
-
-    assert.equal(fixture.announced.length, afterLoad + 1);
-    const announced = fixture.announced.at(-1);
-    assert.deepEqual(announced, report.status, "the announced status is the one reported back");
-    assert.ok(announced?.denyWrite.includes(join(fixture.projectRoot, "build/artifacts")));
+    assert.equal(fixture.announced.length, 1, "load publishes the effective policy once");
+    const changes = [
+        { run: () => fixture.manager.add("build/artifacts"), denied: true },
+        { run: () => fixture.manager.remove("build/artifacts"), denied: false },
+        { run: () => fixture.manager.reset(), denied: false },
+    ];
+    for (const change of changes) {
+        const before: number = fixture.announced.length;
+        const report = change.run();
+        assert.equal(fixture.announced.length, before + 1);
+        const announced = fixture.announced.at(-1);
+        assert.deepEqual(announced, report.status, "the announced status is the one reported back");
+        assert.equal(announced?.denyWrite.includes(join(fixture.projectRoot, "build/artifacts")), change.denied);
+        assert.deepEqual(fixture.controller.status().denyWrite, report.status.denyWrite);
+    }
 });
 
 test("a rule set is rendered with its canonical paths and the template behind each one", () => {
@@ -479,7 +493,7 @@ test("normalization collapses the spellings of one path into one template", () =
     assert.equal(normalizeDenyRuleTemplate("/"), sep);
 });
 
-test("the planning functions are pure: they neither read nor write the override", () => {
+test("planning computes changes without mutating the input or creating an override", () => {
     const fixture = harness("pure-planning");
     const templates = [...PACKAGED_DENY_WRITE_TEMPLATES];
 

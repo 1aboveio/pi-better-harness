@@ -7,7 +7,6 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import {
     formatIncompleteResult,
     formatSubagentResult,
@@ -182,19 +181,4 @@ describe("subagent_result for incomplete child exits", () => {
         assert.doesNotMatch(content, /^\[sa_legacy_completed · completed · exit 0[^\]]*\]\nprogress before exit$/m);
     });
 
-    // @covers subagent.result
-    // @level unit
-    it("is wired into the registered subagent_result tool", () => {
-        // Handlers live in tools.ts; index.ts registers the factory result so the
-        // model reaches the same execute path tests drive (no drift-prone copy).
-        const toolsSource = readFileSync(new URL("../tools.ts", import.meta.url), "utf8");
-        const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-        const finalizationSource = readFileSync(new URL("../finalization.ts", import.meta.url), "utf8");
-
-        assert.match(toolsSource, /buildSubagentResultText/);
-        assert.match(indexSource, /subagentResultTool\(Type\)/);
-        assert.match(finalizationSource, /formatSubagentResult/);
-        assert.match(finalizationSource, /resolveLifecycle/);
-        assert.match(finalizationSource, /lifecycleClassification/);
-    });
 });

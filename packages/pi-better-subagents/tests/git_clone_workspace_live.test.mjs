@@ -20,6 +20,7 @@ import {
     lstatSync,
     mkdirSync,
     mkdtempSync,
+    readFileSync,
     realpathSync,
     rmSync,
     writeFileSync,
@@ -168,7 +169,7 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
             stubPi,
             [
                 '#!/bin/sh',
-                `printf '%s\\n' "$*" > ${JSON.stringify(marker)}`,
+                `pwd -P > ${JSON.stringify(marker)}`,
                 'printf \'{"type":"agent_end"}\\n\'',
                 'exit 0',
                 '',
@@ -249,10 +250,11 @@ describe('subagent_spawn git_clone_workspace live execute', () => {
 
             // Child was actually spawned through the execute path.
             const deadline = Date.now() + 3000;
-            while (!existsSync(marker) && Date.now() < deadline) {
+            while ((!existsSync(marker) || readFileSync(marker, 'utf8').trim() === '') && Date.now() < deadline) {
                 sleepMs(25);
             }
             assert.ok(existsSync(marker), 'stub pi must have been invoked by the live execute path');
+            assert.equal(readFileSync(marker, 'utf8').trim(), realpathSync(sandboxDir), 'child actually runs in the disposable clone');
 
             // Meta records the prepared clone workspace as cwd.
             const idMatch = text.match(/id=(sa_[a-z0-9_]+)/);

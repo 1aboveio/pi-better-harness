@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
@@ -11,32 +14,50 @@ type RegisteredTool = {
 describe("golden path: background process journey", () => {
   it("launches a task, observes it running, then verifies final result and logs", async () => {
     const harness = createHarness();
+    const directory = mkdtempSync(join(tmpdir(), "bg-golden-"));
+    const release = join(directory, "release");
+    let id: string | undefined;
+    try {
+      const launchText = await harness.execute("bg_task_spawn", {
+        name: "golden path process",
+        shell: false,
+        argv: [process.execPath, "-e", `
+          const fs = require('node:fs');
+          console.log('golden:start');
+          const timer = setInterval(() => {
+            if (fs.existsSync(${JSON.stringify(release)})) {
+              clearInterval(timer);
+              console.log('golden:done');
+            }
+          }, 20);
+        `],
+        callback: false,
+        timeout_seconds: 10,
+      });
+      id = extractTaskId(launchText);
 
-    const launchText = await harness.execute("bg_task_spawn", {
-      name: "golden path process",
-      command: "node -e 'console.log(\"golden:start\"); setTimeout(() => { console.log(\"golden:done\"); }, 1500)'",
-      callback: false,
-      timeout_seconds: 5,
-    });
-    const id = extractTaskId(launchText);
+      const initialStatus = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true }));
+      expect(initialStatus).toMatchObject({ id, kind: "process", status: "running" });
 
-    const initialStatus = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true }));
-    expect(initialStatus).toMatchObject({ id, kind: "process", status: "running" });
+      await expect.poll(() => harness.execute("bg_task_log", { id }), { timeout: 5000 }).toContain("golden:start");
+      const midStatus = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true }));
+      expect(midStatus.status).toBe("running");
 
-    await sleep(750);
-    const midStatus = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true }));
-    expect(midStatus.status).toBe("running");
+      writeFileSync(release, "finish");
+      const finalStatus = await waitForPublicStatus(harness, id, (status) => status.status === "succeeded");
+      expect(finalStatus).toMatchObject({ id, kind: "process", status: "succeeded", lastExitCode: 0 });
+      expect(finalStatus.result).toMatchObject({ exitCode: 0, signal: null });
 
-    const finalStatus = await waitForPublicStatus(harness, id, (status) => status.status === "succeeded");
-    expect(finalStatus).toMatchObject({ id, kind: "process", status: "succeeded", lastExitCode: 0 });
-    expect(finalStatus.result).toMatchObject({ exitCode: 0, signal: null });
+      const logText = await harness.execute("bg_task_log", { id, tail_lines: 40 });
+      expect(logText).toContain("golden:start");
+      expect(logText).toContain("golden:done");
 
-    const logText = await harness.execute("bg_task_log", { id, tail_lines: 40 });
-    expect(logText).toContain("golden:start");
-    expect(logText).toContain("golden:done");
-
-    const listText = await harness.execute("bg_task_list", { status: ["succeeded"], limit: 20 });
-    expect(listText).toContain(id);
+      const listText = await harness.execute("bg_task_list", { status: ["succeeded"], limit: 20 });
+      expect(listText).toContain(id);
+    } finally {
+      if (id) await harness.execute("bg_task_stop", { id });
+      rmSync(directory, { recursive: true, force: true });
+    }
   }, 10_000);
 });
 

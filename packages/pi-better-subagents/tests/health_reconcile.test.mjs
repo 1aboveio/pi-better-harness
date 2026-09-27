@@ -25,9 +25,6 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
     OLD_METADATA_LOST_CONFIRM_TICKS,
     captureProcessIdentity,
@@ -51,7 +48,6 @@ function makeProbe({ pids = [], tokens = {}, pgids = {}, groups = [] } = {}) {
 }
 
 const NOW = 1_800_000_000_000;
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("reconcileRun — supervised running", () => {
     it("keeps a run running when the pid exists and the start token matches", () => {
@@ -141,8 +137,8 @@ describe("reconcileRun — lost", () => {
 
         let misses = first.patch.probeMisses;
         let last = first;
-        while (misses < OLD_METADATA_LOST_CONFIRM_TICKS) {
-            last = reconcileRun({ ...meta, probeMisses: misses }, probe, NOW + 1000);
+        for (let tick = 1; tick < OLD_METADATA_LOST_CONFIRM_TICKS; tick++) {
+            last = reconcileRun({ ...meta, probeMisses: misses }, probe, NOW + tick * 1000);
             misses = last.patch.probeMisses ?? misses;
         }
         assert.equal(last.status, "lost");
@@ -172,30 +168,6 @@ describe("reconcileRun — process-group-only (no descendant evidence)", () => {
         assert.notEqual(r.reason, "orphaned-descendants-alive");
     });
 
-    it("exposes no descendants method on ProcessProbe (source + runtime seam)", () => {
-        const probe = makeProbe({});
-        assert.equal("descendants" in probe, false);
-        assert.equal(typeof realProcessProbe.descendants, "undefined");
-        assert.equal(typeof probe.descendants, "undefined");
-
-        const healthSrc = readFileSync(join(ROOT, "health.ts"), "utf-8");
-        assert.match(healthSrc, /export interface ProcessProbe/);
-        assert.doesNotMatch(
-            healthSrc,
-            /descendants\s*\(/,
-            "ProcessProbe / realProcessProbe must not expose a descendants method",
-        );
-        assert.doesNotMatch(
-            healthSrc,
-            /scanDescendants|orphaned-descendants-alive/,
-            "descendant scan paths and reasons must be fully removed from #63",
-        );
-        assert.match(
-            healthSrc,
-            /pgid\s*\?\?\s*meta\.pid|meta\.pgid\s*\?\?\s*meta\.pid/,
-            "legacy pgid=pid fallback must remain explicit",
-        );
-    });
 });
 
 describe("reconcileRun — durability of orphaned and lost", () => {

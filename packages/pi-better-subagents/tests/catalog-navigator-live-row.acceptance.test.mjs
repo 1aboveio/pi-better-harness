@@ -34,7 +34,8 @@ describe("catalog navigator live row", { concurrency: false }, () => {
         mkdirSync(work, { recursive: true });
         mkdirSync(tmp, { recursive: true });
         mkdirSync(sessions, { recursive: true });
-        const hold = await startHold(holdMs);
+        const phase = join(sandbox, "navigator-live-row.phase");
+        const hold = await startHold(holdMs, () => writeFileSync(phase + ".provider-ready", "ready"));
         const hits = join(sandbox, "hold-hits.json");
         hold.hitsPath = hits;
         writeFileSync(join(agent, "models.json"), JSON.stringify({
@@ -70,10 +71,8 @@ overrides:
 ---
 Reply with the single word DONE.
 `);
-        const out = join(repoRoot, ".rush-results/navigator-live-row.json");
-        const phase = join(repoRoot, ".rush-results/navigator-live-row.phase");
-        const screen = join(repoRoot, ".rush-results/navigator-live-row.pty");
-        mkdirSync(join(repoRoot, ".rush-results"), { recursive: true });
+        const out = join(sandbox, "navigator-live-row.json");
+        const screen = join(sandbox, "navigator-live-row.pty");
         const pi = process.env.PI_BIN ?? "pi";
         const child = spawn("python3", ["-"], {
             cwd: repoRoot,
@@ -120,6 +119,8 @@ Reply with the single word DONE.
         assert.match(stopText, /Stopped subagent/);
         const capture = readFileSync(screen);
         assert.ok(capture.length > 0, "pty capture must contain the real Pi TUI bytes");
+        assert.ok(capture.includes(Buffer.from(agentName)), "real TUI must paint the live agent name");
+        assert.ok(hold.hits.some((hit) => hit.method === "POST"), "child must reach the local model provider");
         evidence.screenBytes = capture.length;
         evidence.screenHasName = capture.includes(Buffer.from(agentName));
         evidence.holdRequests = hold.hits.length;
@@ -127,7 +128,7 @@ Reply with the single word DONE.
     });
 });
 
-function startHold(ms) {
+function startHold(ms, onRequest) {
     const hits = [];
     const server = createServer((request, response) => {
         const chunks = [];
@@ -139,6 +140,7 @@ function startHold(ms) {
                 response.end(JSON.stringify({ object: "list", data: [{ id: "hold-stream" }] }));
                 return;
             }
+            if (request.method === "POST") onRequest();
             response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
             const send = (payload) => response.write(`data: ${JSON.stringify(payload)}\n\n`);
             send({ id: "chatcmpl-hold", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
@@ -213,14 +215,14 @@ else:
             if not chunk:
                 break
             buf.extend(chunk)
+        if sent and ${JSON.stringify(agentName)}.encode() in buf:
+            open(phase + ".painted", "w").write("painted")
         exited, _ = os.waitpid(pid, os.WNOHANG)
         if exited:
             break
         if not sent and os.path.exists(phase):
             try:
-                os.write(fd, b"\\x1b[D")
-                time.sleep(0.3)
-                os.write(fd, b"\\x1b[B")
+                os.write(fd, b"\\x1b[D\\x1b[B")
             except OSError:
                 pass
             sent = True
@@ -229,7 +231,6 @@ else:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
-        time.sleep(0.4)
         try:
             os.kill(pid, signal.SIGKILL)
         except OSError:

@@ -266,6 +266,9 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
             const { id, pid } = await spawnRun(h);
             const meta = readMeta(id);
             assert.equal(meta.pid, pid);
+            assert.equal(meta.spawnPid, process.pid);
+            const parentToken = realProcessProbe.startToken(process.pid);
+            if (parentToken !== undefined) assert.equal(meta.spawnPidStartTime, parentToken);
             assert.equal(realProcessProbe.pidExists(pid), true, "spawned child stays alive for probing");
             // Best-effort capabilities: assert parity only where the OS probe
             // actually exposes the field in this environment.
@@ -390,6 +393,49 @@ describe("AC9 — health ticker production lifecycle (fake clock)", () => {
                 assert.equal(isHealthTickerActive(), false, "ticker self-stops after the last monitored run went terminal");
             } finally {
                 h.shutdown();
+            }
+        });
+    });
+});
+
+describe("abandoned records through session startup", () => {
+    it("adopts dead-parent work silently, leaves live parents alone, and does not sweep on health ticks", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            const seeded = [];
+            const seed = (spawnPid, status = "running") => {
+                const id = nextRunId();
+                dirOnly.push(id);
+                seeded.push(id);
+                writeMeta({ id, status, pid: DEAD_PID, pgid: DEAD_PID, pidStartTime: "gone",
+                    spawnPid, cwd: h.ctx.cwd, promptPreview: "abandoned",
+                    startedAt: Date.now(), logPath: join(runDir(id), "output.log"), sessionId: id });
+                return id;
+            };
+            try {
+                const abandoned = seed(DEAD_PID);
+                const liveParent = seed(process.ppid);
+                await h.handlers.get("session_start")({}, h.ctx);
+                assert.equal(readMeta(abandoned).status, "lost");
+                assert.ok(readMeta(abandoned).adoptedFromLostParentAt > 0);
+                assert.equal(readMeta(liveParent).status, "running");
+                assert.equal(readMeta(liveParent).adoptedFromLostParentAt, undefined);
+                assert.equal(isHealthTickerActive(), false, "adoption never keeps monitoring alive");
+                assert.deepEqual(h.sent, []);
+                assert.deepEqual(h.notes, []);
+
+                // Keep the ticker genuinely active while a NEW foreign record appears.
+                const owned = seed(process.pid, "orphaned");
+                writeMeta({ ...readMeta(owned), pid: process.pid, pgid: undefined, pidStartTime: undefined, callback: false });
+                await h.handlers.get("session_start")({}, h.ctx);
+                assert.equal(isHealthTickerActive(), true);
+                const later = seed(DEAD_PID);
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(readMeta(later).status, "running", "periodic tick must not adopt foreign work");
+                assert.equal(readMeta(later).adoptedFromLostParentAt, undefined);
+            } finally {
+                for (const id of seeded) rmSync(runDir(id), { recursive: true, force: true });
+                await h.shutdown();
             }
         });
     });
@@ -763,10 +809,11 @@ describe("callback session isolation", () => {
 
             assert.ok(suppressed, "completion callback suppression marker is written");
             assert.match(suppressed.completionCallbackSuppressedReason, /origin session session-a does not match active session session-b/);
+            await getCallbackBatcher(h.pi).flush();
             assert.equal(
-                h.sent.some((s) => s.message?.customType === "subagent-complete" && s.message.content.includes(id)),
+                h.sent.some((s) => s.message.content.includes(id)),
                 false,
-                "completion follow-up must not be delivered to the new session",
+                "no message type may deliver this run to the new session",
             );
             rmSync(runDir(id), { recursive: true, force: true });
         } finally {

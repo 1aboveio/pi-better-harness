@@ -59,12 +59,18 @@ describe("background task registry maintenance", () => {
   it("removes terminal task directories older than seven days", () => {
     const now = Date.now();
     const old = fixture("succeeded", { startedAt: now - 9 * DAY, endedAt: now - 8 * DAY });
+    const boundary = fixture("succeeded", { startedAt: now - 8 * DAY, endedAt: now - 7 * DAY });
+    const recent = fixture("failed", { startedAt: now - DAY, endedAt: now - DAY });
     writeMeta(old);
+    writeMeta(boundary);
+    writeMeta(recent);
 
-    const result = runTaskMaintenance({ now, metas: [old], force: true });
+    const result = runTaskMaintenance({ now, metas: [old, boundary, recent], force: true });
 
-    expect(result.removed).toBeGreaterThanOrEqual(1);
+    expect(result.removed).toBe(1);
     expect(readMeta(old.id)).toBeUndefined();
+    expect(readMeta(boundary.id)?.status).toBe("succeeded");
+    expect(readMeta(recent.id)?.status).toBe("failed");
   });
 });
 

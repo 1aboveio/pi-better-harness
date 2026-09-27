@@ -21,7 +21,8 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { closeSync, openSync, writeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -162,6 +163,34 @@ async function runBash(
     }
 }
 
+let handshakeId = 0;
+
+/** Park a real shell after startup until the test changes policy or observes output. */
+async function pausedBash(command: string) {
+    const fifo = join(projectRoot, `handshake-${handshakeId++}`);
+    execFileSync("mkfifo", [fifo]);
+    const fd = openSync(fifo, "r+");
+    let ready!: () => void;
+    const started = new Promise<void>((resolve) => { ready = resolve; });
+    const pending = runBash(`printf 'sandbox-ready\\n'; read release < ${JSON.stringify(fifo)}; ${command}`, {
+        timeout: 10,
+        onUpdate: (update) => {
+            if (JSON.stringify(update).includes("sandbox-ready")) ready();
+        },
+    });
+    const close = () => { closeSync(fd); rmSync(fifo, { force: true }); };
+    try {
+        await Promise.race([started, pending.then((result) => {
+            throw new Error(`shell exited before readiness: ${JSON.stringify(result)}`);
+        })]);
+    } catch (error) { close(); throw error; }
+    return { pending, release: () => { writeSync(fd, "go\n"); }, close: async () => {
+        writeSync(fd, "go\n");
+        await pending;
+        close();
+    } };
+}
+
 async function setSandbox(state: "on" | "off"): Promise<void> {
     await commands.get("sandbox")?.handler(state, ctx);
 }
@@ -269,41 +298,61 @@ test("the sandboxed shell runs in the project working directory", { skip }, asyn
 });
 
 test("output still streams incrementally while the sandboxed command runs", { skip }, async () => {
-    const updates: string[] = [];
-    const result = await runBash("printf 'first\\n'; sleep 0.4; printf 'second\\n'", {
-        onUpdate: (update) => {
-            const content = (update as { content: Array<{ type: string; text?: string }> }).content;
-            const first = content[0];
-            if (first?.type === "text" && first.text) updates.push(first.text);
-        },
-    });
-
-    assert.equal(result.ok, true, result.ok ? "" : result.message);
-    assert.ok(
-        updates.some((text) => text.includes("first") && !text.includes("second")),
-        `expected a partial update before completion, saw ${JSON.stringify(updates)}`,
-    );
+    const running = await pausedBash("printf 'second\\n'");
+    try {
+        // pausedBash cannot resolve until a streamed update arrives while the
+        // shell is blocked, so buffering all output until exit fails this test.
+        running.release();
+        const result = await running.pending;
+        assert.equal(result.ok, true, result.ok ? "" : result.message);
+        assert.match(result.ok ? result.text : "", /second/);
+    } finally { await running.close(); }
 });
 
 test("a sandboxed command still times out and its process tree is killed", { skip }, async () => {
     const marker = join(projectRoot, "timeout-marker.txt");
+    let pids: number[] = [];
     const result = await runBash(
-        `sleep 30 && printf 'survived\\n' > ${JSON.stringify(marker)}`,
-        { timeout: 1 },
+        `sleep 30 & child=$!; printf 'tree:%s,%s\\n' "$$" "$child"; wait "$child" && printf 'survived\\n' > ${JSON.stringify(marker)}`,
+        { timeout: 1, onUpdate: (update) => {
+            const match = /tree:(\d+),(\d+)/.exec(JSON.stringify(update));
+            if (match) pids = [Number(match[1]), Number(match[2])];
+        } },
     );
 
     assert.equal(result.ok, false);
     assert.match(result.ok ? "" : result.message, /timed out after 1 seconds/);
+    assert.equal(pids.length, 2, "the shell and its descendant must start before timeout");
+    for (const pid of pids) {
+        // Linux may retain a killed, orphaned child as a zombie until init
+        // reaps it. Such a process cannot execute or write the marker.
+        if (process.platform === "linux") {
+            try {
+                if (/\) Z /.test(readFileSync(`/proc/${pid}/stat`, "utf8"))) continue;
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            }
+        }
+        try {
+            assert.throws(() => process.kill(pid, 0), { code: "ESRCH" },
+                `timed-out process ${pid} is still running`);
+        } finally {
+            try { process.kill(pid, "SIGKILL"); } catch { /* Already exited. */ }
+        }
+    }
     assert.equal(existsSync(marker), false);
 });
 
 test("a sandboxed command is still cancellable", { skip }, async () => {
     const controller = new AbortController();
     const marker = join(projectRoot, "cancel-marker.txt");
-    const pending = runBash(`sleep 30 && printf 'survived\\n' > ${JSON.stringify(marker)}`, {
+    const pending = runBash(`printf 'cancel-ready\\n'; sleep 30 && printf 'survived\\n' > ${JSON.stringify(marker)}`, {
         signal: controller.signal,
+        timeout: 10,
+        onUpdate: (update) => {
+            if (JSON.stringify(update).includes("cancel-ready")) controller.abort();
+        },
     });
-    setTimeout(() => controller.abort(), 300);
 
     const result = await pending;
 
@@ -326,6 +375,13 @@ test("large output is still truncated with pi's own details contract", { skip },
     const details = result.details as { truncation?: { truncated?: boolean }; fullOutputPath?: string };
     assert.equal(details.truncation?.truncated, true);
     assert.ok(details.fullOutputPath);
+    try {
+        assert.equal(readFileSync(details.fullOutputPath, "utf8"),
+            Array.from({ length: 5000 }, (_, index) => `${index + 1}\n`).join(""));
+        const displayed = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+        assert.ok(displayed.length < readFileSync(details.fullOutputPath, "utf8").length);
+        assert.match(displayed, /5000/);
+    } finally { rmSync(details.fullOutputPath, { force: true }); }
 });
 
 test("user-entered ! commands run under the same confinement", { skip }, async () => {
@@ -430,17 +486,17 @@ test("a command already running keeps the policy it launched with when the sandb
     const target = join(outside, "mid-flight.txt");
     rmSync(target, { force: true });
 
-    const pending = runBash(`sleep 1; printf 'late\\n' > ${JSON.stringify(target)}`);
-    // Switch protection off while that command is still running. It must keep
-    // the confinement it launched with, not pick up the new state.
-    await new Promise((done) => setTimeout(done, 250));
-    await setSandbox("off");
-
-    const result = await pending;
-
-    assert.equal(result.ok, false, "the in-flight command must stay confined");
-    assert.equal(existsSync(target), false);
-    await setSandbox("on");
+    const running = await pausedBash(`printf 'late\\n' > ${JSON.stringify(target)}`);
+    try {
+        await setSandbox("off");
+        running.release();
+        const result = await running.pending;
+        assert.equal(result.ok, false, "the in-flight command must stay confined");
+        assert.equal(existsSync(target), false);
+    } finally {
+        await running.close();
+        await setSandbox("on");
+    }
 });
 
 test("/sandbox off lifts confinement and /sandbox on restores it without a restart", { skip }, async () => {
@@ -539,24 +595,21 @@ test("a command already running keeps the deny rules it launched with", { skip }
     rmSync(target, { force: true });
 
     // Launches while the path is writable, then the rule lands mid-flight.
-    const pending = runBash(`sleep 1; printf 'late\\n' > ${JSON.stringify(target)}`);
-    await new Promise((done) => setTimeout(done, 250));
-    await commands.get("sandbox")?.handler("deny add late-denied", ctx);
-
-    const result = await pending;
-
-    assert.equal(result.ok, true, result.ok ? "" : result.message);
-    assert.equal(
-        readFileSync(target, "utf8"),
-        "late\n",
-        "the running command keeps the policy it launched with",
-    );
-    // A command launched after the change is confined by it.
-    const later = await runBash(`printf 'blocked\\n' > ${JSON.stringify(join(denied, "later.txt"))}`);
-    assert.equal(later.ok, false);
-    assert.equal(existsSync(join(denied, "later.txt")), false);
-
-    await commands.get("sandbox")?.handler("deny reset", ctx);
+    const running = await pausedBash(`printf 'late\\n' > ${JSON.stringify(target)}`);
+    try {
+        await commands.get("sandbox")?.handler("deny add late-denied", ctx);
+        running.release();
+        const result = await running.pending;
+        assert.equal(result.ok, true, result.ok ? "" : result.message);
+        assert.equal(readFileSync(target, "utf8"), "late\n",
+            "the running command keeps the policy it launched with");
+        const later = await runBash(`printf 'blocked\\n' > ${JSON.stringify(join(denied, "later.txt"))}`);
+        assert.equal(later.ok, false);
+        assert.equal(existsSync(join(denied, "later.txt")), false);
+    } finally {
+        await running.close();
+        await commands.get("sandbox")?.handler("deny reset", ctx);
+    }
 });
 
 test("a confined command cannot rewrite the profile the next one is launched under", { skip }, async () => {

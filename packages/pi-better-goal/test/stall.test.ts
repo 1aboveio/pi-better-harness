@@ -16,7 +16,16 @@ const goal: GoalSnapshot = {
   completedAt: null,
 };
 
-test("goal stall tracks changed evidence and exempts active work", () => {
+test("goal stall tracks changed evidence and exempts active work", (t) => {
+  const keys = ["PI_BETTER_STALL_QUIET_MS", "PI_BETTER_STALL_MS"];
+  const previous = keys.map((key) => [key, process.env[key]] as const);
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  for (const key of keys) delete process.env[key];
   const continuation = {
     goalId: goal.goalId,
     lastEvidenceSignature: "evidence",
@@ -26,6 +35,8 @@ test("goal stall tracks changed evidence and exempts active work", () => {
     blocked: false,
     updatedAt: 1,
   };
+  assert.equal(observeGoalStall(goal, { ...continuation, lastProgressAt: 300_000 }, { now: 300_100 })?.state, "healthy",
+    "new progress resets the age even for an old goal");
   assert.equal(observeGoalStall(goal, continuation, { now: 300_100 })?.state, "stalled");
   assert.equal(observeGoalStall(goal, continuation, { now: 300_100, foregroundRunning: true })?.state, "quiet");
   assert.equal(observeGoalStall(goal, continuation, { now: 300_100, backgroundRunning: true })?.state, "quiet");

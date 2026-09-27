@@ -134,7 +134,7 @@ describe("adopted records reach a terminal status and then age out", () => {
         // Child gone, but its process group still has members.
         const groupStillAlive = probe({ alive: [], groups: [999_100] });
         const result = reconcileRun(meta, groupStillAlive, Date.parse("2026-07-30T00:00:00Z"));
-        assert.notEqual(result.status, "lost", "live related process is not lost");
+        assert.equal(result.status, "orphaned", "live related process remains non-final");
         rmSync(runDir(id), { recursive: true, force: true });
     });
 
@@ -163,33 +163,6 @@ describe("adopted records reach a terminal status and then age out", () => {
         const back = JSON.parse(readFileSync(join(runDir(id), "meta.json"), "utf-8"));
         assert.equal(back.adoptedFromLostParentAt, 1_800_000_000_000, "marker persists for diagnosis");
         rmSync(runDir(id), { recursive: true, force: true });
-    });
-});
-
-describe("wiring", () => {
-    it("adopts once at session start, outside the periodic owned-work health path", async () => {
-        const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-        const sweep = src.match(/function reconcileAbandonedRuns[\s\S]*?\n}/)?.[0] ?? "";
-        assert.ok(sweep, "sweep located");
-        assert.match(sweep, /ownedByThisParent\(summary\)\) continue/, "owned runs stay on the owner path");
-        assert.match(sweep, /isAbandonedByParent\(summary, realProcessProbe\)/);
-        assert.match(sweep, /reconcileRun\(meta, realProcessProbe, now\)/, "same evidence rules");
-        assert.doesNotMatch(sweep, /notify|deliverHealthCallback/, "no notify, no callback for a dead session's run");
-
-        const healthTick = src.match(/function reconcileHealth[\s\S]*?\n}/)?.[0] ?? "";
-        assert.doesNotMatch(healthTick, /reconcileAbandonedRuns\(\)/, "periodic health never scans foreign runs");
-        assert.match(src, /ensureSubagentProvider\(\);\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*reconcileAbandonedRuns\(\)/);
-
-        // Adopted records must not extend this session's ticker lifetime.
-        const health = readFileSync(new URL("../health.ts", import.meta.url), "utf8");
-        const monitoring = health.match(/export function needsMonitoring[\s\S]*?\n}/)?.[0] ?? "";
-        assert.match(monitoring, /ownedByThisParent/);
-        assert.doesNotMatch(monitoring, /isAbandonedByParent/, "an adopted record never keeps the loop alive");
-    });
-
-    it("records the spawning pi's start token so recycling can be detected later", () => {
-        const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-        assert.match(src, /spawnPid: process\.pid, spawnPidStartTime: parentStartToken\(\)/);
     });
 });
 

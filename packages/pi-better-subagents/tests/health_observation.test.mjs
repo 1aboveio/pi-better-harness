@@ -899,26 +899,33 @@ describe("mayAffectChildEventFacts — pre-parse filter", () => {
         assert.equal(mayAffectChildEventFacts("{}"), true);
     });
 
-    it("names every type the fold branches on", () => {
-        // Anti-drift: a new branch in extractChildEventFacts that this set does
-        // not name would be silently filtered out of incremental reads.
-        const source = readFileSync(join(ROOT, "health-observation.ts"), "utf-8");
-        const fold = source.slice(
-            source.indexOf("export function extractChildEventFacts("),
-            source.indexOf("export function extractChildEventFactsFromLog("),
-        );
-        assert.ok(fold.length > 0, "fold body located");
-        // `(type === "x")`, not `typeof e.type === "string"`.
-        const branched = [...fold.matchAll(/(?:^|[\s(])type === "([A-Za-z0-9_]+)"/gm)].map((m) => m[1]);
-        assert.ok(branched.length >= 11, `expected the fold's branches, saw ${branched.length}`);
-        for (const type of branched) {
-            assert.ok(
-                CHILD_EVENT_FACT_TYPES.has(type),
-                `extractChildEventFacts branches on "${type}" — add it to CHILD_EVENT_FACT_TYPES`,
-            );
-        }
-        for (const type of CHILD_EVENT_FACT_TYPES) {
-            assert.ok(branched.includes(type), `CHILD_EVENT_FACT_TYPES names "${type}" but the fold ignores it`);
+    it("preserves each meaningful event through incremental disk reads", () => {
+        const id = uniqueId("fact_filter");
+        const events = [
+            { type: "tool_execution_start", toolCallId: "tool", toolName: "bash" },
+            { type: "tool_execution_update", toolCallId: "tool" },
+            { type: "tool_execution_end", toolCallId: "tool", isError: false },
+            { type: "compaction_start", reason: "manual" },
+            { type: "compaction_end", reason: "manual", aborted: false },
+            { type: "auto_retry_start", attempt: 1, errorMessage: "503" },
+            { type: "auto_retry_end", success: true },
+            { type: "message_end", message: { role: "assistant", content: "done" } },
+            { type: "turn_end", message: { role: "assistant", content: "done" } },
+            { type: "agent_end", willRetry: true },
+            { type: "agent_settled" },
+        ];
+        mkdirSync(runDir(id), { recursive: true });
+        writeFileSync(logPathFor(id), "");
+        try {
+            for (const [index, event] of events.entries()) {
+                const at = NOW + index;
+                appendFileSync(logPathFor(id), JSON.stringify({ ...event, at }) + "\n");
+                const { facts } = extractChildEventFactsFromLog(id, { now: at });
+                assert.equal(facts.lastMeaningfulAt, at, `${event.type} must survive the disk filter`);
+            }
+        } finally {
+            resetChildEventLogCursor(id);
+            cleanup(id);
         }
     });
 });

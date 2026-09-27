@@ -4,7 +4,7 @@
  * navigator provider, this calls that tool with the live Pi context, reads
  * the provider list while the child is running, then stops and reads the result.
  */
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import type { ExtensionContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const HOOKS = Symbol.for("pi-better-subagents.acceptance-hooks");
@@ -91,7 +91,12 @@ export default function navigatorLiveRowProbe(pi: ExtensionAPI) {
             }
             try { (ctx.ui as { requestRender?: () => void }).requestRender?.(); } catch { /* the TUI paints on its own tick */ }
             write(phase, { phase: "running", id: row.id, at: Date.now() });
-            await new Promise((resolve) => setTimeout(resolve, 2500));
+            const paintDeadline = Date.now() + 10_000;
+            while (phase && (!existsSync(phase + ".painted") || !existsSync(phase + ".provider-ready")) && Date.now() < paintDeadline) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            if (!phase || !existsSync(phase + ".painted")) throw new Error("PTY never painted the named-agent row");
+            if (!existsSync(phase + ".provider-ready")) throw new Error("child never reached the local model provider");
             const still = hooks.listRows().find((item) => item.id === row!.id);
             evidence.providerRowsAfterPaint = hooks.listRows();
             evidence.stillRunning = still?.status === "running";

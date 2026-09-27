@@ -7,7 +7,7 @@ import test from "node:test";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import extension from "../src/index.js";
+import extension from "./extension-fixture.js";
 import { currentGoalSnapshot } from "../src/goal-state.js";
 import { currentWorkflowOwner, skillCommandName, workflowOwnerFromSkill } from "../src/workflow.js";
 

@@ -30,6 +30,7 @@ describe("synthesizeSpeech", () => {
     expect(audio.contentType).toBe("audio/mpeg");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://proxy.example.com/v1/audio/speech");
+    expect(calls[0]!.init.method).toBe("POST");
     expect(calls[0]!.init.headers).toMatchObject({
       Authorization: "Bearer secret-key",
       "Content-Type": "application/json",
@@ -70,12 +71,16 @@ describe("synthesizeSpeech", () => {
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "audio/mpeg",
     });
-    expect(String(calls[0]!.init.body)).toBe("model=tts-model&input=hello&voice=alloy&response_format=mp3");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.init.method).toBe("POST");
+    expect([...new URLSearchParams(String(calls[0]!.init.body)).entries()].sort()).toEqual([
+      ["input", "hello"], ["model", "tts-model"], ["response_format", "mp3"], ["voice", "alloy"],
+    ]);
   });
 
   it("surfaces provider errors without leaking request body", async () => {
     const fetchImpl = async () => new Response("bad key", { status: 401, statusText: "Unauthorized" });
-    await expect(synthesizeSpeech({
+    const request = synthesizeSpeech({
       url: "https://proxy.example.com/v1/audio/speech",
       apiKey: "secret-key",
       model: "tts-model",
@@ -83,6 +88,8 @@ describe("synthesizeSpeech", () => {
       format: "mp3",
       bodyFormat: "json",
       maxChars: 6000,
-    }, { text: "hello" }, fetchImpl as typeof fetch)).rejects.toThrow(/401.*bad key/);
+    }, { text: "PRIVATE_SPEECH_SENTINEL" }, fetchImpl as typeof fetch);
+    await expect(request).rejects.toThrow(/401.*bad key/);
+    await expect(request).rejects.not.toThrow(/PRIVATE_SPEECH_SENTINEL|secret-key/);
   });
 });

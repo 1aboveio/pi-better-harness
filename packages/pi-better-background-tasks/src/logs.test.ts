@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -42,12 +42,21 @@ describe("background task log retention", () => {
     const path = logPath();
     writeFileSync(path, `${"discarded\n".repeat(12_000)}final diagnostic\n`);
 
-    const result = retainLogTail(path, 64 * 1024);
+    const before = statSync(path);
+    const writer = openSync(path, "a");
+    try {
+      const result = retainLogTail(path, 64 * 1024);
 
-    expect(result?.discardedBytes).toBeGreaterThan(0);
-    expect(statSync(path).size).toBeLessThan(64 * 1024);
-    const log = readLog(path, 10);
-    expect(log.text).toContain("log retention discarded");
-    expect(log.text).toContain("final diagnostic");
+      expect(result?.discardedBytes).toBeGreaterThan(0);
+      expect(statSync(path)).toMatchObject({ ino: before.ino, dev: before.dev });
+      expect(statSync(path).size).toBeLessThan(64 * 1024);
+      writeSync(writer, "output after compaction\n");
+      expect(readFileSync(path, "utf8")).toContain("output after compaction\n");
+      const log = readLog(path, 10);
+      expect(log.text).toContain("log retention discarded");
+      expect(log.text).toContain("final diagnostic");
+    } finally {
+      closeSync(writer);
+    }
   });
 });

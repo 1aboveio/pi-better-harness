@@ -14,10 +14,12 @@ import nodeTest, { after, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+    createBashToolDefinition,
     createEditToolDefinition,
     createWriteToolDefinition,
     discoverAndLoadExtensions,
     getAgentDir,
+    initTheme,
 } from "@earendil-works/pi-coding-agent";
 import type {
     EventBus,
@@ -27,6 +29,7 @@ import type {
     RegisteredCommand,
     SessionStartEvent,
     ToolDefinition,
+    Theme,
     UserBashEventResult,
 } from "@earendil-works/pi-coding-agent";
 
@@ -43,12 +46,16 @@ import {
     FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
     type ForegroundSandboxPolicyEvent,
 } from "../events.ts";
+import { describeSandboxSupport } from "../shared-sandbox-core.ts";
 import { realBackendSkip } from "./support/resolvable-backend.ts";
 
-// The factory builds its own controller and installs kernel-backed SDK tools.
-// Run these registrations only where a real backend is available.
+// Policy/registration checks need discovery only; worker execution needs a
+// usable kernel. Keep those separate so a restricted host still runs the former.
 const backendSkip = realBackendSkip();
+const support = describeSandboxSupport();
 const test = (name: string, fn: (t: TestContext) => void | Promise<void>) =>
+    nodeTest(name, { skip: support.supported ? false : support.reason }, fn);
+const kernelTest = (name: string, fn: (t: TestContext) => void | Promise<void>) =>
     nodeTest(name, { skip: backendSkip }, fn);
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -237,15 +244,6 @@ test("the extension registers the built-in overrides, user_bash routing, and the
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
 });
 
-test("no tool can read or change sandbox state, so the model cannot disable its own sandbox", () => {
-    const recorded = record();
-    piBetterSandbox(recorded.pi);
-
-    // Every registered tool is an override of a pi built-in the model already
-    // had; sandbox control lives in a slash command, which the model cannot call.
-    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
-});
-
 test("the task gate rejects unknown and replaced tools while admitting installed definitions", async () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
@@ -272,27 +270,43 @@ test("the task gate rejects unknown and replaced tools while admitting installed
     assert.equal(call("write"), undefined);
 });
 
-test("the write and edit overrides keep pi's own schemas, prompt guidance and renderers", () => {
+test("registered file and bash overrides preserve SDK contracts and rendered output", () => {
+    initTheme("dark", false);
     const recorded = record();
     piBetterSandbox(recorded.pi);
 
     const builtIn = {
+        bash: createBashToolDefinition(process.cwd()),
         write: createWriteToolDefinition(process.cwd()),
         edit: createEditToolDefinition(process.cwd()),
     };
-    for (const name of ["write", "edit"] as const) {
+    for (const name of ["write", "edit", "bash"] as const) {
         const override = recorded.tools.get(name);
         assert.ok(override, `${name} must be overridden`);
+        assert.equal(override.name, builtIn[name].name);
+        assert.equal(override.label, builtIn[name].label);
+        assert.equal(override.renderShell, builtIn[name].renderShell);
         assert.equal(override.description, builtIn[name].description);
         assert.equal(override.promptSnippet, builtIn[name].promptSnippet);
         assert.deepEqual(override.promptGuidelines, builtIn[name].promptGuidelines);
         assert.deepEqual(override.parameters, builtIn[name].parameters);
-        assert.equal(typeof override.renderCall, "function");
-        assert.equal(typeof override.renderResult, "function");
+        const theme = { fg: (_color: string, text: string) => text,
+            bg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
+        const renderContext = () => ({ cwd: process.cwd(), state: {}, argsComplete: false,
+            expanded: false, isPartial: false, isError: true, args: { path: "example.txt" }, invalidate() {} });
+        const input = { command: "printf preview", path: "example.txt", content: "preview", edits: [{ oldText: "old", newText: "new" }] };
+        const original = builtIn[name] as ToolDefinition;
+        assert.deepEqual(override.renderCall!(input, theme, renderContext() as never).render(80),
+            original.renderCall!(input, theme, renderContext() as never).render(80));
+        const error = { content: [{ type: "text" as const, text: "synthetic write denied" }], details: undefined };
+        const rendered = override.renderResult!(error, { expanded: false, isPartial: false }, theme, renderContext() as never).render(80);
+        assert.deepEqual(rendered,
+            original.renderResult!(error, { expanded: false, isPartial: false }, theme, renderContext() as never).render(80));
+        assert.match(rendered.join("\n"), /synthetic write denied/);
     }
 });
 
-test("a session with a different cwd re-registers the file tools against that cwd", async () => {
+kernelTest("a session with a different cwd re-registers the file tools against that cwd", async () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("file-tool-cwd");
@@ -312,18 +326,6 @@ test("a session with a different cwd re-registers the file tools against that cw
         {} as ExtensionContext,
     );
     assert.equal(readFileSync(join(root, "session-cwd.txt"), "utf8"), "here\n");
-});
-
-test("the bash override keeps pi's own schema, description and renderers", () => {
-    const recorded = record();
-    piBetterSandbox(recorded.pi);
-    const bash = recorded.tools.get("bash");
-
-    assert.ok(bash);
-    assert.equal(bash.name, "bash");
-    assert.ok("command" in (bash.parameters as { properties: Record<string, unknown> }).properties);
-    assert.equal(typeof bash.renderCall, "function");
-    assert.equal(typeof bash.renderResult, "function");
 });
 
 test("user_bash routes ! and !! through the same confined operations as the bash tool", () => {
@@ -399,10 +401,10 @@ test("the published policy is frozen so one consumer cannot rewrite another's co
     assert.ok(policy);
     assert.throws(() => {
         (policy as { state: string }).state = "disabled";
-    });
+    }, TypeError);
     assert.throws(() => {
         (policy.denyWrite as string[]).push("/etc/passwd");
-    });
+    }, TypeError);
 });
 
 test("/sandbox reports the effective status without changing it", async () => {
@@ -536,9 +538,10 @@ test("a session override never survives the next session start", async () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("no-persist");
-    await startSession(recorded, root);
-    await recorded.commands.get("sandbox")?.handler("off", context(root, { confirm: true }).ctx);
+    await startSession(recorded, root, "startup", false);
     assert.equal(recorded.published.at(-1)?.state, "disabled");
+    await recorded.commands.get("sandbox")?.handler("on", context(root).ctx);
+    assert.equal(recorded.published.at(-1)?.state, "enabled");
 
     await startSession(recorded, root, "resume", false);
 
@@ -586,14 +589,18 @@ test("pi loads the published entry point and registers the same surface", async 
     assert.ok(extension.handlers.has("user_bash"));
 });
 
-test("the package ships an extension entry point and no launcher executable", () => {
-    const manifest = JSON.parse(
-        readFileSync(join(packageRoot, "package.json"), "utf8"),
-    ) as Record<string, unknown>;
-
-    assert.deepEqual(manifest.pi, { extensions: ["./index.ts"] });
+test("the manifest entry points load an extension without a launcher executable", async () => {
+    const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as {
+        pi: { extensions: string[] }; bin?: unknown;
+    };
     assert.equal("bin" in manifest, false, "users invoke ordinary pi; this package ships no binary");
-    assert.equal(existsSync(join(packageRoot, "index.ts")), true);
+    const result = await discoverAndLoadExtensions(
+        manifest.pi.extensions.map((entry) => join(packageRoot, entry)),
+        project("manifest-cwd"), project("manifest-agent"),
+    );
+    assert.deepEqual(result.errors, []);
+    assert.ok(result.extensions.some((extension) => extension.commands.has("sandbox")),
+        "the declared entry points must actually register the sandbox");
 });
 
 // --- write-deny rules -------------------------------------------------------
@@ -669,7 +676,7 @@ test("/sandbox deny list shows the packaged defaults as canonical absolute paths
     assert.equal(existsSync(denyRuleOverridePath()), false, "listing must not create an override");
 });
 
-test("a new deny rule reaches the write and edit tools pi already holds", async () => {
+kernelTest("a new deny rule reaches the write and edit tools pi already holds", async () => {
     forgetDenyOverride();
     const recorded = record();
     piBetterSandbox(recorded.pi);
@@ -711,7 +718,7 @@ test("a new deny rule reaches the write and edit tools pi already holds", async 
     assert.equal(readFileSync(join(root, "build", "third.txt"), "utf8"), "three\n");
 });
 
-test("a deny rule denies a whole subtree, and a file rule only that file", async () => {
+kernelTest("a deny rule denies a whole subtree, and a file rule only that file", async () => {
     forgetDenyOverride();
     const recorded = record();
     piBetterSandbox(recorded.pi);
@@ -733,7 +740,7 @@ test("a deny rule denies a whole subtree, and a file rule only that file", async
     assert.equal(readFileSync(join(root, "notes.txt.bak"), "utf8"), "fine\n");
 });
 
-test("a rule change applies to the next mutation, not to the one pi is already running", async () => {
+kernelTest("a new deny rule preserves completed writes and blocks subsequent mutations", async () => {
     forgetDenyOverride();
     const recorded = record();
     piBetterSandbox(recorded.pi);

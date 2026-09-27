@@ -263,7 +263,7 @@ await record(
         component.handleInput("<left>");
         check(timers.activeCount() === 0, "back disposes timer");
         const listLines = component.render(80);
-        check(listLines.some((l) => l.startsWith("> ") && l.includes("smoke-run")), `selection: ${JSON.stringify(listLines)}`);
+        check(listLines.some((l) => l.startsWith("› ") && l.includes("smoke-run")), `selection: ${JSON.stringify(listLines)}`);
         check(doneCalls.length === 0, "back must not close");
 
         // Re-enter and Escape-close.
@@ -298,22 +298,6 @@ await record(
             cwd: repoRoot,
             stdio: "pipe",
         });
-        const src = execFileSync(process.execPath, ["-e", "const fs=require('fs');process.stdout.write(fs.readFileSync('index.ts','utf8'))"], {
-            cwd: repoRoot,
-            encoding: "utf8",
-        });
-        check(src.includes("buildNavigatorDetail") || src.includes("navigatorDetail"), "detail builder wired");
-        check(src.includes("getDetail"), "getDetail injected into openTrackedNavigator");
-        check(src.includes("openTrackedNavigator"), "openTrackedNavigator used (sync dispose capture)");
-        check(src.includes("disposeTrackedNavigator"), "disposeTrackedNavigator used on session_shutdown");
-        check(!src.includes("setFooter"), "must not replace the full footer");
-        const shutdownIdx = src.indexOf('pi.on("session_shutdown"');
-        check(shutdownIdx >= 0, "session_shutdown exists");
-        const shutdownBody = src.slice(shutdownIdx, src.indexOf("});", shutdownIdx) + 3);
-        check(
-            shutdownBody.includes("disposeTrackedNavigator"),
-            "session_shutdown must call disposeTrackedNavigator",
-        );
 
         // Behavioral teardown proof (not source-scan): enter detail under Pi
         // custom() semantics (promise → done(null)), then invoke the same

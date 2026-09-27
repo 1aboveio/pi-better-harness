@@ -1,44 +1,35 @@
-/**
- * The parallel tool-call race imported catalog-identity dynamically while Pi
- * was still evaluating it, so allocateCatalogLabel saw an uninitialized
- * registry binding and threw reading baseDir. The launch path must keep a
- * static import and still allocate under concurrent callers.
- */
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+// Exercise the launch-time import/allocator path concurrently; import spelling
+// cannot prove that the registry is initialized when parallel launches arrive.
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { describe, it } from "node:test";
+import { join } from "node:path";
+import { it } from "node:test";
 import assert from "node:assert/strict";
-import { allocateCatalogLabel } from "../catalog-identity.ts";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const runtimePath = join(here, "../catalog-runtime.ts");
-
-describe("catalog identity import", () => {
-    it("keeps allocateCatalogLabel statically bound in the launch runtime", () => {
-        const source = readFileSync(runtimePath, "utf8");
-        const start = source.indexOf("async function allocateDirectRoleLabel");
-        const end = source.indexOf("export function roleSlug");
-        assert.ok(start >= 0 && end > start, "allocateDirectRoleLabel must stay in catalog-runtime.ts");
-        const body = source.slice(start, end);
-        assert.match(source, /import\s+\{\s*allocateCatalogLabel\s*\}\s+from\s+"\.\/catalog-identity\.ts"/);
-        assert.doesNotMatch(body, /import\s*\(/);
-        assert.match(body, /allocateCatalogLabel\(/);
-    });
-
-    it("allocates distinct labels from the statically imported allocator", () => {
-        const registryDir = mkdtempSync(join(tmpdir(), "catalog-identity-static-"));
-        try {
-            const labels = Array.from({ length: 8 }, () => allocateCatalogLabel({
-                roleId: "role.developer",
-                roleName: "Developer",
-                registryDir,
-            }));
-            assert.equal(new Set(labels).size, labels.length);
-            for (const label of labels) assert.match(label, /^developer-\d+$/);
-        } finally {
-            rmSync(registryDir, { recursive: true, force: true });
+it("parallel direct-role preparations allocate independent durable labels", async () => {
+    const root = mkdtempSync(join(tmpdir(), "catalog-import-race-"));
+    try {
+        const { loadLaunchSnapshot, prepareCatalogJob } = await import("../catalog-runtime.ts");
+        const host = {
+            cwd: root, userRoot: join(root, "agent"), registryDir: join(root, "registry"),
+            projectTrusted: true, hasUI: false, foregroundModel: "test/model",
+            registry: { getAvailable: () => [{ provider: "test", id: "model", reasoning: true }] },
+        };
+        mkdirSync(host.userRoot);
+        const snapshot = loadLaunchSnapshot(host);
+        const jobs = Array.from({ length: 8 }, (_, index) => ({
+            role: "role.developer", prompt: `Build task ${index}`, model: "test/model", thinking: "low",
+        }));
+        const prepared = await Promise.all(jobs.map((job) => prepareCatalogJob(snapshot, job, host)));
+        for (const [index, result] of prepared.entries()) {
+            assert.equal(result.status, "ready", result.message);
+            assert.match(result.assign.prompt, new RegExp(`Build task ${index}`));
+            assert.match(result.assign.name, /^developer-\d+$/);
         }
-    });
+        const names = prepared.map((result) => result.assign.name);
+        assert.equal(new Set(names).size, jobs.length);
+        const next = await prepareCatalogJob(snapshot, jobs[0], host);
+        assert.equal(next.status, "ready", next.message);
+        assert.equal(names.includes(next.assign.name), false, "later launch must honor reservations");
+    } finally { rmSync(root, { recursive: true, force: true }); }
 });

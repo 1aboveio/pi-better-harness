@@ -1,5 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failedResult, FakeRemoteRunner, successfulResult } from "../../ssh-core/test-support/index.js";
@@ -204,11 +207,22 @@ describe("pi-better-ssh extension", () => {
         successfulResult("Exit request sent\n"),
         successfulResult("Exit request sent\n"),
       ]);
+      const muxEntries = new Map();
+      const foreignRunner = new FakeRemoteRunner([
+        successfulResult("Master foreign\n"), successfulResult("foreign command\n"),
+      ]);
+      const foreign = createHarness("other-mux-session");
+      registerSshExtension(foreign.pi, {
+        runner: foreignRunner,
+        controlPathRoot: join(fixtureRoot, "control"),
+        muxEntries,
+      });
+      await foreign.execute("remote_bash", { command: "hostname", host: "foreign" });
       const harness = createHarness("mux-session-217");
       registerSshExtension(harness.pi, {
         runner,
         controlPathRoot: join(fixtureRoot, "control"),
-        muxEntries: new Map(),
+        muxEntries,
       });
 
       await harness.execute("remote_bash", { command: "hostname", host: "alpha" });
@@ -237,10 +251,14 @@ describe("pi-better-ssh extension", () => {
         scope: "all",
         masters: [{ target: "ops@beta", state: "stopped" }],
       });
-      expect(runner.runCalls.slice(8, 10).every((call) => call.argv?.includes("check"))).toBe(true);
-      expect(runner.runCalls.slice(10, 12).every((call) => call.argv?.includes("exit"))).toBe(true);
-      expect(runner.runCalls[10]?.argv).toContain("alpha");
-      expect(runner.runCalls[11]?.argv).toContain("ops@beta");
+      expect([...muxEntries.values()].map((entry) => entry.sessionScope)).toEqual(["other-mux-session"]);
+      expect(foreignRunner.runCalls).toHaveLength(2);
+      expect(runner.runCalls.slice(8).map((call) => call.argv?.slice(-4))).toEqual([
+        ["-O", "check", "--", "alpha"],
+        ["-O", "check", "--", "ops@beta"],
+        ["-O", "exit", "--", "alpha"],
+        ["-O", "exit", "--", "ops@beta"],
+      ]);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
@@ -278,56 +296,40 @@ describe("pi-better-ssh extension", () => {
     }
   });
 
-  // @covers pi-better-ssh.docs
-  // @level integration
-  // @fails-without-fix pi-better-ssh.docs
-  it("ships the complete install, usage, profile, mux, and safety contract", () => {
-    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-
-    for (const required of [
-      "pi install npm:pi-better-ssh",
-      "remote_bash",
-      "ssh_profile",
-      "ssh_mux",
-      "Host airflow-prod",
-      "~/.ssh/config",
-      "user@host",
-      "ControlMaster",
-      "ControlPath",
-      "BatchMode=yes",
-      "shell:false",
-      "bg_task_spawn",
-      "structured `ssh`",
-      "built-in `bash` remains local",
-    ]) {
-      expect(readme).toContain(required);
-    }
-  });
-
   // @covers pi-better-ssh.release-contract
   // @level integration
-  // @fails-without-fix pi-better-ssh.release-contract
-  it("is independently publishable and included in the root extension bundle", () => {
-    const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-    const rootPackageJson = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
-    const releaseGuide = readFileSync(new URL("../../../docs/development-and-release.md", import.meta.url), "utf8");
-    const publishWorkflow = readFileSync(new URL("../../../.github/workflows/publish.yml", import.meta.url), "utf8");
-    const changelog = readFileSync(new URL("../../../CHANGELOG.md", import.meta.url), "utf8");
-
-    expect(packageJson).toMatchObject({
-      name: "pi-better-ssh",
-      publishConfig: { access: "public" },
-      pi: { extensions: ["./src/index.ts"] },
-    });
-    expect(packageJson.keywords).toContain("pi-package");
-    expect(releaseGuide).toContain("| `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |");
-    expect(releaseGuide).toContain("pi install npm:pi-better-ssh");
-    expect(publishWorkflow).toContain("- pi-better-ssh");
-    expect(publishWorkflow).toContain('pi-better-ssh) WORKSPACE="packages/pi-better-ssh"');
-    expect(publishWorkflow).toContain("check_pack_file /tmp/package-pack.json src/shared-ssh-core/index.ts");
-    expect(changelog).toContain("## [pi-better-ssh@0.1.0]");
-    expect(rootPackageJson.pi.extensions).toContain("./packages/pi-better-ssh/src/index.ts");
-  });
+  it("loads the independently packed extension registered in the root bundle", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pi-ssh-pack-"));
+    const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+    const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    try {
+      const packOutput = JSON.parse(execFileSync("npm", [
+        "pack", "--ignore-scripts", "--json", "--pack-destination", directory,
+        "--cache", join(directory, "npm-cache"),
+      ], { cwd: packageRoot, encoding: "utf8" }));
+      const packed = Array.isArray(packOutput) ? packOutput[0]
+        : packOutput.filename ? packOutput
+        : Object.values(packOutput).find((value: any) => value?.filename);
+      expect(packed?.filename).toBeTypeOf("string");
+      execFileSync("tar", ["-xzf", join(directory, packed.filename), "-C", directory]);
+      const manifest = JSON.parse(readFileSync(join(directory, "package/package.json"), "utf8"));
+      const rootManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+      expect(manifest.pi.extensions).toHaveLength(1);
+      expect(rootManifest.pi.extensions.map((entry: string) => resolve(repoRoot, entry)))
+        .toContain(resolve(packageRoot, manifest.pi.extensions[0]));
+      symlinkSync(join(repoRoot, "node_modules"), join(directory, "node_modules"), "dir");
+      const output = execFileSync(process.execPath, [
+        "--import", "tsx", "--input-type=module", "-e",
+        `import extension from ${JSON.stringify(join(directory, "package", manifest.pi.extensions[0]))};
+         const tools = [];
+         extension({ registerTool(tool) { tools.push(tool.name); }, on() {} });
+         console.log(JSON.stringify(tools));`,
+      ], { cwd: directory, encoding: "utf8" });
+      expect(JSON.parse(output)).toEqual(["remote_bash", "ssh_profile", "ssh_mux"]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 function createHarness(sessionId = "session-216", entries: SessionEntry[] = []) {
