@@ -12,6 +12,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realp
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { describeSandboxSupport } from "../shared-sandbox-core.ts";
@@ -21,7 +22,29 @@ import { logPathFor, runDir } from "../registry.ts";
 import { activeFailures, failureHistory } from "../shared-failure-observations.ts";
 import { readCommandIntent } from "../incident-model.ts";
 
-const supported = describeSandboxSupport().supported;
+/**
+ * Real-kernel lane convention (docs/development-and-release.md, "Sandbox confinement lanes"):
+ * skip without a usable backend, but PI_SANDBOX_REQUIRE_BACKEND turns that skip into a failure.
+ * CI runs this file in the macos-sandbox and linux-sandbox lanes (test:*-sandbox scripts).
+ */
+function realBackendSkip() {
+    const support = describeSandboxSupport();
+    const required = process.env.PI_SANDBOX_REQUIRE_BACKEND;
+    if (required && (!support.supported || support.backend !== required)) {
+        throw new Error(`PI_SANDBOX_REQUIRE_BACKEND=${required} but this runner selected ${support.supported ? support.backend : support.reason}`);
+    }
+    if (!support.supported) return `requires a real sandbox backend: ${support.reason}`;
+    const probe = support.backend === "linux-bubblewrap"
+        ? spawnSync(support.executable, ["--ro-bind", "/", "/", "--", "/bin/true"], { encoding: "utf8" })
+        : spawnSync(support.executable, ["-p", "(version 1) (allow default)", "/usr/bin/true"], { encoding: "utf8" });
+    if (probe.status !== 0) {
+        const reason = probe.error?.message ?? probe.stderr;
+        if (required) throw new Error(`PI_SANDBOX_REQUIRE_BACKEND=${required} but ${support.backend} cannot start: ${reason}`);
+        return `requires usable ${support.backend}: ${reason}`;
+    }
+    return false;
+}
+const backendSkip = realBackendSkip();
 
 function fixture(t) {
     const base = realpathSync(mkdtempSync(join(process.platform === "win32" ? tmpdir() : "/var/tmp", "pi-child-incidents-")));
@@ -31,7 +54,8 @@ function fixture(t) {
     writeFileSync(join(agent, "auth.json"), "{}");
     writeFileSync(join(agent, "settings.json"), "{}");
     const policy = { version: 1, root: project, home: join(base, "home"), agentDir: agent, profilePath: join(control, "task.sb"), scratch,
-        permissions: { projectFiles: "read-write", outsideProject: "read", storedCredentials: "off", commands: true, network: false },
+        // A policy every backend can enforce (the task_runtime defaults; Linux bubblewrap cannot hide credentials under a read-only whole-root bind).
+        permissions: { projectFiles: "read-write", outsideProject: "read", storedCredentials: "read", commands: true, network: true },
         denyWrite: [agent, control, join(scratch, ".sandbox-anchor")], tools: ["read", "write", "edit", "bash"] };
     const previousAgent = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = agent;
@@ -96,7 +120,7 @@ test("the child and parent share one intent validator", () => {
     }
 });
 
-test("declared exit codes are validated before execution and classify only the final structured exit", { skip: !supported }, async (t) => {
+test("declared exit codes are validated before execution and classify only the final structured exit", { skip: backendSkip }, async (t) => {
     const f = fixture(t);
     const session = await sessionFixture(t, f);
     const child = childRun(t, session);
@@ -119,7 +143,7 @@ test("declared exit codes are validated before execution and classify only the f
     assert.equal(activeFailures(state).find((x) => x.id === "tool:invalid").category, "rejected-intent", "the command that never ran is not a failure of its operation");
 });
 
-test("a child supersedes its merge conflict through failure_disposition and the parent journals exactly that", { skip: !supported }, async (t) => {
+test("a child supersedes its merge conflict through failure_disposition and the parent journals exactly that", { skip: backendSkip }, async (t) => {
     const f = fixture(t);
     const session = await sessionFixture(t, f);
     const child = childRun(t, session);
