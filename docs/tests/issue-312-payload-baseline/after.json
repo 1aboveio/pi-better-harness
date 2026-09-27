@@ -1,9 +1,9 @@
 {
   "phase": "after",
-  "measuredAt": "2026-09-27T10:49:16.451Z",
+  "measuredAt": "2026-09-27T11:10:38.919Z",
   "git": {
     "branch": "fix/quiet-failure-history",
-    "sha": "104471ae4757b5268f0449790a952d81f4abec05",
+    "sha": "2d43e40e358d80b91f4aa8db5a14d528aad8c0e9",
     "dirty": false
   },
   "model": {
@@ -62,7 +62,7 @@
     {
       "id": "subagent.success.result",
       "utf8Bytes": 339,
-      "sha256": "f697ecac72dafba44e037cf2c3e32c7ab7448cbdb328b62eb352edfd535f202c",
+      "sha256": "95f2b358ec25e2ff354dea7b50e9dd4dccb238a7d7700f6373fc351f3a81a005",
       "excerpt": "[sa_issue312_success · completed · exit 0 · 45s · lifecycle complete] issue-312-synthetic review complete. Finding: the helper returns the bounded page. Next: reconstruct unread bytes through the caller cursor. --- statusCursor=p1.eyJrIjoi…",
       "facts": {
         "utf16CodeUnits": 335,
@@ -99,7 +99,7 @@
     {
       "id": "subagent.success.output",
       "utf8Bytes": 307,
-      "sha256": "cf08e600a7b3dc84425d7549f06cc492cf9732167837f1a3f837747647f626ff",
+      "sha256": "1aae208ba02990a82914fc3f13cbafff9d245257ea2172b7b6c987071090d865",
       "excerpt": "[sa_issue312_success · completed · 45s] issue-312-synthetic review complete. Finding: the helper returns the bounded page. Next: reconstruct unread bytes through the caller cursor. --- statusCursor=p1.eyJrIjoicyIsInIiOiIwYzJzeFNzYmh5SW5iSn…",
       "facts": {
         "utf16CodeUnits": 305,
@@ -170,7 +170,7 @@
     {
       "id": "subagent.failed.result",
       "utf8Bytes": 515,
-      "sha256": "2bb33114c95c3b70d39fd75dda5016b55f4eb468799d2ac5e020398fff4a10ff",
+      "sha256": "5aa9988ce7103e557074e002d0a547c9ad1858cfbf1948970772d4b46efff238",
       "excerpt": "[sa_issue312_failed · failed · exit 1 · 45s · lifecycle failed_exit] Action required · observed 2023-11-14T22:13:20.000Z · Child exited with code 1 Work correctness was not inferred from lifecycle alone. Lifecycle: failed_exit Lifecycle di…",
       "facts": {
         "utf16CodeUnits": 509,
@@ -243,7 +243,7 @@
     {
       "id": "subagent.incomplete.result",
       "utf8Bytes": 818,
-      "sha256": "e67ca0dfa7d6b4a9a7d916ef45fcb085030a351b135575c9e7826a669e6be10c",
+      "sha256": "4f9e11f7b6a75b1bd67b1ce2ec069f2e147224d5c819c9efc655683a060e967e",
       "excerpt": "[sa_issue312_incomplete · failed · exit 0 · 45s · lifecycle incomplete_no_terminal_event] Observation incomplete · observed 2023-11-14T22:13:20.000Z · Child exit evidence is incomplete Run ended unexpectedly before producing a coherent fin…",
       "facts": {
         "utf16CodeUnits": 812,
@@ -316,7 +316,7 @@
     {
       "id": "subagent.orphaned.result",
       "utf8Bytes": 725,
-      "sha256": "b07cf962fe8a5492477fc9f641a292cb7308f4b13c98a3adb1c635600ca86110",
+      "sha256": "f0e99a1a1aa1123695b46d8b67f8567cf1e0758e3b423af67eaca077cae4f30d",
       "excerpt": "[sa_issue312_orphaned · orphaned · 45s] Run is orphaned — non-final. Supervision was lost; related processes may still be alive. There is no final result yet. [health: orphaned] Run is orphaned — non-final. Supervision was lost; related pr…",
       "facts": {
         "utf16CodeUnits": 719,
@@ -389,7 +389,7 @@
     {
       "id": "subagent.unicode.result",
       "utf8Bytes": 2047,
-      "sha256": "470c300065a1ba32202ab07d11bd722f6477d944e62f9a1bc7ef9421c2041a0e",
+      "sha256": "7a701537afc340e101a103b03053e18b9872fb47b707bc76dde667ed17c97f71",
       "excerpt": "[sa_issue312_unicode · completed · exit 0 · 45s · lifecycle complete] {\"marker\":\"issue-312-synthetic\",\"note\":\"合成任务 ✓ 测量载荷\",\"emoji\":\"📦🧠✅\",\"combining\":\"é\",\"terminalFailure\":true,\"payload\":\"你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你…",
       "facts": {
         "utf16CodeUnits": 984,
@@ -429,7 +429,7 @@
     {
       "id": "subagent.multi_page.result",
       "utf8Bytes": 1993,
-      "sha256": "bc8e19739c0eca1eb37ef219e2b66c5450c3340bd2ca77443be7d969aa6e1b7b",
+      "sha256": "b5e64956c42d12be3956359a1c6d88fd226c7f44e596dbca78fed25beb2dea29",
       "excerpt": "[sa_issue312_multi_page · completed · exit 0 · 45s · lifecycle complete] issue-312-synthetic multi-page answer begins. 001 finding: 合成段落 ✓ café 📦 — keep line 1 intact across page boundaries. 002 finding: 合成段落 ✓ café 📦 — keep line 2 intac…",
       "facts": {
         "utf16CodeUnits": 1719,
@@ -476,7 +476,7 @@
     {
       "id": "subagent.many_failures.result",
       "utf8Bytes": 397,
-      "sha256": "656ff5b0002a17c1e11dc8976f370d91c6aa6aadc10183900124ca67748954aa",
+      "sha256": "1befc65c4311258b4e364ac1c8a886507c87b3ac1eea8272922a045d7f6590bc",
       "excerpt": "[sa_issue312_many_failures · completed · exit 0 · 45s · lifecycle complete] No failures need action · 12 unclassified tool errors (history) Work correctness was not inferred from lifecycle alone. issue-312-synthetic finished with unresolve…",
       "facts": {
         "utf16CodeUnits": 392,
@@ -514,7 +514,7 @@
     {
       "id": "subagent.quiet_history.result",
       "utf8Bytes": 401,
-      "sha256": "b8275a809d0d45d235ead1a6a26048a99c8f91b7570447050f3f298a57f4c280",
+      "sha256": "4e1a2fa1ff830f5d16e9a19050ddd597a61665578d753248e62408e42a3ced05",
       "excerpt": "[sa_issue312_quiet_history · completed · exit 0 · 45s · lifecycle complete] No failures need action · 8 unclassified tool errors · 2 expected (history) Work correctness was not inferred from lifecycle alone. issue-312-synthetic kyc review …",
       "facts": {
         "utf16CodeUnits": 395,
@@ -543,7 +543,7 @@
         "expectedFailures": 2,
         "incidentCursorPresent": false,
         "followedIncidentCursorUtf8Bytes": 0,
-        "explicitHistoryUtf8Bytes": 2490,
+        "explicitHistoryUtf8Bytes": 2498,
         "explicitHistoryPages": 2,
         "explicitHistoryRows": 10,
         "containsToolResultWrapper": false
@@ -669,7 +669,7 @@
     {
       "id": "background.success.status",
       "utf8Bytes": 589,
-      "sha256": "0b4acd2850393dfcc92902ae8dfdd2dedc729c884e6c4c7914e6ae832897ce60",
+      "sha256": "6eb52ee5e219b6ab215581ff71cf9b4351576dd16259346908d0dca2f9c8b1cb",
       "excerpt": "Background task bg_issue312_success is succeeded. exit=0 exit_code running checks ready exit 0 kind: process name: synthetic-success elapsed: 45s --- hasMore=true omittedBytes=52 nextCursor=p1.eyJrIjoiZiIsInIiOiJKMEdzLWVKWTYzR05IUTRvIiwiby…",
       "facts": {
         "utf16CodeUnits": 589,
@@ -704,7 +704,7 @@
     {
       "id": "background.success.status.wrapper",
       "utf8Bytes": 589,
-      "sha256": "0b4acd2850393dfcc92902ae8dfdd2dedc729c884e6c4c7914e6ae832897ce60",
+      "sha256": "6eb52ee5e219b6ab215581ff71cf9b4351576dd16259346908d0dca2f9c8b1cb",
       "excerpt": "Background task bg_issue312_success is succeeded. exit=0 exit_code running checks ready exit 0 kind: process name: synthetic-success elapsed: 45s --- hasMore=true omittedBytes=52 nextCursor=p1.eyJrIjoiZiIsInIiOiJKMEdzLWVKWTYzR05IUTRvIiwiby…",
       "facts": {
         "utf16CodeUnits": 589,
@@ -780,7 +780,7 @@
     {
       "id": "background.failed.status",
       "utf8Bytes": 682,
-      "sha256": "68d2f1cadac0758b0677be620cdf3ef5de25d2fcb16a2702d97ba24586419d97",
+      "sha256": "7cb1995de63f6abd33bc73a1b98a2441c1aa40959b918b12100bcfc95e9dfacc",
       "excerpt": "Action required · observed 2023-11-14T22:13:20.000Z · issue-312-synthetic matched $.terminalFailure = true · evidence: output.log#poll=18 Background task bg_issue312_failed is failed. Condition matched: $.terminalFailure = true observed: u…",
       "facts": {
         "utf16CodeUnits": 679,
@@ -815,7 +815,7 @@
     {
       "id": "background.repeated_poll.status",
       "utf8Bytes": 842,
-      "sha256": "4fcb8574518bb711a4f7cd7d499327654b2fe18bf7458b894848eee0994d78d9",
+      "sha256": "d0bf80fdb6e939c62900a5eceedad9f33dcf47f600243a68e4045d249129cb54",
       "excerpt": "Background task bg_issue312_repeated_poll is running. exit=0 {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} --- check 2023-11-14T22:52:05.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} k…",
       "facts": {
         "utf16CodeUnits": 842,
@@ -852,7 +852,7 @@
     {
       "id": "background.repeated_poll.log.default",
       "utf8Bytes": 962,
-      "sha256": "1ca7221c9d63c6bb926fa94bcd026025fa9e386b3490daf16708a4edb9ebb2c5",
+      "sha256": "adde8c18e0423d59308d105ae4a5f5e462fe078e61244b821669413203f9264c",
       "excerpt": "bg_issue312_repeated_poll log (running) · newest 10 display rows exit=0 {\"status\":\"pending\",\"marker\":\"issue-312-synthetic\"} --- check 2023-11-14T22:50:35.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-312-sy…",
       "facts": {
         "utf16CodeUnits": 961,
@@ -890,7 +890,7 @@
     {
       "id": "background.repeated_poll.log.full",
       "utf8Bytes": 10495,
-      "sha256": "fea9d09bd6b4d8c3519f8de843d876a878ce766c89807bb091aae994515d4c23",
+      "sha256": "9c30d93ffb355756771683291751528430df427b7c39265676e6c6565cf88d1d",
       "excerpt": "bg_issue312_repeated_poll raw log (running) exit=0 Raw retained bytes; capture/retention loss is not recoverable as full history. --- check 2023-11-14T22:12:35.000Z exit=0 signal=null duration_ms=18 --- {\"status\":\"pending\",\"marker\":\"issue-…",
       "facts": {
         "utf16CodeUnits": 10495,
@@ -929,7 +929,7 @@
     {
       "id": "background.unicode.status",
       "utf8Bytes": 1024,
-      "sha256": "44628a695d1bc94269a96f5f4eba01d3354397482f4efdcf2191cbb186a16d8d",
+      "sha256": "d3bac88cf3c00a2298901f6633d591af05aa6dacab75041148a247b3631c8c8c",
       "excerpt": "Background task bg_issue312_unicode is succeeded. exit=0 json_path_equals 你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你你…",
       "facts": {
         "utf16CodeUnits": 694,
@@ -965,7 +965,7 @@
     {
       "id": "background.unicode.log",
       "utf8Bytes": 8074,
-      "sha256": "1901c4c6c5b195446a648d167555b3cf9d8171e4281154e55761a04c90f1a7c5",
+      "sha256": "d683ba36f90e3a43a699ff69adc851a060f0f239dc8364ea9d3d1a600661d302",
       "excerpt": "bg_issue312_unicode raw log (succeeded) exit=0 json_path_equals Raw retained bytes; capture/retention loss is not recoverable as full history. {\"marker\":\"issue-312-synthetic\",\"note\":\"合成任务 ✓ 测量载荷\",\"emoji\":\"📦🧠✅\",\"combining\":\"é\",\"terminalF…",
       "facts": {
         "utf16CodeUnits": 3049,
@@ -1003,13 +1003,13 @@
     },
     {
       "id": "background.many_failures.status",
-      "utf8Bytes": 744,
-      "sha256": "53bd1a4cdc29a816e92a035c0dd0de19970e834bfc22c68a24d4e2868ae2c83a",
-      "excerpt": "12 active failure observations · 1 shown · 11 omitted · incidentCursor=i1.eyJrIjoiaSIsIm8iOjEsInYiOiIwOWI0NGM4MWVlOGExY2NiIiwibiI6MTIsInIiOiJpaFBGLXpiQkt3VkVlUFhGIn0 (pass as cursor to bg_task_status id=bg_issue312_many_failures) Observati…",
+      "utf8Bytes": 752,
+      "sha256": "0069a1b428797ad82125b548e6beb21ba98bc09d0d4699b6f5d5f0ce5ce97d7c",
+      "excerpt": "12 active failure observations · 1 shown · 11 omitted · incidentCursor=i1.eyJrIjoiaSIsIngiOjIsIm8iOjEsInYiOiJhNjMzNTdmODMxYTZlN2JmIiwibiI6MTIsInIiOiJpaFBGLXpiQkt3VkVlUFhGIn0 (pass as cursor to bg_task_status id=bg_issue312_many_failures) O…",
       "facts": {
-        "utf16CodeUnits": 738,
+        "utf16CodeUnits": 746,
         "lineCount": 11,
-        "longestLineUtf8Bytes": 232,
+        "longestLineUtf8Bytes": 240,
         "containsNonAscii": true,
         "utf8GreaterThanUtf16": true,
         "orderedToolSequence": null,
@@ -1025,7 +1025,7 @@
         "containsSyntheticMarker": true,
         "proposedBudgetBytes": 1024,
         "exceedsProposedBudget": false,
-        "utf8BytesExcludingIsolatedTmpdir": 744,
+        "utf8BytesExcludingIsolatedTmpdir": 752,
         "isolatedTmpdirPrefixBytes": 0
       },
       "family": "many-failures",
@@ -1130,7 +1130,7 @@
       "orphaned": 1312,
       "unicode-long-line-json": 11145,
       "multi-page-answer": 1993,
-      "many-failures": 2971,
+      "many-failures": 2979,
       "quiet-history": 401,
       "repeated-poll": 12299,
       "many-completions": 1949

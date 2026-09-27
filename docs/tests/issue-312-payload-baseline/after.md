@@ -1,6 +1,6 @@
 # Issue #312 model-facing payload baseline (after)
 
-Measured at 2026-09-27T10:49:16.451Z from fix/quiet-failure-history @ `104471ae4757b5268f0449790a952d81f4abec05`.
+Measured at 2026-09-27T11:10:38.919Z from fix/quiet-failure-history @ `2d43e40e358d80b91f4aa8db5a14d528aad8c0e9`.
 Accounting: **UTF-8 bytes** (`Buffer.byteLength(text, "utf8")`). Tokenizer counts are not included.
 
 Runtime model for this capture session: `unknown/unknown` effort `unknown`.
@@ -56,7 +56,7 @@ This AFTER capture measures the shipped OUTPUT-POLICY defaults. Compare it with 
 | `background.repeated_poll.log.full` | repeated-poll | bg_task_log | 10495 | 10495 | 280 | no / 16384 | no |
 | `background.unicode.status` | unicode-long-line-json | bg_task_status | 1024 | 694 | 497 | no / 1024 | no |
 | `background.unicode.log` | unicode-long-line-json | bg_task_log | 8074 | 3049 | 7647 | no / 16384 | no |
-| `background.many_failures.status` | many-failures | bg_task_status | 744 | 738 | 232 | no / 1024 | no |
+| `background.many_failures.status` | many-failures | bg_task_status | 752 | 746 | 240 | no / 1024 | no |
 | `background.many_failures.list` | many-failures | bg_task_list | 806 | 801 | 140 | no / 1024 | no |
 | `callback.many_completions.batch` | many-completions | createCallbackBatcher.sendMessage | 1949 | 1469 | 288 | no / 2048 | no |
 
