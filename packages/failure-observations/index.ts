@@ -321,7 +321,7 @@ export function formatPendingAttention(state: FailureState, incidents: readonly 
   return lines.join("\n");
 }
 
-/** The terminal fact that lifecycle success is not evidence of correct work. Never clipped (#325). */
+/** The terminal fact that lifecycle success is not evidence of correct work. Kept whenever it fits and never cut mid-sentence (#325). */
 export const CORRECTNESS_NOTE: string = "Work correctness was not inferred from lifecycle alone.";
 export interface TerminalFailureParts {
   /** Actionable and observation-incomplete incidents among `incidents`, one row each. */
@@ -631,9 +631,9 @@ export function formatIncidentSummary(state: FailureState, options: { maxBytes: 
  * unclassified, expected, and closed incidents are counts. When any active row is not shown, a
  * count line gives the exact total, shown, omitted, and an incident cursor at the first unshown row.
  *
- * The result never exceeds `maxBytes` and is made of whole lines (#325). Under a tight budget,
- * incident rows go first, then the lower-priority notes (closed history, expected, earlier
- * reported), then the count line's cursor and the count line itself, then the unclassified count.
+ * The result never exceeds `maxBytes` and is made of whole lines (#325). Under a tight budget it
+ * drops, in order: incident rows; the lower-priority notes (closed history, expected, earlier
+ * reported); the cursor's retrieval hint; the unclassified count; the cursor; the count line.
  * The correctness note goes last, and only when it alone does not fit: it is never cut mid-sentence.
  */
 export function formatTerminalIncidentSummary(state: FailureState, options: { maxBytes: number; resource?: string; retrieval?: string }): IncidentSummary {

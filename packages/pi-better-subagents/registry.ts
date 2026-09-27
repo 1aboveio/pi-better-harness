@@ -221,6 +221,25 @@ export function recordTaskRuntimeProvenance(id: string): void {
     writeFileSync(path, JSON.stringify({ version: 1, id }), { mode: 0o600 });
 }
 /**
+ * Remove a run directory together with its provenance record (#325). Every run-removal path
+ * uses this, so no provenance outlives its run. Throws when the run directory cannot be removed.
+ */
+export function removeRunDirectory(id: string): void {
+    rmSync(runDir(id), { recursive: true, force: true });
+    removeTaskRuntimeProvenance(id);
+}
+/** Best-effort removal of a run's provenance record (e.g. after a failed launch). */
+export function removeTaskRuntimeProvenance(id: string): void {
+    try { rmSync(taskRuntimeProvenancePath(id), { force: true }); } catch { /* invalid id or already gone */ }
+}
+/** Provenance records whose run directory no longer exists (e.g. removed by an older version). */
+export function orphanedTaskRuntimeProvenance(): string[] {
+    let names: string[];
+    try { names = readdirSync(join(baseDir(), "task-runtime")); } catch { return []; }
+    return names.filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5))
+        .filter((id) => { try { statSync(runDir(id)); return false; } catch { return true; } });
+}
+/**
  * Whether the parent may honour structured intent for this run. `unknown` means the answer could
  * not be read right now (unreadable metadata or provenance); callers retry instead of caching it.
  * A missing or mismatched provenance record is a definite `unconfined` (the exact-retry rule).
@@ -879,8 +898,7 @@ export function readMeta(id: string): RunMeta | undefined {
  */
 export function removeMetaArtifacts(meta: RunMeta): boolean {
     try {
-        rmSync(runDir(meta.id), { recursive: true, force: true });
-        rmSync(taskRuntimeProvenancePath(meta.id), { force: true });
+        removeRunDirectory(meta.id);
         if (meta.taskRuntime && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(meta.id) && meta.cwd === taskWorkspaceDir(meta.id)) {
             rmSync(taskWorkspaceDir(meta.id), { recursive: true, force: true });
         }

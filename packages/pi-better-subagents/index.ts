@@ -12,7 +12,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { writeFileSync, mkdirSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
@@ -49,6 +49,7 @@ import {
     sessionsDir,
     runDir,
     recordTaskRuntimeProvenance,
+    removeRunDirectory,
     logPathFor,
     promptPathFor,
     nextRunId,
@@ -1436,7 +1437,16 @@ export default function (pi: ExtensionAPI) {
         const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: piBin, fileArgs: args };
         const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
-        const spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
+        let spawned: ReturnType<typeof spawnDetached>;
+        try {
+            spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
+        } catch (error) {
+            // Nothing references the run yet (no metadata): drop its directory (prompt, control/),
+            // its provenance record, and the task scratch, so a failed launch leaves nothing behind (#325).
+            try { removeRunDirectory(id); } catch { /* best effort */ }
+            if (taskRuntime?.policy.scratch) rmSync(taskRuntime.policy.scratch, { recursive: true, force: true });
+            throw error;
+        }
         // Record process identity (pgid, start-time token) so health
         // reconciliation can tell a supervised child from a recycled pid
         // or an orphaned process group (#63). Best-effort: when the OS

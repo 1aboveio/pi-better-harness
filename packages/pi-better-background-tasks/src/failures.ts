@@ -63,8 +63,19 @@ function declaredOperation(meta: BackgroundTaskMeta): string | undefined {
 }
 
 /**
+ * Recovery crosses tasks only within one owner (#325): the same non-empty session id, or, for
+ * sessionless tasks, the same spawning process (#312's sessionless ownership rule). The origin
+ * index alone treats two sessionless sessions in one cwd as one origin.
+ */
+function sameRecoveryOwner(a: BackgroundTaskMeta, b: BackgroundTaskMeta): boolean {
+  const sa = a.callbackOrigin?.sessionId, sb = b.callbackOrigin?.sessionId;
+  if (sa || sb) return Boolean(sa) && sa === sb;
+  return a.spawnPid === b.spawnPid && a.spawnPidStartTime === b.spawnPidStartTime;
+}
+
+/**
  * A task that succeeded with a declared `operationId` recovers the unresolved failures of earlier
- * tasks in the same session that declared the same operation (same kind, cwd, and SSH target) and
+ * tasks of the same owner (session, or spawning process when sessionless) that declared the same operation (same kind, cwd, and SSH target) and
  * failed before this task started: a modified retry as a new task. Observation gaps and expected
  * failures are left alone; nothing is matched on command text.
  */
@@ -74,7 +85,7 @@ export function recoverDeclaredOperation(meta: BackgroundTaskMeta, at = Date.now
   let earlier: BackgroundTaskMeta[];
   try { earlier = listMetasForOrigin(originOf(meta)); } catch { return; }
   for (const task of earlier) {
-    if (task.id === meta.id || task.startedAt >= meta.startedAt || declaredOperation(task) !== operation) continue;
+    if (task.id === meta.id || task.startedAt >= meta.startedAt || declaredOperation(task) !== operation || !sameRecoveryOwner(task, meta)) continue;
     const path = failurePath(task.id);
     const events: FailureEvent[] = activeFailures(readFailureState(path))
       .filter((x) => x.status === "unresolved" && x.category !== "observation-incomplete" && x.lastObservedAt <= meta.startedAt)

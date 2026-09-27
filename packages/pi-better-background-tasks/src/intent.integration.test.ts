@@ -9,7 +9,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterAll, describe, expect, it } from "vitest";
 import { failurePath, terminalFailureAttention } from "./failures.js";
 import { activeFailures, failureCounts, readFailureState } from "./shared-failure-observations.js";
-import { listMetasForOrigin, readMeta, taskDir } from "./registry.js";
+import { listMetasForOrigin, readMeta, taskDir, writeMeta } from "./registry.js";
 import { spawnTask, startWatchTask } from "./runtime.js";
 import { registerTools } from "./tools.js";
 import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
@@ -83,6 +83,29 @@ describe("#325 background task structured intent", () => {
     expect(activeFailures(state(quickFail.id))).toHaveLength(1);
   });
 
+  it("declared recovery never crosses sessions, including two sessionless sessions in one cwd", async () => {
+    const run = (command: string, origin: { cwd: string; sessionId?: string }, extra: Record<string, unknown> = {}) => {
+      const meta = spawnTask(pi, { command, callback: false, operation_id: "cross", ...extra }, origin.cwd, origin, () => origin);
+      ids.push(meta.id);
+      return meta;
+    };
+    const other = { cwd: origin.cwd, sessionId: `${origin.sessionId}-other` };
+    const failedHere = run("exit 3", origin);
+    await terminal(failedHere.id);
+    await terminal(run("true", other).id);
+    expect(activeFailures(state(failedHere.id))).toHaveLength(1);
+    // Sessionless: same cwd, but a different spawning process owns the earlier task.
+    const sessionless = { cwd: origin.cwd };
+    const foreign = run("exit 4", sessionless);
+    await terminal(foreign.id);
+    writeMeta({ ...readMeta(foreign.id)!, spawnPid: 1, spawnPidStartTime: "another-process" });
+    const mine = run("exit 5", sessionless);
+    await terminal(mine.id);
+    await terminal(run("true", sessionless).id);
+    expect(activeFailures(state(foreign.id))).toHaveLength(1);
+    expect(activeFailures(state(mine.id))).toHaveLength(0);
+  });
+
   it("a watch poll exiting with a declared code is expected, not an actionable poll failure", async () => {
     let sequence = 0;
     const poll = (exitCode: number, stdout: string) => ({ stdout, stderr: "", exitCode, signal: null, startedAt: Date.now() + ++sequence, endedAt: Date.now() + sequence });
@@ -106,10 +129,7 @@ describe("#325 background task structured intent", () => {
       expect(findProviderRejectedKeywords(intent)).toEqual([]);
       expect(JSON.stringify(intent)).not.toMatch(/"(pattern|format)":/);
     }
-    // OpenAI rejects `uniqueItems` in any function schema. (The pre-existing `env`/`ssh.options` records use
-    // patternProperties, which the shared checker also lists; they are outside #325.)
-    for (const tool of Object.values(tools)) {
-      expect(findProviderRejectedKeywords(JSON.parse(JSON.stringify(tool.parameters))).filter((path: string) => !path.endsWith("patternProperties"))).toEqual([]);
-    }
+    // Every background tool schema passes the shared provider check.
+    for (const tool of Object.values(tools)) expect(findProviderRejectedKeywords(JSON.parse(JSON.stringify(tool.parameters)))).toEqual([]);
   });
 });

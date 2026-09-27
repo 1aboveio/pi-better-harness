@@ -285,7 +285,8 @@ validated before launch (a malformed value starts nothing):
 
 - `operation_id`: a stable name (letters, digits, `. _ : / -`, up to 64
   characters) for one logical operation. When a later task with the same
-  `operation_id`, kind, cwd, SSH target, and session succeeds, the unresolved
+  `operation_id`, kind, cwd, SSH target, and owner (the same session id, or for
+  sessionless tasks the same Pi process) succeeds, the unresolved
   failures of earlier tasks that failed before it started are recovered. Use it
   when a retry changes the command, scope, or timeout.
 - `expected_exit_codes`: distinct non-zero exit codes (1-255) that are

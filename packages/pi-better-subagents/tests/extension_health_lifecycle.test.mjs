@@ -45,7 +45,7 @@
 import { describe, it, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { mkdtempSync, writeFileSync, appendFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, appendFileSync, chmodSync, rmSync, readFileSync, readdirSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -60,7 +60,7 @@ process.env.TMPDIR = HERMETIC_TMPDIR;
 
 const { default: betterSubagents, setIdentityProbeForTests, isHealthTickerActive } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
-const { readMeta, writeMeta, nextRunId, runDir } = await import("../registry.ts");
+const { readMeta, writeMeta, nextRunId, runDir, baseDir, recordTaskRuntimeProvenance, removeRunDirectory, taskRuntimeProvenancePath } = await import("../registry.ts");
 const { realProcessProbe, OLD_METADATA_LOST_CONFIRM_TICKS } = await import("../health.ts");
 const { killProcessTree } = await import("../spawn.ts");
 const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
@@ -349,6 +349,73 @@ describe("#315 child tool failures and parent wakes", () => {
             assert.equal(h.sent.filter((x) => x.message.customType === "background-completion-batch").length, 1);
             assert.equal(failureWakes(h).length, 0);
         } finally { h.shutdown(); }
+    });
+});
+
+describe("#325 lost runs", () => {
+    it("observation gaps found after the lost health callback are not deferred, and are delivered once", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            const id = nextRunId();
+            const keeper = nextRunId();
+            dirOnly.push(id, keeper);
+            const log = join(runDir(id), "output.log");
+            try {
+                writeMeta({ id, status: "lost", pid: DEAD_PID, spawnPid: process.pid, cwd: h.ctx.cwd,
+                    callbackOrigin: { cwd: h.ctx.cwd, sessionId: "test-session" }, promptPreview: "lost gaps",
+                    startedAt: Date.now() - 60_000, lostAt: Date.now() - 30_000, endedAt: Date.now() - 30_000, lostCallbackSentAt: Date.now() - 30_000,
+                    logPath: log, sessionId: id, callback: true });
+                writeFileSync(log, "");
+                observeFailures(failurePath(id), [
+                    { id: "supervision:lost", operation: "supervision:lost", kind: "incomplete", summary: "Child supervision was lost; outcome is unknown" },
+                    { id: "delivered:lost", operation: "attention-delivery", kind: "delivered", incidents: ["supervision:lost"] },
+                ]);
+                // Another monitored run keeps the health ticker alive (callback:false keeps it silent).
+                writeMeta({ id: keeper, status: "orphaned", pid: process.pid, spawnPid: process.pid, cwd: h.ctx.cwd, promptPreview: "keeper",
+                    startedAt: Date.now(), orphanedCallbackSentAt: Date.now(), logPath: join(runDir(keeper), "output.log"), sessionId: keeper, callback: false });
+                await h.handlers.get("session_start")({}, h.ctx);
+                appendFileSync(log, '{"type":"tool_execution_end","toolCallId":"broken"}\n');
+                for (let i = 0; i < 3; i++) {
+                    mock.timers.tick(HEALTH_TICK_MS);
+                    await new Promise((resolve) => setImmediate(resolve));
+                }
+                const wakes = h.sent.filter((x) => x.message.customType === "subagent-failure");
+                assert.equal(wakes.length, 1, "delivered once; the receipt prevents repeats");
+                assert.match(wakes[0].message.content, /Observation incomplete · .*malformed structured events/);
+                assert.doesNotMatch(wakes[0].message.content, /supervision was lost/i, "the delivered supervision incident is not repeated");
+            } finally {
+                writeMeta({ ...readMeta(keeper), status: "lost", endedAt: Date.now(), lostCallbackSentAt: Date.now() });
+                h.shutdown();
+            }
+        });
+    });
+});
+
+describe("#325 failed launches", () => {
+    it("a spawn that fails leaves no run directory, control files, or provenance behind", async () => {
+        const h = makeHarness();
+        const runsRoot = join(baseDir(), "runs");
+        const provenanceRoot = join(baseDir(), "task-runtime");
+        const list = (dir) => { try { return readdirSync(dir).sort(); } catch { return []; } };
+        const before = { runs: list(runsRoot), provenance: list(provenanceRoot) };
+        try {
+            // A working directory that does not exist: the OS refuses the spawn after the run directory was prepared.
+            await assert.rejects(() => h.tools.get("subagent_spawn").execute("tc",
+                { prompt: "x", clean: true, sandbox: false, cwd: join(tmpdir(), `no-such-dir-${process.pid}`) }, undefined, undefined, h.ctx), /Failed to spawn/);
+            assert.deepEqual(list(runsRoot), before.runs);
+            assert.deepEqual(list(provenanceRoot), before.provenance);
+        } finally {
+            h.shutdown();
+        }
+    });
+    it("every run-removal path also removes the run's provenance record", () => {
+        const id = nextRunId();
+        mkdirSync(runDir(id), { recursive: true });
+        recordTaskRuntimeProvenance(id);
+        assert.ok(existsSync(taskRuntimeProvenancePath(id)));
+        removeRunDirectory(id);
+        assert.equal(existsSync(runDir(id)), false);
+        assert.equal(existsSync(taskRuntimeProvenancePath(id)), false);
     });
 });
 

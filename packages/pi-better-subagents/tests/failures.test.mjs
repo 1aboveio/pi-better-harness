@@ -6,7 +6,7 @@ import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "no
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { runDir, logPathFor, baseDir, recordTaskRuntimeProvenance, taskRuntimeProvenancePath } from "../registry.ts";
-import { collectRunFailures, failurePath, failureSummary, readRunFailures, resetFailureScanCursor, toolOperation } from "../failures.ts";
+import { collectRunFailures, failurePath, failureSummary, readRunFailures, resetFailureScanCursor, toolOperation, TRUST_WAIT_MS } from "../failures.ts";
 import { activeFailures, markFailureAttentionDelivered, pendingFailureAttention } from "../shared-failure-observations.ts";
 
 function fixture(t) {
@@ -362,11 +362,30 @@ test("#325 a transient metadata read failure defers the scan instead of pinning 
     let state = collectRunFailures(f.id, "/repo");
     assert.equal(active315(state).length, 0, "nothing is folded while trust is unknown");
     assert.equal(readRunFailures(f.id).seen.length, 0, "and nothing is journaled under the wrong rule");
-    // A terminal read cannot wait: it says the observations are incomplete rather than claiming health.
-    state = collectRunFailures(f.id, "/repo", true);
-    assert.match(runFailureFacts(state, true), /Observation incomplete · .*Run metadata could not be read/);
     writeFileSync(meta, good);
     state = collectRunFailures(f.id, "/repo");
     assert.deepEqual(active315(state).map((x) => [x.id, x.status]), [["tool:probe", "expected"]], "the retry honours the trusted runtime");
-    assert.equal(failureCounts(state).recovered, 2, "the declared retry recovered, and the metadata gap closed");
+    assert.equal(failureCounts(state).recovered, 1, "the declared retry recovered");
+});
+
+test("#325 permanently unreadable metadata: the wait is bounded and real failures stay visible under the exact rule", (t) => {
+    // Terminal read: no waiting at all.
+    const done = confinedFixture(t);
+    writeFileSync(join(runDir(done.id), "meta.json"), "{corrupt");
+    appendIntentRun(done);
+    let state = collectRunFailures(done.id, "/repo", true);
+    const facts = runFailureFacts(state, true);
+    assert.match(facts, /Observation incomplete · .*Run metadata could not be read/);
+    assert.deepEqual(active315(state).filter((x) => x.category !== "observation-incomplete").map((x) => [x.id, x.status]), [["tool:t1", "unresolved"]],
+        "the real failure is scanned (exact rule: the undeclared-trust retry does not recover it)");
+    // Running read: waits, then scans once TRUST_WAIT_MS has passed.
+    const running = confinedFixture(t);
+    writeFileSync(join(runDir(running.id), "meta.json"), "{corrupt");
+    appendIntentRun(running);
+    const start = Date.now();
+    t.mock.method(Date, "now", () => start);
+    assert.equal(active315(collectRunFailures(running.id, "/repo")).length, 0, "within the bound: deferred");
+    Date.now.mock.mockImplementation(() => start + TRUST_WAIT_MS);
+    state = collectRunFailures(running.id, "/repo");
+    assert.deepEqual(active315(state).map((x) => x.id).sort(), [active315(state).find((x) => x.category === "observation-incomplete").id, "tool:t1"].sort());
 });

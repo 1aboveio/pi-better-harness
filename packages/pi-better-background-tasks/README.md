@@ -130,8 +130,9 @@ or `bg_task` to declare intent before launch; a malformed declaration starts
 nothing. An exit code in `expected_exit_codes` (distinct integers 1-255, such as
 `[1]` for a no-match probe) is recorded as an **Expected failure** that needs no
 action; signals and timeouts never are. When a task with an `operation_id`
-succeeds, earlier failed tasks in the same session with the same `operation_id`,
-kind, cwd, and SSH target recover, so a retry with a changed command or timeout
+succeeds, earlier failed tasks with the same `operation_id`, kind, cwd, SSH
+target, and owner (the same session id, or for sessionless tasks the same Pi
+process) recover, so a retry with a changed command or timeout
 closes the original incident. Observation gaps are never recovered this way, and
 no command text is compared.
 

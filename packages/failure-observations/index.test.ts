@@ -510,6 +510,7 @@ test("the journal fingerprint changes on every append, deletion, and marker chan
   assert.notEqual(twice, once);
   rmSync(path);
   assert.match(failureJournalFingerprint(path), /^unreadable:ENOENT\|1\|0$/, "a lost journal keeps its marker");
+});
 
 test("#325 terminal summary under a budget sweep: rows drop first, output never exceeds the budget, notes are never cut", () => {
   let state = emptyFailureState();
@@ -533,8 +534,16 @@ test("#325 terminal summary under a budget sweep: rows drop first, output never 
     assert.ok(Buffer.byteLength(out.text) <= maxBytes, `budget ${maxBytes}: ${Buffer.byteLength(out.text)} bytes`);
     const lines = out.text ? out.text.split("\n") : [];
     for (const line of lines) {
-      // Every line is whole: either a line of the unbounded summary, or a count line.
-      assert.ok(allLines.has(line) || /^\d+ active failure observations · \d+ shown · \d+ omitted · /.test(line), `budget ${maxBytes}: clipped line ${JSON.stringify(line)}`);
+      // Every line is whole: a line of the unbounded summary, or one of the three exact count-line forms.
+      const count = /^(\d+) active failure observations · (\d+) shown · (\d+) omitted · (?:incidentCursor=(\S+)( \(.*\))?|incident cursor not shown \(page too small\))$/.exec(line);
+      assert.ok(allLines.has(line) || count, `budget ${maxBytes}: clipped line ${JSON.stringify(line)}`);
+      if (count && !allLines.has(line)) {
+        assert.equal(Number(count[1]), out.total);
+        assert.equal(Number(count[2]), out.represented);
+        assert.equal(Number(count[3]), out.omitted);
+        if (count[4]) assert.equal(count[4], incidentCursorAt(state, out.represented, "sweep"), "the cursor is whole and resumes at the first unshown row");
+        if (count[5]) assert.equal(count[5], ` (${retrieval})`, "the retrieval hint is whole");
+      }
     }
     if (maxBytes >= correctness) assert.ok(lines.includes(CORRECTNESS_NOTE), `budget ${maxBytes}: the correctness note is kept whenever it fits`);
     else assert.ok(!out.text.includes("Work correctness"), "the note is never cut mid-sentence");
