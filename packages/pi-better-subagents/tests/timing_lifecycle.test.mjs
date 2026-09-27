@@ -23,9 +23,9 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-timing-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
 
-const { default: betterSubagents } = await import("../index.ts");
+const { default: betterSubagents, progressCacheIdsForTests } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
-const { readMeta, runDir } = await import("../registry.ts");
+const { readMeta, writeMeta, runDir } = await import("../registry.ts");
 const { killProcessTree } = await import("../spawn.ts");
 
 const HEALTH_TICK_MS = 15_000;
@@ -248,7 +248,7 @@ describe("harness timing: soft deadline", () => {
 
     it("a child that finishes inside grace is not killed and reports deadline: finished in grace", async () => {
         await withFakeClock(async () => {
-            writeFakePi("#!/bin/sh\nsleep 0.4\nexit 0\n");
+            writeFakePi("#!/bin/sh\nsleep 0.4\necho '{\"type\":\"agent_end\"}'\nexit 0\n");
             const h = makeHarness();
             try {
                 const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0, noWaitForLaunch: true });
@@ -303,6 +303,80 @@ describe("harness timing: soft deadline", () => {
     });
 });
 
+describe("harness timing: a steer queued behind a long tool call", () => {
+    // Exits 0 with a coherent stream once the test creates `done` next to the steer file.
+    const WAIT_SCRIPT = "#!/bin/sh\nd=$(dirname \"$PI_SUBAGENT_STEER_FILE\")\necho launched --extension\nwhile [ ! -f \"$d/done\" ]; do sleep 0.05; done\necho '{\"type\":\"agent_end\"}'\nexit 0\n";
+    const longCallStart = (id) => [
+        { type: "message_end", message: { role: "assistant", timestamp: Date.now(), content: [] } },
+        { type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: "./gradlew test" } },
+    ];
+    const longCallEnd = (id) => [
+        { type: "tool_execution_end", toolCallId: id, toolName: "bash", isError: false, result: { content: [] } },
+        { type: "message_end", message: { role: "toolResult", toolCallId: id, toolName: "bash", isError: false, timestamp: Date.now(), content: [] } },
+    ];
+
+    it("holds the deadline stop until the steer is delivered, then a child finishing inside grace is not killed", async () => {
+        await withFakeClock(async () => {
+            writeFakePi(WAIT_SCRIPT);
+            const h = makeHarness();
+            try {
+                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 0.005, max_minutes: 0, stuck_minutes: 0 });
+                appendEvents(run.id, longCallStart("long"));
+                await sleep(80);
+                await tick();
+                assert.ok(readMeta(run.id).timing.steerRequestedAt > 0, "steer requested at the deadline");
+                await sleep(400);
+                await tick();
+                assert.equal(readMeta(run.id).status, "running", "past request + grace, but the steer waits behind the open tool call");
+                assert.match((await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text,
+                    /once the message reaches it/);
+
+                appendEvents(run.id, longCallEnd("long"));
+                // The child's steer extension writes this receipt when the steer enters its conversation.
+                writeFileSync(`${steerPath(run.id)}.delivered`, JSON.stringify({ id: `deadline:${run.id}`, at: Date.now() }));
+                await tick();
+                const deliveredAt = readMeta(run.id).timing.steerDeliveredAt;
+                assert.ok(deliveredAt > 0, "delivery time recorded durably");
+                await sleep(100);
+                await tick();
+                assert.equal(readMeta(run.id).status, "running", "grace runs from delivery");
+                writeFileSync(join(runDir(run.id), "done"), "");
+                const done = await waitFor(() => { const m = readMeta(run.id); return m && m.status !== "running" ? m : undefined; });
+                assert.equal(done.status, "completed");
+                assert.equal(done.timing.stopReason, undefined);
+                assert.equal(await getCallbackBatcher(h.pi).flush(), true);
+                const completion = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+                assert.match(completion.at(-1).message.content, /status=completed; deadline: finished in grace/);
+                rmSync(runDir(run.id), { recursive: true, force: true });
+            } finally {
+                writeFakePi(IDLE_SCRIPT);
+                h.shutdown();
+            }
+        });
+    });
+
+    it("a tool call that never ends is bounded by the ceiling", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 0.001, max_minutes: 0.008, stuck_minutes: 0 });
+                appendEvents(run.id, longCallStart("hang"));
+                await sleep(80);
+                await tick();
+                await sleep(150);
+                await tick();
+                assert.equal(readMeta(run.id).status, "running", "held: the steer is still waiting");
+                await sleep(300);
+                await tick();
+                const meta = readMeta(run.id);
+                assert.equal(meta.status, "killed");
+                assert.equal(meta.timing.stopReason, "ceiling");
+                await reap(run);
+            } finally { h.shutdown(); }
+        });
+    });
+});
+
 describe("harness timing: ceiling", () => {
     it("stops at the hard ceiling without grace and reports reason ceiling", async () => {
         await withFakeClock(async () => {
@@ -320,6 +394,48 @@ describe("harness timing: ceiling", () => {
                 assert.match(completion.at(-1).message.content, /stopped: ceiling/);
                 const result = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(result, /Timing: stopped: ceiling/);
+                await reap(run);
+            } finally { h.shutdown(); }
+        });
+    });
+});
+
+describe("harness timing: orphaned runs and memory", () => {
+    it("the ceiling also stops an orphaned run whose process group is still alive", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const run = await spawnRun(h, { deadline_minutes: 0, max_minutes: 0.001, stuck_minutes: 0 });
+                const meta = readMeta(run.id);
+                meta.status = "orphaned";
+                meta.orphanedAt = Date.now();
+                meta.orphanedCallbackSentAt = Date.now();
+                writeMeta(meta);
+                await sleep(80);
+                await tick();
+                const after = readMeta(run.id);
+                assert.equal(after.status, "killed");
+                assert.equal(after.timing.stopReason, "ceiling");
+                assert.ok(await waitFor(() => { try { process.kill(run.pid, 0); return false; } catch { return true; } }), "the group is gone");
+                await reap(run);
+            } finally { h.shutdown(); }
+        });
+    });
+
+    it("releases a run's progress state once it is no longer live, whatever ended it", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness();
+            try {
+                const run = await spawnRun(h, { deadline_minutes: 0, max_minutes: 0, stuck_minutes: 5 });
+                await tick();
+                assert.ok(progressCacheIdsForTests().includes(run.id), "held while running");
+                const meta = readMeta(run.id);
+                meta.status = "lost";
+                meta.lostAt = Date.now();
+                meta.lostCallbackSentAt = Date.now();
+                writeMeta(meta);
+                await tick();
+                assert.equal(progressCacheIdsForTests().includes(run.id), false, "released after reconcile marks it lost");
                 await reap(run);
             } finally { h.shutdown(); }
         });

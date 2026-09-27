@@ -52,6 +52,8 @@ export interface RunTiming {
     stuckMs?: number;
     /** When the wrap-up steer was requested from the child. */
     steerRequestedAt?: number;
+    /** When the steer entered the child's conversation (grace starts here). */
+    steerDeliveredAt?: number;
     /** When the parent wake for the deadline was handed off (or suppressed). */
     deadlineWakeSentAt?: number;
     /** When the stuck wake was handed off (or suppressed). */
@@ -149,10 +151,10 @@ export function resolveRunTiming(input: {
 // ---- tool parameters -------------------------------------------------------
 
 const TIMING_DESCRIPTIONS = {
-    deadline_minutes: "Soft deadline in minutes (default 30; 0 = none; null = default). At the deadline the child is told to stop starting new work, commit what is done, and report, and you get one wake. If it has not finished after grace_minutes, the harness stops it with reason deadline.",
-    grace_minutes: "Minutes after the soft deadline before the run is stopped (default 5; null = default).",
-    max_minutes: "Hard ceiling in minutes (default 90; 0 = none; null = default). The run is stopped at once, without grace, with reason ceiling.",
-    stuck_minutes: "No-progress window in minutes (default 10; 0 = off; null = default). Progress is any successful tool call that is not an exact repeat of an earlier one (same tool, same arguments); edits, writes, commits, and a success after a failure always count. Time inside a running tool call does not count. Wakes you once per stuck spell; never stops the run.",
+    deadline_minutes: "Soft deadline in minutes (default 30; 0 = none; null or omitted = inherit: in a batch job the shared value, otherwise the default). At the deadline the child is told to stop starting new work, commit what is done, and report, and you get one wake. Grace starts when the message reaches the child (after its current tool call); if it has not finished by then, the harness stops it with reason deadline.",
+    grace_minutes: "Minutes after the wrap-up message reaches the child before the run is stopped (default 5; null or omitted = inherit).",
+    max_minutes: "Hard ceiling in minutes (default 90; 0 = none; null or omitted = inherit). The run is stopped at once, without grace, with reason ceiling.",
+    stuck_minutes: "No-progress window in minutes (default 10; 0 = off; null or omitted = inherit). Progress is any successful tool call that is not an exact repeat of an earlier one (same tool, same arguments); edits, writes, commits, and a success after a failure always count. Time inside a running tool call does not count. Wakes you once per stuck spell; never stops the run.",
 } as const;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the host's TypeBox builder types its own schemas
@@ -194,16 +196,12 @@ export interface ProgressState {
     /** Tool-call time since the last progress (closed intervals). */
     pausedMs: number;
     lastToolFailed: boolean;
-    /** The child reported delivering the wrap-up steer. */
-    steerDelivered: boolean;
 }
 
 export function emptyProgress(startedAt: number): ProgressState {
-    return { startedAt, open: new Map(), seen: new Set(), pausedMs: 0, lastToolFailed: false, steerDelivered: false };
+    return { startedAt, open: new Map(), seen: new Set(), pausedMs: 0, lastToolFailed: false };
 }
 
-/** Typed marker the child's control extension writes after delivering a steer. */
-export const STEER_DELIVERED_EVENT = "subagent_steer_delivered";
 
 const GIT_COMMIT = /(^|[\s;&|(])git(\s+-[cC]\s+\S+)*\s+commit\b/;
 
@@ -240,22 +238,30 @@ function remember(state: ProgressState, key: string): boolean {
     return true;
 }
 
+/**
+ * File-mutating tools by name: edit, write, multi_edit, apply_patch, str_replace,
+ * str_replace_editor, write_file, edit_file, and the like. A successful call always
+ * counts as progress, even when it repeats an earlier one.
+ */
+export function isMutatingTool(name: string): boolean {
+    return /(?:^|[_-])(?:edit|write|patch|replace)(?:$|[_-])|^multi_?edit$/i.test(name);
+}
+
 function isProgressResult(name: string, command: string | undefined, afterFailure: boolean, novel: boolean): boolean {
     if (afterFailure || novel) return true;
-    if (name === "edit" || name === "write") return true;
+    if (isMutatingTool(name)) return true;
     return name === "bash" && typeof command === "string" && GIT_COMMIT.test(command);
 }
 
 /** Cheap pre-filter: only these rows can change progress state. */
 export function isProgressRelevantLine(line: string): boolean {
     const head = line.slice(0, 160);
-    return head.includes('"tool_execution_start"') || head.includes('"message_end"') || head.includes(`"${STEER_DELIVERED_EVENT}"`);
+    return head.includes('"tool_execution_start"') || head.includes('"message_end"');
 }
 
 /** Fold one parsed child event into the progress state. */
 export function foldProgress(state: ProgressState, event: Record<string, unknown>): void {
     const type = event.type;
-    if (type === STEER_DELIVERED_EVENT) { state.steerDelivered = true; return; }
     if (type === "tool_execution_start") {
         const id = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
         if (!id) return;
@@ -325,7 +331,18 @@ export function decideTiming(timing: RunTiming | undefined, progress: ProgressSt
     if (timing.deadlineAt !== undefined && now >= timing.deadlineAt) {
         if (timing.steerRequestedAt === undefined) actions.steer = true;
         if (timing.deadlineWakeSentAt === undefined) actions.deadlineWake = true;
-        if (now >= timing.deadlineAt + timing.graceMs) actions.stop = "deadline";
+        // Grace starts when the steer enters the child's conversation, not when it was queued: Pi
+        // delivers a steer only after the current tool call, so a 20-minute test that began just
+        // before the deadline must not be killed mid-run. While the steer is undelivered and a tool
+        // call is open, the deadline stop is held (the ceiling still bounds the run). Undelivered
+        // with no tool open (e.g. a child without the steer extension), grace runs from the request.
+        const deliveredAt = timing.steerDeliveredAt;
+        if (deliveredAt !== undefined) {
+            if (now >= deliveredAt + timing.graceMs) actions.stop = "deadline";
+        } else if (timing.steerRequestedAt !== undefined && !(progress && progress.open.size > 0)
+            && now >= timing.steerRequestedAt + timing.graceMs) {
+            actions.stop = "deadline";
+        }
         // Past the deadline the wrap-up flow governs; a stuck wake would only repeat it.
         return actions;
     }
@@ -380,13 +397,18 @@ export function describeTiming(meta: { timing?: RunTiming; startedAt: number; st
         return { reason, short: "stopped: ceiling", line: `Timing: stopped: ceiling — the harness stopped this run at its ${ceiling} hard ceiling, without grace.` };
     }
     if (reason === "deadline" && t.stopReason === "deadline") {
-        return { reason, short: "stopped: deadline", line: `Timing: stopped: deadline — the run passed its ${deadline} soft deadline, was told to wrap up, and had not finished after ${grace} grace, so the harness stopped it.` };
+        return { reason, short: "stopped: deadline", line: `Timing: stopped: deadline — the run passed its ${deadline} soft deadline, was told to wrap up, and had not finished ${grace} after the message reached it, so the harness stopped it.` };
     }
     if (reason === "deadline") {
-        const running = meta.status === undefined || meta.status === "running";
-        return running
-            ? { reason, short: "deadline: wrapping up", line: `Timing: deadline — past its ${deadline} soft deadline; the child was told to wrap up and will be stopped after ${grace} grace if it has not finished.` }
-            : { reason, short: "deadline: finished in grace", line: `Timing: deadline — passed its ${deadline} soft deadline and finished within the ${grace} grace.` };
+        if (meta.status === undefined || meta.status === "running") {
+            const pending = t.steerDeliveredAt === undefined ? " once the message reaches it (after its current tool call)" : "";
+            return { reason, short: "deadline: wrapping up", line: `Timing: deadline — past its ${deadline} soft deadline; the child was told to wrap up and will be stopped ${grace} later${pending} if it has not finished.` };
+        }
+        if (meta.status === "completed") {
+            return { reason, short: "deadline: finished in grace", line: `Timing: deadline — passed its ${deadline} soft deadline and finished within the ${grace} grace.` };
+        }
+        // Crashed, stopped by a user, orphaned, or lost after the deadline: the harness did not stop it.
+        return { reason, short: "deadline: passed", line: `Timing: deadline — passed its ${deadline} soft deadline and was told to wrap up; it then ended ${meta.status} before the harness stopped it.` };
     }
     const window = t.stuckMs !== undefined ? fmtMinutes(t.stuckMs) : "?";
     return { reason, short: "stuck", line: `Timing: stuck — no progress (a successful tool call that is not an exact repeat of an earlier one) for ${window} outside running tool calls.` };

@@ -36,7 +36,7 @@ import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
-import { STEER_FILE_ENV } from "./child-steer.ts";
+import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
     decideTiming,
     describeTiming,
@@ -740,10 +740,12 @@ function deliverTimingWake(pi: ExtensionAPI | undefined, meta: RunMeta, kind: "d
 function stopForTiming(pi: ExtensionAPI | undefined, id: string, reason: TimingStopReason, now: number): boolean {
     if (!patchTiming(id, { stopReason: reason, stoppedAt: now })) return false;
     const outcome = stopRun(id, { now: () => now });
-    if (outcome.action === "not-running") {
-        // The child finished on its own first; its own exit is the outcome.
+    if (outcome.action !== "stopped") {
+        // The child finished on its own first (or an orphaned run's group was already gone and
+        // it was finalized from its log): its own exit is the outcome, not a harness stop.
         patchTiming(id, { stopReason: undefined, stoppedAt: undefined });
-        return false;
+        progressCache.delete(id);
+        return outcome.action === "finalized";
     }
     const current = readMeta(id);
     if (current && current.callback !== false && current.completionCallbackPendingAt === undefined
@@ -767,11 +769,22 @@ function stopForTiming(pi: ExtensionAPI | undefined, id: string, reason: TimingS
  */
 function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number): boolean {
     const timing = meta.timing;
-    if (!timing || meta.status !== "running") return false;
-    const progress = timing.stuckMs !== undefined ? readProgress(meta) : undefined;
-    if (progress?.lastProgressAt !== undefined && progress.lastProgressAt > (timing.lastProgressAt ?? 0)) {
-        meta = patchTiming(meta.id, { lastProgressAt: progress.lastProgressAt }) ?? meta;
+    if (!timing || timing.stopReason) return false;
+    // The ceiling also bounds an orphaned run (child gone, its process group still alive).
+    if (meta.status === "orphaned") {
+        return timing.ceilingAt !== undefined && now >= timing.ceilingAt ? stopForTiming(pi, meta.id, "ceiling", now) : false;
     }
+    if (meta.status !== "running") return false;
+    const needsProgress = timing.stuckMs !== undefined || (timing.deadlineAt !== undefined && now >= timing.deadlineAt);
+    const progress = needsProgress ? readProgress(meta) : undefined;
+    const patch: Partial<NonNullable<RunMeta["timing"]>> = {};
+    if (progress?.lastProgressAt !== undefined && progress.lastProgressAt > (timing.lastProgressAt ?? 0)) patch.lastProgressAt = progress.lastProgressAt;
+    if (timing.steerRequestedAt !== undefined && timing.steerDeliveredAt === undefined) {
+        // The child's receipt for this run's steer; clamped so a skewed clock cannot move grace earlier than the request.
+        const receipt = readSteerReceipt(steerPathFor(meta.id));
+        if (receipt?.id === `deadline:${meta.id}`) patch.steerDeliveredAt = Math.min(now, Math.max(receipt.at, timing.steerRequestedAt));
+    }
+    if (Object.keys(patch).length) meta = patchTiming(meta.id, patch) ?? meta;
     const actions = decideTiming(meta.timing, progress, now);
     if (actions.stop) return stopForTiming(pi, meta.id, actions.stop, now);
     if (actions.steer) {
@@ -785,7 +798,8 @@ function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number)
         const limit = t.deadlineAt !== undefined ? fmtWindow(t.deadlineAt - meta.startedAt) : "soft";
         deliverTimingWake(pi, meta, "deadline", "deadline",
             `Subagent ${timingLabel(meta)} reached its ${limit} soft deadline. The harness told it to stop starting new work, ` +
-            `commit what is done, and report. If it has not finished in ${fmtWindow(t.graceMs)}, the harness stops it (reason: deadline). ` +
+            `commit what is done, and report. The message reaches it after its current tool call; if it has not finished ${fmtWindow(t.graceMs)} after that, ` +
+            `the harness stops it (reason: deadline). ` +
             `Its completion or stop is reported here; no action is needed now.`,
             (current) => current.timing?.deadlineWakeSentAt !== undefined,
             (at) => { patchTiming(meta.id, { deadlineWakeSentAt: at }); });
@@ -864,7 +878,21 @@ function reconcileHealth(): void {
         const meta = readMeta(summary.id);
         if (meta && meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined) enqueueCompletionCallback(pi!, meta.id);
     }
+    pruneProgressCache();
     if (!needsMonitoring(listMetasForParent(process.pid)) && !hasPendingFailureCallbacks()) stopHealthTicker();
+}
+
+/** Release progress state for runs that are no longer live (lost, stopped, or finished by any path). */
+function pruneProgressCache(): void {
+    for (const id of [...progressCache.keys()]) {
+        const meta = readMeta(id);
+        if (!meta || (meta.status !== "running" && meta.status !== "orphaned")) progressCache.delete(id);
+    }
+}
+
+/** Test seam: run ids whose progress state is held in memory. */
+export function progressCacheIdsForTests(): string[] {
+    return [...progressCache.keys()];
 }
 
 /**

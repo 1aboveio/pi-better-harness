@@ -87,20 +87,22 @@ defaults.
 | Control | Default | What happens |
 |---------|---------|--------------|
 | Soft deadline (`deadline_minutes`) | 30 | The child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
-| Grace (`grace_minutes`) | 5 | If the child has not finished this long after the deadline, the harness stops it. The ordinary completion callback reports `killed; stopped: deadline`. A child that finishes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
-| Hard ceiling (`max_minutes`) | 90 | The run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. |
+| Grace (`grace_minutes`) | 5 | Grace starts when the steering message actually reaches the child, which is after its current tool call. While the message is still waiting behind a running tool call, the deadline stop is held, so a test run that began just before the deadline is not killed mid-run. If the child has not finished by the end of grace, the harness stops it; the ordinary completion callback reports `killed; stopped: deadline`. A child that completes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
+| Hard ceiling (`max_minutes`) | 90 | The run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds everything, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
 | Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. |
 
-`0` turns a control off; `null` or an omitted value means "use the default".
-Values are minutes and may be fractional. `subagent_spawn_batch` accepts the
-same four fields in `shared` and in each job (a job value wins).
+`0` turns a control off. `null` or an omitted value means "inherit": on
+`subagent_spawn` that is the configured default; on a `subagent_spawn_batch` job
+it is the `shared` value, then the configured default. Values are minutes and
+may be fractional. A job's own number (including `0`) wins over `shared`.
 
 **Progress**, defined simply: any successful tool call that is not an exact
 repeat of an earlier call in the same run. "Exact repeat" means the same tool
 name and the same arguments, with null and absent optional fields treated alike
-(as in #336) and key order ignored. A successful `edit` or `write`, a `git
-commit`, and a success directly after a failed call always count, even when
-repeated. Re-reading the same file or re-running the same command with the same
+(as in #336) and key order ignored. A successful file-mutating tool (`edit`,
+`write`, `multi_edit`, `apply_patch`, `str_replace`, `write_file`, and similarly
+named tools), a `git commit`, and a success directly after a failed call always
+count, even when repeated. Re-reading the same file or re-running the same command with the same
 arguments does not reset the stuck window, so a read-only research child making
 distinct calls is never flagged, while one looping on the same read is. The
 harness remembers up to 4096 distinct calls per run as fixed-size hashes of the
@@ -114,8 +116,9 @@ three times wakes the parent once as an `Action required` incident
 
 **Where the reason shows.** `subagent_list` rows, `subagent_output`,
 `subagent_result`, and completion callbacks carry `stopped: deadline`,
-`deadline: wrapping up`, `deadline: finished in grace`, `stopped: ceiling`, or
-`stuck`. The spawn response lists the limits in force.
+`deadline: wrapping up`, `deadline: finished in grace` (completed after the
+deadline), `deadline: passed` (ended some other way after the deadline, for
+example it crashed or a user stopped it), `stopped: ceiling`, or `stuck`. The spawn response lists the limits in force.
 
 **Global defaults.** Precedence is spawn parameter, then environment, then
 `config.json`, then the built-in default:
@@ -132,9 +135,13 @@ requested, deadline wake, stuck wake, stop reason) are stored in the run's
 metadata at launch, so `/reload` keeps the deadline and never repeats a wake.
 The parent checks timing on its 15-second supervision tick. The steer travels
 through a request file in the run directory, read by a small harness extension
-loaded into every child (it registers no tools and runs no commands); the child
-writes a `subagent_steer_delivered` marker to its log when it hands the message
-to Pi. Wakes follow `callback:false` and session ownership like other callbacks.
+loaded into every child (it registers no tools and runs no commands). When the
+message enters the child's conversation, the extension writes a receipt file
+next to the request; grace starts at that time. The extension runs in the
+trusted Pi process, and the child's confined tools cannot write the run
+directory, so a child cannot forge a receipt. Without a receipt and with no
+tool call running (for example, a child started without the extension), grace
+runs from when the steer was requested. Wakes follow `callback:false` and session ownership like other callbacks.
 Runs launched before this feature have no timing record and are not timed.
 
 Output-control parameters are spelled the same across subagents and background
