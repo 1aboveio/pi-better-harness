@@ -52,8 +52,8 @@ describe("extension e2e", () => {
 
     expect(harness.tools.get("bg_task_status")?.description).toContain("compact model-facing summary");
     expect(harness.tools.get("bg_task_status")?.description).toContain("verbose:true only");
-    expect(harness.tools.get("bg_task_log")?.description).toContain("compact 5-line terminal-aware tail");
-    expect(harness.tools.get("bg_task_log")?.description).toContain("tail_lines:0 returns the retained raw log");
+    expect(harness.tools.get("bg_task_log")?.description).toContain("compact 10-line terminal-aware tail");
+    expect(harness.tools.get("bg_task_log")?.description).toContain("tail_lines:0 pages the retained raw log");
     expect(harness.tools.get("bg_task")?.description).toContain("action:status");
     expect(harness.tools.get("bg_status")?.description).toContain("explicit full-data recovery");
   });
@@ -179,7 +179,8 @@ describe("extension e2e", () => {
     const statusText = await harness.execute("bg_task_status", { id });
     expect(statusText).toContain(`Background task ${id}`);
     expect(statusText).toContain("is succeeded");
-    expect(statusText).toContain("For full metadata use bg_task_status");
+    expect(statusText).toContain("Condition matched");
+    expect(statusText).toContain("$.status");
     expect(statusText).not.toContain("success_when");
 
     const verboseStatusText = await harness.execute("bg_task_status", { id, verbose: true });

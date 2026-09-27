@@ -183,14 +183,15 @@ export function runCommandOnce(
   validateCommandSpec(spec);
   const startedAt = Date.now();
   const child = spawnArgs(spec, true, ["ignore", "pipe", "pipe"]);
-  let stdout = "";
-  let stderr = "";
+  const cap = Math.max(1, Math.floor(maxBufferBytes));
+  const stdoutCapture = createCaptureBuffer();
+  const stderrCapture = createCaptureBuffer();
   let timedOut = false;
-  child.stdout?.on("data", (chunk: Buffer) => {
-    if (Buffer.byteLength(stdout) < maxBufferBytes) stdout += chunk.toString("utf8");
+  child.stdout?.on("data", (chunk: Buffer | string) => {
+    captureChunk(stdoutCapture, chunk, cap);
   });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    if (Buffer.byteLength(stderr) < maxBufferBytes) stderr += chunk.toString("utf8");
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    captureChunk(stderrCapture, chunk, cap);
   });
   return new Promise((resolve, reject) => {
     // The group outlives the leader as long as any member is alive, so the
@@ -239,17 +240,82 @@ export function runCommandOnce(
     });
     child.on("close", (exitCode, signal) => {
       settle();
+      const stdout = finishCapture(stdoutCapture);
+      const stderr = finishCapture(stderrCapture);
+      const captureTruncated = stdout.discardedBytes > 0 || stderr.discardedBytes > 0;
       resolve({
         exitCode,
         signal,
-        stdout,
-        stderr,
+        stdout: stdout.text,
+        stderr: stderr.text,
         startedAt,
         endedAt: Date.now(),
         ...(timedOut ? { timedOut: true } : {}),
+        ...(stdout.discardedBytes > 0 ? { stdoutDiscardedBytes: stdout.discardedBytes } : {}),
+        ...(stderr.discardedBytes > 0 ? { stderrDiscardedBytes: stderr.discardedBytes } : {}),
+        ...(captureTruncated ? { captureTruncated: true } : {}),
       });
     });
   });
+}
+
+interface CaptureBuffer {
+  chunks: Buffer[];
+  storedBytes: number;
+  discardedBytes: number;
+  truncated: boolean;
+}
+
+function createCaptureBuffer(): CaptureBuffer {
+  return { chunks: [], storedBytes: 0, discardedBytes: 0, truncated: false };
+}
+
+function asBuffer(chunk: Buffer | string): Buffer {
+  return Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+}
+
+/** Largest UTF-8 prefix of `buffer` that fits in `maxBytes`. */
+export function utf8PrefixLength(buffer: Buffer, maxBytes: number): number {
+  if (maxBytes <= 0) return 0;
+  if (buffer.length <= maxBytes) return buffer.length;
+  let end = maxBytes;
+  while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end -= 1;
+  if (end === 0 && (buffer[0]! & 0xc0) === 0x80) return 0;
+  const lead = buffer[end]!;
+  const need = lead <= 0x7f ? 1
+    : (lead & 0xe0) === 0xc0 ? 2
+    : (lead & 0xf0) === 0xe0 ? 3
+    : (lead & 0xf8) === 0xf0 ? 4
+    : 1;
+  return end + need <= maxBytes ? end + need : end;
+}
+
+function captureChunk(target: CaptureBuffer, chunk: Buffer | string, maxBytes: number): void {
+  const buffer = asBuffer(chunk);
+  if (target.truncated) {
+    target.discardedBytes += buffer.length;
+    return;
+  }
+  const room = maxBytes - target.storedBytes;
+  if (buffer.length <= room) {
+    target.chunks.push(buffer);
+    target.storedBytes += buffer.length;
+    return;
+  }
+  const take = utf8PrefixLength(buffer, room);
+  if (take > 0) {
+    target.chunks.push(buffer.subarray(0, take));
+    target.storedBytes += take;
+  }
+  target.discardedBytes += buffer.length - take;
+  target.truncated = true;
+}
+
+function finishCapture(target: CaptureBuffer): { text: string; discardedBytes: number } {
+  return {
+    text: Buffer.concat(target.chunks, target.storedBytes).toString("utf8"),
+    discardedBytes: target.discardedBytes,
+  };
 }
 
 /**

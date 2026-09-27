@@ -487,9 +487,7 @@ export async function stopTask(
   if (remoteSessionMayExist) {
     const remoteTask = activeRemoteTasks.get(id);
     if (!remoteTask) {
-      meta.stopRequestedAt = undefined;
-      meta.error = `Cannot stop remote tmux session ${remote.sessionName}: its active SSH controller is unavailable.`;
-      writeMeta(meta);
+      recordStopError(meta, `Cannot stop remote tmux session ${remote.sessionName}: its active SSH controller is unavailable.`);
       scheduleRemoteSessionPoll(pi, id, REMOTE_SESSION_POLL_MS, getActiveSession);
       return meta;
     }
@@ -497,18 +495,14 @@ export async function stopTask(
       const stopped = await remoteTask.killTmuxSession();
       if (stopped.exitCode !== 0) {
         const detail = stopped.stderr.trim() || stopped.stdout.trim() || "remote tmux returned no diagnostic";
-        meta.stopRequestedAt = undefined;
-        meta.error = `Could not kill remote tmux session ${remote.sessionName} on ${meta.ssh?.target} (exit ${stopped.exitCode ?? "unknown"}): ${detail}`;
-        writeMeta(meta);
+        recordStopError(meta, `Could not kill remote tmux session ${remote.sessionName} on ${meta.ssh?.target} (exit ${stopped.exitCode ?? "unknown"}): ${detail}`);
         scheduleRemoteSessionPoll(pi, id, REMOTE_SESSION_POLL_MS, getActiveSession);
         return meta;
       }
       remote.stopMessage = `Killed remote tmux session ${remote.sessionName} on ${meta.ssh?.target}.`;
       appendLine(meta.logPath, `--- ${remote.stopMessage} ---`);
     } catch (error) {
-      meta.stopRequestedAt = undefined;
-      meta.error = error instanceof Error ? error.message : String(error);
-      writeMeta(meta);
+      recordStopError(meta, error instanceof Error ? error.message : String(error));
       scheduleRemoteSessionPoll(pi, id, REMOTE_SESSION_POLL_MS, getActiveSession);
       return meta;
     }
@@ -516,9 +510,7 @@ export async function stopTask(
     try {
       stopProcessGroup(meta.pid, meta.pgid);
     } catch (error) {
-      meta.stopRequestedAt = undefined;
-      meta.error = error instanceof Error ? error.message : String(error);
-      writeMeta(meta);
+      recordStopError(meta, error instanceof Error ? error.message : String(error));
       if (meta.deadlineAt && meta.deadlineAt > Date.now()) {
         scheduleProcessTimeout(pi, id, meta.deadlineAt, getActiveSession);
       }
@@ -528,6 +520,7 @@ export async function stopTask(
 
   stopFailureAttention(id);
   meta.status = "cancelled";
+  meta.stopError = undefined;
   meta.endedAt = Date.now();
   meta.result = {
     reason: meta.remote?.session === "direct"
@@ -539,6 +532,13 @@ export async function stopTask(
   activeRemoteTasks.delete(id);
   void notifyTerminal(pi, meta, getActiveSession);
   return meta;
+}
+
+function recordStopError(meta: BackgroundTaskMeta, message: string): void {
+  meta.stopRequestedAt = undefined;
+  meta.stopError = message;
+  meta.error = message;
+  writeMeta(meta);
 }
 
 function scheduleWatch(
@@ -583,6 +583,7 @@ async function pollWatch(
     appendWatchResult(meta.logPath, result);
     const latest = readMeta(id);
     if (!latest || latest.status !== "running") return;
+    applyCaptureOverflow(latest, result);
     enforceLogRetention(latest);
     latest.lastCheckedAt = Date.now();
     latest.lastProgressAt = latest.lastCheckedAt;
@@ -632,7 +633,13 @@ async function pollWatch(
     if (conditionErrors.length) latest.error = conditionErrors.join("; ");
     if (failure?.matched) {
       recordFailure(latest, "failure_when", "failure condition matched", pollKey, { category: "condition", at: result.endedAt });
-      finalize(latest, { status: "failed", reason: "failure condition matched", matchedCondition: latest.failureWhen, commandResult: result }, pi, getActiveSession);
+      finalize(latest, {
+        status: "failed",
+        reason: "failure condition matched",
+        matchedCondition: latest.failureWhen,
+        matchedValue: failure.value,
+        commandResult: result,
+      }, pi, getActiveSession);
       return;
     }
     if (transportFailure) {
@@ -647,7 +654,13 @@ async function pollWatch(
       return;
     }
     if (success?.matched) {
-      finalize(latest, { status: "succeeded", reason: "success condition matched", matchedCondition: latest.successWhen, commandResult: result }, pi, getActiveSession);
+      finalize(latest, {
+        status: "succeeded",
+        reason: "success condition matched",
+        matchedCondition: latest.successWhen,
+        matchedValue: success.value,
+        commandResult: result,
+      }, pi, getActiveSession);
       return;
     }
     writeMeta(latest);
@@ -683,10 +696,12 @@ function finalize(
   meta.result = {
     reason: terminal.reason,
     matchedCondition: terminal.matchedCondition,
+    matchedValue: terminal.matchedValue,
     exitCode: terminal.commandResult?.exitCode,
     signal: terminal.commandResult?.signal,
   };
   if (terminal.commandResult) {
+    applyCaptureOverflow(meta, terminal.commandResult);
     meta.lastExitCode = terminal.commandResult.exitCode;
     meta.lastSignal = terminal.commandResult.signal;
     meta.lastCheckedAt = terminal.commandResult.endedAt;
@@ -950,7 +965,18 @@ function enforceLogRetention(meta: BackgroundTaskMeta): void {
   if (!compacted) return;
   meta.logDiscardedBytes = (meta.logDiscardedBytes ?? 0) + compacted.discardedBytes;
   meta.logRetentionEvents = (meta.logRetentionEvents ?? 0) + 1;
+  meta.logGeneration = (meta.logGeneration ?? 0) + 1;
   writeMeta(meta);
+}
+
+function applyCaptureOverflow(meta: BackgroundTaskMeta, result: CommandResult): void {
+  const stdout = result.stdoutDiscardedBytes ?? 0;
+  const stderr = result.stderrDiscardedBytes ?? 0;
+  if (!result.captureTruncated && stdout === 0 && stderr === 0) return;
+  meta.stdoutDiscardedBytes = (meta.stdoutDiscardedBytes ?? 0) + stdout;
+  meta.stderrDiscardedBytes = (meta.stderrDiscardedBytes ?? 0) + stderr;
+  meta.captureDiscardedBytes = (meta.captureDiscardedBytes ?? 0) + stdout + stderr;
+  meta.captureOverflowEvents = (meta.captureOverflowEvents ?? 0) + 1;
 }
 
 function extractLastState(result: { stdout: string }): unknown {

@@ -34,6 +34,12 @@ export interface CommandResult {
   startedAt: number;
   endedAt: number;
   timedOut?: boolean;
+  /** Bytes of stdout never stored because the capture cap was reached. */
+  stdoutDiscardedBytes?: number;
+  /** Bytes of stderr never stored because the capture cap was reached. */
+  stderrDiscardedBytes?: number;
+  /** True when stdout or stderr capture overflowed. Distinct from log retention. */
+  captureTruncated?: boolean;
 }
 
 export interface RemoteTaskParams {
@@ -102,6 +108,13 @@ export interface BackgroundTaskMeta {
   maxLogBytes?: number;
   logDiscardedBytes?: number;
   logRetentionEvents?: number;
+  /** Incremented on every same-inode compaction so log-page cursors can detect it. */
+  logGeneration?: number;
+  /** Bytes never captured into watch/command buffers. Distinct from logDiscardedBytes. */
+  captureDiscardedBytes?: number;
+  captureOverflowEvents?: number;
+  stdoutDiscardedBytes?: number;
+  stderrDiscardedBytes?: number;
   pid?: number;
   /** Opaque process-start token used to reject recycled child PIDs. */
   pidStartTime?: string;
@@ -114,6 +127,8 @@ export interface BackgroundTaskMeta {
   notifyOn?: "terminal";
   stopRequestedAt?: number;
   error?: string;
+  /** Set when stop failed while the task is still running. Distinct from poll errors. */
+  stopError?: string;
   ssh?: ResolvedSshIdentity;
   remote?: ResolvedRemoteTaskMetadata;
 }
@@ -122,6 +137,7 @@ export interface TerminalResult {
   status: Exclude<BackgroundTaskStatus, "running">;
   reason: string;
   matchedCondition?: Condition;
+  matchedValue?: unknown;
   commandResult?: CommandResult;
 }
 

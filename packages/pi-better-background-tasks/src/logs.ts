@@ -1,8 +1,9 @@
 import { appendFileSync, closeSync, openSync, readSync, statSync, truncateSync } from "node:fs";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
-import { readBoundedTail, tailTerminalDisplay, terminalDisplayRows } from "./shared-log-utils.js";
-import type { CommandResult } from "./types.js";
+import { pageRetainedFile, readBoundedTail, tailTerminalDisplay, terminalDisplayRows } from "./shared-log-utils.js";
+import type { FilePageRequest, PageResult } from "./shared-log-utils.js";
+import type { BackgroundTaskMeta, CommandResult } from "./types.js";
 
 export const DEFAULT_MAX_LOG_BYTES = 4 * 1024 * 1024;
 export const MAX_LOG_TAIL_READ_BYTES = 512 * 1024;
@@ -10,7 +11,10 @@ const RETAINED_LOG_FRACTION = 0.75;
 
 export function appendWatchResult(logPath: string, result: CommandResult): void {
   mkdirSync(dirname(logPath), { recursive: true });
-  const header = `\n--- check ${new Date(result.startedAt).toISOString()} exit=${result.exitCode ?? "null"} signal=${result.signal ?? "null"} duration_ms=${result.endedAt - result.startedAt} ---\n`;
+  const capture = result.captureTruncated
+    ? ` capture_discarded_stdout=${result.stdoutDiscardedBytes ?? 0} capture_discarded_stderr=${result.stderrDiscardedBytes ?? 0}`
+    : "";
+  const header = `\n--- check ${new Date(result.startedAt).toISOString()} exit=${result.exitCode ?? "null"} signal=${result.signal ?? "null"} duration_ms=${result.endedAt - result.startedAt}${capture} ---\n`;
   appendFileSync(logPath, header);
   if (result.stdout) appendFileSync(logPath, result.stdout.endsWith("\n") ? result.stdout : `${result.stdout}\n`);
   if (result.stderr) appendFileSync(logPath, `[stderr]\n${result.stderr.endsWith("\n") ? result.stderr : `${result.stderr}\n`}`);
@@ -27,16 +31,52 @@ export function appendTaskOutput(logPath: string, output: string): void {
   appendFileSync(logPath, output);
 }
 
-export function readLog(logPath: string, tailLines?: number): { text: string; truncated: boolean } {
+export interface LogRead {
+  text: string;
+  truncated: boolean;
+  totalBytes?: number;
+  error?: string;
+}
+
+export function readLog(logPath: string, tailLines?: number): LogRead {
   const requestedRows = tailLines && tailLines > 0 ? Math.floor(tailLines) : undefined;
   const tail = readBoundedTail(logPath, MAX_LOG_TAIL_READ_BYTES);
-  if (!tail.text) return { text: "", truncated: tail.truncated };
-  if (!requestedRows) return { text: tail.text, truncated: tail.truncated };
+  if (tail.error) {
+    return { text: "", truncated: tail.truncated, totalBytes: tail.totalBytes, error: tail.error };
+  }
+  if (!tail.text) return { text: "", truncated: false, totalBytes: tail.totalBytes };
+  if (!requestedRows) return { text: tail.text, truncated: tail.truncated, totalBytes: tail.totalBytes };
   const rows = terminalDisplayRows(tail.text);
   return {
     text: tailTerminalDisplay(tail.text, requestedRows),
     truncated: tail.truncated || rows.length > requestedRows,
+    totalBytes: tail.totalBytes,
   };
+}
+
+export function captureGapsFor(meta: BackgroundTaskMeta): Array<{ bytes: number; detail?: string }> {
+  const gaps: Array<{ bytes: number; detail?: string }> = [];
+  if (meta.stdoutDiscardedBytes) {
+    gaps.push({ bytes: meta.stdoutDiscardedBytes, detail: "stdout capture overflow" });
+  }
+  if (meta.stderrDiscardedBytes) {
+    gaps.push({ bytes: meta.stderrDiscardedBytes, detail: "stderr capture overflow" });
+  }
+  if (!gaps.length && meta.captureDiscardedBytes) {
+    gaps.push({ bytes: meta.captureDiscardedBytes, detail: `${meta.captureOverflowEvents ?? 1} capture overflow(s)` });
+  }
+  return gaps;
+}
+
+/** Page retained raw bytes with this task's generation and disclosed capture/retention loss. */
+export function pageTaskLog(meta: BackgroundTaskMeta, request: FilePageRequest = {}): PageResult {
+  return pageRetainedFile(meta.logPath, {
+    ...request,
+    resource: request.resource ?? meta.id,
+    generation: request.generation ?? meta.logGeneration ?? 0,
+    discardedBytes: request.discardedBytes ?? meta.logDiscardedBytes,
+    captureGaps: request.captureGaps ?? captureGapsFor(meta),
+  });
 }
 
 export function resolveMaxLogBytes(value: number | undefined): number {
