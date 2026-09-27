@@ -1,0 +1,46 @@
+name: windows-spike
+# Throwaway spike for #344. Never merged.
+on:
+  push:
+    branches: [spike/windows-sandbox-344]
+jobs:
+  spike:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Stage spike outside the checkout
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory C:\spike | Out-Null
+          Copy-Item spike-windows\* C:\spike -Recurse
+          Push-Location C:\spike; npm install --no-audit --no-fund; Pop-Location
+          icacls C:\spike /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
+          whoami /groups /fo list | Select-String "Mandatory"
+      - name: Spike as the runner (elevated)
+        shell: pwsh
+        run: node C:\spike\run.mjs C:\spike\out-elevated.json
+      - name: Spike as a standard user
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $pw = 'Sp1ke!Passw0rd#344'
+          net user spikeuser $pw /add | Out-Null
+          $cred = New-Object System.Management.Automation.PSCredential('spikeuser', (ConvertTo-SecureString $pw -AsPlainText -Force))
+          $node = (Get-Command node).Source
+          Write-Host "node: $node"
+          icacls (Split-Path $node) | Select-Object -First 4
+          $p = Start-Process -FilePath $node -ArgumentList 'C:\spike\run.mjs','C:\spike\out-standard.json' -Credential $cred -LoadUserProfile -Wait -PassThru -WorkingDirectory C:\spike -RedirectStandardOutput C:\spike\std.out -RedirectStandardError C:\spike\std.err
+          Write-Host "exit: $($p.ExitCode)"
+          Get-Content C:\spike\std.err -ErrorAction SilentlyContinue
+          Get-Content C:\spike\out-standard.json -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-results
+          path: |
+            C:\spike\out-*.json
+            C:\spike\std.*

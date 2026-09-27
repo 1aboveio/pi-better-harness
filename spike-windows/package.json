@@ -1,0 +1,1 @@
+{ "name": "spike-windows", "private": true, "type": "module", "dependencies": { "koffi": "3.3.1" } }
