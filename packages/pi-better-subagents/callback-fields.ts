@@ -10,6 +10,7 @@ import type { CallbackBatchEvent, UrgentCallbackEvent } from "./shared-callback-
 import { activeFailures, pendingAttentionNote, pendingAttentionRows, requiresAction, terminalFailureParts,
     type FailureState } from "./shared-failure-observations.ts";
 import type { RunMeta } from "./registry.ts";
+import { describeTiming } from "./timing.ts";
 
 export function runLabel(meta: Pick<RunMeta, "id" | "name">): string {
     return meta.name ? `${meta.name} (${meta.id})` : meta.id;
@@ -43,11 +44,13 @@ function observationStatus(state: FailureState): string | undefined {
 export function completionCallbackFields(meta: RunMeta, state: FailureState, incidents: readonly string[] = []): CompletionFields {
     const status = observationStatus(state);
     const { failureRows, incidentCount, notes } = terminalFields(state, incidents);
+    // Harness timing reason (deadline / ceiling / stuck) is a lifecycle fact, shown next to the status.
+    const timing = describeTiming({ ...meta, status: meta.status });
     return {
         source: "subagent",
         id: meta.id,
         label: runLabel(meta),
-        status: status ? `${meta.status}; ${status}` : meta.status,
+        status: [meta.status, timing?.short, status].filter(Boolean).join("; "),
         detailTool: "subagent_result",
         outcome: meta.status,
         failureRows,

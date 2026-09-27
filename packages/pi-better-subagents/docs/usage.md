@@ -69,12 +69,70 @@ thresholds continue to take precedence for subagent health.
 
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
-| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`. |
+| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; same optional params as `subagent_spawn`), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_list` | never | Compact current-session list (default 10 rows / 1 KiB page). Params: `all` (machine-global / foreign session), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
 | `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
 | `subagent_result` | never | Finished-run answer for the current session (2 KiB page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (max 8 KiB), `lines` (optional line cap per answer page), `mode` (`raw`), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
 | `subagent_stop` | never | SIGTERM a running run's process group. |
+
+## Run timing (deadline, ceiling, stuck)
+
+Timeout control belongs to the harness, not to the prompt or the skill that
+launched the run. A time limit written into a prompt is enforced by nothing, and
+a parent that only notices late tends to kill a child that was still making
+progress. Every run is timed by default; spawn parameters only override the
+defaults.
+
+| Control | Default | What happens |
+|---------|---------|--------------|
+| Soft deadline (`deadline_minutes`) | 30 | The child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
+| Grace (`grace_minutes`) | 5 | If the child has not finished this long after the deadline, the harness stops it. The ordinary completion callback reports `killed; stopped: deadline`. A child that finishes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
+| Hard ceiling (`max_minutes`) | 90 | The run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. |
+| Stuck window (`stuck_minutes`) | 10 | No progress for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. |
+
+`0` turns a control off; `null` or an omitted value means "use the default".
+Values are minutes and may be fractional. `subagent_spawn_batch` accepts the
+same four fields in `shared` and in each job (a job value wins).
+
+**Progress**, defined simply: a successful `edit` or `write`, a successful `bash`
+call that runs `git commit`, or any successful tool call that directly follows a
+failed one. Reads, searches, and green test runs on their own are not progress.
+Time the child spends waiting on a running tool call does not count toward the
+stuck window, so a child in the middle of a 20-minute test run is waiting, not
+stuck; a command that hangs is bounded by the deadline and the ceiling instead.
+The other stuck signal is the existing escalation: the same operation failing
+three times wakes the parent once as an `Action required` incident
+([failure observations](failure-observations.md)).
+
+Read-only runs (review, research) make no edits, so a long one can trip the
+stuck wake while working normally; the wake says so. Raise `stuck_minutes` or
+set it to `0` for such runs.
+
+**Where the reason shows.** `subagent_list` rows, `subagent_output`,
+`subagent_result`, and completion callbacks carry `stopped: deadline`,
+`deadline: wrapping up`, `deadline: finished in grace`, `stopped: ceiling`, or
+`stuck`. The spawn response lists the limits in force.
+
+**Global defaults.** Precedence is spawn parameter, then environment, then
+`config.json`, then the built-in default:
+
+| Setting | Environment | `config.json` |
+|---------|-------------|---------------|
+| Soft deadline | `PI_SUBAGENT_DEADLINE_MINUTES` | `deadlineMinutes` |
+| Grace | `PI_SUBAGENT_GRACE_MINUTES` | `graceMinutes` |
+| Hard ceiling | `PI_SUBAGENT_MAX_MINUTES` | `maxMinutes` |
+| Stuck window | `PI_SUBAGENT_STUCK_MINUTES` | `stuckMinutes` |
+
+**Durability and delivery.** The policy and its one-shot markers (steer
+requested, deadline wake, stuck wake, stop reason) are stored in the run's
+metadata at launch, so `/reload` keeps the deadline and never repeats a wake.
+The parent checks timing on its 15-second supervision tick. The steer travels
+through a request file in the run directory, read by a small harness extension
+loaded into every child (it registers no tools and runs no commands); the child
+writes a `subagent_steer_delivered` marker to its log when it hands the message
+to Pi. Wakes follow `callback:false` and session ownership like other callbacks.
+Runs launched before this feature have no timing record and are not timed.
 
 Output-control parameters are spelled the same across subagents and background
 tasks: `max_bytes` and `lines`. The older spellings `maxBytes` and `tail_lines`

@@ -16,6 +16,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 - Explicit tool allowlists for child sessions.
 - Durable logs, result retrieval, and [failure observations](docs/failure-observations.md) independent of lifecycle status. A live child handles its own tool errors; the parent is woken only for actionable incidents, and children can classify handled failures with `failure_disposition`.
 - Live background-work navigator for active runs.
+- Harness-owned run timing: every run gets a soft deadline (30 min, then a wrap-up steer into the child and one parent wake, stopped after 5 min grace), a hard ceiling (90 min), and a no-progress wake (10 min). Override per spawn with `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`, or globally in `config.json` / `PI_SUBAGENT_*_MINUTES`. See [usage notes](docs/usage.md#run-timing-deadline-ceiling-stuck).
 
 ## Install
 

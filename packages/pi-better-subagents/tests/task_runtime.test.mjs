@@ -58,6 +58,27 @@ test('real Pi RPC startup takes runtime locks with task network and commands dis
     assert.equal(existsSync(join(f.agent, 'auth.json.lock')), false);
 });
 
+// @covers subagent.timing
+test('the harness steer extension loads in a confined child without changing its guarded tool set', { skip: !supported }, (t) => {
+    const f = fixture(t, { commands: false, network: false, storedCredentials: 'off' });
+    const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control,
+        tools: ['read', 'bash'], permissions: f.policy.permissions,
+        piBin: fileURLToPath(new URL('./cli.js', import.meta.resolve('@earendil-works/pi-coding-agent'))) });
+    t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
+    const result = spawnSync(prepared.file, [...prepared.fileArgs,
+        '--mode', 'rpc', '--offline', '--no-session', '--no-extensions', '--extension', fileURLToPath(new URL('../child-steer.ts', import.meta.url)),
+        '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve', '--no-builtin-tools'], {
+        cwd: f.project, encoding: 'utf8', timeout: 30000,
+        input: '{"type":"get_state","id":"startup"}\n',
+        env: { ...process.env, PI_CODING_AGENT_DIR: f.agent, PI_SUBAGENT_STEER_FILE: join(f.control, 'steer.json') },
+    });
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    const rows = (result.stderr + '\n' + result.stdout).split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+    assert.equal(rows.find((row) => row.id === 'startup')?.success, true, result.stdout);
+    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read', 'bash'], result.stderr + result.stdout);
+    assert.doesNotMatch(result.stderr, /Extension error|Failed to load extension/i);
+});
+
 test('malformed bootstrap policy terminates before Pi can offer tools', (t) => {
     const f = fixture(t);
     const policyPath = join(f.control, 'bad.json');

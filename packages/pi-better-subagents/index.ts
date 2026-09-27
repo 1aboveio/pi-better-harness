@@ -12,7 +12,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { writeFileSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
@@ -35,7 +35,23 @@ import {
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
-import { loadConfig, normalizeTools, resolveExtensionPath, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
+import { loadConfig, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
+import { STEER_FILE_ENV } from "./child-steer.ts";
+import {
+    decideTiming,
+    describeTiming,
+    emptyProgress,
+    foldProgress,
+    formatTimingLimits,
+    isProgressRelevantLine,
+    resolveRunTiming,
+    steerText,
+    timingParameterSchemas,
+    type ProgressState,
+    type TimingParams,
+    type TimingStopReason,
+} from "./timing.ts";
+import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODE_REQUEST, delegationPrompt, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime } from "./task-policy.ts";
@@ -624,6 +640,168 @@ function deliverHealthCallback(pi: ExtensionAPI | undefined, meta: RunMeta, stat
     });
 }
 
+// ---- harness timing: soft deadline, hard ceiling, stuck wake ----------------
+//
+// Timeout control is the harness's job, not the launching prompt's: nothing
+// else enforces an orchestrator's "30-minute attempt", and a parent that only
+// notices late kills a child that was still making progress. Policy lives in
+// timing.ts; this host part reads progress from the child's own event log,
+// writes the steer request the child's control extension (child-steer.ts)
+// delivers, wakes the parent once per event, and stops the run when due.
+
+/** Incremental progress read per run (rebuilt from the log after /reload). */
+const progressCache = new Map<string, { cursor?: LogCursor; state: ProgressState }>();
+
+function steerPathFor(id: string): string {
+    return join(runDir(id), "steer.json");
+}
+
+function childSteerExtensionPath(): string {
+    return join(selfDir(), "child-steer.ts");
+}
+
+function readProgress(meta: RunMeta): ProgressState {
+    let entry = progressCache.get(meta.id);
+    const read = readAppendedLines(logPathFor(meta.id), entry?.cursor);
+    if (!entry || read.restarted) entry = { state: emptyProgress(meta.startedAt) };
+    if (read.error === undefined) entry.cursor = read.cursor;
+    for (const line of read.lines) {
+        if (!isProgressRelevantLine(line)) continue;
+        let event: unknown;
+        try { event = JSON.parse(line); } catch { continue; }
+        if (event && typeof event === "object") foldProgress(entry.state, event as Record<string, unknown>);
+    }
+    progressCache.set(meta.id, entry);
+    return entry.state;
+}
+
+/** Merge into the durable timing record under a fresh read. */
+function patchTiming(id: string, patch: Partial<NonNullable<RunMeta["timing"]>>): RunMeta | undefined {
+    const current = readMeta(id);
+    if (!current?.timing) return undefined;
+    current.timing = { ...current.timing, ...patch };
+    for (const key of Object.keys(patch) as (keyof typeof patch)[]) {
+        if (patch[key] === undefined) delete current.timing[key];
+    }
+    writeMeta(current);
+    return current;
+}
+
+function requestSteer(meta: RunMeta, now: number): void {
+    const path = steerPathFor(meta.id);
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ id: `deadline:${meta.id}`, text: steerText(meta.timing!, meta.startedAt), at: now }));
+    renameSync(tmp, path);
+}
+
+function timingLabel(meta: RunMeta): string {
+    return meta.name ? `${meta.name} (${meta.id})` : meta.id;
+}
+
+function fmtWindow(ms: number): string {
+    const minutes = Math.round(ms / 60_000);
+    return minutes >= 1 ? `${minutes}m` : `${Math.max(1, Math.round(ms / 1000))}s`;
+}
+
+/**
+ * One parent wake for a timing event. The marker records a handoff (or an
+ * intentional suppression), so reloads and later ticks never repeat it.
+ */
+function deliverTimingWake(pi: ExtensionAPI | undefined, meta: RunMeta, kind: "deadline" | "stuck", key: string,
+    content: string, isHandled: (current: RunMeta) => boolean, markHandled: (at: number) => void): void {
+    if (!callbackSuppressionReason(meta)) {
+        try { uiCtx?.ui.notify(content, "warning"); } catch { /* ignore */ }
+    }
+    if (!pi || meta.callback === false) { markHandled(Date.now()); return; }
+    void getCallbackBatcher(pi).deliverUrgent({
+        source: "subagent",
+        id: meta.id,
+        label: timingLabel(meta),
+        status: key,
+        customType: `subagent-${kind}`,
+        content,
+        detailTool: "subagent_result",
+        isDelivered: () => {
+            const current = readMeta(meta.id);
+            if (!current) throw new Error("Subagent metadata is unavailable; defer timing notification");
+            return isHandled(current);
+        },
+        getSuppressionReason: () => {
+            const current = readMeta(meta.id);
+            if (!current) throw new Error("Subagent metadata is unavailable; defer timing notification");
+            return callbackSuppressionReason(current);
+        },
+        onDelivered: (at) => markHandled(at),
+        onSuppressed: (_reason, at) => markHandled(at),
+    });
+}
+
+/** Stop a run for a timing reason and report it through the ordinary completion callback. */
+function stopForTiming(pi: ExtensionAPI | undefined, id: string, reason: TimingStopReason, now: number): boolean {
+    if (!patchTiming(id, { stopReason: reason, stoppedAt: now })) return false;
+    const outcome = stopRun(id, { now: () => now });
+    if (outcome.action === "not-running") {
+        // The child finished on its own first; its own exit is the outcome.
+        patchTiming(id, { stopReason: undefined, stoppedAt: undefined });
+        return false;
+    }
+    const current = readMeta(id);
+    if (current && current.callback !== false && current.completionCallbackPendingAt === undefined
+        && current.completionCallbackSentAt === undefined && current.completionCallbackSuppressedAt === undefined) {
+        current.completionCallbackPendingAt = now;
+        writeMeta(current);
+    }
+    progressCache.delete(id);
+    if (current && !callbackSuppressionReason(current)) {
+        const note = describeTiming({ ...current, status: current.status });
+        try { uiCtx?.ui.notify(`Subagent ${timingLabel(current)} ${note?.short ?? `stopped: ${reason}`}.`, "warning"); } catch { /* ignore */ }
+    }
+    if (pi) enqueueCompletionCallback(pi, id);
+    renderWidget();
+    return true;
+}
+
+/**
+ * Apply the run's timing policy at `now`. Returns true when the run was stopped.
+ * Only supervised `running` runs owned by this parent are timed.
+ */
+function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number): boolean {
+    const timing = meta.timing;
+    if (!timing || meta.status !== "running") return false;
+    const progress = timing.stuckMs !== undefined ? readProgress(meta) : undefined;
+    if (progress?.lastProgressAt !== undefined && progress.lastProgressAt > (timing.lastProgressAt ?? 0)) {
+        meta = patchTiming(meta.id, { lastProgressAt: progress.lastProgressAt }) ?? meta;
+    }
+    const actions = decideTiming(meta.timing, progress, now);
+    if (actions.stop) return stopForTiming(pi, meta.id, actions.stop, now);
+    if (actions.steer) {
+        try {
+            requestSteer(meta, now);
+            meta = patchTiming(meta.id, { steerRequestedAt: now }) ?? meta;
+        } catch { /* retried on the next tick */ }
+    }
+    if (actions.deadlineWake && meta.timing?.steerRequestedAt !== undefined) {
+        const t = meta.timing;
+        const limit = t.deadlineAt !== undefined ? fmtWindow(t.deadlineAt - meta.startedAt) : "soft";
+        deliverTimingWake(pi, meta, "deadline", "deadline",
+            `Subagent ${timingLabel(meta)} reached its ${limit} soft deadline. The harness told it to stop starting new work, ` +
+            `commit what is done, and report. If it has not finished in ${fmtWindow(t.graceMs)}, the harness stops it (reason: deadline). ` +
+            `Its completion or stop is reported here; no action is needed now.`,
+            (current) => current.timing?.deadlineWakeSentAt !== undefined,
+            (at) => { patchTiming(meta.id, { deadlineWakeSentAt: at }); });
+    }
+    if (actions.stuckWake) {
+        const { anchorAt, ageMs } = actions.stuckWake;
+        deliverTimingWake(pi, meta, "stuck", `stuck:${anchorAt}`,
+            `Subagent ${timingLabel(meta)} looks stuck: no progress for ${fmtWindow(ageMs)} (no file edit or write, git commit, ` +
+            `or success after a failure, not counting time inside running tool calls). Read-only work such as review or research can look like this. ` +
+            `It is still running and will not be stopped for this; this is reported once. Inspect it with subagent_output before deciding to stop it.`,
+            (current) => current.timing?.stuckWakeSentAt !== undefined && (current.timing.stuckAnchorAt ?? 0) >= anchorAt,
+            (at) => { patchTiming(meta.id, { stuckWakeSentAt: at, stuckAnchorAt: anchorAt }); });
+    }
+    return false;
+}
+
 /** One reconciliation + durable health-callback recovery pass. */
 function reconcileHealth(): void {
     const ctx = uiCtx;
@@ -643,6 +821,9 @@ function reconcileHealth(): void {
                 summary: meta.status === "lost" ? "Child supervision was lost; outcome is unknown" : "Child supervision interrupted; related work may still be alive" }], now);
         }
         deliverFailureAttention(pi, meta, now);
+        try {
+            if (enforceTiming(pi, meta, now)) continue;
+        } catch { /* timing is best-effort per tick; supervision below still runs */ }
 
         if (meta.status === "running" || meta.status === "orphaned") {
             const result = reconcileRun(meta, realProcessProbe, now);
@@ -1191,6 +1372,7 @@ function resolvePiBinary(): string {
  * path without importing the pi package.
  */
 function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: number | null): void {
+    progressCache.delete(id);
     // Host-facing wrapper around first-party finalizer (finalization.ts).
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation; finalization.ts enforces canExitFinalize + lifecycle authority.
@@ -1202,6 +1384,10 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
         sendMessage: () => enqueueCompletionCallback(pi, id),
     });
     if (result.applied && hasPendingFailureCallbacks()) ensureHealthTicker();
+}
+
+function timingSchemaFields() {
+    return timingParameterSchemas(Type);
 }
 
 /** String for one role, or an array when the caller assigns more than one. Arrays reach clarification instead of being rejected. */
@@ -1315,7 +1501,7 @@ export default function (pi: ExtensionAPI) {
         git_clone_workspace?: boolean; approve?: boolean; allow_nested?: boolean;
         agent?: string; role?: string | readonly string[]; alias?: string;
         catalog?: CatalogRunRecord; catalogResolved?: boolean;
-    };
+    } & TimingParams;
 
     /**
      * Shared internal spawn path used by both subagent_spawn and
@@ -1338,6 +1524,8 @@ export default function (pi: ExtensionAPI) {
         assertThinkingLevel(p.thinking);
         const permissionPlan = resolveSubagentPermissions(pi, p.sandbox);
         const cfg = loadConfig();
+        // Harness-owned timing (soft deadline, ceiling, stuck window); validated before any side effect.
+        resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt: 0 });
         let model: string | undefined;
         let thinking: ThinkingLevel | undefined;
         if (p.catalogResolved === true) {
@@ -1405,7 +1593,10 @@ export default function (pi: ExtensionAPI) {
             model, clean, allowNested: sandboxEnabled ? false : p.allow_nested, config: cfg,
         });
         const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
-        const extArgs = resolvedExtArgs.map((value, index) => sandboxEnabled && resolvedExtArgs[index - 1] === "--extension" ? canonicalizePath(value) : value);
+        // The harness's own child control extension (no tools, no command I/O) rides along in every
+        // mode, including clean: it is how a soft-deadline steer reaches the child session.
+        const extArgs = [...resolvedExtArgs, "--extension", childSteerExtensionPath()]
+            .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
         if (sandboxEnabled && resolution.mode === "inherit") {
             throw new Error("Task confinement requires explicit extensions; inheritExtensions is unsupported while sandboxing is enabled.");
         }
@@ -1455,7 +1646,8 @@ export default function (pi: ExtensionAPI) {
 
         let spawned: ReturnType<typeof spawnDetached>;
         try {
-            spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id) });
+            spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
+                env: { [STEER_FILE_ENV]: steerPathFor(id) } });
         } catch (error) {
             // Nothing references the run yet (no metadata): drop its directory (prompt, control/),
             // its provenance record, and the task scratch, so a failed launch leaves nothing behind (#325).
@@ -1469,6 +1661,7 @@ export default function (pi: ExtensionAPI) {
         // probes are unavailable the fields stay absent and the run is
         // reconciled via the conservative old-metadata path.
         const identity = captureProcessIdentity(spawned.pid, spawnIdentityProbe);
+        const startedAt = Date.now();
 
         const meta: RunMeta = {
             id, name: p.name, status: "running",
@@ -1476,13 +1669,14 @@ export default function (pi: ExtensionAPI) {
             effort: thinking, cwd,
             ...identity,
             promptPreview: p.prompt.slice(0, 200),
-            startedAt: Date.now(), logPath: logPathFor(id), sessionId: id,
+            startedAt, logPath: logPathFor(id), sessionId: id,
             callbackOrigin,
             sandbox: sandboxDir, taskRuntime: Boolean(taskRuntime), taskScratch: taskRuntime?.policy.scratch, callback: p.callback !== false,
             ...batchInfo,
             // The launch record is JSON. Registry freezes that value; it does not
             // require the resolver's nominal type to carry an index signature.
             ...(p.catalog ? { catalog: p.catalog as unknown as RunMeta["catalog"] } : {}),
+            timing: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt }),
         };
         writeMeta(meta);
 
@@ -1505,7 +1699,7 @@ export default function (pi: ExtensionAPI) {
               `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
               `Add a toolExtensions entry in config.json.\n`
             : "");
-        return { id, meta, spawned, runtime, warn, sandboxDir };
+        return { id, meta, spawned, runtime: runtime + (meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""), warn, sandboxDir };
     }
 
     // ---- subagent_spawn -------------------------------------------------
@@ -1525,6 +1719,7 @@ export default function (pi: ExtensionAPI) {
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
             "By default the subagent is sandboxed. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Without published settings, legacy write confinement applies. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
+            "Every run is timed by the harness: a soft deadline (default 30 min) steers the child to wrap up and wakes you once, the run is stopped after grace_minutes (reason deadline), a hard ceiling (default 90 min) stops it without grace (reason ceiling), and no progress for stuck_minutes (default 10) wakes you once (reason stuck). Set deadline_minutes/max_minutes/stuck_minutes to fit the task instead of writing a time limit into the prompt; do not stop a slow child that is still making progress.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
         ],
         parameters: Type.Object({
@@ -1545,6 +1740,7 @@ export default function (pi: ExtensionAPI) {
             git_clone_workspace: Type.Optional(Type.Boolean({ description: "Prepare a disposable Git clone workspace for sandboxed Git-mutating subagents. The clone has a real .git/ directory inside the sandbox writable root and is self-contained after setup." })),
             approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in the child (default: false; headless runs cannot prompt for trust)." })),
             allow_nested: Type.Optional(Type.Boolean({ description: "Allow the child to spawn its own subagents (default: false). Loads this extension in the child and allowlists its tools." })),
+            ...timingSchemaFields(),
         }),
 
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1647,6 +1843,7 @@ export default function (pi: ExtensionAPI) {
                 git_clone_workspace: Type.Optional(Type.Boolean({ description: "Prepare a disposable Git clone workspace for each job (same semantics as subagent_spawn)." })),
                 approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in children." })),
                 allow_nested: Type.Optional(Type.Boolean({ description: "Allow children to spawn their own subagents." })),
+                ...timingSchemaFields(),
             }, { description: "Options applied to every job; per-job values override these." })),
             jobs: Type.Array(Type.Object({
                 prompt: Type.String({ description: "The task for this job." }),
@@ -1666,6 +1863,7 @@ export default function (pi: ExtensionAPI) {
                 git_clone_workspace: Type.Optional(Type.Boolean()),
                 approve: Type.Optional(Type.Boolean()),
                 allow_nested: Type.Optional(Type.Boolean()),
+                ...timingSchemaFields(),
             }, { description: "A single batch job." }), {
                 minItems: 1,
                 description: "One or more jobs to launch. Each must have a prompt.",
@@ -1991,6 +2189,7 @@ export default function (pi: ExtensionAPI) {
         stopHealthTicker();
         spendCache.clear();
         healthLogCache.clear();
+        progressCache.clear();
         // Release the incremental log cursors' retained state with the session.
         resetChildEventLogCursor();
         resetParseRunCursor();
