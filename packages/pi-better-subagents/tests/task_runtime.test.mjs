@@ -201,12 +201,18 @@ test('compatibility temp cannot retarget project ancestors or sibling runtime co
       for(const path of ${JSON.stringify([join(f.agent, 'settings.json'), join(f.control, 'policy')])}) {
         assert.throws(()=>fs.writeFileSync(path,'forbidden'), { code: /^(EPERM|EACCES|EROFS)$/ });
       }
-      assert.throws(()=>fs.renameSync(${JSON.stringify(f.base)},${JSON.stringify(f.base + '-moved')}), { code: /^(EPERM|EACCES|EROFS)$/ });
-      assert.throws(()=>fs.rmSync(${JSON.stringify(f.agent)},{recursive:true}), { code: /^(EPERM|EACCES|EROFS)$/ });
+      // Linux bind mounts reject directory removal/rename with EBUSY.
+      const directoryDenied = process.platform === 'linux' ? /^(EPERM|EACCES|EROFS|EBUSY)$/ : /^(EPERM|EACCES|EROFS)$/;
+      assert.throws(()=>fs.renameSync(${JSON.stringify(f.base)},${JSON.stringify(f.base + '-moved')}), { code: directoryDenied });
+      assert.throws(()=>fs.rmSync(${JSON.stringify(f.agent)},{recursive:true}), { code: directoryDenied });
       fs.writeFileSync(${JSON.stringify(join(f.project, 'ordinary.txt'))},'allowed');
     `;
     const quote = (text) => `'${text.replaceAll("'", `'\\''`)}'`;
     await execute(session, 'bash', { command: `${quote(process.execPath)} -e ${quote(script)}` });
+    assert.equal(existsSync(f.base + '-moved'), false);
+    assert.equal(readFileSync(join(f.agent, 'settings.json'), 'utf8'), '{}');
+    assert.equal(readFileSync(join(f.agent, 'auth.json'), 'utf8'), '{}');
+    assert.equal(existsSync(join(f.control, 'policy')), false);
     assert.equal(readFileSync(join(f.project, 'ordinary.txt'), 'utf8'), 'allowed');
     // A separate launch must still refer to the same captured project.
     await execute(session, 'write', { path: 'second-launch.txt', content: 'same root' });

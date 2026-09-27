@@ -51,6 +51,10 @@ Parent-session checks already inspected:
 
 The worker reports preserve the checks each worker actually ran. Their nested-sandbox `/var/tmp` and Seatbelt failures were environmental and were **subsequently resolved by the parent-session strict runs above**. Historical failed edits and initial failed fixtures were corrected; they are not outstanding findings. No kernel gate was disabled to produce the parent results.
 
+## Cross-platform CI follow-up
+
+PR #313's first CI run passed macOS and Windows but exposed an overly narrow directory-denial assertion on Linux: Bubblewrap's bind mounts reject ancestor rename with `EBUSY`. The directory rename/removal assertions now allow that Linux-specific result while ordinary file writes still require permission errors. Additional assertions verify that the original settings and credentials remain intact, the forbidden control file was not created, and the ancestor was not moved. The corrected runtime suite passed all ten cases locally; GitHub CI validates the Linux behavior.
+
 ## Look-alikes kept
 
 - Files created by real operations, generated SBPL/argv, NDJSON inputs, parsed manifests and packed artifacts are valid behavioral inputs or outputs; they account for most remaining text-oracle leads.
