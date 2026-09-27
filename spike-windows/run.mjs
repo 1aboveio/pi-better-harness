@@ -14,7 +14,7 @@ const here = import.meta.dirname;
 const home = join(os.homedir(), "spikehome");
 const nogrant = join(os.homedir(), "spike-nogrant");
 const sh = (file, args, opts = {}) => execFileSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts }).trim();
-const icacls = (...args) => sh("icacls", args);
+const icacls = (...args) => { try { return sh("icacls", args); } catch (e) { return `ERR ${(e.stdout ?? "") + (e.stderr ?? e.message)}`.slice(0, 300); } };
 const report = { user: os.userInfo().username, home: os.homedir() };
 
 const [, userSid] = sh("whoami", ["/user", "/fo", "csv", "/nh"]).split(",").map((s) => s.replace(/"/g, ""));
