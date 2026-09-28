@@ -414,13 +414,22 @@ function lexicalAndCanonical(home: string, name: string, seams: SandboxSeams): s
 
 /**
  * Every symlink directory entry met while resolving `path`, component by
- * component (as `readlink` would follow them). A chain such as
+ * component (as `readlink` would follow them), plus where a dangling chain
+ * would land. A chain such as
  * `~/.zshrc -> ~/.dotfiles/zshrc -> ~/dotfiles/zshrc` has an intermediate link
  * in a removable directory; replacing it would retarget the protected entry, so
- * each hop the user could replace is protected too. Bounded: a loop or more
- * than 40 hops stops the walk (such a path resolves to nothing).
+ * each hop the user could replace is protected too. When a followed link
+ * points at something missing, creating it would give the entry content, so
+ * the first missing component (which covers every missing directory below it)
+ * and the full path it would resolve to are protected as well. Bounded: a loop
+ * or more than 40 hops stops the walk (such a path resolves to nothing).
  */
 function symlinkHops(path: string): string[] {
+    const { hops, unresolved } = walkSymlinks(path);
+    return [...hops, ...unresolved];
+}
+
+function walkSymlinks(path: string): { hops: string[]; unresolved: string[] } {
     const hops: string[] = [];
     const seen = new Set<string>();
     let followed = 0;
@@ -433,7 +442,13 @@ function symlinkHops(path: string): string[] {
         if (component === "..") { current = dirname(current); continue; }
         const entry = join(current, component);
         let link: boolean;
-        try { link = lstatSync(entry).isSymbolicLink(); } catch { break; }
+        try {
+            link = lstatSync(entry).isSymbolicLink();
+        } catch {
+            // Missing. Only a followed link makes this a dangling target; a
+            // plain absent path is guarded as it is.
+            return { hops, unresolved: followed ? [...new Set([entry, resolve(entry, ...pending)])] : [] };
+        }
         if (!link) { current = entry; continue; }
         if (++followed > 40 || seen.has(entry)) break;
         seen.add(entry);
@@ -448,7 +463,12 @@ function symlinkHops(path: string): string[] {
             pending = [...target.split(sep), ...pending];
         }
     }
-    return hops;
+    return { hops, unresolved: [] };
+}
+
+/** Whether a symlink resolves to nothing: dangling (ENOENT), or looping or over 40 hops (ELOOP). */
+function unresolvable(path: string): boolean {
+    try { statSync(path); return false; } catch { return true; }
 }
 
 function broadCredentialPaths(home: string, seams: SandboxSeams): string[] {
@@ -1296,7 +1316,10 @@ function maskSources(profilePath: string): { directory: string; file: string } {
  * home itself stay read-only, so sibling repositories cannot even be edited in
  * place there. Credentials are masked by empty mode-000 mounts; code that runs
  * later and caller-denied paths are read-only binds. Every writable bind and
- * protected leaf is a mount point, which Linux refuses to rename.
+ * protected leaf is a mount point, which Linux refuses to rename. A protected
+ * symlink inside a writable directory (a stow link in `~/.config`) makes that
+ * directory read-only with each existing entry bound writable again, so only
+ * new top-level entries there are refused.
  */
 function buildLinuxBroadCommand(
     bwrap: string,
@@ -1347,15 +1370,38 @@ function buildLinuxBroadCommand(
     const readOnly = new Set<string>();
     const directoryLocation = (path: string) => [...DIRECTORY_LOCATIONS]
         .some((name) => canonicalizePath(join(broad.home, name), seams) === path);
+    // Directories holding a protected symlink: read-only, so the link cannot be
+    // replaced, with their existing entries bound writable again below.
+    const linkParents = new Set<string>();
+    const danglingTargets = new Set(protectedPaths.flatMap((path) => walkSymlinks(path).unresolved));
     const guard = (path: string, hide: boolean) => {
         let directory: boolean | undefined;
-        if (canonicalizePath(path, seams) !== path) {
+        let link = false;
+        try { link = lstatSync(path).isSymbolicLink(); } catch { /* absent or intermediate link */ }
+        if (canonicalizePath(path, seams) !== path || (link && unresolvable(path))) {
             // A literal twin of a canonical deny entry: its target is guarded on
-            // its own. A symlink leaf inside a writable root could be replaced,
-            // so its directory becomes read-only; home itself already is.
-            let link = false;
-            try { link = lstatSync(path).isSymbolicLink(); } catch { /* absent or intermediate link */ }
-            if (link && dirname(path) !== broad.home && writableAt(dirname(path))) readOnly.add(dirname(path));
+            // its own. A looping link resolves to nothing (ELOOP), and a dangling
+            // one's missing target is guarded below, so only the link itself
+            // needs guarding here. A symlink leaf inside a writable root could be
+            // replaced, so its directory is protected; home already is.
+            if (link && dirname(path) !== broad.home && writableAt(dirname(path))) linkParents.add(dirname(path));
+            return;
+        }
+        if (danglingTargets.has(path)) {
+            // Where a dangling link would land: nothing may be created there.
+            // Lock its nearest existing ancestor (entries stay writable, see
+            // below) rather than plant a placeholder in the user's files. Temp
+            // and the workspace root stay open to new entries, so a placeholder
+            // is bound there instead, failing closed if it cannot be made.
+            if (!writableAt(path)) return;
+            let ancestor = dirname(path);
+            while (!exists(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+            if (ancestor === project || broad.tempRoots.includes(ancestor)) {
+                if (!materialize(path)) throw new Error(`Cannot protect denied path: ${path}`);
+                readOnly.add(path);
+            } else if (ancestor !== broad.home) {
+                linkParents.add(ancestor);
+            }
             return;
         }
         if (!exists(path)) {
@@ -1384,19 +1430,37 @@ function buildLinuxBroadCommand(
     for (const path of writeDenied) guard(path, false);
     if (permissions.projectFiles === "read") readOnly.add(project);
 
+    // A read-only link parent keeps its existing entries writable: each one is
+    // bound back read-write (a mount point, so it cannot be renamed away either).
+    // Only new top-level entries in that directory are lost. Protected entries
+    // keep their own mounts, and a symlink entry is never bound: a bind follows
+    // it, and writes through it already meet its target's own mounts.
+    const rebound = new Set<string>();
+    for (const parent of linkParents) readOnly.add(parent);
+    for (const parent of linkParents) {
+        for (const entry of list(parent)) {
+            if (entry.symlink) continue;
+            const path = join(parent, entry.name);
+            if (insideProtected(path) || readOnly.has(path) || writable.has(path)) continue;
+            rebound.add(path);
+        }
+    }
+
     // Intermediate directories between a writable root and anything bound
     // inside it become mount points too, so none of them can be renamed away.
     const anchors = new Set<string>();
     for (const target of [...writableRoots, ...readOnly, ...hidden.map((entry) => entry.path)]) {
         for (const parent of protectedAncestors([target])) {
             if (writableRoots.some((root) => root !== parent && contains(root, parent)) &&
-                !readOnly.has(parent) && !writable.has(parent)) anchors.add(parent);
+                !readOnly.has(parent) && !writable.has(parent) && !rebound.has(parent)) anchors.add(parent);
         }
     }
-    type Mount = { option: "--bind" | "--ro-bind"; source: string; path: string; rank: number };
+    type Mount = { option: "--bind" | "--bind-try" | "--ro-bind"; source: string; path: string; rank: number };
     const mounts: Mount[] = [
         ...[...anchors].map((path) => ({ option: "--bind" as const, source: path, path, rank: 0 })),
         ...writableRoots.map((path) => ({ option: "--bind" as const, source: path, path, rank: 1 })),
+        // `-try`: an entry removed before a resumed launch stays read-only instead of failing it.
+        ...[...rebound].map((path) => ({ option: "--bind-try" as const, source: path, path, rank: 1 })),
         ...[...readOnly].map((path) => ({ option: "--ro-bind" as const, source: path, path, rank: 2 })),
         ...hidden.map(({ path, source }) => ({ option: "--ro-bind" as const, source, path, rank: 3 })),
     ].sort((a, b) => a.path.length - b.path.length || a.rank - b.rank);
