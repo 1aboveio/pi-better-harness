@@ -22,7 +22,7 @@ Two kinds of extension tool, chosen by a human in `/sandbox` → Subagents · To
 - The whole patch is validated before anything is written: syntax, the file rules for every target, and every hunk against current content. Each file is then written whole, so none is ever half-patched. Removals run last. If a write fails part-way, applied files are restored where the rules allow, and the error lists what was restored, what could not be, and what was never applied.
 - It is a task builtin only when ticked (default on), and it is activated for a child that may `edit` or `write`, or asks for it by name.
 
-**Trusted tools run outside the file rules.** A third-party tool the human ticks is loaded into the child and runs in the child Pi process with that process's access. The page says so, and ticking one is a loosening change (a second Space; saving it needs a second Enter).
+**Trusted tools run outside the file rules.** A third-party tool the human ticks is loaded into the child and runs in the child Pi process with that process's access. The page says so, and ticking one is a loosening change: the page names it, and saving it as defaults needs a second Enter. (Ticking originally needed a second Space; that was dropped so a whole package's tools can be ticked in one keystroke.)
 
 - The candidate list comes from what the running Pi has registered (`pi.getAllTools()` with `sourceInfo`), by owning package. Builtins, the guarded names and this harness's own tools are excluded.
 - Defaults: `web_fetch` and `web_search` from `@juicesharp/rpiv-web-tools` on; everything else off.

@@ -61,7 +61,7 @@ async function settle() {
 test("default table has the locked rows and independent Main/Subagents values", () => {
     const h = harness();
     const lines = table(h.page, 84).map(plain);
-    assert.equal(lines.length, 14);
+    assert.equal(lines.length, 13);
     assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents/);
     assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
     assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
@@ -74,9 +74,8 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[8]!, /Guarded \(follows the file rules\)/);
     assert.match(lines[9]!, /\[x\] apply_patch\s+harness adapter/);
     assert.match(lines[10]!, /Trusted \(runs outside the file rules\)/);
-    assert.match(lines[11]!, /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/);
-    assert.match(lines[12]!, /\[x\] web_search\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/);
-    assert.match(lines[13]!, /Save as defaults/);
+    assert.match(lines[11]!, /\[x\] ▸ @juicesharp\/rpiv-web-tools\s+2 of 2 on · needs Network On · 2 not loaded$/);
+    assert.match(lines[12]!, /Save as defaults/);
 });
 
 test("disabled details are dimmed and inactive but survive off/on toggles", async () => {
@@ -92,7 +91,7 @@ test("disabled details are dimmed and inactive but survive off/on toggles", asyn
     h.press(Key.down, Key.space);
     await settle();
     assert.equal(h.current.main.projectFiles, "off");
-    h.press(Key.up, Key.space, Key.space);
+    h.press(Key.up, Key.space);
     await settle();
     assert.equal(h.current.main.enabled, false);
     assert.equal(h.current.main.projectFiles, "off");
@@ -107,13 +106,13 @@ test("arrows select rows and columns, Space cycles, Enter saves only on action, 
     h.press(Key.right, Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "off");
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "read");
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "write");
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "read-write");
     h.press(Key.down, Key.down, Key.down, Key.down, Key.space);
@@ -136,7 +135,7 @@ test("file rows cycle four levels and explain Write; credentials are fixed under
     const hint = () => h.page.render(120).map(plain).find((line) => /deletable|rename-based|always hides/.test(line));
     h.press(Key.right, Key.down, Key.down);
     assert.match(hint()!, /Write: git and rename-based saves fail outside the project except in worktree folders/);
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.outsideProject, "read-write");
     assert.match(plain(table(h.page, 100)[3]!), /Outside project\s+-\s+Write & delete/);
@@ -145,7 +144,7 @@ test("file rows cycle four levels and explain Write; credentials are fixed under
     assert.equal(hint(), undefined, "credentials are editable again");
     assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s*$/);
     h.press(Key.up);
-    h.press(Key.space); await settle(); h.press(Key.space, Key.space); await settle(); h.press(Key.space, Key.space); await settle();
+    h.press(Key.space); await settle(); h.press(Key.space); await settle(); h.press(Key.space); await settle();
     assert.equal(h.current.subagents.outsideProject, "write");
     const before = h.changes.length;
     h.press(Key.down, Key.space);
@@ -154,22 +153,19 @@ test("file rows cycle four levels and explain Write; credentials are fixed under
     assert.match(plain(h.page.render(120).at(-1)!), /always hides credential files/);
 });
 
-test("a looser value applies only on a second Space; a tighter one applies at once", async () => {
+test("Space applies a looser value at once and names what it loosened", async () => {
     const h = harness();
     h.press(Key.right, Key.down, Key.down, Key.space);
     await settle();
-    assert.equal(h.changes.length, 0, "Write → Write & delete waits for confirmation");
-    assert.equal(h.current.subagents.outsideProject, "write");
-    assert.match(plain(h.page.render(140).at(-1)!), /Looser \(Subagents: outsideProject write → read-write\)\. Press Space again to apply/);
-    h.press(Key.up, Key.down, Key.space);
-    await settle();
-    assert.equal(h.changes.length, 0, "moving away cancels the pending change");
-    h.press(Key.space);
-    await settle();
     assert.equal(h.current.subagents.outsideProject, "read-write");
+    assert.match(plain(h.page.render(140).at(-1)!), /Looser \(Subagents: outsideProject write → read-write\)\.$/);
     h.press(Key.space);
     await settle();
-    assert.equal(h.current.subagents.outsideProject, "off", "tightening applies immediately");
+    assert.equal(h.current.subagents.outsideProject, "off");
+    assert.doesNotMatch(plain(h.page.render(140).at(-1)!), /Looser/, "a tighter value clears the note");
+    h.press(Key.up, Key.up, Key.space);
+    await settle();
+    assert.equal(h.current.subagents.enabled, false, "switching a sandbox off takes one Space");
 });
 
 test("saving looser defaults needs a second Enter; any other key cancels it", async () => {
@@ -197,12 +193,12 @@ test("change and save failures stay inline without optimistic state or closing",
         change: () => { if (failChange) throw new Error("change failed"); },
         save: () => { if (failSave) throw new Error("save failed"); },
     });
-    h.press(Key.right, Key.space, Key.space);
+    h.press(Key.right, Key.space);
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /change failed/);
     assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/);
     failChange = false;
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
     h.press(...toSave);
@@ -262,7 +258,7 @@ test("open uses custom only for interactive TUI and resolves on Escape", async (
     assert.equal(factory, undefined);
 });
 
-test("Tools section lists guarded and discovered trusted tools; ticking a trusted tool needs a second Space", async () => {
+test("Tools section lists guarded and discovered trusted tools; Space ticks a trusted tool at once", async () => {
     const discovered = [
         { name: "web_fetch", package: "npm:@juicesharp/rpiv-web-tools" },
         { name: "web_search", package: "npm:@juicesharp/rpiv-web-tools" },
@@ -274,22 +270,15 @@ test("Tools section lists guarded and discovered trusted tools; ticking a truste
     assert.ok(at(/Subagents · Tools/) > at(/Network access/));
     assert.ok(at(/Guarded \(follows the file rules\)/) < at(/\[x\] apply_patch\s+harness adapter/));
     assert.ok(at(/Trusted \(runs outside the file rules\)/) < at(/\[ \] ask_user_question\s+@juicesharp\/rpiv-ask-user-question$/));
-    assert.match(lines[at(/web_fetch/)]!, /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On$/);
+    assert.match(lines[at(/rpiv-web-tools/)]!, /\[x\] ▸ @juicesharp\/rpiv-web-tools\s+2 of 2 on · needs Network On$/);
     assert.ok(lines.some((line) => /Trusted tools run outside the file rules/.test(line)));
-    // Rows after Network access: apply_patch, ask_user_question, web_fetch, web_search.
+    // Rows after Network access: apply_patch, ask_user_question, the rpiv-web-tools group.
     h.press(Key.right, ...Array(7).fill(Key.down), Key.space);
     await settle();
-    assert.equal(h.changes.length, 0, "ticking a trusted tool waits for confirmation");
-    assert.match(plain(h.page.render(160).at(-1)!), /Looser \(Subagents: trusted tool ask_user_question \(@juicesharp\/rpiv-ask-user-question\) runs outside the file rules\)\. Press Space again/);
-    assert.ok(h.page.render(160).map(plain).some((line) => /Trusted tools run in the subagent's Pi process, outside the file rules/.test(line)));
-    h.press(Key.space);
-    await settle();
     assert.deepEqual(h.current.subagentTools.trusted.at(-1), { name: "ask_user_question", package: "npm:@juicesharp/rpiv-ask-user-question" });
-    // Unticking a trusted tool and the guarded adapter are tighter: they apply at once.
-    h.press(Key.down, Key.space);
-    await settle();
-    assert.deepEqual(h.current.subagentTools.trusted.map((tool) => tool.name), ["web_search", "ask_user_question"]);
-    h.press(Key.up, Key.up, Key.space);
+    assert.match(plain(h.page.render(160).at(-1)!), /Looser \(Subagents: trusted tool ask_user_question \(@juicesharp\/rpiv-ask-user-question\) runs outside the file rules\)/);
+    assert.ok(h.page.render(160).map(plain).some((line) => /Trusted tools run in the subagent's Pi process, outside the file rules/.test(line)));
+    h.press(Key.up, Key.space);
     await settle();
     assert.equal(h.current.subagentTools.applyPatch, false);
     h.press(Key.space);
@@ -300,12 +289,54 @@ test("Tools section lists guarded and discovered trusted tools; ticking a truste
     assert.deepEqual(h.saved.at(-1)!.subagentTools, h.current.subagentTools);
 });
 
+test("tools from one package fold into a group that ticks, unticks and expands as a whole", async () => {
+    const pkg = "npm:pi-xai-oauth";
+    const discovered = ["xai_x_search", "xai_critique", "xai_deep_research"].map((name) => ({ name, package: pkg }));
+    const h = harness({ discoverTools: () => discovered });
+    const tools = () => h.page.render(120).map(plain).filter((line) => /xai/.test(line));
+    const ticked = () => h.current.subagentTools.trusted.filter((tool) => tool.package === pkg).map((tool) => tool.name).sort();
+    // Rows after Network access: apply_patch, the rpiv-web-tools group, the pi-xai-oauth group.
+    assert.deepEqual(tools(), ["    [ ] ▸ pi-xai-oauth               0 of 3 on"], "groups start collapsed");
+    h.press(...Array(8).fill(Key.down));
+    assert.ok(h.page.render(120).map(plain).some((line) => /Space ticks or unticks every tool in this package/.test(line)));
+    h.press(Key.space);
+    await settle();
+    assert.deepEqual(ticked(), ["xai_critique", "xai_deep_research", "xai_x_search"]);
+    assert.match(plain(h.page.render(160).at(-1)!), /Looser \(Subagents: 3 trusted tools run outside the file rules\)/);
+    h.press(Key.right);
+    assert.deepEqual(tools().map((line) => line.trim()), [
+        ">   [x] ▾ pi-xai-oauth               3 of 3 on",
+        "[x]   xai_critique",
+        "[x]   xai_deep_research",
+        "[x]   xai_x_search",
+    ]);
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.deepEqual(ticked(), ["xai_deep_research", "xai_x_search"]);
+    assert.match(tools()[0]!, /\[-\] ▾ pi-xai-oauth\s+2 of 3 on/, "a partly ticked group shows [-]");
+    // Left on a nested tool collapses its group and selects the group row.
+    h.press(Key.left);
+    assert.deepEqual(tools().map((line) => line.trim()), [">   [-] ▸ pi-xai-oauth               2 of 3 on"]);
+    assert.equal(h.current.subagents.enabled, true, "folding never changes the column");
+    h.press(Key.space);
+    await settle();
+    assert.deepEqual(ticked(), ["xai_critique", "xai_deep_research", "xai_x_search"], "a partly ticked group ticks the rest");
+    h.press(Key.space);
+    await settle();
+    assert.deepEqual(ticked(), [], "a fully ticked group unticks all");
+});
+
 test("a ticked tool that is not loaded stays listed so it can be unticked", async () => {
     const h = harness({ discoverTools: () => [] });
     const lines = h.page.render(120).map(plain);
-    assert.ok(lines.some((line) => /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/.test(line)));
-    h.press(...Array(7).fill(Key.down), Key.space);
+    assert.ok(lines.some((line) => /\[x\] ▸ @juicesharp\/rpiv-web-tools\s+2 of 2 on · needs Network On · 2 not loaded/.test(line)));
+    h.press(...Array(7).fill(Key.down), Key.right, Key.down);
+    assert.ok(h.page.render(120).map(plain).some((line) => /> {3}\[x\] {3}web_fetch\s+needs Network On · not loaded/.test(line)));
+    h.press(Key.space);
     await settle();
     assert.deepEqual(h.current.subagentTools.trusted.map((tool) => tool.name), ["web_search"]);
-    assert.ok(!h.page.render(120).map(plain).some((line) => /web_fetch/.test(line)), "an unticked, unloaded tool disappears");
+    const after = h.page.render(120).map(plain);
+    assert.ok(!after.some((line) => /web_fetch/.test(line)), "an unticked, unloaded tool disappears");
+    assert.ok(after.some((line) => /\[x\] web_search\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/.test(line)),
+        "a package left with one tool is a plain row again");
 });

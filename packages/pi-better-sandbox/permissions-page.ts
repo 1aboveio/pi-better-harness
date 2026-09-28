@@ -15,12 +15,16 @@ export interface PermissionPageHandlers {
     discoverTools?(): readonly Pick<DiscoveredTool, "name" | "package">[];
 }
 
+type TrustedTool = { name: string; package: string; loaded: boolean };
+/** One visible Tools row: a package with several tools folds into a group row. */
 type ToolItem =
     | { kind: "guarded"; name: "apply_patch" }
-    | { kind: "trusted"; name: string; package: string; loaded: boolean };
+    | { kind: "trusted"; tool: TrustedTool; nested: boolean }
+    | { kind: "group"; package: string; tools: TrustedTool[]; open: boolean };
 
 const GUARDED_HINT = "apply_patch goes through the guarded file operations: Project files and Outside project apply to it.";
 const TRUSTED_HINT = "Trusted tools run in the subagent's Pi process, outside the file rules. Tick only tools you trust.";
+const GROUP_HINT = "Space ticks or unticks every tool in this package. → expands, ← collapses.";
 
 export const DEFAULT_PERMISSION_SETTINGS = defaultSandboxPermissions();
 
@@ -92,24 +96,57 @@ export function createPermissionsPage(
     }
     const isTicked = (item: { name: string; package: string }) =>
         !!settings?.subagentTools.trusted.some((tool) => tool.name === item.name && tool.package === item.package);
-    /** Guarded first, then discovered and ticked trusted tools, by name. */
+    /** Packages whose group row is expanded; groups start collapsed. */
+    const expanded = new Set<string>();
+    /**
+     * Guarded first, then discovered and ticked trusted tools by package. A
+     * package with several tools is one group row, followed by its tools when expanded.
+     */
     function toolItems(): ToolItem[] {
-        const trusted = new Map<string, ToolItem & { kind: "trusted" }>();
-        for (const tool of discovered) trusted.set(`${tool.name}\0${tool.package}`, { kind: "trusted", name: tool.name, package: tool.package, loaded: true });
+        const trusted = new Map<string, TrustedTool>();
+        for (const tool of discovered) trusted.set(`${tool.name}\0${tool.package}`, { name: tool.name, package: tool.package, loaded: true });
         for (const tool of settings?.subagentTools.trusted ?? []) {
             const key = `${tool.name}\0${tool.package}`;
-            if (!trusted.has(key)) trusted.set(key, { kind: "trusted", name: tool.name, package: tool.package, loaded: false });
+            if (!trusted.has(key)) trusted.set(key, { name: tool.name, package: tool.package, loaded: false });
         }
-        return [{ kind: "guarded", name: "apply_patch" },
-            ...[...trusted.values()].sort((a, b) => a.name.localeCompare(b.name) || a.package.localeCompare(b.package))];
+        const byPackage = new Map<string, TrustedTool[]>();
+        for (const tool of [...trusted.values()].sort((a, b) =>
+            packageLabel(a.package).localeCompare(packageLabel(b.package)) || a.name.localeCompare(b.name))) {
+            byPackage.set(tool.package, [...byPackage.get(tool.package) ?? [], tool]);
+        }
+        const result: ToolItem[] = [{ kind: "guarded", name: "apply_patch" }];
+        for (const [pkg, tools] of byPackage) {
+            if (tools.length === 1) {
+                result.push({ kind: "trusted", tool: tools[0]!, nested: false });
+                continue;
+            }
+            const open = expanded.has(pkg);
+            result.push({ kind: "group", package: pkg, tools, open });
+            if (open) result.push(...tools.map((tool) => ({ kind: "trusted" as const, tool, nested: true })));
+        }
+        return result;
     }
     let items = toolItems();
+    const toolAt = (index: number): ToolItem | undefined => index >= rows.length && index < saveRow() ? items[index - rows.length] : undefined;
+
+    /** Expand or collapse the group at, or containing, the selected row. */
+    function fold(open: boolean): boolean {
+        const item = toolAt(row);
+        if (!item || item.kind === "guarded" || (item.kind === "trusted" && !item.nested)) return false;
+        const pkg = item.kind === "group" ? item.package : item.tool.package;
+        if (open) expanded.add(pkg);
+        else expanded.delete(pkg);
+        items = toolItems();
+        // Collapsing from a nested tool moves the selection to its group row.
+        if (!open) row = rows.length + items.findIndex((entry) => entry.kind === "group" && entry.package === pkg);
+        requestRender();
+        return true;
+    }
     const saveRow = () => rows.length + items.length;
     let row = 0;
     let column = 0;
     let busy = false;
     let pendingConfirmation: string | undefined;
-    let pendingChange: string | undefined;
 
     function report(error: unknown): void {
         message = errorText(error);
@@ -122,10 +159,15 @@ export function createPermissionsPage(
         const next = snapshot(settings);
         if (row >= rows.length) {
             const item = items[row - rows.length]!;
-            if (item.kind === "guarded") next.subagentTools.applyPatch = !next.subagentTools.applyPatch;
-            else if (isTicked(item)) {
-                next.subagentTools.trusted = next.subagentTools.trusted.filter((tool) => !(tool.name === item.name && tool.package === item.package));
-            } else next.subagentTools.trusted.push({ name: item.name, package: item.package });
+            if (item.kind === "guarded") {
+                next.subagentTools.applyPatch = !next.subagentTools.applyPatch;
+                return apply(next);
+            }
+            const tools = item.kind === "group" ? item.tools : [item.tool];
+            const inSet = (tool: { name: string; package: string }) => tools.some((t) => t.name === tool.name && t.package === tool.package);
+            // A partly ticked group ticks the rest; a fully ticked one unticks all.
+            next.subagentTools.trusted = next.subagentTools.trusted.filter((tool) => !inSet(tool));
+            if (!tools.every(isTicked)) next.subagentTools.trusted.push(...tools.map((tool) => ({ name: tool.name, package: tool.package })));
             return apply(next);
         }
         const key = rows[row]!.key;
@@ -151,23 +193,18 @@ export function createPermissionsPage(
 
     async function apply(next: PermissionSettings): Promise<void> {
         if (!settings) return;
-        // A looser value is applied only on a second Space, like a looser Save.
+        // Space applies at once; a looser change is named, and saving it as defaults still asks.
         const loosened = describeLoosening(settings, next);
-        const nextKey = JSON.stringify(next);
-        if (loosened.length && pendingChange !== nextKey) {
-            pendingChange = nextKey;
-            message = `Looser (${loosened.join("; ")}). Press Space again to apply.`;
-            isError = false;
-            requestRender();
-            return;
-        }
-        pendingChange = undefined;
+        // A group tick loosens once per tool; name them as one count.
+        const trusted = loosened.filter((line) => line.startsWith("Subagents: trusted tool "));
+        if (trusted.length > 1) loosened.splice(loosened.indexOf(trusted[0]!), trusted.length, `Subagents: ${trusted.length} trusted tools run outside the file rules`);
         busy = true;
         try {
             await handlers.change(snapshot(next));
             settings = next;
             items = toolItems();
-            message = "";
+            row = Math.min(row, saveRow());
+            message = loosened.length ? `Looser (${loosened.join("; ")}).` : "";
             isError = false;
             requestRender();
         } catch (error) {
@@ -212,7 +249,6 @@ export function createPermissionsPage(
         invalidate() {},
         handleInput(data: string) {
             if (!matchesKey(data, Key.enter)) pendingConfirmation = undefined;
-            if (!matchesKey(data, Key.space)) pendingChange = undefined;
             if (matchesKey(data, Key.escape)) {
                 close();
             } else if (matchesKey(data, Key.up)) {
@@ -222,9 +258,11 @@ export function createPermissionsPage(
                 row = Math.min(saveRow(), row + 1);
                 requestRender();
             } else if (matchesKey(data, Key.left)) {
+                if (fold(false)) return;
                 column = 0;
                 requestRender();
             } else if (matchesKey(data, Key.right)) {
+                if (fold(true)) return;
                 column = 1;
                 requestRender();
             } else if (matchesKey(data, Key.space)) {
@@ -268,16 +306,32 @@ export function createPermissionsPage(
             }
             // Subagents · Tools: which extension tools a confined subagent may use.
             output.push("", theme.fg("text", truncateToWidth(`${prefix ? "  " : ""}Subagents · Tools`, w, "")));
-            const nameWidth = Math.min(24, Math.max(...items.map((item) => visibleWidth(item.name))), Math.max(0, w - prefix - 8));
+            const label = (item: ToolItem) => item.kind === "group" ? `${item.open ? "▾" : "▸"} ${packageLabel(item.package)}`
+                : item.kind === "trusted" ? `${item.nested ? "  " : ""}${item.tool.name}` : item.name;
+            const nameWidth = Math.min(40, Math.max(...items.map((item) => visibleWidth(label(item)))), Math.max(0, w - prefix - 8));
             items.forEach((item, index) => {
                 if (index === 0) output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Guarded (follows the file rules)`, w, "")));
                 if (index === 1) output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Trusted (runs outside the file rules)`, w, "")));
                 const selected = row === rows.length + index;
-                const ticked = item.kind === "guarded" ? !!settings?.subagentTools.applyPatch : isTicked(item);
-                const detail = item.kind === "guarded" ? "harness adapter" : [packageLabel(item.package),
-                    ...(isNetworkTool(item.name) ? ["needs Network On"] : []), ...(item.loaded ? [] : ["not loaded"])].join(" · ");
-                const text = `${prefix ? (selected ? "> " : "  ") : ""}  [${ticked ? "x" : " "}] ${cell(item.name, nameWidth)} ${detail}`;
-                output.push(theme.fg(selected ? "accent" : settings ? "text" : "dim", truncateToWidth(text, w, "")));
+                let mark: string;
+                let detail: string[];
+                if (item.kind === "guarded") {
+                    mark = settings?.subagentTools.applyPatch ? "x" : " ";
+                    detail = ["harness adapter"];
+                } else if (item.kind === "group") {
+                    const on = item.tools.filter(isTicked).length;
+                    const missing = item.tools.filter((tool) => !tool.loaded).length;
+                    mark = on === item.tools.length ? "x" : on ? "-" : " ";
+                    detail = [`${on} of ${item.tools.length} on`, ...(item.tools.some((tool) => isNetworkTool(tool.name)) ? ["needs Network On"] : []),
+                        ...(missing ? [`${missing} not loaded`] : [])];
+                } else {
+                    mark = isTicked(item.tool) ? "x" : " ";
+                    // A nested tool's package is its group row.
+                    detail = [...(item.nested ? [] : [packageLabel(item.tool.package)]), ...(isNetworkTool(item.tool.name) ? ["needs Network On"] : []),
+                        ...(item.tool.loaded ? [] : ["not loaded"])];
+                }
+                const text = `${prefix ? (selected ? "> " : "  ") : ""}  [${mark}] ${cell(label(item), nameWidth)} ${detail.join(" · ")}`;
+                output.push(theme.fg(selected ? "accent" : settings ? "text" : "dim", truncateToWidth(text, w, "").trimEnd()));
             });
             if (items.length === 1) {
                 output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Trusted (runs outside the file rules)`, w, "")),
@@ -285,11 +339,11 @@ export function createPermissionsPage(
             }
             output.push("", line("Save as defaults", "", "", row === saveRow()));
             const selected = row < rows.length ? rows[row]!.key : undefined;
-            const tool = row >= rows.length && row < saveRow() ? items[row - rows.length] : undefined;
-            const contextual = tool ? (tool.kind === "guarded" ? GUARDED_HINT : TRUSTED_HINT)
+            const tool = toolAt(row);
+            const contextual = tool ? (tool.kind === "guarded" ? GUARDED_HINT : tool.kind === "group" ? GROUP_HINT : TRUSTED_HINT)
                 : selected && settings ? cellHint(selected, settings[columns[column]!]) : undefined;
             for (const hint of [
-                "↑↓ Select row · ←→ Select column · Space Change · Enter Save · Esc Back",
+                "↑↓ Select row · ←→ Select column or fold a group · Space Change · Enter Save · Esc Back",
                 "Changes apply to new launches. Background tasks follow their launcher.",
                 "Stored credentials: known files only; excludes OS vaults and environment tokens.",
                 "Trusted tools run outside the file rules.",
