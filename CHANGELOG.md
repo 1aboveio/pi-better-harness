@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- `expectedExitCodes` (subagent bash) and `expected_exit_codes` (background tasks) accept `0` and drop it, since exit 0 is already success; a list of only zeros declares nothing. Before, a call that listed `0` was refused and wasted a turn. The schema descriptions say so. (#332)
+
 ### Fixed
 
 - **subagents**, **background-tasks**: pressing `x` twice in the navigator detail view no longer leaves a hidden list overlay that swallows every key. The view moves to the next row's detail (or the previous one); when nothing is left, it closes and typing reaches the editor again. (#332)
@@ -15,6 +19,17 @@ All notable changes to this project are documented in this file. The format is b
 - **background-tasks**: the README's "Reloads and session switches" now says an exit during a session switch is recorded only while the same Pi process stays open; after Pi quits, a resumed task whose process is gone is marked lost. (#332)
 - **release**: the publish workflow waits up to 10 minutes (backing off 5 s to 60 s) for the new version and checks the registry's version document, not only `npm view`, so a slow but successful publish still gets its tag and GitHub release. A rerun skips a version that is already on npm. (#332)
 - **tests**: the navigator TUI e2e and the other root script suites run against a private registry, so they no longer leave `by-parent-active/<pid>/sa_navigator_e2e_*` markers or tasks in the real `$TMPDIR` registries. The background-tasks suite no longer leaks an empty temp directory for each fully skipped test file, and its macOS process-tree stop test counts zombies and a vanished process group as stopped. (#332)
+- Navigator rows for subagents and background tasks show their normal columns (model, effort, tool, tokens, or the command) again when a run only has failure history. Failure text leads a row only when something needs action; the "No failures need action · … (history)" line stays in the detail view. (#332)
+- After an exact-rule scan (run metadata unreadable), a later trusted rescan no longer closes the "run metadata could not be read" gap while a leftover it cannot re-key (a failure whose call declared intent) is unresolved. The gap is re-checked on every scan and closes once those leftovers are resolved; a plain failure never holds it. (#332)
+- The provenance sweep deletes a run's trust record only when the run directory is definitely gone (ENOENT), not on any stat error. (#332)
+- A sandboxed subagent that fails to spawn no longer leaves its `sessions/<id>` directory or its `git_clone_workspace` clone behind. (#332)
+- Only Pi's exact schema-refusal format (`Validation failed for tool "bash":`, `  - path: message` lines, `Received arguments:`) files a bash call as a rejected intent; a command that ran and printed that prefix is an ordinary failure. (#332)
+- The parent reads intent the way Pi coerced it before execute, so `expectedExitCodes: ["1"]` with a declared exit 1 records an expected failure instead of nothing, and a scalar `0`, `""`, or `false` exit-code value or an empty id counts as undeclared. Exact operation identity uses the same normalized intent, so a `[0]` declaration and its plain retry are one operation. (#332)
+- Unconfined runs treat an explicit-null intent field like an absent one, so `{command, expectedExitCodes: null}` and `{command}` are the same operation. (#332)
+- A `null` canonical output control no longer hides its deprecated alias (`{max_bytes: null, maxBytes: 300}` uses 300); `include: 42` gets an unknown-value note; a `bg_task_list` page cursor passed to `bg_task_status` gets a clear note instead of a stale-cursor reset. (#332)
+- Docs: the subagent run-timing notes now cover three limits of the deadline hold: `max_minutes: 0` means a steer stuck behind a hung tool call is never stopped, `/reload` on a child log over 32 MiB can lose the hold, and the steer receipt matches the steer by exact text. (#332)
+- **sandbox**: on Linux, a protected symlink inside a writable dot directory (a stow link such as `~/.config/git -> ../dotfiles/.config/git`, or mise's `~/.local/bin -> ~/.local/share/mise/shims`) no longer makes that whole directory read-only. The directory stays read-only so the link can't be replaced, but every existing entry in it is bound writable again; only creating new top-level entries there is refused. Symlink entries and protected entries are never re-bound. A symlink loop among those links no longer fails every launch with "Cannot protect denied path": the looping links are protected and the loop is left unresolvable. A dangling link inside a writable directory no longer fails the launch either. (#345)
+- **sandbox**: a protected entry that is a dangling symlink (for example `~/.zshrc -> ~/.dotfiles/zshrc` with the target missing) now protects the path it would resolve to, on macOS and Linux: the task can't create the target or any missing directory on the way to it, and existing ancestors can't be renamed. On Linux the target's nearest existing directory is locked the same way as above rather than getting a placeholder file. The subagents and background-tasks copies of the sandbox core carry the same fixes. (#345)
 
 ## [pi-better-harness@0.7.0] - 2026-09-27
 

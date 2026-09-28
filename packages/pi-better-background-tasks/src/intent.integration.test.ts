@@ -69,12 +69,28 @@ describe("#325 background task structured intent", () => {
     expect((await terminal(watch.id)).status).toBe("succeeded");
     // A genuinely malformed declaration is still refused before launch, by Pi's schema check.
     expect(() => validateToolArguments({ name: "bg_task_spawn", parameters: tools.bg_task_spawn.parameters } as any,
-      { type: "toolCall", id: "bad", name: "bg_task_spawn", arguments: { command: "true", expected_exit_codes: [0] } } as any)).toThrow(/expected_exit_codes/);
+      { type: "toolCall", id: "bad", name: "bg_task_spawn", arguments: { command: "true", expected_exit_codes: [256] } } as any)).toThrow(/expected_exit_codes/);
+  });
+
+  it("#332 a declared exit code 0 is dropped, not refused: [0, 1] declares [1] and [0] declares nothing", async () => {
+    const tools: Record<string, any> = {};
+    registerTools({ on() {}, registerTool(tool: any) { tools[tool.name] = tool; } } as any);
+    // Pi's schema check lets the 0 through to the tool.
+    expect(validateToolArguments({ name: "bg_task_spawn", parameters: tools.bg_task_spawn.parameters } as any,
+      { type: "toolCall", id: "zero", name: "bg_task_spawn", arguments: { command: "true", expected_exit_codes: [0, 1] } } as any))
+      .toMatchObject({ expected_exit_codes: [0, 1] });
+    const probe = spawn("exit 1", { expected_exit_codes: [0, 1] });
+    expect(readMeta(probe.id)).toMatchObject({ expectedExitCodes: [1] });
+    const plain = spawn("exit 1", { expected_exit_codes: [0] });
+    expect(readMeta(plain.id)).not.toHaveProperty("expectedExitCodes");
+    await Promise.all([terminal(probe.id), terminal(plain.id)]);
+    expect(activeFailures(state(probe.id))).toEqual([expect.objectContaining({ status: "expected" })]);
+    expect(activeFailures(state(plain.id))).toEqual([expect.objectContaining({ status: "unresolved", category: "exit" })]);
   });
 
   it("malformed intent is rejected before anything is launched", () => {
     const before = listMetasForOrigin(origin).length;
-    for (const intent of [{ expected_exit_codes: [0] }, { expected_exit_codes: [1, 1] }, { expected_exit_codes: [] }, { operation_id: "has space" }]) {
+    for (const intent of [{ expected_exit_codes: [256] }, { expected_exit_codes: [1, 1] }, { expected_exit_codes: [] }, { operation_id: "has space" }]) {
       expect(() => spawnTask(pi, { command: "touch should-not-run", callback: false, ...intent }, origin.cwd, origin, () => origin))
         .toThrow(/Invalid command intent: (expected_exit_codes|operation_id) .*The task was not started/);
       expect(() => startWatchTask(pi, { command: "true", callback: false, success_when: { type: "exit_code", equals: 0 }, ...intent },
@@ -147,7 +163,7 @@ describe("#325 background task structured intent", () => {
       const properties = tools[name].parameters.properties;
       // Each field admits an explicit null ("not declared"), which models routinely send.
       expect(properties.operation_id.anyOf).toEqual([{ type: "null" }, { type: "string" }]);
-      expect(properties.expected_exit_codes.anyOf).toEqual([{ type: "array", items: { type: "integer", minimum: 1, maximum: 255 }, minItems: 1, maxItems: 16 }, { type: "null" }]);
+      expect(properties.expected_exit_codes.anyOf).toEqual([{ type: "array", items: { type: "integer", minimum: 0, maximum: 255 }, minItems: 1, maxItems: 16 }, { type: "null" }]);
       // Provider-rejected keywords (#327): distinctness and the id format are validated in code instead.
       const intent = JSON.parse(JSON.stringify({ properties: { operation_id: properties.operation_id, expected_exit_codes: properties.expected_exit_codes } }));
       expect(findProviderRejectedKeywords(intent)).toEqual([]);

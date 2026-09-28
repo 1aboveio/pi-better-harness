@@ -15,6 +15,7 @@ import {
 } from "./output.js";
 import { inspectMeta, logPathFor, metaPathFor, taskDir, writeMeta } from "./registry.js";
 import { registerTools } from "./tools.js";
+import { ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition } from "./types.js";
 
 const createdIds: string[] = [];
@@ -491,6 +492,17 @@ describe("review regressions (#312)", () => {
     expect(seen.at(-1)).toBe(ids[0]);
   });
 
+  it("#332 a bg_task_list page cursor passed to status gets a clear note, not a stale status reset", () => {
+    for (let index = 0; index < 12; index += 1) fixture({ id: `bg_listcursor_${Date.now()}_${index}` });
+    const listed = formatList({ origin, limit: 2 });
+    const listCursor = listed.match(/nextCursor=(\S+)/)?.[1];
+    expect(listCursor).toMatch(/^l1\./);
+    const meta = fixture();
+    const status = formatStatus(inspectMeta(meta.id), { origin, cursor: listCursor });
+    expect(status).toContain("cursor ignored: it is a bg_task_list page cursor");
+    expect(status).not.toContain("reset=stale-cursor");
+  });
+
   it("resets a raw cursor when the session scope changes", () => {
     const meta = fixture({ logLines: ["0123456789".repeat(4_000)] });
     const own = formatLog(meta.id, { origin, raw: true });
@@ -800,5 +812,23 @@ describe("status cursor delegation (#323)", () => {
     const withoutFlag = textOf(await tools.bg_task_status.execute("tc", { id: meta.id, cursor, max_bytes: 2048 }, undefined, undefined, ctx));
     expect(withoutFlag).toBe(withFlag);
     expect(withoutFlag).not.toContain("reset=");
+  });
+});
+
+describe("#332 navigator rows", () => {
+  it("history-only failures keep the command in the row; an actionable incident still leads it", () => {
+    ensureBackgroundTasksNavigatorProvider({} as any);
+    ensureBackgroundTasksNavigator({ cwd: origin.cwd, hasUI: false, sessionManager: { getSessionId: () => origin.sessionId } } as any);
+    const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("background-tasks");
+    const quiet = fixture({ status: "running", endedAt: undefined, command: "rg needle src" });
+    recordFailure(quiet, "exit", "exited with declared expected code 1", "q1", { expected: true });
+    let row = provider.listRows(Date.now()).find((x: any) => x.id === quiet.id);
+    expect(row.primary).toBe("rg needle src");
+    expect(row.facts.join("\n")).not.toMatch(/Expected failure|No failures need action/);
+    expect(provider.detail(quiet.id, Date.now()).subtitle).toBe("rg needle src");
+    const loud = fixture({ status: "running", endedAt: undefined, command: "npm test" });
+    recordFailure(loud, "exit", "exited with code 2", "l1");
+    row = provider.listRows(Date.now()).find((x: any) => x.id === loud.id);
+    expect(row.primary).toMatch(/Action required/);
   });
 });

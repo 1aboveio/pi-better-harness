@@ -96,6 +96,21 @@ defaults.
 it is the `shared` value, then the configured default. Values are minutes and
 may be fractional. A job's own number (including `0`) wins over `shared`.
 
+**Known limits of the deadline hold.**
+
+- `max_minutes: 0` turns the ceiling off, and the ceiling is the only control
+  that bounds a tool call that never ends. With it off, a steer stuck behind a
+  hung tool call is never delivered, the deadline stop stays held, and the run
+  is never stopped. Keep a ceiling when a command can hang.
+- The parent reads at most the last 32 MiB of a child log after `/reload`. If
+  the log is larger and the running tool call started before that window, the
+  parent cannot see the call, so the hold is lost and grace counts from when
+  the steer was sent. The child can be stopped mid-call.
+- The child confirms delivery by matching the steer's exact text in its
+  conversation. If another extension rewrites user input (an input-transform
+  hook), the text no longer matches, no receipt is written, and grace silently
+  counts from when the steer was sent instead of when it arrived.
+
 **Progress**, defined simply: any successful tool call that is not an exact
 repeat of an earlier call in the same run. "Exact repeat" means the same tool
 name and the same arguments, with null and absent optional fields treated alike
