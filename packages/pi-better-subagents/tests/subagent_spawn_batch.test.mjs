@@ -407,6 +407,19 @@ describe("planBatchLaunches", () => {
 });
 
 describe("formatBatchLaunchResponse", () => {
+    it("appends a job's model note and leaves other lines bare", () => {
+        const text = formatBatchLaunchResponse({
+            batchId: "batch_note",
+            launched: [
+                { name: "dev", id: "sa_1", modelNote: "model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)" },
+                { name: "rev", id: "sa_2" },
+            ],
+            skipped: [],
+        });
+        assert.match(text, /^• dev → sa_1 · model openai\/gpt-6-astra@high \(role default openai\/gpt-6-sol@high\)$/m);
+        assert.match(text, /^• rev → sa_2$/m);
+    });
+
     it("formats a fully launched batch with batchName", () => {
         const text = formatBatchLaunchResponse({
             batchId: "batch_abc123",

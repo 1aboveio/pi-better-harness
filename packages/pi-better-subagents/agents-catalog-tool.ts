@@ -37,7 +37,7 @@ export function agentsCatalogTool(Type: TypeModule, deps: DiscoveryDeps = {}) {
     return {
         name: "agents_catalog" as const,
         label: "Agents catalog",
-        description: "List or inspect role and named-agent definitions, including inheritance, diagnostics, restrictions, and whether launchability is actually known. This tool does not create, import, or edit definitions.",
+        description: "List or inspect role and named-agent definitions, including inheritance, default model and effort, diagnostics, restrictions, and whether launchability is actually known. This tool does not create, import, or edit definitions.",
         promptSnippet: "List and inspect catalog roles and named agents, including inheritance and whether launchability is known.",
         promptGuidelines: [
             "Use agents_catalog to discover roles and named agents before subagent_spawn. It is read-only.",
@@ -46,6 +46,7 @@ export function agentsCatalogTool(Type: TypeModule, deps: DiscoveryDeps = {}) {
             "Ask the user to run /agents create or /agents import-codex for writes. Those commands confirm role, scope, and import replacement.",
             "Launch with the existing subagent_spawn or batch tool. Pass one agent or one role, not both. Two roles for one run need the user to choose one or split the work.",
             "Put an authoritative model or effort on the structured invocation. Do not rely on copying a model name into the child prompt. Explicit invocation and workflow choices override definition defaults.",
+            "Each entry shows its default model@effort when set. Omit model and thinking on the spawn to use it; name one only for a stated reason.",
         ],
         parameters: Type.Object({
             action: Type.String({ description: "list or inspect. No other action is accepted." }),

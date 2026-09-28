@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- Subagents: role default models are now visible, so an orchestrator stops guessing them. `agents_catalog` list and inspect lines end with each role's and named agent's default model and effort (for example `default openai/gpt-6-sol@high`), and the structured view carries it as `defaults`. The spawn and batch guidance says to omit `model` and `thinking` to use that default and to name one only for a stated reason. A catalog launch whose model or effort differs from its role or agent default says so on its launch line, for example `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`, including each batch job and batch `shared` settings; a launch on the default adds nothing. (#365)
+
 ## [pi-better-harness@0.10.0] - 2026-09-28
 
 ### Changed

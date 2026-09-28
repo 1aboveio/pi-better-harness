@@ -151,6 +151,7 @@ import {
     loadLaunchSnapshot,
     noteCatalogHost,
     prepareCatalogJob,
+    catalogDefaultNote,
     tiersForLaunch,
     type CatalogHost,
     type CatalogJobFields,
@@ -175,6 +176,7 @@ const projectConfigDirName = typeof (PiCodingAgent as { CONFIG_DIR_NAME?: unknow
     : ".pi";
 
 const CATALOG_GUIDELINES = [
+    "With an agent or role, omit model and thinking to launch on its default model and effort, which agents_catalog shows. Name a model or effort only for a stated reason, such as a task or workflow instruction, and never copy one from another role's runs.",
     "When a task, workflow, or skill instruction names a model or effort, translate that authoritative choice into the structured model and thinking arguments before spawning. The runtime does not parse prose, quoted model names, or comparisons, and copying a model into the child prompt does not change the launch.",
     "Optional agent, role, and alias select a catalog definition. Pass one agent id or one role id. Pass an array of role ids when one run was given more than one role: that call asks to choose one or split, and without a UI choice it returns clarification-needed and starts no child. Naming both an agent and a role does the same. One job's choice does not change another job. A named agent displays its defined name. A direct role displays the label allocated from the local run registry. Calls without agent or role keep the existing name and model chain.",
     "Catalog model and effort are resolved before the child starts. An unavailable explicit model or unsupported explicit effort does not launch and does not fall back. The catalog grants no tools, sandbox modes, extensions, or permissions.",
@@ -1551,6 +1553,8 @@ export default function (pi: ExtensionAPI) {
         runtime: string;
         warn: string;
         sandboxDir?: string;
+        /** Set only when a catalog run's model or effort differs from its role or agent default. */
+        modelNote?: string;
     }> {
         assertThinkingLevel(p.thinking);
         const permissionPlan = resolveSubagentPermissions(pi, p.sandbox);
@@ -1766,7 +1770,8 @@ export default function (pi: ExtensionAPI) {
               `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
               `Add a toolExtensions entry in config.json.\n`
             : "");
-        return { id, meta, spawned, runtime: runtime + (meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""), warn, sandboxDir };
+        const modelNote = catalogDefaultNote(p.catalog, model, thinking);
+        return { id, meta, spawned, runtime: runtime + (meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""), warn, sandboxDir, modelNote };
     }
 
     // ---- subagent_spawn -------------------------------------------------
@@ -1783,7 +1788,7 @@ export default function (pi: ExtensionAPI) {
             "After subagent_spawn, do NOT call subagent_output or subagent_result in a loop to wait for the result, and do NOT sleep. The run completes on its own and reports back on the next turn.",
             "Call subagent_result after a completion or attention callback, or when the user explicitly asks for the result. Use subagent_output only when the user explicitly asks how a run is progressing; never use either tool to poll.",
             ...SUBAGENT_ORCHESTRATION_GUIDELINES,
-            "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
+            "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
             "By default the subagent is sandboxed. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Without published settings, legacy write confinement applies. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Every run is timed by the harness: a soft deadline (default 30 min) steers the child to wrap up and wakes you once, the run is stopped after grace_minutes (reason deadline), a hard ceiling (default 90 min) stops it without grace (reason ceiling), and no progress for stuck_minutes (default 10) wakes you once (reason stuck). Set deadline_minutes/max_minutes/stuck_minutes to fit the task instead of writing a time limit into the prompt; do not stop a slow child that is still making progress.",
@@ -1795,8 +1800,8 @@ export default function (pi: ExtensionAPI) {
             agent: Type.Optional(Type.String({ description: "Named agent id (agent.<slug>). Mutually exclusive with role. The navigator shows the defined agent name." })),
             role: catalogRoleSchema("direct role launch"),
             alias: Type.Optional(Type.String({ description: "Per-run display alias for a direct role launch, such as checkout. Not a reusable agent. Colliding aliases gain a numeric suffix." })),
-            model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (for example openai/gpt-5.5@high). Providerless patterns are resolved by Pi. Default: inherit foreground model. Put authoritative model choices here; do not rely on prompt text." })),
-            thinking: Type.Optional(Type.String({ description: "Reasoning effort for the child: off, minimal, low, medium, high, xhigh, or max (default: Pi/model default)." })),
+            model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (for example openai/gpt-5.5@high). Providerless patterns are resolved by Pi. Omit to use the agent or role default; without one, inherit the foreground model. Put authoritative model choices here; do not rely on prompt text." })),
+            thinking: Type.Optional(Type.String({ description: "Reasoning effort for the child: off, minimal, low, medium, high, xhigh, or max. Omit to use the agent or role default; without one, the Pi/model default." })),
             tools: Type.Optional(Type.String({ description: "Tool allowlist: comma-separated names the child may use (e.g. 'read,bash,web_fetch'). This ALSO selects which extensions load — only packages backing a requested tool are loaded. Defaults to the configured safe set." })),
             exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist, applied on top of the allowlist." })),
             clean: Type.Optional(Type.Boolean({ description: "Run a hermetic child with NO extensions at all (only built-ins: read, bash, edit, write). Default false — the extensions backing the requested tools load, so web_fetch and model auth (e.g. xai) work." })),
@@ -1841,21 +1846,22 @@ export default function (pi: ExtensionAPI) {
                         throw new Error(`Choosing split needs ${catalog.jobs.length} subagent slots, but only one was free. Nothing was launched.`);
                     }
                     reserved += extra;
-                    const launched: { name?: string; id: string }[] = [];
+                    const launched: { name?: string; id: string; modelNote?: string }[] = [];
                     for (const job of catalog.jobs) {
-                        const { id } = await spawnSubagentRun(ctx, job);
+                        const { id, modelNote } = await spawnSubagentRun(ctx, job);
                         gate.commit(1);
                         reserved -= 1;
-                        launched.push({ name: job.name, id });
+                        launched.push({ name: job.name, id, modelNote });
                     }
-                    return text(launched.map((item) => `Subagent launched: ${item.name ? `${item.name} ` : ""}id=${item.id}.`).join("\n"));
+                    return text(launched.map((item) => `Subagent launched: ${item.name ? `${item.name} ` : ""}id=${item.id}.${item.modelNote ? ` ${item.modelNote}.` : ""}`).join("\n"));
                 }
                 Object.assign(p, catalog.jobs[0]);
-                const { id, spawned, runtime, warn, sandboxDir } = await spawnSubagentRun(ctx, p);
+                const { id, spawned, runtime, warn, sandboxDir, modelNote } = await spawnSubagentRun(ctx, p);
                 gate.commit(1);
                 reserved = 0;
                 return text(
                     `Subagent launched: ${p.name ? `${p.name} ` : ""}id=${id} (pid ${spawned.pid}).\n` +
+                    (modelNote ? `${modelNote[0]!.toUpperCase()}${modelNote.slice(1)}.\n` : "") +
                     (p.callback === false
                         ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
                         : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
@@ -1898,7 +1904,7 @@ export default function (pi: ExtensionAPI) {
                 agent: Type.Optional(Type.String({ description: "Named agent id applied to jobs that do not select their own agent or role." })),
                 role: catalogRoleSchema("shared role selector"),
                 alias: Type.Optional(Type.String({ description: "Direct-role alias applied when a job does not set alias." })),
-                model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort (default: inherit foreground model). Put authoritative model choices here; prompt text is not parsed." })),
+                model: Type.Optional(Type.String({ description: "Pi model pattern, preferably provider/id, optionally suffixed with @effort. Omit to use the agent or role default; without one, inherit the foreground model. Put authoritative model choices here; prompt text is not parsed." })),
                 thinking: Type.Optional(Type.String({ description: "Reasoning effort applied to every job: off, minimal, low, medium, high, xhigh, or max." })),
                 tools: Type.Optional(Type.String({ description: "Tool allowlist applied to every job." })),
                 exclude_tools: Type.Optional(Type.String({ description: "Comma-separated tool denylist applied to every job." })),
@@ -1997,7 +2003,7 @@ export default function (pi: ExtensionAPI) {
 
             const names = assignBatchJobNames(p.jobs);
             const batchId = nextBatchId();
-            const launched: { name: string; id: string }[] = [];
+            const launched: { name: string; id: string; modelNote?: string }[] = [];
             const failed: { name: string; reason: string }[] = [];
             const skipped: { name: string }[] = [];
             // How many reject-mode reserved slots are still held (not yet committed/released).
@@ -2035,10 +2041,10 @@ export default function (pi: ExtensionAPI) {
                             name = prepared.assign.name;
                         }
                     }
-                    const { id } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
+                    const { id, modelNote } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
                     gate.commit(1);
                     if (!launchAvailable) reservedRemaining -= 1;
-                    launched.push({ name, id });
+                    launched.push({ name, id, ...(modelNote ? { modelNote } : {}) });
                 } catch (err) {
                     gate.release(1);
                     if (!launchAvailable) reservedRemaining -= 1;

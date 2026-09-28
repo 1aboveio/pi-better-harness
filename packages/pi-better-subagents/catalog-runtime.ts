@@ -4,7 +4,7 @@
  * `spawnSubagentRun`. This module does not grant tools, sandbox modes, or
  * extensions, and it does not read task prose for model choices.
  */
-import { describeDefaultLaunchCapabilities, LEGACY_CAPABILITY_CONTROLS, type LaunchEnricher, type LaunchEnrichment } from "./agent-inspection.ts";
+import { describeDefaultLaunchCapabilities, formatModelEffort, LEGACY_CAPABILITY_CONTROLS, type LaunchEnricher, type LaunchEnrichment } from "./agent-inspection.ts";
 import { resolveSelection, type EffectiveDefinition } from "./catalog-resolver.ts";
 import { defaultUserRoot, loadCatalog, type CatalogSnapshot } from "./catalog-store.ts";
 import { loadConfig, type SubagentConfig } from "./config.ts";
@@ -250,6 +250,37 @@ export async function clarifyCatalogRequest(
     const ordered = [...clean, ...resolvedPure, ...resolvedMixed];
     ordered.sort((left, right) => sortKey(left) - sortKey(right));
     return { status: "resolved", jobs: ordered.map(stripBookkeeping) };
+}
+
+/**
+ * Launch-line note for a catalog run whose effective model or effort differs
+ * from the role or agent default, e.g.
+ * `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`.
+ * Undefined for a non-catalog run, a definition with no default, or a launch
+ * that matches the default. Only the fields the definition sets are compared.
+ */
+export function catalogDefaultNote(
+    record: Pick<CatalogRunRecord, "kind" | "effective"> | undefined,
+    model: string | undefined,
+    thinking: string | undefined,
+): string | undefined {
+    if (!record) return undefined;
+    const defaultModel = record.effective.model.value;
+    const defaultEffort = record.effective.effort.value;
+    const defaultLabel = formatModelEffort(defaultModel, defaultEffort);
+    if (!defaultLabel) return undefined;
+    const modelDiffers = defaultModel !== null && !sameModel(defaultModel, model);
+    const effortDiffers = defaultEffort !== null && defaultEffort !== (thinking ?? null);
+    if (!modelDiffers && !effortDiffers) return undefined;
+    const actual = formatModelEffort(model ?? "Pi default", thinking) ?? "Pi default";
+    return `model ${actual} (${record.kind} default ${defaultLabel})`;
+}
+
+function sameModel(defaultModel: string, actual: string | undefined): boolean {
+    if (actual === undefined) return false;
+    if (defaultModel === actual) return true;
+    // A providerless default resolves to provider/id; the id alone still matches.
+    return !defaultModel.includes("/") && actual.slice(actual.indexOf("/") + 1) === defaultModel;
 }
 
 export async function prepareCatalogJob(snapshot: CatalogSnapshot, job: CatalogJobFields, host: CatalogHost): Promise<PreparedCatalogJob> {

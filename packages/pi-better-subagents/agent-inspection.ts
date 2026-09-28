@@ -80,6 +80,23 @@ export interface OperationField {
     inherited: boolean;
 }
 
+export interface DefinitionDefaults {
+    model: string | null;
+    effort: string | null;
+    /** Compact `model@effort` form, as shown in the catalog list and launch notes. */
+    label: string;
+}
+
+/** `model@effort`, `model`, or `effort <level>` when only an effort is set. Undefined when neither is set. */
+export function formatModelEffort(model: string | null | undefined, effort: string | null | undefined): string | undefined {
+    const m = typeof model === "string" && model.trim() !== "" ? model : undefined;
+    const e = typeof effort === "string" && effort.trim() !== "" ? effort : undefined;
+    if (m && e) return `${m}@${e}`;
+    if (m) return m;
+    if (e) return `effort ${e}`;
+    return undefined;
+}
+
 export interface OperationCapabilities {
     grantedByCatalog: false;
     sameAsLegacySpawn: true;
@@ -113,6 +130,8 @@ export interface OperationView {
     instructionMode?: string;
     instructions?: string;
     fields?: { model: OperationField; effort: OperationField; tier: OperationField };
+    /** The definition's own default model and effort (role default, or the agent's override or inherited value). Null when neither is set. */
+    defaults: DefinitionDefaults | null;
     requestedModel: string | null;
     requestedEffort: string | null;
     actualModel: string | null;
@@ -311,6 +330,7 @@ export function presentCatalogEntry(snapshot: CatalogSnapshot, id: string, enric
         instructionMode: inspection.instructionMode,
         instructions: inspection.instructions,
         fields,
+        defaults: definitionDefaults(fields),
         requestedModel: enrichment?.requestedModel ?? fields?.model.value ?? null,
         requestedEffort: enrichment?.requestedEffort ?? (fields?.effort.value ?? null),
         actualModel: enrichment?.actualModel ?? null,
@@ -350,6 +370,7 @@ export function renderOperationView(view: OperationView): string {
         `definitionValid=${yesNo(view.definitionValid)}`,
         `catalogLaunchable=${yesNo(view.catalogLaunchable)}`,
         `launchable=${view.launchable === null ? "unknown" : yesNo(view.launchable)}`,
+        ...(view.defaults ? [`default ${view.defaults.label}`] : []),
     ].join(" ");
     const lines = [
         header,
@@ -395,6 +416,13 @@ export function renderOperationView(view: OperationView): string {
     }
     for (const diagnostic of view.validation) lines.push(`${diagnostic.code}: ${diagnostic.message}`);
     return lines.join("\n");
+}
+
+function definitionDefaults(fields: OperationView["fields"]): DefinitionDefaults | null {
+    const model = fields?.model.value ?? null;
+    const effort = fields?.effort.value ?? null;
+    const label = formatModelEffort(model, effort);
+    return label ? { model, effort, label } : null;
 }
 
 function field(value: { value: string | null; source: OperationField["source"]; explicit: boolean }): OperationField {
