@@ -121,9 +121,9 @@ the sandbox is enabled again.
 
 | | macOS (Seatbelt) | Linux (Bubblewrap) | Windows |
 | - | - | - | - |
-| Outside project = Write | Writes across home and temp. Removal and renaming refused outside the disposable places. | Fallback: ordinary top-level home folders (`~/projects`, `~/Documents`, …) and home itself are **read-only**. Dot entries, temp, worktree folders (found within three levels of home), and the workspace are writable, removal included. A directory holding a protected symlink (typically `~/.config` with a stow link such as `~/.config/git`) keeps its existing entries writable but refuses new top-level entries. | No backend: confined launches fail closed. |
+| Outside project = Write | Writes across home and temp. Removal and renaming refused outside the disposable places. | Fallback: ordinary top-level home folders (`~/projects`, `~/Documents`, …) and home itself are **read-only**. Dot entries, temp, worktree folders (found within three levels of home), and the workspace are writable, removal included. A directory holding a protected symlink (typically `~/.config` with a stow link such as `~/.config/git`) keeps its existing entries writable but refuses new top-level entries. A protected symlink pointing at nothing can get an empty read-only placeholder that stays on disk; the launch says so, and you remove the placeholder before creating the real target. | No backend: confined launches fail closed. |
 | Project files = Write | Enforced. | **Refused at launch** (bind mounts cannot separate removal from writing). Use Write & delete or Read. | No backend. |
-| Deny list | Path rules. | Credentials masked by empty mode-000 mounts. Code that runs later is bound read-only. | No backend. |
+| Deny list | Path rules, matched ignoring case on every volume (as Seatbelt does). | Credentials masked by empty mode-000 mounts. Code that runs later is bound read-only. | No backend. |
 
 Linux could separate removal from writing with Landlock (5.19+), but nothing
 here can apply it: Node has no binding and `bwrap` does not expose it. Windows

@@ -317,6 +317,7 @@ describe("foreground sandbox launch planning", () => {
       }, (line) => notices.push(line));
       expect(notices).toHaveLength(1);
       expect(notices[0]).toContain(join(project, "rc"));
+      expect(notices[0]).toContain("remove it before creating the real target");
       expect(existsSync(join(project, "rc"))).toBe(true);
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
