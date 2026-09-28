@@ -10,8 +10,8 @@ import {
 } from "./shared-navigator.ts";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { activeFailures, failureLabel, readFailureState } from "./shared-failure-observations.js";
-import { failurePath, failureSummary } from "./failures.js";
+import { actionableFailures, failureLabel, readFailureState } from "./shared-failure-observations.js";
+import { failurePath, failureView } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
 import { stopTask } from "./runtime.js";
@@ -105,7 +105,9 @@ function isExpiredTerminalNavigatorRow(meta: BackgroundTaskMeta, now: number): b
 }
 
 function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
-  const failure = failureSummary(meta.id);
+  // Only a failure that needs action replaces the row's command; history stays in the detail view (#332).
+  const view = failureView(meta.id);
+  const failure = view.actionable ? view.text : "";
   const elapsed = formatDuration((meta.endedAt ?? now) - meta.startedAt);
   return {
     providerId: "background-tasks",
@@ -129,7 +131,8 @@ function rowFromMeta(meta: BackgroundTaskMeta, now: number): BackgroundWorkRow {
 
 function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
   if (!meta) return null;
-  const failure = failureSummary(meta.id);
+  const view = failureView(meta.id);
+  const failure = view.text;
   const log = readLog(meta.logPath, options?.logTailLines ?? NAVIGATOR_DETAIL_ROWS);
   const command = commandLabel(meta);
   const metadata = [
@@ -164,7 +167,7 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
     title: meta.name || meta.id,
     status: meta.status,
     statusTone: toneForStatus(meta.status),
-    subtitle: failure ? failure.split("\n")[0]! : compactCommandLabel(meta),
+    subtitle: view.actionable ? failure.split("\n")[0]! : compactCommandLabel(meta),
     metadata,
     foldedSections: [{
       id: "command",
@@ -217,7 +220,7 @@ function secondaryLabel(meta: BackgroundTaskMeta): string | undefined {
 
 function factsForMeta(meta: BackgroundTaskMeta, now: number): string[] {
   const facts: string[] = [];
-  const incident = activeFailures(readFailureState(failurePath(meta.id)))[0];
+  const incident = actionableFailures(readFailureState(failurePath(meta.id)))[0];
   if (incident) facts.push(`${failureLabel(incident)}: ${incident.summary}`);
   if (meta.status === "running") {
     const stall = observeBackgroundTaskStall(meta, now);

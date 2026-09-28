@@ -49,7 +49,7 @@ Sandboxed children (the task runtime) get two structured additions. The parent h
 
 - `bash` accepts optional `operationId`, `attemptId`, and `expectedExitCodes`, validated before the command runs.
   - `operationId` names one logical operation across modified retries. A later success with the same `operationId` (a changed scope, timeout, or flag) recovers the earlier failure automatically. Without it, the exact rule applies. `attemptId` names one execution for use as evidence and never changes operation identity.
-  - `expectedExitCodes` (distinct integers 1–255) declares intentional non-zero exits, such as `[1]` for an `rg`/`grep` no-match or a `git diff --exit-code` probe. Only the final shell exit code is classified, taken from the tool's structured result, never from output text. Timeouts, aborts, and undeclared codes stay ordinary failures.
+  - `expectedExitCodes` (distinct integers 1–255; a `0` is ignored, since exit 0 is already success) declares intentional non-zero exits, such as `[1]` for an `rg`/`grep` no-match or a `git diff --exit-code` probe. Only the final shell exit code is classified, taken from the tool's structured result, never from output text. Timeouts, aborts, and undeclared codes stay ordinary failures.
 - `failure_disposition({ disposition, targets, reason, evidence? })` records an explicit classification of the child's own incidents:
   - `recovered`: the same operation later passed. Evidence must be a successful attempt of that operation that started after the failure.
   - `superseded`: a different verification or remediation established the outcome, such as resolving a merge conflict and continuing. Evidence must be a successful attempt that started after the failure.

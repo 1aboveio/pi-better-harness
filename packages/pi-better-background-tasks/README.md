@@ -151,7 +151,7 @@ evidence is reported as **observation incomplete**.
 Pass `operation_id` and `expected_exit_codes` on `bg_task_spawn`, `bg_task_watch`,
 or `bg_task` to declare intent before launch; a malformed declaration starts
 nothing. An exit code in `expected_exit_codes` (distinct integers 1-255, such as
-`[1]` for a no-match probe) is recorded as an **Expected failure** that needs no
+`[1]` for a no-match probe; a `0` is ignored) is recorded as an **Expected failure** that needs no
 action; signals and timeouts never are. When a task with an `operation_id`
 succeeds, earlier failed tasks with the same `operation_id`, kind, cwd, SSH
 target, and owner (the same session id, or for sessionless tasks the same Pi

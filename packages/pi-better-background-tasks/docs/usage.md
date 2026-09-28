@@ -294,7 +294,7 @@ validated before launch (a malformed value starts nothing):
   failures of earlier tasks that failed before it started are recovered. Use it
   when a retry changes the command, scope, or timeout.
 - `expected_exit_codes`: distinct non-zero exit codes (1-255) that are
-  intentional, such as `[1]` for a `grep`/`rg` no-match or `git diff
+  intentional (a `0` is ignored, since exit 0 is already success), such as `[1]` for a `grep`/`rg` no-match or `git diff
   --exit-code` probe. A matching process exit or watch poll is recorded as an
   expected failure, not one needing action. The task's status still reports the
   exit; signals and timeouts are never expected.
