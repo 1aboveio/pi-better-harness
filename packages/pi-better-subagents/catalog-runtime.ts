@@ -4,7 +4,7 @@
  * `spawnSubagentRun`. This module does not grant tools, sandbox modes, or
  * extensions, and it does not read task prose for model choices.
  */
-import { describeDefaultLaunchCapabilities, LEGACY_CAPABILITY_CONTROLS, type LaunchEnricher, type LaunchEnrichment } from "./agent-inspection.ts";
+import { describeDefaultLaunchCapabilities, formatModelEffort, LEGACY_CAPABILITY_CONTROLS, type LaunchEnricher, type LaunchEnrichment } from "./agent-inspection.ts";
 import { resolveSelection, type EffectiveDefinition } from "./catalog-resolver.ts";
 import { defaultUserRoot, loadCatalog, type CatalogSnapshot } from "./catalog-store.ts";
 import { loadConfig, type SubagentConfig } from "./config.ts";
@@ -250,6 +250,57 @@ export async function clarifyCatalogRequest(
     const ordered = [...clean, ...resolvedPure, ...resolvedMixed];
     ordered.sort((left, right) => sortKey(left) - sortKey(right));
     return { status: "resolved", jobs: ordered.map(stripBookkeeping) };
+}
+
+/**
+ * Launch-line note for a catalog run whose effective model or effort differs
+ * from the role or agent default. The wording names the cause, so a fallback
+ * or a capped effort is not mistaken for a caller override:
+ * - override: `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`
+ * - fallback: `model xai/grok-4.7@high (role default openai/gpt-6-sol@high unavailable; foreground fallback)`
+ * - capped effort: `model openai/gpt-6-sol@medium (role default openai/gpt-6-sol@high; effort capped at medium by the model)`
+ * Undefined for a non-catalog run, a definition with no default, or a launch
+ * that matches the default. Only the fields the definition sets are compared.
+ */
+export function catalogDefaultNote(
+    record: Pick<CatalogRunRecord, "kind" | "effective" | "modelSelection" | "effortSelection"> | undefined,
+    model: string | undefined,
+    thinking: string | undefined,
+): string | undefined {
+    if (!record) return undefined;
+    const defaultModel = record.effective.model.value;
+    const defaultEffort = record.effective.effort.value;
+    const defaultLabel = formatModelEffort(defaultModel, defaultEffort);
+    if (!defaultLabel) return undefined;
+    const modelSource = record.modelSelection?.source;
+    const modelFallback = defaultModel !== null && modelSource !== undefined && FALLBACK_SOURCES.has(modelSource);
+    const modelDiffers = defaultModel !== null && (modelFallback || !sameModel(defaultModel, model, modelSource));
+    const effortCapped = defaultEffort !== null && record.effortSelection?.adjusted === true && (thinking ?? null) !== defaultEffort;
+    const effortDiffers = defaultEffort !== null && (thinking ?? null) !== defaultEffort;
+    if (!modelDiffers && !effortDiffers) return undefined;
+    const actual = formatModelEffort(model ?? "Pi default", thinking) ?? "Pi default";
+    const causes = [
+        modelFallback ? `${record.kind} default ${defaultLabel} unavailable; ${FALLBACK_LABELS[modelSource!] ?? modelSource} fallback` : `${record.kind} default ${defaultLabel}`,
+        ...(effortCapped ? [`effort capped at ${thinking ?? "the model default"} by the model`] : []),
+    ];
+    return `model ${actual} (${causes.join("; ")})`;
+}
+
+/** Model sources that mean the default could not be used, not that the caller chose another model. */
+const FALLBACK_SOURCES: ReadonlySet<string> = new Set(["tier-candidate", "foreground", "configured-default"]);
+const FALLBACK_LABELS: Record<string, string> = {
+    "tier-candidate": "same-tier",
+    foreground: "foreground",
+    "configured-default": "configured-default",
+};
+
+function sameModel(defaultModel: string, actual: string | undefined, source: string | undefined): boolean {
+    // The resolver launched the definition's own preference: same model, however it was spelled.
+    if (source === "role-default" || source === "agent-override") return true;
+    if (actual === undefined) return false;
+    if (defaultModel === actual) return true;
+    // A providerless default names the id; the resolved provider/id (the id may itself contain "/") still matches.
+    return !defaultModel.includes("/") ? actual.endsWith(`/${defaultModel}`) : false;
 }
 
 export async function prepareCatalogJob(snapshot: CatalogSnapshot, job: CatalogJobFields, host: CatalogHost): Promise<PreparedCatalogJob> {

@@ -43,6 +43,13 @@ uses `agents_catalog` to discover current role descriptions and delegates every
 nontrivial role-owned task, while the foreground coordinates, integrates, and
 verifies. See [usage notes](docs/usage.md#delegation-mode).
 
+`agents_catalog` shows each role's and named agent's default model and effort,
+such as `default openai/gpt-6-sol@high`. To launch on that default, omit
+`model` and `thinking` on a role or agent spawn; name one only for a stated
+reason. When a launch's model or effort differs from the default, its launch
+line says so, for example
+`model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`.
+
 ## When To Use
 
 Use this package for independent coding, review, research, or verification work that can finish later. Do not use it for steps that need immediate foreground interaction or user clarification.

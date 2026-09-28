@@ -52,6 +52,8 @@ Codex applies the agent file's model and `model_reasoning_effort` ahead of the c
 
 `agents_catalog` accepts `list` and `inspect` only. It uses the same inspection view as `/agents show`. It has no write path. Launch remains `subagent_spawn` or the batch tool, with at most one `agent` or `role` selector. Those selectors are lifecycle's wiring, not this tool.
 
+Each list line and the inspect header end with the definition's default model and effort when one is set, such as `default openai/gpt-6-sol@high`: a role's own default, or a named agent's override or inherited role default. The structured view carries the same value as `defaults: { model, effort, label }`, or `null` when neither is set. A spawn that omits `model` and `thinking` uses it. When a catalog launch's model or effort differs from it, the launch line (and each batch job line) adds a note such as `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`. Only the fields the definition sets are compared. The note names the cause: a fallback from an unavailable default reads `(role default openai/gpt-6-sol@high unavailable; foreground fallback)` (or `same-tier` / `configured-default`), and an effort the model cannot run adds `effort capped at <level> by the model`.
+
 ## Lifecycle attachment
 
 ```ts

@@ -22,6 +22,7 @@ const {
     loadLaunchSnapshot,
     noteCatalogHost,
     prepareCatalogJob,
+    catalogDefaultNote,
     roleSlug,
     tiersForLaunch,
 } = await import("../catalog-runtime.ts");
@@ -86,6 +87,46 @@ ${body}
 
 describe("catalog runtime", () => {
     after(() => setConfigForTests(undefined));
+
+    it("compares only the default fields a definition sets", () => {
+        const record = (kind, model, effort, modelSource = "invocation", adjusted = false) => ({
+            kind,
+            effective: {
+                model: { value: model, source: "role-default", explicit: false },
+                effort: { value: effort, source: "role-default", explicit: false },
+                tier: { value: null, source: "absent", explicit: false },
+            },
+            modelSelection: { source: modelSource },
+            effortSelection: { adjusted },
+        });
+        assert.equal(catalogDefaultNote(undefined, "openai/gpt-6-astra", "high"), undefined);
+        assert.equal(catalogDefaultNote(record("role", null, null), "openai/gpt-6-astra", "high"), undefined);
+        assert.equal(catalogDefaultNote(record("role", "openai/gpt-6-sol", "high"), "openai/gpt-6-sol", "high"), undefined);
+        // A providerless default matches its resolved provider/id, including a nested id.
+        assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null), "openai/gpt-6-sol", "low"), undefined);
+        assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null), "openrouter/openai/gpt-6-sol", "low"), undefined);
+        assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null, "role-default"), "openrouter/openai/gpt-6-sol", undefined), undefined);
+        assert.equal(
+            catalogDefaultNote(record("role", "openai/gpt-6-sol", "high", "tier-candidate"), "openai/gpt-6-sol-backup", "high"),
+            "model openai/gpt-6-sol-backup@high (role default openai/gpt-6-sol@high unavailable; same-tier fallback)",
+        );
+        assert.equal(
+            catalogDefaultNote(record("role", "openai/gpt-6-sol", "xhigh", "role-default", true), "openai/gpt-6-sol", "high"),
+            "model openai/gpt-6-sol@high (role default openai/gpt-6-sol@xhigh; effort capped at high by the model)",
+        );
+        assert.equal(
+            catalogDefaultNote(record("agent", "openai/gpt-6-sol", "xhigh", "configured-default", true), "openai/gpt-6-luna", "high"),
+            "model openai/gpt-6-luna@high (agent default openai/gpt-6-sol@xhigh unavailable; configured-default fallback; effort capped at high by the model)",
+        );
+        assert.equal(
+            catalogDefaultNote(record("agent", "openai/gpt-6-sol", null), "openai/gpt-6-astra", undefined),
+            "model openai/gpt-6-astra (agent default openai/gpt-6-sol)",
+        );
+        assert.equal(
+            catalogDefaultNote(record("role", null, "high"), "openai/gpt-6-astra", "low"),
+            "model openai/gpt-6-astra@low (role default effort high)",
+        );
+    });
 
     it("resolves a named agent before launch and keeps the defined name", async () => {
         const fx = fixture();
@@ -472,6 +513,7 @@ fi
         }, null, null, ctx());
         const text = textOf(result);
         assert.match(text, /Payments Developer/);
+        assert.match(text, /^Model openai\/gpt-6-astra@high \(agent default openai\/gpt-6-sol@high\)\.$/m);
         const id = text.match(/id=(sa_\S+)/)[1];
         const run = join(runtimeTmp, "pi-better-subagents", "runs", id);
         const meta = JSON.parse(readFileSync(join(run, "meta.json"), "utf8"));
@@ -517,6 +559,9 @@ fi
 
         const namedId = runIdFrom(namedResult);
         const roleId = runIdFrom(roleResult);
+        // A fallback is worded as a fallback, so the parent does not mistake it for an override to undo.
+        assert.match(textOf(namedResult), /^Model xai\/grok-4\.7@high \(agent default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
+        assert.match(textOf(roleResult), /^Model xai\/grok-4\.7@high \(role default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
         const named = metaOf(namedId);
         const role = metaOf(roleId);
         const roleInstructions = loadCatalog({
@@ -567,6 +612,7 @@ fi
             tools: "read,bash",
             sandbox: false,
         }, null, null, ctx());
+        assert.doesNotMatch(textOf(result), /default/);
         const id = textOf(result).match(/id=(sa_\S+)/)[1];
         const meta = JSON.parse(readFileSync(join(runtimeTmp, "pi-better-subagents", "runs", id, "meta.json"), "utf8"));
         assert.equal(meta.name, "legacy-name");
@@ -606,6 +652,9 @@ fi
         const text = textOf(result);
         const ids = [...text.matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
         assert.equal(ids.length, 2);
+        // Both jobs name their own defaults explicitly, so neither launch line carries a note.
+        assert.match(text, /• Payments Developer → sa_[a-z0-9_]+$/m);
+        assert.match(text, /• Review Agent → sa_[a-z0-9_]+$/m);
         const metas = ids.map((id) => JSON.parse(readFileSync(join(runtimeTmp, "pi-better-subagents", "runs", id, "meta.json"), "utf8")));
         assert.equal(metas[0].catalog.snapshotDigest, metas[1].catalog.snapshotDigest);
         assert.equal(metas[0].model, "openai/gpt-6-sol");
@@ -613,6 +662,55 @@ fi
         assert.equal(metas[0].effort, "high");
         assert.equal(metas[1].effort, "medium");
         assert.notEqual(metas[0].catalog.id, metas[1].catalog.id);
+    });
+
+    it("adds no model note when a role launch uses its default", async (t) => {
+        setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+        t.after(() => setConfigForTests(undefined));
+        const result = await tools.subagent_spawn.execute("tc", {
+            prompt: "Build on the default.",
+            role: "role.developer",
+            tools: "read,bash",
+            sandbox: false,
+        }, null, null, ctx());
+        const text = textOf(result);
+        assert.doesNotMatch(text, /default openai/);
+        const meta = metaOf(runIdFrom(result));
+        assert.equal(meta.model, "openai/gpt-6-sol");
+        assert.equal(meta.effort, "high");
+    });
+
+    it("notes an effort-only override against the role default", async (t) => {
+        setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+        t.after(() => setConfigForTests(undefined));
+        const result = await tools.subagent_spawn.execute("tc", {
+            prompt: "Build lighter.",
+            role: "role.developer",
+            thinking: "low",
+            tools: "read,bash",
+            sandbox: false,
+        }, null, null, ctx());
+        assert.match(textOf(result), /^Model openai\/gpt-6-sol@low \(role default openai\/gpt-6-sol@high\)\.$/m);
+    });
+
+    it("notes a batch shared model override on every job it changes", async (t) => {
+        setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+        t.after(() => setConfigForTests(undefined));
+        const result = await tools.subagent_spawn_batch.execute("tc", {
+            jobs: [
+                { prompt: "Implement A.", alias: "dev-a" },
+                { prompt: "Implement B.", alias: "dev-b" },
+                { prompt: "Review.", role: "role.reviewer", alias: "rev" },
+            ],
+            shared: { role: "role.developer", model: "openai/gpt-6-astra", tools: "read,bash", sandbox: false },
+        }, null, null, ctx());
+        const text = textOf(result);
+        const lines = text.split("\n").filter((line) => line.startsWith("• "));
+        assert.equal(lines.length, 3, text);
+        assert.match(lines[0], /^• \S*dev-a\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role default openai\/gpt-6-sol@high\)$/);
+        assert.match(lines[1], /^• \S*dev-b\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role default openai\/gpt-6-sol@high\)$/);
+        // The reviewer default is astra@medium, so the shared model changes nothing there.
+        assert.match(lines[2], /^• \S*rev\S* → sa_[a-z0-9_]+$/);
     });
 
     it("treats a blocked catalog job as a batch failure and does not start that child", async () => {
@@ -812,6 +910,7 @@ fi
                 tools: "read,bash",
                 sandbox: false,
             }, null, null, host);
+            assert.match(textOf(result), /^Model openai\/gpt-6-sol-backup@high \(role default openai\/gpt-6-sol@high unavailable; same-tier fallback\)\.$/m);
             const meta = metaOf(runIdFrom(result));
             assert.equal(meta.model, "openai/gpt-6-sol-backup");
             assert.equal(meta.effort, "high");
@@ -830,6 +929,13 @@ fi
         assert.equal(inspected.details.view.launchable, true);
         assert.equal(inspected.details.view.actualModel, "openai/gpt-6-sol");
         assert.equal(inspected.details.view.actualEffort, "high");
+        assert.deepEqual(inspected.details.view.defaults, { model: "openai/gpt-6-sol", effort: "high", label: "openai/gpt-6-sol@high" });
+        assert.match(inspected.content[0].text.split("\n")[0], / default openai\/gpt-6-sol@high$/);
+        const listed = await tools.agents_catalog.execute("tc", { action: "list" }, null, null, ctx());
+        const agentLine = listed.content[0].text.split("\n").find((line) => line.startsWith("agent agent.payments "));
+        assert.ok(agentLine?.endsWith(" default openai/gpt-6-sol@high"), agentLine);
+        const agentEntry = listed.details.entries.find((entry) => entry.id === "agent.payments");
+        assert.equal(agentEntry.defaults.label, "openai/gpt-6-sol@high");
         assert.equal(inspected.details.view.capabilities.grantedByCatalog, false);
         assert.equal(inspected.details.wrote, false);
     });

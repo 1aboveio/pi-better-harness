@@ -215,8 +215,8 @@ export function formatBatchLaunchResponse({ batchId, batchName, launched, skippe
         lines.push(
             `Batch ${label} launched ${launched.length} subagent(s):`,
         );
-        for (const { name, id } of launched) {
-            lines.push(`• ${name} → ${id}`);
+        for (const { name, id, modelNote } of launched) {
+            lines.push(`• ${name} → ${id}${modelNote ? ` · ${modelNote}` : ""}`);
         }
     }
 

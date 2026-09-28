@@ -497,6 +497,16 @@ describe("catalog discovery and inheritance", () => {
             for (const entry of snapshot.roles.values()) {
                 assert.match(presented.text, new RegExp(`description: ${JSON.stringify(entry.definition.description).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
             }
+            // Each list line names the role's default model@effort, in text and in details.
+            const listLines = presented.text.split("\n");
+            for (const approved of APPROVED_ROLE_DEFAULTS) {
+                const label = `${approved.model}@${approved.effort}`;
+                const line = listLines.find((item) => item.startsWith(`role ${approved.id} `));
+                assert.ok(line, approved.id);
+                assert.ok(line.endsWith(` default ${label}`), line);
+                const entry = presented.entries.find((item) => item.id === approved.id);
+                assert.deepEqual(entry.defaults, { model: approved.model, effort: approved.effort, label });
+            }
         } finally {
             ctx.cleanup();
         }
