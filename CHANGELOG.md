@@ -6,11 +6,35 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.8.0] - 2026-09-28
+
+### Changed
+
+- Bundle subagents 0.7.0, background-tasks 0.5.0 and sandbox 0.7.0: sandboxed subagents get a guarded `apply_patch` and the trusted tools ticked in `/sandbox` → Subagents · Tools (`web_fetch` and `web_search` by default); the Linux sandbox no longer locks a whole directory for a dotfile symlink and protects dangling symlink targets; the navigator no longer freezes the keyboard after closing a row or stacks overlays; history-only rows show their normal columns again.
+
+### Fixed
+
+- The publish workflow waits up to 10 minutes (backing off 5 s to 60 s) for the new version and checks the registry's version document, not only `npm view`, so a slow but successful publish still gets its tag and GitHub release. A rerun skips a version that is already on npm. (#332)
+- The navigator TUI e2e and the other root script suites run against a private registry, so they no longer leave `by-parent-active/<pid>/sa_navigator_e2e_*` markers or tasks in the real `$TMPDIR` registries. The background-tasks suite no longer leaks an empty temp directory for each fully skipped test file, and its macOS process-tree stop test counts zombies and a vanished process group as stopped. (#332)
+
+## [pi-better-sandbox@0.7.0] - 2026-09-28
+
+### Added
+
+- `/sandbox` gains a Subagents · Tools section. Guarded tools follow the file rules; trusted tools (the other tools your Pi has loaded, by package) run outside them and need a second Space to tick. Defaults: `apply_patch`, `web_fetch` and `web_search` on. A ticked trusted tool's package loads into the child (a single extension file with no manifest loads by itself, never its directory), which admits the tool only when its name and package both match. Known network tool names (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network is Off; a ticked tool whose package can't be found is refused at launch. Settings persist in the permissions file. See ADR 0009. (#351)
+- Upgrading: existing sandbox permission files have no Tools settings, so they pick up the defaults, and `apply_patch`, `web_fetch` and `web_search` become available to sandboxed subagents. Untick them in `/sandbox` → Subagents · Tools to opt out. (#351)
+
+### Fixed
+
+- On Linux, a protected symlink inside a writable dot directory (a stow link such as `~/.config/git -> ../dotfiles/.config/git`, or mise's `~/.local/bin -> ~/.local/share/mise/shims`) no longer makes that whole directory read-only. The directory stays read-only so the link can't be replaced, but every existing entry in it is bound writable again; only creating new top-level entries there is refused. Symlink entries and protected entries are never re-bound. A symlink loop among those links no longer fails every launch with "Cannot protect denied path": the looping links are protected and the loop is left unresolvable. A dangling link inside a writable directory no longer fails the launch either. (#345)
+- A protected entry that is a dangling symlink (for example `~/.zshrc -> ~/.dotfiles/zshrc` with the target missing) now protects the path it would resolve to, on macOS and Linux: the task can't create the target or any missing directory on the way to it, and existing ancestors can't be renamed. On Linux the target's nearest existing directory is locked the same way as above rather than getting a placeholder file. The subagents and background-tasks copies of the sandbox core carry the same fixes. (#345)
+
+## [pi-better-subagents@0.7.0] - 2026-09-28
+
 ### Added
 
 - Confined subagents get a guarded `apply_patch`: the Codex tool's name, schema and patch format (`*** Begin Patch`, Add/Update/Delete File, `*** Move to`, `@@` hunks), applied only through the task's guarded file operations and a new guarded remove, which judges both the resolved target and the entry itself without following it, so a link planted in `~/.ssh`, `~/.pi` or a sibling repository can't be removed. The Project files / Outside project levels govern it exactly as they govern write, edit and bash. The whole patch is checked before anything is written, no file is left half-patched, and a failure part-way reports what was and wasn't applied. (#351)
-- `/sandbox` gains a Subagents · Tools section. Guarded tools follow the file rules; trusted tools (the other tools your Pi has loaded, by package) run outside them and need a second Space to tick. Defaults: `apply_patch`, `web_fetch` and `web_search` on. A ticked trusted tool's package loads into the child (a single extension file with no manifest loads by itself, never its directory), which admits the tool only when its name and package both match. Known network tool names (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network is Off; a ticked tool whose package can't be found is refused at launch. Settings persist in the permissions file. See ADR 0009. (#351)
-- Upgrading: existing sandbox permission files have no Tools settings, so they pick up the defaults, and `apply_patch`, `web_fetch` and `web_search` become available to sandboxed subagents. Untick them in `/sandbox` → Subagents · Tools to opt out. (#351)
+- Trusted tools ticked in `/sandbox` → Subagents · Tools load into sandboxed children and are admitted only from their own package (or, for a single extension file, that file); known network tools are refused while Network is Off. (#351)
 
 ### Changed
 
@@ -18,13 +42,9 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
-- **subagents**, **background-tasks**: pressing `x` twice in the navigator detail view no longer leaves a hidden list overlay that swallows every key. The view moves to the next row's detail (or the previous one); when nothing is left, it closes and typing reaches the editor again. (#332)
-- **subagents**, **background-tasks**: if the navigator detail view loses focus while it is open (for example, another extension re-installs the editor), moving through the work list reuses it instead of stacking a second overlay. Esc closes the navigator rather than revealing an older one underneath, and hands focus to the editor Pi has mounted now, not the one that was mounted when the view opened. Esc also closes such a view when no work is left in the list. (#332)
-- **subagents**, **background-tasks**: an expanded output section in the navigator detail view fits the terminal, and its `showing N/M rows` count matches what is on screen. A terminal shorter than the work list plus the editor no longer gets more lines than it has rows; the input frame stays at the bottom. (#332)
-- **background-tasks**: after `/reload`, the check on a task still run by the earlier instance backs off from 250 ms to 4 s instead of reading the task's metadata four times a second for as long as it runs. (#332)
-- **background-tasks**: the README's "Reloads and session switches" now says an exit during a session switch is recorded only while the same Pi process stays open; after Pi quits, a resumed task whose process is gone is marked lost. (#332)
-- **release**: the publish workflow waits up to 10 minutes (backing off 5 s to 60 s) for the new version and checks the registry's version document, not only `npm view`, so a slow but successful publish still gets its tag and GitHub release. A rerun skips a version that is already on npm. (#332)
-- **tests**: the navigator TUI e2e and the other root script suites run against a private registry, so they no longer leave `by-parent-active/<pid>/sa_navigator_e2e_*` markers or tasks in the real `$TMPDIR` registries. The background-tasks suite no longer leaks an empty temp directory for each fully skipped test file, and its macOS process-tree stop test counts zombies and a vanished process group as stopped. (#332)
+- Pressing `x` twice in the navigator detail view no longer leaves a hidden list overlay that swallows every key. The view moves to the next row's detail (or the previous one); when nothing is left, it closes and typing reaches the editor again. (#332)
+- If the navigator detail view loses focus while it is open (for example, another extension re-installs the editor), moving through the work list reuses it instead of stacking a second overlay. Esc closes the navigator rather than revealing an older one underneath, and hands focus to the editor Pi has mounted now, not the one that was mounted when the view opened. Esc also closes such a view when no work is left in the list. (#332)
+- An expanded output section in the navigator detail view fits the terminal, and its `showing N/M rows` count matches what is on screen. A terminal shorter than the work list plus the editor no longer gets more lines than it has rows; the input frame stays at the bottom. (#332)
 - Navigator rows for subagents and background tasks show their normal columns (model, effort, tool, tokens, or the command) again when a run only has failure history. Failure text leads a row only when something needs action; the "No failures need action · … (history)" line stays in the detail view. (#332)
 - After an exact-rule scan (run metadata unreadable), a later trusted rescan no longer closes the "run metadata could not be read" gap while a leftover it cannot re-key (a failure whose call declared intent) is unresolved. The gap is re-checked on every scan and closes once those leftovers are resolved; a plain failure never holds it. (#332)
 - The provenance sweep deletes a run's trust record only when the run directory is definitely gone (ENOENT), not on any stat error. (#332)
@@ -34,8 +54,22 @@ All notable changes to this project are documented in this file. The format is b
 - Unconfined runs treat an explicit-null intent field like an absent one, so `{command, expectedExitCodes: null}` and `{command}` are the same operation. (#332)
 - A `null` canonical output control no longer hides its deprecated alias (`{max_bytes: null, maxBytes: 300}` uses 300); `include: 42` gets an unknown-value note; a `bg_task_list` page cursor passed to `bg_task_status` gets a clear note instead of a stale-cursor reset. (#332)
 - Docs: the subagent run-timing notes now cover three limits of the deadline hold: `max_minutes: 0` means a steer stuck behind a hung tool call is never stopped, `/reload` on a child log over 32 MiB can lose the hold, and the steer receipt matches the steer by exact text. (#332)
-- **sandbox**: on Linux, a protected symlink inside a writable dot directory (a stow link such as `~/.config/git -> ../dotfiles/.config/git`, or mise's `~/.local/bin -> ~/.local/share/mise/shims`) no longer makes that whole directory read-only. The directory stays read-only so the link can't be replaced, but every existing entry in it is bound writable again; only creating new top-level entries there is refused. Symlink entries and protected entries are never re-bound. A symlink loop among those links no longer fails every launch with "Cannot protect denied path": the looping links are protected and the loop is left unresolvable. A dangling link inside a writable directory no longer fails the launch either. (#345)
-- **sandbox**: a protected entry that is a dangling symlink (for example `~/.zshrc -> ~/.dotfiles/zshrc` with the target missing) now protects the path it would resolve to, on macOS and Linux: the task can't create the target or any missing directory on the way to it, and existing ancestors can't be renamed. On Linux the target's nearest existing directory is locked the same way as above rather than getting a placeholder file. The subagents and background-tasks copies of the sandbox core carry the same fixes. (#345)
+
+## [pi-better-background-tasks@0.5.0] - 2026-09-28
+
+### Changed
+
+- `expectedExitCodes` (subagent bash) and `expected_exit_codes` (background tasks) accept `0` and drop it, since exit 0 is already success; a list of only zeros declares nothing. Before, a call that listed `0` was refused and wasted a turn. The schema descriptions say so. (#332)
+
+### Fixed
+
+- Pressing `x` twice in the navigator detail view no longer leaves a hidden list overlay that swallows every key. The view moves to the next row's detail (or the previous one); when nothing is left, it closes and typing reaches the editor again. (#332)
+- If the navigator detail view loses focus while it is open (for example, another extension re-installs the editor), moving through the work list reuses it instead of stacking a second overlay. Esc closes the navigator rather than revealing an older one underneath, and hands focus to the editor Pi has mounted now, not the one that was mounted when the view opened. Esc also closes such a view when no work is left in the list. (#332)
+- An expanded output section in the navigator detail view fits the terminal, and its `showing N/M rows` count matches what is on screen. A terminal shorter than the work list plus the editor no longer gets more lines than it has rows; the input frame stays at the bottom. (#332)
+- After `/reload`, the check on a task still run by the earlier instance backs off from 250 ms to 4 s instead of reading the task's metadata four times a second for as long as it runs. (#332)
+- The README's "Reloads and session switches" now says an exit during a session switch is recorded only while the same Pi process stays open; after Pi quits, a resumed task whose process is gone is marked lost. (#332)
+- Navigator rows for subagents and background tasks show their normal columns (model, effort, tool, tokens, or the command) again when a run only has failure history. Failure text leads a row only when something needs action; the "No failures need action · … (history)" line stays in the detail view. (#332)
+- A `null` canonical output control no longer hides its deprecated alias (`{max_bytes: null, maxBytes: 300}` uses 300); `include: 42` gets an unknown-value note; a `bg_task_list` page cursor passed to `bg_task_status` gets a clear note instead of a stale-cursor reset. (#332)
 
 ## [pi-better-harness@0.7.0] - 2026-09-27
 
