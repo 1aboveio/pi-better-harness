@@ -6,6 +6,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- pi-better-goal: automatic continuation now allows ten identical no-progress retries (was three) before holding the goal, and backs off linearly: each identical outcome waits one more grace period than the last (30s, 60s, 90s, ... by default). New evidence, interactive input or a background drain resets it to the base delay. `PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES` still overrides the limit.
+
+### Fixed
+
+- pi-better-goal: saturate calculated continuation delays at Node's timer limit instead of overflowing into a 1 ms retry.
+- pi-better-goal: `/goal resume` reopens an active no-progress hold without accruing its active clock twice, while preserving the existing paused-goal and model-resume policies.
+- pi-better-goal: persist background-drain progress before activity listeners run, invalidate cached pre-drain evidence, and preserve progress across callback cancellation; repeated active-to-idle cycles with the same task identity each reset backoff.
+- pi-better-goal: reject stale collections and in-flight wake audits after goal/turn/session changes or cancellation, without treating missing evidence as a synthetic empty turn.
+
+### Added
+
+- pi-better-goal: real Pi runtime coverage proving inner exponential network retries finish before the Goal ledger updates, and held goals recover through the actual command path. The pinned Pi 0.99.1 compatibility lane runs this check.
+
 ## [pi-better-harness@0.13.1] - 2026-09-30
 
 ### Changed

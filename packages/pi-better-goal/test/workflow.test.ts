@@ -7,7 +7,7 @@ import test from "node:test";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import extension from "./extension-fixture.js";
+import extension, { toolContext } from "./extension-fixture.js";
 import { currentGoalSnapshot } from "../src/goal-state.js";
 import { currentWorkflowOwner, skillCommandName, workflowOwnerFromSkill } from "../src/workflow.js";
 
@@ -86,7 +86,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
   const resumed = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
   assert.match(resumed.systemPrompt, /Only coordinate work/);
-  await tools.get("release_workflow")!.execute("release", {}, undefined, undefined, ctx);
+  await tools.get("release_workflow")!.execute("release", {}, undefined, undefined, toolContext(ctx));
   assert.equal(currentWorkflowOwner(entries), null);
   await handlers.get("input")?.({ source: "interactive", text: "/skill:fixture new task" }, ctx);
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
@@ -206,7 +206,7 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner);
   const prompt = await goalHandlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
   assert.match(prompt.systemPrompt, /Coordinate the rush run/, "resumed turns carry the coordinator's instructions");
-  const synced = await planTools.get("sync_workflow_plan")!.execute("bind", { path: planPath, revision: 1 }, undefined, undefined, ctx);
+  const synced = await planTools.get("sync_workflow_plan")!.execute("bind", { path: planPath, revision: 1 }, undefined, undefined, toolContext(ctx));
   assert.equal((synced.details as { runId: string }).runId, "run-1");
 
   await goalCommands.get("workflow")?.handler("clear", ctx);
