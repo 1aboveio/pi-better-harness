@@ -51,7 +51,7 @@ import {
 
 const POLL_INTERVAL_MS = 2_000;
 const DEFAULT_IDLE_CONTINUATION_DELAY_MS = 30_000;
-const DEFAULT_MAX_NO_PROGRESS_RETRIES = 3;
+const DEFAULT_MAX_NO_PROGRESS_RETRIES = 10;
 const WAKE_DISABLED =
   process.env.PI_BETTER_GOAL_DISABLE_WAKE === "1" ||
   process.env.PI_BETTER_EXTENSION_DISABLE_WAKE === "1";
@@ -119,6 +119,14 @@ function parseDurationEnv(raw: string | undefined, fallback: number): number {
   }
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/**
+ * Linear backoff for no-progress retries: each identical outcome waits one more
+ * grace period than the last (30s, 60s, 90s, ... by default).
+ */
+export function idleContinuationDelay(noProgressRetries: number, baseMs = IDLE_CONTINUATION_DELAY_MS): number {
+  return baseMs * (1 + Math.max(0, noProgressRetries));
 }
 
 function parseRetryLimit(raw: string | undefined, fallback: number): number {
@@ -466,7 +474,7 @@ export default function (pi: ExtensionAPI): void {
       idleContinuationTimer = undefined;
       idleContinuationSignature = "";
       void sendIdleContinuationAfterAudit(goal.goalId, ctx, kind, snapshot);
-    }, IDLE_CONTINUATION_DELAY_MS);
+    }, idleContinuationDelay(kind === "continuation" ? currentContinuationState(ctx, goal.goalId)?.noProgressRetries ?? 0 : 0));
     idleContinuationTimer.unref?.();
   };
 

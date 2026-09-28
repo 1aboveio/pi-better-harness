@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- pi-better-goal: automatic continuation now allows ten identical no-progress retries (was three) before holding the goal, and backs off linearly: each identical outcome waits one more grace period than the last (30s, 60s, 90s, … by default). New evidence, interactive input or a background drain resets it to the base delay. `PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES` still overrides the limit.
+
 ## [pi-better-harness@0.11.0] - 2026-09-28
 
 ### Changed

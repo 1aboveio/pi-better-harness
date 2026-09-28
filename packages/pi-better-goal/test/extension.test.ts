@@ -473,25 +473,30 @@ test("identical autonomous outcomes pause continuation until interactive input r
     ],
   };
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  // The first outcome is new evidence; each identical retry after it waits
+  // one more 30s grace period than the last.
+  for (let attempt = 0; attempt <= 10; attempt += 1) {
     await handlers.get("agent_start")?.({}, ctx);
     await handlers.get("agent_end")?.(identicalOutcome, ctx);
     await handlers.get("agent_settled")?.({}, ctx);
-    t.mock.timers.tick(30_000);
+    const delay = 30_000 * (attempt + 1);
+    const before: number = messages.length;
+    if (attempt === 10) break;
+    t.mock.timers.tick(delay - 1);
     await flushPromises();
+    assert.equal(messages.length, before, `retry ${attempt} waits the full ${delay}ms`);
+    t.mock.timers.tick(1);
+    await flushPromises();
+    assert.equal(messages.length, before + 1, `retry ${attempt} fires after ${delay}ms`);
   }
-  assert.equal(messages.length, 4, "the initial turn plus three no-progress retries are allowed");
-
-  await handlers.get("agent_start")?.({}, ctx);
-  await handlers.get("agent_end")?.(identicalOutcome, ctx);
-  await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(30_000);
+  assert.equal(messages.length, 11, "the initial turn plus ten no-progress retries are allowed");
+  t.mock.timers.tick(30_000 * 12);
   await flushPromises();
-  assert.equal(messages.length, 4, "the fourth identical outcome holds automatic continuation");
+  assert.equal(messages.length, 11, "the eleventh identical outcome holds automatic continuation");
 
   const blocked = latestContinuationState(entries);
   assert.equal(blocked?.blocked, true);
-  assert.equal(blocked?.noProgressRetries, 3);
+  assert.equal(blocked?.noProgressRetries, 10);
 
   await handlers.get("input")?.({ source: "interactive" }, ctx);
   const reset = latestContinuationState(entries);
@@ -503,7 +508,7 @@ test("identical autonomous outcomes pause continuation until interactive input r
   await handlers.get("agent_settled")?.({}, ctx);
   t.mock.timers.tick(30_000);
   await flushPromises();
-  assert.equal(messages.length, 5, "interactive input reopens the autonomous loop");
+  assert.equal(messages.length, 12, "interactive input reopens the loop at the base delay");
 });
 
 test("an aborted run pauses the active goal and suppresses pokes while paused", async (t) => {
