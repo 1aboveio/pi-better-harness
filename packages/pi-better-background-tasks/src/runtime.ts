@@ -19,6 +19,7 @@ import type {
   CommandResult,
   CommandSpec,
   Condition,
+  FirstWatchCheck,
   RemoteTaskParams,
   SshConnectionParams,
   TerminalResult,
@@ -46,6 +47,40 @@ let scheduledWorkSuspended = false;
 const REMOTE_SESSION_POLL_MS = 100;
 
 export const DEFAULT_WATCH_TIMEOUT_SECONDS = 15 * 60;
+/** Consecutive blind checks (exit 0, stderr, no condition matched) before a watch is flagged (#359). */
+export const DEFAULT_BLIND_CHECKS = 3;
+/** How long bg_task_watch waits for the first check before returning (#359). */
+export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
+const BLIND_OPERATION = "watch-blind";
+
+/** In-flight first checks of watches launched by this instance, keyed by task id. */
+const firstCheckWaiters = new Map<string, { promise: Promise<FirstWatchCheck | undefined>; resolve: (check: FirstWatchCheck | undefined) => void }>();
+
+/**
+ * Wait for a watch's first check, bounded by `timeoutMs` (#359). Resolves undefined when the
+ * check is still running at the deadline, or when this instance did not launch the watch.
+ */
+export async function awaitFirstWatchCheck(id: string, timeoutMs = FIRST_WATCH_CHECK_WAIT_MS): Promise<FirstWatchCheck | undefined> {
+  const waiter = firstCheckWaiters.get(id);
+  if (!waiter) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), Math.max(0, timeoutMs));
+    timer.unref();
+  });
+  try {
+    return await Promise.race([waiter.promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function settleFirstCheck(id: string, check: FirstWatchCheck | undefined): void {
+  const waiter = firstCheckWaiters.get(id);
+  if (!waiter) return;
+  firstCheckWaiters.delete(id);
+  waiter.resolve(check);
+}
 
 /**
  * Stop this extension instance's scheduled work when its session shuts down (#324).
@@ -83,6 +118,8 @@ export function suspendScheduledWork(): void {
   remoteSessionTimers.clear();
   processTimeoutTimers.clear();
   logRetentionTimers.clear();
+  // A launch still waiting on a first check that will not run here reports it as still running.
+  for (const id of [...firstCheckWaiters.keys()]) settleFirstCheck(id, undefined);
   suspendFailureAttention();
 }
 
@@ -121,6 +158,8 @@ export interface WatchTaskParams extends CommandSpec, TaskIntentParams {
   max_log_bytes?: number;
   success_when: Condition;
   failure_when?: Condition;
+  /** Consecutive blind checks before the watch is flagged (#359). Default 3; 0 turns it off. */
+  blind_checks?: number;
   ssh?: SshConnectionParams;
   remote?: RemoteTaskParams;
 }
@@ -431,6 +470,7 @@ export function startWatchTask(
     const error = condition && validateCondition(condition);
     if (error) throw new Error(`${name}: ${error}`);
   }
+  const blindChecks = readBlindChecks(params.blind_checks);
   const intent = readTaskIntent(params);
   const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
   const id = nextTaskId();
@@ -475,6 +515,7 @@ export function startWatchTask(
     spawnPidStartTime: currentProcessStartToken(),
     successWhen: params.success_when,
     failureWhen: params.failure_when,
+    ...(blindChecks !== undefined ? { blindChecks } : {}),
     notifyOn: "terminal",
     ssh: remoteTask?.metadata.ssh,
     remote: remoteTask?.metadata.remote,
@@ -484,10 +525,21 @@ export function startWatchTask(
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
   for (const line of sandboxNotices) appendLine(meta.logPath, `--- ${line} ---`);
   writeMeta(meta);
+  let resolveFirst!: (check: FirstWatchCheck | undefined) => void;
+  const firstCheck = new Promise<FirstWatchCheck | undefined>((resolve) => { resolveFirst = resolve; });
+  firstCheckWaiters.set(id, { promise: firstCheck, resolve: resolveFirst });
   scheduleWatch(pi, id, 0, getActiveSession, remoteTask
     ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
     : undefined);
   return meta;
+}
+
+function readBlindChecks(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error("blind_checks must be a non-negative integer (0 turns the blind-check rule off).");
+  }
+  return value;
 }
 
 function resolveWatchTimeoutSeconds(timeoutSeconds: number | undefined): number | undefined {
@@ -760,6 +812,7 @@ async function pollWatch(
 ): Promise<void> {
   if (activePolls.has(id)) return;
   activePolls.add(id);
+  let checked: FirstWatchCheck | undefined;
   try {
     const meta = readMeta(id);
     if (!meta || meta.status !== "running" || meta.kind !== "command_watch") return;
@@ -772,6 +825,10 @@ async function pollWatch(
     const result = runOnce
       ? await runOnce(timeoutMs)
       : await runCommandOnce(commandSpecFromMeta(meta), undefined, timeoutMs);
+    checked = {
+      exitCode: result.exitCode, signal: result.signal, durationMs: Math.max(0, result.endedAt - result.startedAt),
+      ...(result.timedOut ? { timedOut: true } : {}), stdout: result.stdout, stderr: result.stderr,
+    };
     // A poll that was in flight when the session shut down belongs to a stale instance.
     if (scheduledWorkSuspended) return;
     appendWatchResult(meta.logPath, result);
@@ -824,6 +881,10 @@ async function pollWatch(
     else if (result.exitCode !== 0) recordExitFailure(latest, "watch-poll", `Watch poll exited with code ${result.exitCode ?? "unknown"}`, result.exitCode, pollKey,
       { expected: expectedPollExit, at: result.endedAt });
     else recoverFailure(latest, "watch-poll", pollKey, result.endedAt);
+    observeBlindCheck(latest, result, pollKey, {
+      clean: !transportFailure && !conditionErrors.length,
+      matched: failure?.matched === true || success?.matched === true,
+    });
     if (conditionErrors.length) latest.error = conditionErrors.join("; ");
     if (failure?.matched) {
       recordFailure(latest, "failure_when", "failure condition matched", pollKey, { category: "condition", at: result.endedAt });
@@ -871,10 +932,44 @@ async function pollWatch(
       }
       recordFailure(meta, "watch-poll", reason, `throw:${meta.lastCheckedAt ?? meta.startedAt}`, { category: meta.ssh ? "ssh" : "execution" });
       finalize(meta, { status: "failed", reason }, pi, getActiveSession);
+      checked ??= { exitCode: null, signal: null, durationMs: 0, stdout: "", stderr: "", error: reason };
     }
   } finally {
     activePolls.delete(id);
+    if (firstCheckWaiters.has(id)) {
+      if (checked) settleFirstCheck(id, checked);
+      else if (readMeta(id)?.status !== "running") settleFirstCheck(id, undefined);
+    }
   }
+}
+
+/**
+ * Blind-check rule (#359). A check that exits 0, writes stderr, and matches neither condition
+ * is probably broken: it prints an error and then reports "still pending" forever (the real
+ * incident was a gcloud --format error followed by `exit 0`). After `blindChecks` such checks
+ * in a row, record one actionable incident; the existing attention path wakes the parent once.
+ * The watch keeps running. A later check with no stderr, or one matching a condition, recovers
+ * it. A clean pending check (exit 0, no stderr) never counts.
+ */
+function observeBlindCheck(meta: BackgroundTaskMeta, result: CommandResult, pollKey: unknown,
+  check: { clean: boolean; matched: boolean }): void {
+  const threshold = meta.blindChecks ?? DEFAULT_BLIND_CHECKS;
+  const stderr = result.stderr.trim();
+  const blind = threshold > 0 && check.clean && !check.matched && result.exitCode === 0 && stderr.length > 0;
+  if (!blind) {
+    meta.blindCheckStreak = 0;
+    if (!stderr || check.matched) recoverFailure(meta, BLIND_OPERATION, pollKey, result.endedAt);
+    return;
+  }
+  const streak = (meta.blindCheckStreak ?? 0) + 1;
+  meta.blindCheckStreak = streak;
+  if (streak !== threshold) return;
+  const lastLine = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1) ?? "";
+  const clipped = lastLine.length > 240 ? `${lastLine.slice(0, 239)}…` : lastLine;
+  // The summary is capped in compact rows; the stderr line rides as evidence, which rows show whole.
+  recordFailure(meta, BLIND_OPERATION,
+    `Blind watch check: ${streak} checks in a row exited 0 with stderr and matched no condition; the check may be broken. The watch keeps running.`,
+    pollKey, { category: "blind-check", at: result.endedAt, evidence: `latest stderr: ${clipped}` });
 }
 
 function finalize(

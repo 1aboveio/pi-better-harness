@@ -124,6 +124,49 @@ Missing JSON fields or invalid JSON output remain retryable; task status shows
 the condition evaluation error until a subsequent poll recovers. Keep a finite
 timeout to bound watches whose output never becomes evaluable.
 
+### Writing a watch check
+
+A check that swallows its own errors reports "still pending" forever. Keep
+failures visible:
+
+- Do not end the check with `exit 0` or `|| true`. A check that exits non-zero
+  is recorded as a failure and escalates to the parent session.
+- Map an unknown or unparseable state to failure (a non-zero exit), not to
+  pending.
+- Prefer structured output parsed with `jq -e` over hand-written format
+  strings. `jq -e` exits non-zero when the field is missing, so a broken query
+  shows up at once.
+
+For example, a Cloud Run job execution:
+
+```sh
+status=$(gcloud run jobs executions describe "$EXECUTION" --region="$REGION" --format=json \
+  | jq -er '.status.conditions[] | select(.type == "Completed") | .status') || exit 2
+case "$status" in
+  True) echo TERMINAL_SUCCESS ;;
+  False) echo TERMINAL_FAILURE ;;
+  Unknown) echo STILL_RUNNING ;;
+  *) echo "unexpected Completed status: $status" >&2; exit 2 ;;
+esac
+```
+
+with `success_when: {type: "stdout_contains", value: "TERMINAL_SUCCESS"}` and
+`failure_when: {type: "stdout_contains", value: "TERMINAL_FAILURE"}`.
+
+`bg_task_watch` (and `bg_task` with `action: "watch"`) waits up to 15 seconds
+for the first check and puts its exit code, a few lines of stdout and a few
+lines of stderr in the tool result, so a broken check is visible at launch. If
+the first check is still running after 15 seconds, the result says so and the
+watch continues.
+
+A running watch also guards against a blind check. When 3 checks in a row exit
+0, write to stderr, and match neither `success_when` nor `failure_when`, the
+watch records one incident that needs action, with the latest stderr line, and
+wakes the parent session once. The watch keeps running. A later check with no
+stderr, or one that matches a condition, recovers the incident. A clean pending
+check (exit 0, no stderr) never counts. Set `blind_checks` to change the count,
+or `blind_checks: 0` to turn the rule off.
+
 ## Install
 
 ```sh

@@ -70,6 +70,29 @@ describe("extension e2e", () => {
     }
   });
 
+  it("#359 tells the model how to write a watch check and exposes blind_checks on both watch entry points", async () => {
+    const harness = createHarness();
+    for (const name of ["bg_task_watch", "bg_task"]) {
+      const tool = harness.tools.get(name);
+      expect(tool?.description).toContain("do not end it with `exit 0` or `|| true`");
+      expect(tool?.description).toContain("Map an unknown or unparseable state to failure");
+      expect(tool?.description).toContain("jq -er");
+      expect(tool?.parameters?.properties?.blind_checks?.description).toContain("0 turns it off");
+    }
+    // The wrapper's watch action goes through the same first-check wait as bg_task_watch.
+    const launch = await harness.execute("bg_task", {
+      action: "watch",
+      command: "echo STILL_UNKNOWN; echo 'ERROR: broken format' >&2; exit 0",
+      interval_seconds: 60,
+      timeout_seconds: 5,
+      callback: false,
+      success_when: { type: "stdout_contains", value: "TERMINAL_SUCCESS" },
+    });
+    expect(launch).toContain("First check: exit 0");
+    expect(launch).toContain("ERROR: broken format");
+    await harness.execute("bg_task", { action: "stop", id: extractTaskId(launch) });
+  });
+
   // @covers background-task.ssh-tool-contract
   // @level integration
   it("registers structured SSH and remote fields on every spawn/watch entry point", () => {

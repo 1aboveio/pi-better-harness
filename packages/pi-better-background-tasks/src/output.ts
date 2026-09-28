@@ -40,7 +40,10 @@ import {
 import { failurePath } from "./failures.js";
 import { captureGapsFor, pageTaskLog, readLog, type LogRead } from "./logs.js";
 import { belongsToOrigin, inspectMeta, listTaskRecords, originOf, type MetaInspection } from "./registry.js";
-import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition } from "./types.js";
+import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition, FirstWatchCheck } from "./types.js";
+
+/** The launch tool stopped waiting for a watch's first check after this long (#359). */
+export type FirstCheckPending = { stillRunningAfterMs: number };
 
 /**
  * Issue #312 consumer budgets. Defaults follow OUTPUT-POLICY / shared
@@ -435,12 +438,17 @@ function asInspection(inspection: MetaInspection | BackgroundTaskMeta | undefine
   return { id: meta.id, meta, found: true, readable: true };
 }
 
-export function formatLaunch(meta: BackgroundTaskMeta): string {
+/**
+ * Launch result. For a watch, `firstCheck` reports its first check (#359): the check's result,
+ * or how long the tool waited when it was still running when the launch tool stopped waiting.
+ */
+export function formatLaunch(meta: BackgroundTaskMeta, firstCheck?: FirstWatchCheck | FirstCheckPending): string {
   const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
   const remoteLines = [
     ...(meta.ssh ? [`Remote: ${meta.ssh.target}${meta.remote?.session ? ` mode=${meta.remote.session}` : ""}${meta.remote?.sessionName ? ` session=${meta.remote.sessionName}` : ""}.`] : []),
     ...(meta.remote?.bootstrapMessage ? [`Remote setup: ${meta.remote.bootstrapMessage}`] : []),
     ...(meta.remote?.warning ? [`Warning: ${meta.remote.warning}`] : []),
+    ...(firstCheck ? [formatFirstWatchCheck(meta, firstCheck)] : []),
   ];
   return assembleBackgroundContent({
     surface: "status",
@@ -453,6 +461,34 @@ export function formatLaunch(meta: BackgroundTaskMeta): string {
     },
     gaps: taskGaps(meta),
   });
+}
+
+const FIRST_CHECK_TAIL_LINES = 3;
+const FIRST_CHECK_LINE_CHARS = 200;
+
+function tailLines(text: string): string[] {
+  return text.split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean)
+    .slice(-FIRST_CHECK_TAIL_LINES)
+    .map((line) => line.length > FIRST_CHECK_LINE_CHARS ? `${line.slice(0, FIRST_CHECK_LINE_CHARS - 1)}…` : line);
+}
+
+/** The first check of a watch, bounded to a few short lines of each stream (#359). */
+export function formatFirstWatchCheck(meta: BackgroundTaskMeta, check: FirstWatchCheck | FirstCheckPending): string {
+  if ("stillRunningAfterMs" in check) {
+    return `First check still running after ${formatDuration(check.stillRunningAfterMs)}; the watch continues in the background. Check it later with bg_task_status.`;
+  }
+  if (check.error) return `First check could not run: ${oneLine(check.error, 300)}`;
+  const outcome = check.timedOut ? "timed out" : check.signal ? `signal ${check.signal}` : `exit ${check.exitCode ?? "unknown"}`;
+  const took = check.durationMs < 1000 ? `${check.durationMs}ms` : formatDuration(check.durationMs);
+  const lines = [`First check: ${outcome} in ${took}.`];
+  const stdout = tailLines(check.stdout);
+  const stderr = tailLines(check.stderr);
+  lines.push(stdout.length ? `stdout tail:\n${stdout.map((line) => `  ${line}`).join("\n")}` : "stdout: (empty)");
+  if (stderr.length) lines.push(`stderr tail:\n${stderr.map((line) => `  ${line}`).join("\n")}`);
+  if (check.exitCode === 0 && stderr.length && meta.status === "running") {
+    lines.push("The check exited 0 but wrote stderr: if it is broken, the watch cannot tell. Let errors exit non-zero.");
+  }
+  return lines.join("\n");
 }
 
 function redactedVerbose(meta: BackgroundTaskMeta): unknown {
