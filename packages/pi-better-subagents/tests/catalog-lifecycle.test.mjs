@@ -89,19 +89,35 @@ describe("catalog runtime", () => {
     after(() => setConfigForTests(undefined));
 
     it("compares only the default fields a definition sets", () => {
-        const record = (kind, model, effort) => ({
+        const record = (kind, model, effort, modelSource = "invocation", adjusted = false) => ({
             kind,
             effective: {
                 model: { value: model, source: "role-default", explicit: false },
                 effort: { value: effort, source: "role-default", explicit: false },
                 tier: { value: null, source: "absent", explicit: false },
             },
+            modelSelection: { source: modelSource },
+            effortSelection: { adjusted },
         });
         assert.equal(catalogDefaultNote(undefined, "openai/gpt-6-astra", "high"), undefined);
         assert.equal(catalogDefaultNote(record("role", null, null), "openai/gpt-6-astra", "high"), undefined);
         assert.equal(catalogDefaultNote(record("role", "openai/gpt-6-sol", "high"), "openai/gpt-6-sol", "high"), undefined);
-        // A providerless default matches its resolved provider/id.
+        // A providerless default matches its resolved provider/id, including a nested id.
         assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null), "openai/gpt-6-sol", "low"), undefined);
+        assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null), "openrouter/openai/gpt-6-sol", "low"), undefined);
+        assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null, "role-default"), "openrouter/openai/gpt-6-sol", undefined), undefined);
+        assert.equal(
+            catalogDefaultNote(record("role", "openai/gpt-6-sol", "high", "tier-candidate"), "openai/gpt-6-sol-backup", "high"),
+            "model openai/gpt-6-sol-backup@high (role default openai/gpt-6-sol@high unavailable; same-tier fallback)",
+        );
+        assert.equal(
+            catalogDefaultNote(record("role", "openai/gpt-6-sol", "xhigh", "role-default", true), "openai/gpt-6-sol", "high"),
+            "model openai/gpt-6-sol@high (role default openai/gpt-6-sol@xhigh; effort capped at high by the model)",
+        );
+        assert.equal(
+            catalogDefaultNote(record("agent", "openai/gpt-6-sol", "xhigh", "configured-default", true), "openai/gpt-6-luna", "high"),
+            "model openai/gpt-6-luna@high (agent default openai/gpt-6-sol@xhigh unavailable; configured-default fallback; effort capped at high by the model)",
+        );
         assert.equal(
             catalogDefaultNote(record("agent", "openai/gpt-6-sol", null), "openai/gpt-6-astra", undefined),
             "model openai/gpt-6-astra (agent default openai/gpt-6-sol)",
@@ -543,9 +559,9 @@ fi
 
         const namedId = runIdFrom(namedResult);
         const roleId = runIdFrom(roleResult);
-        // A fallback away from the default is still a difference the parent should see.
-        assert.match(textOf(namedResult), /Model xai\/grok-4\.7@high \(agent default openai\/gpt-6-sol@high\)/);
-        assert.match(textOf(roleResult), /Model xai\/grok-4\.7@high \(role default openai\/gpt-6-sol@high\)/);
+        // A fallback is worded as a fallback, so the parent does not mistake it for an override to undo.
+        assert.match(textOf(namedResult), /^Model xai\/grok-4\.7@high \(agent default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
+        assert.match(textOf(roleResult), /^Model xai\/grok-4\.7@high \(role default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
         const named = metaOf(namedId);
         const role = metaOf(roleId);
         const roleInstructions = loadCatalog({
@@ -894,6 +910,7 @@ fi
                 tools: "read,bash",
                 sandbox: false,
             }, null, null, host);
+            assert.match(textOf(result), /^Model openai\/gpt-6-sol-backup@high \(role default openai\/gpt-6-sol@high unavailable; same-tier fallback\)\.$/m);
             const meta = metaOf(runIdFrom(result));
             assert.equal(meta.model, "openai/gpt-6-sol-backup");
             assert.equal(meta.effort, "high");

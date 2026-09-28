@@ -254,13 +254,16 @@ export async function clarifyCatalogRequest(
 
 /**
  * Launch-line note for a catalog run whose effective model or effort differs
- * from the role or agent default, e.g.
- * `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`.
+ * from the role or agent default. The wording names the cause, so a fallback
+ * or a capped effort is not mistaken for a caller override:
+ * - override: `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`
+ * - fallback: `model xai/grok-4.7@high (role default openai/gpt-6-sol@high unavailable; foreground fallback)`
+ * - capped effort: `model openai/gpt-6-sol@medium (role default openai/gpt-6-sol@high; effort capped at medium by the model)`
  * Undefined for a non-catalog run, a definition with no default, or a launch
  * that matches the default. Only the fields the definition sets are compared.
  */
 export function catalogDefaultNote(
-    record: Pick<CatalogRunRecord, "kind" | "effective"> | undefined,
+    record: Pick<CatalogRunRecord, "kind" | "effective" | "modelSelection" | "effortSelection"> | undefined,
     model: string | undefined,
     thinking: string | undefined,
 ): string | undefined {
@@ -269,18 +272,35 @@ export function catalogDefaultNote(
     const defaultEffort = record.effective.effort.value;
     const defaultLabel = formatModelEffort(defaultModel, defaultEffort);
     if (!defaultLabel) return undefined;
-    const modelDiffers = defaultModel !== null && !sameModel(defaultModel, model);
-    const effortDiffers = defaultEffort !== null && defaultEffort !== (thinking ?? null);
+    const modelSource = record.modelSelection?.source;
+    const modelFallback = defaultModel !== null && modelSource !== undefined && FALLBACK_SOURCES.has(modelSource);
+    const modelDiffers = defaultModel !== null && (modelFallback || !sameModel(defaultModel, model, modelSource));
+    const effortCapped = defaultEffort !== null && record.effortSelection?.adjusted === true && (thinking ?? null) !== defaultEffort;
+    const effortDiffers = defaultEffort !== null && (thinking ?? null) !== defaultEffort;
     if (!modelDiffers && !effortDiffers) return undefined;
     const actual = formatModelEffort(model ?? "Pi default", thinking) ?? "Pi default";
-    return `model ${actual} (${record.kind} default ${defaultLabel})`;
+    const causes = [
+        modelFallback ? `${record.kind} default ${defaultLabel} unavailable; ${FALLBACK_LABELS[modelSource!] ?? modelSource} fallback` : `${record.kind} default ${defaultLabel}`,
+        ...(effortCapped ? [`effort capped at ${thinking ?? "the model default"} by the model`] : []),
+    ];
+    return `model ${actual} (${causes.join("; ")})`;
 }
 
-function sameModel(defaultModel: string, actual: string | undefined): boolean {
+/** Model sources that mean the default could not be used, not that the caller chose another model. */
+const FALLBACK_SOURCES: ReadonlySet<string> = new Set(["tier-candidate", "foreground", "configured-default"]);
+const FALLBACK_LABELS: Record<string, string> = {
+    "tier-candidate": "same-tier",
+    foreground: "foreground",
+    "configured-default": "configured-default",
+};
+
+function sameModel(defaultModel: string, actual: string | undefined, source: string | undefined): boolean {
+    // The resolver launched the definition's own preference: same model, however it was spelled.
+    if (source === "role-default" || source === "agent-override") return true;
     if (actual === undefined) return false;
     if (defaultModel === actual) return true;
-    // A providerless default resolves to provider/id; the id alone still matches.
-    return !defaultModel.includes("/") && actual.slice(actual.indexOf("/") + 1) === defaultModel;
+    // A providerless default names the id; the resolved provider/id (the id may itself contain "/") still matches.
+    return !defaultModel.includes("/") ? actual.endsWith(`/${defaultModel}`) : false;
 }
 
 export async function prepareCatalogJob(snapshot: CatalogSnapshot, job: CatalogJobFields, host: CatalogHost): Promise<PreparedCatalogJob> {
