@@ -124,6 +124,7 @@ export function createTaskBashOperations(
                     .map(([key, value]) => `${key}=${value}`), shell.shell, ...shell.args, command],
             }, { sandboxEnabled: true, explicitSandbox: true });
             if (!wrapped) throw new Error("Sandbox: no task execution backend is available.");
+            for (const line of wrapped.notices ?? []) options.onData(Buffer.from(`${line}\n`));
             if (options.signal?.aborted) throw new Error("aborted");
             if (options.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout <= 0 || options.timeout * 1000 > 2147483647)) {
                 throw new Error("Invalid timeout: must be a positive, supported number of seconds");

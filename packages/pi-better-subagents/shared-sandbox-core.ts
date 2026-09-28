@@ -109,8 +109,12 @@ export type SandboxCommandArgs = SandboxTarget & {
     internalHelperExecutable?: boolean;
 };
 
-/** The wrapper command to spawn: the backend executable and its full argv. */
-export type SandboxCommand = { file: string; fileArgs: string[] };
+/**
+ * The wrapper command to spawn: the backend executable and its full argv.
+ * `notices` are lines the caller shows with the launch output, such as a
+ * placeholder the Linux backend had to leave in the user's files.
+ */
+export type SandboxCommand = { file: string; fileArgs: string[]; notices?: string[] };
 
 /** The caller's default-on / explicit-request / opt-out decision. */
 export type SandboxRequest = {
@@ -131,7 +135,11 @@ export type SandboxSeams = {
     platform?: () => string;
     /** Defaults to a PATH scan that stats and access-checks without executing. */
     lookupExecutable?: (name: string) => string | undefined;
-    /** Defaults to `fs.realpathSync`. Must throw when the path does not exist. */
+    /**
+     * Defaults to `fs.realpathSync.native`, which (unlike the JS `realpathSync`)
+     * returns the on-disk case of every existing component on a case-insensitive
+     * volume, as the kernel sees it. Must throw when the path does not exist.
+     */
     canonicalize?: (path: string) => string;
     /** Defaults to `fs.writeFileSync`. */
     writeProfile?: (path: string, contents: string) => void;
@@ -325,7 +333,7 @@ function currentPlatform(seams: SandboxSeams): string {
  * canonicalizes through its real parent chain.
  */
 export function canonicalizePath(path: string, seams: SandboxSeams = {}): string {
-    const canonicalize = seams.canonicalize ?? realpathSync;
+    const canonicalize = seams.canonicalize ?? realpathSync.native;
     const absolute = resolve(path);
     try {
         const resolved = canonicalize(absolute);
@@ -337,7 +345,7 @@ export function canonicalizePath(path: string, seams: SandboxSeams = {}): string
             try {
                 const source = statSync(resolved);
                 const alias = statSync(candidate);
-                if (source.dev === alias.dev && source.ino === alias.ino) return realpathSync(candidate);
+                if (source.dev === alias.dev && source.ino === alias.ino) return realpathSync.native(candidate);
             } catch { /* An unrelated Data-volume path keeps its original identity. */ }
         }
         return resolved;
@@ -358,7 +366,7 @@ function compile(
     // bind-mounts it; the macOS backend has always tolerated a not-yet-created
     // one. Keep both behaviors rather than unifying them here.
     const writableRoot = strictRoot
-        ? (seams.canonicalize ?? realpathSync)(policy.writableRoot)
+        ? (seams.canonicalize ?? realpathSync.native)(policy.writableRoot)
         : canonicalizePath(policy.writableRoot, seams);
 
     // The broad profile also keeps each literal entry: its removal grants would
@@ -544,6 +552,67 @@ function contains(root: string, target: string): boolean {
     return target.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
 
+/** Per-device answer to "does this volume fold case?" (APFS/HFS+ default). */
+const caseFoldingByDevice = new Map<number, boolean>();
+
+/**
+ * Whether the volume holding `path` (its nearest existing ancestor) ignores
+ * case: an existing component whose case-swapped spelling names the same
+ * inode proves it. macOS only; false whenever it cannot be shown.
+ */
+function caseInsensitiveVolume(path: string): boolean {
+    if (process.platform !== "darwin") return false;
+    let current = path;
+    while (!existsSync(current) && dirname(current) !== current) current = dirname(current);
+    let device: number;
+    try { device = statSync(current).dev; } catch { return false; }
+    const known = caseFoldingByDevice.get(device);
+    if (known !== undefined) return known;
+    for (let probe = current; dirname(probe) !== probe; probe = dirname(probe)) {
+        const name = basename(probe);
+        const swapped = [...name].map((c) => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join("");
+        if (swapped === name) continue;
+        try {
+            const original = statSync(probe);
+            if (original.dev !== device) break;
+            let folded = false;
+            try {
+                const other = statSync(join(dirname(probe), swapped));
+                folded = other.dev === original.dev && other.ino === original.ino;
+            } catch { /* The swapped name is absent: case-sensitive. */ }
+            caseFoldingByDevice.set(device, folded);
+            return folded;
+        } catch { return false; }
+    }
+    return false;
+}
+
+/**
+ * Spell `path` the way the policy spells it when they differ only in case on a
+ * case-insensitive volume. `canonicalizePath` fixes the case of every existing
+ * component, but a missing tail (`~/.NPMRC` while `~/.npmrc` is absent) keeps
+ * the caller's case, and the kernel still treats it as the protected name. The
+ * longest policy path that matches case-insensitively wins, so the pre-check
+ * decides as the kernel does (#354).
+ */
+function alignCaseToPolicy(path: string, policy: CompiledSandboxWritePolicy): string {
+    const broad = policy.broad;
+    const candidates = [policy.writableRoot, ...policy.denyWrite, ...(policy.credentialPaths ?? []),
+        ...(policy.runtimeWrite ?? []), ...(policy.compatibilityWrite ?? []),
+        ...(broad ? [broad.home, ...broad.tempRoots, ...broad.deleteRoots, ...broad.codePaths] : [])];
+    const lower = path.toLowerCase();
+    if (lower.length !== path.length) return path;
+    let best: string | undefined;
+    for (const candidate of candidates) {
+        const folded = candidate.toLowerCase();
+        if (folded.length !== candidate.length || !contains(folded, lower)) continue;
+        if (!best || candidate.length > best.length) best = candidate;
+    }
+    // Already spelled as the policy spells it: nothing to probe.
+    if (!best || path.startsWith(best) || !caseInsensitiveVolume(path)) return path;
+    return `${best}${path.slice(best.length)}`;
+}
+
 function isCredential(path: string, policy: CompiledSandboxWritePolicy): boolean {
     return (policy.credentialPaths ?? []).some((credential) => contains(credential, path));
 }
@@ -558,7 +627,7 @@ export function evaluateReadAccess(
     policy: CompiledSandboxWritePolicy,
     seams: SandboxSeams = {},
 ): ReadAccessDecision {
-    const path = canonicalizePath(target, seams);
+    const path = alignCaseToPolicy(canonicalizePath(target, seams), policy);
     const permissions = policy.permissions;
     if (!permissions) return { allowed: true, path };
     if (policy.broad) {
@@ -585,7 +654,7 @@ export function evaluateWriteAccess(
     policy: CompiledSandboxWritePolicy,
     seams: SandboxSeams = {},
 ): WriteAccessDecision {
-    const path = canonicalizePath(target, seams);
+    const path = alignCaseToPolicy(canonicalizePath(target, seams), policy);
     if (policy.broad) return evaluateBroadWrite(path, policy, policy.broad, seams);
     if (!policy.permissions && !contains(policy.writableRoot, path)) {
         return { allowed: false, path, reason: "outside-writable-root" };
@@ -1370,10 +1439,28 @@ function buildLinuxBroadCommand(
     const readOnly = new Set<string>();
     const directoryLocation = (path: string) => [...DIRECTORY_LOCATIONS]
         .some((name) => canonicalizePath(join(broad.home, name), seams) === path);
+    // The literal fixed-list entry (a dangling `~/.ssh` link) or its canonical path.
+    const directoryEntry = (path: string) => directoryLocation(path) ||
+        [...DIRECTORY_LOCATIONS].some((name) => join(broad.home, name) === path);
     // Directories holding a protected symlink: read-only, so the link cannot be
     // replaced, with their existing entries bound writable again below.
     const linkParents = new Set<string>();
-    const danglingTargets = new Set(protectedPaths.flatMap((path) => walkSymlinks(path).unresolved));
+    // Where dangling links would land. Only the first missing component of each
+    // needs a guard: nothing can be created below a read-only mount or a locked
+    // parent. It is a directory when more of the path lies below it, or when the
+    // link is a directory-type entry (`~/.ssh -> ~/work/ssh`).
+    const firstMissing = new Map<string, boolean>();
+    const belowFirstMissing = new Set<string>();
+    for (const path of protectedPaths) {
+        const unresolved = walkSymlinks(path).unresolved;
+        if (!unresolved.length) continue;
+        const first = unresolved[0]!;
+        const full = unresolved.at(-1)!;
+        firstMissing.set(first, firstMissing.get(first) === true || first !== full || directoryEntry(path));
+        if (full !== first) belowFirstMissing.add(full);
+    }
+    const created: string[] = [];
+    const makeDirectory = seams.makeDirectory ?? ((target: string) => mkdirSync(target, { recursive: true, mode: 0o700 }));
     const guard = (path: string, hide: boolean) => {
         let directory: boolean | undefined;
         let link = false;
@@ -1387,21 +1474,39 @@ function buildLinuxBroadCommand(
             if (link && dirname(path) !== broad.home && writableAt(dirname(path))) linkParents.add(dirname(path));
             return;
         }
-        if (danglingTargets.has(path)) {
+        if (belowFirstMissing.has(path) && !firstMissing.has(path)) return; // Its first missing component is guarded.
+        if (firstMissing.has(path)) {
             // Where a dangling link would land: nothing may be created there.
-            // Lock its nearest existing ancestor (entries stay writable, see
-            // below) rather than plant a placeholder in the user's files. Temp
-            // and the workspace root stay open to new entries, so a placeholder
-            // is bound there instead, failing closed if it cannot be made.
+            // A missing directory gets an empty read-only placeholder directory,
+            // so only that one name is taken, not every new entry beside it
+            // (`~/.cache/<tool>/…` would otherwise lock all of `~/.cache`). A
+            // missing file is not planted in the user's files: its parent is
+            // locked instead (entries stay writable, see below), except in the
+            // workspace root and temp, which must keep accepting new entries,
+            // so the file placeholder is bound there. Each placeholder made is
+            // reported, and the workspace and temp fail closed without one.
             if (!writableAt(path)) return;
-            let ancestor = dirname(path);
-            while (!exists(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
-            if (ancestor === project || broad.tempRoots.includes(ancestor)) {
-                if (!materialize(path)) throw new Error(`Cannot protect denied path: ${path}`);
-                readOnly.add(path);
-            } else if (ancestor !== broad.home) {
-                linkParents.add(ancestor);
+            const ancestor = dirname(path);
+            if (ancestor === broad.home) return; // Home is read-only already.
+            const failClosed = ancestor === project || broad.tempRoots.includes(ancestor);
+            const directory = firstMissing.get(path)!;
+            if (directory || failClosed) {
+                const existed = exists(path);
+                let made: boolean;
+                if (directory) {
+                    try { makeDirectory(path); } catch { /* Re-checked below. */ }
+                    made = exists(path);
+                } else {
+                    made = materialize(path);
+                }
+                if (made) {
+                    if (!existed) created.push(`${path}${directory ? "/" : ""}`);
+                    readOnly.add(path);
+                    return;
+                }
+                if (failClosed) throw new Error(`Cannot protect denied path: ${path}`);
             }
+            linkParents.add(ancestor);
             return;
         }
         if (!exists(path)) {
@@ -1476,6 +1581,9 @@ function buildLinuxBroadCommand(
         file: bwrap,
         fileArgs: [...fileArgs, ...(!permissions.network ? ["--unshare-net"] : []),
             "--", args.execPath, ...args.execArgs],
+        ...(created.length && { notices: [
+            `Sandbox: created an empty read-only placeholder where a protected symlink points at nothing, and left it in place: ${created.join(", ")}`,
+        ] }),
     };
 }
 

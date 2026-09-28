@@ -287,3 +287,30 @@ test("removal judges a link's own entry without following it (no kernel needed)"
         rmSync(temporary, { recursive: true, force: true });
     }
 });
+
+test("case-variant paths to protected entries are refused by the pre-checks on a case-insensitive volume (#354)", { skip: process.platform === "win32" }, (t) => {
+    const base = realpathSync(mkdtempSync(join(fileURLToPath(new URL(".", import.meta.url)), "task-case-")));
+    try {
+        if (!existsSync(base.toUpperCase()) || !existsSync(base.toLowerCase())) {
+            t.skip("the fixture volume is case-sensitive");
+            return;
+        }
+        const home = join(base, "home"), root = join(home, "work", "project");
+        for (const dir of [root, join(home, ".ssh"), join(home, ".cache")]) mkdirSync(dir, { recursive: true });
+        writeFileSync(join(home, ".ssh", "id_ed25519"), "synthetic-secret");
+        symlinkSync(join(home, ".cache"), join(home, ".ssh", "planted"));
+        const plan = { confined: true as const, profilePath: join(base, "profile.sb"), policy: {
+            writableRoot: root, home, denyWrite: [],
+            permissions: { projectFiles: "read-write", outsideProject: "write", storedCredentials: "read", commands: true, network: true } as SandboxPermissions,
+        } };
+        const ops = createTaskFileOperations({ requireLaunchPlan: () => plan });
+        const ssh = join(home, ".ssh");
+        assert.throws(() => ops.check.write(join(home, ".SSH", "id_ed25519")), new RegExp(`refused to write ${ssh}/id_ed25519: permission-denied`));
+        assert.throws(() => ops.check.write(join(home, ".Ssh", "new_key")), /refused to write .*permission-denied/);
+        assert.throws(() => ops.check.remove(join(home, ".SSH", "planted")), new RegExp(`refused to remove ${ssh}/planted: `));
+        assert.throws(() => ops.check.write(join(home, ".ZSHRC")), /refused to write .*\.zshrc: write-denied/);
+        ops.check.write(join(home, ".CACHE", "x"));
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+    }
+});
