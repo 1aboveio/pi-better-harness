@@ -93,8 +93,12 @@ type NavigatorState = {
   mainListCloseArmTimer?: ReturnType<typeof setTimeout>;
   mainListDeadlineScheduler?: RenderScheduler;
   editorComponent?: Component;
+  /** The editor Pi currently has mounted (the wrapper the factory returned last). */
+  editorFocusTarget?: unknown;
   detailOverlayRows?: number;
   dispose?: () => void;
+  /** The mounted detail overlay, reused instead of stacking a second one. */
+  overlay?: { showDetail(navigatorId: string): void; focus(): void };
 };
 
 const GLOBAL_KEY = Symbol.for("pi-better-harness.navigator.state");
@@ -199,6 +203,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   const s = state();
   try { s.dispose?.(); } catch { /* ignore */ }
   s.dispose = undefined;
+  s.overlay = undefined;
   stopMainListWidget();
   const activeCtx = ctx ?? s.uiCtx;
   s.uiCtx = undefined;
@@ -627,7 +632,7 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
   if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
-  return new Proxy(inner, {
+  const proxy = new Proxy(inner, {
     get(target, prop) {
       if (prop === "handleInput") {
         return (data: string) => {
@@ -644,12 +649,24 @@ function wrapEditor(inner: any, deps: HostDeps): unknown {
       return Reflect.set(target, prop, value);
     },
   });
+  // Pi mounts and focuses whatever the factory returns; an extension that
+  // re-installs the editor replaces it, so this always names the live one.
+  state().editorFocusTarget = proxy;
+  return proxy;
 }
 
 function handleMainListInput(data: string, deps: HostDeps): boolean {
   const s = state();
   const rows = listRows();
-  if (rows.length === 0) return false;
+  if (rows.length === 0) {
+    // Every row is gone, but an overlay that lost focus may still be mounted: Esc still closes it.
+    if (s.overlay && deps.matchKey(data, "escape")) {
+      unfocusMainList();
+      dismissOverlay();
+      return true;
+    }
+    return false;
+  }
   if (!s.mainListFocused) {
     if (!deps.isOpenTrigger(data)) return false;
     focusMainList();
@@ -673,7 +690,10 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
   }
   if (deps.matchKey(data, "enter")) {
     const selected = selectedMainListRow();
-    if (selected?.parentRow) unfocusMainList();
+    if (selected?.parentRow) {
+      unfocusMainList();
+      dismissOverlay();
+    }
     else openNavigator();
     return true;
   }
@@ -683,9 +703,17 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
   }
   if (deps.matchKey(data, "escape") || deps.isOpenTrigger(data)) {
     unfocusMainList();
+    dismissOverlay();
     return true;
   }
   return false;
+}
+
+/** Close a detail overlay that is still mounted while the editor has focus. */
+function dismissOverlay(): void {
+  const s = state();
+  if (!s.overlay) return;
+  try { s.dispose?.(); } catch { /* ignore */ }
 }
 
 function handleMainListCloseKey(): void {
@@ -721,20 +749,54 @@ function openNavigator(): void {
   const rows = listRows();
   if (rows.length === 0) return;
   const selectedId = selectedMainListRow()?.navigatorId ?? rows[0]!.navigatorId;
+  // An overlay that lost focus (another UI took it and handed it to the editor)
+  // is still mounted: switch its detail and focus it rather than stacking a
+  // second overlay over it, whose Esc would only reveal the stale one below.
+  const mounted = s.overlay;
+  if (mounted) {
+    // showDetail may close the overlay (and clear s.overlay); focus() is then a no-op.
+    mounted.showDetail(selectedId);
+    mounted.focus();
+    return;
+  }
   try {
     try { s.dispose?.(); } catch { /* ignore */ }
     s.dispose = undefined;
     let disposeToken: (() => void) | undefined;
+    let overlayRef: NavigatorState["overlay"];
+    let handle: { focus?(): void; unfocus?(options?: { target: unknown }): void } | undefined;
+    const release = () => {
+      if (overlayRef && s.overlay === overlayRef) s.overlay = undefined;
+    };
     const opened = (ctx.ui as any).custom((tui: any, theme: any, _keybindings: any, done: (v: null) => void) => {
-      const component = createOverlayComponent(rows, deps, tui, theme, done, () => {
+      const component = createOverlayComponent(rows, deps, tui, theme, (value) => {
+        release();
+        // Pi restores focus to the editor that was focused when the overlay opened. If an
+        // extension re-installed the editor since, that instance is unmounted and every key
+        // would be lost; hand focus to the live editor before closing.
+        const liveEditor = s.editorFocusTarget;
+        if (liveEditor) {
+          try { handle?.unfocus?.({ target: liveEditor }); } catch { /* ignore */ }
+        }
+        done(value);
+      }, () => {
         s.lastHint = undefined;
         refreshBackgroundWorkNavigator(ctx);
       }, selectedId);
-      disposeToken = () => component.dispose();
+      overlayRef = {
+        showDetail: (navigatorId) => component.showDetail(navigatorId),
+        focus: () => {
+        if (s.overlay !== overlayRef) return;
+        try { handle?.focus?.(); } catch { /* ignore */ }
+      },
+      };
+      s.overlay = overlayRef;
+      disposeToken = () => component.dismiss();
       s.dispose = disposeToken;
       return component;
-    }, { overlay: true, overlayOptions: detailOverlayOptions });
+    }, { overlay: true, overlayOptions: detailOverlayOptions, onHandle: (h: typeof handle) => { handle = h; } });
     const clear = () => {
+      release();
       if (s.dispose === disposeToken) s.dispose = undefined;
     };
     void Promise.resolve(opened).then(clear, clear);
@@ -750,16 +812,16 @@ function createOverlayComponent(
   theme: { fg?(color: string, value: string): string } | undefined,
   done: (v: null) => void,
   onClosed: () => void,
-  initialDetailId?: string,
+  initialDetailId: string,
 ) {
+  // The overlay only ever shows one row's detail; the rail below it is the list.
   const overlayState: OverlayState = { rows: initialRows, selected: 0 };
-  let mode: "list" | "detail" = initialDetailId ? "detail" : "list";
   let logTailRows: number = DEFAULT_LOG_TAIL_ROWS;
   const expandedSections = new Set<string>();
-  let detailId: string | null = initialDetailId ?? null;
-  let detail: BackgroundWorkDetail | null = detailId ? (detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? null) : null;
+  let detailId: string = initialDetailId;
+  let detail: BackgroundWorkDetail | null = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? null;
   applyDefaultExpandedSections(detail, expandedSections);
-  if (detailId) {
+  {
     const idx = overlayState.rows.findIndex((row) => row.navigatorId === detailId);
     if (idx >= 0) overlayState.selected = idx;
   }
@@ -776,7 +838,7 @@ function createOverlayComponent(
   }
 
   const detailScheduler = createRenderScheduler(() => {
-    if (!detailId || mode !== "detail" || closed) return;
+    if (closed) return;
     detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
     requestRender();
     startDetailTimer();
@@ -837,29 +899,11 @@ function createOverlayComponent(
     expandedSections.clear();
     detail = detailFor(row.navigatorId, Date.now(), { logTailLines: logTailRows }) ?? fallbackDetail(row);
     applyDefaultExpandedSections(detail, expandedSections);
-    mode = "detail";
     startDetailTimer();
     requestRender();
   }
 
-  if (detailId) startDetailTimer();
-
-  function leaveDetail(): void {
-    if (mode !== "detail") return;
-    const viewedId = detailId;
-    clearCloseArm();
-    stopDetailTimer();
-    mode = "list";
-    detail = null;
-    detailId = null;
-    expandedSections.clear();
-    refreshRows();
-    if (viewedId) {
-      const idx = overlayState.rows.findIndex((row) => row.navigatorId === viewedId);
-      if (idx >= 0) overlayState.selected = idx;
-    }
-    requestRender();
-  }
+  startDetailTimer();
 
   function close(): void {
     if (closed) return;
@@ -871,20 +915,28 @@ function createOverlayComponent(
 
   function handleCloseKey(): void {
     const row = selectedRow();
-    if (!row) return;
+    if (!row || row.parentRow) return;
     const now = Date.now();
     if (closeArm?.id === row.navigatorId && now >= closeArm.armedAt && now < closeArm.armedAt + CLOSE_ARM_MS) {
       clearCloseArm();
+      const before = overlayState.rows;
+      const closedIdx = overlayState.selected;
       closeFor(row);
-      if (mode === "detail") {
-        stopDetailTimer();
-        mode = "list";
-        detail = null;
-        detailId = null;
-      }
-      refreshRows();
+      stopDetailTimer();
+      const after = listRows();
+      const nextId = neighbourCloseTarget(before, closedIdx, row.navigatorId, after);
       onClosed();
-      requestRender();
+      if (!nextId) {
+        // Nothing left to show: hand the keyboard back to the editor.
+        unfocusMainList();
+        close();
+        return;
+      }
+      state().mainListSelectedId = nextId;
+      overlayState.rows = after;
+      overlayState.selected = Math.max(0, after.findIndex((candidate) => candidate.navigatorId === nextId));
+      refreshMainListWidget();
+      openDetail();
       return;
     }
     clearCloseArm();
@@ -903,18 +955,16 @@ function createOverlayComponent(
   return {
     render(width: number) {
       refreshRows();
-      const railLines = mode === "detail"
-        ? buildMainListLines(overlayState.rows, width, deps.truncate, fg, {
-            selectedId: selectedRow()?.navigatorId,
-            focused: true,
-          })
-        : [];
-      const editorLines = mode === "detail" ? renderEditorLines(width) : [];
+      const railLines = buildMainListLines(overlayState.rows, width, deps.truncate, fg, {
+        selectedId: selectedRow()?.navigatorId,
+        focused: true,
+      });
+      const editorLines = renderEditorLines(width);
       const bottomLines = [...railLines, ...editorLines];
       const overlayRows = state().detailOverlayRows;
       const detailRows = overlayRows === undefined ? undefined : Math.max(1, overlayRows - bottomLines.length);
       let contentLines: string[];
-      if (mode === "detail" && detail?.transcript && deps.createTranscriptComponent) {
+      if (detail?.transcript && deps.createTranscriptComponent) {
         if (transcriptDetail !== detail || !transcriptComponent) {
           transcriptDetail = detail;
           transcriptComponent = deps.createTranscriptComponent(detail, theme);
@@ -930,15 +980,13 @@ function createOverlayComponent(
       } else {
         transcriptDetail = null;
         transcriptComponent = null;
-        contentLines = mode === "detail"
-          ? buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, maxRows: detailRows, bottomFooter: false })
-          : buildListLines(overlayState, width, deps.truncate, fg);
+        contentLines = buildDetailLines(detail, width, deps.truncate, fg, { expandedSections, logTailRows, minRows: detailRows, maxRows: detailRows, bottomFooter: false });
       }
-      if (mode !== "detail") return contentLines;
-      if (detailRows === undefined) return [...contentLines, ...bottomLines];
+      if (overlayRows === undefined || detailRows === undefined) return [...contentLines, ...bottomLines];
       const fittedContent = contentLines.slice(0, detailRows);
       while (fittedContent.length < detailRows) fittedContent.push("");
-      return [...fittedContent, ...bottomLines];
+      // A terminal shorter than rail + editor keeps the bottom rows (the input frame) and drops the top.
+      return [...fittedContent, ...bottomLines].slice(-Math.max(1, overlayRows));
     },
     handleInput(data: string) {
       if (closed) return;
@@ -946,62 +994,83 @@ function createOverlayComponent(
         handleCloseKey();
         return;
       }
-      if (mode === "detail") {
-        if (deps.matchKey(data, "up")) {
-          selectOverlayRow(overlayState.selected - 1);
-          activateSelectedRow();
-        }
-        else if (deps.matchKey(data, "down")) {
-          selectOverlayRow(overlayState.selected + 1);
-          activateSelectedRow();
-        }
-        else if (deps.matchKey(data, "left")) {
-          const mainIdx = overlayState.rows.findIndex((row) => row.parentRow && row.id === "main");
-          if (mainIdx >= 0) selectOverlayRow(mainIdx);
-          close();
-        }
-        else if (deps.matchKey(data, "enter")) {
-          const row = selectedRow();
-          if (row?.parentRow || row?.navigatorId !== detailId) openDetail();
-          else {
-            const sectionId = firstToggleableSectionId(detail);
-            if (!sectionId) return;
-            if (expandedSections.has(sectionId)) expandedSections.delete(sectionId);
-            else expandedSections.add(sectionId);
-            requestRender();
-          }
-        }
-        else if (data === "l" || data === "L") {
-          logTailRows = cycleLogTailRows(logTailRows);
-          if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+      if (deps.matchKey(data, "up")) {
+        selectOverlayRow(overlayState.selected - 1);
+        activateSelectedRow();
+      }
+      else if (deps.matchKey(data, "down")) {
+        selectOverlayRow(overlayState.selected + 1);
+        activateSelectedRow();
+      }
+      else if (deps.matchKey(data, "left")) {
+        const mainIdx = overlayState.rows.findIndex((row) => row.parentRow && row.id === "main");
+        if (mainIdx >= 0) selectOverlayRow(mainIdx);
+        close();
+      }
+      else if (deps.matchKey(data, "enter")) {
+        const row = selectedRow();
+        if (row?.parentRow || row?.navigatorId !== detailId) openDetail();
+        else {
+          const sectionId = firstToggleableSectionId(detail);
+          if (!sectionId) return;
+          if (expandedSections.has(sectionId)) expandedSections.delete(sectionId);
+          else expandedSections.add(sectionId);
           requestRender();
         }
-        else if (deps.matchKey(data, "escape")) {
-          unfocusMainList();
-          close();
-        }
-        return;
       }
-      if (deps.matchKey(data, "up")) {
-        overlayState.selected = Math.max(0, overlayState.selected - 1);
-        clearCloseArm();
+      else if (data === "l" || data === "L") {
+        logTailRows = cycleLogTailRows(logTailRows);
+        if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
         requestRender();
-      } else if (deps.matchKey(data, "down")) {
-        overlayState.selected = Math.min(Math.max(0, overlayState.rows.length - 1), overlayState.selected + 1);
-        clearCloseArm();
-        requestRender();
-      } else if (deps.matchKey(data, "enter")) {
-        openDetail();
-      } else if (deps.matchKey(data, "escape")) {
+      }
+      else if (deps.matchKey(data, "escape")) {
+        unfocusMainList();
         close();
       }
     },
+    /** Show another row's detail in this overlay (the main list moved while it was unfocused). */
+    showDetail(navigatorId: string) {
+      if (closed) return;
+      refreshRows();
+      const idx = overlayState.rows.findIndex((row) => row.navigatorId === navigatorId);
+      if (idx < 0) return;
+      overlayState.selected = idx;
+      state().mainListSelectedId = navigatorId;
+      if (overlayState.rows[idx]!.parentRow) close();
+      else openDetail();
+    },
+    /** Close the overlay (done), e.g. when the navigator is disposed. */
+    dismiss() { close(); },
     invalidate() { transcriptComponent?.invalidate(); },
     dispose() {
       clearCloseArm();
       detailScheduler.dispose();
     },
   };
+}
+
+/**
+ * After a confirmed close, the row whose detail the overlay shows next: the
+ * nearest closable row below the closed one in the pre-close order, else the
+ * nearest above it. `undefined` means nothing closable remains.
+ */
+function neighbourCloseTarget(
+  before: ReadonlyArray<{ navigatorId: string; parentRow?: boolean }>,
+  closedIdx: number,
+  closedId: string,
+  after: ReadonlyArray<{ navigatorId: string; parentRow?: boolean }>,
+): string | undefined {
+  const remaining = new Set(after.filter((row) => !row.parentRow && row.navigatorId !== closedId).map((row) => row.navigatorId));
+  for (let i = closedIdx + 1; i < before.length; i += 1) {
+    const id = before[i]?.navigatorId;
+    if (id && remaining.has(id)) return id;
+  }
+  for (let i = Math.min(closedIdx, before.length) - 1; i >= 0; i -= 1) {
+    const id = before[i]?.navigatorId;
+    if (id && remaining.has(id)) return id;
+  }
+  // Rows that appeared since the last render.
+  return after.find((row) => remaining.has(row.navigatorId))?.navigatorId;
 }
 
 function buildTranscriptDetailLines(
@@ -1088,33 +1157,6 @@ function fallbackDetail(row: InternalRow): BackgroundWorkDetail {
   };
 }
 
-function buildListLines(nav: OverlayState, width: number, truncate: (s: string, width: number) => string, fg: (color: string, value: string) => string): string[] {
-  const lines: string[] = [];
-  lines.push(rule(`Work · ${nav.rows.length}`, width));
-  const selected = nav.rows[nav.selected];
-  const closeAction = selected ? "x close" : null;
-  lines.push(dim(`   ${["↑↓ select", "Enter view", closeAction, "Esc close"].filter(Boolean).join(" · ")}`, fg));
-  lines.push("");
-  if (nav.rows.length === 0) lines.push("   (no work)");
-  let lastProvider = "";
-  for (let i = 0; i < nav.rows.length; i += 1) {
-    const row = nav.rows[i]!;
-    if (row.providerLabel !== lastProvider) {
-      lines.push(dim(section(row.providerLabel, width), fg));
-      lastProvider = row.providerLabel;
-    }
-    const prefix = i === nav.selected ? fg("accent", "›  ") : "   ";
-    const status = fg(toneColor(row.statusTone, row.status), row.status);
-    const facts = (row.facts ?? []).filter(Boolean).slice(0, 2);
-    const suffix = facts.length ? ` · ${facts.join(" · ")}` : "";
-    lines.push(`${prefix}${row.name || row.id} · ${row.kind} · ${row.elapsed} · ${row.primary} · ${status}${suffix}`);
-    if (row.secondary) lines.push(`      ${row.secondary}`);
-  }
-  lines.push("");
-  lines.push(dim(rule("", width), fg));
-  return lines.map((line) => safeTruncate(line, width, truncate));
-}
-
 function buildDetailLines(
   detail: BackgroundWorkDetail | null,
   width: number,
@@ -1173,7 +1215,9 @@ function buildDetailLines(
       lines.push(`   ${preview} ${folded}`);
     } else {
       const wrapped = wrapEvidenceText(body, width - 6);
-      const shown = wrapped.slice(0, tailRows);
+      let shown = wrapped.slice(0, tailRows);
+      // Same budget as the tail branch: the header row and the trailing blank come out of maxRows too.
+      if (options.maxRows !== undefined) shown = shown.slice(0, Math.max(1, options.maxRows - lines.length - 2));
       lines.push(dim(section(`${detail.evidence.label} · showing ${shown.length}/${wrapped.length} rows`, width), fg));
       for (const raw of shown) lines.push(raw ? `   ${raw}` : "   ");
     }
