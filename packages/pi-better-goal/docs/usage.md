@@ -58,7 +58,8 @@ While the goal is paused, the agent has a `goal_resume` tool and is told to
 call it only for such a clear go-ahead, never for questions, "why...", "what
 about...", "let me think", or discussion. `goal_resume` resumes exactly as
 `/goal resume` does. You can always resume yourself with `/goal resume` or the
-`alt+g` hotkey.
+`alt+g` hotkey. On a macOS terminal without Option-as-Meta, `alt+g` types `©`
+instead; use `/goal resume` there.
 
 To stop the loop until you say otherwise, use `/goal pause`. Only you can undo
 it, with `/goal resume` or `alt+g`: the agent's `goal_resume` refuses it, and

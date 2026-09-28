@@ -222,3 +222,49 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   assert.equal(currentWorkflowOwner(entries), null);
   await goalHandlers.get("session_shutdown")?.({}, ctx);
 });
+test("an escape-paused workflow goal puts the paused instruction before, and over, the workflow text", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const dir = mkdtempSync(join(tmpdir(), "pi-workflow-paused-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const skillPath = join(dir, "SKILL.md");
+  writeFileSync(skillPath, "---\nname: fixture\nmetadata:\n  workflow-role: coordinator\n---\n# Fixture\nOnly coordinate work.\n");
+  const entries: Array<{ type: string; customType?: string; data?: unknown }> = [];
+  const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+  const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> | void }>();
+  const ctx = {
+    cwd: dir,
+    hasUI: false,
+    isIdle: () => true,
+    sessionManager: { getBranch: () => entries, getSessionId: () => "workflow-paused" },
+    ui: { notify() {}, setStatus() {}, setWidget() {} },
+  } as unknown as ExtensionContext;
+  const pi = {
+    events: new EventEmitter(),
+    appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
+    getCommands: () => [{ name: "skill:fixture", source: "skill", sourceInfo: { path: skillPath } }],
+    sendMessage() {},
+    sendUserMessage() {},
+    registerCommand(name: string, command: { handler(args: string, ctx: ExtensionContext): Promise<void> | void }) { commands.set(name, command); },
+    registerTool() {},
+    on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { handlers.set(event, handler); },
+  } as unknown as ExtensionAPI;
+  extension(pi);
+  await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+  await commands.get("goal")?.handler("/skill:fixture implement task", ctx);
+  await handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [], stopReason: "aborted" }] }, ctx);
+  assert.equal(currentGoalSnapshot(ctx)?.pauseReason, "interrupt");
+
+  const prompt = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  const paused = prompt.indexOf("paused because the user pressed escape");
+  const override = prompt.indexOf("this overrides the workflow instructions below");
+  const workflow = prompt.indexOf("Follow the workflow instructions below");
+  const skillText = prompt.indexOf("Only coordinate work.");
+  assert.ok(paused > 0 && override > paused, "the paused instruction states that it overrides the workflow");
+  assert.ok(workflow > override && skillText > workflow, "the workflow text follows the paused instruction");
+  assert.match(prompt, /with a choice that means proceed/);
+
+  await commands.get("goal")?.handler("resume", ctx);
+  const running = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  assert.doesNotMatch(running, /pressed escape|overrides the workflow/);
+  await handlers.get("session_shutdown")?.({}, ctx);
+});

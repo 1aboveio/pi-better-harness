@@ -17,10 +17,13 @@ const fixtures = mkdtempSync(join(tmpdir(), "pi-goal-pause-"));
 const probePath = join(fixtures, "scripted-model.mjs");
 const readyPath = join(fixtures, "ready");
 const logPath = join(fixtures, "model-calls.jsonl");
+// A private tmux server (-L) keeps the test off the user's default server.
 const session = `pi-goal-pause-${process.pid}`;
 
 after(() => {
-  spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
+  spawnSync("tmux", ["-L", session, "kill-server"], { stdio: "ignore" });
+  // kill-server can leave the private socket file behind.
+  rmSync(join(process.env.TMUX_TMPDIR || "/tmp", `tmux-${process.getuid?.() ?? 0}`, session), { force: true });
   rmSync(fixtures, { recursive: true, force: true });
 });
 
@@ -80,7 +83,7 @@ function startPiSession() {
     "--name goal-pause-e2e",
     "--model openai/gpt-4o-mini",
   ].join(" ");
-  execFileSync("tmux", ["new-session", "-d", "-s", session, "-x", "110", "-y", "32", command]);
+  execFileSync("tmux", ["-L", session, "new-session", "-d", "-s", session, "-x", "110", "-y", "32", command]);
 }
 
 function scriptedModelExtension() {
@@ -158,15 +161,15 @@ function waitForFile(path, timeoutMs = 10_000) {
 }
 
 function sendKey(key) {
-  execFileSync("tmux", ["send-keys", "-t", session, key]);
+  execFileSync("tmux", ["-L", session, "send-keys", "-t", session, key]);
 }
 
 function sendLiteral(value) {
-  execFileSync("tmux", ["send-keys", "-t", session, "-l", value]);
+  execFileSync("tmux", ["-L", session, "send-keys", "-t", session, "-l", value]);
 }
 
 function captureScreen() {
-  return execFileSync("tmux", ["capture-pane", "-t", session, "-p"], { encoding: "utf8" })
+  return execFileSync("tmux", ["-L", session, "capture-pane", "-t", session, "-p"], { encoding: "utf8" })
     .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 

@@ -78,7 +78,7 @@ export const GOAL_RESUME_SHORTCUT = "alt+g";
 /** When the agent may call `goal_resume`; shared by the tool description and the paused prompt. */
 const GOAL_RESUME_RULE =
   "Call goal_resume only when the user's latest message clearly says to proceed (for example \"go\", \"continue\", \"ok do it\", \"approved, proceed\"), " +
-  "or answers a decision you explicitly asked for in your previous message. Never call it for questions, \"why...\", \"what about...\", \"let me think\", or discussion.";
+  "or answers a decision you explicitly asked for in your previous message with a choice that means proceed. Never call it for questions, \"why...\", \"what about...\", \"let me think\", or discussion.";
 
 /** True when the agent may resume this goal with `goal_resume`. */
 export function agentResumable(goal: GoalSnapshot | null): boolean {
@@ -1027,9 +1027,12 @@ export default function (pi: ExtensionAPI): void {
         return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.` };
       }
       return {
-        systemPrompt: `${event.systemPrompt}\n\nActive workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
+        systemPrompt: `${event.systemPrompt}\n\n` +
+          (pausedInstruction
+            ? `${pausedInstruction}\nWhile the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n`
+            : "") +
+          `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
           (isPokeable(goal) ? `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.` : "") +
-          (pausedInstruction ? `\n\n${pausedInstruction}` : "") +
           (questionInstruction ? `\n\n${questionInstruction.trim()}` : ""),
       };
     }
