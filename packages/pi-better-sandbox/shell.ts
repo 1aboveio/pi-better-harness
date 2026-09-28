@@ -76,7 +76,10 @@ export function buildSandboxedShellCommand(
     // `exec` stays unquoted so the outer shell replaces itself with the wrapper:
     // the process pi tracks, signals, and kills is the sandboxed one.
     const argv = [sandboxCommand.file, ...sandboxCommand.fileArgs].map(quoteForPosixShell);
-    return `exec ${argv.join(" ")}`;
+    // A notice (such as a placeholder left in the user's files) is printed by
+    // the outer, unconfined shell, once, before it becomes the wrapper.
+    const notices = (sandboxCommand.notices ?? []).map((line) => `printf '%s\\n' ${quoteForPosixShell(line)} >&2; `).join("");
+    return `${notices}exec ${argv.join(" ")}`;
 }
 
 export type SandboxedBashOperationsOptions = ForegroundShellSeams & {

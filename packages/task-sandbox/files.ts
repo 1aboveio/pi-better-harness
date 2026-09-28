@@ -122,7 +122,7 @@ export function removeDecision(path: string, policy: CompiledSandboxWritePolicy)
     const literalLeaf: SandboxSeams = {
         canonicalize: (candidate) => {
             if (candidate === entry) throw new Error("the leaf entry is judged literally");
-            return realpathSync(candidate);
+            return realpathSync.native(candidate);
         },
     };
     return evaluateDeleteAccess(entry, policy, literalLeaf);

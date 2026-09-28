@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -298,6 +298,30 @@ describe("foreground sandbox launch planning", () => {
     // The deny that protects the mechanism itself: the registry holds the launch
     // vector a resumed watch re-runs and the profile that vector names.
     expect(profile).toContain(`(deny file-write* (subpath "${realpathSync(baseDir())}"))`);
+  });
+
+  it("reports a placeholder the Linux backend leaves in the workspace, for the task log (#350)", () => {
+    const { spec, project, profilePath } = wrapFixture("placeholder-notice-linux");
+    const fakeHome = join(fixtureRoot, "placeholder-notice-home");
+    mkdirSync(fakeHome, { recursive: true });
+    symlinkSync(join(project, "rc"), join(fakeHome, ".zlogin"));
+    const permissions = { projectFiles: "read-write", outsideProject: "write", storedCredentials: "read",
+      commands: true, network: true } as const;
+    const previousHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+    try {
+      const notices: string[] = [];
+      confineCommandSpec(spec, { ...wrapPlan(project), permissions }, profilePath, {
+        ...LINUX, makeDirectory: () => {},
+        maskSources: () => ({ directory: join(fixtureRoot, "mask-dir"), file: join(fixtureRoot, "mask-file") }),
+      }, (line) => notices.push(line));
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain(join(project, "rc"));
+      expect(existsSync(join(project, "rc"))).toBe(true);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
   });
 
   it("passes the permission snapshot to the backend, including network", () => {
