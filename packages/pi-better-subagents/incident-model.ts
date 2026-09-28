@@ -8,12 +8,10 @@
  * `operationId` or the exact tool/arguments/cwd hash; expected exits require a code
  * declared on the attempt before it ran and a structured exit code from the tool.
  */
-import { failureIdentity, findIncident, validateDisposition, INCIDENT_DISPOSITIONS, INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES,
+import { failureIdentity, findIncident, validateDisposition, INCIDENT_DISPOSITIONS,
     REJECTED_INTENT_CATEGORY, readCommandIntent, withoutAbsentIntent, type CommandIntent, type FailureEvent, type FailureState, type IncidentDisposition } from "./shared-failure-observations.ts";
 
 export const DISPOSITION_TOOL = "failure_disposition";
-// The intent validator is shared with background tasks through the vendored failure-observations module (#325).
-export { INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES, readCommandIntent, withoutAbsentIntent, type CommandIntent };
 
 function stable(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(stable);
@@ -209,10 +207,12 @@ export function foldToolStart(model: IncidentModel, row: any, cwd: string, sink:
     }
     const parsed = toolName === "bash" ? readCommandIntent(row.args) : { intent: {} as CommandIntent };
     const intent = parsed.intent;
-    // Mirrors the child's check: any earlier bash start that named this attemptId, valid or not.
-    const rawAttemptId = toolName === "bash" && typeof row.args?.attemptId === "string" ? row.args.attemptId as string : undefined;
-    const reused = rawAttemptId !== undefined && model.namedAttempts.has(rawAttemptId);
-    if (rawAttemptId !== undefined) model.namedAttempts.add(rawAttemptId);
+    // Mirrors the child's check: any earlier bash start that named this attemptId, valid or not. The name
+    // is read after the same normalization the child applies, so `attemptId: ""` or `null` names nothing (#332).
+    const namedArgs = toolName === "bash" ? withoutAbsentIntent(row.args) : undefined;
+    const namedAttemptId = typeof namedArgs?.attemptId === "string" ? namedArgs.attemptId as string : undefined;
+    const reused = namedAttemptId !== undefined && model.namedAttempts.has(namedAttemptId);
+    if (namedAttemptId !== undefined) model.namedAttempts.add(namedAttemptId);
     const predictedRejection = parsed.error ?? (reused ? `attemptId ${intent.attemptId} was already used` : undefined);
     // A predicted refusal falls back to exact identity: if the child ran the command after all, it is
     // an ordinary failure of exactly that command, never a failure of the operation it named.

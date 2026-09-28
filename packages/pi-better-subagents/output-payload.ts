@@ -48,6 +48,7 @@ import {
 import {
     actionableFailures,
     failureJournalFingerprint,
+    fileChangeIdentity,
     failureRevision,
     formatIncidentSummary,
     formatTerminalIncidentSummary,
@@ -777,16 +778,7 @@ const LIST_INCIDENT_CACHE_MAX = 4096;
 let listIncidentComputations = 0;
 
 function listIncidentKey(id: string, terminal: boolean): string {
-    return JSON.stringify([terminal, logIdentityKey(logPathFor(id)), failureJournalFingerprint(failurePath(id))]);
-}
-
-function logIdentityKey(path: string): string {
-    try {
-        const stats = statSync(path, { bigint: true });
-        return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
-    } catch (error) {
-        return `unreadable:${(error as NodeJS.ErrnoException).code ?? "error"}`;
-    }
+    return JSON.stringify([terminal, fileChangeIdentity(logPathFor(id)), failureJournalFingerprint(failurePath(id))]);
 }
 
 export function listIncidentCount(id: string, cwd: string, terminal: boolean): ListIncidentCount {

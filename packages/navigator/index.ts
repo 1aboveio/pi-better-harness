@@ -95,6 +95,8 @@ type NavigatorState = {
   editorComponent?: Component;
   /** The editor Pi currently has mounted (the wrapper the factory returned last). */
   editorFocusTarget?: unknown;
+  /** How many times that wrapper has rendered, so an overlay can tell whether it is still on screen. */
+  editorRenders?: number;
   detailOverlayRows?: number;
   dispose?: () => void;
   /** The mounted detail overlay, reused instead of stacking a second one. */
@@ -632,7 +634,7 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
   if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
-  const proxy = new Proxy(inner, {
+  const proxy: any = new Proxy(inner, {
     get(target, prop) {
       if (prop === "handleInput") {
         return (data: string) => {
@@ -640,6 +642,13 @@ function wrapEditor(inner: any, deps: HostDeps): unknown {
             return;
           }
           target.handleInput(data);
+        };
+      }
+      if (prop === "render" && typeof target.render === "function") {
+        return (...args: unknown[]) => {
+          const s = state();
+          if (s.editorFocusTarget === proxy) s.editorRenders = (s.editorRenders ?? 0) + 1;
+          return target.render(...args);
         };
       }
       const value = Reflect.get(target, prop);
@@ -709,6 +718,19 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
   return false;
 }
 
+/**
+ * Whether pi-tui has the editor our wrapper returned mounted (#332). Pi mounts whatever the factory
+ * returns, so another extension's `setEditorComponent` (a foreign factory, or `undefined` for Pi's
+ * default editor) unmounts it, and no key reaches our input handler after that. `undefined` means
+ * the host cannot say (no `isComponentMounted`), and callers keep their earlier behaviour.
+ */
+function liveEditorMounted(tui: unknown): boolean | undefined {
+  const live = state().editorFocusTarget;
+  const check = (tui as { isComponentMounted?: (component: unknown) => boolean } | undefined)?.isComponentMounted;
+  if (!live || typeof check !== "function") return undefined;
+  try { return check.call(tui, live) === true; } catch { return undefined; }
+}
+
 /** Close a detail overlay that is still mounted while the editor has focus. */
 function dismissOverlay(): void {
   const s = state();
@@ -774,8 +796,10 @@ function openNavigator(): void {
         // Pi restores focus to the editor that was focused when the overlay opened. If an
         // extension re-installed the editor since, that instance is unmounted and every key
         // would be lost; hand focus to the live editor before closing.
+        // Only a mounted editor can take focus: after another extension replaced ours, Pi already
+        // focused its replacement, and handing focus to our unmounted wrapper would swallow every key.
         const liveEditor = s.editorFocusTarget;
-        if (liveEditor) {
+        if (liveEditor && liveEditorMounted(tui) !== false) {
           try { handle?.unfocus?.({ target: liveEditor }); } catch { /* ignore */ }
         }
         done(value);
@@ -952,8 +976,30 @@ function createOverlayComponent(
     requestRender();
   }
 
+  let editorRendersSeen: number | undefined;
+  /**
+   * Our editor wrapper was uninstalled: close, since no key of ours can reach this overlay again and
+   * it would cover the editor that replaced ours (#332). An extension that composes the editor inside
+   * its own non-container component still renders ours, so the wrapper also counts as live while it
+   * rendered since the previous overlay frame (Pi renders the editor before it composites overlays).
+   */
+  function closeIfEditorReplaced(): void {
+    const rendersBefore = editorRendersSeen;
+    const renders = state().editorRenders ?? 0;
+    editorRendersSeen = renders;
+    if (closed || liveEditorMounted(tui) !== false || rendersBefore === undefined || renders !== rendersBefore) return;
+    // Not from inside pi-tui's render pass: hiding an overlay there would change the stack it is drawing.
+    queueMicrotask(() => {
+      if (closed) return;
+      unfocusMainList();
+      close();
+      requestRender();
+    });
+  }
+
   return {
     render(width: number) {
+      closeIfEditorReplaced();
       refreshRows();
       const railLines = buildMainListLines(overlayState.rows, width, deps.truncate, fg, {
         selectedId: selectedRow()?.navigatorId,

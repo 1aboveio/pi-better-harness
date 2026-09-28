@@ -11,9 +11,11 @@
  */
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { emptyFailureState, reduceFailure, type FailureEvent, type FailureState } from "./shared-failure-observations.ts";
-import { DISPOSITION_TOOL, INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES, describeOpenTargets, foldToolEnd, foldToolStart,
-    newIncidentModel, readCommandIntent, readDispositionRequest, resolveDisposition, type IncidentModel, type IncidentSink } from "./incident-model.ts";
+// The intent validator is shared with background tasks through the vendored failure-observations module (#325).
+import { emptyFailureState, reduceFailure, INTENT_ID_PATTERN, MAX_EXPECTED_EXIT_CODES, readCommandIntent, withoutAbsentIntent,
+    type FailureEvent, type FailureState } from "./shared-failure-observations.ts";
+import { DISPOSITION_TOOL, describeOpenTargets, foldToolEnd, foldToolStart,
+    newIncidentModel, readDispositionRequest, resolveDisposition, type IncidentModel, type IncidentSink } from "./incident-model.ts";
 
 const { createBashToolDefinition } = PiCodingAgent;
 
@@ -95,7 +97,7 @@ export function intentBashDefinition(cwd: string, operations: BashOperations) {
             if (error) throw new Error(`Invalid command intent: ${error}. The command was not run.`);
             if (intent.attemptId) {
                 const reused = sessionToolCalls(ctx).some((row) => row.type === "tool_execution_start" && row.toolName === "bash" &&
-                    row.toolCallId !== toolCallId && (row.args as any)?.attemptId === intent.attemptId);
+                    row.toolCallId !== toolCallId && (withoutAbsentIntent(row.args) as any)?.attemptId === intent.attemptId);
                 if (reused) throw new Error(`Invalid command intent: attemptId ${intent.attemptId} was already used. The command was not run.`);
             }
             const { operationId: _o, attemptId: _a, expectedExitCodes: _e, ...command } = params ?? {};

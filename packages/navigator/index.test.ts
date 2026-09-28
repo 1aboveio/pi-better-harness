@@ -1867,4 +1867,87 @@ describe("shared background work navigator", () => {
       unregister();
     }
   });
+
+  it("closes the detail overlay when another extension replaces the editor, and never hands focus to the unmounted wrapper", async () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      listRows: () => ["alpha", "beta"].map((id, i) => ({
+        providerId: "subagents", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "subagent", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300 - i,
+      })),
+    });
+    const mounted: any[] = [];
+    const unfocusTargets: unknown[] = [];
+    const widgets: unknown[] = [];
+    // pi-tui's view: what the editor container holds, and whether a component is in the tree.
+    let editorSlot: any;
+    const tui = {
+      requestRender() {},
+      isComponentMounted(component: unknown) { return component === editorSlot; },
+    };
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, widget: unknown) { widgets.push(widget); },
+      getEditorComponent() { return this.factory; },
+      // Pi's setCustomEditorComponent: build the new editor and mount it in place of the old one.
+      setEditorComponent(factory: any) {
+        this.factory = factory;
+        editorSlot = factory ? factory(tui, {}, {}) : { render: () => ["default editor"], handleInput() {} };
+      },
+      custom(factory: any, options: any) {
+        let component: any;
+        component = factory(tui, this.theme, {}, () => { mounted.splice(mounted.indexOf(component), 1); });
+        mounted.push(component);
+        options?.onHandle?.({ focus() {}, unfocus(unfocusOptions?: { target: unknown }) { unfocusTargets.push(unfocusOptions?.target); } });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    /** One pi-tui frame: the base (editor included) renders first, then the overlays. */
+    const frame = () => { editorSlot?.render?.(100); for (const overlay of [...mounted]) overlay.render(100); };
+    const settle = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", render: () => ["our editor"], handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      editorSlot = ui.factory(tui, {}, {});
+      const ours = editorSlot;
+      ours.handleInput("left");
+      ours.handleInput("down");
+      assert.equal(mounted.length, 1);
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 1, "the overlay stays while our editor is on screen");
+
+      // An extension that composes the editor inside its own (non-container) component keeps ours
+      // rendering and receiving keys: the overlay stays.
+      const inner = ui.factory;
+      ui.setEditorComponent((t: any, th: any, kb: any) => {
+        const wrapped = inner(t, th, kb);
+        return { render: (width: number) => wrapped.render(width), handleInput: (data: string) => wrapped.handleInput(data) };
+      });
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 1, "a composed editor still shows ours");
+      editorSlot.handleInput("escape");
+      assert.equal(mounted.length, 0);
+
+      // Reopen, then an extension replaces the editor outright (Pi's default here).
+      editorSlot.handleInput("left");
+      editorSlot.handleInput("down");
+      assert.equal(mounted.length, 1);
+      frame();
+      ui.setEditorComponent(undefined);
+      frame(); frame(); await settle();
+      assert.equal(mounted.length, 0, "the overlay closes instead of covering the replacement editor");
+      assert.deepEqual(unfocusTargets, [], "focus is never handed to an unmounted wrapper");
+      assert.doesNotMatch(renderWidget(widgets.at(-1), 100, ui.theme).join("\n"), /^› /m, "the rail is unfocused");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
 });

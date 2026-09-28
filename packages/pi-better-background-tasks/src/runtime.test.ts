@@ -823,6 +823,28 @@ describe("runtime", () => {
     expect(readMeta(meta.id)?.callbackSuppressedReason).toContain("cancelled");
   });
 
+  // @covers background-task.ssh-timeout
+  // @level integration
+  it("#332 kills a remote tmux session whose creation finishes after the task timed out", async () => {
+    const delayedStart = deferred<ReturnType<typeof successfulResult>>();
+    const runner = new FakeRemoteRunner([
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
+      delayedStart.promise,
+      successfulResult(""),
+    ]);
+    const meta = spawnTask(fakePi, { command: "sleep 300", timeout_seconds: 0.05, callback: false, ssh: { host: "late.example", user: "deploy" } },
+      process.cwd(), undefined, undefined, { remoteRunner: runner });
+    await runner.waitForRunCalls(2);
+    const timedOut = await waitForMeta(meta.id, (current) => current?.status === "timed_out", 1_000);
+    expect(timedOut?.result).toMatchObject({ reason: expect.stringMatching(/before remote tmux session .* started/) });
+    delayedStart.resolve(successfulResult(""));
+    await runner.waitForRunCalls(3);
+    expect(runner.runCalls.at(-1)?.command).toBe(`tmux kill-session -t 'pi-bg-${meta.id}'`);
+    const killed = `Killed remote tmux session pi-bg-${meta.id} on deploy@late.example: it started after the task was timed_out`;
+    for (let i = 0; i < 50 && !readFileSync(meta.logPath, "utf8").includes(killed); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(readFileSync(meta.logPath, "utf8")).toContain(killed);
+  });
+
   // @covers background-task.ssh-spawn
   // @level integration
   // @fails-without-fix background-task.ssh-spawn

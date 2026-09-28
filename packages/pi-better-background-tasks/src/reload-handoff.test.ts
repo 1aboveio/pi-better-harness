@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { currentProcessStartToken } from "./process-identity.js";
 import { getRegistryIoMetrics, readMeta, resetRegistryIoMetrics, taskDir, writeMeta } from "./registry.js";
 import { resumeRunningTask, resumeScheduledWork, spawnTask, suspendScheduledWork } from "./runtime.js";
-import type { BackgroundTaskMeta } from "./types.js";
+import type { BackgroundTaskMeta, CommandResult } from "./types.js";
+import { FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
 
 const origin = { cwd: process.cwd(), sessionId: "reload-handoff" };
 const ids: string[] = [];
@@ -100,5 +101,40 @@ describe("reload handoff", () => {
     await vi.advanceTimersByTimeAsync(4_000);
     vi.useRealTimers();
     await until(() => (messages.some((m) => m.includes(id)) ? true : undefined));
+  });
+
+  it("#332 a stop from the reloaded instance while the old instance's tmux start is in flight does not orphan the remote session", async () => {
+    let releaseStart!: (result: CommandResult) => void;
+    const start = new Promise<CommandResult>((resolve) => { releaseStart = resolve; });
+    const runner = new FakeRemoteRunner([
+      successfulResult("__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n"),
+      start,
+      successfulResult(""),
+    ]);
+    const before = host();
+    const meta = spawnTask(before.pi, { command: "sleep 300", callback: false, ssh: { host: "reload.example", user: "deploy" } },
+      process.cwd(), origin, () => origin, { remoteRunner: runner });
+    ids.push(meta.id);
+    await runner.waitForRunCalls(2);
+    // /reload while `tmux new-session` is in flight: the fresh instance resumes the task and stops it.
+    suspendScheduledWork();
+    vi.resetModules();
+    const fresh = await import("./runtime.js");
+    const after = host();
+    fresh.resumeScheduledWork();
+    const freshRunner = new FakeRemoteRunner([]);
+    fresh.resumeRunningTask(after.pi, readMeta(meta.id)!, () => origin, { remoteRunner: freshRunner });
+    const stopped = await fresh.stopTask(after.pi, meta.id, () => origin);
+    expect(stopped?.status).toBe("cancelled");
+    // The old instance's start then succeeds; it is the only one that can still reach that session.
+    releaseStart(successfulResult(""));
+    await runner.waitForRunCalls(3);
+    expect(runner.runCalls.map((call) => call.command)).toEqual([
+      expect.stringContaining("command -v tmux"),
+      expect.stringContaining(`new-session -d -s 'pi-bg-${meta.id}'`),
+      `tmux kill-session -t 'pi-bg-${meta.id}'`,
+    ]);
+    expect(freshRunner.runCalls).toEqual([]);
+    expect(readMeta(meta.id)?.status).toBe("cancelled");
   });
 });

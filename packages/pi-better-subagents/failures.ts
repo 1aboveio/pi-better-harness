@@ -99,8 +99,23 @@ function settleMetadataGap(id: string, scan: Scan): void {
     }
     const held = [...intentBearing].some((incident) => findIncident(state, incident)?.status === "unresolved");
     if (held) return;
-    observeFailures(failurePath(id), [{ id: `run-metadata-readable:${gap.id}`, operation: "run-metadata", kind: "recovered", incidents: [gap.id] }]);
+    observeFailures(failurePath(id), [{ id: failureIdentity("run-metadata-readable", gap.id), operation: "run-metadata", kind: "recovered", incidents: [gap.id] }]);
     scan.gap = undefined;
+}
+/**
+ * The tool incidents the exact-rule scan left unresolved, fixed when trust first becomes readable. The
+ * first trusted scan journals a no-op marker; every later rebuild of the scan (a parent restart or a
+ * cache eviction) counts only incidents journaled before it, so a failure from the trusted period is
+ * never mistaken for a leftover that holds the gap (#332).
+ */
+function exactRuleLeftovers(path: string, prior: FailureState, gapId: string): Set<string> {
+    const marker = failureIdentity("run-metadata-trusted", gapId);
+    const state = prior.seen.includes(marker) ? prior
+        : observeFailures(path, [{ id: marker, operation: "run-metadata", kind: "delivered", incidents: [] }]);
+    const boundary = state.seen.indexOf(marker);
+    const journaledBefore = new Set(boundary < 0 ? state.seen : state.seen.slice(0, boundary));
+    return new Set(Object.values(state.observations)
+        .filter((x) => x.category === "tool" && x.status === "unresolved" && journaledBefore.has(x.id)).map((x) => x.id));
 }
 /** Scan complete source records, independent of the finite progress/transcript tail. */
 export function collectRunFailures(id: string, cwd: string, terminal = false): FailureState {
@@ -160,8 +175,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
                 // differently is still unresolved (#332).
                 const prior = readRunFailures(id);
                 const deferred = prior.observations[failureIdentity("run-metadata")];
-                if (deferred && deferred.status === "unresolved") scan.gap = { id: deferred.id,
-                    before: new Set(Object.values(prior.observations).filter((x) => x.category === "tool" && x.status === "unresolved").map((x) => x.id)) };
+                if (deferred && deferred.status === "unresolved") scan.gap = { id: deferred.id, before: exactRuleLeftovers(path, prior, deferred.id) };
             }
         }
         scan.head = head;

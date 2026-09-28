@@ -573,3 +573,32 @@ test("#332 Pi's scalar null coercion runs the command: a 0/\"\"/false exit-code 
     assert.equal(byId["tool:s0"].count, 2, "both ran as the same plain npm test");
     assert.equal(byId["tool:ran"].category, "tool");
 });
+
+test("#332 an empty attemptId names nothing: a repeat is a failure of the declared operation, which a later retry recovers", (t) => {
+    // The child normalizes `attemptId: ""` away before its reuse check, so the second call runs. The parent
+    // must not predict an "already used" refusal for it and file it under exact identity instead.
+    const f = confinedFixture(t);
+    f.append(bashStart("e1", { command: "npm test", operationId: "t", attemptId: "" }), bashFail("e1", "1 failing\n\nCommand exited with code 1"),
+        bashStart("e2", { command: "npm test", operationId: "t", attemptId: "" }), bashFail("e2", "1 failing\n\nCommand exited with code 1"));
+    let active = active315(collectRunFailures(f.id, "/repo"));
+    assert.deepEqual(active.map((x) => [x.id, x.count]), [["tool:e1", 2]], "both runs are one declared operation");
+    f.append(bashStart("e3", { command: "npm test -- scoped", operationId: "t" }), bashOk("e3"));
+    active = active315(collectRunFailures(f.id, "/repo"));
+    assert.deepEqual(active, [], "the declared retry recovers every failure of the operation");
+});
+
+test("#332 a restart does not count a trusted-period failure as a leftover that holds the metadata gap", (t) => {
+    const { f, gap } = exactRuleThenTrusted(t, [bashStart("t1", { command: "npm test", operationId: "t" }), bashFail("t1", "1 failing")]);
+    collectRunFailures(f.id, "/repo");
+    assert.equal(gap()?.status, "unresolved", "held by the exact-rule leftover t1");
+    // A real failure under trust, with declared intent, that the child has not handled yet.
+    f.append(bashStart("b1", { command: "npm run build", operationId: "build" }), bashFail("b1", "build failed"));
+    collectRunFailures(f.id, "/repo");
+    // The parent restarts (or the scan cache evicts this run): the scan is rebuilt from the journal.
+    resetFailureScanCursor(f.id);
+    f.append(...dispose("d1", { disposition: "expected", targets: ["tool:t1"], reason: "known flaky suite" }));
+    const state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "expected");
+    assert.equal(active315(state).find((x) => x.id === "tool:b1")?.status, "unresolved", "the trusted failure stays an ordinary incident");
+    assert.equal(gap()?.status, "resolved", "only exact-rule leftovers hold the gap, however the scan was rebuilt");
+});

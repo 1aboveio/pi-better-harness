@@ -6,6 +6,20 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **subagents**: An empty `attemptId` (`""` or `null`) names no attempt. The parent no longer predicts an "already used" refusal for a second call with `attemptId: ""`, which it then filed under the exact command instead of the declared `operationId`, so a later `operationId` retry could not recover it. The child reads earlier attempt ids through the same normalization, so `attemptId: 7` and `"7"` are one id on both sides. (#332)
+- **subagents**: After a parent restart, `/reload` or scan-cache eviction, the "run metadata could not be read" gap is held only by incidents the exact-rule scan left unresolved. A failure with declared intent from the trusted period no longer keeps it open. The first trusted scan marks the boundary in the failure journal. (#332)
+- **navigator**: When another extension replaces the editor (`setEditorComponent(undefined)` or its own factory), the detail overlay closes instead of covering the new editor, where Esc could not close it and typed text did not show. Closing the overlay never hands focus to our unmounted editor. An extension that wraps our editor inside its own keeps the overlay open. (#332)
+- **background-tasks**: A remote tmux session whose creation finishes after the task stopped is killed by the launch that created it. Before, a stop from the instance that `/reload` loaded, or a timeout before the session started, left the session running on the remote host. (#332)
+- **background-tasks**: The completion callback's history line (for example `No failures need action · 1 expected (history)`) now leads the decision, so a tight callback budget no longer clips it first. A declared expected exit is no longer read as a plain failure. (#332)
+- **failure observations**: The journal's 400-character cut no longer leaves half of a surrogate pair, which full rows showed as `�`. (#332)
+
+### Changed
+
+- **failure observations**: Documented that an incident page smaller than the next code point returns no text and a retry cursor, the same contract as `pageVerbatimText`. The subagents doc explains what a corrupt `meta.json` does to a running trusted run. (#332)
+- Internal: one file change-identity helper for the list incident cache and the journal fingerprint; `TaskIntentParams` shared by spawn and watch parameters; subagents import the intent validator from the failure-observations module directly; the terminal summary's budget ladder finds the unclassified note by value, not by a regex on its text; the metadata-gap recovery id uses `failureIdentity`. (#332)
+
 ## [pi-better-harness@0.8.0] - 2026-09-28
 
 ### Changed

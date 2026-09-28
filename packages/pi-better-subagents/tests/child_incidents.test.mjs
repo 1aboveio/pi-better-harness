@@ -19,8 +19,7 @@ import { describeSandboxSupport } from "../shared-sandbox-core.ts";
 import taskGuard from "../task-guard.ts";
 import { collectRunFailures, failurePath } from "../failures.ts";
 import { logPathFor, recordTaskRuntimeProvenance, runDir, taskRuntimeProvenancePath } from "../registry.ts";
-import { activeFailures, failureHistory } from "../shared-failure-observations.ts";
-import { readCommandIntent } from "../incident-model.ts";
+import { activeFailures, failureHistory, readCommandIntent } from "../shared-failure-observations.ts";
 import { intentBashDefinition } from "../child-incidents.ts";
 
 /**
@@ -182,17 +181,22 @@ test("a child supersedes its merge conflict through failure_disposition and the 
 test("#325 after a branch switch the child still refuses a reused attemptId, so the parent never misfiles a real run", async (t) => {
     // Branch A ran attempt a1; the child then moved to branch B, whose path no longer contains it.
     // The parent scans the whole process log (both branches) and predicts a reuse; the child must agree.
-    const assistant = (id, args) => ({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: args }] } });
-    const result = (id) => ({ type: "message", message: { role: "toolResult", toolCallId: id, toolName: "bash", isError: true, content: [{ type: "text", text: "1 failing" }] } });
-    const earlier = [assistant("a-run", { command: "npm test", attemptId: "a1" }), result("a-run")];
-    const current = [assistant("b-run", { command: "npm test -- scoped", attemptId: "a1" })];
-    /** A real session manager whose branch/entries views are the scenario's. */
-    const sessionView = (branch, entries) => {
-        const real = SessionManager.inMemory(process.cwd());
-        return { sessionManager: new Proxy(real, { get: (target, key) => key === "getBranch" ? () => branch : key === "getEntries" ? () => entries
-            : typeof target[key] === "function" ? target[key].bind(target) : target[key] }) };
-    };
-    const ctx = sessionView(current, [...earlier, ...current]);
+    // A real session manager, branched the way Pi's /tree does, so getBranch() really omits branch A (#332).
+    const assistant = (id, args) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: args }],
+        api: "openai-responses", provider: "openai", model: "gpt-test", stopReason: "toolUse", timestamp: Date.now(),
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    const result = (id) => ({ role: "toolResult", toolCallId: id, toolName: "bash", isError: true, content: [{ type: "text", text: "1 failing" }], timestamp: Date.now() });
+    const session = SessionManager.inMemory(process.cwd());
+    const fork = session.appendMessage({ role: "user", content: "run the tests", timestamp: Date.now() });
+    session.appendMessage(assistant("a-run", { command: "npm test", attemptId: "a1" }));
+    session.appendMessage(result("a-run"));
+    session.branch(fork);
+    session.appendMessage(assistant("b-run", { command: "npm test -- scoped", attemptId: "a1" }));
+    const callIds = (entries) => entries.flatMap((entry) => entry.type === "message" && Array.isArray(entry.message.content)
+        ? entry.message.content.filter((part) => part.type === "toolCall").map((part) => part.id) : []);
+    assert.deepEqual(callIds(session.getBranch()), ["b-run"], "the current branch no longer contains a1's run");
+    assert.deepEqual(callIds(session.getEntries()), ["a-run", "b-run"]);
+    const ctx = { sessionManager: session };
     let ran = 0;
     const operations = { exec: async () => { ran += 1; return { exitCode: 1 }; } };
     const bash = intentBashDefinition(process.cwd(), operations);
@@ -214,9 +218,8 @@ test("#325 after a branch switch the child still refuses a reused attemptId, so 
     const state = collectRunFailures(id, process.cwd());
     assert.deepEqual(activeFailures(state).map((x) => [x.id, x.category]).sort(), [["tool:a-run", "tool"], ["tool:b-run", "rejected-intent"]]);
     // With a fresh attemptId on the new branch the command runs normally.
-    const fresh = [assistant("b-2", { command: "npm test -- scoped", attemptId: "a2" })];
-    const ctx2 = sessionView(fresh, [...earlier, ...current, ...fresh]);
-    await assert.rejects(bash.execute("b-2", { command: "npm test -- scoped", attemptId: "a2" }, undefined, undefined, ctx2), /exit code 1|code 1/i);
+    session.appendMessage(assistant("b-2", { command: "npm test -- scoped", attemptId: "a2" }));
+    await assert.rejects(bash.execute("b-2", { command: "npm test -- scoped", attemptId: "a2" }, undefined, undefined, ctx), /exit code 1|code 1/i);
     assert.equal(ran, 1, "an unused attemptId runs");
 });
 
@@ -260,4 +263,22 @@ test("#332 a declared exit code 0 passes Pi's schema and the intent bash: it is 
     await assert.rejects(bash.execute("zero", zeroOnly, undefined, undefined, ctx), (error) => !/Invalid command intent/.test(error.message) && /code 1/i.test(error.message),
         "a zero-only list declares nothing: the command runs and its exit 1 is an ordinary failure");
     assert.match(bash.parameters.properties.expectedExitCodes.description, /0 is allowed and ignored/);
+});
+
+test("#332 the child reads an earlier attemptId the way the parent does: \"\" names nothing, and 7 is the id \"7\"", async () => {
+    const assistant = (id, args) => ({ role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: args }],
+        api: "openai-responses", provider: "openai", model: "gpt-test", stopReason: "toolUse", timestamp: Date.now(),
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    const session = SessionManager.inMemory(process.cwd());
+    // The session record keeps the raw arguments; Pi coerces them before execute.
+    session.appendMessage(assistant("n-1", { command: "npm test", attemptId: 7 }));
+    session.appendMessage(assistant("n-2", { command: "npm test", attemptId: "7" }));
+    let ran = 0;
+    const bash = intentBashDefinition(process.cwd(), { exec: async () => { ran += 1; return { exitCode: 0 }; } });
+    await assert.rejects(bash.execute("n-2", { command: "npm test", attemptId: "7" }, undefined, undefined, { sessionManager: session }), /attemptId 7 was already used/);
+    assert.equal(ran, 0);
+    session.appendMessage(assistant("e-1", { command: "npm test", attemptId: "" }));
+    session.appendMessage(assistant("e-2", { command: "npm test", attemptId: "" }));
+    await bash.execute("e-2", { command: "npm test", attemptId: "" }, undefined, undefined, { sessionManager: session });
+    assert.equal(ran, 1, "an empty attemptId is undeclared, so a repeat runs");
 });
