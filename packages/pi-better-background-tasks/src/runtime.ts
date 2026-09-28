@@ -31,6 +31,8 @@ const processTimeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const activeProcessTimeouts = new Set<string>();
 const activeRemoteTasks = new Map<string, ResolvedSshRemoteTask>();
 const remoteSessionStarts = new Map<string, Promise<CommandResult>>();
+/** Tasks whose stop in this instance is waiting on an in-flight tmux start, and kills the session itself. */
+const remoteStopsAwaitingStart = new Set<string>();
 const activePolls = new Set<string>();
 const logRetentionTimers = new Map<string, ReturnType<typeof setInterval>>();
 const LOG_RETENTION_CHECK_MS = 1000;
@@ -94,12 +96,16 @@ export function resumeScheduledWork(): void {
 
 export type ActiveSessionProvider = () => BackgroundTaskCallbackOrigin | undefined;
 
-export interface SpawnTaskParams extends CommandSpec {
-  name?: string;
-  /** Structured intent (#325): stable id shared by modified retries of one operation. */
+/** Structured intent (#325), declared by the launching agent and shared by spawns and watchers. */
+export interface TaskIntentParams {
+  /** Stable id shared by modified retries of one operation. */
   operation_id?: string | null;
-  /** Structured intent (#325): non-zero exit codes declared intentional before launch. */
+  /** Non-zero exit codes declared intentional before launch. */
   expected_exit_codes?: number[] | null;
+}
+
+export interface SpawnTaskParams extends CommandSpec, TaskIntentParams {
+  name?: string;
   callback?: boolean;
   timeout_seconds?: number;
   max_log_bytes?: number;
@@ -107,12 +113,8 @@ export interface SpawnTaskParams extends CommandSpec {
   remote?: RemoteTaskParams;
 }
 
-export interface WatchTaskParams extends CommandSpec {
+export interface WatchTaskParams extends CommandSpec, TaskIntentParams {
   name?: string;
-  /** Structured intent (#325): stable id shared by modified retries of one operation. */
-  operation_id?: string | null;
-  /** Structured intent (#325): non-zero exit codes declared intentional before launch. */
-  expected_exit_codes?: number[] | null;
   callback?: boolean;
   interval_seconds?: number;
   timeout_seconds?: number;
@@ -280,7 +282,15 @@ async function launchRemoteTmux(
       if (remoteSessionStarts.get(id) === startAttempt) remoteSessionStarts.delete(id);
     }
     const afterStart = readMeta(id);
-    if (!afterStart || afterStart.status !== "running" || afterStart.stopRequestedAt) return;
+    if (!afterStart) return;
+    if (afterStart.status !== "running" || afterStart.stopRequestedAt) {
+      // Stopped (or timed out) while the start was in flight. A stop in this instance awaited the
+      // attempt and kills the session itself. Anything else could not see the attempt: a stop from
+      // an instance loaded by /reload, or a deadline that found the session not yet started. Only
+      // this launch can still reach the session it may just have created, so it kills it (#332).
+      if (!remoteStopsAwaitingStart.has(id)) await killSessionStartedAfterStop(afterStart, remoteTask);
+      return;
+    }
     if (started.exitCode !== 0) {
       const detail = started.stderr.trim() || started.stdout.trim() || "remote tmux returned no diagnostic";
       const reason = `Could not create remote tmux session ${afterStart.remote?.sessionName} on ${afterStart.ssh?.target} (exit ${started.exitCode ?? "unknown"}): ${detail}`;
@@ -297,6 +307,19 @@ async function launchRemoteTmux(
     scheduleRemoteSessionPoll(pi, id, 0, getActiveSession);
   } catch (error) {
     failRemoteTask(pi, id, error, getActiveSession);
+  }
+}
+
+/** Kill a tmux session whose start completed after its task stopped; a failed start may still have left it running. */
+async function killSessionStartedAfterStop(meta: BackgroundTaskMeta, remoteTask: ResolvedSshRemoteTask): Promise<void> {
+  const session = `remote tmux session ${meta.remote?.sessionName} on ${meta.ssh?.target}`;
+  try {
+    const stopped = await remoteTask.killTmuxSession();
+    appendLine(meta.logPath, stopped.exitCode === 0
+      ? `--- Killed ${session}: it started after the task was ${meta.status === "running" ? "stopped" : meta.status} ---`
+      : `--- Could not kill ${session} that started after the task stopped (exit ${stopped.exitCode ?? "unknown"}) ---`);
+  } catch (error) {
+    appendLine(meta.logPath, `--- Could not kill ${session} that started after the task stopped: ${error instanceof Error ? error.message : String(error)} ---`);
   }
 }
 
@@ -647,7 +670,9 @@ export async function stopTask(
   const remoteSessionMayExist = remote?.session === "tmux"
     && (remote.sessionStarted !== false || remoteStartAttempt !== undefined);
   if (remoteStartAttempt) {
+    remoteStopsAwaitingStart.add(id);
     try { await remoteStartAttempt; } catch { /* A failed SSH result can still leave the detached session running. */ }
+    finally { remoteStopsAwaitingStart.delete(id); }
   }
 
   if (remoteSessionMayExist) {

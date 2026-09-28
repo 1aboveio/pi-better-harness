@@ -13,7 +13,7 @@ import { activeFailures, failureCounts, readFailureState } from "./shared-failur
 import { listMetasForOrigin, readMeta, taskDir, writeMeta } from "./registry.js";
 import { spawnTask, startWatchTask } from "./runtime.js";
 import { registerTools } from "./tools.js";
-import { FakeRemoteRunner } from "./test-support/fake-remote-runner.js";
+import { FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
 // @ts-expect-error untyped repo script shared with the subagent schema test (#327)
 import { findProviderRejectedKeywords } from "../../../scripts/provider-schema-compat.mjs";
 
@@ -120,6 +120,27 @@ describe("#325 background task structured intent", () => {
     const quickFail = spawn("exit 6", { operation_id: "e2e" });
     await Promise.all([terminal(slowPass.id), terminal(quickFail.id)]);
     expect(activeFailures(state(quickFail.id))).toHaveLength(1);
+  });
+
+  it("#332 a remote tmux SSH spawn that succeeds recovers an earlier failed remote attempt of the same operation", async () => {
+    const tmuxProbe = "__PI_BG_TMUX_PATH__=/usr/bin/tmux\n__PI_BG_TMUX_VERSION__=tmux 3.4\n";
+    const remote = (command: string, exitCode: number, host = "deploy.example") => {
+      // Probe, create the tmux session, then one supervision poll that reports the exit.
+      const runner = new FakeRemoteRunner([successfulResult(tmuxProbe), successfulResult(""), successfulResult(`__PI_BG_STATUS__=${exitCode}\n__PI_BG_SIZE__=0\n`)]);
+      const meta = spawnTask(pi, { command, callback: false, operation_id: "deploy", ssh: { host, user: "ci" } }, origin.cwd, origin, () => origin, { remoteRunner: runner });
+      ids.push(meta.id);
+      return meta;
+    };
+    const failed = remote("./deploy.sh --all", 3);
+    expect((await terminal(failed.id)).status).toBe("failed");
+    expect(activeFailures(state(failed.id))).toHaveLength(1);
+    // The same operation on another SSH target is a different operation.
+    expect((await terminal(remote("./deploy.sh --one", 0, "other.example").id)).status).toBe("succeeded");
+    expect(activeFailures(state(failed.id))).toHaveLength(1);
+    // The modified retry on the same target succeeds through finalize, which recovers the earlier failure.
+    expect((await terminal(remote("./deploy.sh --one", 0).id)).status).toBe("succeeded");
+    expect(activeFailures(state(failed.id))).toHaveLength(0);
+    expect(failureCounts(state(failed.id)).recovered).toBe(1);
   });
 
   it("declared recovery never crosses sessions, including two sessionless sessions in one cwd", async () => {

@@ -736,3 +736,33 @@ test("an incident cursor from before scope and detail existed resets instead of 
   assert.notEqual(v(compact.nextCursor), v(full.nextCursor));
   assert.notEqual(v(compact.nextCursor), v(pageFailureIncidents(state, { maxBytes: 150, resource, scope: "all" }).nextCursor));
 });
+
+test("#332 the journal's 400-unit cut never leaves half of a surrogate pair", () => {
+  // 399 ASCII units, then an emoji (two UTF-16 units) straddling the cut.
+  const summary = `${"x".repeat(399)}😀 and more`;
+  const state = reduceFailure(emptyFailureState(), { ...failed, summary }, 1);
+  const kept = activeFailures(state)[0]!.summary;
+  assert.equal(kept, "x".repeat(399), "the split pair is dropped whole");
+  assert.doesNotMatch(kept, /[\uD800-\uDFFF]/);
+  const full = formatFailureLines(state, { detail: "full" })[0]!;
+  assert.ok(!full.includes("�") && !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(full), full.slice(-20));
+  // A pair that fits whole is kept.
+  const whole = reduceFailure(emptyFailureState(), { ...failed, summary: `${"x".repeat(398)}😀tail` }, 1);
+  assert.equal(activeFailures(whole)[0]!.summary, `${"x".repeat(398)}😀`);
+});
+
+test("#332 an incident page too small for the next code point returns nothing and a retry cursor, like pageVerbatimText", () => {
+  const state = reduceFailure(emptyFailureState(), { ...failed, summary: "😀 four-byte lead" }, 1);
+  // Page up to the emoji, then ask for 1-3 bytes at it.
+  const rows = formatFailureLines(state);
+  const lead = Buffer.byteLength(rows[0]!.slice(0, rows[0]!.indexOf("😀")));
+  const upTo = pageFailureIncidents(state, { maxBytes: lead });
+  for (const maxBytes of [1, 2, 3]) {
+    const page = pageFailureIncidents(state, { cursor: upTo.nextCursor, maxBytes });
+    assert.equal(page.text, "");
+    assert.equal(page.hasMore, true);
+    assert.equal(page.nextCursor, page.cursor, "the cursor stays put so a larger page can retry");
+  }
+  const retry = pageFailureIncidents(state, { cursor: upTo.nextCursor, maxBytes: 4 });
+  assert.equal(retry.text, "😀");
+});

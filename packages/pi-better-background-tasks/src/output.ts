@@ -240,9 +240,10 @@ export function formatCallbackFacts(meta: BackgroundTaskMeta): {
     meta.captureDiscardedBytes ? `capture overflow discarded ${meta.captureDiscardedBytes} bytes; not full history` : undefined,
   ].filter((line): line is string => Boolean(line));
   // History (expected and closed incidents) is not a row, but the callback still says it exists, so a
-  // declared expected exit is not read as a plain failure.
+  // declared expected exit is not read as a plain failure. It leads the decision: a tight callback
+  // budget keeps a prefix of the decision, and this short line must survive it (#332).
   const history = rows.length ? historyTailLine(state) : quietFailureLine(state);
-  const decision = [formatDecision(meta), ...gapLines, history].filter(Boolean).join("\n") || undefined;
+  const decision = [history, formatDecision(meta), ...gapLines].filter(Boolean).join("\n") || undefined;
   return {
     outcome: meta.status,
     ...(rows.length ? { failureRows: rows, incidentCount: rows.length } : {}),

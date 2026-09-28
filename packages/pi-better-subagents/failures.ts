@@ -99,8 +99,54 @@ function settleMetadataGap(id: string, scan: Scan): void {
     }
     const held = [...intentBearing].some((incident) => findIncident(state, incident)?.status === "unresolved");
     if (held) return;
-    observeFailures(failurePath(id), [{ id: `run-metadata-readable:${gap.id}`, operation: "run-metadata", kind: "recovered", incidents: [gap.id] }]);
+    observeFailures(failurePath(id), [{ id: failureIdentity("run-metadata-readable", gap.id), operation: "run-metadata", kind: "recovered", incidents: [gap.id] }]);
     scan.gap = undefined;
+}
+/**
+ * Scan-period markers (#332). While a "run metadata could not be read" gap is open, each scan that
+ * starts under a different rule from the last marked one journals a no-op marker (a `delivered`
+ * event naming no incident) whose id records the rule: `run-metadata-scan:<rule>:<journal length>`.
+ * The ids are read back by prefix, so they are plain strings, not `failureIdentity` hashes.
+ */
+const SCAN_MARKER_PREFIX = "run-metadata-scan:";
+type ScanRule = "exact" | "trusted";
+function scanRuleAt(marker: string): ScanRule | undefined {
+    if (!marker.startsWith(SCAN_MARKER_PREFIX)) return undefined;
+    const rule = marker.slice(SCAN_MARKER_PREFIX.length).split(":")[0];
+    return rule === "exact" || rule === "trusted" ? rule : undefined;
+}
+/** Journal that a scan under `rule` begins, unless the last marked period already used it. */
+function markScanPeriod(path: string, state: FailureState, rule: ScanRule): FailureState {
+    let last: ScanRule | undefined;
+    for (let i = state.seen.length - 1; i >= 0 && !last; i -= 1) last = scanRuleAt(state.seen[i]!);
+    if (last === rule) return state;
+    return observeFailures(path, [{ id: `${SCAN_MARKER_PREFIX}${rule}:${state.seen.length}`, operation: "run-metadata", kind: "delivered", incidents: [] }]);
+}
+/**
+ * The unresolved tool incidents first journaled by an exact-rule scan, which a trusted scan cannot
+ * re-key. Each incident belongs to the period of the last marker before it, so a failure from a
+ * trusted period is never mistaken for a leftover, however often the scan is rebuilt (a parent
+ * restart, `/reload`, or cache eviction), and a later exact-rule period's failures always are. An
+ * incident before every marker is a leftover only when the journal has no exact-rule marker at all
+ * (the first trusted scan of a gap, or a journal from before the markers existed).
+ */
+function exactRuleLeftovers(path: string, prior: FailureState): Set<string> {
+    const state = markScanPeriod(path, prior, "trusted");
+    const period = new Map<string, ScanRule | undefined>();
+    let current: ScanRule | undefined;
+    let sawExact = false;
+    for (const id of state.seen) {
+        const rule = scanRuleAt(id);
+        if (rule) { current = rule; sawExact ||= rule === "exact"; continue; }
+        period.set(id, current);
+    }
+    const leftover = (id: string) => {
+        if (!period.has(id)) return false;
+        const rule = period.get(id);
+        return rule === "exact" || (rule === undefined && !sawExact);
+    };
+    return new Set(Object.values(state.observations)
+        .filter((x) => x.category === "tool" && x.status === "unresolved" && leftover(x.id)).map((x) => x.id));
 }
 /** Scan complete source records, independent of the finite progress/transcript tail. */
 export function collectRunFailures(id: string, cwd: string, terminal = false): FailureState {
@@ -151,6 +197,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
                         summary: "Run metadata could not be read; tool failures are scanned under the exact-retry rule" }]);
                 }
                 if (!waited) return prior;
+                markScanPeriod(path, readRunFailures(id), "exact");
                 scan = { offset: 0, head, identity, model: newIncidentModel(false) };
             } else {
                 trustUnknownSince.delete(id);
@@ -160,8 +207,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
                 // differently is still unresolved (#332).
                 const prior = readRunFailures(id);
                 const deferred = prior.observations[failureIdentity("run-metadata")];
-                if (deferred && deferred.status === "unresolved") scan.gap = { id: deferred.id,
-                    before: new Set(Object.values(prior.observations).filter((x) => x.category === "tool" && x.status === "unresolved").map((x) => x.id)) };
+                if (deferred && deferred.status === "unresolved") scan.gap = { id: deferred.id, before: exactRuleLeftovers(path, prior) };
             }
         }
         scan.head = head;

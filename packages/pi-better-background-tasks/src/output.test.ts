@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { recordFailure } from "./failures.js";
+import { packCallbackBatch } from "./shared-callback-batcher.js";
 import { pageTaskLog, readLog, retainLogTail } from "./logs.js";
 import {
   BACKGROUND_OUTPUT_BUDGET_BYTES,
@@ -421,6 +422,23 @@ describe("quiet failure history", () => {
     const history = textOf(await tools.bg_task_status.execute("x", { id: meta.id, history: true }, undefined, undefined, { cwd: origin.cwd, sessionManager: { getSessionId: () => origin.sessionId } }));
     expect(history).toMatch(/History page of 1 failure observation/);
     expect(history).toMatch(/^Expected failure · .*declared expected\) · evidence: output\.log#exit$/m);
+  });
+
+  it("#332 a tight callback budget keeps the history line whenever it shows any decision", () => {
+    const meta = fixture({ status: "failed", lastExitCode: 1, callbackOrigin: origin, captureDiscardedBytes: 4096,
+      result: { reason: `process exited with code 1: ${"a long reason ".repeat(20)}` } });
+    recordFailure(meta, "exit", "process exited with code 1 (declared expected)", "exit", { category: "exit", expected: true });
+    const facts = formatCallbackFacts(meta);
+    const event = { source: "background-task" as const, id: meta.id, label: meta.id, status: "failed", detailTool: "bg_task_status" as const,
+      outcome: facts.outcome, decision: facts.decision, callback: true };
+    let clipped = 0;
+    for (let maxBytes = 200; maxBytes <= 1200; maxBytes += 10) {
+      const text = packCallbackBatch([event], { maxBytes }).text;
+      if (!text.includes("decision: ")) continue;
+      if (!text.includes("capture overflow")) clipped += 1;
+      expect(text, `budget ${maxBytes}`).toContain("No failures need action · 1 expected (history)");
+    }
+    expect(clipped, "some budgets keep only a prefix of the decision").toBeGreaterThan(0);
   });
 
   it("completion callback facts count history beside actionable rows", () => {

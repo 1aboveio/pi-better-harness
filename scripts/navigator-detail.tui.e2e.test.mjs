@@ -14,6 +14,8 @@ const piBin = join(repoRoot, "node_modules", ".bin", "pi");
 const goldenSession = `pi-navigator-e2e-${process.pid}`;
 const closeSession = `pi-navigator-close-e2e-${process.pid}`;
 const refocusSession = `pi-navigator-refocus-e2e-${process.pid}`;
+const replaceSession = `pi-navigator-replace-e2e-${process.pid}`;
+const wrapSession = `pi-navigator-wrap-e2e-${process.pid}`;
 // Each test drives its own private tmux server; these point at the active one.
 let session = goldenSession;
 let tmuxArgs = ["-L", session];
@@ -31,7 +33,7 @@ const skip = hasTmux || process.env.CI || process.env.PI_NAVIGATOR_REQUIRE_TMUX
   : "requires tmux for a real terminal session (test:golden requires it)";
 
 after(() => {
-  for (const name of [goldenSession, closeSession, refocusSession]) spawnSync("tmux", ["-L", name, "kill-server"], { stdio: "ignore" });
+  for (const name of [goldenSession, closeSession, refocusSession, replaceSession, wrapSession]) spawnSync("tmux", ["-L", name, "kill-server"], { stdio: "ignore" });
   for (const worker of dummyWorkers) {
     try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
@@ -218,16 +220,76 @@ test("after an editor swap, the detail overlay is reused and Esc returns the key
   waitForScreen((screen) => screen.includes("typed-after-refocus") && !screen.includes("provider "));
 });
 
+// @covers navigator.detail-overlay
+// @level e2e
+test("when another extension replaces the editor, the detail overlay closes and typing shows in the new editor", { skip }, () => {
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "navigator golden path requires tmux; skipping cannot satisfy this gate");
+  mkdirSync(evidenceDir, { recursive: true });
+  const { state, piPid, replacePath } = launchPi(replaceSession);
+  seedNavigatorState({
+    cwd: state.cwd, sessionId: state.sessionId, piPid,
+    subagentId: `sa_navigator_replace_${process.pid}`, taskId: `bg_navigator_replace_${process.pid}`,
+  });
+
+  sendKey("Left");
+  waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("background golden path"));
+  sendKey("Down");
+  waitForScreen((screen) => screen.includes("provider Subagents") && hasSettledInputFrame(screen));
+
+  // Another extension restores Pi's default editor (setEditorComponent(undefined)): ours is unmounted.
+  writeFileSync(replacePath, "");
+  waitFor(() => !existsSync(replacePath), "the probe to replace the editor");
+  const closed = waitForScreen((screen) => !screen.includes("provider Subagents"));
+  assert.doesNotMatch(closed, /^━━ /mu, `the detail overlay must not stay over the replacement editor:\n${closed}`);
+  execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", "typed-after-replace"]);
+  const typed = waitForScreen((screen) => screen.includes("typed-after-replace"));
+  saveScreen("replaced-editor-typed", typed);
+});
+
+// @covers navigator.detail-overlay
+// @level e2e
+test("when another extension wraps the editor, Esc from the reused overlay returns the keyboard to it", { skip }, () => {
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "navigator golden path requires tmux; skipping cannot satisfy this gate");
+  mkdirSync(evidenceDir, { recursive: true });
+  const { state, piPid, focusStealPath } = launchPi(wrapSession);
+  seedNavigatorState({
+    cwd: state.cwd, sessionId: state.sessionId, piPid,
+    subagentId: `sa_navigator_wrap_${process.pid}`, taskId: `bg_navigator_wrap_${process.pid}`,
+  });
+
+  sendKey("Left");
+  waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("background golden path"));
+  sendKey("Down");
+  waitForScreen((screen) => screen.includes("provider Subagents") && hasSettledInputFrame(screen));
+
+  // Another extension wraps our editor in its own component: pi-tui mounts the wrapper, not ours.
+  writeFileSync(focusStealPath, "wrap");
+  waitFor(() => !existsSync(focusStealPath), "the probe to wrap the editor");
+  sleep(400);
+  sendKey("Down");
+  const moved = waitForScreen((screen) => screen.includes("provider Background Tasks") && hasSettledInputFrame(screen));
+  assert.equal(moved.split(/\r?\n/).filter((line) => /^━━ /u.test(line)).length, 1, `the wrapped editor keeps one overlay:\n${moved}`);
+  sendKey("Escape");
+  const closed = waitForScreen((screen) => !screen.includes("provider ") && screen.includes("← work navigator"));
+  assert.doesNotMatch(closed, /^━━ /mu, closed);
+  execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", "typed-after-wrap"]);
+  const typed = waitForScreen((screen) => screen.includes("typed-after-wrap"));
+  saveScreen("wrapped-editor-typed", typed);
+});
+
 function launchPi(name) {
   session = name;
   tmuxArgs = ["-L", name];
   const probeStatePath = join(fixtures, `${name}-session-state.json`);
   const focusStealPath = join(fixtures, `${name}-steal-focus`);
-  writeFileSync(probePath, probeExtension(probeStatePath, focusStealPath));
+  const replacePath = join(fixtures, `${name}-replace-editor`);
+  writeFileSync(probePath, probeExtension(probeStatePath, focusStealPath, replacePath));
   startPiSession();
   const state = waitForJson(probeStatePath);
   const piPid = Number(execFileSync("tmux", [...tmuxArgs, "display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8" }).trim());
-  return { state, piPid, focusStealPath };
+  return { state, piPid, focusStealPath, replacePath };
 }
 
 function waitFor(condition, what, timeoutMs = 5_000) {
@@ -279,18 +341,32 @@ function startPiSession() {
   execFileSync("tmux", [...tmuxArgs, "new-session", "-d", "-s", session, "-x", "100", "-y", "40", command]);
 }
 
-function probeExtension(path, focusStealPath) {
+function probeExtension(path, focusStealPath, replacePath) {
   // Besides reporting the session, the probe re-installs the current editor when the
-  // test creates focusStealPath, the way any extension that wraps the editor does.
+  // test creates focusStealPath, the way any extension that wraps the editor does (with
+  // "wrap" in the file, inside its own proxy component), and restores Pi's default
+  // editor when it creates replacePath.
   return `export default function(pi) {
   pi.on("session_start", async (_event, ctx) => {
     const fs = await import("node:fs");
     fs.writeFileSync(${JSON.stringify(path)}, JSON.stringify({ cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() }, null, 2));
     const timer = setInterval(() => {
       if (!fs.existsSync(${JSON.stringify(focusStealPath)})) return;
+      const mode = fs.readFileSync(${JSON.stringify(focusStealPath)}, "utf8").trim();
       fs.rmSync(${JSON.stringify(focusStealPath)}, { force: true });
-      ctx.ui.setEditorComponent(ctx.ui.getEditorComponent());
+      const prev = ctx.ui.getEditorComponent();
+      if (mode !== "wrap") ctx.ui.setEditorComponent(prev);
+      // Wrap the current editor in this extension's own component, delegating everything to it.
+      else ctx.ui.setEditorComponent((t, th, kb) => new Proxy(prev(t, th, kb), {
+        get(target, prop) { const value = Reflect.get(target, prop); return typeof value === "function" ? value.bind(target) : value; },
+      }));
     }, 100);
+    const replacer = setInterval(() => {
+      if (!fs.existsSync(${JSON.stringify(replacePath)})) return;
+      fs.rmSync(${JSON.stringify(replacePath)}, { force: true });
+      ctx.ui.setEditorComponent(undefined);
+    }, 100);
+    replacer.unref?.();
     timer.unref?.();
   });
 }

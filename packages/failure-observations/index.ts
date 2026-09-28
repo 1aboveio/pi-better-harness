@@ -74,7 +74,8 @@ export function failureIdentity(...parts: unknown[]): string {
   return createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
 }
 function text(value: string | undefined, fallback: string): string {
-  return (value || fallback).replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 400);
+  // The 400-unit cut can split a surrogate pair; a lone half would render as U+FFFD (#332).
+  return dropLoneSurrogates((value || fallback).replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 400));
 }
 
 /** Agent tool attempts: the agent handles its own tool errors, so one failure is not yet actionable. */
@@ -516,6 +517,8 @@ export interface TerminalFailureParts {
   rows: string[];
   /** Counts and separate facts: earlier-reported, unclassified, expected, closed history, correctness. */
   notes: string[];
+  /** The unclassified-count note, when it is among `notes`: a byte budget keeps it longer than the others. */
+  unclassifiedNote?: string;
 }
 /**
  * Terminal/completion facts: actionable and incomplete incidents from `incidents` as rows,
@@ -529,12 +532,14 @@ export function terminalFailureParts(state: FailureState, incidents: readonly st
   const earlier = activeFailures(state).filter((x) => !wanted.has(x.id) && reportable(x)).length;
   if (earlier) notes.push(`${earlier} actionable incident${earlier === 1 ? " was" : "s were"} reported earlier; not repeated here.`);
   const counts = failureCounts(state);
-  if (counts.unclassified) notes.push(`${counts.unclassified} earlier tool failure${counts.unclassified === 1 ? "" : "s"} remain${counts.unclassified === 1 ? "s" : ""} unclassified.`);
+  const unclassifiedNote = counts.unclassified
+    ? `${counts.unclassified} earlier tool failure${counts.unclassified === 1 ? "" : "s"} remain${counts.unclassified === 1 ? "s" : ""} unclassified.` : undefined;
+  if (unclassifiedNote) notes.push(unclassifiedNote);
   if (counts.expected) notes.push(`${counts.expected} expected failure${counts.expected === 1 ? "" : "s"} recorded.`);
   const history = closedHistoryLine(state);
   if (history) notes.push(history);
   if (counts.unclassified || counts.actionRequired) notes.push(CORRECTNESS_NOTE);
-  return { rows, notes };
+  return { rows, notes, ...(unclassifiedNote ? { unclassifiedNote } : {}) };
 }
 export function formatTerminalFailureFacts(state: FailureState, incidents: readonly string[] = []): string {
   const { rows, notes } = terminalFailureParts(state, incidents);
@@ -642,7 +647,10 @@ export interface IncidentPageRequest extends IncidentRowOptions {
  * Caller-owned incident pages. Whole rows are preferred; a row larger than the
  * page is split at a code-point boundary and resumes at that byte, so pages
  * reconstruct formatFailureLines() exactly (join with "\n" except after a page
- * that `endsPartial`). A page never exceeds `maxBytes`.
+ * that `endsPartial`). A page never exceeds `maxBytes`, so one smaller than the
+ * next code point (up to 4 bytes) returns no text, `hasMore`, and a `nextCursor`
+ * equal to `cursor`: the caller retries with a larger page, as with
+ * pageVerbatimText. Consumers never ask for fewer than 4 bytes.
  */
 export function pageFailureIncidents(state: FailureState, request: IncidentPageRequest = {}): FailureIncidentPage {
   // A cursor carries its view: following a history cursor stays in history without the flag.
@@ -760,14 +768,19 @@ export function incidentVerbatimPage(state: FailureState, request: IncidentPageR
  * it, so a cache keyed by it never serves stale incident counts.
  */
 export function failureJournalFingerprint(path: string): string {
-  let file: string;
+  return `${fileChangeIdentity(path)}|${existsSync(`${path}.observed`) ? 1 : 0}|${pendingWrites.get(path)?.length ?? 0}`;
+}
+/**
+ * A file's identity and change stamp (device, inode, size, and nanosecond mtime/ctime), or its read
+ * error. Any append, rewrite, replacement, or deletion changes it; for cache keys, never for trust.
+ */
+export function fileChangeIdentity(path: string): string {
   try {
     const stats = statSync(path, { bigint: true });
-    file = `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
+    return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}:${stats.ctimeNs}`;
   } catch (error) {
-    file = `unreadable:${(error as NodeJS.ErrnoException).code ?? "error"}`;
+    return `unreadable:${(error as NodeJS.ErrnoException).code ?? "error"}`;
   }
-  return `${file}|${existsSync(`${path}.observed`) ? 1 : 0}|${pendingWrites.get(path)?.length ?? 0}`;
 }
 
 export function incidentCursorAt(state: FailureState, offset: number, resource?: string, options: IncidentRowOptions = {}): string {
@@ -902,7 +915,7 @@ export function formatTerminalIncidentSummary(state: FailureState, options: Inci
   //    cursor's retrieval hint, the unclassified count, the cursor, and the count line. The
   //    correctness note goes last, and only when it alone does not fit.
   const correctness: string[] = notes.filter((x) => x === CORRECTNESS_NOTE);
-  const unclassified = notes.filter((x) => x !== CORRECTNESS_NOTE && /remains? unclassified\.$/.test(x));
+  const unclassified = notes.filter((x) => x === parts.unclassifiedNote);
   const low = notes.filter((x) => !correctness.includes(x) && !unclassified.includes(x));
   const ladder: Array<{ mode: Header | undefined; notes: string[] }> = [];
   for (let keep = low.length - 1; keep >= 0; keep -= 1) ladder.push({ mode: "full", notes: [...low.slice(0, keep), ...unclassified, ...correctness] });
