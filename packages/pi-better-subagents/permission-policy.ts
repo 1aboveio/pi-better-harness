@@ -1,4 +1,5 @@
 /** Optional sandbox-extension policy, mirrored per Pi event bus at launch time. */
+import { defaultSubagentTools, parseSubagentTools, type SubagentToolSettings } from "./shared-task-tools.ts";
 export const SANDBOX_POLICY_CHANNEL = "pi-better-sandbox:policy";
 export const SANDBOX_POLICY_REQUEST_CHANNEL = "pi-better-sandbox:policy-request";
 
@@ -15,6 +16,7 @@ export type PermissionProfile = Readonly<{
 export type PermissionSnapshot = Readonly<{
     permissions?: PermissionProfile;
     subagentPermissions?: PermissionProfile;
+    subagentTools?: SubagentToolSettings;
 }>;
 
 type EventBus = {
@@ -52,6 +54,7 @@ function readPolicy(data: unknown): PermissionSnapshot | undefined {
     return Object.freeze({
         ...(p.permissions === undefined ? {} : { permissions: profile(p.permissions) }),
         ...(p.subagentPermissions === undefined ? {} : { subagentPermissions: profile(p.subagentPermissions) }),
+        ...(p.subagentTools === undefined ? {} : { subagentTools: parseSubagentTools(p.subagentTools) }),
     });
 }
 
@@ -87,20 +90,23 @@ export function resolveSubagentPermissions(pi: unknown, requestedSandbox: boolea
     sandboxEnabled: boolean;
     enforced: boolean;
     permissions?: Omit<PermissionProfile, "enabled">;
+    /** Which extension tools a confined child may use; defaults when no settings are published. */
+    tools: SubagentToolSettings;
 } {
     const snapshot = currentSandboxPermissions(pi);
+    const tools = snapshot?.subagentTools ?? defaultSubagentTools();
     if (snapshot?.permissions?.enabled && !snapshot.permissions.commands) {
         throw new Error("Main sandbox profile disables commands. Enable commands in the sandbox UI before launching a subagent.");
     }
     const child = snapshot?.subagentPermissions;
-    if (!child) return { sandboxEnabled: requestedSandbox !== false, enforced: false };
+    if (!child) return { sandboxEnabled: requestedSandbox !== false, enforced: false, tools };
     if (child.enabled && requestedSandbox === false) {
         throw new Error("Subagent sandbox is enforced by the human-enabled profile; sandbox:false cannot bypass it. Change Subagents permissions in the sandbox UI.");
     }
     const sandboxEnabled = child.enabled || requestedSandbox === true;
-    if (!sandboxEnabled) return { sandboxEnabled: false, enforced: false };
+    if (!sandboxEnabled) return { sandboxEnabled: false, enforced: false, tools };
     // Starting Pi is runtime work. These capabilities constrain task tools;
     // they do not disable provider transport or the fixed file-operation worker.
     const { enabled: _enabled, ...permissions } = child;
-    return { sandboxEnabled: true, enforced: true, permissions };
+    return { sandboxEnabled: true, enforced: true, permissions, tools };
 }

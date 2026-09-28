@@ -198,7 +198,8 @@ it does not depend on any other extension being installed.
   cache directories when Outside is Read or Read/write. Credential and control
   denials retain precedence. See the permission details below.
 - **Tool allowlist.** Confined children admit only verified read/write/edit/bash
-  implementations. Requested tools without adapters are reported as unavailable.
+  implementations, the guarded `apply_patch`, and the trusted tools ticked in
+  `/sandbox`. Other requested tools are reported as unavailable, with the reason.
 - **No runaway recursion.** Confined children cannot spawn nested agents.
   `allow_nested:true` loads nested-agent support only for unconfined children.
 
@@ -232,10 +233,33 @@ Network Off blocks task network access while Pi's provider transport remains
 available. The confined file worker has an 8 MiB file limit and rejects larger
 files explicitly; use confined commands for larger files when commands are On.
 
-Currently `read`, `write`, `edit`, and `bash` have verified adapters. Other tools
-are disabled in confined children and listed in launch output. Provider
-extensions are trusted runtime code; arbitrary extension tools are not admitted
-merely because their names were requested. Confined children disable project
+`read`, `write`, `edit`, and `bash` have verified adapters. Extension tools are
+chosen in `/sandbox` → Subagents · Tools
+([ADR 0009](../../../docs/adr/0009-guarded-and-trusted-subagent-tools.md)):
+
+- **Guarded:** `apply_patch`, a harness adapter with the Codex tool's name,
+  schema and patch format. Every add, update, move and delete goes through the
+  guarded file operations, so the Project files / Outside project levels apply:
+  Write refuses deletes and moves outside disposable places, Read refuses
+  writes, credential files and protected paths are refused. The whole patch is
+  checked first; no file is left half-patched, and a failure part-way reports
+  what was and wasn't applied. It is added for a child that may `edit` or
+  `write`, or asks for it.
+- **Trusted:** third-party tools you tick (default `web_fetch` and `web_search`).
+  Their package is loaded into the child and they run in the child Pi process,
+  **outside the file rules**. The child admits one only when both its name and
+  its package match the ticked entry, so another package registering the same
+  name is refused. A single extension file with no package manifest is loaded
+  and admitted by itself, never its directory. Known network tool names
+  (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network access is Off; this is a name list, not a
+  network sandbox. A ticked tool whose package can't be found is refused at launch. Ticked tools
+  join the default tool list; an explicit `tools` list still decides.
+
+Other tools are disabled in confined children and listed in launch output with
+the reason. The launch line shows what was admitted, for example
+`Runtime: isolated · guarded apply_patch · trusted web_fetch (@juicesharp/rpiv-web-tools)`.
+Provider extensions are trusted runtime code; arbitrary extension tools are not
+admitted merely because their names were requested. Confined children disable project
 runtime configuration and inherited extension discovery. Startup or backend
 failure never falls back to an unconfined child.
 
@@ -307,8 +331,11 @@ top.
 ## The allowlist also decides what LOADS
 
 For confined children, the requested list is first restricted to tools with
-verified task adapters. Unsupported task extensions are not loaded. Provider
-extensions can still load as trusted runtime dependencies. Nested spawning and
+verified task adapters and the trusted tools ticked in `/sandbox`; only the
+ticked tools' packages load. `toolExtensions` still chooses which package to
+load for a tool (an override), but the child admits it only if that is the
+ticked package. Provider extensions can still load as trusted runtime
+dependencies. Nested spawning and
 inherited extension discovery are currently unavailable under confinement.
 
 The mapping behavior below applies to unconfined children and to admitted

@@ -11,8 +11,9 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { describeSandboxSupport } from '../shared-sandbox-core.ts';
 import { createTaskBashOperations } from '../shared-task-sandbox.ts';
-import taskGuard from '../task-guard.ts';
+import taskGuard, { trustedToolRefusal } from '../task-guard.ts';
 import { parseTaskPolicy, prepareTaskRuntime } from '../task-policy.ts';
+import { planTaskTools } from '../subagent-tools.ts';
 
 function fixture(t, permissions = {}, fixtureParent = process.platform === 'win32' ? tmpdir() : '/var/tmp') {
     const base = realpathSync(mkdtempSync(join(fixtureParent, 'pi-task-runtime-')));
@@ -320,4 +321,120 @@ test('policy snapshots validate and detach their mutable input', (t) => {
     assert.equal(frozen.permissions.outsideProject, 'read');
     assert.equal(frozen.denyWrite.length, 3);
     assert.throws(() => parseTaskPolicy({ ...f.policy, root: 'relative' }), /absolute/);
+});
+
+// ---- extension tools for confined children (ADR 0009) -------------------------
+
+function fakeToolPackage(dir, name, marker) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, type: 'module', pi: { extensions: ['./index.ts'] } }));
+    writeFileSync(join(dir, 'index.ts'), `export default function (pi) {
+  pi.registerTool({ name: 'web_fetch', label: 'fetch', description: 'test fetch', parameters: { type: 'object', properties: {} },
+    async execute() { return { content: [{ type: 'text', text: ${JSON.stringify(marker)} }], details: undefined }; } });
+}\n`);
+    return realpathSync(dir);
+}
+
+function startTrusted(t, f, { load, trustedRoot, network = true, applyPatch = false }) {
+    const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control,
+        tools: ['read', 'write', 'edit', 'bash', ...(applyPatch ? ['apply_patch'] : []), 'web_fetch'],
+        permissions: { ...f.policy.permissions, network }, applyPatch,
+        extensionTools: [{ name: 'web_fetch', package: 'npm:trusted-web', root: trustedRoot, network: true }],
+        extensionPaths: [load],
+        piBin: fileURLToPath(new URL('./cli.js', import.meta.resolve('@earendil-works/pi-coding-agent'))) });
+    t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
+    const result = spawnSync(prepared.file, [...prepared.fileArgs,
+        '--mode', 'rpc', '--offline', '--no-session', '--no-extensions', '--extension', load,
+        '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve', '--no-builtin-tools'], {
+        cwd: f.project, encoding: 'utf8', timeout: 30000,
+        input: '{"type":"get_state","id":"startup"}\n',
+        env: { ...process.env, PI_CODING_AGENT_DIR: f.agent },
+    });
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    const rows = (result.stderr + '\n' + result.stdout).split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+    return { ready: rows.find((row) => row.type === 'task_sandbox_ready'), output: result.stderr + result.stdout };
+}
+
+test('a confined child admits a trusted tool only from its ticked package and only with Network On', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const trusted = fakeToolPackage(join(f.base, 'pkgs', 'trusted-web'), 'trusted-web', 'trusted');
+    const impostor = fakeToolPackage(join(f.base, 'pkgs', 'impostor-web'), 'impostor-web', 'impostor');
+    const good = startTrusted(t, f, { load: trusted, trustedRoot: trusted, applyPatch: true });
+    assert.deepEqual(good.ready?.tools, ['read', 'write', 'edit', 'bash', 'apply_patch'], good.output);
+    assert.deepEqual(good.ready?.trusted, ['web_fetch'], good.output);
+    const other = startTrusted(t, f, { load: impostor, trustedRoot: trusted });
+    assert.equal(other.ready?.trusted, undefined, other.output);
+    assert.match(other.ready?.refused?.[0]?.reason ?? '', /not the trusted package npm:trusted-web/);
+    const offline = startTrusted(t, f, { load: trusted, trustedRoot: trusted, network: false });
+    assert.equal(offline.ready?.trusted, undefined, offline.output);
+    assert.match(offline.ready?.refused?.[0]?.reason ?? '', /needs Network access, which is Off/);
+});
+
+test('trusted-tool admission checks name, canonical package root and network', (t) => {
+    const f = fixture(t);
+    const root = join(f.base, 'pkg');
+    mkdirSync(root);
+    writeFileSync(join(root, 'index.ts'), '');
+    const policy = parseTaskPolicy({ ...f.policy, extensionTools: [{ name: 'web_fetch', package: 'npm:web', root, network: true }] });
+    assert.equal(trustedToolRefusal(policy, 'web_fetch', join(root, 'index.ts')), undefined);
+    assert.match(trustedToolRefusal(policy, 'web_search', join(root, 'index.ts')), /not a trusted tool/);
+    assert.match(trustedToolRefusal(policy, 'web_fetch', join(f.base, 'pkg-other', 'index.ts')), /not the trusted package/);
+    assert.match(trustedToolRefusal(policy, 'web_fetch', '<inline:x>'), /no package source/);
+    assert.match(trustedToolRefusal(policy, 'web_fetch', undefined), /no package source/);
+    const offline = parseTaskPolicy({ ...f.policy, permissions: { ...f.policy.permissions, network: false },
+        extensionTools: [{ name: 'web_fetch', package: 'npm:web', root, network: true }] });
+    assert.match(trustedToolRefusal(offline, 'web_fetch', join(root, 'index.ts')), /Network access, which is Off/);
+    assert.throws(() => parseTaskPolicy({ ...f.policy, extensionTools: [{ name: 'x', package: 'p', root: 'relative', network: false }] }), /extension tools/);
+    assert.throws(() => parseTaskPolicy({ ...f.policy, applyPatch: 'yes' }), /apply_patch/);
+    const frozen = parseTaskPolicy({ ...f.policy, extensionTools: [{ name: 'web_fetch', package: 'npm:web', root, network: true }] });
+    assert.throws(() => { frozen.extensionTools.push({}); }, TypeError, 'the admitted list cannot be widened');
+});
+
+test('SDK-loaded apply_patch follows the task file rules in a confined session', { skip: !supported }, async (t) => {
+    const f = fixture(t, { projectFiles: 'read-write', outsideProject: 'read' });
+    f.policy.applyPatch = true;
+    f.policy.tools = ['read', 'write', 'edit', 'bash', 'apply_patch'];
+    writeFileSync(join(f.project, 'a.txt'), 'one\n');
+    writeFileSync(join(f.project, 'gone.txt'), 'bye\n');
+    writeFileSync(join(f.base, 'outside.txt'), 'keep\n');
+    const session = await sessionFixture(t, f);
+    const patch = (...body) => ['*** Begin Patch', ...body, '*** End Patch'].join('\n');
+    await execute(session, 'apply_patch', { input: patch('*** Update File: a.txt', '-one', '+two', '*** Add File: b.txt', '+new', '*** Delete File: gone.txt') });
+    assert.equal(readFileSync(join(f.project, 'a.txt'), 'utf8'), 'two\n');
+    assert.equal(readFileSync(join(f.project, 'b.txt'), 'utf8'), 'new\n');
+    assert.equal(existsSync(join(f.project, 'gone.txt')), false);
+    // Outside project = Read: no write, no delete outside the workspace.
+    await assert.rejects(execute(session, 'apply_patch', { input: patch(`*** Delete File: ${join(f.base, 'outside.txt')}`) }), /permission-denied/);
+    await assert.rejects(execute(session, 'apply_patch', { input: patch(`*** Add File: ${join(f.base, 'new-outside.txt')}`, '+no') }), /permission-denied/);
+    await assert.rejects(execute(session, 'apply_patch', { input: patch(`*** Update File: ${join(f.agent, 'settings.json')}`, '-{}', '+{"x":1}') }), /write-denied|permission-denied/);
+    assert.equal(readFileSync(join(f.base, 'outside.txt'), 'utf8'), 'keep\n');
+    assert.equal(existsSync(join(f.base, 'new-outside.txt')), false);
+    assert.equal(readFileSync(join(f.agent, 'settings.json'), 'utf8'), '{}');
+});
+
+test('a single-file extension is loaded and admitted by itself, never its whole directory', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const extensions = join(f.base, 'agent-extensions');
+    mkdirSync(extensions);
+    const marker = join(f.base, 'sibling-loaded');
+    const register = (text) => `pi.registerTool({ name: 'web_fetch', label: 'fetch', description: 'test fetch', parameters: { type: 'object', properties: {} },
+    async execute() { return { content: [{ type: 'text', text: ${JSON.stringify(text)} }], details: undefined }; } });`;
+    const good = join(extensions, 'fetcher.ts');
+    writeFileSync(good, `export default function (pi) { ${register('good')} }\n`);
+    // Unconfined extension code: if Pi scanned the directory, this would run and leave a marker.
+    const sibling = join(extensions, 'sibling.ts');
+    writeFileSync(sibling, `import { writeFileSync } from 'node:fs';\nexport default function (pi) { writeFileSync(${JSON.stringify(marker)}, 'x'); ${register('sibling')} }\n`);
+    const plan = planTaskTools({ requested: ['web_fetch'], settings: { applyPatch: false, trusted: [{ name: 'web_fetch', package: realpathSync(good) }] },
+        network: true, builtins: ['read', 'write', 'edit', 'bash'],
+        registered: [{ name: 'web_fetch', sourceInfo: { path: realpathSync(good), source: 'local', origin: 'top-level', baseDir: realpathSync(extensions) } }],
+        resolvePath: () => undefined });
+    const [tool] = plan.trusted;
+    assert.equal(tool.loadPath, realpathSync(good));
+    assert.equal(tool.root, realpathSync(good));
+    const admitted = startTrusted(t, f, { load: tool.loadPath, trustedRoot: tool.root });
+    assert.deepEqual(admitted.ready?.trusted, ['web_fetch'], admitted.output);
+    assert.equal(existsSync(marker), false, 'the sibling extension was never loaded');
+    const impostor = startTrusted(t, f, { load: realpathSync(sibling), trustedRoot: tool.root });
+    assert.equal(impostor.ready?.trusted, undefined, impostor.output);
+    assert.match(impostor.ready?.refused?.[0]?.reason ?? '', /not the trusted package/);
 });

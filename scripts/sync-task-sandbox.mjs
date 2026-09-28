@@ -3,14 +3,19 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomically } from "./atomic-write.mjs";
 
-const files = { "index.ts": "shared-task-sandbox.ts", "files.ts": "shared-task-files.ts" };
+const files = {
+  "index.ts": "shared-task-sandbox.ts", "files.ts": "shared-task-files.ts",
+  "apply-patch.ts": "shared-task-apply-patch.ts", "tools.ts": "shared-task-tools.ts",
+};
 const consumers = ["pi-better-sandbox", "pi-better-subagents"];
 export function taskSandboxCopies(root = resolve(import.meta.dirname, "..")) {
   return Object.entries(files).flatMap(([source, target]) => {
     const content = `// Generated from packages/task-sandbox/${source}. Do not edit directly.\n` +
       readFileSync(resolve(root, "packages/task-sandbox", source), "utf8")
         .replaceAll('"../sandbox-core/index.ts"', '"./shared-sandbox-core.ts"')
-        .replaceAll('"./files.ts"', '"./shared-task-files.ts"');
+        .replaceAll('"./files.ts"', '"./shared-task-files.ts"')
+        .replaceAll('"./apply-patch.ts"', '"./shared-task-apply-patch.ts"')
+        .replaceAll('"./tools.ts"', '"./shared-task-tools.ts"');
     return consumers.map((consumer) => ({ path: resolve(root, "packages", consumer, target), content }));
   });
 }

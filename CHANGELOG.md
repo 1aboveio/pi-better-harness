@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Confined subagents get a guarded `apply_patch`: the Codex tool's name, schema and patch format (`*** Begin Patch`, Add/Update/Delete File, `*** Move to`, `@@` hunks), applied only through the task's guarded file operations and a new guarded remove, which judges both the resolved target and the entry itself without following it, so a link planted in `~/.ssh`, `~/.pi` or a sibling repository can't be removed. The Project files / Outside project levels govern it exactly as they govern write, edit and bash. The whole patch is checked before anything is written, no file is left half-patched, and a failure part-way reports what was and wasn't applied. (#351)
+- `/sandbox` gains a Subagents · Tools section. Guarded tools follow the file rules; trusted tools (the other tools your Pi has loaded, by package) run outside them and need a second Space to tick. Defaults: `apply_patch`, `web_fetch` and `web_search` on. A ticked trusted tool's package loads into the child (a single extension file with no manifest loads by itself, never its directory), which admits the tool only when its name and package both match. Known network tool names (`web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name) are refused while Network is Off; a ticked tool whose package can't be found is refused at launch. Settings persist in the permissions file. See ADR 0009. (#351)
+- Upgrading: existing sandbox permission files have no Tools settings, so they pick up the defaults, and `apply_patch`, `web_fetch` and `web_search` become available to sandboxed subagents. Untick them in `/sandbox` → Subagents · Tools to opt out. (#351)
+
 ### Changed
 
 - `expectedExitCodes` (subagent bash) and `expected_exit_codes` (background tasks) accept `0` and drop it, since exit 0 is already success; a list of only zeros declares nothing. Before, a call that listed `0` was refused and wasted a turn. The schema descriptions say so. (#332)

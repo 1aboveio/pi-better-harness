@@ -1,6 +1,7 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
+import { isNetworkTool, packageLabel, type DiscoveredTool } from "./shared-task-tools.ts";
 import { defaultSandboxPermissions, describeLoosening, type CredentialAccess, type FileAccess, type SandboxPermissionProfile as PermissionProfile, type SandboxPermissionSettings as PermissionSettings } from "./permissions.ts";
 export type { PermissionProfile, PermissionSettings };
 
@@ -10,7 +11,16 @@ export interface PermissionPageHandlers {
     save(settings: PermissionSettings): void | Promise<void>;
     /** What saving `settings` would loosen versus the saved defaults; non-empty requires a confirming second Enter. */
     loosening?(settings: PermissionSettings): string[];
+    /** Trusted-tool candidates registered in the running Pi (builtins and harness tools excluded). */
+    discoverTools?(): readonly Pick<DiscoveredTool, "name" | "package">[];
 }
+
+type ToolItem =
+    | { kind: "guarded"; name: "apply_patch" }
+    | { kind: "trusted"; name: string; package: string; loaded: boolean };
+
+const GUARDED_HINT = "apply_patch goes through the guarded file operations: Project files and Outside project apply to it.";
+const TRUSTED_HINT = "Trusted tools run in the subagent's Pi process, outside the file rules. Tick only tools you trust.";
 
 export const DEFAULT_PERMISSION_SETTINGS = defaultSandboxPermissions();
 
@@ -43,7 +53,8 @@ function cellHint(key: string, profile: PermissionProfile | undefined): string |
 const columns = ["main", "subagents"] as const;
 
 function snapshot(settings: PermissionSettings): PermissionSettings {
-    return { main: { ...settings.main }, subagents: { ...settings.subagents } };
+    return { main: { ...settings.main }, subagents: { ...settings.subagents }, subagentTools: {
+        applyPatch: settings.subagentTools.applyPatch, trusted: settings.subagentTools.trusted.map((tool) => ({ ...tool })) } };
 }
 
 function errorText(error: unknown): string {
@@ -72,6 +83,28 @@ export function createPermissionsPage(
         message = errorText(error);
         isError = true;
     }
+    let discovered: readonly Pick<DiscoveredTool, "name" | "package">[] = [];
+    try {
+        discovered = handlers.discoverTools?.() ?? [];
+    } catch (error) {
+        message = `Tool discovery failed: ${errorText(error)}`;
+        isError = true;
+    }
+    const isTicked = (item: { name: string; package: string }) =>
+        !!settings?.subagentTools.trusted.some((tool) => tool.name === item.name && tool.package === item.package);
+    /** Guarded first, then discovered and ticked trusted tools, by name. */
+    function toolItems(): ToolItem[] {
+        const trusted = new Map<string, ToolItem & { kind: "trusted" }>();
+        for (const tool of discovered) trusted.set(`${tool.name}\0${tool.package}`, { kind: "trusted", name: tool.name, package: tool.package, loaded: true });
+        for (const tool of settings?.subagentTools.trusted ?? []) {
+            const key = `${tool.name}\0${tool.package}`;
+            if (!trusted.has(key)) trusted.set(key, { kind: "trusted", name: tool.name, package: tool.package, loaded: false });
+        }
+        return [{ kind: "guarded", name: "apply_patch" },
+            ...[...trusted.values()].sort((a, b) => a.name.localeCompare(b.name) || a.package.localeCompare(b.package))];
+    }
+    let items = toolItems();
+    const saveRow = () => rows.length + items.length;
     let row = 0;
     let column = 0;
     let busy = false;
@@ -85,11 +118,19 @@ export function createPermissionsPage(
     }
 
     async function change(): Promise<void> {
-        if (!settings || busy || row === rows.length) return;
+        if (!settings || busy || row === saveRow()) return;
+        const next = snapshot(settings);
+        if (row >= rows.length) {
+            const item = items[row - rows.length]!;
+            if (item.kind === "guarded") next.subagentTools.applyPatch = !next.subagentTools.applyPatch;
+            else if (isTicked(item)) {
+                next.subagentTools.trusted = next.subagentTools.trusted.filter((tool) => !(tool.name === item.name && tool.package === item.package));
+            } else next.subagentTools.trusted.push({ name: item.name, package: item.package });
+            return apply(next);
+        }
         const key = rows[row]!.key;
         const profile = columns[column]!;
         if (key !== "enabled" && !settings[profile].enabled) return;
-        const next = snapshot(settings);
         if (key === "enabled" || key === "commands" || key === "network") {
             next[profile][key] = !next[profile][key];
         } else if (key === "storedCredentials") {
@@ -105,6 +146,11 @@ export function createPermissionsPage(
             const current = next[profile][key];
             next[profile][key] = fileValues[(fileValues.indexOf(current) + 1) % fileValues.length]!;
         }
+        return apply(next);
+    }
+
+    async function apply(next: PermissionSettings): Promise<void> {
+        if (!settings) return;
         // A looser value is applied only on a second Space, like a looser Save.
         const loosened = describeLoosening(settings, next);
         const nextKey = JSON.stringify(next);
@@ -120,6 +166,7 @@ export function createPermissionsPage(
         try {
             await handlers.change(snapshot(next));
             settings = next;
+            items = toolItems();
             message = "";
             isError = false;
             requestRender();
@@ -172,7 +219,7 @@ export function createPermissionsPage(
                 row = Math.max(0, row - 1);
                 requestRender();
             } else if (matchesKey(data, Key.down)) {
-                row = Math.min(rows.length, row + 1);
+                row = Math.min(saveRow(), row + 1);
                 requestRender();
             } else if (matchesKey(data, Key.left)) {
                 column = 0;
@@ -182,7 +229,7 @@ export function createPermissionsPage(
                 requestRender();
             } else if (matchesKey(data, Key.space)) {
                 void change();
-            } else if (matchesKey(data, Key.enter) && row === rows.length) {
+            } else if (matchesKey(data, Key.enter) && row === saveRow()) {
                 void save();
             }
         },
@@ -219,13 +266,33 @@ export function createPermissionsPage(
                     row === i, !settings || (i > 0 && !settings.main.enabled), !settings || (i > 0 && !settings.subagents.enabled)));
                 if (i === 0) output.push("");
             }
-            output.push("", line("Save as defaults", "", "", row === rows.length));
+            // Subagents · Tools: which extension tools a confined subagent may use.
+            output.push("", theme.fg("text", truncateToWidth(`${prefix ? "  " : ""}Subagents · Tools`, w, "")));
+            const nameWidth = Math.min(24, Math.max(...items.map((item) => visibleWidth(item.name))), Math.max(0, w - prefix - 8));
+            items.forEach((item, index) => {
+                if (index === 0) output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Guarded (follows the file rules)`, w, "")));
+                if (index === 1) output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Trusted (runs outside the file rules)`, w, "")));
+                const selected = row === rows.length + index;
+                const ticked = item.kind === "guarded" ? !!settings?.subagentTools.applyPatch : isTicked(item);
+                const detail = item.kind === "guarded" ? "harness adapter" : [packageLabel(item.package),
+                    ...(isNetworkTool(item.name) ? ["needs Network On"] : []), ...(item.loaded ? [] : ["not loaded"])].join(" · ");
+                const text = `${prefix ? (selected ? "> " : "  ") : ""}  [${ticked ? "x" : " "}] ${cell(item.name, nameWidth)} ${detail}`;
+                output.push(theme.fg(selected ? "accent" : settings ? "text" : "dim", truncateToWidth(text, w, "")));
+            });
+            if (items.length === 1) {
+                output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Trusted (runs outside the file rules)`, w, "")),
+                    theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}    No other extension tools are installed.`, w, "")));
+            }
+            output.push("", line("Save as defaults", "", "", row === saveRow()));
             const selected = row < rows.length ? rows[row]!.key : undefined;
-            const contextual = selected && settings ? cellHint(selected, settings[columns[column]!]) : undefined;
+            const tool = row >= rows.length && row < saveRow() ? items[row - rows.length] : undefined;
+            const contextual = tool ? (tool.kind === "guarded" ? GUARDED_HINT : TRUSTED_HINT)
+                : selected && settings ? cellHint(selected, settings[columns[column]!]) : undefined;
             for (const hint of [
                 "↑↓ Select row · ←→ Select column · Space Change · Enter Save · Esc Back",
                 "Changes apply to new launches. Background tasks follow their launcher.",
                 "Stored credentials: known files only; excludes OS vaults and environment tokens.",
+                "Trusted tools run outside the file rules.",
                 ...(contextual ? [contextual] : []),
             ]) output.push(theme.fg("dim", truncateToWidth(hint, w, "")));
             if (message) output.push(theme.fg(isError ? "error" : "muted", truncateToWidth(message.replace(/[\r\n]+/g, " "), w, "")));

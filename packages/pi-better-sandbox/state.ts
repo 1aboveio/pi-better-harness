@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createTaskScratch, ensureHarnessRuntimeDirectories, harnessRuntimeDirectories, runtimeCodeRoot, writableRuntimeAlias } from "./shared-task-sandbox.ts";
 
-import { parseSandboxPermissions, type SandboxPermissionSettings, type SandboxPermissionProfile } from "./permissions.ts";
+import { parseSandboxPermissions, type SandboxPermissionSettings, type SandboxPermissionProfile, type SubagentToolSettings } from "./permissions.ts";
 import {
     canonicalizePath,
     describeSandboxSupport,
@@ -67,6 +67,8 @@ export type ForegroundSandboxStatus = {
     readonly networkPolicy: "unrestricted" | "blocked";
     readonly permissions?: Readonly<SandboxPermissionProfile>;
     readonly subagentPermissions?: Readonly<SandboxPermissionProfile>;
+    /** Extension tools a confined subagent may use (ADR 0009). */
+    readonly subagentTools?: Readonly<SubagentToolSettings>;
     /** Human-readable evidence for why `state` is what it is. */
     readonly reason: string;
 };
@@ -236,6 +238,8 @@ export class ForegroundSandboxController {
             ...(this.#permissions ? {
                 permissions: Object.freeze({ ...this.#permissions.main, enabled: this.isUserEnabled() }),
                 subagentPermissions: Object.freeze({ ...this.#permissions.subagents }),
+                subagentTools: Object.freeze({ applyPatch: this.#permissions.subagentTools.applyPatch,
+                    trusted: Object.freeze(this.#permissions.subagentTools.trusted.map((tool) => Object.freeze({ ...tool }))) }) as Readonly<SubagentToolSettings>,
             } : {}),
         } as const;
 

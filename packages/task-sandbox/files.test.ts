@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
@@ -253,4 +254,36 @@ test("failed sandbox launch never falls back to host fs", async () => {
         assert.equal(existsSync(join(f.root, "unwritten.txt")), false);
         await denied(f.ops.read.readFile(join(f.root, "entry.txt")), /sandbox|profile|failed|bubblewrap/i);
     } finally { f.cleanup(); }
+});
+
+test("removal judges a link's own entry without following it (no kernel needed)", { skip: process.platform === "win32" }, () => {
+    // A home outside every temp root, so only the entry rules decide.
+    const base = realpathSync(mkdtempSync(join(fileURLToPath(new URL(".", import.meta.url)), "task-remove-entry-")));
+    const temporary = realpathSync(mkdtempSync(join(tmpdir(), "task-remove-target-")));
+    try {
+        const home = join(base, "home"), root = join(home, "work", "project");
+        for (const dir of [root, join(home, ".ssh"), join(home, ".pi", "agent"), join(home, "projects", "other"), join(home, ".cache")]) mkdirSync(dir, { recursive: true });
+        const target = join(temporary, "deletable.txt");
+        writeFileSync(target, "x");
+        const links = {
+            ssh: join(home, ".ssh", "planted"), pi: join(home, ".pi", "agent", "planted"),
+            sibling: join(home, "projects", "other", "planted"), cache: join(home, ".cache", "planted"), temp: join(temporary, "planted"),
+        };
+        for (const link of Object.values(links)) symlinkSync(target, link);
+        const plan = { confined: true as const, profilePath: join(base, "profile.sb"), policy: {
+            writableRoot: root, home, denyWrite: [],
+            permissions: { projectFiles: "read-write", outsideProject: "write", storedCredentials: "read", commands: true, network: true } as SandboxPermissions,
+        } };
+        const ops = createTaskFileOperations({ requireLaunchPlan: () => plan });
+        // The target itself is deletable, so only the entry check can refuse these.
+        ops.check.remove(target);
+        for (const link of [links.ssh, links.pi, links.sibling]) {
+            assert.throws(() => ops.check.remove(link), new RegExp(`Task sandbox refused to remove ${link}: `), link);
+        }
+        ops.check.remove(links.cache);
+        ops.check.remove(links.temp);
+    } finally {
+        rmSync(base, { recursive: true, force: true });
+        rmSync(temporary, { recursive: true, force: true });
+    }
 });

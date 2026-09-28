@@ -6,6 +6,7 @@ import {
     SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL,
 } from "../permission-policy.ts";
 import { maybeBuildSandboxCommand } from "../sandbox.ts";
+import { defaultSubagentTools } from "../shared-task-tools.ts";
 import { compileWritePolicy } from "../shared-sandbox-core.ts";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,9 +26,18 @@ function fixture(before = false) {
 
 describe("subagent permission policy", () => {
     it("keeps the default-on switch when there is no publisher or event bus", () => {
-        assert.deepEqual(resolveSubagentPermissions({}, undefined), { sandboxEnabled: true, enforced: false });
+        assert.deepEqual(resolveSubagentPermissions({}, undefined), { sandboxEnabled: true, enforced: false, tools: defaultSubagentTools() });
         const pi = { events: new EventEmitter() };
-        assert.deepEqual(resolveSubagentPermissions(pi, false), { sandboxEnabled: false, enforced: false });
+        assert.deepEqual(resolveSubagentPermissions(pi, false), { sandboxEnabled: false, enforced: false, tools: defaultSubagentTools() });
+    });
+
+    it("carries published subagent tools and rejects a malformed tool list", () => {
+        const { pi, publish } = fixture(true);
+        const tools = { applyPatch: false, trusted: [{ name: "web_fetch", package: "npm:other-web" }] };
+        publish({ state: "disabled", permissions: main, subagentPermissions: child, subagentTools: tools });
+        assert.deepEqual(resolveSubagentPermissions(pi, undefined).tools, tools);
+        publish({ state: "disabled", permissions: main, subagentPermissions: child, subagentTools: { applyPatch: true, trusted: [{ name: "apply_patch", package: "npm:x" }] } });
+        assert.throws(() => resolveSubagentPermissions(pi, undefined), /cannot be a trusted tool/);
     });
 
     it("requests current settings on late subscription and captures changes per bus", () => {

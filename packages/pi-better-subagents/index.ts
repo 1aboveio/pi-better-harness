@@ -57,6 +57,7 @@ import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime } from "./task-policy.ts";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
 import { TASK_BUILTINS } from "./shared-task-sandbox.ts";
+import { APPLY_PATCH, describeTaskTools, planTaskTools } from "./subagent-tools.ts";
 import { observeSandboxPermissions, resolveSubagentPermissions } from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
 import { join } from "node:path";
@@ -1620,14 +1621,32 @@ export default function (pi: ExtensionAPI) {
                 .filter(Boolean).join(",");
         }
 
+        // A confined child gets extension tools only through /sandbox Subagents · Tools (ADR 0009):
+        // the guarded apply_patch adapter, and trusted tools admitted by name and package.
+        const requestedExcludes = new Set((p.exclude_tools ?? "").split(",").map((t) => t.trim()).filter(Boolean));
+        if (sandboxEnabled && !clean) {
+            const names = allow.split(",").filter(Boolean);
+            // Models reach for apply_patch whenever they may edit; ticked trusted tools join the default set.
+            if (permissionPlan.tools.applyPatch && names.some((name) => name === "edit" || name === "write")) names.push(APPLY_PATCH);
+            if (p.tools === undefined) names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
+            allow = [...new Set(names)].join(",");
+        }
+        const taskTools = sandboxEnabled ? planTaskTools({
+            requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name)),
+            settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
+            builtins: TASK_BUILTINS, registered: pi.getAllTools?.() ?? [],
+            toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
+        }) : undefined;
         const resolution = resolveExtensions({
             tools: sandboxEnabled ? allow.split(",").filter((name) => (TASK_BUILTINS as readonly string[]).includes(name)).join(",") : allow,
             model, clean, allowNested: sandboxEnabled ? false : p.allow_nested, config: cfg,
         });
         const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
+        const trustedExtArgs = [...new Set(taskTools?.trusted.map((tool) => tool.loadPath) ?? [])]
+            .filter((path) => !resolvedExtArgs.includes(path)).flatMap((path) => ["--extension", path]);
         // The harness's own child control extension (no tools, no command I/O) rides along in every
         // mode, including clean: it is how a soft-deadline steer reaches the child session.
-        const extArgs = [...resolvedExtArgs, "--extension", childSteerExtensionPath()]
+        const extArgs = [...resolvedExtArgs, ...trustedExtArgs, "--extension", childSteerExtensionPath()]
             .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
         if (sandboxEnabled && resolution.mode === "inherit") {
             throw new Error("Task confinement requires explicit extensions; inheritExtensions is unsupported while sandboxing is enabled.");
@@ -1660,13 +1679,16 @@ export default function (pi: ExtensionAPI) {
 
         const piBin = resolvePiBinary();
         const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
-        const unavailableTools = sandboxEnabled ? selectedTools.filter((name) => !(TASK_BUILTINS as readonly string[]).includes(name)) : [];
+        const unavailable = taskTools?.refused.filter((tool) => selectedTools.includes(tool.name)) ?? [];
+        const unavailableTools = unavailable.map((tool) => tool.name);
         if (sandboxEnabled && selectedTools.length && unavailableTools.length === selectedTools.length) {
-            throw new Error(`No requested tool has a verified task sandbox adapter: ${unavailableTools.join(", ")}.`);
+            throw new Error(`No requested tool has a verified task sandbox adapter: ${unavailable.map((tool) => `${tool.name} (${tool.reason})`).join(", ")}.`);
         }
         const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
             root: requestedSandboxDir, controlDir: join(runDir(id), "control"), piBin,
             tools: selectedTools, permissions: permissionPlan.permissions,
+            applyPatch: taskTools?.applyPatch === true,
+            extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => tool) ?? [],
             extensionPaths: extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]!] : []),
             runtimeRoots: [baseDir()],
         }) : undefined;
@@ -1730,13 +1752,16 @@ export default function (pi: ExtensionAPI) {
         // Footer hint: a visible run now exists, so `← background work · N` shows.
         updateNavigatorFooter(ctx);
 
+        const toolSummary = taskTools ? describeTaskTools(taskTools) : undefined;
         const runtime = resolution.mode === "inherit"
             ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
-            : resolution.specs.length
+            : toolSummary
+                ? `Runtime: isolated · ${toolSummary}${resolution.specs.length ? ` · extensions ${resolution.specs.join(", ")}` : ""}\n`
+                : resolution.specs.length
                 ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
                 : `Runtime: isolated · built-in tools only\n`;
-        const warn = (unavailableTools.length ? `Task sandbox: unavailable adapters for ${unavailableTools.join(", ")}; these tools are disabled.\n` : "") +
-            (resolution.unmapped.length
+        const warn = (unavailable.length ? `Task sandbox: ${unavailable.map((tool) => `${tool.name} disabled (${tool.reason})`).join("; ")}.\n` : "") +
+            (!sandboxEnabled && resolution.unmapped.length
             ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
               `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
               `Add a toolExtensions entry in config.json.\n`

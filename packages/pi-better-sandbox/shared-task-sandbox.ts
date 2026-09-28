@@ -11,8 +11,11 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 import { canonicalizePath, compileWritePolicy, isRemovableUnderWrite, maybeBuildSandboxCommand, type SandboxPermissions } from "./shared-sandbox-core.ts";
 import { createTaskFileOperations, type TaskFileController } from "./shared-task-files.ts";
+import { APPLY_PATCH_TOOL, createApplyPatchToolDefinition } from "./shared-task-apply-patch.ts";
 
 export const TASK_BUILTINS = Object.freeze(["read", "write", "edit", "bash"] as const);
+/** Harness adapters that follow the file rules; each is a task builtin only when the profile enables it. */
+export const GUARDED_TASK_TOOLS = Object.freeze([APPLY_PATCH_TOOL] as const);
 
 /** Loaded code and its installed dependencies must remain task-read-only. */
 export function runtimeCodeRoot(path: string): string {
@@ -165,6 +168,8 @@ export function installTaskTools(pi: ExtensionAPI, options: {
     shellPath?: () => string | undefined;
     trustedSources: readonly string[];
     admitExtensionTool?: (name: string, input: unknown, sourcePath: string | undefined) => boolean;
+    /** Register the guarded apply_patch adapter as a task builtin. */
+    applyPatch?: boolean;
     /** Build the admitted bash definition from the confined operations (default: the SDK bash tool). */
     bashDefinition?: (cwd: string, operations: BashOperations) => ReturnType<typeof createBashToolDefinition>;
 }) {
@@ -188,6 +193,12 @@ export function installTaskTools(pi: ExtensionAPI, options: {
         pi.registerTool(own(createWriteToolDefinition(cwd, { operations: files.write })));
         pi.registerTool(own(createEditToolDefinition(cwd, { operations: files.edit })));
         pi.registerTool(own(options.bashDefinition ? options.bashDefinition(cwd, bash) : createBashToolDefinition(cwd, { operations: bash })));
+        if (options.applyPatch) {
+            pi.registerTool(own(createApplyPatchToolDefinition(cwd, {
+                readFile: files.read.readFile, writeFile: files.write.writeFile, mkdir: files.write.mkdir,
+                remove: files.remove.remove, checkWrite: files.check.write, checkRemove: files.check.remove,
+            }, PiCodingAgent.withFileMutationQueue)) as any);
+        }
     };
     register(options.cwd);
     pi.on("user_bash", () => ({ operations: bash }));

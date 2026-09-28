@@ -2,12 +2,13 @@
 /** Kernel-confined operations for Pi's built-in file tools. */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { access, mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { constants, realpathSync } from "node:fs";
+import { access, lstat, mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type { ReadOperations, WriteOperations, EditOperations } from "@earendil-works/pi-coding-agent";
 import {
-    canonicalizePath, compileWritePolicy, evaluateReadAccess, evaluateWriteAccess, maybeBuildSandboxCommand,
-    type SandboxWritePolicy,
+    canonicalizePath, compileWritePolicy, evaluateDeleteAccess, evaluateReadAccess, evaluateWriteAccess, maybeBuildSandboxCommand,
+    type CompiledSandboxWritePolicy, type SandboxSeams, type SandboxWritePolicy, type WriteAccessDecision,
 } from "./shared-sandbox-core.ts";
 
 export interface TaskFileController {
@@ -73,6 +74,9 @@ process.stdin.on('end', async () => {
         if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > MAX)
           throw Object.assign(new Error('File exceeds 8 MiB operation limit'), {code:'EFBIG'});
         await fs.writeFile(path, content, 'utf8'); break;
+      case 'unlink':
+        if ((await fs.lstat(path)).isDirectory()) throw Object.assign(new Error('Refusing to remove a directory'), {code:'EISDIR'});
+        await fs.unlink(path); break;
       default: throw new Error('Unknown file operation');
     }
     process.stdout.write(JSON.stringify({ok:true, data}));
@@ -82,7 +86,48 @@ process.stdin.on('end', async () => {
   }
 });`;
 
-type Operation = "read" | "mime" | "access-read" | "access-edit" | "mkdir" | "existing-directory" | "write";
+type Operation = "read" | "mime" | "access-read" | "access-edit" | "mkdir" | "existing-directory" | "write" | "unlink";
+
+/** Guarded removal of one file (never a directory). Follows the same launch policy as writes. */
+export interface TaskRemoveOperations {
+    remove(path: string): Promise<void>;
+}
+
+/**
+ * Policy pre-checks with no I/O, so a multi-file tool can validate a whole
+ * request before changing anything. Each throws the same refusal the operation
+ * itself would; unconfined plans allow everything.
+ */
+export interface TaskAccessChecks {
+    write(path: string): void;
+    remove(path: string): void;
+}
+
+function refusal(verb: string, decision: WriteAccessDecision): Error {
+    const detail = !decision.allowed && decision.deniedBy ? ` (protected by ${decision.deniedBy})` : "";
+    return new Error(`Task sandbox refused to ${verb} ${decision.path}: ${decision.allowed ? "" : decision.reason}${detail}.`);
+}
+
+/**
+ * Removing an entry is judged on both its resolved target and its own directory
+ * entry, so a link can neither remove a protected file nor hide a protected entry.
+ * The entry is evaluated without following its final component: the parent is
+ * canonicalized, the leaf is taken literally. Otherwise a link planted in
+ * `~/.ssh` or a sibling repository would be judged by its (deletable) target.
+ */
+export function removeDecision(path: string, policy: CompiledSandboxWritePolicy): WriteAccessDecision {
+    const target = evaluateDeleteAccess(path, policy);
+    if (!target.allowed) return target;
+    const entry = join(canonicalizePath(dirname(path)), basename(path));
+    if (entry === target.path) return target;
+    const literalLeaf: SandboxSeams = {
+        canonicalize: (candidate) => {
+            if (candidate === entry) throw new Error("the leaf entry is judged literally");
+            return realpathSync(candidate);
+        },
+    };
+    return evaluateDeleteAccess(entry, policy, literalLeaf);
+}
 
 function mimeType(data: Buffer): string | null {
     const ascii = (at: number, text: string) => data.toString("ascii", at, at + text.length) === text;
@@ -117,7 +162,7 @@ function mimeType(data: Buffer): string | null {
 }
 
 export function createTaskFileOperations(controller: TaskFileController): {
-    read: ReadOperations; write: WriteOperations; edit: EditOperations;
+    read: ReadOperations; write: WriteOperations; edit: EditOperations; remove: TaskRemoveOperations; check: TaskAccessChecks;
 } {
     async function run(operation: Operation, path: string, content?: string): Promise<Buffer | void> {
         const plan = controller.requireLaunchPlan();
@@ -139,11 +184,18 @@ export function createTaskFileOperations(controller: TaskFileController): {
                     return;
                 case "mkdir": await mkdir(path, { recursive: true }); return;
                 case "write": return writeFile(path, content!, "utf8");
+                case "unlink":
+                    if ((await lstat(path)).isDirectory()) throw Object.assign(new Error("Refusing to remove a directory"), { code: "EISDIR" });
+                    return unlink(path);
             }
         }
 
         const policy = compileWritePolicy(plan.policy);
-        const writing = operation === "write" || operation === "mkdir" || operation === "access-edit";
+        if (operation === "unlink") {
+            const decision = removeDecision(path, policy);
+            if (!decision.allowed) throw refusal("remove", decision);
+        }
+        const writing = operation === "write" || operation === "mkdir" || operation === "access-edit" || operation === "unlink";
         const decision = writing ? evaluateWriteAccess(path, policy) : evaluateReadAccess(path, policy);
         if (!decision.allowed && operation !== "existing-directory") {
             if (operation === "mkdir" && decision.reason === "permission-denied") {
@@ -227,7 +279,17 @@ export function createTaskFileOperations(controller: TaskFileController): {
         });
     }
 
+    const check = (verb: "write" | "remove") => (path: string) => {
+        const plan = controller.requireLaunchPlan();
+        if (!plan.confined) return;
+        const policy = compileWritePolicy(plan.policy);
+        const decision = verb === "write" ? evaluateWriteAccess(path, policy) : removeDecision(path, policy);
+        if (!decision.allowed) throw refusal(verb, decision);
+    };
+
     return {
+        remove: { remove: (path) => run("unlink", path) as Promise<void> },
+        check: { write: check("write"), remove: check("remove") },
         read: {
             readFile: (path) => run("read", path) as Promise<Buffer>,
             access: (path) => run("access-read", path) as Promise<void>,

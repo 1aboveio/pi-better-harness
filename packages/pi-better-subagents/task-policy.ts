@@ -17,6 +17,20 @@ export type TaskPolicy = Readonly<{
     permissions: Readonly<SandboxPermissions>;
     denyWrite: readonly string[];
     tools: readonly string[];
+    /** The guarded apply_patch adapter is a task builtin for this run. */
+    applyPatch: boolean;
+    /** Trusted extension tools admitted by name AND canonical package root (ADR 0009). */
+    extensionTools: readonly TaskExtensionTool[];
+}>;
+
+export type TaskExtensionTool = Readonly<{
+    name: string;
+    /** Owning package as the parent resolved it (for messages). */
+    package: string;
+    /** Canonical package root; the registered tool's source must lie inside it. */
+    root: string;
+    /** Refused while the profile's Network access is Off. */
+    network: boolean;
 }>;
 
 /**
@@ -45,6 +59,13 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {
     if (typeof p.commands !== "boolean" || typeof p.network !== "boolean") throw new Error("Invalid task sandbox capabilities.");
     if (!Array.isArray(v.denyWrite) || !v.denyWrite.every((path) => typeof path === "string" && isAbsolute(path))) throw new Error("Invalid task sandbox protected paths.");
     if (!Array.isArray(v.tools) || !v.tools.every((name) => typeof name === "string" && name.length > 0)) throw new Error("Invalid task sandbox tool selection.");
+    if (v.applyPatch !== undefined && typeof v.applyPatch !== "boolean") throw new Error("Invalid task sandbox apply_patch setting.");
+    const extensionTools = v.extensionTools ?? [];
+    if (!Array.isArray(extensionTools) || !extensionTools.every((entry) => {
+        const e = entry as Record<string, unknown> | null;
+        return !!e && typeof e.name === "string" && e.name.length > 0 && typeof e.package === "string" &&
+            typeof e.root === "string" && isAbsolute(e.root) && typeof e.network === "boolean";
+    })) throw new Error("Invalid task sandbox extension tools.");
     return Object.freeze({
         version: 1, root: absolute("root"), home: absolute("home"), agentDir: absolute("agentDir"), profilePath: absolute("profilePath"), scratch: absolute("scratch"),
         permissions: Object.freeze({
@@ -52,12 +73,17 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {
             commands: p.commands, network: p.network,
         } as SandboxPermissions),
         denyWrite: Object.freeze([...v.denyWrite]), tools: Object.freeze([...v.tools]),
+        applyPatch: v.applyPatch === true,
+        extensionTools: Object.freeze((extensionTools as TaskExtensionTool[]).map((e) => Object.freeze({
+            name: e.name, package: e.package, root: e.root, network: e.network,
+        }))),
     });
 }
 
 export function prepareTaskRuntime(options: {
     root: string; controlDir: string; tools: readonly string[]; piBin: string;
     permissions?: SandboxPermissions; extensionPaths?: readonly string[]; runtimeRoots?: readonly string[];
+    applyPatch?: boolean; extensionTools?: readonly TaskExtensionTool[];
 }): { file: string; fileArgs: string[]; policy: TaskPolicy; policyPath: string } {
     if (typeof PiCodingAgent.getAgentDir !== "function" || typeof PiCodingAgent.getPackageDir !== "function") {
         throw new Error("Task sandbox requires a supported active Pi SDK; refusing an unguarded child.");
@@ -93,6 +119,8 @@ export function prepareTaskRuntime(options: {
             runtimeCodeRoot(sdkEntry), runtimeCodeRoot(ownEntry), ...(options.extensionPaths ?? []).map(runtimeCodeRoot),
         ])],
         tools: options.tools,
+        applyPatch: options.applyPatch === true,
+        extensionTools: (options.extensionTools ?? []).map((tool) => ({ ...tool, root: canonicalizePath(tool.root) })),
     });
     compileWritePolicy({ writableRoot: root, home, permissions: policy.permissions, denyWrite: policy.denyWrite, runtimeCompatibility: true });
     const policyPath = join(controlDir, "task-policy.json");
