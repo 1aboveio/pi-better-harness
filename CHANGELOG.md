@@ -6,6 +6,18 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.12.2] - 2026-09-28
+
+### Changed
+
+- Bundle subagents 0.9.2: `subagent_result` states its default and maximum page budgets as the exact `max_bytes` values, 2048 and 8192 bytes.
+
+## [pi-better-subagents@0.9.2] - 2026-09-28
+
+### Changed
+
+- `subagent_result` now states its default and maximum page budgets as 2048 and 8192 bytes, so agents can pass the exact `max_bytes` value without converting from KiB notation. (#376)
+
 ## [pi-better-harness@0.12.1] - 2026-09-28
 
 ### Fixed
