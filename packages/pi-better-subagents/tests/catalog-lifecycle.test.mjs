@@ -1049,6 +1049,62 @@ fi
             assert.deepEqual(newRuns(before), []);
         });
 
+        it("lowercases and trims a named agent id in the agent field and in inspect", async (t) => {
+            setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+            t.after(() => setConfigForTests(undefined));
+            const spawned = await tools.subagent_spawn.execute("tc", {
+                prompt: "x", agent: "  Agent.Payments ", tools: "read,bash", sandbox: false,
+            }, null, null, ctx());
+            assert.equal((await settledMeta(runIdFrom(spawned))).catalog.id, "agent.payments");
+            const batch = await tools.subagent_spawn_batch.execute("tc", {
+                jobs: [{ prompt: "x" }],
+                shared: { agent: "AGENT.PAYMENTS", tools: "read,bash", sandbox: false },
+            }, null, null, ctx());
+            assert.equal((await settledMeta(runIdFrom(batch))).catalog.id, "agent.payments");
+
+            const inspected = await tools.agents_catalog.execute("tc", { action: "inspect", id: " Agent.Payments " }, null, null, ctx());
+            assert.equal(inspected.isError, undefined);
+            assert.equal(inspected.details.view.id, "agent.payments");
+            const missing = await tools.agents_catalog.execute("tc", { action: "inspect", id: "AGENT.Missing" }, null, null, ctx());
+            assert.equal(missing.isError, true);
+            assert.match(missing.content[0].text, /No catalog definition has id agent\.missing\./);
+            assert.doesNotMatch(missing.content[0].text, /No role named/);
+        });
+
+        it("rejects a present-but-blank role or agent and starts no child", async (t) => {
+            setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+            t.after(() => setConfigForTests(undefined));
+            const before = runsNow();
+            const spawnCases = [
+                [{ role: "  " }, /: role is blank\. /],
+                [{ role: "" }, /: role is blank\. /],
+                [{ role: ["developer", " "] }, /: role is blank\. /],
+                [{ agent: "   " }, /: agent is blank\. /],
+            ];
+            for (const [selector, pattern] of spawnCases) {
+                await assert.rejects(
+                    tools.subagent_spawn.execute("tc", { prompt: "x", tools: "read,bash", sandbox: false, ...selector }, null, null, ctx()),
+                    pattern,
+                    JSON.stringify(selector),
+                );
+            }
+            await assert.rejects(
+                tools.subagent_spawn_batch.execute("tc", {
+                    jobs: [{ prompt: "x" }],
+                    shared: { role: " ", tools: "read,bash", sandbox: false },
+                }, null, null, ctx()),
+                /: shared\.role is blank\. /,
+            );
+            await assert.rejects(
+                tools.subagent_spawn_batch.execute("tc", {
+                    jobs: [{ prompt: "ok", role: "developer" }, { prompt: "x", agent: "" }],
+                    shared: { tools: "read,bash", sandbox: false },
+                }, null, null, ctx()),
+                /: jobs\[1\]\.agent is blank\. /,
+            );
+            assert.deepEqual(newRuns(before), []);
+        });
+
         it("lists roles by short name and inspects by short name with the full id in details", async () => {
             const listed = await tools.agents_catalog.execute("tc", { action: "list" }, null, null, ctx());
             const lines = listed.content[0].text.split("\n");

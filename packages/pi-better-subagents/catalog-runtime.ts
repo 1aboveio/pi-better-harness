@@ -22,7 +22,7 @@ import {
 import { allocateCatalogLabel } from "./catalog-identity.ts";
 import { resolveRoleAssignment, type RoleAssignment } from "./role-assignment.ts";
 import { configureTierPolicy, DEFAULT_TIER_POLICY, type TierPolicy, type TierSpec } from "./tier-policy.ts";
-import { canonicalRoleId, shortRoleName, type Diagnostic, type ThinkingLevel } from "./catalog-schema.ts";
+import { canonicalAgentId, canonicalRoleId, shortRoleName, type Diagnostic, type ThinkingLevel } from "./catalog-schema.ts";
 
 export interface CatalogHost {
     cwd: string;
@@ -559,7 +559,28 @@ function composePrompt(instructions: string, task: string): string {
 }
 
 function agentIdOf(job: { agent?: unknown }): string | undefined {
-    return typeof job.agent === "string" && job.agent.trim() !== "" ? job.agent.trim() : undefined;
+    return typeof job.agent === "string" && job.agent.trim() !== "" ? canonicalAgentId(job.agent) : undefined;
+}
+
+/**
+ * Error text for a selector that is present but blank (`role: "  "`,
+ * `agent: ""`, or an empty or blank role array). Absent or null means no
+ * selector and returns undefined. `where` names the field's owner, such as
+ * `shared` or `jobs[1]`.
+ */
+export function blankCatalogSelector(input: { agent?: unknown; role?: unknown } | undefined, where?: string): string | undefined {
+    if (!input) return undefined;
+    const field = (name: string) => (where ? `${where}.${name}` : name);
+    const blank = (value: unknown) => typeof value !== "string" || value.trim() === "";
+    if (input.agent !== undefined && input.agent !== null && blank(input.agent)) {
+        return `${field("agent")} is blank. Pass a named agent id such as agent.payments, or omit agent. No child was started.`;
+    }
+    const role = input.role;
+    if (role === undefined || role === null) return undefined;
+    if (Array.isArray(role) ? role.length === 0 || role.some(blank) : blank(role)) {
+        return `${field("role")} is blank. Pass a role name such as developer, or omit role. No child was started.`;
+    }
+    return undefined;
 }
 
 function roleIdsOf(job: { role?: unknown; roleIds?: unknown }): string[] {

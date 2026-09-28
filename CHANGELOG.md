@@ -8,7 +8,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
-- pi-better-subagents: roles are typed and read by their short name. The `role` field of `subagent_spawn`, `subagent_spawn_batch` (per job and `shared`), `agents_catalog` inspect, and `/agents create|import-codex --role` accept `developer` for `role.developer`, trimmed and case-insensitive; the prefixed id keeps working. A role field only ever selects a role, never an `agent.*` named agent, and an unknown name fails with the list of valid role names. `agents_catalog` list lines, navigator details, and the launch override note (`role developer default openai/gpt-6-sol@high`) show the short name; inspect output, structured details, role files, and run metadata keep the stored `role.` id. (#370)
+- pi-better-subagents: roles are typed and read by their short name. The `role` field of `subagent_spawn`, `subagent_spawn_batch` (per job and `shared`), `agents_catalog` inspect, and `/agents create|import-codex --role` accept `developer` for `role.developer`, trimmed and case-insensitive; the prefixed id keeps working. A role field only ever selects a role, never an `agent.*` named agent, and an unknown name fails with the list of valid role names. Named agent ids in `agent` and inspect are trimmed and lowercased too, and a present-but-blank `role` or `agent` is rejected instead of launching a catalog-free child. `agents_catalog` list lines, navigator details, and the launch override note (`role developer default openai/gpt-6-sol@high`) show the short name; inspect output, structured details, role files, and run metadata keep the stored `role.` id. (#370)
 
 ## [pi-better-harness@0.11.0] - 2026-09-28
 

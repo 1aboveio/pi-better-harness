@@ -162,9 +162,10 @@ export function listCatalog(snapshot: CatalogSnapshot): CatalogListEntry[] {
 export function inspectCatalog(snapshot: CatalogSnapshot, id: string): CatalogInspection {
     const entry = findEntry(snapshot, id);
     if (!entry) {
+        const isAgent = id.trim().toLowerCase().startsWith("agent.");
         const diagnostic = blockedDiagnostic(
-            id.startsWith("agent.") ? DiagnosticCodes.unknownAgent : DiagnosticCodes.unknownRole,
-            id.startsWith("agent.")
+            isAgent ? DiagnosticCodes.unknownAgent : DiagnosticCodes.unknownRole,
+            isAgent
                 ? `No catalog definition has id ${id}. Check the id, or reload after adding the file. Display names and filenames are not ids.`
                 : `No role named ${shortRoleName(id)}. ${validRolesSentence(snapshot)} Check the name, or reload after adding the file. Display names and filenames are not ids.`,
             id,

@@ -147,6 +147,7 @@ import { createAgentOperations } from "./agent-operations.ts";
 import {
     clarifyCatalogRequest,
     createLaunchEnricher,
+    blankCatalogSelector,
     hasCatalogSelector,
     loadLaunchSnapshot,
     noteCatalogHost,
@@ -1818,6 +1819,9 @@ export default function (pi: ExtensionAPI) {
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const p = params as SpawnParams;
             if (p.prompt.trim() === "") throw new Error("prompt is empty.");
+            // A present-but-blank role or agent is a mistake, not a request for a catalog-free child.
+            const blankSelector = blankCatalogSelector(p);
+            if (blankSelector) throw new Error(blankSelector);
 
             const cfg = loadConfig();
             const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -1962,6 +1966,10 @@ export default function (pi: ExtensionAPI) {
             const gate = getSharedCapacityGate(countRunning);
 
             validateBatchPlan({ shared: p.shared, jobs: p.jobs, onCapacity: p.onCapacity, config: cfg });
+            // A present-but-blank role or agent rejects the whole batch before any launch.
+            const blankSelector = blankCatalogSelector(p.shared, "shared")
+                ?? p.jobs.map((job, index) => blankCatalogSelector(job, `jobs[${index}]`)).find(Boolean);
+            if (blankSelector) throw new Error(blankSelector);
 
             let catalogSnapshot: CatalogSnapshot | undefined;
             let catalogHost: CatalogHost | undefined;

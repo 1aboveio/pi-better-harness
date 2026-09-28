@@ -272,14 +272,18 @@ export function canonicalRoleId(value: string): string {
     return trimmed.startsWith(ROLE_ID_PREFIX) ? trimmed : `${ROLE_ID_PREFIX}${trimmed}`;
 }
 
+/** Canonical named-agent id: trimmed and lowercased, since ids are lowercase-only. */
+export function canonicalAgentId(value: string): string {
+    return value.trim().toLowerCase();
+}
+
 /**
  * Canonical id for a field that takes either kind, such as `agents_catalog`
- * inspect. An `agent.` id is kept as typed; anything else is read as a role.
+ * inspect. An `agent.` id (any case) is lowercased; anything else is read as a role.
  */
 export function canonicalCatalogId(value: string): string {
-    const trimmed = value.trim();
-    if (trimmed.toLowerCase().startsWith("agent.")) return trimmed;
-    return canonicalRoleId(trimmed);
+    const lowered = value.trim().toLowerCase();
+    return lowered.startsWith("agent.") ? lowered : canonicalRoleId(lowered);
 }
 
 export function isPreferenceKey(value: string): value is PreferenceKey {
