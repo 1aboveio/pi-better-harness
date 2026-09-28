@@ -279,6 +279,8 @@ export function confineCommandSpec(
   plan: ForegroundSandboxPlan,
   profilePath: string,
   seams: SandboxSeams = {},
+  /** Receives lines to show with the launch (e.g. a placeholder left in the user's files). */
+  onNotice: (line: string) => void = () => {},
 ): CommandSpec {
   if (!plan.confined) return spec;
 
@@ -331,6 +333,7 @@ export function confineCommandSpec(
     throw blocked(plan, error instanceof Error ? error.message : String(error));
   }
   if (!command) throw blocked(plan, "no sandbox backend was applied");
+  for (const line of command.notices ?? []) onNotice(line);
 
   return { ...spec, argv: [command.file, ...command.fileArgs], shell: false };
 }

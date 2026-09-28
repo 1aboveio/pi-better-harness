@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- Sandbox (Linux, Outside project = Write): a protected dotfile that dangles into a missing directory (for example `~/.zshrc -> ~/.cache/zsh/zshrc`) no longer locks all of `~/.cache` or `~/.config` against new entries. Only the missing directory is guarded, with an empty read-only placeholder directory. A dangling link into the workspace gets a placeholder of the right kind: a directory for a directory-type entry such as `~/.ssh` or for a missing directory on the way, a file otherwise, instead of always a file. Each placeholder stays on disk, and the launch that creates one says so in one line: the bash tool's output, the foreground shell's stderr, or the background task's log. A dangling link to a missing file directly inside a dot directory still locks that directory for new top-level entries (see ADR 0008). The subagents and background-tasks copies of the sandbox core carry the same fix. (#350)
+- Sandbox (macOS): the policy pre-checks for write, remove and `apply_patch` validation now agree with the kernel on case-insensitive APFS. `~/.SSH/id_ed25519` or a new `~/.ZSHRC` is refused up front, as Seatbelt refuses it, instead of passing validation and failing with EPERM in the write phase. Paths are canonicalized with the OS `realpath`, which returns the on-disk case, and a missing tail is matched to protected entries without regard to case. (#354)
+
 ## [pi-better-harness@0.8.0] - 2026-09-28
 
 ### Changed

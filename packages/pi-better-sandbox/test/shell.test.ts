@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -274,4 +274,28 @@ test("the operations pi already holds pick up a rule change on the next command"
     };
     assert.equal(profileOf(local.calls[0] as string).includes(join(root, "build")), false);
     assert.ok(profileOf(local.calls[1] as string).includes(join(root, "build")));
+});
+
+test("a placeholder the Linux backend leaves in the workspace is announced in one line of launch output (#350)", () => {
+    const base = project("linux-placeholder-notice");
+    const fakeHome = join(base, "home"), root = join(base, "project");
+    mkdirSync(fakeHome, { recursive: true });
+    mkdirSync(root, { recursive: true });
+    symlinkSync(join(root, "rc"), join(fakeHome, ".zlogin"));
+    const plan = { confined: true as const, profilePath: join(base, "p.sb"), policy: {
+        writableRoot: root, home: fakeHome,
+        permissions: { projectFiles: "read-write", outsideProject: "write", storedCredentials: "read", commands: true, network: true } as const,
+    } };
+    // `/bin/echo` stands in for bwrap so the wrapper runs anywhere and only prints its argv.
+    const linux = { platform: () => "linux", lookupExecutable: () => "/bin/echo", makeDirectory: () => {},
+        maskSources: () => ({ directory: join(base, "mask-dir"), file: join(base, "mask-file") }) };
+    const wrapped = buildSandboxedShellCommand("true", plan, linux);
+    assert.ok(wrapped.startsWith("printf "), wrapped);
+    const result = spawnSync("/bin/sh", ["-c", wrapped], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr.trim().split("\n").length, 1);
+    assert.match(result.stderr, new RegExp(`placeholder.*${join(root, "rc")}`));
+    assert.ok(existsSync(join(root, "rc")));
+    // The next launch finds it in place and says nothing.
+    assert.ok(buildSandboxedShellCommand("true", plan, linux).startsWith("exec "));
 });

@@ -157,9 +157,10 @@ export function spawnTask(
     }, dependencies.remoteRunner)
     : undefined;
   const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const sandboxNotices: string[] = [];
   const launchSpec = remoteTask
     ? commandSpec
-    : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id));
+    : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id), {}, (line) => sandboxNotices.push(line));
   const tmuxBacked = remoteTask?.metadata.remote.session === "tmux";
   // Outside project = Write or Write & delete can change files outside the
   // project: start an APFS local snapshot (macOS, background, never blocks).
@@ -169,6 +170,9 @@ export function spawnTask(
     : remoteTask
       ? remoteTask.spawn(logPath, true)
       : spawnCommand(launchSpec, logPath, true);
+  for (const line of sandboxNotices) {
+    try { appendLine(logPath, `--- ${line} ---`); } catch { /* log gone */ }
+  }
   if (snapshot?.started) {
     void snapshot.done.then((outcome) => {
       if (!outcome.ok) {
@@ -421,9 +425,10 @@ export function startWatchTask(
     }, dependencies.remoteRunner)
     : undefined;
   const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const sandboxNotices: string[] = [];
   const launchSpec = remoteTask
     ? commandSpec
-    : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id));
+    : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id), {}, (line) => sandboxNotices.push(line));
   const meta: BackgroundTaskMeta = {
     id,
     name: params.name,
@@ -454,6 +459,7 @@ export function startWatchTask(
   };
   ensureTaskDir(id);
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
+  for (const line of sandboxNotices) appendLine(meta.logPath, `--- ${line} ---`);
   writeMeta(meta);
   scheduleWatch(pi, id, 0, getActiveSession, remoteTask
     ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)

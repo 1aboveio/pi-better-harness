@@ -90,7 +90,7 @@ export function prepareTaskRuntime(options: {
     }
     const support = describeSandboxSupport();
     if (!support.supported) throw new Error(`Task sandbox unavailable: ${support.reason}`);
-    const root = realpathSync(options.root);
+    const root = realpathSync.native(options.root);
     const home = homedir();
     if (root === dirname(root) || root === canonicalizePath(home)) throw new Error("Task sandbox requires a project directory, not the filesystem or home root.");
     const permissions = options.permissions ?? DEFAULT_TASK_PERMISSIONS;
