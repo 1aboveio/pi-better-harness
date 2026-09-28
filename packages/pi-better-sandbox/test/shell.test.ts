@@ -295,6 +295,7 @@ test("a placeholder the Linux backend leaves in the workspace is announced in on
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stderr.trim().split("\n").length, 1);
     assert.match(result.stderr, new RegExp(`placeholder.*${join(root, "rc")}`));
+    assert.match(result.stderr, /remove it before creating the real target/);
     assert.ok(existsSync(join(root, "rc")));
     // The next launch finds it in place and says nothing.
     assert.ok(buildSandboxedShellCommand("true", plan, linux).startsWith("exec "));

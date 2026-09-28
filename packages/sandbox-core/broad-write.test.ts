@@ -128,6 +128,27 @@ describe("broad-write policy compilation", () => {
         assert.equal(evaluateDeleteAccess(join(home, ".CACHE", "pip"), policy, darwin).allowed, true);
     }));
 
+    it("folds case on darwin whatever the volume, as Seatbelt does, and never on Linux (#358)", () => fixture(({ home, project }) => {
+        // An identity canonicalize keeps the caller's case on every component,
+        // as a case-sensitive volume would: the outcome now rests on the platform alone.
+        const keepCase = (path: string) => path;
+        const darwin: SandboxSeams = { platform: () => "darwin", canonicalize: keepCase };
+        const linux: SandboxSeams = { platform: () => "linux", canonicalize: keepCase };
+        const policy = compileWritePolicy({ writableRoot: project, home, permissions: broad }, darwin);
+        const upperProject = join(home, "projects", "TASK");
+        // darwin: a case variant is the protected entry, and the workspace, as the kernel sees them.
+        assert.deepEqual(evaluateWriteAccess(join(home, ".ZSHRC"), policy, darwin),
+            { allowed: false, path: join(home, ".zshrc"), reason: "write-denied", deniedBy: join(home, ".zshrc") });
+        assert.equal(evaluateReadAccess(join(home, ".SSH", "id_ed25519"), policy, darwin).allowed, false);
+        assert.deepEqual(evaluateWriteAccess(join(upperProject, "a.ts"), policy, darwin), { allowed: true, path: join(project, "a.ts") });
+        assert.equal(evaluateDeleteAccess(join(upperProject, "a.ts"), policy, darwin).allowed, true, "workspace removal rights, as the kernel grants");
+        // Linux: case is significant, so a variant is a different, unrelated path.
+        assert.deepEqual(evaluateWriteAccess(join(home, ".ZSHRC"), policy, linux), { allowed: true, path: join(home, ".ZSHRC") });
+        assert.equal(evaluateReadAccess(join(home, ".SSH", "id_ed25519"), policy, linux).allowed, true);
+        assert.equal(evaluateWriteAccess(join(upperProject, "a.ts"), policy, linux).path, join(upperProject, "a.ts"));
+        assert.equal(evaluateDeleteAccess(join(upperProject, "a.ts"), policy, linux).allowed, false, "no workspace removal rights on Linux");
+    }));
+
     it("treats Project files = Write as writable but not removable, except worktree folders", () => fixture(({ home, project }) => {
         const darwin: SandboxSeams = { platform: () => "darwin" };
         for (const outsideProject of ["write", "read"] as const) {
@@ -329,6 +350,7 @@ describe("broad-write policy compilation", () => {
         assert.equal(decidingMount(rows, join(project, "src", "a.ts")), "--bind", "the rest of the workspace stays writable");
         assert.equal(command.notices?.length, 1, "one line of launch output");
         assert.match(command.notices![0]!, /placeholder/);
+        assert.match(command.notices![0]!, /remove it before creating the real target/, "tells the user what to do with it (#358)");
         for (const path of [join(project, "rc"), `${join(project, "ssh")}/`, `${join(project, "deep")}/`]) {
             assert.ok(command.notices![0]!.includes(path), path);
         }

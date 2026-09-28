@@ -551,50 +551,18 @@ function contains(root: string, target: string): boolean {
     return target.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
 
-/** Per-device answer to "does this volume fold case?" (APFS/HFS+ default). */
-const caseFoldingByDevice = new Map<number, boolean>();
-
 /**
- * Whether the volume holding `path` (its nearest existing ancestor) ignores
- * case: an existing component whose case-swapped spelling names the same
- * inode proves it. macOS only; false whenever it cannot be shown.
+ * Spell `path` the way the policy spells it when they differ only in case, on
+ * macOS. `canonicalizePath` fixes the case of every existing component on a
+ * case-insensitive volume, but a missing tail (`~/.NPMRC` while `~/.npmrc` is
+ * absent) keeps the caller's case, and the kernel still treats it as the
+ * protected name. Seatbelt matches paths case-insensitively on every volume,
+ * case-sensitive APFS included, so this folds on darwin without probing the
+ * volume: the pre-check decides as the kernel does (#354, #358). The longest
+ * policy path that matches case-insensitively wins. Other platforms never fold.
  */
-function caseInsensitiveVolume(path: string): boolean {
-    if (process.platform !== "darwin") return false;
-    let current = path;
-    while (!existsSync(current) && dirname(current) !== current) current = dirname(current);
-    let device: number;
-    try { device = statSync(current).dev; } catch { return false; }
-    const known = caseFoldingByDevice.get(device);
-    if (known !== undefined) return known;
-    for (let probe = current; dirname(probe) !== probe; probe = dirname(probe)) {
-        const name = basename(probe);
-        const swapped = [...name].map((c) => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join("");
-        if (swapped === name) continue;
-        try {
-            const original = statSync(probe);
-            if (original.dev !== device) break;
-            let folded = false;
-            try {
-                const other = statSync(join(dirname(probe), swapped));
-                folded = other.dev === original.dev && other.ino === original.ino;
-            } catch { /* The swapped name is absent: case-sensitive. */ }
-            caseFoldingByDevice.set(device, folded);
-            return folded;
-        } catch { return false; }
-    }
-    return false;
-}
-
-/**
- * Spell `path` the way the policy spells it when they differ only in case on a
- * case-insensitive volume. `canonicalizePath` fixes the case of every existing
- * component, but a missing tail (`~/.NPMRC` while `~/.npmrc` is absent) keeps
- * the caller's case, and the kernel still treats it as the protected name. The
- * longest policy path that matches case-insensitively wins, so the pre-check
- * decides as the kernel does (#354).
- */
-function alignCaseToPolicy(path: string, policy: CompiledSandboxWritePolicy): string {
+function alignCaseToPolicy(path: string, policy: CompiledSandboxWritePolicy, seams: SandboxSeams): string {
+    if (currentPlatform(seams) !== "darwin") return path;
     const broad = policy.broad;
     const candidates = [policy.writableRoot, ...policy.denyWrite, ...(policy.credentialPaths ?? []),
         ...(policy.runtimeWrite ?? []), ...(policy.compatibilityWrite ?? []),
@@ -607,8 +575,7 @@ function alignCaseToPolicy(path: string, policy: CompiledSandboxWritePolicy): st
         if (folded.length !== candidate.length || !contains(folded, lower)) continue;
         if (!best || candidate.length > best.length) best = candidate;
     }
-    // Already spelled as the policy spells it: nothing to probe.
-    if (!best || path.startsWith(best) || !caseInsensitiveVolume(path)) return path;
+    if (!best || path.startsWith(best)) return path;
     return `${best}${path.slice(best.length)}`;
 }
 
@@ -626,7 +593,7 @@ export function evaluateReadAccess(
     policy: CompiledSandboxWritePolicy,
     seams: SandboxSeams = {},
 ): ReadAccessDecision {
-    const path = alignCaseToPolicy(canonicalizePath(target, seams), policy);
+    const path = alignCaseToPolicy(canonicalizePath(target, seams), policy, seams);
     const permissions = policy.permissions;
     if (!permissions) return { allowed: true, path };
     if (policy.broad) {
@@ -653,7 +620,7 @@ export function evaluateWriteAccess(
     policy: CompiledSandboxWritePolicy,
     seams: SandboxSeams = {},
 ): WriteAccessDecision {
-    const path = alignCaseToPolicy(canonicalizePath(target, seams), policy);
+    const path = alignCaseToPolicy(canonicalizePath(target, seams), policy, seams);
     if (policy.broad) return evaluateBroadWrite(path, policy, policy.broad, seams);
     if (!policy.permissions && !contains(policy.writableRoot, path)) {
         return { allowed: false, path, reason: "outside-writable-root" };
@@ -1581,7 +1548,7 @@ function buildLinuxBroadCommand(
         fileArgs: [...fileArgs, ...(!permissions.network ? ["--unshare-net"] : []),
             "--", args.execPath, ...args.execArgs],
         ...(created.length && { notices: [
-            `Sandbox: created an empty read-only placeholder where a protected symlink points at nothing, and left it in place: ${created.join(", ")}`,
+            `Sandbox: created an empty read-only placeholder where a protected symlink points at nothing, and left it in place (remove it before creating the real target): ${created.join(", ")}`,
         ] }),
     };
 }

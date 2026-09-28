@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- sandbox: on macOS the write, read, and remove pre-checks now fold case on every volume, as Seatbelt does, instead of probing whether the volume is case-insensitive. On a case-sensitive APFS volume the policy and the kernel now agree: `~/.SSH` is refused like `~/.ssh`, and a directory differing from the workspace only in case gets the workspace's rights. Linux never folds. ADR 0008 notes the case-sensitive-volume consequence. (#358)
+- sandbox: the one-line notice a Linux launch prints when it leaves an empty read-only placeholder for a dangling protected link now tells the user to remove the placeholder before creating the real target. (#358)
+
 ## [pi-better-harness@0.12.0] - 2026-09-28
 
 ### Changed
