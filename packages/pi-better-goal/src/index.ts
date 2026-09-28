@@ -70,6 +70,34 @@ const MAX_NO_PROGRESS_RETRIES = parseRetryLimit(
  * steering after the whole tool batch, and callback batches are follow-ups
  * that wait for the entire run), so the goal harvests them explicitly.
  */
+/** Model-callable resume, active only while an escape-paused goal waits. */
+export const GOAL_RESUME_TOOL = "goal_resume";
+/** Hotkey that resumes any paused goal, like `/goal resume`. */
+export const GOAL_RESUME_SHORTCUT = "alt+g";
+
+/** When the agent may call `goal_resume`; shared by the tool description and the paused prompt. */
+const GOAL_RESUME_RULE =
+  "Call goal_resume only when the user's latest message clearly says to proceed (for example \"go\", \"continue\", \"ok do it\", \"approved, proceed\"), " +
+  "or answers a decision you explicitly asked for in your previous message with a choice that means proceed. Never call it for questions, \"why...\", \"what about...\", \"let me think\", or discussion.";
+
+/** True when the agent may resume this goal with `goal_resume`. */
+export function agentResumable(goal: GoalSnapshot | null): boolean {
+  return goal?.status === "paused" && goal.pauseReason === "interrupt";
+}
+
+/** Footer status for a paused goal, telling the user how to resume it. */
+export function pausedGoalStatus(goal: GoalSnapshot): string {
+  return agentResumable(goal) ? 'goal paused · say "go" or /goal resume' : "goal paused · /goal resume";
+}
+
+function pausedGoalPrompt(goal: GoalSnapshot): string {
+  return [
+    `Pi Better Goal is paused because the user pressed escape. Goal: ${goal.objective}`,
+    "Treat the user's messages as ordinary conversation: answer them, but do not continue the goal's work until it is resumed.",
+    GOAL_RESUME_RULE,
+  ].join("\n");
+}
+
 const BLOCKING_QUESTION_TOOLS: ReadonlySet<string> = new Set(["ask_user_question"]);
 
 const GOAL_ACTIONS: readonly AutocompleteItem[] = [
@@ -195,6 +223,11 @@ function formatGoal(
     `Elapsed time: ${timing.elapsedSeconds}s`,
     `Observable progress: ${stall?.state ?? "unknown"}`,
     continuationStatus,
+    ...(goal.status === "paused"
+      ? [agentResumable(goal)
+        ? 'Resume: say "go" (the agent calls goal_resume), /goal resume, or alt+g'
+        : "Resume: /goal resume or alt+g"]
+      : []),
   ].join("\n");
 }
 
@@ -304,6 +337,8 @@ export default function (pi: ExtensionAPI): void {
     backgroundDrainTracker = null;
     clearIdleContinuation();
     syncPollingState();
+    syncResumeTool(goal);
+    applyStatus(ctx);
     // Force a full redraw when the dock height changes (absent ↔ visible clock).
     refreshGoalWidget?.(!wasVisible || !isGoalClockVisible(goal));
   };
@@ -317,14 +352,16 @@ export default function (pi: ExtensionAPI): void {
     backgroundDrainTracker = null;
     clearIdleContinuation();
     syncPollingState();
+    syncResumeTool(null);
+    applyStatus(ctx);
     refreshGoalWidget?.(wasVisible);
   };
 
   /**
-   * An interrupt (escape, or anything else that aborts the running turn) is a
-   * soft pause: it stops autonomous continuation now, and the user's next
-   * conversational message resumes the goal once that exchange settles. Only
-   * `/goal pause` (or an unavailable command/workflow) is a sticky pause.
+   * An interrupt (escape, or anything else that aborts the running turn) pauses
+   * the goal. It stays paused while the user talks: messages are ordinary
+   * conversation. It resumes through `/goal resume`, the hotkey, or the agent's
+   * `goal_resume` once the user clearly says to proceed.
    */
   const pauseGoalOnInterrupt = (ctx: ExtensionContext): void => {
     const goal = getGoal(ctx);
@@ -332,7 +369,7 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     setGoal(goalWithStatus(goal, "paused", undefined, "interrupt"), ctx, "runtime");
-    notifyGoal(ctx, "Goal paused (interrupted). Send a message to resume it after that exchange, or use /goal pause to keep it paused.");
+    notifyGoal(ctx, 'Goal paused. Say "go" to resume it, or use /goal resume.');
   };
 
   /** Why a paused goal cannot become active again, or null when it can. */
@@ -344,6 +381,28 @@ export default function (pi: ExtensionAPI): void {
       return `Cannot resume: /${goal.command.name} is no longer registered at its original source.`;
     }
     return null;
+  };
+
+  /**
+   * The one resume path shared by `/goal resume`, the hotkey, and `goal_resume`:
+   * reactivate the paused goal and queue its continuation.
+   */
+  const resumeGoal = (
+    ctx: ExtensionContext,
+    source: GoalEntrySource,
+  ): { ok: true; goal: GoalSnapshot } | { ok: false; message: string } => {
+    const current = getGoal(ctx);
+    if (!current || current.status !== "paused") {
+      return { ok: false, message: "Only paused goals can be resumed." };
+    }
+    const blocker = resumeBlocker(current);
+    if (blocker) {
+      return { ok: false, message: blocker };
+    }
+    const goal = goalWithStatus(current, "active");
+    setGoal(goal, ctx, source);
+    queueGoalContinuation(goal, ctx);
+    return { ok: true, goal };
   };
 
   const boundCommandReady = (goal: GoalSnapshot, ctx: ExtensionContext): boolean => {
@@ -503,35 +562,61 @@ export default function (pi: ExtensionAPI): void {
       clearIdleContinuation();
     }
 
-    if (ctx.hasUI) {
-      const goal = getGoal(ctx);
-      const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
-      const goalStall = observeGoalStall(goal, continuation, {
-        foregroundRunning,
-        backgroundRunning: latestSnapshot?.backgroundRunning ?? false,
-      });
-      let waitingOnAnswer = 0;
-      for (const activeAtStart of pendingQuestions.values()) {
-        waitingOnAnswer += finishedSinceQuestion(activeAtStart, snapshot).length;
-      }
-      const status = waitingOnAnswer > 0
-        ? `${waitingOnAnswer} background done; waiting on your answer`
-        : snapshot.backgroundRunning
-        ? `bg ${snapshot.activeBackgroundCount}${snapshot.unhealthyBackgroundCount ? `, ${snapshot.unhealthyBackgroundCount} unhealthy` : ""}`
-        : continuation?.blocked
-          ? "waiting: no progress"
-          : goalStall?.state === "stalled"
-            ? "goal stalled"
-          : undefined;
-      try {
-        ctx.ui.setStatus(EXTENSION_NAME, status);
-      } catch {
-        // UI status is best-effort only.
-      }
-    }
+    applyStatus(ctx);
 
     return snapshot;
   };
+
+  /** Footer status from the goal state and the latest activity snapshot. */
+  const statusText = (ctx: ExtensionContext, snapshot: ActivitySnapshot | null): string | undefined => {
+    const goal = getGoal(ctx);
+    let waitingOnAnswer = 0;
+    if (snapshot) {
+      for (const activeAtStart of pendingQuestions.values()) {
+        waitingOnAnswer += finishedSinceQuestion(activeAtStart, snapshot).length;
+      }
+    }
+    if (waitingOnAnswer > 0) return `${waitingOnAnswer} background done; waiting on your answer`;
+    const background = snapshot?.backgroundRunning
+      ? `bg ${snapshot.activeBackgroundCount}${snapshot.unhealthyBackgroundCount ? `, ${snapshot.unhealthyBackgroundCount} unhealthy` : ""}`
+      : undefined;
+    if (goal?.status === "paused") return background ? `${pausedGoalStatus(goal)} · ${background}` : pausedGoalStatus(goal);
+    if (background) return background;
+    const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
+    if (continuation?.blocked) return "waiting: no progress";
+    const goalStall = observeGoalStall(goal, continuation, {
+      foregroundRunning,
+      backgroundRunning: snapshot?.backgroundRunning ?? false,
+    });
+    return goalStall?.state === "stalled" ? "goal stalled" : undefined;
+  };
+
+  function applyStatus(ctx: ExtensionContext): void {
+    if (!ctx.hasUI) return;
+    try {
+      ctx.ui.setStatus(EXTENSION_NAME, statusText(ctx, latestSnapshot));
+    } catch {
+      // UI status is best-effort only.
+    }
+  }
+
+  /**
+   * `goal_resume` is in the model's tool list only while an escape-paused goal
+   * waits. Pi activates newly registered tools by default, so this also removes
+   * it at session start. Only this one tool is toggled; other extensions' tool
+   * choices are left as they are.
+   */
+  function syncResumeTool(goal: GoalSnapshot | null): void {
+    if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+    try {
+      const active = pi.getActiveTools();
+      const wanted = agentResumable(goal);
+      if (active.includes(GOAL_RESUME_TOOL) === wanted) return;
+      pi.setActiveTools(wanted ? [...active, GOAL_RESUME_TOOL] : active.filter((name) => name !== GOAL_RESUME_TOOL));
+    } catch {
+      // Tool activation is unavailable before Pi binds the session; the tool also refuses on its own.
+    }
+  }
 
   const collectIfPossible = (): void => {
     const ctx = currentCtx;
@@ -675,18 +760,11 @@ export default function (pi: ExtensionAPI): void {
       }
 
       if (trimmed === "resume") {
-        if (!current || current.status !== "paused") {
-          notifyGoal(ctx, "Only paused goals can be resumed.", "warning");
+        const result = resumeGoal(ctx, "command");
+        if (!result.ok) {
+          notifyGoal(ctx, result.message, current?.status === "paused" ? "error" : "warning");
           return;
         }
-        const blocker = resumeBlocker(current);
-        if (blocker) {
-          notifyGoal(ctx, blocker, "error");
-          return;
-        }
-        const goal = goalWithStatus(current, "active");
-        setGoal(goal, ctx, "command");
-        queueGoalContinuation(goal, ctx);
         notifyGoal(ctx, "Goal resumed.");
         return;
       }
@@ -789,6 +867,44 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerTool({
+    name: GOAL_RESUME_TOOL,
+    label: "Resume Goal",
+    description:
+      "Resume the goal the user paused with escape, exactly like /goal resume. " + GOAL_RESUME_RULE,
+    promptSnippet: "Resume the escape-paused goal, only on the user's clear go-ahead.",
+    parameters: Type.Object({
+      reason: Type.Optional(Type.String({ description: "Short quote or summary of the user's go-ahead." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const reason = (params as { reason?: string }).reason;
+      const current = getGoal(ctx);
+      if (!agentResumable(current)) {
+        const text = current?.status === "paused"
+          ? "This goal was paused with /goal pause or by the runtime. Only the user can resume it, with /goal resume."
+          : "No goal is paused, so there is nothing to resume.";
+        return { content: [{ type: "text", text }], details: { ok: false, goal: current } };
+      }
+      const result = resumeGoal(ctx, "tool");
+      if (!result.ok) {
+        return { content: [{ type: "text", text: `Goal stays paused. ${result.message}` }], details: { ok: false, goal: getGoal(ctx) } };
+      }
+      return {
+        content: [{ type: "text", text: "Goal resumed. Its continuation runs after this turn." }],
+        details: { ok: true, goal: result.goal, ...(reason ? { reason } : {}) },
+      };
+    },
+  });
+
+  pi.registerShortcut?.(GOAL_RESUME_SHORTCUT, {
+    description: "Resume the paused goal",
+    handler: (ctx) => {
+      currentCtx = ctx;
+      const result = resumeGoal(ctx, "command");
+      notifyGoal(ctx, result.ok ? "Goal resumed." : result.message, result.ok ? "info" : "warning");
+    },
+  });
+
   pi.registerCommand("better-activity", {
     description: "Show foreground/background activity known to pi-better-goal",
     handler: async (_args, ctx) => {
@@ -849,6 +965,7 @@ export default function (pi: ExtensionAPI): void {
       notifyGoal(ctx, "Goal paused: invoke its skill directly before resuming.", "error");
     }
     pi.events.emit(EVENT_READY, { version: EXTENSION_VERSION });
+    syncResumeTool(getGoal(ctx));
     installGoalWidget(ctx);
     latestSnapshot = await publishSnapshot(ctx);
     syncPollingState();
@@ -874,23 +991,9 @@ export default function (pi: ExtensionAPI): void {
         }
       }
     }
+    // A paused goal stays paused while the user talks: the message is ordinary
+    // conversation. Only /goal resume, the hotkey, or goal_resume resume it.
     const goal = getGoal(ctx);
-    if (goal?.status === "paused" && goal.pauseReason === "interrupt") {
-      // Conversational input after an interrupt means the user has taken the
-      // wheel, not stopped the goal: reactivate it so continuation resumes once
-      // this exchange settles. Pi's built-in commands (/settings, /model, ...)
-      // and extension commands never reach this handler.
-      const blocker = resumeBlocker(goal);
-      if (blocker) {
-        notifyGoal(ctx, `Goal stays paused. ${blocker}`, "warning");
-        return;
-      }
-      const resumed = goalWithStatus(goal, "active");
-      setGoal(resumed, ctx, "runtime");
-      resetContinuationState(resumed);
-      notifyGoal(ctx, "Goal resumed; it continues after this exchange.");
-      return;
-    }
     if (goal?.status === "active") {
       resetContinuationState(goal);
     }
@@ -901,8 +1004,9 @@ export default function (pi: ExtensionAPI): void {
     const goal = currentGoalSnapshot(ctx);
     const owner = getWorkflow(ctx);
     const snapshot = await publishSnapshot(ctx);
+    const pausedInstruction = agentResumable(goal) ? pausedGoalPrompt(goal!) : "";
     if (!isPokeable(goal) && !owner) {
-      return;
+      return pausedInstruction ? { systemPrompt: `${event.systemPrompt}\n\n${pausedInstruction}` } : undefined;
     }
 
     const questionInstruction = snapshot.backgroundRunning
@@ -923,7 +1027,11 @@ export default function (pi: ExtensionAPI): void {
         return { systemPrompt: `${event.systemPrompt}\n\nWorkflow ${owner.name} is unavailable. Stop work and ask the user to restore or reinvoke the skill.` };
       }
       return {
-        systemPrompt: `${event.systemPrompt}\n\nActive workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
+        systemPrompt: `${event.systemPrompt}\n\n` +
+          (pausedInstruction
+            ? `${pausedInstruction}\nWhile the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n`
+            : "") +
+          `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
           (isPokeable(goal) ? `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.` : "") +
           (questionInstruction ? `\n\n${questionInstruction.trim()}` : ""),
       };

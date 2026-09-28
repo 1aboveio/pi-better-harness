@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- pi-better-goal: a goal paused by `escape` stays paused while you talk. Your next message no longer resumes it; the agent answers, and the goal's work loop does not restart. A new `goal_resume` tool, offered to the model only while an `escape`-paused goal waits, resumes it exactly as `/goal resume` does. The agent is told to call it only when your latest message clearly says to proceed ("go", "continue", "ok do it") or answers a decision it asked for with a choice that means proceed, never for questions or discussion. `/goal pause` still resumes only through `/goal resume`, and `goal_resume` refuses it. A new `alt+g` hotkey resumes any paused goal (on a macOS terminal without Option-as-Meta it types `©`; use `/goal resume` there). The status line shows `goal paused · say "go" or /goal resume` (or `goal paused · /goal resume` after `/goal pause`). Goals paused by `escape` under the old rule stay paused until resumed. (#362)
+
 ## [pi-better-harness@0.9.0] - 2026-09-28
 
 ### Changed

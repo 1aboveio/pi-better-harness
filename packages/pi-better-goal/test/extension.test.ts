@@ -592,7 +592,7 @@ test("an aborted run without an active goal creates no goal", async (t) => {
   assert.equal(latestGoal(entries), undefined, "an abort without a goal creates nothing");
 });
 
-test("an interrupt pause resumes after the user's next message is handled", async (t) => {
+test("an escape pause stays paused while the user asks a question; no continuation runs", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
 
@@ -605,21 +605,65 @@ test("an interrupt pause resumes after the user's next message is handled", asyn
   assert.equal(latestGoal(entries)?.status, "paused");
   assert.equal(latestGoal(entries)?.pauseReason, "interrupt");
 
-  await handlers.get("input")?.({ source: "interactive", text: "what is recipient-test?" }, ctx);
-  assert.equal(latestGoal(entries)?.status, "active", "conversational input reactivates an interrupted goal");
-  assert.equal(latestGoal(entries)?.pauseReason, undefined);
-  assert.equal(messages.length, 0, "the user's exchange runs first; nothing is injected into it");
+  await handlers.get("input")?.({ source: "interactive", text: "why is recipient-test failing?" }, ctx);
+  assert.equal(latestGoal(entries)?.status, "paused", "a question does not resume the goal");
 
   await handlers.get("agent_start")?.({}, ctx);
   await handlers.get("agent_end")?.(answeredOutcome, ctx);
   await handlers.get("agent_settled")?.({}, ctx);
   t.mock.timers.tick(30_000);
   await flushPromises();
-  assert.equal(messages.length, 1, "continuation resumes once the exchange settles");
+  assert.equal(messages.length, 0, "the goal loop does not restart after the answer");
+  assert.equal(latestGoal(entries)?.status, "paused");
+});
+
+test("goal_resume resumes an escape-paused goal and its continuation runs", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries, tools, activeTools } = createContinuationHarness();
+
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  messages.length = 0;
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
+  assert.ok(activeTools().includes("goal_resume"), "the model sees goal_resume while the goal is escape-paused");
+
+  await handlers.get("input")?.({ source: "interactive", text: "go" }, ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  const result = await tools.get("goal_resume")!.execute("call", { reason: "user said go" }, undefined, undefined, ctx);
+  assert.equal((result.details as { ok: boolean }).ok, true);
+  assert.equal(latestGoal(entries)?.status, "active");
+  assert.equal(latestGoal(entries)?.pauseReason, undefined);
+  assert.equal(activeTools().includes("goal_resume"), false, "the tool leaves the model's list once the goal runs");
+  assert.equal(messages.length, 1, "resuming queues the continuation, as /goal resume does");
   assert.match(String((messages[0] as { content?: unknown }).content), /Continue working toward the active thread goal/);
 });
 
-test("an interrupt pause is persisted and resumes on input after a session reload", async (t) => {
+test("goal_resume is absent and refused unless the goal is escape-paused", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries, tools, activeTools } = createContinuationHarness();
+  await handlers.get("session_start")?.({}, ctx);
+  const goalResume = tools.get("goal_resume")!;
+  assert.equal(activeTools().includes("goal_resume"), false, "no goal: the tool is not offered");
+  const noGoal = await goalResume.execute("call", {}, undefined, undefined, ctx);
+  assert.equal((noGoal.details as { ok: boolean }).ok, false);
+
+  await commands.get("goal")?.handler("keep watching", ctx);
+  assert.equal(activeTools().includes("goal_resume"), false, "active goal: the tool is not offered");
+  const whileActive = await goalResume.execute("call", {}, undefined, undefined, ctx);
+  assert.equal((whileActive.details as { ok: boolean }).ok, false);
+
+  await commands.get("goal")?.handler("pause", ctx);
+  messages.length = 0;
+  assert.equal(activeTools().includes("goal_resume"), false, "/goal pause: only the user resumes");
+  const afterPause = await goalResume.execute("call", {}, undefined, undefined, ctx);
+  assert.equal((afterPause.details as { ok: boolean }).ok, false);
+  assert.match((afterPause.content[0] as { text: string }).text, /\/goal resume/);
+  assert.equal(latestGoal(entries)?.status, "paused");
+  assert.equal(messages.length, 0);
+});
+
+test("an escape pause persisted by an older version stays paused after reload until /goal resume", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const first = createContinuationHarness();
   await first.handlers.get("session_start")?.({}, first.ctx);
@@ -631,12 +675,71 @@ test("an interrupt pause is persisted and resumes on input after a session reloa
   second.entries.push(...first.entries);
   await second.handlers.get("session_start")?.({}, second.ctx);
   assert.equal(latestGoal(second.entries)?.status, "paused");
+  assert.ok(second.activeTools().includes("goal_resume"), "a restored escape pause offers goal_resume");
   t.mock.timers.tick(30_000);
   await flushPromises();
-  assert.equal(second.messages.length, 0, "a reloaded interrupted goal is not poked on its own");
+  assert.equal(second.messages.length, 0, "a reloaded paused goal is not poked on its own");
 
   await second.handlers.get("input")?.({ source: "interactive", text: "continue" }, second.ctx);
+  assert.equal(latestGoal(second.entries)?.status, "paused", "a message alone never resumes; the agent decides via goal_resume");
+
+  await second.commands.get("goal")?.handler("resume", second.ctx);
   assert.equal(latestGoal(second.entries)?.status, "active");
+  assert.equal(second.messages.length, 1, "/goal resume queues the continuation");
+});
+
+test("the resume hotkey resumes any paused goal", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, messages, ctx, entries, shortcuts } = createContinuationHarness();
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await commands.get("goal")?.handler("pause", ctx);
+  messages.length = 0;
+
+  const hotkey = shortcuts.get("alt+g");
+  assert.ok(hotkey, "alt+g is registered");
+  await hotkey.handler(ctx);
+  assert.equal(latestGoal(entries)?.status, "active");
+  assert.equal(messages.length, 1);
+});
+
+test("the status line shows a paused goal and how to resume it", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, ctx, statuses } = createContinuationHarness(undefined, { hasUI: true });
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_start")?.({}, ctx);
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.equal(statuses.at(-1), 'goal paused · say "go" or /goal resume');
+
+  await commands.get("goal")?.handler("resume", ctx);
+  await commands.get("goal")?.handler("pause", ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.equal(statuses.at(-1), "goal paused · /goal resume", "an explicit pause names only /goal resume");
+
+  await commands.get("goal")?.handler("resume", ctx);
+  await handlers.get("agent_settled")?.({}, ctx);
+  assert.equal(statuses.at(-1), undefined, "a running goal clears the paused status");
+});
+
+test("an escape-paused goal tells the agent to converse and when it may resume", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const { commands, handlers, ctx } = createContinuationHarness();
+  await handlers.get("session_start")?.({}, ctx);
+  await commands.get("goal")?.handler("keep watching", ctx);
+  await handlers.get("agent_end")?.(abortedOutcome, ctx);
+
+  const update = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt?: string };
+  assert.match(update.systemPrompt ?? "", /paused because the user pressed escape/);
+  assert.match(update.systemPrompt ?? "", /do not continue the goal's work/);
+  assert.match(update.systemPrompt ?? "", /Call goal_resume only when the user's latest message clearly says to proceed/);
+  assert.match(update.systemPrompt ?? "", /Never call it for questions/);
+
+  await commands.get("goal")?.handler("resume", ctx);
+  await commands.get("goal")?.handler("pause", ctx);
+  const sticky = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx);
+  assert.equal(sticky, undefined, "a /goal pause adds no goal_resume guidance");
 });
 
 test("an explicit /goal pause is not undone by later user messages", async (t) => {
@@ -795,8 +898,11 @@ test("running background work warns the agent that a blocking question holds com
 const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] };
 const answeredOutcome = { messages: [{ role: "assistant", content: [{ type: "text", text: "Here is the answer." }], stopReason: "stop" }] };
 
-function createContinuationHarness(signal?: AbortSignal) {
+function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: boolean } = {}) {
   const entries: SessionEntry[] = [];
+  const tools = new Map<string, ToolDefinition>();
+  let active: string[] = [];
+  const statuses: Array<string | undefined> = [];
   const commands = new Map<string, CommandDefinition>();
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const messages: unknown[] = [];
@@ -807,7 +913,7 @@ function createContinuationHarness(signal?: AbortSignal) {
   let aborts = 0;
 
   const ctx = {
-    hasUI: false,
+    hasUI: options.hasUI ?? false,
     isIdle: () => idle,
     signal,
     abort: () => {
@@ -817,13 +923,19 @@ function createContinuationHarness(signal?: AbortSignal) {
     ui: {
       confirm: async () => true,
       notify: () => undefined,
-      setStatus: () => undefined,
+      setStatus: (_key: string, value: string | undefined) => {
+        statuses.push(value);
+      },
       setWidget: () => undefined,
     },
   } as unknown as ExtensionContext;
 
   const pi = {
     events,
+    getActiveTools: () => [...active],
+    setActiveTools(names: string[]) {
+      active = [...names];
+    },
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data });
     },
@@ -834,8 +946,10 @@ function createContinuationHarness(signal?: AbortSignal) {
     registerCommand(name: string, command: CommandDefinition) {
       commands.set(name, command);
     },
-    registerTool() {
-      // Not needed for these continuation regressions.
+    registerTool(tool: ToolDefinition) {
+      tools.set(tool.name, tool);
+      // Pi activates newly registered tools by default.
+      active.push(tool.name);
     },
     registerShortcut(name: string, shortcut: { handler(ctx: ExtensionContext): Promise<void> | void }) {
       shortcuts.set(name, shortcut);
@@ -855,6 +969,9 @@ function createContinuationHarness(signal?: AbortSignal) {
     entries,
     events,
     shortcuts,
+    tools,
+    statuses,
+    activeTools: () => [...active],
     setBusy: (busy: boolean) => {
       idle = !busy;
     },
