@@ -8,7 +8,7 @@ It ships one extension that:
 - treats current-parent `running` and `orphaned` subagents as active background work
 - owns `/goal` plus the `get_goal` and `update_goal` tools; only `/goal <objective>` can create a goal
 - shows the current goal with active and elapsed clocks in a right-aligned widget above custom footers such as `pi-observability`
-- pauses the active goal on `escape` (while still interrupting a running agent turn), resumes it after your next message, and never pokes a paused goal
+- pauses the active goal on `escape` (while still interrupting a running agent turn), keeps it paused while you talk to the agent, resumes it on a clear go-ahead, and never pokes a paused goal
 - tells the agent, right after a blocking `ask_user_question` is answered, which background work finished while the question was pending
 - publishes a typed activity snapshot on `pi.events`
 - adds goal-aware prompt context while background work is active, so foreground idleness is not confused with goal completion
@@ -35,6 +35,7 @@ Model-callable tools:
 
 - `get_goal`
 - `update_goal`
+- `goal_resume` (only while a goal is paused by `escape`)
 - `get_background_activity`
 
 ## Pause With Escape
@@ -45,16 +46,25 @@ are cancelled: a paused goal is never poked. While the agent is still
 streaming, `escape` also interrupts the turn, preserving its built-in
 meaning. `escape` without an active goal does nothing.
 
-An `escape` pause is an interruption, not a stop. The next message you send
-(a question, a correction, or `continue`) reactivates the goal, and automatic
-continuation resumes once that exchange settles. Anything else that aborts the
-running turn, such as `/compact` while streaming or switching sessions, pauses
-the same way. Until you send a message, the goal stays paused.
+A paused goal stays paused while you talk. Your messages are ordinary
+conversation: the agent answers questions and discusses options, but the
+goal's work loop does not restart. Anything else that aborts the running turn,
+such as `/compact` while streaming or switching sessions, pauses the same way.
+The status line shows `goal paused · say "go" or /goal resume`.
 
-To stop the loop until you say otherwise, use `/goal pause`: an explicit pause
-is only undone by `/goal resume`, never by an ordinary message or a later
-`escape`. A goal paused because its bound command or workflow is unavailable
-also stays paused. Pi's built-in commands (`/settings`, `/model`, `/session`,
+To resume an `escape` pause, say so plainly ("go", "continue", "ok do it",
+"approved, proceed"), or answer a decision the agent explicitly asked you for.
+While the goal is paused, the agent has a `goal_resume` tool and is told to
+call it only for such a clear go-ahead, never for questions, "why...", "what
+about...", "let me think", or discussion. `goal_resume` resumes exactly as
+`/goal resume` does. You can always resume yourself with `/goal resume` or the
+`alt+g` hotkey.
+
+To stop the loop until you say otherwise, use `/goal pause`. Only you can undo
+it, with `/goal resume` or `alt+g`: the agent's `goal_resume` refuses it, and
+its status line reads `goal paused · /goal resume`. A goal paused because its
+bound command or workflow is unavailable follows the same rule. A later
+`escape` never softens an explicit pause. Pi's built-in commands (`/settings`, `/model`, `/session`,
 and so on) and extension commands never change goal state; note that Pi only
 recognizes a built-in by its exact text, so `/settings session` is sent to the
 model as an ordinary message.
