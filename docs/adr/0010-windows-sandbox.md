@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. Design and spike only; no product code yet. One problem is open: child processes with piped stdio (see [Open problem](#open-problem-child-processes-with-pipes)). Issue #344. Extends [ADR 0008](0008-write-without-delete.md), whose "Windows" paragraph this replaces once accepted.
+Proposed. The pipe-independent core has landed (see [Landed so far](#landed-so-far)); the launcher and everything that would run a confined task on Windows are paused. One problem is open and needs a human decision: child processes with piped stdio (see [Open problem](#open-problem-child-processes-with-pipes)). Until it is resolved, win32 keeps failing closed exactly as before. Issue #344. Extends [ADR 0008](0008-write-without-delete.md), whose "Windows" paragraph this replaces once accepted.
 
 ## Problem
 
@@ -149,7 +149,19 @@ A throwaway spike ran on `windows-latest` on branch [`spike/windows-sandbox-344`
 - A default DACL on the restricted token is needed. Without it, even `CreatePipe` fails inside the task.
 - Structures must be packed by hand in some places (the `SID_AND_ATTRIBUTES` array), and a crash in the native call takes down the process. The production launcher keeps each Win32 step behind a checked wrapper and never runs koffi in the parent's own process for process creation.
 
+## Landed so far
+
+Only the parts that do not depend on the pipe fix are built, and all of them are inert on win32:
+
+- **`packages/sandbox-core/windows-plan.ts`** — the plan compiler. It is pure: given a policy, a home, a workspace, the resolved known folders and a SID resolver, it returns the restricting-SID set, the ordered deny-before-allow ACEs (files and the HKCU autostart keys), the deny-list entries to materialize, and the grants it dropped for being rooted inside a denied tree. It performs no Win32 calls and no filesystem access (existence is an injected predicate), so it is unit-tested on every OS in `windows-plan.test.ts`. It also owns the win32 path handling: `normalizeWin32`, case-insensitive `containsWin32`, and `isWin32Root`, which refuses a rule rooted at a whole volume or share.
+- The Windows credential and code-that-runs-later lists, and the HKCU autostart keys, live in that module as fixed lists.
+
+Nothing wires this into a backend. `selectedSandboxBackend` still returns nothing on win32, so `sandboxSupported` is false and confined launches still fail closed with "sandbox is unsupported on win32", exactly as before. The consumers vendor only `index.ts`, so the compiler does not yet reach them. The launcher, the ACL applier, the backend wiring, the CI lane and the docs wait on the open problem below.
+
 ## Open problem: child processes with pipes
+
+**Paused for a human decision.** Investigating this blocker is on hold at the user's direction; implementation of the launcher and the Windows backend does not resume until that decision is made.
+
 
 Inside the sandbox, a child started with ignored stdio runs (`cmd.exe`, `node.exe`), but a child started with piped stdio fails with `EPERM`. Anonymous pipes (`CreatePipe`) work. Creating a named pipe works, but opening its client end fails with access denied. libuv, Node's I/O layer, uses named pipes for child stdio, so every `execFileSync` or `spawn` with pipes fails. Until this is solved, most real tool use inside the sandbox fails.
 
@@ -176,7 +188,7 @@ The launcher's own pipe to the parent works, because the task inherits the handl
 
 ## Implementation plan (after the open problem is resolved)
 
-1. **Plan compiler in `sandbox-core`**, pure code that runs on every OS: backend id `windows-restricted-token`; win32 paths (case-insensitive containment, drive roots, `%LOCALAPPDATA%\Temp`); the Windows list additions; compiling a policy into rule SIDs, DACL entries and the token's SID set, including leaving out grants inside denied trees. Unit tests use a `platform: "win32"` seam on the existing lanes.
+1. **Plan compiler in `sandbox-core`** — done (`windows-plan.ts`, `windows-plan.test.ts`): pure, runs on every OS; win32 paths (case-insensitive containment, drive/share roots, `%LOCALAPPDATA%\Temp`); the Windows list additions; compiles a policy into rule SIDs, ACEs and the restricting-SID set, and leaves out grants inside denied trees. Still to add here when the backend is wired: the `windows-restricted-token` backend id, worktree discovery reuse, and folding the compiler into `index.ts` so consumers vendor it.
 2. **ACL applier** (Windows only): idempotent ensure-entry with propagation, the rule state file, the automatic first walk with progress, repair and remove. Registry rules per the answer to the open problem.
 3. **Launcher**: handle inheritance, token, default DACL, job object, `CreateProcessAsUserW`, exit code; plumbed through `SandboxCommand`.
 4. **Wiring**: `selectedSandboxBackend` on win32; the Network Off refusal with the internal-worker exception; `describeSandboxSupport` and `/sandbox` status; koffi as a win32-only optional dependency of the three packages, with the harness bundle checked.
