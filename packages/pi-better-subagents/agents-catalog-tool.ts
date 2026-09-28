@@ -4,6 +4,7 @@
  * collected. This module does not write files.
  */
 import { presentCatalog, presentCatalogEntry, type LaunchEnricher } from "./agent-inspection.ts";
+import { canonicalCatalogId } from "./catalog-schema.ts";
 import { defaultUserRoot, loadCatalog } from "./catalog-store.ts";
 
 type TypeModule = {
@@ -41,6 +42,7 @@ export function agentsCatalogTool(Type: TypeModule, deps: DiscoveryDeps = {}) {
         promptSnippet: "List and inspect catalog roles and named agents, including inheritance and whether launchability is known.",
         promptGuidelines: [
             "Use agents_catalog to discover roles and named agents before subagent_spawn. It is read-only.",
+            "Roles are listed by short name. Pass that name as role (role: \"developer\"). Pass a named agent by its full id (agent: \"agent.payments\").",
             "Do not treat a valid definition as launchable. definitionValid and catalogLaunchable do not select a model or start a child.",
             "A role name or instruction that says read-only is not enforcement. Unsupported execution restrictions stay blocking.",
             "Ask the user to run /agents create or /agents import-codex for writes. Those commands confirm role, scope, and import replacement.",
@@ -50,7 +52,7 @@ export function agentsCatalogTool(Type: TypeModule, deps: DiscoveryDeps = {}) {
         ],
         parameters: Type.Object({
             action: Type.String({ description: "list or inspect. No other action is accepted." }),
-            id: Type.Optional(Type.String({ description: "Role or agent id for inspect. Display names and filenames are not ids." })),
+            id: Type.Optional(Type.String({ description: "What to inspect: a role's short name (developer) or a named agent's id (agent.payments). The prefixed role id (role.developer) also works. Display names and filenames are not ids." })),
         }),
         async execute(
             _toolCallId: string,
@@ -72,8 +74,8 @@ export function agentsCatalogTool(Type: TypeModule, deps: DiscoveryDeps = {}) {
                     details: { action, wrote: false, revision: listed.revision, entries: listed.entries, diagnostics: listed.diagnostics },
                 };
             }
-            if (!params.id?.trim()) return toolError("inspect needs an id. Call agents_catalog with action list to see ids. Nothing was written.");
-            const view = presentCatalogEntry(loadCatalog(host), params.id.trim(), deps.enrich);
+            if (!params.id?.trim()) return toolError("inspect needs a role name or agent id. Call agents_catalog with action list to see them. Nothing was written.");
+            const view = presentCatalogEntry(loadCatalog(host), canonicalCatalogId(params.id), deps.enrich);
             return {
                 content: [{ type: "text" as const, text: view.text }],
                 details: { action, wrote: false, view },

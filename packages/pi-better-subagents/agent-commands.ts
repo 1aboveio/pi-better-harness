@@ -15,7 +15,9 @@ import {
     CATALOG_SCHEMA_VERSION,
     DiagnosticCodes,
     EFFORT_LEVELS,
+    canonicalRoleId,
     parseDefinition,
+    shortRoleName,
     type AgentDefinition,
     type Diagnostic,
     type InstructionMode,
@@ -52,9 +54,9 @@ const KNOWN_FLAGS = new Set(["role", "scope", "name", "id", "mode", "description
 const USAGE = [
     "/agents list",
     "/agents show <id>    (inspect is the same command)",
-    "/agents create [--role <role-id>] [--name <name>] [--scope user|project] [--mode add|replace] [--instructions <text>] [--model <provider/model>] [--effort <level>] [--tier <label>]",
+    "/agents create [--role <role>] [--name <name>] [--scope user|project] [--mode add|replace] [--instructions <text>] [--model <provider/model>] [--effort <level>] [--tier <label>]",
     "/agents reload",
-    "/agents import-codex <file.toml> [--scope user|project] [--role <role-id>]",
+    "/agents import-codex <file.toml> [--scope user|project] [--role <role>]",
     "Create and import write to the personal catalog unless --scope project is set.",
     "Import confirms one base role and replace mode. It does not scan .codex/agents.",
 ].join("\n");
@@ -263,14 +265,14 @@ async function runCreate(
     deps: AgentCommandDeps,
 ): Promise<AgentCommandResult> {
     if (parsed.positionals.length > 1) {
-        return result("error", "create", false, "create takes flags, not a bare role name. Use --role <role-id>. Nothing was written.");
+        return result("error", "create", false, "create takes flags, not a bare role name. Use --role <role>. Nothing was written.");
     }
     const scope = readScope(parsed.flags);
     if (scope.error) return result("error", "create", false, `${scope.error} Nothing was written.`);
     if (scope.value === "project" && !loc.projectTrusted) return untrusted("create");
     const snapshot = readCatalog(loc);
     const roles = catalogRoles(snapshot);
-    let roleIds = [...(parsed.flags.get("role") ?? [])];
+    let roleIds = (parsed.flags.get("role") ?? []).map(canonicalRoleId);
     if (roleIds.length > 1) {
         const decision = await resolveRoleAssignment(roleIds.map((roleId) => ({ roleId })), {
             hasUI: host.hasUI,
@@ -284,7 +286,7 @@ async function runCreate(
     let roleId = roleIds[0];
     if (!roleId) {
         if (!host.hasUI) {
-            return clarification("create", `create needs --role <role-id>. UI is unavailable, so no role was chosen. Roles: ${roles.map((role) => role.id).join(", ") || "none"}. Nothing was written.`);
+            return clarification("create", `create needs --role <role>. UI is unavailable, so no role was chosen. Roles: ${roles.map((role) => shortRoleName(role.id)).join(", ") || "none"}. Nothing was written.`);
         }
         if (roles.length === 0) return result("error", "create", false, "No roles are available to use as a base. Nothing was written.");
         const selected = await host.ui.select("Choose one base role", roles.map(roleOption));
@@ -292,7 +294,7 @@ async function runCreate(
         roleId = selected.split(" ")[0];
     }
     if (!roleId || !roles.some((role) => role.id === roleId)) {
-        return result("error", "create", false, `Unknown role ${roleId ?? ""}. Nothing was written. Use /agents list and pass one role id.`);
+        return result("error", "create", false, `Unknown role ${shortRoleName(roleId ?? "")}. Valid roles: ${roles.map((role) => shortRoleName(role.id)).join(", ") || "none"}. Nothing was written.`);
     }
     let name = parsed.flags.get("name")?.[0];
     if (!name?.trim()) {
@@ -407,7 +409,7 @@ async function runImport(
     const roles = catalogRoles(snapshot);
     if (roles.length === 0) return result("error", "import-codex", false, "No roles are available to use as the one base role. Nothing was imported.");
     const suggestion = suggestBaseRoles(`${document.name}\n${document.description}\n${document.developerInstructions}`, roles);
-    const requestedRoles = [...(parsed.flags.get("role") ?? [])];
+    const requestedRoles = (parsed.flags.get("role") ?? []).map(canonicalRoleId);
     if (requestedRoles.length > 1) {
         const decision = await resolveRoleAssignment(requestedRoles.map((roleId) => ({ roleId })), {
             hasUI: host.hasUI,
@@ -420,7 +422,7 @@ async function runImport(
     }
     let roleId = requestedRoles[0];
     if (roleId && !roles.some((role) => role.id === roleId)) {
-        return result("error", "import-codex", false, `Unknown role ${roleId}. Nothing was imported.`);
+        return result("error", "import-codex", false, `Unknown role ${shortRoleName(roleId)}. Valid roles: ${roles.map((role) => shortRoleName(role.id)).join(", ")}. Nothing was imported.`);
     }
     const sourceRef = codexSourceRef(resolved);
     const existingLookup = matchExisting(listScopeAgents(loc, scope.value).agents, document.proposedId, sourceRef);

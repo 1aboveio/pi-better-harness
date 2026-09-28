@@ -6,6 +6,8 @@ Catalog launches use the existing `spawnSubagentRun` path. There is no second sc
 
 `subagent_spawn`, batch `shared`, and each batch job accept optional `agent`, `role`, and `alias`.
 
+- `role` takes a role's short name (`role: "developer"`). It is trimmed and case-insensitive, and the stored id (`role.developer`) also works. A bare name only ever selects a role, never an `agent.*` named agent. An unknown name fails and lists the valid role names. `agent` ids are trimmed and lowercased the same way.
+- A `role` or `agent` that is present but blank (`role: "  "`) is rejected before any launch. Only an absent field means no selector.
 - A per-job `agent` or `role` replaces the shared selector pair. It does not combine `shared.agent` with `job.role`.
 - `model` and `thinking` still merge per field. Per-job wins.
 - One agent or one role is a normal launch. Both, or more than one role id, asks the UI to choose one or split into separate runs.
@@ -28,7 +30,7 @@ The first `meta.json` write stores the launched `model` and `effort` plus a JSON
 
 A named agent displays its defined name. A direct role asks `allocateCatalogLabel({ roleId, roleName, alias })` when that module is present. `roleName` is the slug (`developer`), not `role.developer`. The label is allocated in the local run registry. An explicit `alias` (or the legacy `name` when `alias` is omitted) is the alias; collisions are the allocator's numeric suffix. Batch-generated `job-N` labels are not aliases.
 
-Navigator rows keep the display name, model, and effort. Details include the run id and, for catalog runs, the role id.
+Navigator rows keep the display name, model, and effort. Details include the run id and, for catalog runs, the short role name (`developer`). The full `roleId` stays in `meta.json`.
 
 ## Tier candidates
 

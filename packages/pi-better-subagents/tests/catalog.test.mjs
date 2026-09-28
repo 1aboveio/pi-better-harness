@@ -501,7 +501,8 @@ describe("catalog discovery and inheritance", () => {
             const listLines = presented.text.split("\n");
             for (const approved of APPROVED_ROLE_DEFAULTS) {
                 const label = `${approved.model}@${approved.effort}`;
-                const line = listLines.find((item) => item.startsWith(`role ${approved.id} `));
+                // The list names the role by its short name; details keep the full id.
+                const line = listLines.find((item) => item.startsWith(`role ${approved.id.slice("role.".length)} `));
                 assert.ok(line, approved.id);
                 assert.ok(line.endsWith(` default ${label}`), line);
                 const entry = presented.entries.find((item) => item.id === approved.id);

@@ -22,7 +22,7 @@ import {
 import { allocateCatalogLabel } from "./catalog-identity.ts";
 import { resolveRoleAssignment, type RoleAssignment } from "./role-assignment.ts";
 import { configureTierPolicy, DEFAULT_TIER_POLICY, type TierPolicy, type TierSpec } from "./tier-policy.ts";
-import type { Diagnostic, ThinkingLevel } from "./catalog-schema.ts";
+import { canonicalAgentId, canonicalRoleId, shortRoleName, type Diagnostic, type ThinkingLevel } from "./catalog-schema.ts";
 
 export interface CatalogHost {
     cwd: string;
@@ -256,14 +256,14 @@ export async function clarifyCatalogRequest(
  * Launch-line note for a catalog run whose effective model or effort differs
  * from the role or agent default. The wording names the cause, so a fallback
  * or a capped effort is not mistaken for a caller override:
- * - override: `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`
- * - fallback: `model xai/grok-4.7@high (role default openai/gpt-6-sol@high unavailable; foreground fallback)`
- * - capped effort: `model openai/gpt-6-sol@medium (role default openai/gpt-6-sol@high; effort capped at medium by the model)`
+ * - override: `model openai/gpt-6-astra@high (role developer default openai/gpt-6-sol@high)`
+ * - fallback: `model xai/grok-4.7@high (role developer default openai/gpt-6-sol@high unavailable; foreground fallback)`
+ * - capped effort: `model openai/gpt-6-sol@medium (role developer default openai/gpt-6-sol@high; effort capped at medium by the model)`
  * Undefined for a non-catalog run, a definition with no default, or a launch
  * that matches the default. Only the fields the definition sets are compared.
  */
 export function catalogDefaultNote(
-    record: Pick<CatalogRunRecord, "kind" | "effective" | "modelSelection" | "effortSelection"> | undefined,
+    record: Pick<CatalogRunRecord, "kind" | "effective" | "modelSelection" | "effortSelection"> & { id?: string } | undefined,
     model: string | undefined,
     thinking: string | undefined,
 ): string | undefined {
@@ -279,8 +279,10 @@ export function catalogDefaultNote(
     const effortDiffers = defaultEffort !== null && (thinking ?? null) !== defaultEffort;
     if (!modelDiffers && !effortDiffers) return undefined;
     const actual = formatModelEffort(model ?? "Pi default", thinking) ?? "Pi default";
+    // A role run names its short role (`role developer default …`); an agent run keeps `agent default …`.
+    const owner = record.kind === "role" && record.id ? `role ${shortRoleName(record.id)}` : record.kind;
     const causes = [
-        modelFallback ? `${record.kind} default ${defaultLabel} unavailable; ${FALLBACK_LABELS[modelSource!] ?? modelSource} fallback` : `${record.kind} default ${defaultLabel}`,
+        modelFallback ? `${owner} default ${defaultLabel} unavailable; ${FALLBACK_LABELS[modelSource!] ?? modelSource} fallback` : `${owner} default ${defaultLabel}`,
         ...(effortCapped ? [`effort capped at ${thinking ?? "the model default"} by the model`] : []),
     ];
     return `model ${actual} (${causes.join("; ")})`;
@@ -547,8 +549,7 @@ async function allocateDirectRoleLabel(input: { roleId: string; roleName: string
 }
 
 export function roleSlug(roleId: string): string {
-    const raw = roleId.startsWith("role.") ? roleId.slice("role.".length) : roleId;
-    return raw.trim().toLowerCase();
+    return shortRoleName(roleId).trim().toLowerCase();
 }
 
 function composePrompt(instructions: string, task: string): string {
@@ -558,7 +559,28 @@ function composePrompt(instructions: string, task: string): string {
 }
 
 function agentIdOf(job: { agent?: unknown }): string | undefined {
-    return typeof job.agent === "string" && job.agent.trim() !== "" ? job.agent.trim() : undefined;
+    return typeof job.agent === "string" && job.agent.trim() !== "" ? canonicalAgentId(job.agent) : undefined;
+}
+
+/**
+ * Error text for a selector that is present but blank (`role: "  "`,
+ * `agent: ""`, or an empty or blank role array). Absent or null means no
+ * selector and returns undefined. `where` names the field's owner, such as
+ * `shared` or `jobs[1]`.
+ */
+export function blankCatalogSelector(input: { agent?: unknown; role?: unknown } | undefined, where?: string): string | undefined {
+    if (!input) return undefined;
+    const field = (name: string) => (where ? `${where}.${name}` : name);
+    const blank = (value: unknown) => typeof value !== "string" || value.trim() === "";
+    if (input.agent !== undefined && input.agent !== null && blank(input.agent)) {
+        return `${field("agent")} is blank. Pass a named agent id such as agent.payments, or omit agent. No child was started.`;
+    }
+    const role = input.role;
+    if (role === undefined || role === null) return undefined;
+    if (Array.isArray(role) ? role.length === 0 || role.some(blank) : blank(role)) {
+        return `${field("role")} is blank. Pass a role name such as developer, or omit role. No child was started.`;
+    }
+    return undefined;
 }
 
 function roleIdsOf(job: { role?: unknown; roleIds?: unknown }): string[] {
@@ -569,8 +591,11 @@ function roleIdsOf(job: { role?: unknown; roleIds?: unknown }): string[] {
     const ids: string[] = [];
     for (const value of values) {
         if (typeof value !== "string") continue;
-        const trimmed = value.trim();
-        if (trimmed && !ids.includes(trimmed)) ids.push(trimmed);
+        // A bare name (`developer`) and the prefixed id (`role.developer`) are
+        // the same role. The canonical id always starts with `role.`, so a
+        // role field never reaches an `agent.*` named agent.
+        const id = canonicalRoleId(value);
+        if (id && !ids.includes(id)) ids.push(id);
     }
     return ids;
 }

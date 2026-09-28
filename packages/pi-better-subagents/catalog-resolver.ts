@@ -8,6 +8,7 @@
 import {
     DiagnosticCodes,
     hasBlockingDiagnostic,
+    shortRoleName,
     type CatalogDefinition,
     type CatalogKind,
     type Diagnostic,
@@ -161,9 +162,12 @@ export function listCatalog(snapshot: CatalogSnapshot): CatalogListEntry[] {
 export function inspectCatalog(snapshot: CatalogSnapshot, id: string): CatalogInspection {
     const entry = findEntry(snapshot, id);
     if (!entry) {
+        const isAgent = id.trim().toLowerCase().startsWith("agent.");
         const diagnostic = blockedDiagnostic(
-            id.startsWith("agent.") ? DiagnosticCodes.unknownAgent : DiagnosticCodes.unknownRole,
-            `No catalog definition has id ${id}. Check the id, or reload after adding the file. Display names and filenames are not ids.`,
+            isAgent ? DiagnosticCodes.unknownAgent : DiagnosticCodes.unknownRole,
+            isAgent
+                ? `No catalog definition has id ${id}. Check the id, or reload after adding the file. Display names and filenames are not ids.`
+                : `No role named ${shortRoleName(id)}. ${validRolesSentence(snapshot)} Check the name, or reload after adding the file. Display names and filenames are not ids.`,
             id,
         );
         return {
@@ -212,7 +216,7 @@ function resolveRole(snapshot: CatalogSnapshot, roleId: string): Resolution {
         return {
             status: "not-found",
             launchable: false,
-            diagnostics: [blockedDiagnostic(DiagnosticCodes.unknownRole, `Unknown role ${roleId}. It was not launched.`, roleId)],
+            diagnostics: [blockedDiagnostic(DiagnosticCodes.unknownRole, `Unknown role ${shortRoleName(roleId)}. ${validRolesSentence(snapshot)} It was not launched.`, roleId)],
         };
     }
     if (entry.duplicate || !entry.definition || entry.definition.kind !== "role") {
@@ -391,6 +395,16 @@ function fieldFromRole<T>(value: T | null | undefined): FieldValue<T> {
 
 function absentField<T>(): FieldValue<T> {
     return { value: null, source: "absent", explicit: false };
+}
+
+/** Valid short role names, for an unknown-role message. */
+function validRoleNames(snapshot: CatalogSnapshot): string[] {
+    return [...snapshot.roles.keys()].map(shortRoleName).sort();
+}
+
+function validRolesSentence(snapshot: CatalogSnapshot): string {
+    const names = validRoleNames(snapshot);
+    return names.length > 0 ? `Valid roles: ${names.join(", ")}.` : "No roles are defined.";
 }
 
 function findEntry(snapshot: CatalogSnapshot, id: string): CatalogEntry | undefined {
