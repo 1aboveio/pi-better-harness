@@ -97,6 +97,11 @@ type NavigatorState = {
   editorFocusTarget?: unknown;
   /** How many times that wrapper has rendered, so an overlay can tell whether it is still on screen. */
   editorRenders?: number;
+  /**
+   * Whether that wrapper rendered between the overlay's last two frames: true while it is on screen,
+   * including inside another extension's editor that wraps it. Undefined until two frames compare.
+   */
+  editorRenderedLastFrame?: boolean;
   detailOverlayRows?: number;
   dispose?: () => void;
   /** The mounted detail overlay, reused instead of stacking a second one. */
@@ -784,6 +789,7 @@ function openNavigator(): void {
   try {
     try { s.dispose?.(); } catch { /* ignore */ }
     s.dispose = undefined;
+    s.editorRenderedLastFrame = undefined;
     let disposeToken: (() => void) | undefined;
     let overlayRef: NavigatorState["overlay"];
     let handle: { focus?(): void; unfocus?(options?: { target: unknown }): void } | undefined;
@@ -796,10 +802,12 @@ function openNavigator(): void {
         // Pi restores focus to the editor that was focused when the overlay opened. If an
         // extension re-installed the editor since, that instance is unmounted and every key
         // would be lost; hand focus to the live editor before closing.
-        // Only a mounted editor can take focus: after another extension replaced ours, Pi already
+        // Only an editor on screen can take focus: after another extension replaced ours, Pi already
         // focused its replacement, and handing focus to our unmounted wrapper would swallow every key.
+        // An extension that wraps ours mounts its own component, so pi-tui does not find ours, but ours
+        // still renders and handles every key through it: that is still the live editor (#332).
         const liveEditor = s.editorFocusTarget;
-        if (liveEditor && liveEditorMounted(tui) !== false) {
+        if (liveEditor && (liveEditorMounted(tui) !== false || s.editorRenderedLastFrame !== false)) {
           try { handle?.unfocus?.({ target: liveEditor }); } catch { /* ignore */ }
         }
         done(value);
@@ -987,6 +995,7 @@ function createOverlayComponent(
     const rendersBefore = editorRendersSeen;
     const renders = state().editorRenders ?? 0;
     editorRendersSeen = renders;
+    state().editorRenderedLastFrame = rendersBefore === undefined ? undefined : renders !== rendersBefore;
     if (closed || liveEditorMounted(tui) !== false || rendersBefore === undefined || renders !== rendersBefore) return;
     // Not from inside pi-tui's render pass: hiding an overlay there would change the stack it is drawing.
     queueMicrotask(() => {

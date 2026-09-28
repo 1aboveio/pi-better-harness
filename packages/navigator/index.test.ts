@@ -1926,14 +1926,16 @@ describe("shared background work navigator", () => {
       // An extension that composes the editor inside its own (non-container) component keeps ours
       // rendering and receiving keys: the overlay stays.
       const inner = ui.factory;
+      let wrapped: any;
       ui.setEditorComponent((t: any, th: any, kb: any) => {
-        const wrapped = inner(t, th, kb);
+        wrapped = inner(t, th, kb);
         return { render: (width: number) => wrapped.render(width), handleInput: (data: string) => wrapped.handleInput(data) };
       });
       frame(); frame(); await settle();
       assert.equal(mounted.length, 1, "a composed editor still shows ours");
       editorSlot.handleInput("escape");
       assert.equal(mounted.length, 0);
+      assert.deepEqual(unfocusTargets.splice(0), [wrapped], "ours still renders inside the wrapper, so it takes focus back");
 
       // Reopen, then an extension replaces the editor outright (Pi's default here).
       editorSlot.handleInput("left");
@@ -1943,7 +1945,7 @@ describe("shared background work navigator", () => {
       ui.setEditorComponent(undefined);
       frame(); frame(); await settle();
       assert.equal(mounted.length, 0, "the overlay closes instead of covering the replacement editor");
-      assert.deepEqual(unfocusTargets, [], "focus is never handed to an unmounted wrapper");
+      assert.deepEqual(unfocusTargets, [], "focus is never handed to a replaced wrapper");
       assert.doesNotMatch(renderWidget(widgets.at(-1), 100, ui.theme).join("\n"), /^› /m, "the rail is unfocused");
     } finally {
       disposeBackgroundWorkNavigator(ctx);

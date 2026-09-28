@@ -602,3 +602,28 @@ test("#332 a restart does not count a trusted-period failure as a leftover that 
     assert.equal(active315(state).find((x) => x.id === "tool:b1")?.status, "unresolved", "the trusted failure stays an ordinary incident");
     assert.equal(gap()?.status, "resolved", "only exact-rule leftovers hold the gap, however the scan was rebuilt");
 });
+
+test("#332 review: a second exact-rule period under the same open gap still holds it after the trusted marker", (t) => {
+    const { f, gap } = exactRuleThenTrusted(t, [bashStart("t1", { command: "npm test", operationId: "t" }), bashFail("t1", "1 failing")]);
+    collectRunFailures(f.id, "/repo");
+    assert.equal(gap()?.status, "unresolved");
+    // The metadata becomes unreadable again: after a restart, the run ends and is scanned under the exact rule.
+    const meta = join(runDir(f.id), "meta.json");
+    const good = readFileSync(meta, "utf8");
+    writeFileSync(meta, "{corrupt");
+    resetFailureScanCursor(f.id);
+    f.append(bashStart("b1", { command: "npm run build", operationId: "build" }), bashFail("b1", "build failed"));
+    collectRunFailures(f.id, "/repo", true);
+    // Readable again: a trusted scan cannot re-key b1, so its declared retry does not recover it.
+    writeFileSync(meta, good);
+    resetFailureScanCursor(f.id);
+    f.append(bashStart("b2", { command: "npm run build -- --fix", operationId: "build" }), bashOk("b2"));
+    f.append(...dispose("d1", { disposition: "expected", targets: ["tool:t1"], reason: "known flaky suite" }));
+    let state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:b1")?.status, "unresolved");
+    assert.equal(gap()?.status, "unresolved", "b1 is an exact-rule leftover, journaled after the first trusted marker");
+    f.append(...dispose("d2", { disposition: "superseded", targets: ["tool:b1"], reason: "the fixed build passed", evidence: "b2" }));
+    state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:b1"), undefined, "the child supersedes b1 with b2");
+    assert.equal(gap()?.status, "resolved");
+});
