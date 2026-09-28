@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **background-tasks**: `bg_task_watch` and the `bg_task` watch action wait up to 15 seconds for the first check and include its exit code and the newest stderr and stdout lines in the tool result; stdout is cut first, and the log path is shown whole or not at all. If the check is still running when the wait ends, Esc is pressed, or the session shuts down, the result says so at once and the watch continues. Local and SSH watches alike. (#359)
+- **background-tasks**: A watch whose checks exit 0, write stderr, and match neither `success_when` nor `failure_when` 3 times in a row records one incident that needs action, with the latest stderr line and how to silence expected stderr (`2>/dev/null` or `blind_checks:0`), and wakes the parent once. The watch keeps running. A check with empty stderr recovers it whatever its exit code, as does a matched condition; a non-zero check that writes stderr leaves it open. Clean pending checks never count. `blind_checks` sets the count (`0` turns it off). Before, a check broken this way (an invalid gcloud `--format` followed by `exit 0`) ran blind for 47 checks without anything recorded. (#359)
+
 ### Fixed
 
 - **subagents**: An empty `attemptId` (`""` or `null`) names no attempt. The parent no longer predicts an "already used" refusal for a second call with `attemptId: ""`, which it then filed under the exact command instead of the declared `operationId`, so a later `operationId` retry could not recover it. The child reads earlier attempt ids through the same normalization, so `attemptId: 7` and `"7"` are one id on both sides. (#332)
@@ -19,6 +24,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- **background-tasks**: The watch tool descriptions and README say not to end a check with `exit 0` or `|| true`, to map an unknown state to failure, and show a JSON plus `jq -e` check. (#359)
 - **failure observations**: Documented that an incident page smaller than the next code point returns no text and a retry cursor, the same contract as `pageVerbatimText`. The subagents doc explains what a corrupt `meta.json` does to a running trusted run. (#332)
 - Internal: one file change-identity helper for the list incident cache and the journal fingerprint; `TaskIntentParams` shared by spawn and watch parameters; subagents import the intent validator from the failure-observations module directly; the terminal summary's budget ladder finds the unclassified note by value, not by a regex on its text; the metadata-gap recovery id uses `failureIdentity`. (#332)
 

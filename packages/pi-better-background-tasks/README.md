@@ -124,6 +124,57 @@ Missing JSON fields or invalid JSON output remain retryable; task status shows
 the condition evaluation error until a subsequent poll recovers. Keep a finite
 timeout to bound watches whose output never becomes evaluable.
 
+### Writing a watch check
+
+A check that swallows its own errors reports "still pending" forever. Keep
+failures visible:
+
+- Do not end the check with `exit 0` or `|| true`. A check that exits non-zero
+  is recorded as a failure and escalates to the parent session.
+- Map an unknown or unparseable state to failure (a non-zero exit), not to
+  pending.
+- Prefer structured output parsed with `jq -e` over hand-written format
+  strings. `jq -e` exits non-zero when the field is missing, so a broken query
+  shows up at once.
+
+For example, a Cloud Run job execution:
+
+```sh
+status=$(gcloud run jobs executions describe "$EXECUTION" --region="$REGION" --format=json \
+  | jq -er '.status.conditions[] | select(.type == "Completed") | .status') || exit 2
+case "$status" in
+  True) echo TERMINAL_SUCCESS ;;
+  False) echo TERMINAL_FAILURE ;;
+  Unknown) echo STILL_RUNNING ;;
+  *) echo "unexpected Completed status: $status" >&2; exit 2 ;;
+esac
+```
+
+with `success_when: {type: "stdout_contains", value: "TERMINAL_SUCCESS"}` and
+`failure_when: {type: "stdout_contains", value: "TERMINAL_FAILURE"}`.
+
+`bg_task_watch` (and `bg_task` with `action: "watch"`) waits up to 15 seconds
+for the first check and puts its exit code, the newest few lines of stderr and
+of stdout in the tool result, so a broken check is visible at launch. When the
+result is short on room, stdout is cut first. If the first check is still
+running after 15 seconds, or you press Esc during the wait, the result says so
+at once and the watch continues.
+
+A running watch also guards against a blind check. When 3 checks in a row exit
+0, write to stderr, and match neither `success_when` nor `failure_when`, the
+watch records one incident that needs action, with the latest stderr line, and
+wakes the parent session once. The watch keeps running. A later check with
+empty stderr recovers the incident whatever its exit code (a non-zero or
+failed check is then recorded as its own incident), and so does a check that
+matches a condition. A non-zero check that writes stderr restarts the count but
+leaves the incident open. A clean pending check (exit 0, no stderr) never
+counts.
+
+Some tools write to stderr on success (`gcloud … list` prints "Listed 0
+items.", and kubectl and npm print warnings), which can raise a false alarm.
+If the stderr is expected, redirect it (`2>/dev/null`) or set
+`blind_checks: 0`. Set `blind_checks` to another number to change the count.
+
 ## Install
 
 ```sh

@@ -14,8 +14,8 @@ import {
 } from "./output.js";
 import { readOutputControls } from "./shared-log-utils.js";
 import { cancelCallbackBatch } from "./shared-callback-batcher.js";
-import { inspectMeta, listMetasForOrigin, writeMeta } from "./registry.js";
-import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
+import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
+import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
 import { ForegroundSandboxBlockedError } from "./sandbox.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
@@ -91,11 +91,23 @@ const CommandFields = {
 
 const SpawnParams = Type.Object(CommandFields);
 
+const BlindChecksField = Type.Optional(Type.Integer({ minimum: 0, description: "Flag the watch as possibly blind after this many checks in a row exit 0, write stderr, and match neither success_when nor failure_when: one incident that needs action, with the latest stderr line. The watch keeps running; a check with no stderr or a matched condition recovers it. Default 3; 0 turns it off." }));
+
+/**
+ * How to write a watch check (#359): a check that swallows its own errors reports "pending"
+ * forever. Shared by bg_task_watch and the bg_task wrapper.
+ */
+const WATCH_CHECK_GUIDANCE = "Waits up to 15s for the first check and returns its exit code with stdout and stderr tails; if it is still running, says so. "
+  + "Write the check so a broken check is visible: do not end it with `exit 0` or `|| true`, because a check that exits non-zero is recorded and escalates. "
+  + "Map an unknown or unparseable state to failure (exit non-zero), not to pending. Prefer structured output, e.g. `--format=json | jq -er '.status'`, over fragile format strings. "
+  + "A check that exits 0 but writes stderr without matching a condition for blind_checks (default 3) checks in a row is flagged as needing action; if that stderr is expected, redirect it (2>/dev/null) or set blind_checks:0.";
+
 const WatchParams = Type.Object({
   ...CommandFields,
   interval_seconds: Type.Optional(Type.Number({ description: "Polling interval in seconds. Default 30." })),
   success_when: ConditionSchema,
   failure_when: Type.Optional(ConditionSchema),
+  blind_checks: BlindChecksField,
 });
 
 const CursorFields = {
@@ -152,6 +164,7 @@ const ActionParams = Type.Object({
   interval_seconds: Type.Optional(Type.Number()),
   success_when: Type.Optional(ConditionSchema),
   failure_when: Type.Optional(ConditionSchema),
+  blind_checks: BlindChecksField,
   raw: Type.Optional(Type.Boolean()),
   ...HistoryField,
   ...CursorFields,
@@ -215,12 +228,12 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task_watch",
     label: "BG Watch",
-    description: "Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. Returns immediately with its task id. Default timeout 900 seconds; pass timeout_seconds:0 to disable.",
+    description: `Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. Returns its task id once the first check finishes. ${WATCH_CHECK_GUIDANCE} Default timeout 900 seconds; pass timeout_seconds:0 to disable.`,
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: WatchParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const launched = reportLaunch(() => startWatchTask(pi, params, ctx.cwd, activeSession, getActiveSession));
+      const launched = await launchWatch(pi, params, ctx.cwd, activeSession, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal);
       refreshBackgroundTasksNavigator(ctx);
       return text(launched);
     },
@@ -278,15 +291,15 @@ export function registerTools(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn/watch return immediately; do not poll in foreground. For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override. Stop and clear change only current-session tasks: clear dismisses every owned terminal task, or one task with id (all:true allows another session's task by id).",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn returns immediately; do not poll in foreground. For action:watch: " + WATCH_CHECK_GUIDANCE + " For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override. Stop and clear change only current-session tasks: clear dismisses every owned terminal task, or one task with id (all:true allows another session's task by id).",
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
     },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, params, ctx, activeSession, getActiveSession);
+      return actionText(pi, params, ctx, activeSession, getActiveSession, signal);
     },
   });
 
@@ -356,11 +369,12 @@ async function actionText(
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+  signal?: AbortSignal,
 ) {
   if (params.action === "log" && params.id) {
     return logText(String(params.id), logOptions(params, callbackOrigin));
   }
-  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession));
+  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal));
 }
 
 async function runAction(
@@ -369,13 +383,14 @@ async function runAction(
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+  signal?: AbortSignal,
 ): Promise<string> {
   switch (params.action) {
     case "spawn":
       return withNavigatorRefresh(ctx, reportLaunch(() => spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
     case "watch":
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
-      return withNavigatorRefresh(ctx, reportLaunch(() => startWatchTask(pi, params as never, ctx.cwd, callbackOrigin, getActiveSession)));
+      return withNavigatorRefresh(ctx, await launchWatch(pi, params as unknown as WatchTaskParams, ctx.cwd, callbackOrigin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal));
     case "list":
       return formatList(listOptions(params, callbackOrigin));
     case "status":
@@ -407,6 +422,33 @@ function reportLaunch(launch: () => BackgroundTaskMeta): string {
     if (error instanceof ForegroundSandboxBlockedError) return error.message;
     throw error;
   }
+}
+
+/**
+ * Start a watch and wait, bounded by `waitMs`, for its first check, so the launch result
+ * shows what the check really prints (#359). Local and SSH watches share this path.
+ */
+export async function launchWatch(
+  pi: ExtensionAPI,
+  params: WatchTaskParams,
+  cwd: string,
+  callbackOrigin: BackgroundTaskCallbackOrigin | undefined,
+  getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+  waitMs = FIRST_WATCH_CHECK_WAIT_MS,
+  signal?: AbortSignal,
+): Promise<string> {
+  let meta: BackgroundTaskMeta;
+  try {
+    meta = startWatchTask(pi, params, cwd, callbackOrigin, getActiveSession);
+  } catch (error) {
+    if (error instanceof ForegroundSandboxBlockedError) return error.message;
+    throw error;
+  }
+  // Esc (the tool's abort signal) ends the wait at once; the watch itself keeps running.
+  const outcome = await awaitFirstWatchCheck(meta.id, waitMs, signal);
+  const latest = readMeta(meta.id) ?? meta;
+  if (outcome && !("pending" in outcome && isTerminalStatus(latest.status))) return formatLaunch(latest, outcome);
+  return formatLaunch(latest);
 }
 
 function withNavigatorRefresh(ctx: ExtensionContext, result: string): string {

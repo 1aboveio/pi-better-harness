@@ -42,6 +42,18 @@ export interface CommandResult {
   captureTruncated?: boolean;
 }
 
+/** A watch's first check, as reported in the launch tool result (#359). */
+export interface FirstWatchCheck {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  durationMs: number;
+  timedOut?: boolean;
+  stdout: string;
+  stderr: string;
+  /** Set when the check itself could not run (e.g. an SSH runner error). */
+  error?: string;
+}
+
 export interface RemoteTaskParams {
   session?: "tmux" | "direct";
   install_tmux?: boolean;
@@ -124,6 +136,14 @@ export interface BackgroundTaskMeta {
   spawnPidStartTime?: string;
   successWhen?: Condition;
   failureWhen?: Condition;
+  /**
+   * Watch only (#359): consecutive exit-0 checks that write stderr and match neither
+   * condition before the watch is flagged as possibly blind. 0 turns the rule off;
+   * undefined means DEFAULT_BLIND_CHECKS.
+   */
+  blindChecks?: number;
+  /** Current run of such checks; reset by any other check. */
+  blindCheckStreak?: number;
   /**
    * Caller-declared structured intent (#325), validated before launch. A later task of the same
    * kind, cwd, SSH target, and session with the same operationId that succeeds recovers this

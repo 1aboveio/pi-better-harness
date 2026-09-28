@@ -282,6 +282,19 @@ Command watchers default to a 15 minute timeout when `timeout_seconds` is
 omitted. Pass `timeout_seconds: 0` to disable the watcher timeout explicitly.
 Spawned processes do not get a default timeout.
 
+`bg_task_watch` and `bg_task` `action: "watch"` wait up to 15 seconds for the
+first check and return its exit code with the newest stderr and stdout lines
+(stdout is cut first), or say at once that the check is still running when the
+wait ends, Esc is pressed, or the session shuts down. A watch whose checks exit
+0 and write stderr without matching either condition `blind_checks` times in a
+row (default 3, `0` turns it off) records one incident that needs action with
+the latest stderr line and how to silence expected stderr (`2>/dev/null` or
+`blind_checks: 0`), and wakes the parent once. The watch keeps running. The
+incident recovers on a check with empty stderr, whatever its exit code, or on a
+matched condition; a non-zero check with stderr leaves it open. Do not end
+a check with `exit 0` or `|| true`, and map an unknown state to a non-zero
+exit; see "Writing a watch check" in the README.
+
 ## Declared intent: retries and expected exits
 
 `bg_task_spawn`, `bg_task_watch`, and `bg_task` accept two optional fields,
