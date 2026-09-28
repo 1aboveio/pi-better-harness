@@ -420,7 +420,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         name: "subagent_result",
         label: "Subagent Result",
         description:
-            "Read a subagent's final output if it has finished. NEVER waits. Default current session. Ordinary answers are preserved verbatim in a 2 KiB UTF-8 page (max_bytes up to 8 KiB, optional lines cap); pass cursor to reconstruct the rest. Pass all:true for a foreign-session id. mode=raw pages retained log bytes (16 KiB default, 64 KiB cap). Failures and exceptional lifecycle facts come before progress. No tool-name histories or default cost lines; pass include:[\"cost\",\"tools\"] to opt in.",
+            "Read a subagent's final output if it has finished. NEVER waits. Default current session. Ordinary answers are preserved verbatim in a 2048-byte UTF-8 page (max_bytes up to 8192 bytes, optional lines cap); pass cursor to reconstruct the rest. Pass all:true for a foreign-session id. mode=raw pages retained log bytes (16 KiB default, 64 KiB cap). Failures and exceptional lifecycle facts come before progress. No tool-name histories or default cost lines; pass include:[\"cost\",\"tools\"] to opt in.",
         promptSnippet: "Read a finished subagent's final result (never waits)",
         promptGuidelines: [
             "Use subagent_result to collect a finished run's output. If it reports the run is still going, stop — do not poll; you'll be notified when it finishes.",
@@ -429,7 +429,7 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
             cursor: Type.Optional(Type.String({ description: "Caller-owned answer page or status cursor from a previous response." })),
-            max_bytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 2 KiB, max 8 KiB)." })),
+            max_bytes: Type.Optional(Type.Number({ description: "UTF-8 byte budget for this page (default 2048 bytes, max 8192 bytes)." })),
             maxBytes: Type.Optional(Type.Number({ description: MAX_BYTES_ALIAS_DESCRIPTION })),
             lines: Type.Optional(Type.Number({ description: "Optional line cap for each answer page (default: bytes only). nextCursor continues after the last line shown." })),
             tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines. lines wins when both are given." })),
