@@ -6,9 +6,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.11.0] - 2026-09-28
+
 ### Changed
 
-- Subagents: role default models are now visible, so an orchestrator stops guessing them. `agents_catalog` list and inspect lines end with each role's and named agent's default model and effort (for example `default openai/gpt-6-sol@high`), and the structured view carries it as `defaults`. The spawn and batch guidance says to omit `model` and `thinking` to use that default and to name one only for a stated reason. A catalog launch whose model or effort differs from its role or agent default says so on its launch line, for example `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`, including each batch job and batch `shared` settings. A fallback from an unavailable default reads `(role default … unavailable; foreground fallback)` and a capped effort adds `effort capped at … by the model`, so neither looks like an override to undo. A launch on the default adds nothing. (#365)
+- Bundle subagents 0.8.0: `agents_catalog` shows each role's default model, spawn guidance says to omit `model` to use it, and the launch line flags an override or a fallback.
+
+## [pi-better-subagents@0.8.0] - 2026-09-28
+
+### Changed
+
+- Role default models are now visible, so an orchestrator stops guessing them. `agents_catalog` list and inspect lines end with each role's and named agent's default model and effort (for example `default openai/gpt-6-sol@high`), and the structured view carries it as `defaults`. The spawn and batch guidance says to omit `model` and `thinking` to use that default and to name one only for a stated reason. A catalog launch whose model or effort differs from its role or agent default says so on its launch line, for example `model openai/gpt-6-astra@high (role default openai/gpt-6-sol@high)`, including each batch job and batch `shared` settings. A fallback from an unavailable default reads `(role default … unavailable; foreground fallback)` and a capped effort adds `effort capped at … by the model`, so neither looks like an override to undo. A launch on the default adds nothing. (#365)
 
 ## [pi-better-harness@0.10.0] - 2026-09-28
 
