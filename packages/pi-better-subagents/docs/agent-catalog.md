@@ -50,6 +50,8 @@ Look at payment edge cases before editing.
 | `name` | Display text. Changing it does not change `id`. |
 | Filename | Not an id. Discovery reads every `*.md` file in the scope directory, one level deep. |
 
+People type and read a role by its short name: `developer` is `role.developer`. The `role` field of `subagent_spawn` and `subagent_spawn_batch` and the `agents_catalog` inspect id accept it (trimmed, case-insensitive), and `agents_catalog` lists roles by it. The prefixed id is what files, `roleId`, and run metadata store, and it keeps working as input. Named agents keep their full `agent.<slug>` id everywhere.
+
 `kind` must match the id prefix. `roleIds`, `baseRoles`, `inherits`, and a list of roles are rejected. Agentier executable-role memberships are eligibility data, not extra inheritance parents, and are not accepted as additional `roleId`s.
 
 ## Portable preferences vs host controls
@@ -96,14 +98,14 @@ Model availability, same-tier fallback, and nearest-effort adjustment are not de
 
 ## Approved bundled roles
 
-| Id | Name | Model | Effort | Tier |
-| --- | --- | --- | --- | --- |
-| `role.researcher` | Researcher | `openai/gpt-6-sol` | medium | balanced |
-| `role.explorer` | Explorer | `openai/gpt-6-luna` | medium | efficient |
-| `role.product-manager` | Product Manager | `openai/gpt-6-sol` | medium | balanced |
-| `role.developer` | Developer | `openai/gpt-6-sol` | high | balanced |
-| `role.reviewer` | Reviewer | `openai/gpt-6-astra` | medium | frontier |
-| `role.architect` | Architect | `openai/gpt-6-astra` | high | frontier |
+| Role | Stored id | Name | Model | Effort | Tier |
+| --- | --- | --- | --- | --- | --- |
+| `researcher` | `role.researcher` | Researcher | `openai/gpt-6-sol` | medium | balanced |
+| `explorer` | `role.explorer` | Explorer | `openai/gpt-6-luna` | medium | efficient |
+| `product-manager` | `role.product-manager` | Product Manager | `openai/gpt-6-sol` | medium | balanced |
+| `developer` | `role.developer` | Developer | `openai/gpt-6-sol` | high | balanced |
+| `reviewer` | `role.reviewer` | Reviewer | `openai/gpt-6-astra` | medium | frontier |
+| `architect` | `role.architect` | Architect | `openai/gpt-6-astra` | high | frontier |
 
 Bundled descriptions are routing boundaries for coordinator mode. Researcher owns
 external and documentary evidence; Explorer maps repository code paths; Product

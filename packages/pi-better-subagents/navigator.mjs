@@ -399,7 +399,7 @@ export function buildNavigatorDetail(id, deps) {
     return {
         id: meta.id,
         name: meta.name,
-        role: meta.catalog?.roleId || meta.catalog?.roleName || undefined,
+        role: meta.catalog?.roleName || (meta.catalog?.roleId ? String(meta.catalog.roleId).replace(/^role\./, "") : undefined) || undefined,
         status,
         model: deps.shortModel(meta.model),
         effort: effortRaw ? String(effortRaw) : undefined,

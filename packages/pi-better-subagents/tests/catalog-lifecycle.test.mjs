@@ -399,12 +399,12 @@ Edited instructions.
             now: 2_000,
         });
         assert.equal(detail.name, "Payments Developer");
-        assert.equal(detail.role, "role.developer");
+        assert.equal(detail.role, "developer");
         assert.equal(detail.model, "openai/gpt-6-astra");
         assert.equal(detail.effort, "high");
         const text = buildDetailLines(detail, { width: 100, truncate: (line) => line }).join("\n");
         assert.match(text, /sa_catalog/);
-        assert.match(text, /role\.developer/);
+        assert.match(text, /^   role +developer$/m);
         assert.match(text, /gpt-6-astra/);
         assert.match(text, /high/);
         assert.equal(roleSlug("role.developer"), "developer");
@@ -561,7 +561,7 @@ fi
         const roleId = runIdFrom(roleResult);
         // A fallback is worded as a fallback, so the parent does not mistake it for an override to undo.
         assert.match(textOf(namedResult), /^Model xai\/grok-4\.7@high \(agent default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
-        assert.match(textOf(roleResult), /^Model xai\/grok-4\.7@high \(role default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
+        assert.match(textOf(roleResult), /^Model xai\/grok-4\.7@high \(role developer default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
         const named = metaOf(namedId);
         const role = metaOf(roleId);
         const roleInstructions = loadCatalog({
@@ -690,7 +690,7 @@ fi
             tools: "read,bash",
             sandbox: false,
         }, null, null, ctx());
-        assert.match(textOf(result), /^Model openai\/gpt-6-sol@low \(role default openai\/gpt-6-sol@high\)\.$/m);
+        assert.match(textOf(result), /^Model openai\/gpt-6-sol@low \(role developer default openai\/gpt-6-sol@high\)\.$/m);
     });
 
     it("notes a batch shared model override on every job it changes", async (t) => {
@@ -707,8 +707,8 @@ fi
         const text = textOf(result);
         const lines = text.split("\n").filter((line) => line.startsWith("• "));
         assert.equal(lines.length, 3, text);
-        assert.match(lines[0], /^• \S*dev-a\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role default openai\/gpt-6-sol@high\)$/);
-        assert.match(lines[1], /^• \S*dev-b\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role default openai\/gpt-6-sol@high\)$/);
+        assert.match(lines[0], /^• \S*dev-a\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6-sol@high\)$/);
+        assert.match(lines[1], /^• \S*dev-b\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6-sol@high\)$/);
         // The reviewer default is astra@medium, so the shared model changes nothing there.
         assert.match(lines[2], /^• \S*rev\S* → sa_[a-z0-9_]+$/);
     });
@@ -829,12 +829,12 @@ fi
         });
         assert.equal(detail.id, ids[1]);
         assert.equal(detail.name, metas[1].name);
-        assert.equal(detail.role, "role.developer");
+        assert.equal(detail.role, "developer");
         assert.equal(detail.model, "openai/gpt-6-sol");
         assert.equal(detail.effort, "high");
         const lines = buildDetailLines(detail, { width: 120, truncate: (line) => line }).join("\n");
         assert.match(lines, new RegExp(ids[1]));
-        assert.match(lines, /role\.developer/);
+        assert.match(lines, /^   role +developer$/m);
         assert.match(lines, /gpt-6-sol/);
         assert.match(lines, /high/);
     });
@@ -910,7 +910,7 @@ fi
                 tools: "read,bash",
                 sandbox: false,
             }, null, null, host);
-            assert.match(textOf(result), /^Model openai\/gpt-6-sol-backup@high \(role default openai\/gpt-6-sol@high unavailable; same-tier fallback\)\.$/m);
+            assert.match(textOf(result), /^Model openai\/gpt-6-sol-backup@high \(role developer default openai\/gpt-6-sol@high unavailable; same-tier fallback\)\.$/m);
             const meta = metaOf(runIdFrom(result));
             assert.equal(meta.model, "openai/gpt-6-sol-backup");
             assert.equal(meta.effort, "high");
@@ -938,6 +938,140 @@ fi
         assert.equal(agentEntry.defaults.label, "openai/gpt-6-sol@high");
         assert.equal(inspected.details.view.capabilities.grantedByCatalog, false);
         assert.equal(inspected.details.wrote, false);
+    });
+
+    describe("short role names (#370)", () => {
+        const VALID = "Valid roles: architect, developer, explorer, product-manager, researcher, reviewer.";
+
+        function newRuns(before) {
+            const runsDir = join(runtimeTmp, "pi-better-subagents", "runs");
+            return (existsSync(runsDir) ? readdirSync(runsDir) : []).filter((id) => !before.has(id));
+        }
+
+        function runsNow() {
+            const runsDir = join(runtimeTmp, "pi-better-subagents", "runs");
+            return new Set(existsSync(runsDir) ? readdirSync(runsDir) : []);
+        }
+
+        it("launches a bare, trimmed, mixed-case role name as the stored role id", async (t) => {
+            setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+            t.after(() => setConfigForTests(undefined));
+            for (const role of ["developer", "  Developer ", "ROLE.developer", "role.developer"]) {
+                const result = await tools.subagent_spawn.execute("tc", {
+                    prompt: "Build it.",
+                    role,
+                    tools: "read,bash",
+                    sandbox: false,
+                }, null, null, ctx());
+                // Let each run finish so later tests keep their capacity.
+                const meta = await settledMeta(runIdFrom(result));
+                assert.equal(meta.catalog.kind, "role", role);
+                assert.equal(meta.catalog.id, "role.developer", role);
+                assert.equal(meta.catalog.roleId, "role.developer", role);
+                assert.equal(meta.model, "openai/gpt-6-sol", role);
+                assert.equal(meta.effort, "high", role);
+            }
+        });
+
+        it("rejects an unknown bare name, lists the valid short names, and starts no child", async (t) => {
+            setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+            t.after(() => setConfigForTests(undefined));
+            const before = runsNow();
+            await assert.rejects(
+                tools.subagent_spawn.execute("tc", { prompt: "x", role: "devloper", tools: "read,bash", sandbox: false }, null, null, ctx()),
+                (error) => {
+                    assert.match(error.message, /^Unknown role devloper\. /);
+                    assert.ok(error.message.includes(VALID), error.message);
+                    assert.doesNotMatch(error.message, /role\.developer/);
+                    return true;
+                },
+            );
+            assert.deepEqual(newRuns(before), []);
+        });
+
+        it("never resolves a role field to a named agent, bare or prefixed", async (t) => {
+            setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+            t.after(() => setConfigForTests(undefined));
+            const before = runsNow();
+            for (const role of ["payments", "agent.payments"]) {
+                await assert.rejects(
+                    tools.subagent_spawn.execute("tc", { prompt: "x", role, tools: "read,bash", sandbox: false }, null, null, ctx()),
+                    (error) => {
+                        assert.match(error.message, /^Unknown role /);
+                        assert.ok(error.message.includes(VALID), error.message);
+                        return true;
+                    },
+                    role,
+                );
+            }
+            assert.deepEqual(newRuns(before), []);
+            // The same name still works where it belongs: the agent field.
+            const agent = await tools.subagent_spawn.execute("tc", {
+                prompt: "x", agent: "agent.payments", tools: "read,bash", sandbox: false,
+            }, null, null, ctx());
+            assert.equal((await settledMeta(runIdFrom(agent))).catalog.id, "agent.payments");
+        });
+
+        it("resolves a shared bare role and a per-job bare role in one batch", async (t) => {
+            setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+            t.after(() => setConfigForTests(undefined));
+            const result = await tools.subagent_spawn_batch.execute("tc", {
+                jobs: [
+                    { prompt: "Review." },
+                    { prompt: "Build.", role: " DEVELOPER " },
+                ],
+                shared: { role: "reviewer", tools: "read,bash", sandbox: false },
+            }, null, null, ctx());
+            const ids = [...textOf(result).matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
+            assert.equal(ids.length, 2, textOf(result));
+            const metas = await Promise.all(ids.map(settledMeta));
+            assert.deepEqual(metas.map((meta) => meta.catalog.roleId), ["role.reviewer", "role.developer"]);
+            assert.deepEqual(metas.map((meta) => meta.model), ["openai/gpt-6-astra", "openai/gpt-6-sol"]);
+            // A per-job override names the short role in its default note.
+            const noted = await tools.subagent_spawn_batch.execute("tc", {
+                jobs: [{ prompt: "Build.", role: "developer", model: "openai/gpt-6-astra@high", name: "noted" }],
+                shared: { tools: "read,bash", sandbox: false },
+            }, null, null, ctx());
+            assert.match(textOf(noted), /· model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6-sol@high\)$/m);
+            await settledMeta(runIdFrom(noted));
+        });
+
+        it("rejects an unknown bare role in a batch job without starting it", async (t) => {
+            setConfigForTests({ defaultModel: null, maxConcurrent: 64, tierPolicy: null });
+            t.after(() => setConfigForTests(undefined));
+            const before = runsNow();
+            const result = await tools.subagent_spawn_batch.execute("tc", {
+                jobs: [{ prompt: "x", role: "payments" }],
+                shared: { tools: "read,bash", sandbox: false },
+            }, null, null, ctx());
+            assert.match(textOf(result), /Unknown role payments\./);
+            assert.ok(textOf(result).includes(VALID), textOf(result));
+            assert.deepEqual(newRuns(before), []);
+        });
+
+        it("lists roles by short name and inspects by short name with the full id in details", async () => {
+            const listed = await tools.agents_catalog.execute("tc", { action: "list" }, null, null, ctx());
+            const lines = listed.content[0].text.split("\n");
+            assert.ok(lines.some((line) => line.startsWith('role developer "Developer" ') && line.endsWith(" default openai/gpt-6-sol@high")), listed.content[0].text);
+            assert.equal(lines.some((line) => /^role role\./.test(line)), false);
+            assert.ok(lines.some((line) => line.startsWith("agent agent.payments ")));
+            assert.ok(listed.details.entries.some((entry) => entry.id === "role.developer" && entry.identity.id === "role.developer"));
+
+            for (const id of ["developer", " Developer ", "role.developer"]) {
+                const inspected = await tools.agents_catalog.execute("tc", { action: "inspect", id }, null, null, ctx());
+                assert.equal(inspected.isError, undefined, id);
+                assert.equal(inspected.details.view.id, "role.developer", id);
+                assert.match(inspected.content[0].text.split("\n")[0], /^role role\.developer "Developer" /);
+            }
+            const agent = await tools.agents_catalog.execute("tc", { action: "inspect", id: "agent.payments" }, null, null, ctx());
+            assert.equal(agent.details.view.id, "agent.payments");
+
+            const bareAgent = await tools.agents_catalog.execute("tc", { action: "inspect", id: "payments" }, null, null, ctx());
+            assert.equal(bareAgent.isError, true);
+            assert.equal(bareAgent.details.view.found, false);
+            assert.match(bareAgent.content[0].text, /No role named payments\. /);
+            assert.ok(bareAgent.content[0].text.includes(VALID), bareAgent.content[0].text);
+        });
     });
 
     it("stops the sibling when one catalog job is blocked and still launches the other when capacity allows", async () => {

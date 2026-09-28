@@ -252,6 +252,36 @@ export function kindForId(id: string): CatalogKind | undefined {
     return undefined;
 }
 
+/** Prefix every role id carries. Stored ids and files keep it; people type and read the short name. */
+export const ROLE_ID_PREFIX = "role.";
+
+/** Short, user-facing role name: `role.developer` becomes `developer`. Any other id is returned unchanged. */
+export function shortRoleName(id: string): string {
+    return id.startsWith(ROLE_ID_PREFIX) ? id.slice(ROLE_ID_PREFIX.length) : id;
+}
+
+/**
+ * Canonical role id for a value typed into a `role` field. Trimmed and
+ * lowercased; a bare name gains the `role.` prefix, so `Developer` becomes
+ * `role.developer`. The result always starts with `role.`, so a role field
+ * can never select an `agent.*` named agent.
+ */
+export function canonicalRoleId(value: string): string {
+    const trimmed = value.trim().toLowerCase();
+    if (trimmed === "") return trimmed;
+    return trimmed.startsWith(ROLE_ID_PREFIX) ? trimmed : `${ROLE_ID_PREFIX}${trimmed}`;
+}
+
+/**
+ * Canonical id for a field that takes either kind, such as `agents_catalog`
+ * inspect. An `agent.` id is kept as typed; anything else is read as a role.
+ */
+export function canonicalCatalogId(value: string): string {
+    const trimmed = value.trim();
+    if (trimmed.toLowerCase().startsWith("agent.")) return trimmed;
+    return canonicalRoleId(trimmed);
+}
+
 export function isPreferenceKey(value: string): value is PreferenceKey {
     return (PREFERENCE_KEYS as readonly string[]).includes(value);
 }

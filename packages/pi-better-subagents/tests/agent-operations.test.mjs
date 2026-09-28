@@ -146,7 +146,9 @@ describe("agent operations", () => {
             const winner = listed.data.entries.find((entry) => entry.id === "agent.personal-dev");
             assert.equal(winner.identity.scope, "project");
             assert.equal(winner.shadowed.some((item) => item.scope === "user"), true);
-            assert.match(listed.message, /role\.developer/);
+            // Roles are listed by short name; the structured entry keeps the stored id.
+            assert.match(listed.message, /^role developer "Developer" /m);
+            assert.equal(listed.data.entries.some((entry) => entry.id === "role.developer"), true);
             assert.match(listed.message, /not required/);
             const inspected = await executeAgentsCommand("inspect agent.personal-dev", host(ctx, scripted([]), { hasUI: false }), deps(ctx));
             assert.equal(inspected.status, "ok");
@@ -633,15 +635,17 @@ You only have read-only access.
                 isProjectTrusted: () => true,
                 ui,
             });
-            assert.match(ui.calls.find((call) => call.type === "notify").message, /role\.developer/);
+            assert.match(ui.calls.find((call) => call.type === "notify").message, /^role developer "Developer" /m);
+            // --role takes the short name the list shows; the file stores the full id.
             const created = await executeAgentsCommand(
-                'create --role role.developer --name "Payments" --model openai/gpt-6-luna --instructions "Look at payments."',
+                'create --role Developer --name "Payments" --model openai/gpt-6-luna --instructions "Look at payments."',
                 host(ctx, scripted([]), { hasUI: false }),
                 deps(ctx),
             );
             assert.equal(created.wrote, true, created.message);
             const definition = parseDefinition(readFileSync(created.path, "utf8")).definition;
             assert.deepEqual(definition.overrides, { model: "openai/gpt-6-luna" });
+            assert.equal(definition.roleId, "role.developer");
             assert.equal(definition.instructionMode, "add");
             assert.equal(created.data.fields.model.explicit, true);
             assert.equal(created.data.fields.effort.source, "role-default");

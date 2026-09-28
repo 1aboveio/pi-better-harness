@@ -27,7 +27,8 @@ session's override.
 - **Adaptive:** delegate useful, substantial independent work while continuing
   foreground work; keep small or coupled tasks local.
 - **Coordinator:** use `agents_catalog` to discover current roles and delegate
-  every nontrivial task owned by an available role. The foreground owns
+  every nontrivial task owned by an available role, passing the role by its
+  short name (`role: "developer"`). The foreground owns
   orchestration, cross-role decisions, unowned or ambiguous work, integration,
   and final verification. Current role descriptions, including custom catalog
   overrides, determine ownership.

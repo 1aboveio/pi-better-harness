@@ -8,7 +8,7 @@
  * and a catalog block stays not launchable even if enrichment disagrees.
  */
 import { inspectCatalog, listCatalog, type CatalogInspection } from "./catalog-resolver.ts";
-import { formatDiagnostic, type Diagnostic } from "./catalog-schema.ts";
+import { formatDiagnostic, shortRoleName, type Diagnostic } from "./catalog-schema.ts";
 import type { CatalogSnapshot } from "./catalog-store.ts";
 import { loadConfig, normalizeTools, SAFE_DEFAULT_TOOLS, type SubagentConfig } from "./config.ts";
 import { resolveExtensions } from "./extensions.ts";
@@ -227,7 +227,7 @@ export function presentCatalog(snapshot: CatalogSnapshot, enrich?: LaunchEnriche
         "Definition validity is not launchability. Model availability is decided only by the injected resolver.",
         ...snapshot.diagnostics.map((diagnostic) => formatDiagnostic(diagnostic)),
         ...entries.flatMap((entry) => [
-            entry.text.split("\n")[0] ?? entry.id,
+            renderCatalogListLine(entry),
             `  description: ${JSON.stringify(entry.identity.description ?? "")}`,
         ]),
     ];
@@ -361,10 +361,10 @@ export function presentCatalogEntry(snapshot: CatalogSnapshot, id: string, enric
     return view;
 }
 
-export function renderOperationView(view: OperationView): string {
-    const header = [
+function renderHeader(view: OperationView, shownId: string): string {
+    return [
         view.identity.kind ?? "missing",
-        view.id,
+        shownId,
         view.identity.name ? JSON.stringify(view.identity.name) : "unnamed",
         `scope=${view.identity.scope ?? "none"}`,
         `definitionValid=${yesNo(view.definitionValid)}`,
@@ -372,6 +372,19 @@ export function renderOperationView(view: OperationView): string {
         `launchable=${view.launchable === null ? "unknown" : yesNo(view.launchable)}`,
         ...(view.defaults ? [`default ${view.defaults.label}`] : []),
     ].join(" ");
+}
+
+/**
+ * One `agents_catalog` list line. A role shows its short name (`role developer
+ * "Developer" …`), which is what the `role` field accepts; a named agent keeps
+ * its full id. Inspect output and structured details keep the full id.
+ */
+export function renderCatalogListLine(view: OperationView): string {
+    return renderHeader(view, view.identity.kind === "role" ? shortRoleName(view.id) : view.id);
+}
+
+export function renderOperationView(view: OperationView): string {
+    const header = renderHeader(view, view.id);
     const lines = [
         header,
         `identity: id=${view.id} kind=${view.identity.kind ?? "unknown"} name=${JSON.stringify(view.identity.name ?? "")} description=${JSON.stringify(view.identity.description ?? "")}`,

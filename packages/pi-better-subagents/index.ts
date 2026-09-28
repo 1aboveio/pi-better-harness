@@ -178,7 +178,7 @@ const projectConfigDirName = typeof (PiCodingAgent as { CONFIG_DIR_NAME?: unknow
 const CATALOG_GUIDELINES = [
     "With an agent or role, omit model and thinking to launch on its default model and effort, which agents_catalog shows. Name a model or effort only for a stated reason, such as a task or workflow instruction, and never copy one from another role's runs.",
     "When a task, workflow, or skill instruction names a model or effort, translate that authoritative choice into the structured model and thinking arguments before spawning. The runtime does not parse prose, quoted model names, or comparisons, and copying a model into the child prompt does not change the launch.",
-    "Optional agent, role, and alias select a catalog definition. Pass one agent id or one role id. Pass an array of role ids when one run was given more than one role: that call asks to choose one or split, and without a UI choice it returns clarification-needed and starts no child. Naming both an agent and a role does the same. One job's choice does not change another job. A named agent displays its defined name. A direct role displays the label allocated from the local run registry. Calls without agent or role keep the existing name and model chain.",
+    "Optional agent, role, and alias select a catalog definition. Pass one named agent id (agent: \"agent.payments\") or one role by its short name (role: \"developer\"); the role.developer form also works. Pass an array of role names when one run was given more than one role: that call asks to choose one or split, and without a UI choice it returns clarification-needed and starts no child. Naming both an agent and a role does the same. One job's choice does not change another job. A named agent displays its defined name. A direct role displays the label allocated from the local run registry. Calls without agent or role keep the existing name and model chain.",
     "Catalog model and effort are resolved before the child starts. An unavailable explicit model or unsupported explicit effort does not launch and does not fall back. The catalog grants no tools, sandbox modes, extensions, or permissions.",
 ];
 
@@ -1425,8 +1425,8 @@ function timingSchemaFields() {
 
 /** String for one role, or an array when the caller assigns more than one. Arrays reach clarification instead of being rejected. */
 function catalogRoleSchema(purpose: string) {
-    const one = `One role id (role.<slug>) for this ${purpose}. Mutually exclusive with agent.`;
-    const many = `Two or more role ids for this ${purpose}. An array is ambiguous and asks to choose one role or split into separate runs. No child launches until that choice is made.`;
+    const one = `One role by short name (developer) for this ${purpose}; role.developer also works, case-insensitive. Mutually exclusive with agent.`;
+    const many = `Two or more role names for this ${purpose}. An array is ambiguous and asks to choose one role or split into separate runs. No child launches until that choice is made.`;
     return Type.Optional(Type.Union([
         Type.String({ description: one }),
         Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: many }),
