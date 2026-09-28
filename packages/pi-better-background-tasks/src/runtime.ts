@@ -65,8 +65,9 @@ export async function awaitFirstWatchCheck(id: string, timeoutMs = FIRST_WATCH_C
   if (!waiter) return undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<undefined>((resolve) => {
+    // Kept referenced: the launching tool call is waiting on it, and the watch timers are
+    // unref'd, so an unref'd wait could let the event loop drain before the first check.
     timer = setTimeout(() => resolve(undefined), Math.max(0, timeoutMs));
-    timer.unref();
   });
   try {
     return await Promise.race([waiter.promise, timeout]);
