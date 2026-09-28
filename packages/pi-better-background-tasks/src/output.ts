@@ -42,8 +42,8 @@ import { captureGapsFor, pageTaskLog, readLog, type LogRead } from "./logs.js";
 import { belongsToOrigin, inspectMeta, listTaskRecords, originOf, type MetaInspection } from "./registry.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, Condition, FirstWatchCheck } from "./types.js";
 
-/** The launch tool stopped waiting for a watch's first check after this long (#359). */
-export type FirstCheckPending = { stillRunningAfterMs: number };
+/** The launch tool stopped waiting while a watch's first check was still running (#359). */
+export type FirstCheckPending = { pending: "timeout" | "aborted" | "suspended"; waitedMs: number };
 
 /**
  * Issue #312 consumer budgets. Defaults follow OUTPUT-POLICY / shared
@@ -440,7 +440,11 @@ function asInspection(inspection: MetaInspection | BackgroundTaskMeta | undefine
 
 /**
  * Launch result. For a watch, `firstCheck` reports its first check (#359): the check's result,
- * or how long the tool waited when it was still running when the launch tool stopped waiting.
+ * or why the launch stopped waiting while it was still running.
+ *
+ * The first check gets whatever the status budget leaves after the rest of the launch text, so
+ * nothing else is clipped for it. The log path is kept whole or dropped whole: a clipped path
+ * looks valid but points nowhere.
  */
 export function formatLaunch(meta: BackgroundTaskMeta, firstCheck?: FirstWatchCheck | FirstCheckPending): string {
   const label = meta.name ? `${meta.name} (${meta.id})` : meta.id;
@@ -448,19 +452,26 @@ export function formatLaunch(meta: BackgroundTaskMeta, firstCheck?: FirstWatchCh
     ...(meta.ssh ? [`Remote: ${meta.ssh.target}${meta.remote?.session ? ` mode=${meta.remote.session}` : ""}${meta.remote?.sessionName ? ` session=${meta.remote.sessionName}` : ""}.`] : []),
     ...(meta.remote?.bootstrapMessage ? [`Remote setup: ${meta.remote.bootstrapMessage}`] : []),
     ...(meta.remote?.warning ? [`Warning: ${meta.remote.warning}`] : []),
-    ...(firstCheck ? [formatFirstWatchCheck(meta, firstCheck)] : []),
   ];
-  return assembleBackgroundContent({
+  const logLine = `Log: ${meta.logPath}`;
+  const build = (checkText: string | undefined, withLog: boolean) => assembleBackgroundContent({
     surface: "status",
     sections: {
       identity: `Started background ${meta.kind} ${label}. Status: ${meta.status}.`,
       failure: incidentSection(meta.id, {}),
       decision: formatDecision(meta),
-      diagnostics: remoteLines.join("\n") || undefined,
-      progress: `Log: ${meta.logPath}`,
+      diagnostics: [...remoteLines, ...(checkText ? [checkText] : [])].join("\n") || undefined,
+      progress: withLog ? logLine : undefined,
     },
     gaps: taskGaps(meta),
   });
+  let checkText: string | undefined;
+  if (firstCheck) {
+    const room = backgroundBudget("status") - utf8ByteLength(build(undefined, true)) - 1;
+    checkText = formatFirstWatchCheck(meta, firstCheck, room);
+  }
+  const text = build(checkText, true);
+  return text.includes(logLine) ? text : build(checkText, false);
 }
 
 const FIRST_CHECK_TAIL_LINES = 3;
@@ -472,23 +483,64 @@ function tailLines(text: string): string[] {
     .map((line) => line.length > FIRST_CHECK_LINE_CHARS ? `${line.slice(0, FIRST_CHECK_LINE_CHARS - 1)}…` : line);
 }
 
-/** The first check of a watch, bounded to a few short lines of each stream (#359). */
-export function formatFirstWatchCheck(meta: BackgroundTaskMeta, check: FirstWatchCheck | FirstCheckPending): string {
-  if ("stillRunningAfterMs" in check) {
-    return `First check still running after ${formatDuration(check.stillRunningAfterMs)}; the watch continues in the background. Check it later with bg_task_status.`;
+function pendingFirstCheckText(check: FirstCheckPending): string {
+  switch (check.pending) {
+    case "aborted":
+      return "First check still running; stopped waiting because the tool call was cancelled. The watch continues in the background; check it later with bg_task_status.";
+    case "suspended":
+      return "First check still running when the session shut down. The watch continues when its session resumes; check it later with bg_task_status.";
+    default:
+      return `First check still running after ${formatDuration(check.waitedMs)}; the watch continues in the background. Check it later with bg_task_status.`;
   }
+}
+
+/**
+ * The first check of a watch in at most `maxBytes` (#359). What matters most is kept first: the
+ * outcome, the exit-0-with-stderr warning, the newest stderr lines, then the newest stdout lines,
+ * so stdout is cut first. Lines are shown oldest to newest.
+ */
+export function formatFirstWatchCheck(meta: BackgroundTaskMeta, check: FirstWatchCheck | FirstCheckPending, maxBytes = Number.MAX_SAFE_INTEGER): string {
+  if ("pending" in check) return pendingFirstCheckText(check);
   if (check.error) return `First check could not run: ${oneLine(check.error, 300)}`;
   const outcome = check.timedOut ? "timed out" : check.signal ? `signal ${check.signal}` : `exit ${check.exitCode ?? "unknown"}`;
   const took = check.durationMs < 1000 ? `${check.durationMs}ms` : formatDuration(check.durationMs);
-  const lines = [`First check: ${outcome} in ${took}.`];
+  const header = `First check: ${outcome} in ${took}.`;
   const stdout = tailLines(check.stdout);
   const stderr = tailLines(check.stderr);
-  lines.push(stdout.length ? `stdout tail:\n${stdout.map((line) => `  ${line}`).join("\n")}` : "stdout: (empty)");
-  if (stderr.length) lines.push(`stderr tail:\n${stderr.map((line) => `  ${line}`).join("\n")}`);
-  if (check.exitCode === 0 && stderr.length && meta.status === "running") {
-    lines.push("The check exited 0 but wrote stderr: if it is broken, the watch cannot tell. Let errors exit non-zero.");
+  const warning = check.exitCode === 0 && stderr.length && meta.status === "running"
+    ? "The check exited 0 but wrote stderr: if it is broken, the watch cannot tell. Let errors exit non-zero."
+    : undefined;
+  const keptErr: string[] = [];
+  const keptOut: string[] = [];
+  let keptEmptyStdout = false;
+  const render = () => [
+    header,
+    ...(warning ? [warning] : []),
+    ...(keptErr.length ? [`stderr tail:\n${keptErr.map((line) => `  ${line}`).join("\n")}`] : []),
+    ...(keptOut.length ? [`stdout tail:\n${keptOut.map((line) => `  ${line}`).join("\n")}`] : []),
+    ...(keptEmptyStdout ? ["stdout: (empty)"] : []),
+  ].join("\n");
+  const fits = () => utf8ByteLength(render()) <= maxBytes;
+  // Newest first within each stream; each kept line goes in front to stay in order.
+  for (const line of [...stderr].reverse()) {
+    keptErr.unshift(line);
+    if (!fits()) { keptErr.shift(); break; }
   }
-  return lines.join("\n");
+  for (const line of [...stdout].reverse()) {
+    keptOut.unshift(line);
+    if (!fits()) { keptOut.shift(); break; }
+  }
+  if (!stdout.length) {
+    keptEmptyStdout = true;
+    if (!fits()) keptEmptyStdout = false;
+  }
+  const omitted = (stderr.length - keptErr.length) + (stdout.length - keptOut.length);
+  if (omitted > 0) {
+    const note = `(${omitted} output line${omitted === 1 ? "" : "s"} omitted; see bg_task_log)`;
+    const text = `${render()}\n${note}`;
+    if (utf8ByteLength(text) <= maxBytes) return text;
+  }
+  return render();
 }
 
 function redactedVerbose(meta: BackgroundTaskMeta): unknown {

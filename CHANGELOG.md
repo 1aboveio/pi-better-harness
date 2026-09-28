@@ -8,8 +8,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
-- **background-tasks**: `bg_task_watch` and the `bg_task` watch action wait up to 15 seconds for the first check and include its exit code, a stdout tail and a stderr tail in the tool result. If the check is still running, the result says so and the watch continues. Local and SSH watches alike. (#359)
-- **background-tasks**: A watch whose checks exit 0, write stderr, and match neither `success_when` nor `failure_when` 3 times in a row records one incident that needs action, with the latest stderr line, and wakes the parent once. The watch keeps running; a check with no stderr or a matched condition recovers it. Clean pending checks never count. `blind_checks` sets the count (`0` turns it off). Before, a check broken this way (an invalid gcloud `--format` followed by `exit 0`) ran blind for 47 checks without anything recorded. (#359)
+- **background-tasks**: `bg_task_watch` and the `bg_task` watch action wait up to 15 seconds for the first check and include its exit code and the newest stderr and stdout lines in the tool result; stdout is cut first, and the log path is shown whole or not at all. If the check is still running when the wait ends, Esc is pressed, or the session shuts down, the result says so at once and the watch continues. Local and SSH watches alike. (#359)
+- **background-tasks**: A watch whose checks exit 0, write stderr, and match neither `success_when` nor `failure_when` 3 times in a row records one incident that needs action, with the latest stderr line and how to silence expected stderr (`2>/dev/null` or `blind_checks:0`), and wakes the parent once. The watch keeps running. A check with empty stderr recovers it whatever its exit code, as does a matched condition; a non-zero check that writes stderr leaves it open. Clean pending checks never count. `blind_checks` sets the count (`0` turns it off). Before, a check broken this way (an invalid gcloud `--format` followed by `exit 0`) ran blind for 47 checks without anything recorded. (#359)
 
 ### Fixed
 

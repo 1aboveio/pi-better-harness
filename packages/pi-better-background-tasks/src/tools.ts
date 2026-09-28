@@ -100,7 +100,7 @@ const BlindChecksField = Type.Optional(Type.Integer({ minimum: 0, description: "
 const WATCH_CHECK_GUIDANCE = "Waits up to 15s for the first check and returns its exit code with stdout and stderr tails; if it is still running, says so. "
   + "Write the check so a broken check is visible: do not end it with `exit 0` or `|| true`, because a check that exits non-zero is recorded and escalates. "
   + "Map an unknown or unparseable state to failure (exit non-zero), not to pending. Prefer structured output, e.g. `--format=json | jq -er '.status'`, over fragile format strings. "
-  + "A check that exits 0 but writes stderr without matching a condition for blind_checks (default 3) checks in a row is flagged as needing action.";
+  + "A check that exits 0 but writes stderr without matching a condition for blind_checks (default 3) checks in a row is flagged as needing action; if that stderr is expected, redirect it (2>/dev/null) or set blind_checks:0.";
 
 const WatchParams = Type.Object({
   ...CommandFields,
@@ -231,9 +231,9 @@ export function registerTools(pi: ExtensionAPI): void {
     description: `Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. Returns its task id once the first check finishes. ${WATCH_CHECK_GUIDANCE} Default timeout 900 seconds; pass timeout_seconds:0 to disable.`,
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: WatchParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const launched = await launchWatch(pi, params, ctx.cwd, activeSession, getActiveSession);
+      const launched = await launchWatch(pi, params, ctx.cwd, activeSession, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal);
       refreshBackgroundTasksNavigator(ctx);
       return text(launched);
     },
@@ -297,9 +297,9 @@ export function registerTools(pi: ExtensionAPI): void {
     renderResult(result: unknown, options: unknown, theme: unknown) {
       return renderBackgroundTaskLogDisplay(result, options, theme);
     },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, params, ctx, activeSession, getActiveSession);
+      return actionText(pi, params, ctx, activeSession, getActiveSession, signal);
     },
   });
 
@@ -369,11 +369,12 @@ async function actionText(
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+  signal?: AbortSignal,
 ) {
   if (params.action === "log" && params.id) {
     return logText(String(params.id), logOptions(params, callbackOrigin));
   }
-  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession));
+  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal));
 }
 
 async function runAction(
@@ -382,13 +383,14 @@ async function runAction(
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
+  signal?: AbortSignal,
 ): Promise<string> {
   switch (params.action) {
     case "spawn":
       return withNavigatorRefresh(ctx, reportLaunch(() => spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
     case "watch":
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
-      return withNavigatorRefresh(ctx, await launchWatch(pi, params as unknown as WatchTaskParams, ctx.cwd, callbackOrigin, getActiveSession));
+      return withNavigatorRefresh(ctx, await launchWatch(pi, params as unknown as WatchTaskParams, ctx.cwd, callbackOrigin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal));
     case "list":
       return formatList(listOptions(params, callbackOrigin));
     case "status":
@@ -433,6 +435,7 @@ export async function launchWatch(
   callbackOrigin: BackgroundTaskCallbackOrigin | undefined,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
   waitMs = FIRST_WATCH_CHECK_WAIT_MS,
+  signal?: AbortSignal,
 ): Promise<string> {
   let meta: BackgroundTaskMeta;
   try {
@@ -441,10 +444,11 @@ export async function launchWatch(
     if (error instanceof ForegroundSandboxBlockedError) return error.message;
     throw error;
   }
-  const check = await awaitFirstWatchCheck(meta.id, waitMs);
+  // Esc (the tool's abort signal) ends the wait at once; the watch itself keeps running.
+  const outcome = await awaitFirstWatchCheck(meta.id, waitMs, signal);
   const latest = readMeta(meta.id) ?? meta;
-  if (check) return formatLaunch(latest, check);
-  return formatLaunch(latest, isTerminalStatus(latest.status) ? undefined : { stillRunningAfterMs: waitMs });
+  if (outcome && !("pending" in outcome && isTerminalStatus(latest.status))) return formatLaunch(latest, outcome);
+  return formatLaunch(latest);
 }
 
 function withNavigatorRefresh(ctx: ExtensionContext, result: string): string {

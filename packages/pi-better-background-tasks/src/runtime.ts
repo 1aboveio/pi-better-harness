@@ -52,31 +52,53 @@ export const DEFAULT_BLIND_CHECKS = 3;
 /** How long bg_task_watch waits for the first check before returning (#359). */
 export const FIRST_WATCH_CHECK_WAIT_MS = 15_000;
 const BLIND_OPERATION = "watch-blind";
-
-/** In-flight first checks of watches launched by this instance, keyed by task id. */
-const firstCheckWaiters = new Map<string, { promise: Promise<FirstWatchCheck | undefined>; resolve: (check: FirstWatchCheck | undefined) => void }>();
+/** How to fix a false alarm: some tools write progress or warnings to stderr on success. */
+export const BLIND_CHECK_HINT = "If the stderr is expected (progress or warnings), redirect it (2>/dev/null) or set blind_checks:0.";
 
 /**
- * Wait for a watch's first check, bounded by `timeoutMs` (#359). Resolves undefined when the
- * check is still running at the deadline, or when this instance did not launch the watch.
+ * Why the launch stopped waiting before the first check finished (#359): the bounded wait
+ * ran out, the tool call was aborted (Esc), or the session shut down.
  */
-export async function awaitFirstWatchCheck(id: string, timeoutMs = FIRST_WATCH_CHECK_WAIT_MS): Promise<FirstWatchCheck | undefined> {
+export type FirstCheckWaitEnd = "timeout" | "aborted" | "suspended";
+/** A first check's outcome, or why it is not known yet; undefined when the watch ended without one. */
+export type FirstCheckOutcome = FirstWatchCheck | { pending: FirstCheckWaitEnd; waitedMs: number } | undefined;
+
+/** In-flight first checks of watches launched by this instance, keyed by task id. */
+const firstCheckWaiters = new Map<string, { promise: Promise<FirstWatchCheck | "suspended" | undefined>; resolve: (check: FirstWatchCheck | "suspended" | undefined) => void }>();
+
+/**
+ * Wait for a watch's first check, bounded by `timeoutMs` and `signal` (#359). Resolves a pending
+ * outcome when the wait ends first, and undefined when this instance did not launch the watch
+ * or the watch ended without a check.
+ */
+export async function awaitFirstWatchCheck(id: string, timeoutMs = FIRST_WATCH_CHECK_WAIT_MS, signal?: AbortSignal): Promise<FirstCheckOutcome> {
   const waiter = firstCheckWaiters.get(id);
   if (!waiter) return undefined;
+  const started = Date.now();
+  const pending = (reason: FirstCheckWaitEnd) => ({ pending: reason, waitedMs: Date.now() - started });
+  if (signal?.aborted) return pending("aborted");
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<undefined>((resolve) => {
+  let onAbort: (() => void) | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
     // Kept referenced: the launching tool call is waiting on it, and the watch timers are
     // unref'd, so an unref'd wait could let the event loop drain before the first check.
-    timer = setTimeout(() => resolve(undefined), Math.max(0, timeoutMs));
+    timer = setTimeout(() => resolve("timeout"), Math.max(0, timeoutMs));
+  });
+  const aborted = new Promise<"aborted">((resolve) => {
+    onAbort = () => resolve("aborted");
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
   try {
-    return await Promise.race([waiter.promise, timeout]);
+    const outcome = await Promise.race([waiter.promise, timeout, aborted]);
+    if (outcome === "timeout" || outcome === "aborted" || outcome === "suspended") return pending(outcome);
+    return outcome;
   } finally {
     if (timer) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
 }
 
-function settleFirstCheck(id: string, check: FirstWatchCheck | undefined): void {
+function settleFirstCheck(id: string, check: FirstWatchCheck | "suspended" | undefined): void {
   const waiter = firstCheckWaiters.get(id);
   if (!waiter) return;
   firstCheckWaiters.delete(id);
@@ -120,7 +142,7 @@ export function suspendScheduledWork(): void {
   processTimeoutTimers.clear();
   logRetentionTimers.clear();
   // A launch still waiting on a first check that will not run here reports it as still running.
-  for (const id of [...firstCheckWaiters.keys()]) settleFirstCheck(id, undefined);
+  for (const id of [...firstCheckWaiters.keys()]) settleFirstCheck(id, "suspended");
   suspendFailureAttention();
 }
 
@@ -526,8 +548,8 @@ export function startWatchTask(
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
   for (const line of sandboxNotices) appendLine(meta.logPath, `--- ${line} ---`);
   writeMeta(meta);
-  let resolveFirst!: (check: FirstWatchCheck | undefined) => void;
-  const firstCheck = new Promise<FirstWatchCheck | undefined>((resolve) => { resolveFirst = resolve; });
+  let resolveFirst!: (check: FirstWatchCheck | "suspended" | undefined) => void;
+  const firstCheck = new Promise<FirstWatchCheck | "suspended" | undefined>((resolve) => { resolveFirst = resolve; });
   firstCheckWaiters.set(id, { promise: firstCheck, resolve: resolveFirst });
   scheduleWatch(pi, id, 0, getActiveSession, remoteTask
     ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
@@ -949,8 +971,11 @@ async function pollWatch(
  * is probably broken: it prints an error and then reports "still pending" forever (the real
  * incident was a gcloud --format error followed by `exit 0`). After `blindChecks` such checks
  * in a row, record one actionable incident; the existing attention path wakes the parent once.
- * The watch keeps running. A later check with no stderr, or one matching a condition, recovers
- * it. A clean pending check (exit 0, no stderr) never counts.
+ * The watch keeps running. A later check with empty stderr, whatever its exit code (including a
+ * non-zero, SSH-transport-failed or condition-error check), or one matching a condition,
+ * recovers it; those failures are recorded as their own incidents. Any other check (non-zero
+ * with stderr) resets the count and leaves the incident open. A clean pending check (exit 0,
+ * no stderr) never counts.
  */
 function observeBlindCheck(meta: BackgroundTaskMeta, result: CommandResult, pollKey: unknown,
   check: { clean: boolean; matched: boolean }): void {
@@ -970,7 +995,7 @@ function observeBlindCheck(meta: BackgroundTaskMeta, result: CommandResult, poll
   // The summary is capped in compact rows; the stderr line rides as evidence, which rows show whole.
   recordFailure(meta, BLIND_OPERATION,
     `Blind watch check: ${streak} checks in a row exited 0 with stderr and matched no condition; the check may be broken. The watch keeps running.`,
-    pollKey, { category: "blind-check", at: result.endedAt, evidence: `latest stderr: ${clipped}` });
+    pollKey, { category: "blind-check", at: result.endedAt, evidence: `latest stderr: ${clipped} · ${BLIND_CHECK_HINT}` });
 }
 
 function finalize(

@@ -154,18 +154,26 @@ with `success_when: {type: "stdout_contains", value: "TERMINAL_SUCCESS"}` and
 `failure_when: {type: "stdout_contains", value: "TERMINAL_FAILURE"}`.
 
 `bg_task_watch` (and `bg_task` with `action: "watch"`) waits up to 15 seconds
-for the first check and puts its exit code, a few lines of stdout and a few
-lines of stderr in the tool result, so a broken check is visible at launch. If
-the first check is still running after 15 seconds, the result says so and the
-watch continues.
+for the first check and puts its exit code, the newest few lines of stderr and
+of stdout in the tool result, so a broken check is visible at launch. When the
+result is short on room, stdout is cut first. If the first check is still
+running after 15 seconds, or you press Esc during the wait, the result says so
+at once and the watch continues.
 
 A running watch also guards against a blind check. When 3 checks in a row exit
 0, write to stderr, and match neither `success_when` nor `failure_when`, the
 watch records one incident that needs action, with the latest stderr line, and
-wakes the parent session once. The watch keeps running. A later check with no
-stderr, or one that matches a condition, recovers the incident. A clean pending
-check (exit 0, no stderr) never counts. Set `blind_checks` to change the count,
-or `blind_checks: 0` to turn the rule off.
+wakes the parent session once. The watch keeps running. A later check with
+empty stderr recovers the incident whatever its exit code (a non-zero or
+failed check is then recorded as its own incident), and so does a check that
+matches a condition. A non-zero check that writes stderr restarts the count but
+leaves the incident open. A clean pending check (exit 0, no stderr) never
+counts.
+
+Some tools write to stderr on success (`gcloud … list` prints "Listed 0
+items.", and kubectl and npm print warnings), which can raise a false alarm.
+If the stderr is expected, redirect it (`2>/dev/null`) or set
+`blind_checks: 0`. Set `blind_checks` to another number to change the count.
 
 ## Install
 
