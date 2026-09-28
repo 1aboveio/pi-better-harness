@@ -26,13 +26,12 @@ Network access                    -                On
 
   Subagents · Tools
     Guarded (follows the file rules)
-    [x] apply_patch  harness adapter
+    [x] apply_patch                  harness adapter
     Trusted (runs outside the file rules)
-    [x] web_fetch    @juicesharp/rpiv-web-tools · needs Network On
-    [x] web_search   @juicesharp/rpiv-web-tools · needs Network On
-    [ ] <other installed tool>  <its package>
+    [x] ▸ @juicesharp/rpiv-web-tools 2 of 2 on · needs Network On
+    [ ] <other installed tool>       <its package>
 
-↑↓ Select row   ←→ Select column   Space Change
+↑↓ Select row   ←→ Select column or fold a group   Space Change
 Save as defaults
 ```
 
@@ -43,8 +42,10 @@ Save as defaults
   patches; deletes and moves follow the removal rules, and a patch is checked in
   full before any file changes.
 - **Trusted** tools are the other tools your Pi has loaded, listed with their
-  package. A ticked one is loaded into the subagent and runs in its Pi process,
-  **outside the file rules**. Ticking one needs a second Space. It is admitted
+  package. A package with several tools is one group row: Space ticks or
+  unticks all of them, → expands it to pick single tools, ← collapses it. A
+  ticked tool is loaded into the subagent and runs in its Pi process,
+  **outside the file rules**. It is admitted
   only from the package you ticked. Known network tool names are refused while
   Network access is Off: `web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name. That is a name list, not a network sandbox.
 
@@ -110,9 +111,9 @@ repository's `.git/hooks` or `.git/config` (`core.hooksPath`, `core.fsmonitor`,
 `~/.gitconfig`, `~/.config/git`, and `~/.git-templates` themselves stay protected. Add your own paths to the deny list with `/sandbox deny add <path>`. Under
 Write, those paths are also protected from removal and renaming.
 
-A looser value (a higher level, a capability switched on, or a sandbox switched
-off) takes effect only on a second Space, and saving looser defaults needs a
-second Enter. Each prompt lists what would loosen. No model
+Space applies a change at once. A looser value (a higher level, a capability or
+trusted tool switched on, or a sandbox switched off) is named on the page, and
+saving looser defaults needs a second Enter that lists what would loosen. No model
 tool can change these settings. Other rows toggle Off/On. Detail cells under an
 Off sandbox display a dimmed `-` and cannot be changed; their values return when
 the sandbox is enabled again.

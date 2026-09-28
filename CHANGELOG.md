@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- pi-better-sandbox: `/sandbox` → Subagents · Tools folds a package's tools into one group row. Space on it ticks or unticks the whole package (a partly ticked group, shown `[-]`, ticks the rest); → expands it to pick single tools and ← collapses it. Space now applies every change on the page at once, and names what a looser change loosened; saving looser defaults still needs a second Enter.
+
 ## [pi-better-harness@0.11.0] - 2026-09-28
 
 ### Changed
