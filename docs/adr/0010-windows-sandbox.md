@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. The pipe-independent core has landed (see [Landed so far](#landed-so-far)); the launcher and everything that would run a confined task on Windows are paused. One problem is open and needs a human decision: child processes with piped stdio (see [Open problem](#open-problem-child-processes-with-pipes)). Until it is resolved, win32 keeps failing closed exactly as before. Issue #344. Extends [ADR 0008](0008-write-without-delete.md), whose "Windows" paragraph this replaces once accepted.
+Superseded by [ADR 0011](0011-windows-sandbox-wsl.md), which runs confined work in WSL 2 under the Linux Bubblewrap backend. The native path below is shelved on its [open problem](#open-problem-child-processes-with-pipes): child processes with piped stdio fail under the restricted token. It is kept as the record of the design and its spike. The inert plan compiler it produced (`packages/sandbox-core/windows-plan.ts`) is recommended for deletion; see ADR 0011, section 8. Issue #344.
 
 ## Problem
 
@@ -186,7 +186,7 @@ The launcher's own pipe to the parent works, because the task inherits the handl
 - **PowerShell with `Add-Type` C#.** It costs 0.5 to 2 s per launch and is blocked under Constrained Language Mode. The spike also hit Windows PowerShell failing to load its own modules when started from `pwsh`.
 - **Reusing landstrip directly.** Both its Windows modes grant `DELETE` together with write, and it is LGPL.
 
-## Implementation plan (after the open problem is resolved)
+## Implementation plan (abandoned; see ADR 0011)
 
 1. **Plan compiler in `sandbox-core`** — done (`windows-plan.ts`, `windows-plan.test.ts`): pure, runs on every OS; win32 paths (case-insensitive containment, drive/share roots, `%LOCALAPPDATA%\Temp`); the Windows list additions; compiles a policy into rule SIDs, ACEs and the restricting-SID set, and leaves out grants inside denied trees. Still to add here when the backend is wired: the `windows-restricted-token` backend id, worktree discovery reuse, and folding the compiler into `index.ts` so consumers vendor it.
 2. **ACL applier** (Windows only): idempotent ensure-entry with propagation, the rule state file, the automatic first walk with progress, repair and remove. Registry rules per the answer to the open problem.
