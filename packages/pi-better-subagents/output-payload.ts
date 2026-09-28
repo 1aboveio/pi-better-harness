@@ -74,7 +74,6 @@ export interface PayloadRequest {
     mode?: unknown;
     all?: unknown;
     lines?: unknown;
-    tail_lines?: unknown;
     limit?: unknown;
     /** Explicit opt-in facts: `cost` (token/cost spend) and/or `tools` (tool-call count). */
     include?: unknown;
@@ -409,12 +408,12 @@ function answerReserve(maxBytes: number, cursor: string | undefined): number {
 }
 
 function outputLineCap(request: PayloadRequest): number {
-    return positiveInt(request.lines) ?? positiveInt(request.tail_lines) ?? OUTPUT_PAGE_DEFAULTS.logLines;
+    return positiveInt(request.lines) ?? OUTPUT_PAGE_DEFAULTS.logLines;
 }
 
 /** Answer-page line cap for subagent_result: only an explicit `lines` request caps it. */
 function answerLineCap(request: PayloadRequest): number | undefined {
-    return positiveInt(request.lines) ?? positiveInt(request.tail_lines);
+    return positiveInt(request.lines);
 }
 
 /**

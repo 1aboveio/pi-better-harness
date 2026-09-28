@@ -60,7 +60,8 @@ process.env.TMPDIR = HERMETIC_TMPDIR;
 
 const { default: betterSubagents, setIdentityProbeForTests, isHealthTickerActive } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
-const { readMeta, writeMeta, nextRunId, runDir, baseDir, recordTaskRuntimeProvenance, removeRunDirectory, taskRuntimeProvenancePath } = await import("../registry.ts");
+const { readMeta, writeMeta, nextRunId, runDir, baseDir, recordTaskRuntimeProvenance, removeRunDirectory, taskRuntimeProvenancePath,
+    discardFailedLaunch, sessionsDir, taskWorkspaceDir } = await import("../registry.ts");
 const { realProcessProbe, OLD_METADATA_LOST_CONFIRM_TICKS } = await import("../health.ts");
 const { killProcessTree } = await import("../spawn.ts");
 const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
@@ -419,6 +420,59 @@ describe("#325 failed launches", () => {
         removeRunDirectory(id);
         assert.equal(existsSync(runDir(id)), false);
         assert.equal(existsSync(taskRuntimeProvenancePath(id)), false);
+    });
+});
+
+describe("#332 navigator rows lead with failure text only when something needs action", () => {
+    const providerRows = () => globalThis[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents").listRows(Date.now());
+    it("history-only failures keep the model/tool/tokens columns; an actionable incident still leads the row", async () => {
+        const h = makeHarness();
+        try {
+            const { id, pid } = await spawnRun(h, { model: "openai/gpt-test" });
+            const log = join(runDir(id), "output.log");
+            const fail = (callId) => [
+                { type: "tool_execution_start", toolCallId: callId, toolName: "bash", args: { command: "npm test" } },
+                { type: "tool_execution_end", toolCallId: callId, toolName: "bash", isError: true, result: { content: [{ type: "text", text: "1 failing" }] } },
+            ];
+            appendFileSync(log, fail("once").map((e) => JSON.stringify(e)).join("\n") + "\n");
+            let row = providerRows().find((x) => x.id === id);
+            assert.ok(row, "the running run is listed");
+            assert.doesNotMatch(row.primary, /No failures need action|unclassified|history/, "a quiet history line never replaces the columns");
+            assert.match(row.primary, /gpt-test/, "the row shows its normal model column");
+            assert.equal(row.secondary, undefined);
+            assert.ok(!row.facts?.some((fact) => /No failures need action/.test(fact)));
+            const detail = renderRegisteredWorkDetail("subagents", id, 120).detail;
+            assert.doesNotMatch(detail.subtitle ?? "", /No failures need action/, "nor the detail subtitle");
+            // Two more failures of the same command: repeated, so it needs action and leads the row.
+            appendFileSync(log, [...fail("twice"), ...fail("thrice")].map((e) => JSON.stringify(e)).join("\n") + "\n");
+            row = providerRows().find((x) => x.id === id);
+            assert.match(row.primary, /Action required/);
+            assert.match(row.secondary ?? "", /gpt-test/);
+            await reapRun({ id, pid });
+        } finally { h.shutdown(); }
+    });
+});
+
+describe("#332 failed sandboxed launches", () => {
+    it("remove the run's own session directory and disposable clone workspace, never shared or caller-chosen ones", () => {
+        const id = nextRunId();
+        const sessionDir = join(sessionsDir(), id);
+        const clone = taskWorkspaceDir(id);
+        const scratch = mkdtempSync(join(tmpdir(), "pi-task-scratch-"));
+        const callerDir = mkdtempSync(join(tmpdir(), "caller-sandbox-dir-"));
+        for (const dir of [runDir(id), sessionDir, join(clone, ".git")]) mkdirSync(dir, { recursive: true });
+        writeFileSync(join(clone, "README.md"), "clone");
+        recordTaskRuntimeProvenance(id);
+        discardFailedLaunch(id, { sessionDir, workspaceDir: clone, scratch });
+        for (const path of [runDir(id), taskRuntimeProvenancePath(id), sessionDir, clone, scratch]) assert.equal(existsSync(path), false, path);
+        // A non-sandboxed launch shares the sessions directory, and a sandbox_dir belongs to the caller.
+        const other = nextRunId();
+        mkdirSync(runDir(other), { recursive: true });
+        discardFailedLaunch(other, { sessionDir: sessionsDir(), workspaceDir: callerDir });
+        assert.equal(existsSync(runDir(other)), false);
+        assert.equal(existsSync(sessionsDir()), true);
+        assert.equal(existsSync(callerDir), true);
+        rmSync(callerDir, { recursive: true, force: true });
     });
 });
 

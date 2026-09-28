@@ -819,29 +819,22 @@ export interface OutputControls {
   maxBytes?: unknown;
   /** Raw requested line count (canonical `lines`, else deprecated `tail_lines`). */
   lines?: unknown;
-  /** Deprecated alias names the caller used (whether or not the canonical name won). */
-  deprecated: string[];
 }
 
 /**
  * Resolve output-control parameters. Both spellings work; when both are given
- * the canonical name wins. Values are returned unvalidated so each surface
- * keeps its own defaults and hard caps.
+ * the canonical name wins. An explicit `null` is "not given", so a null
+ * canonical value never hides an alias value (#332). Values are returned
+ * unvalidated so each surface keeps its own defaults and hard caps.
  */
 export function readOutputControls(params: unknown): OutputControls {
   const p = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
-  const deprecated: string[] = [];
-  const pick = (canonical: keyof typeof OUTPUT_CONTROL_ALIASES): unknown => {
-    const alias = OUTPUT_CONTROL_ALIASES[canonical];
-    if (p[alias] !== undefined) deprecated.push(alias);
-    return p[canonical] !== undefined ? p[canonical] : p[alias];
-  };
+  const pick = (canonical: keyof typeof OUTPUT_CONTROL_ALIASES): unknown => p[canonical] ?? p[OUTPUT_CONTROL_ALIASES[canonical]] ?? undefined;
   const maxBytes = pick("max_bytes");
   const lines = pick("lines");
   return {
     ...(maxBytes !== undefined ? { maxBytes } : {}),
     ...(lines !== undefined ? { lines } : {}),
-    deprecated,
   };
 }
 
@@ -851,7 +844,8 @@ export type OutputInclude = (typeof OUTPUT_INCLUDE_VALUES)[number];
 
 /** Parse an `include` request into known values and unknown ones (both deduplicated). */
 export function readOutputInclude(value: unknown): { include: Set<OutputInclude>; unknown: string[] } {
-  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  // Any other non-null value (a number, boolean, or object) is one unknown entry, never silently nothing (#332).
+  const raw = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : value == null ? [] : [value];
   const include = new Set<OutputInclude>();
   const unknown: string[] = [];
   for (const entry of raw) {

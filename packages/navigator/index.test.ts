@@ -1551,4 +1551,320 @@ describe("shared background work navigator", () => {
     assert.equal(rows.join("").replace(/\s+/g, ""), source.replace(/\s+/g, ""));
     assert.match(rows.join(""), /shared-navigator\.ts/);
   });
+
+  it("keeps a closed detail's keyboard out of a hidden list: opens the next row's detail, then hands focus back", () => {
+    const live = new Set(["alpha", "beta", "gamma"]);
+    const closed: string[] = [];
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      parentRow: () => ({
+        providerId: "subagents", id: "main", name: "main", status: "running", statusTone: "running",
+        kind: "main agent", elapsed: "1m", primary: "foreground", sortStartedAt: 0,
+      }),
+      listRows: () => ["alpha", "beta", "gamma"].filter((id) => live.has(id)).map((id, i) => ({
+        providerId: "subagents", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "subagent", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300 - i,
+      })),
+      detail: (id) => ({
+        providerId: "subagents", id, title: `${id} detail`, status: "running", statusTone: "running",
+        metadata: [], evidence: { label: "output", text: `${id} content` },
+      }),
+      close: (id) => {
+        closed.push(id);
+        live.delete(id);
+        return { action: "stopped", providerId: "subagents", id, status: "cancelled" };
+      },
+    });
+    const widgets: unknown[] = [];
+    let component: any;
+    let overlayCloses = 0;
+    const typed: string[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => { overlayCloses += 1; });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput(data: string) { typed.push(data); } }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("down");
+      editor.handleInput("down");
+      assert.match(component.render(100).join("\n"), /beta content/);
+
+      // Closing the middle row opens the next row below it.
+      component.handleInput("x");
+      component.handleInput("x");
+      assert.deepEqual(closed, ["beta"]);
+      let screen = component.render(100).join("\n");
+      assert.match(screen, /gamma content/, "the next row's detail replaces the closed one");
+      assert.doesNotMatch(screen, /Work · |↑↓ select/, "no list-mode overlay remains after a confirmed close");
+      assert.match(renderWidget(widgets.at(-1), 100, ui.theme).join("\n"), /^› ●\s+gamma/m);
+      assert.equal(overlayCloses, 0);
+
+      // Closing the last row falls back to the previous one.
+      component.handleInput("x");
+      component.handleInput("x");
+      assert.deepEqual(closed, ["beta", "gamma"]);
+      screen = component.render(100).join("\n");
+      assert.match(screen, /alpha content/, "with nothing below, the previous row's detail opens");
+      assert.doesNotMatch(screen, /Work · |↑↓ select/);
+
+      // Closing the only remaining row closes the overlay and returns keys to the editor.
+      component.handleInput("x");
+      component.handleInput("x");
+      assert.deepEqual(closed, ["beta", "gamma", "alpha"]);
+      assert.equal(overlayCloses, 1, "no closable row remains, so the overlay closes");
+      assert.doesNotMatch(renderWidget(widgets.at(-1), 100, ui.theme).join("\n"), /^› /m, "the rail is unfocused");
+      for (const key of ["h", "x", "i"]) editor.handleInput(key);
+      assert.deepEqual(typed, ["h", "x", "i"], "typed text reaches the editor after the close");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("keeps expanded output within the detail viewport and counts only the rows it shows", () => {
+    const output = Array.from({ length: 40 }, (_, i) => `out-row-${String(i + 1).padStart(2, "0")}`).join("\n");
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      detail: (id) => ({
+        providerId: "subagents", id, title: "expanded output", status: "running", statusTone: "running",
+        metadata: [{ label: "provider", value: "Subagents" }],
+        evidence: { label: "output", text: output },
+      }),
+    });
+    let component: any;
+    let customOptions: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any, options: any) {
+        customOptions = options;
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {}, render: () => ["─".repeat(72), "", "─".repeat(72)] }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+      component.handleInput("enter");
+      for (const height of [20, 24, 60]) {
+        assert.equal(customOptions.overlayOptions().visible(72, height), true);
+        const lines: string[] = component.render(72);
+        const rendered = lines.join("\n");
+        assert.equal(lines.length, height, `${height}-row terminal`);
+        const header = rendered.match(/output · showing (\d+)\/40 rows/);
+        assert.ok(header, rendered);
+        const rows = [...rendered.matchAll(/out-row-(\d{2})/g)].map((match) => Number(match[1]));
+        assert.equal(rows.length, Number(header[1]), `${height}-row terminal: the header counts only visible rows`);
+        assert.deepEqual(rows, Array.from({ length: rows.length }, (_, i) => i + 1), "rows start from the head");
+        assert.ok(rows.length <= 25);
+      }
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("never renders more lines than a terminal shorter than the rail and editor", () => {
+    const unregister = registerBackgroundWorkProvider(provider("subagents", "Subagents", 10, 100, () => undefined));
+    let component: any;
+    let customOptions: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any, options: any) {
+        customOptions = options;
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {}, render: () => ["─".repeat(60), "", "─".repeat(60)] }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+      for (let height = 3; height <= 12; height += 1) {
+        customOptions.overlayOptions().visible(60, height);
+        const lines: string[] = component.render(60);
+        assert.ok(lines.length <= height, `${height}-row terminal rendered ${lines.length} lines`);
+        assert.match(lines.at(-1) ?? "", /^─+$/, `${height}-row terminal keeps the input frame at the bottom`);
+      }
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("reuses the mounted detail overlay when the main list moves while it is unfocused", () => {
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      parentRow: () => ({
+        providerId: "subagents", id: "main", name: "main", status: "running", statusTone: "running",
+        kind: "main agent", elapsed: "1m", primary: "foreground", sortStartedAt: 0,
+      }),
+      listRows: () => ["alpha", "beta", "gamma"].map((id, i) => ({
+        providerId: "subagents", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "subagent", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300 - i,
+      })),
+      detail: (id) => ({
+        providerId: "subagents", id, title: `${id} detail`, status: "running", statusTone: "running",
+        metadata: [], evidence: { label: "output", text: `${id} content` },
+      }),
+    });
+    const mounted: any[] = [];
+    let focusCalls = 0;
+    const unfocusTargets: unknown[] = [];
+    const typed: string[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any, options: any) {
+        let component: any;
+        component = factory({ requestRender() {} }, this.theme, {}, () => {
+          mounted.splice(mounted.indexOf(component), 1);
+        });
+        mounted.push(component);
+        options?.onHandle?.({
+          focus() { focusCalls += 1; },
+          unfocus(unfocusOptions?: { target: unknown }) { unfocusTargets.push(unfocusOptions?.target); },
+        });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput(data: string) { typed.push(data); } }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("down");
+      assert.equal(mounted.length, 1);
+      assert.match(mounted[0].render(100).join("\n"), /alpha content/);
+
+      // Another extension re-installed the editor: Pi mounts a new instance with focus
+      // while the overlay stays mounted.
+      const swapped = ui.factory({}, {}, {});
+      assert.notEqual(swapped, editor);
+      swapped.handleInput("down");
+      swapped.handleInput("down");
+      assert.equal(mounted.length, 1, "exactly one overlay stays mounted");
+      assert.equal(focusCalls, 2, "the mounted overlay takes focus back");
+      const screen = mounted[0].render(100).join("\n");
+      assert.match(screen, /gamma content/);
+      assert.equal(screen.match(/━━ \w+ detail/g)?.length, 1, `no stale detail header remains:\n${screen}`);
+
+      mounted[0].handleInput("escape");
+      assert.equal(mounted.length, 0, "Esc closes the navigator");
+      assert.deepEqual(unfocusTargets, [swapped], "focus goes to the live editor, not the unmounted one Pi remembered");
+      swapped.handleInput("h");
+      assert.deepEqual(typed, ["h"], "keys reach the editor again");
+
+      // A stale overlay also goes away when the editor-side main list is left with Esc.
+      swapped.handleInput("left");
+      swapped.handleInput("down");
+      assert.equal(mounted.length, 1);
+      swapped.handleInput("escape");
+      assert.equal(mounted.length, 0);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("lets Esc close a mounted overlay that lost focus after every row disappeared", () => {
+    let rows = ["alpha"];
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      visibleCount: () => rows.length,
+      listRows: () => rows.map((id) => ({
+        providerId: "subagents", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "subagent", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300,
+      })),
+    });
+    let mounted = 0;
+    const typed: string[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        mounted += 1;
+        factory({ requestRender() {} }, this.theme, {}, () => { mounted -= 1; });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput(data: string) { typed.push(data); } }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      editor.handleInput("enter");
+      assert.equal(mounted, 1);
+      rows = [];
+      editor.handleInput("escape");
+      assert.equal(mounted, 0, "Esc closes the stale overlay even with no rows left");
+      editor.handleInput("escape");
+      assert.deepEqual(typed, ["escape"], "with no overlay, Esc goes to the editor as before");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
 });

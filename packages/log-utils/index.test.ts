@@ -761,10 +761,13 @@ describe("pageRows", () => {
 
 describe("shared output controls and scope keys (#321/#323)", () => {
   it("resolves canonical output-control names over deprecated aliases", () => {
-    assert.deepEqual(readOutputControls({ max_bytes: 512, lines: 3 }), { maxBytes: 512, lines: 3, deprecated: [] });
-    assert.deepEqual(readOutputControls({ maxBytes: 256, tail_lines: 4 }), { maxBytes: 256, lines: 4, deprecated: ["maxBytes", "tail_lines"] });
-    assert.deepEqual(readOutputControls({ max_bytes: 512, maxBytes: 256, lines: 0, tail_lines: 9 }), { maxBytes: 512, lines: 0, deprecated: ["maxBytes", "tail_lines"] });
-    assert.deepEqual(readOutputControls(undefined), { deprecated: [] });
+    assert.deepEqual(readOutputControls({ max_bytes: 512, lines: 3 }), { maxBytes: 512, lines: 3 });
+    assert.deepEqual(readOutputControls({ maxBytes: 256, tail_lines: 4 }), { maxBytes: 256, lines: 4 });
+    assert.deepEqual(readOutputControls({ max_bytes: 512, maxBytes: 256, lines: 0, tail_lines: 9 }), { maxBytes: 512, lines: 0 });
+    assert.deepEqual(readOutputControls(undefined), {});
+    // #332: an explicit null canonical value is "not given" and never hides a numeric alias.
+    assert.deepEqual(readOutputControls({ max_bytes: null, maxBytes: 300, lines: null, tail_lines: 7 }), { maxBytes: 300, lines: 7 });
+    assert.deepEqual(readOutputControls({ max_bytes: null, maxBytes: null }), {});
   });
 
   it("parses include opt-ins, deduplicating known values and naming unknown ones", () => {
@@ -773,6 +776,10 @@ describe("shared output controls and scope keys (#321/#323)", () => {
     assert.deepEqual(parsed.unknown, ["bogus"]);
     assert.deepEqual([...readOutputInclude("cost, tools").include].sort(), ["cost", "tools"]);
     assert.equal(readOutputInclude(undefined).include.size, 0);
+    // #332: a non-string, non-array value is an unknown entry that gets a note, not silently nothing.
+    assert.deepEqual(readOutputInclude(42).unknown, ["42"]);
+    assert.deepEqual(readOutputInclude(true).unknown, ["true"]);
+    assert.deepEqual(readOutputInclude(null), { include: new Set(), unknown: [] });
   });
 
   it("keys cursor scopes by session, never letting an unavailable identity match a readable one", () => {

@@ -113,7 +113,7 @@ test("truncation is incomplete without erasing prior incident", (t) => {
 
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { activeFailures as active315, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, requiresAction } from "../shared-failure-observations.ts";
+import { activeFailures as active315, actionableFailures, failureCounts, failureHistory, formatPendingAttention, formatTerminalFailureFacts, requiresAction } from "../shared-failure-observations.ts";
 import { runFailureFacts } from "../failures.ts";
 
 /** A run launched on the trusted task runtime: parent-written metadata is what enables structured intent. */
@@ -351,9 +351,9 @@ test("explicit-null intent fields do not change exact identity: null-only retrie
 
 test("rejected-intent is filed only from the child's own pre-run refusal, never re-derived from arguments", (t) => {
     const f = confinedFixture(t);
-    // Pi's schema check refuses expectedExitCodes [0] before execute; nothing ran.
-    f.append(bashStart("schema", { command: "npm test", expectedExitCodes: [0] }),
-        bashFail("schema", "Validation failed for tool \"bash\":\n  - expectedExitCodes.0: must be >= 1\n\nReceived arguments:\n{}"));
+    // Pi's schema check refuses expectedExitCodes [256] before execute; nothing ran.
+    f.append(bashStart("schema", { command: "npm test", expectedExitCodes: [256] }),
+        bashFail("schema", "Validation failed for tool \"bash\":\n  - expectedExitCodes.0: must be <= 255\n\nReceived arguments:\n{}"));
     // The intent bash's own refusal of a duplicate code the schema cannot express.
     f.append(bashStart("dup", { command: "npm test", expectedExitCodes: [1, 1] }),
         bashFail("dup", "Invalid command intent: expectedExitCodes must be 1-16 distinct integers from 1 to 255. The command was not run."));
@@ -452,4 +452,124 @@ test("#325 permanently unreadable metadata: the wait is bounded and real failure
     Date.now.mock.mockImplementation(() => start + TRUST_WAIT_MS);
     state = collectRunFailures(running.id, "/repo");
     assert.deepEqual(active315(state).map((x) => x.id).sort(), [active315(state).find((x) => x.category === "observation-incomplete").id, "tool:t1"].sort());
+});
+
+// ---- #332 follow-ups -------------------------------------------------------------------------
+
+test("#332 only Pi's exact schema-refusal shape is a rejected intent; a command that ran and printed the prefix is a failure", (t) => {
+    const f = confinedFixture(t);
+    // The intent is one the parent predicts Pi refuses, but the end row is not Pi's refusal: the header
+    // is followed by command output, not by `  - path: message` lines and the received arguments.
+    f.append(bashStart("ran", { command: "cat old-pi.log; exit 1", expectedExitCodes: ["x"] }),
+        bashFail("ran", "Validation failed for tool \"read\": path missing\n\nCommand exited with code 1"));
+    f.append(bashStart("ran-bash", { command: "cat old-pi.log; exit 1", expectedExitCodes: ["y"] }),
+        bashFail("ran-bash", "Validation failed for tool \"bash\": see above\n\nCommand exited with code 1"));
+    f.append(bashStart("refused", { command: "npm test", expectedExitCodes: ["z"] }),
+        bashFail("refused", "Validation failed for tool \"bash\":\n  - expectedExitCodes: must match a schema in anyOf\n  - expectedExitCodes.0: must be integer\n\nReceived arguments:\n{\n  \"expectedExitCodes\": [\"z\"]\n}"));
+    const byId = Object.fromEntries(active315(collectRunFailures(f.id, "/repo")).map((x) => [x.id, x]));
+    assert.equal(byId["tool:ran"].category, "tool");
+    assert.equal(byId["tool:ran-bash"].category, "tool");
+    assert.equal(byId["tool:refused"].category, "rejected-intent");
+});
+
+test("#332 an intent Pi coerced to valid (expectedExitCodes [\"1\"] -> [1]) records its declared exit as expected", (t) => {
+    const f = confinedFixture(t);
+    // The log keeps the raw arguments; the child executed with Pi's coerced [1] and declared the exit.
+    f.append(bashStart("probe", { command: "rg missing src", expectedExitCodes: ["1"] }),
+        bashOk("probe", "\n\nCommand exited with code 1\n(Exit code 1 was declared expected.)", { exitCode: 1, expectedExit: true }));
+    const state = collectRunFailures(f.id, "/repo");
+    assert.deepEqual(active315(state).map((x) => [x.id, x.status]), [["tool:probe", "expected"]]);
+    assert.equal(failureCounts(state).expected, 1);
+});
+
+test("#332 a declared exit code 0 is dropped: [0, 1] still declares 1, and [0] alone declares nothing", (t) => {
+    const f = confinedFixture(t);
+    f.append(bashStart("probe", { command: "rg missing src", expectedExitCodes: [0, 1] }),
+        bashOk("probe", "\n\nCommand exited with code 1\n(Exit code 1 was declared expected.)", { exitCode: 1, expectedExit: true }),
+        bashStart("plain", { command: "npm test", expectedExitCodes: [0] }), bashFail("plain", "1 failing\n\nCommand exited with code 1"));
+    const byId = Object.fromEntries(active315(collectRunFailures(f.id, "/repo")).map((x) => [x.id, x]));
+    assert.equal(byId["tool:probe"].status, "expected");
+    assert.equal(byId["tool:plain"].category, "tool", "a zero-only list is not a refused intent; the command ran and failed");
+    assert.equal(byId["tool:plain"].status, "unresolved");
+});
+
+test("#332 unconfined runs: an explicit-null intent field does not change exact identity", (t) => {
+    const f = fixture(t);
+    f.append(bashStart("n1", { command: "npm test", expectedExitCodes: null }), bashFail("n1", "1 failing"),
+        bashStart("n2", { command: "npm test" }), bashOk("n2"));
+    assert.equal(active315(collectRunFailures(f.id, "/repo")).length, 0, "the exact retry recovers the null-carrying failure");
+});
+
+/** A confined run whose metadata is unreadable at a terminal (exact-rule) scan, then readable again for a fresh scan. */
+function exactRuleThenTrusted(t, rows) {
+    const f = confinedFixture(t);
+    const meta = join(runDir(f.id), "meta.json");
+    const good = readFileSync(meta, "utf8");
+    writeFileSync(meta, "{corrupt");
+    f.append(...rows);
+    collectRunFailures(f.id, "/repo", true);
+    writeFileSync(meta, good);
+    resetFailureScanCursor(f.id);
+    const gap = () => Object.values(readRunFailures(f.id).observations).find((x) => x.operation === "run-metadata");
+    return { f, gap };
+}
+
+test("#332 a trusted rescan keeps the metadata gap open only while a leftover it cannot re-key is unresolved", (t) => {
+    const { f, gap } = exactRuleThenTrusted(t, [bashStart("t1", { command: "npm test", operationId: "t" }), bashFail("t1", "1 failing"),
+        bashStart("t2", { command: "npm test -- scoped", operationId: "t" }), bashOk("t2")]);
+    assert.equal(gap()?.status, "unresolved");
+    let state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "unresolved", "t1's event id is consumed; the declared retry cannot recover it");
+    assert.equal(gap()?.status, "unresolved", "so the gap stays open instead of implying the view is complete");
+    // The child classifies the leftover; the next scan of the same cursor closes the gap.
+    f.append(...dispose("d1", { disposition: "expected", targets: ["tool:t1"], reason: "known flaky suite" }));
+    state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "expected");
+    assert.equal(gap()?.status, "resolved", "re-checked on every scan, not only when the rescan began");
+    assert.equal(actionableFailures(state).length, 0);
+});
+
+test("#332 a gap kept open by a leftover closes once an exact retry recovers it", (t) => {
+    const probe = { command: "rg needle src", expectedExitCodes: [1] };
+    const { f, gap } = exactRuleThenTrusted(t, [bashStart("t1", probe), bashFail("t1", "rg: src: No such file\n\nCommand exited with code 2")]);
+    collectRunFailures(f.id, "/repo");
+    assert.equal(gap()?.status, "unresolved", "held while the declared attempt's failure is unresolved");
+    f.append(bashStart("t2", probe), bashOk("t2", "src/a.ts: needle"));
+    const state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1"), undefined, "the exact retry recovered t1");
+    assert.equal(gap()?.status, "resolved");
+    assert.equal(actionableFailures(state).length, 0, "no stuck observation gap");
+});
+
+test("#332 a plain failure with no intent never keeps the gap open: trust reads it the same way", (t) => {
+    // The reviewer's repro: the exact retry recovers the plain failure, and nothing actionable remains.
+    const { f, gap } = exactRuleThenTrusted(t, [bashStart("t1", { command: "npm test" }), bashFail("t1", "1 failing")]);
+    let state = collectRunFailures(f.id, "/repo");
+    assert.equal(active315(state).find((x) => x.id === "tool:t1")?.status, "unresolved");
+    assert.equal(gap()?.status, "resolved");
+    f.append(bashStart("t2", { command: "npm test" }), bashOk("t2"));
+    state = collectRunFailures(f.id, "/repo");
+    assert.deepEqual(actionableFailures(state), []);
+});
+
+test("#332 exact identity uses the normalized intent: a [0] or [\"1\"] declaration and its plain retry are one operation", (t) => {
+    const f = fixture(t);
+    f.append(bashStart("z1", { command: "npm test", expectedExitCodes: [0] }), bashFail("z1", "1 failing"),
+        bashStart("z2", { command: "npm test" }), bashOk("z2"),
+        bashStart("c1", { command: "npm run lint", expectedExitCodes: ["1", 0] }), bashFail("c1", "lint error\n\nCommand exited with code 2"),
+        bashStart("c2", { command: "npm run lint", expectedExitCodes: [1] }), bashOk("c2"));
+    assert.deepEqual(active315(collectRunFailures(f.id, "/repo")), []);
+});
+
+test("#332 Pi's scalar null coercion runs the command: a 0/\"\"/false exit-code value is no intent, and a ran command never matches the schema refusal", (t) => {
+    const f = confinedFixture(t);
+    f.append(bashStart("s0", { command: "npm test", expectedExitCodes: 0 }), bashFail("s0", "1 failing\n\nCommand exited with code 1"),
+        bashStart("sq", { command: "npm test", operationId: "" }), bashFail("sq", "1 failing\n\nCommand exited with code 1"),
+        // Output that starts like Pi's refusal, with a JSON-looking block, and then the ran command's exit line.
+        bashStart("ran", { command: "cat pi.log; exit 1", expectedExitCodes: ["x"] }),
+        bashFail("ran", "Validation failed for tool \"bash\":\n  - x: y\n\nReceived arguments:\n{}\n\nCommand exited with code 1"));
+    const byId = Object.fromEntries(active315(collectRunFailures(f.id, "/repo")).map((x) => [x.id, x]));
+    assert.equal(byId["tool:s0"].category, "tool");
+    assert.equal(byId["tool:s0"].count, 2, "both ran as the same plain npm test");
+    assert.equal(byId["tool:ran"].category, "tool");
 });

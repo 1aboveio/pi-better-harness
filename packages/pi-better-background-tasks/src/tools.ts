@@ -71,7 +71,7 @@ const RemoteSchema = Type.Object({
 // TypeBox union, and a Null-first union reports a malformed array as "must be null".
 const IntentFields = {
   operation_id: Type.Optional(Type.Unsafe<string | null>({ anyOf: [{ type: "null" }, { type: "string" }], description: "Optional stable id (letters, digits, . _ : / -; up to 64) for one logical operation. Reuse it when you retry with a changed command, scope, or timeout: when a later task with the same operation_id succeeds, earlier failures of that operation in this session are recovered." })),
-  expected_exit_codes: Type.Optional(Type.Unsafe<number[] | null>({ anyOf: [{ type: "array", items: { type: "integer", minimum: 1, maximum: 255 }, minItems: 1, maxItems: 16 }, { type: "null" }], description: "Optional distinct non-zero exit codes that are intentional for this command (e.g. [1] for a no-match probe). Declared before launch; recorded as expected failures, not incidents needing action. Signals and timeouts are never expected." })),
+  expected_exit_codes: Type.Optional(Type.Unsafe<number[] | null>({ anyOf: [{ type: "array", items: { type: "integer", minimum: 0, maximum: 255 }, minItems: 1, maxItems: 16 }, { type: "null" }], description: "Optional distinct non-zero exit codes that are intentional for this command (e.g. [1] for a no-match probe). 0 is allowed and ignored: exit 0 is already success. Declared before launch; recorded as expected failures, not incidents needing action. Signals and timeouts are never expected." })),
 };
 
 const CommandFields = {

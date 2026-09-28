@@ -217,32 +217,22 @@ jobs:
           WORKSPACE: ${{ steps.package.outputs.workspace }}
         run: |
           set -euo pipefail
-          if npm view "${PACKAGE}@${VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+          # The registry's version document, not only `npm view`, whose cache can lag a
+          # publish by minutes: a rerun after a slow publish must skip, not republish.
+          if node scripts/npm-version-visible.mjs "$PACKAGE" "$VERSION"; then
             echo "Skipping ${PACKAGE}@${VERSION}; already published."
           else
             npm publish -w "$WORKSPACE" --registry=https://registry.npmjs.org/
           fi
 
       - name: Verify npm version
+        # Up to 10 minutes, backing off 5 s -> 60 s, checking the registry's version
+        # document first so a slow-but-successful publish still gets its tag and release.
+        timeout-minutes: 15
         env:
           PACKAGE: ${{ steps.package.outputs.name }}
           VERSION: ${{ steps.package.outputs.version }}
-        run: |
-          set -euo pipefail
-          for attempt in {1..12}; do
-            if npm view "${PACKAGE}@${VERSION}" version --registry=https://registry.npmjs.org/ >/tmp/npm-version.txt 2>/tmp/npm-version.err; then
-              actual="$(cat /tmp/npm-version.txt)"
-              if [ "$actual" = "$VERSION" ]; then
-                echo "$PACKAGE@$actual"
-                exit 0
-              fi
-            fi
-            echo "Waiting for ${PACKAGE}@${VERSION} to be visible on npm (attempt ${attempt}/12)."
-            sleep 10
-          done
-          cat /tmp/npm-version.err >&2 || true
-          echo "${PACKAGE}@${VERSION} did not become visible on npm." >&2
-          exit 1
+        run: node scripts/npm-version-visible.mjs "$PACKAGE" "$VERSION" --wait-seconds 600
 
       - name: Create GitHub release
         env:

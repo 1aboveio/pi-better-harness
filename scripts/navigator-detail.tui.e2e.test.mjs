@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -11,27 +11,49 @@ import { writeMeta as writeSubagentMeta } from "../packages/pi-better-subagents/
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const extensionRoot = resolve(process.env.PI_HARNESS_E2E_PACKAGE_ROOT ?? repoRoot);
 const piBin = join(repoRoot, "node_modules", ".bin", "pi");
-const session = `pi-navigator-e2e-${process.pid}`;
-const tmuxArgs = ["-L", session];
-const evidenceDir = resolve(process.env.PI_NAVIGATOR_EVIDENCE_DIR ?? join(tmpdir(), `${session}-evidence`));
+const goldenSession = `pi-navigator-e2e-${process.pid}`;
+const closeSession = `pi-navigator-close-e2e-${process.pid}`;
+const refocusSession = `pi-navigator-refocus-e2e-${process.pid}`;
+// Each test drives its own private tmux server; these point at the active one.
+let session = goldenSession;
+let tmuxArgs = ["-L", session];
+const evidenceDir = resolve(process.env.PI_NAVIGATOR_EVIDENCE_DIR ?? join(tmpdir(), `${goldenSession}-evidence`));
 const unicodeLog = `GOLDEN_LOG_BEGIN${"甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳".repeat(4)}GOLDEN_LOG_END`;
 const taskTitle = `background golden path ${"中文任务标题".repeat(8)}`;
 const fixtures = mkdtempSync(join(tmpdir(), "pi-navigator-e2e-"));
 const probePath = join(fixtures, "session-probe.mjs");
-const probeStatePath = join(fixtures, "session-state.json");
-const subagentId = `sa_navigator_e2e_${process.pid}`;
-const taskId = `bg_navigator_e2e_${process.pid}`;
+const defaultSubagentId = `sa_navigator_e2e_${process.pid}`;
+const defaultTaskId = `bg_navigator_e2e_${process.pid}`;
+const dummyWorkers = [];
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 const skip = hasTmux || process.env.CI || process.env.PI_NAVIGATOR_REQUIRE_TMUX
   ? false
   : "requires tmux for a real terminal session (test:golden requires it)";
 
 after(() => {
-  spawnSync("tmux", [...tmuxArgs, "kill-server"], { stdio: "ignore" });
-  rmSync(join(tmpdir(), "pi-better-subagents", "runs", subagentId), { recursive: true, force: true });
-  rmSync(join(tmpdir(), "pi-better-background-tasks", "tasks", taskId), { recursive: true, force: true });
+  for (const name of [goldenSession, closeSession, refocusSession]) spawnSync("tmux", ["-L", name, "kill-server"], { stdio: "ignore" });
+  for (const worker of dummyWorkers) {
+    try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
+  }
+  // The registries live under the private TMPDIR from scripts/isolate-registry.mjs,
+  // which removes it at exit. Never touch registries in any other TMPDIR (the tests
+  // refuse to seed without the preload, so there is nothing of ours there).
+  if (isPrivateRegistry()) {
+    rmSync(join(tmpdir(), "pi-better-subagents"), { recursive: true, force: true });
+    rmSync(join(tmpdir(), "pi-better-background-tasks"), { recursive: true, force: true });
+  }
   rmSync(fixtures, { recursive: true, force: true });
 });
+
+function isPrivateRegistry() {
+  const isolated = process.env.PI_SCRIPTS_TEST_ISOLATED_TMPDIR;
+  return Boolean(isolated) && tmpdir() === isolated;
+}
+
+function assertPrivateRegistry() {
+  assert.ok(isPrivateRegistry(),
+    "run with --import ./scripts/isolate-registry.mjs so the seeded runs stay out of the machine registry");
+}
 
 // @covers navigator.detail-overlay navigator.unicode-rendering
 // @level e2e
@@ -39,14 +61,12 @@ test("golden path: navigate both providers and read complete Unicode logs withou
   mkdirSync(evidenceDir, { recursive: true });
   t.diagnostic(`terminal evidence: ${evidenceDir}`);
   try {
+    assertPrivateRegistry();
     assert.ok(hasTmux, "navigator golden path requires tmux; skipping cannot satisfy this gate");
     assert.ok(existsSync(piBin), `workspace Pi binary is missing: ${piBin}`);
     assert.ok(existsSync(join(extensionRoot, "package.json")), `extension package is missing: ${extensionRoot}`);
 
-    writeFileSync(probePath, probeExtension(probeStatePath));
-    startPiSession();
-    const state = waitForJson(probeStatePath);
-    const piPid = Number(execFileSync("tmux", [...tmuxArgs, "display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8" }).trim());
+    const { state, piPid } = launchPi(goldenSession);
     seedNavigatorState({ cwd: state.cwd, sessionId: state.sessionId, piPid });
 
     sendKey("Left");
@@ -76,7 +96,7 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     // The 25-row cap includes the transcript's closing fence line, so rows 07-30 are the newest 24 content rows.
     assert.deepEqual(transcriptRows(expandedPage), rowRange(7, 30), "a 60-row terminal fits the whole 25-row cap");
     sendKey("l");
-    const shortPage = waitForScreen((screen) => screen.includes("transcript · latest 10 rows"));
+    const shortPage = waitForScreen((screen) => screen.includes("transcript · latest 10 rows") && hasSettledInputFrame(screen));
     assertSubagentMetadata(shortPage, "10-row subagent detail");
     assert.deepEqual(transcriptRows(shortPage), rowRange(22, 30), "l switches to the latest 10 rows");
     sendKey("l");
@@ -111,6 +131,122 @@ test("golden path: navigate both providers and read complete Unicode logs withou
   }
 });
 
+// @covers navigator.detail-overlay
+// @level e2e
+test("closing work from its detail opens the next row, then returns the keyboard to the editor", { skip }, () => {
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "navigator golden path requires tmux; skipping cannot satisfy this gate");
+  mkdirSync(evidenceDir, { recursive: true });
+  const { state, piPid } = launchPi(closeSession);
+  const origin = { cwd: state.cwd, sessionId: state.sessionId };
+  const now = Date.now();
+  const subagentWorker = startDummyWorker();
+  const taskWorker = startDummyWorker();
+  const closeSubagentId = `sa_navigator_close_${process.pid}`;
+  const closeTaskId = `bg_navigator_close_${process.pid}`;
+  const subagentDir = join(tmpdir(), "pi-better-subagents", "runs", closeSubagentId);
+  mkdirSync(subagentDir, { recursive: true });
+  writeFileSync(join(subagentDir, "output.log"), "");
+  writeSubagentMeta({
+    id: closeSubagentId, name: "subagent to close", status: "running",
+    pid: subagentWorker, pgid: subagentWorker, spawnPid: piPid, model: "openai/gpt-5.5", cwd: state.cwd,
+    promptPreview: "close me from the navigator", startedAt: now - 20_000, logPath: join(subagentDir, "output.log"),
+    sessionId: closeSubagentId, callbackOrigin: origin, callback: false,
+  });
+  const taskDir = join(tmpdir(), "pi-better-background-tasks", "tasks", closeTaskId);
+  mkdirSync(taskDir, { recursive: true });
+  writeFileSync(join(taskDir, "output.log"), "task output\n");
+  writeTaskMeta({
+    id: closeTaskId, name: "task to close", kind: "command_watch", status: "running", startedAt: now - 10_000,
+    logPath: join(taskDir, "output.log"), cwd: state.cwd, command: "sleep 300", shell: true,
+    pid: taskWorker, pgid: taskWorker, spawnPid: piPid, callbackOrigin: origin, callback: false,
+    intervalMs: 15_000, deadlineAt: now + 600_000,
+  });
+
+  const hiddenList = (screen) => /Work · \d|↑↓ select/.test(screen);
+  sendKey("Left");
+  waitForScreen((screen) => screen.includes("subagent to close") && screen.includes("task to close"));
+  sendKey("Down");
+  waitForScreen((screen) => screen.includes("provider Subagents") && hasSettledInputFrame(screen));
+  sendKey("x");
+  sendKey("x");
+  const next = waitForScreen((screen) => screen.includes("provider Background Tasks") && hasSettledInputFrame(screen));
+  assert.ok(!hiddenList(next), `a confirmed close must open the next row's detail, not a list overlay:\n${next}`);
+  sendKey("x");
+  sendKey("x");
+  // Back to the normal layout: the unfocused rail and the editor with Pi's footer below it.
+  const closed = waitForScreen((screen) => !screen.includes("provider Background Tasks") && screen.includes("← work navigator"));
+  assert.ok(!hiddenList(closed), `no list overlay may remain after the last close:\n${closed}`);
+  execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", "typed-after-close"]);
+  const typed = waitForScreen((screen) => screen.includes("typed-after-close"));
+  assert.ok(!hiddenList(typed), typed);
+  saveScreen("closed-then-typed", typed);
+});
+
+// @covers navigator.detail-overlay
+// @level e2e
+test("after an editor swap, the detail overlay is reused and Esc returns the keyboard to the live editor", { skip }, () => {
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "navigator golden path requires tmux; skipping cannot satisfy this gate");
+  mkdirSync(evidenceDir, { recursive: true });
+  const { state, piPid, focusStealPath } = launchPi(refocusSession);
+  seedNavigatorState({
+    cwd: state.cwd, sessionId: state.sessionId, piPid,
+    subagentId: `sa_navigator_refocus_${process.pid}`, taskId: `bg_navigator_refocus_${process.pid}`,
+  });
+
+  sendKey("Left");
+  waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("background golden path"));
+  sendKey("Down");
+  waitForScreen((screen) => screen.includes("provider Subagents") && hasSettledInputFrame(screen));
+
+  // Another extension re-installs the editor (setEditorComponent), which mounts a
+  // new editor instance with focus while the navigator overlay stays mounted.
+  writeFileSync(focusStealPath, "");
+  waitFor(() => !existsSync(focusStealPath), "the probe to swap the editor");
+  sleep(400);
+  sendKey("Down");
+  const moved = waitForScreen((screen) => screen.includes("provider Background Tasks") && hasSettledInputFrame(screen));
+  saveScreen("refocused-detail", moved);
+  const titleRules = moved.split(/\r?\n/).filter((line) => /^━━ /u.test(line));
+  assert.equal(titleRules.length, 1, `exactly one detail header may be visible:\n${moved}`);
+
+  sendKey("Escape");
+  const closed = waitForScreen((screen) => !screen.includes("provider ") && screen.includes("← work navigator"));
+  assert.doesNotMatch(closed, /^━━ /mu, `Esc must close the navigator, not reveal a stale overlay:\n${closed}`);
+  execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", "typed-after-refocus"]);
+  waitForScreen((screen) => screen.includes("typed-after-refocus") && !screen.includes("provider "));
+});
+
+function launchPi(name) {
+  session = name;
+  tmuxArgs = ["-L", name];
+  const probeStatePath = join(fixtures, `${name}-session-state.json`);
+  const focusStealPath = join(fixtures, `${name}-steal-focus`);
+  writeFileSync(probePath, probeExtension(probeStatePath, focusStealPath));
+  startPiSession();
+  const state = waitForJson(probeStatePath);
+  const piPid = Number(execFileSync("tmux", [...tmuxArgs, "display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8" }).trim());
+  return { state, piPid, focusStealPath };
+}
+
+function waitFor(condition, what, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    sleep(50);
+  }
+  throw new Error(`Timed out waiting for ${what}. Current screen:\n${captureScreen()}`);
+}
+
+/** A stand-in process for a run the navigator can stop, in its own process group. */
+function startDummyWorker() {
+  const child = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+  child.unref();
+  dummyWorkers.push(child);
+  return child.pid;
+}
+
 function saveScreen(name, screen) {
   writeFileSync(join(evidenceDir, `${name}.txt`), screen);
 }
@@ -126,6 +262,8 @@ function startPiSession() {
     `cd ${shellQuote(extensionRoot)}`,
     "&& exec env",
     `PI_CODING_AGENT_DIR=${shellQuote(join(fixtures, "agent"))}`,
+    // Explicit, so Pi's registries follow the test's private TMPDIR whatever tmux's global env holds.
+    `TMPDIR=${shellQuote(tmpdir())}`,
     "PI_OFFLINE=1",
     "OPENAI_API_KEY=sk-tui-e2e-placeholder",
     shellQuote(piBin),
@@ -134,18 +272,32 @@ function startPiSession() {
     "--approve",
     "--no-skills",
     "--no-context-files",
-    `--session-dir ${shellQuote(join(fixtures, "sessions"))}`,
+    `--session-dir ${shellQuote(join(fixtures, `${session}-sessions`))}`,
     "--name navigator-tui-e2e",
     "--model openai/gpt-4o-mini",
   ].join(" ");
   execFileSync("tmux", [...tmuxArgs, "new-session", "-d", "-s", session, "-x", "100", "-y", "40", command]);
 }
 
-function probeExtension(path) {
-  return `export default function(pi) {\n  pi.on("session_start", async (_event, ctx) => {\n    const fs = await import("node:fs");\n    fs.writeFileSync(${JSON.stringify(path)}, JSON.stringify({ cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() }, null, 2));\n  });\n}\n`;
+function probeExtension(path, focusStealPath) {
+  // Besides reporting the session, the probe re-installs the current editor when the
+  // test creates focusStealPath, the way any extension that wraps the editor does.
+  return `export default function(pi) {
+  pi.on("session_start", async (_event, ctx) => {
+    const fs = await import("node:fs");
+    fs.writeFileSync(${JSON.stringify(path)}, JSON.stringify({ cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() }, null, 2));
+    const timer = setInterval(() => {
+      if (!fs.existsSync(${JSON.stringify(focusStealPath)})) return;
+      fs.rmSync(${JSON.stringify(focusStealPath)}, { force: true });
+      ctx.ui.setEditorComponent(ctx.ui.getEditorComponent());
+    }, 100);
+    timer.unref?.();
+  });
+}
+`;
 }
 
-function seedNavigatorState({ cwd, sessionId, piPid }) {
+function seedNavigatorState({ cwd, sessionId, piPid, subagentId = defaultSubagentId, taskId = defaultTaskId }) {
   const now = Date.now();
   const callbackOrigin = { cwd, sessionId };
   const subagentDir = join(tmpdir(), "pi-better-subagents", "runs", subagentId);
