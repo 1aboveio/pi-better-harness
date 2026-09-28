@@ -75,7 +75,8 @@ keeps one fixed deny list that is not configurable per tool:
 
 Every entry is protected under the literal path under home, every symlink hop
 on the way to its target, and the target itself. So a dotfiles manager's links
-(stow, chezmoi), including chains of links, can't be swapped or retargeted.
+(stow, chezmoi), including chains of links, can't be swapped or retargeted. A
+link whose target is missing protects that target too: it can't be created.
 
 **Git config and hooks under home are not protected**, so git keeps working:
 `git init`, `git clone` and `git worktree add` copy hook samples into `.git/hooks`.
@@ -97,7 +98,7 @@ the sandbox is enabled again.
 
 | | macOS (Seatbelt) | Linux (Bubblewrap) | Windows |
 | - | - | - | - |
-| Outside project = Write | Writes across home and temp. Removal and renaming refused outside the disposable places. | Fallback: ordinary top-level home folders (`~/projects`, `~/Documents`, …) and home itself are **read-only**. Dot entries, temp, worktree folders (found within three levels of home), and the workspace are writable, removal included. | No backend: confined launches fail closed. |
+| Outside project = Write | Writes across home and temp. Removal and renaming refused outside the disposable places. | Fallback: ordinary top-level home folders (`~/projects`, `~/Documents`, …) and home itself are **read-only**. Dot entries, temp, worktree folders (found within three levels of home), and the workspace are writable, removal included. A directory holding a protected symlink (typically `~/.config` with a stow link such as `~/.config/git`) keeps its existing entries writable but refuses new top-level entries. | No backend: confined launches fail closed. |
 | Project files = Write | Enforced. | **Refused at launch** (bind mounts cannot separate removal from writing). Use Write & delete or Read. | No backend. |
 | Deny list | Path rules. | Credentials masked by empty mode-000 mounts. Code that runs later is bound read-only. | No backend. |
 
