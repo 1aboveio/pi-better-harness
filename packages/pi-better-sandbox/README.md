@@ -155,6 +155,15 @@ environment variables, are excluded. Read / write may be needed by a CLI that
 refreshes a token or updates its credential database. Under Outside project =
 Write, credentials are always Off (see above).
 
+Credential denial does not force npm-compatible tools onto a cold private cache.
+At launch, the trusted runtime writes a sanitized npm user config into private
+task scratch. It keeps only credential-free public and scoped registry URLs,
+drops auth, proxy, cache, and unrelated settings, and starts confined commands
+with that file as their user config. The real `~/.npmrc` remains unreadable
+while `HOME` and the normal `~/.npm` cache path remain unchanged. Project
+`.npmrc` files and tokens
+already inherited in environment variables are outside this sanitization.
+
 File and shell operations use the kernel: macOS uses Seatbelt (`sandbox-exec`)
 and Linux uses Bubblewrap (`bwrap`). `read`, `write`, and `edit` keep Pi's normal
 tool behavior and mutation queues, while a fixed worker performs filesystem
@@ -172,6 +181,7 @@ commands & applications Off. The fixed file worker remains available according
 to the file permissions even when task commands are Off.
 
 The task executor provides private scratch through `TMPDIR`, `TMP`, and `TEMP`.
+The sanitized npm user config also lives there for the lifetime of the task.
 Outside Read and Read/write also retain explicit runtime write exceptions for
 `/tmp` (canonical `/private/tmp` on macOS), the current user's macOS temporary
 directory, and that user's Security.framework MDS cache. MDS access lets CLI

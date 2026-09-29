@@ -225,6 +225,13 @@ where ordinary home folders are read-only. See
 default On. A subagent's project root is its selected workspace (`cwd` / `sandbox_dir`),
 or its disposable clone. `/sandbox off` changes Main, not Subagents.
 
+The real `~/.npmrc` remains unreadable under this default. Before launch, the
+trusted runtime parses it and writes only credential-free public and scoped
+registry URLs to a task-owned config in private scratch. Confined commands are
+started with that config while retaining the normal `HOME` and `~/.npm` cache,
+so npm-compatible clients can reuse cached packages without receiving auth,
+proxy, cache-override, or unrelated user settings.
+
 Pi runs as the trusted runtime so it can take settings/authentication locks,
 connect to its provider, and persist sessions. A mandatory guard loads before
 the task can run. Its immutable launch snapshot controls shell commands and

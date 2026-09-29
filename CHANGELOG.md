@@ -9,6 +9,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Changed
 
 - Subagent soft deadlines and hard ceilings are now disabled by default. The 10-minute no-progress wake remains default-on, so productive long-running agents are not stopped solely because of elapsed wall-clock time; callers can still opt into `deadline_minutes` or `max_minutes` for work with a real time bound.
+- Credential-off sandboxes now give npm-compatible commands a task-owned user config containing only safe public and scoped registry URLs from `~/.npmrc`. Authentication and unrelated settings remain hidden, while `HOME` and the normal `~/.npm` cache stay shared so private-registry cache keys can still match.
 
 ## [pi-better-harness@0.12.2] - 2026-09-28
 

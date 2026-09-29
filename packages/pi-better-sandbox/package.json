@@ -48,9 +48,13 @@
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
+  "dependencies": {
+    "ini": "^6.0.0"
+  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.82.0",
     "@earendil-works/pi-tui": "^0.82.0",
+    "@types/ini": "^4.1.1",
     "@types/node": "^25.0.0",
     "tsx": "^4.22.3",
     "typebox": "^1.1.39",
