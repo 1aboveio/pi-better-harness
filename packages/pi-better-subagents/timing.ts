@@ -1,5 +1,5 @@
 /**
- * Harness-owned run timing: a soft deadline with grace, a hard ceiling, and
+ * Harness-owned run timing: optional elapsed-time limits and default-on
  * no-progress (stuck) detection for every subagent run.
  *
  * Timeout control belongs to the harness, not to the prompt or the skill that
@@ -22,9 +22,10 @@
  * with null/absent optional fields treated alike as in #336). A successful
  * `edit`/`write`, a `git commit`, and a success directly after a failure always
  * count, even when repeated. Re-reading the same file or re-running the same
- * command with the same arguments does not. Time spent waiting on a running tool call does not count toward
- * the stuck window, so a child in the middle of a 20-minute test run is not
- * stuck; a hung command is bounded by the deadline and the ceiling instead.
+ * command with the same arguments does not. Time spent waiting on a running
+ * tool call does not count toward the stuck window, so a child in the middle
+ * of a 20-minute test run is not stuck. A caller that needs to bound a
+ * possibly hung command can opt into a ceiling.
  */
 
 import { createHash } from "node:crypto";
@@ -34,9 +35,9 @@ export type TimingReason = TimingStopReason | "stuck";
 
 /** Built-in defaults, in minutes. `0` disables that control. */
 export const DEFAULT_TIMING_MINUTES = Object.freeze({
-    deadline: 30,
+    deadline: 0,
     grace: 5,
-    max: 90,
+    max: 0,
     stuck: 10,
 });
 
@@ -151,9 +152,9 @@ export function resolveRunTiming(input: {
 // ---- tool parameters -------------------------------------------------------
 
 const TIMING_DESCRIPTIONS = {
-    deadline_minutes: "Soft deadline in minutes (default 30; 0 = none; null or omitted = inherit: in a batch job the shared value, otherwise the default). At the deadline the child is told to stop starting new work, commit what is done, and report, and you get one wake. Grace starts when the message reaches the child (after its current tool call); if it has not finished by then, the harness stops it with reason deadline.",
+    deadline_minutes: "Optional soft deadline in minutes (default: none; 0 = none; null or omitted = inherit: in a batch job the shared value, otherwise the default). At the deadline the child is told to stop starting new work, commit what is done, and report, and you get one wake. Grace starts when the message reaches the child (after its current tool call); if it has not finished by then, the harness stops it with reason deadline.",
     grace_minutes: "Minutes after the wrap-up message reaches the child before the run is stopped (default 5; null or omitted = inherit).",
-    max_minutes: "Hard ceiling in minutes (default 90; 0 = none; null or omitted = inherit). The run is stopped at once, without grace, with reason ceiling.",
+    max_minutes: "Optional hard ceiling in minutes (default: none; 0 = none; null or omitted = inherit). The run is stopped at once, without grace, with reason ceiling.",
     stuck_minutes: "No-progress window in minutes (default 10; 0 = off; null or omitted = inherit). Progress is any successful tool call that is not an exact repeat of an earlier one (same tool, same arguments); edits, writes, commits, and a success after a failure always count. Time inside a running tool call does not count. Wakes you once per stuck spell; never stops the run.",
 } as const;
 

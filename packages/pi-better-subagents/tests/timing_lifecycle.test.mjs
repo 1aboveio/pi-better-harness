@@ -140,16 +140,16 @@ after(() => {
 });
 
 describe("harness timing: launch", () => {
-    it("every run carries the default policy, loads the child steer extension, and gets the steer file path", async () => {
+    it("defaults to stall detection without elapsed-time limits and prepares explicit deadline support", async () => {
         const h = makeHarness();
         try {
             const run = await spawnRun(h, { deadline_minutes: null, grace_minutes: null, max_minutes: null, stuck_minutes: null });
             const meta = readMeta(run.id);
-            assert.equal(meta.timing.deadlineAt - meta.startedAt, 30 * 60_000);
+            assert.equal(meta.timing.deadlineAt, undefined);
             assert.equal(meta.timing.graceMs, 5 * 60_000);
-            assert.equal(meta.timing.ceilingAt - meta.startedAt, 90 * 60_000);
+            assert.equal(meta.timing.ceilingAt, undefined);
             assert.equal(meta.timing.stuckMs, 10 * 60_000);
-            assert.match(run.out, /Timing: soft deadline 30m \(\+5m grace\), ceiling 90m, stuck wake after 10m without progress\./);
+            assert.match(run.out, /Timing: no soft deadline, no ceiling, stuck wake after 10m without progress\./);
             const log = await waitFor(() => {
                 const text = existsSync(meta.logPath) ? readFileSync(meta.logPath, "utf8") : "";
                 return text.includes("--extension") ? text : undefined;

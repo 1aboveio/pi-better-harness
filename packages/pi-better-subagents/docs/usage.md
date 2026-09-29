@@ -82,14 +82,15 @@ thresholds continue to take precedence for subagent health.
 Timeout control belongs to the harness, not to the prompt or the skill that
 launched the run. A time limit written into a prompt is enforced by nothing, and
 a parent that only notices late tends to kill a child that was still making
-progress. Every run is timed by default; spawn parameters only override the
-defaults.
+progress. Every run gets stall detection by default. Elapsed-time limits are
+opt-in because total runtime does not distinguish a slow agent from a stalled
+one.
 
 | Control | Default | What happens |
 |---------|---------|--------------|
-| Soft deadline (`deadline_minutes`) | 30 | The child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
+| Soft deadline (`deadline_minutes`) | Off | When configured, the child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
 | Grace (`grace_minutes`) | 5 | Grace starts when the steering message actually reaches the child, which is after its current tool call. While the message is still waiting behind a running tool call, the deadline stop is held, so a test run that began just before the deadline is not killed mid-run. If the child has not finished by the end of grace, the harness stops it; the ordinary completion callback reports `killed; stopped: deadline`. A child that completes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
-| Hard ceiling (`max_minutes`) | 90 | The run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds everything, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
+| Hard ceiling (`max_minutes`) | Off | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds everything, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
 | Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. |
 
 `0` turns a control off. `null` or an omitted value means "inherit": on
@@ -102,7 +103,8 @@ may be fractional. A job's own number (including `0`) wins over `shared`.
 - `max_minutes: 0` turns the ceiling off, and the ceiling is the only control
   that bounds a tool call that never ends. With it off, a steer stuck behind a
   hung tool call is never delivered, the deadline stop stays held, and the run
-  is never stopped. Keep a ceiling when a command can hang.
+  is never stopped. Opt into a ceiling when a command must have a wall-clock
+  bound.
 - The parent reads at most the last 32 MiB of a child log after `/reload`. If
   the log is larger and the running tool call started before that window, the
   parent cannot see the call, so the hold is lost and grace counts from when
@@ -125,7 +127,8 @@ harness remembers up to 4096 distinct calls per run as fixed-size hashes of the
 name and normalized arguments; past that the oldest is forgotten, so a call from
 long ago counts again. Time the child spends waiting on a running tool call does not count toward the
 stuck window, so a child in the middle of a 20-minute test run is waiting, not
-stuck; a command that hangs is bounded by the deadline and the ceiling instead.
+stuck. A command that hangs is bounded only when the caller opts into a deadline
+or ceiling.
 The other stuck signal is the existing escalation: the same operation failing
 three times wakes the parent once as an `Action required` incident
 ([failure observations](failure-observations.md)).

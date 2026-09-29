@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- Subagent soft deadlines and hard ceilings are now disabled by default. The 10-minute no-progress wake remains default-on, so productive long-running agents are not stopped solely because of elapsed wall-clock time; callers can still opt into `deadline_minutes` or `max_minutes` for work with a real time bound.
+
 ## [pi-better-harness@0.12.2] - 2026-09-28
 
 ### Changed
