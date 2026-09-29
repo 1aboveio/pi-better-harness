@@ -12,7 +12,6 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import {
-    DEFAULT_TIMING_MINUTES,
     TIMING_ENV,
     decideTiming,
     describeTiming,
@@ -44,16 +43,14 @@ describe("timing policy resolution", () => {
         assert.equal(envOnly.deadlineAt, 20 * MIN);
         const defaults = resolveRunTiming({ startedAt: 0 });
         assert.deepEqual(defaults, {
-            deadlineAt: DEFAULT_TIMING_MINUTES.deadline * MIN,
-            graceMs: DEFAULT_TIMING_MINUTES.grace * MIN,
-            ceilingAt: DEFAULT_TIMING_MINUTES.max * MIN,
-            stuckMs: DEFAULT_TIMING_MINUTES.stuck * MIN,
-        });
+            graceMs: 5 * MIN,
+            stuckMs: 10 * MIN,
+        }, "elapsed-time limits are opt-in; stall detection is default-on");
     });
 
     it("treats null and empty env as unset, 0 as off, and rejects anything else", () => {
         const t = resolveRunTiming({ params: { deadline_minutes: null, max_minutes: 0, stuck_minutes: 0 }, env: { [TIMING_ENV.grace]: "" }, startedAt: 0 });
-        assert.equal(t.deadlineAt, 30 * MIN);
+        assert.equal(t.deadlineAt, undefined);
         assert.equal(t.graceMs, 5 * MIN);
         assert.equal(t.ceilingAt, undefined);
         assert.equal(t.stuckMs, undefined);
@@ -71,8 +68,8 @@ describe("timing policy resolution", () => {
         const own = mergeJobOptions(shared, { prompt: "b", deadline_minutes: 7, stuck_minutes: 0 });
         assert.equal(own.deadline_minutes, 7);
         assert.equal(own.stuck_minutes, 0);
-        assert.equal(resolveRunTiming({ params: mergeJobOptions(undefined, { prompt: "c", deadline_minutes: null }), startedAt: 0 }).deadlineAt, 30 * MIN,
-            "with no shared value, null falls through to the default");
+        assert.equal(resolveRunTiming({ params: mergeJobOptions(undefined, { prompt: "c", deadline_minutes: null }), startedAt: 0 }).deadlineAt, undefined,
+            "with no shared value, null falls through to the disabled default");
     });
 
     it("offers provider-accepted schemas that admit explicit null", () => {
