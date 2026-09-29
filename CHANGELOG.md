@@ -6,11 +6,36 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.12.3] - 2026-09-29
+
 ### Changed
 
-- Subagent soft deadlines and hard ceilings are now disabled by default. The 10-minute no-progress wake remains default-on, so productive long-running agents are not stopped solely because of elapsed wall-clock time; callers can still opt into `deadline_minutes` or `max_minutes` for work with a real time bound.
-- `Outside project = Write` now respects the independent Stored credentials setting instead of forcing it Off. The default Read setting lets subagents use `~/.npmrc` and other file-based credentials without permitting credential writes.
-- `/plan` and `/subagents` now provide described argument completions like `/goal`.
+- Bundle sandbox 0.7.3, plan 0.5.1, subagents 0.9.3, and background-tasks 0.6.2: credential permissions stay independent under broad outside writes, long-running subagents default to stall detection without elapsed-time limits, and `/plan` and `/subagents` provide argument completions.
+
+## [pi-better-sandbox@0.7.3] - 2026-09-29
+
+### Changed
+
+- `Outside project = Write` now respects the independent Stored credentials setting instead of forcing it Off. The default Read setting exposes known file-based credentials such as `~/.npmrc` to confined tasks without permitting credential writes. (#379)
+
+## [pi-better-plan@0.5.1] - 2026-09-29
+
+### Changed
+
+- `/plan` now provides labeled, described argument completions for its display and pinning commands. (#379)
+
+## [pi-better-subagents@0.9.3] - 2026-09-29
+
+### Changed
+
+- Soft deadlines and hard ceilings are disabled by default. The 10-minute no-progress wake remains enabled, and callers can still opt into `deadline_minutes` or `max_minutes`. (#378)
+- `Outside project = Write` now respects the independent Stored credentials setting, and `/subagents` provides labeled mode completions. (#379)
+
+## [pi-better-background-tasks@0.6.2] - 2026-09-29
+
+### Changed
+
+- The vendored sandbox policy now respects the independent Stored credentials setting under `Outside project = Write`. (#379)
 
 ## [pi-better-harness@0.12.2] - 2026-09-28
 
