@@ -1,6 +1,6 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
@@ -77,6 +77,21 @@ const UpdatePlanSchema = Type.Object({
 const LEGACY_PLAN_NAV_STATUS_KEY = "pi-better-plan-nav";
 const DELEGATION_MODE_REQUEST = "pi-better-subagents:delegation-mode-request";
 type DelegationMode = "manual" | "adaptive" | "coordinator";
+
+const PLAN_ACTIONS: readonly AutocompleteItem[] = [
+  { value: "clear", label: "clear", description: "Remove the current plan" },
+  { value: "hide", label: "hide", description: "Hide the plan widget" },
+  { value: "show", label: "show", description: "Restore automatic plan display" },
+  { value: "pin auto", label: "pin auto", description: "Use automatic plan pinning" },
+  { value: "pin on", label: "pin on", description: "Keep the plan pinned" },
+  { value: "pin off", label: "pin off", description: "Keep the plan unpinned" },
+];
+
+export function planArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  const prefix = argumentPrefix.trimStart().toLowerCase();
+  const matches = PLAN_ACTIONS.filter((action) => action.value.startsWith(prefix));
+  return matches.length > 0 ? [...matches] : null;
+}
 
 function activeDelegationMode(pi: ExtensionAPI): DelegationMode {
   const request: { mode?: string } = {};
@@ -396,6 +411,7 @@ export default function planExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("plan", {
     description: "Inspect, show, hide, clear, or configure the current plan",
+    getArgumentCompletions: planArgumentCompletions,
     handler: async (args, ctx) => {
       const input = args.trim().toLowerCase();
       if (!input) return showFullPlan(ctx);

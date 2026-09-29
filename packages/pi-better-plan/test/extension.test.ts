@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
-import extension from "../src/index.js";
+import extension, { planArgumentCompletions } from "../src/index.js";
 import { planSetEntry, replacePlan } from "../src/plan-state.js";
 
 interface SessionEntry {
@@ -14,8 +15,35 @@ interface SessionEntry {
 }
 
 interface CommandDefinition {
+  getArgumentCompletions?(prefix: string): AutocompleteItem[] | null;
   handler(args: string, ctx: ExtensionContext): Promise<void> | void;
 }
+
+test("plan action completions expose valid commands with context", () => {
+  assert.deepEqual(planArgumentCompletions(""), [
+    { value: "clear", label: "clear", description: "Remove the current plan" },
+    { value: "hide", label: "hide", description: "Hide the plan widget" },
+    { value: "show", label: "show", description: "Restore automatic plan display" },
+    { value: "pin auto", label: "pin auto", description: "Use automatic plan pinning" },
+    { value: "pin on", label: "pin on", description: "Keep the plan pinned" },
+    { value: "pin off", label: "pin off", description: "Keep the plan unpinned" },
+  ]);
+  assert.deepEqual(planArgumentCompletions(" pin ")?.map((entry) => entry.value), ["pin auto", "pin on", "pin off"]);
+  assert.equal(planArgumentCompletions("unknown"), null);
+});
+
+test("the registered /plan command publishes its argument completions", () => {
+  let command: CommandDefinition | undefined;
+  const pi = {
+    events: new EventEmitter(),
+    appendEntry() {}, registerTool() {}, on() {},
+    registerCommand(name: string, definition: CommandDefinition) { if (name === "plan") command = definition; },
+  } as unknown as ExtensionAPI;
+  extension(pi);
+  assert.deepEqual(command?.getArgumentCompletions?.("pi")?.map((entry) => entry.value), [
+    "pin auto", "pin on", "pin off",
+  ]);
+});
 
 test("plan tools persist progress without taking over editor navigation", async () => {
   const entries: SessionEntry[] = [];
