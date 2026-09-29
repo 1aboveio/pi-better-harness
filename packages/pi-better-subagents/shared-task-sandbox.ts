@@ -6,11 +6,10 @@ const { createBashToolDefinition, createReadToolDefinition, createWriteToolDefin
     createEditToolDefinition, createLocalBashOperations, getShellConfig } = PiCodingAgent;
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
-import { parse as parseIni, stringify as stringifyIni } from "ini";
-import { canonicalizePath, compileWritePolicy, isBroadWritePermissions, isRemovableUnderWrite, maybeBuildSandboxCommand, type SandboxPermissions, type SandboxWritePolicy } from "./shared-sandbox-core.ts";
+import { canonicalizePath, compileWritePolicy, isRemovableUnderWrite, maybeBuildSandboxCommand, type SandboxPermissions } from "./shared-sandbox-core.ts";
 import { createTaskFileOperations, type TaskFileController } from "./shared-task-files.ts";
 import { APPLY_PATCH_TOOL, createApplyPatchToolDefinition } from "./shared-task-apply-patch.ts";
 
@@ -90,68 +89,12 @@ export function ensureHarnessRuntimeDirectories(): string[] {
     return directories;
 }
 
-export const TASK_NPM_USER_CONFIG = "npmrc";
-
-function safeRegistryUrl(value: unknown): string | undefined {
-    if (typeof value !== "string" || /[\0\r\n]/.test(value)) return undefined;
-    try {
-        const url = new URL(value);
-        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return undefined;
-        return url.toString();
-    } catch {
-        return undefined;
-    }
-}
-
-/** Keep npm's cache-routing registry map while dropping every credential-bearing or executable setting. */
-export function sanitizeNpmUserConfig(content: string): string {
-    const parsed = parseIni(content) as Record<string, unknown>;
-    const safe: Record<string, string> = {};
-    for (const [key, value] of Object.entries(parsed)) {
-        if (key !== "registry" && !/^@[^:\s]+:registry$/.test(key)) continue;
-        const registry = safeRegistryUrl(value);
-        if (registry) safe[key] = registry;
-    }
-    return stringifyIni(safe);
-}
-
-export function taskNpmUserConfigPath(scratch: string): string {
-    return join(scratch, TASK_NPM_USER_CONFIG);
-}
-
-function prepareTaskNpmUserConfig(scratch: string, home: string): void {
-    let content = "";
-    try { content = sanitizeNpmUserConfig(readFileSync(join(home, ".npmrc"), "utf8")); }
-    catch { /* Missing, unreadable, or malformed user config becomes an empty safe config. */ }
-    writeFileSync(taskNpmUserConfigPath(scratch), content, { flag: "wx", mode: 0o600 });
-}
-
-export function createTaskScratch(home = homedir()): { path: string; anchor: string } {
+export function createTaskScratch(): { path: string; anchor: string } {
     const path = canonicalizePath(mkdtempSync(join(tmpdir(), "pi-task-scratch-")));
     const anchor = join(path, ".sandbox-anchor");
     writeFileSync(anchor, "", { flag: "wx", mode: 0o400 });
-    prepareTaskNpmUserConfig(path, home);
     // Denying the anchor also prevents renaming/replacing its parent directory.
     return { path, anchor };
-}
-
-/** Build the environment visible to a confined command. Credential-off profiles use only the sanitized npm config. */
-export function taskCommandEnvironment(
-    policy: SandboxWritePolicy,
-    inherited: NodeJS.ProcessEnv,
-    overrides: NodeJS.ProcessEnv = {},
-): NodeJS.ProcessEnv {
-    const scratch = policy.runtimeWrite?.[0];
-    const env: NodeJS.ProcessEnv = { ...inherited, ...overrides,
-        ...(scratch ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : {}) };
-    const credentialsUnavailable = policy.permissions?.storedCredentials === "off" || isBroadWritePermissions(policy.permissions);
-    if (scratch && credentialsUnavailable) {
-        for (const key of Object.keys(env)) {
-            if (key.toLowerCase() === "npm_config_userconfig") delete env[key];
-        }
-        env.npm_config_userconfig = taskNpmUserConfigPath(scratch);
-    }
-    return env;
 }
 
 export function createTaskBashOperations(
@@ -171,7 +114,9 @@ export function createTaskBashOperations(
             const { waitForChildProcess } = await import(pathToFileURL(join(sdkUtils, "child-process.js")).href);
             const { trackDetachedChildPid, untrackDetachedChildPid } = await import(pathToFileURL(join(sdkUtils, "shell.js")).href);
             if (shell.commandTransport === "stdin") throw new Error("Sandbox: this shell cannot be confined by the available backend.");
-            const taskEnv = taskCommandEnvironment(plan.policy, process.env, options.env);
+            const scratch = plan.policy.runtimeWrite?.[0];
+            const taskEnv = { ...process.env, ...options.env,
+                ...(scratch ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : {}) };
             const wrapped = maybeBuildSandboxCommand({
                 policy: plan.policy, profilePath: plan.profilePath,
                 execPath: "/usr/bin/env", execArgs: ["-i", "--", ...Object.entries(taskEnv)

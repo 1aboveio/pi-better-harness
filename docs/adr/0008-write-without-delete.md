@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends [ADR 0005](0005-sandbox-permission-table.md) (file levels, Subagents default) and extends [ADR 0007](0007-trusted-runtime-task-boundary.md)'s protected-path rules. Issue #341. Later amended to preserve npm cache routing without exposing the credential-bearing user config.
+Accepted. Amends [ADR 0005](0005-sandbox-permission-table.md) (file levels, Subagents default) and extends [ADR 0007](0007-trusted-runtime-task-boundary.md)'s protected-path rules. Issue #341.
 
 ## Problem
 
@@ -47,8 +47,6 @@ Dotfiles managers such as stow and chezmoi make `~/.zshrc`, `~/.ssh` or `~/.conf
 Extra paths for the deny list come from the existing `/sandbox deny` rules.
 
 The Subagents default is Project files = Write & delete and Outside project = Write. Main keeps Outside project = Read. Background tasks follow Main's profile. In `/sandbox`, a looser value (a higher level, a capability switched on, a sandbox switched off) applies in-session only on a second Space. Saving looser defaults needs a second Enter. Both prompts name each loosened cell. No model tool can change any of this.
-
-When stored credentials are unavailable, the trusted launcher snapshots a sanitized npm user config into the task's private scratch directory before confinement starts. It parses `~/.npmrc` as INI and retains only `registry` and `@scope:registry` values whose URLs use HTTP(S) and contain no userinfo, query, fragment, or control characters. Authentication keys, proxy settings, cache overrides, and every unrelated setting are dropped. Confined commands receive this path through `npm_config_userconfig`; inherited or caller-supplied spellings of that variable cannot replace it. `HOME` and npm's cache setting are otherwise unchanged, so npm, pnpm, and compatible clients can reuse the normal `~/.npm` cache with the same public or scoped registry identity while the real `~/.npmrc` remains unreadable. Project `.npmrc` files and credentials inherited in environment variables retain their existing trust semantics.
 
 ## Platform enforcement
 
