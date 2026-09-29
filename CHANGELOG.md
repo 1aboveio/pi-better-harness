@@ -9,6 +9,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Changed
 
 - Subagent soft deadlines and hard ceilings are now disabled by default. The 10-minute no-progress wake remains default-on, so productive long-running agents are not stopped solely because of elapsed wall-clock time; callers can still opt into `deadline_minutes` or `max_minutes` for work with a real time bound.
+- `Outside project = Write` now respects the independent Stored credentials setting instead of forcing it Off. The default Read setting lets subagents use `~/.npmrc` and other file-based credentials without permitting credential writes.
 
 ## [pi-better-harness@0.12.2] - 2026-09-28
 

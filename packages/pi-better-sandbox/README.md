@@ -20,7 +20,7 @@ Sandbox                           Off              On
 
 Project files                     -                Write & delete
 Outside project                   -                Write
-Stored credentials                -                Off (fixed)
+Stored credentials                -                Read
 Run commands & applications       -                On
 Network access                    -                On
 
@@ -74,15 +74,14 @@ select the row.
 
 **Outside project = Write** (the Subagents default) lets tasks write across your
 home directory and temp, so tool caches just work with no per-tool setup. It
-keeps one fixed deny list that is not configurable per tool:
+retains fixed protections that are not configurable per tool:
 
-- **Credentials** are neither readable nor writable, whatever the Stored
-  credentials row says: the files listed below plus `~/Library/Keychains`,
+- **Credentials** follow the independent Stored credentials row. The default
+  `Read` setting exposes the files listed below plus `~/Library/Keychains`,
   `~/.claude/.credentials.json`, `~/.claude.json`, `~/.gnupg`,
   `~/.codex/auth.json`, `~/.cargo/credentials(.toml)`, `~/.pgpass`, and
-  `~/.config/rclone`. The table shows
-  "Off (fixed)". Tasks that need git over SSH, `gh`, or cloud CLIs need Outside
-  project = Read or Write & delete.
+  `~/.config/rclone` to confined subagents, while denying writes. Set the row to
+  Off to hide them or Read / write when a CLI must refresh credential state.
 - **Code that runs later** cannot be written, removed, or renamed: shell startup
   files (`.bashrc`, `.zshrc`, `.profile`, and the rest), `~/.config/fish`,
   `~/.gitconfig`, `~/.config/git`, `~/.config/systemd/user`,
@@ -152,8 +151,8 @@ AWS, GitHub CLI, Google Cloud CLI, Azure, Kubernetes, Docker, npm, netrc, Git
 credentials, and Pi's file-based auth. These rules override ordinary file access.
 OS vault services such as Keychain and Secret Service, and tokens inherited in
 environment variables, are excluded. Read / write may be needed by a CLI that
-refreshes a token or updates its credential database. Under Outside project =
-Write, credentials are always Off (see above).
+refreshes a token or updates its credential database. This row applies
+independently of Project files and Outside project.
 
 File and shell operations use the kernel: macOS uses Seatbelt (`sandbox-exec`)
 and Linux uses Bubblewrap (`bwrap`). `read`, `write`, and `edit` keep Pi's normal

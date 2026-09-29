@@ -215,7 +215,10 @@ use Project files = Write & delete and Outside project = **Write**: tasks write
 across home and temp (tool caches such as `~/.gradle` and `~/.npm` just work), but
 outside the workspace they can only remove or rename files in temp, hidden home
 entries, and worktree folders (`.worktrees/`, `*-worktrees/`). Credential files
-are neither readable nor writable, and shell startup files, `~/.pi`, `~/.claude`,
+default to readable but not writable, so npm, git over SSH, and authenticated
+CLIs can reuse their normal user configuration. This exposes known file-based
+credentials to confined subagents; set Stored credentials to Off to hide them.
+Shell startup files, `~/.pi`, `~/.claude`,
 `~/.agents`, and harness state cannot be written, removed, or renamed. Rename-based
 saves and git commits in a sibling repository fail under Write; set Outside
 project to Write & delete when a task needs that. Linux uses a stricter fallback

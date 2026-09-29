@@ -227,10 +227,7 @@ const CREDENTIAL_LOCATIONS = [
     ".docker/config.json", ".npmrc", ".netrc", ".git-credentials", ".pi/agent/auth.json",
 ] as const;
 
-/**
- * Credential stores added by the broad-write profile. They are never readable
- * or writable there, whatever the Stored credentials row says.
- */
+/** Credential stores added to the Stored credentials row by the broad-write profile. */
 const BROAD_CREDENTIAL_LOCATIONS = [
     "Library/Keychains", ".claude/.credentials.json", ".claude.json", ".gnupg",
     ".codex/auth.json", ".cargo/credentials.toml", ".cargo/credentials", ".pgpass", ".config/rclone",
@@ -385,10 +382,7 @@ function compile(
     return {
         writableRoot, denyWrite, home: policy.home,
         ...(policy.permissions && {
-            // The broad-write profile's credential deny list is not optional.
-            permissions: broadMode
-                ? { ...policy.permissions, storedCredentials: "off" as const }
-                : { ...policy.permissions },
+            permissions: { ...policy.permissions },
             credentialPaths: broadMode ? broadCredentialPaths(policy.home, seams) : credentialFilePaths(policy.home, seams),
             compatibilityWrite,
             runtimeWrite,
@@ -597,7 +591,7 @@ export function evaluateReadAccess(
     const permissions = policy.permissions;
     if (!permissions) return { allowed: true, path };
     if (policy.broad) {
-        const denied = isCredential(path, policy) ||
+        const denied = (isCredential(path, policy) && permissions.storedCredentials === "off") ||
             (permissions.projectFiles === "off" && contains(policy.writableRoot, path));
         return denied ? { allowed: false, path, reason: "read-denied" } : { allowed: true, path };
     }
@@ -651,7 +645,8 @@ function evaluateBroadWrite(
     for (const denied of [...policy.denyWrite, ...broad.codePaths]) {
         if (contains(denied, path)) return { allowed: false, path, reason: "write-denied", deniedBy: denied };
     }
-    if (isCredential(path, policy)) return { allowed: false, path, reason: "permission-denied" };
+    if (isCredential(path, policy)) return canWrite(policy.permissions!.storedCredentials)
+        ? { allowed: true, path } : { allowed: false, path, reason: "permission-denied" };
     if (policy.runtimeWrite?.some((root) => contains(root, path))) return { allowed: true, path };
     if (contains(policy.writableRoot, path)) {
         return canWrite(policy.permissions!.projectFiles)
@@ -807,7 +802,8 @@ export function resetRecoverySnapshotClock(): void {
 }
 
 function broadProtectedPaths(policy: CompiledSandboxWritePolicy, broad: CompiledBroadWrite): string[] {
-    return [...policy.denyWrite, ...(policy.credentialPaths ?? []), ...broad.codePaths,
+    return [...policy.denyWrite,
+        ...(policy.permissions?.storedCredentials === "read-write" ? [] : policy.credentialPaths ?? []), ...broad.codePaths,
         ...(!canWrite(policy.permissions?.projectFiles) ? [policy.writableRoot] : [])];
 }
 
@@ -926,7 +922,7 @@ function buildBroadProfile(policy: CompiledSandboxWritePolicy, seams: SandboxSea
         `(allow file-write-unlink (regex #"^${home}/(.+/)?[.]worktrees/."))`,
         `(allow file-write-unlink (regex #"^${home}/(.+/)?[^/]+-worktrees/."))`,
     );
-    // The fixed deny list overrides every grant above. A rule naming
+    // Write-denied controls and credentials override every broad grant above. A rule naming
     // `file-write-unlink` outranks a `file-write*` wildcard whatever their
     // order (verified on the real kernel), so each protected path also gets an
     // explicit unlink denial; otherwise the removal grants above would reopen it.
@@ -935,8 +931,8 @@ function buildBroadProfile(policy: CompiledSandboxWritePolicy, seams: SandboxSea
     if (!canWrite(permissions.projectFiles)) denyWrite(project);
     for (const path of broad.codePaths) denyWrite(path);
     for (const path of policy.credentialPaths ?? []) {
-        rules.push(`(deny file-read* (subpath ${sbpl(path)}))`);
-        denyWrite(path);
+        if (permissions.storedCredentials === "off") rules.push(`(deny file-read* (subpath ${sbpl(path)}))`);
+        if (permissions.storedCredentials !== "read-write") denyWrite(path);
     }
     for (const path of policy.denyWrite) denyWrite(path);
     // Renaming an ancestor would move a protected subtree to an unprotected path,
@@ -1349,9 +1345,11 @@ function maskSources(profilePath: string): { directory: string; file: string } {
  * the root is read-only; temp, the workspace, hidden home entries and worktree
  * folders are writable (removal included); ordinary top-level home folders and
  * home itself stay read-only, so sibling repositories cannot even be edited in
- * place there. Credentials are masked by empty mode-000 mounts; code that runs
- * later and caller-denied paths are read-only binds. Every writable bind and
- * protected leaf is a mount point, which Linux refuses to rename. A protected
+ * place there. Off credentials are masked by empty mode-000 mounts, Read
+ * credentials are read-only binds, and Read / write credentials follow the
+ * surrounding broad-write rules. Code that runs later and caller-denied paths
+ * are read-only binds. Every writable bind and protected leaf is a mount point,
+ * which Linux refuses to rename. A protected
  * symlink inside a writable directory (a stow link in `~/.config`) makes that
  * directory read-only with each existing entry bound writable again, so only
  * new top-level entries there are refused.
@@ -1372,14 +1370,15 @@ function buildLinuxBroadCommand(
         throw new Error("Linux bubblewrap cannot separate removal from writing for Project files; use Write & delete or Read.");
     }
     const credentials = policy.credentialPaths ?? [];
+    const protectedCredentials = permissions.storedCredentials === "read-write" ? [] : credentials;
     const writeDenied = [...broad.codePaths, ...policy.denyWrite];
     if (permissions.projectFiles === "read-write" &&
-        [...credentials, ...writeDenied].some((path) => path !== project && contains(path, project))) {
+        [...protectedCredentials, ...writeDenied].some((path) => path !== project && contains(path, project))) {
         throw new Error("Linux bubblewrap cannot make a project writable inside a protected directory.");
     }
     const list = seams.listDirectory ?? systemListDirectory;
     const exists = (path: string) => (seams.pathExists ?? existsSync)(path);
-    const protectedPaths = [...credentials, ...writeDenied];
+    const protectedPaths = [...protectedCredentials, ...writeDenied];
     const insideProtected = (path: string) => protectedPaths.some((guard) => contains(guard, path));
 
     const writable = new Set<string>();
@@ -1497,7 +1496,10 @@ function buildLinuxBroadCommand(
             readOnly.add(path);
         }
     };
-    for (const path of credentials) guard(path, true);
+    for (const path of credentials) {
+        if (permissions.storedCredentials === "off") guard(path, true);
+        else if (permissions.storedCredentials === "read") guard(path, false);
+    }
     for (const path of writeDenied) guard(path, false);
     if (permissions.projectFiles === "read") readOnly.add(project);
 
