@@ -36,7 +36,6 @@ const fileValues: readonly FileAccess[] = ["off", "read", "write", "read-write"]
 const credentialValues: readonly CredentialAccess[] = ["off", "read", "read-write"];
 const FILE_LABELS: Record<FileAccess, string> = { off: "Off", read: "Read", write: "Write", "read-write": "Write & delete" };
 const CREDENTIAL_LABELS: Record<CredentialAccess, string> = { off: "Off", read: "Read", "read-write": "Read / write" };
-const FIXED_CREDENTIALS = "Outside project = Write always hides credential files; change Outside project to edit this row.";
 
 /** The context line for the highlighted cell, or undefined. */
 function cellHint(key: string, profile: PermissionProfile | undefined): string | undefined {
@@ -47,7 +46,7 @@ function cellHint(key: string, profile: PermissionProfile | undefined): string |
             ? `Write: git and rename-based saves fail ${where} except in worktree folders; set Write & delete if needed.`
             : "Always deletable: temp, hidden ~/.directories and worktree folders (.worktrees/, *-worktrees/).";
     }
-    if (key === "storedCredentials" && profile?.outsideProject === "write") return FIXED_CREDENTIALS;
+    if (key === "storedCredentials") return "Known credential files follow this row independently of Outside project.";
     return undefined;
 }
 const columns = ["main", "subagents"] as const;
@@ -134,12 +133,6 @@ export function createPermissionsPage(
         if (key === "enabled" || key === "commands" || key === "network") {
             next[profile][key] = !next[profile][key];
         } else if (key === "storedCredentials") {
-            if (next[profile].outsideProject === "write") {
-                message = FIXED_CREDENTIALS;
-                isError = false;
-                requestRender();
-                return;
-            }
             const current = next[profile][key];
             next[profile][key] = credentialValues[(credentialValues.indexOf(current) + 1) % credentialValues.length]!;
         } else {
@@ -257,7 +250,7 @@ export function createPermissionsPage(
                 const value = (profile: PermissionProfile): string => {
                     if (entry.key !== "enabled" && !profile.enabled) return "-";
                     if (entry.key === "storedCredentials") {
-                        return profile.outsideProject === "write" ? "Off (fixed)" : CREDENTIAL_LABELS[profile.storedCredentials];
+                        return CREDENTIAL_LABELS[profile.storedCredentials];
                     }
                     const current = profile[entry.key];
                     return typeof current === "boolean" ? (current ? "On" : "Off") : FILE_LABELS[current];

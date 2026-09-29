@@ -17,7 +17,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
+import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import {
     CLOSE_CONFIRM_STATUS_KEY,
@@ -159,6 +159,18 @@ import {
     type CatalogRunRecord,
 } from "./catalog-runtime.ts";
 import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
+
+const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
+    { value: "mode manual", label: "mode manual", description: "Delegate only when explicitly requested" },
+    { value: "mode adaptive", label: "mode adaptive", description: "Delegate substantial independent work" },
+    { value: "mode coordinator", label: "mode coordinator", description: "Delegate role-owned work by default" },
+];
+
+export function subagentsArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+    const prefix = argumentPrefix.trimStart().toLowerCase();
+    const matches = SUBAGENT_MODE_ACTIONS.filter((action) => action.value.startsWith(prefix));
+    return matches.length > 0 ? [...matches] : null;
+}
 
 /** The tools this extension registers — excluded from children by default so a
  *  subagent cannot recursively spawn more subagents unless explicitly allowed. */
@@ -2138,6 +2150,7 @@ export default function (pi: ExtensionAPI) {
         agentOperations.registerCommands(pi);
         pi.registerCommand("subagents", {
             description: "Show or change the current-session delegation mode",
+            getArgumentCompletions: subagentsArgumentCompletions,
             async handler(args, ctx) {
                 const tokens = args.trim().split(/\s+/).filter(Boolean);
                 if (tokens.length === 0) {

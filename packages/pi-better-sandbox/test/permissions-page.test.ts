@@ -66,8 +66,7 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
     assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
     assert.match(lines[3]!, /Outside project\s+-\s+Write\s*$/);
-    // Outside project = Write always hides credential files.
-    assert.match(lines[4]!, /Stored credentials\s+-\s+Off \(fixed\)/);
+    assert.match(lines[4]!, /Stored credentials\s+-\s+Read\s*$/);
     assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
     assert.match(lines[6]!, /Network access\s+-\s+On/);
     assert.match(lines[7]!, /Subagents · Tools/);
@@ -131,27 +130,24 @@ test("arrows select rows and columns, Space cycles, Enter saves only on action, 
     assert.ok(h.renders > 0);
 });
 
-test("file rows cycle four levels and explain Write; credentials are fixed under Outside Write", async () => {
+test("file rows cycle four levels and credentials remain independent under Outside Write", async () => {
     const h = harness();
-    const hint = () => h.page.render(120).map(plain).find((line) => /deletable|rename-based|always hides/.test(line));
+    const hint = () => h.page.render(140).map(plain).find((line) => /deletable|rename-based|Known credential/.test(line));
     h.press(Key.right, Key.down, Key.down);
     assert.match(hint()!, /Write: git and rename-based saves fail outside the project except in worktree folders/);
-    h.press(Key.space, Key.space);
-    await settle();
-    assert.equal(h.current.subagents.outsideProject, "read-write");
-    assert.match(plain(table(h.page, 100)[3]!), /Outside project\s+-\s+Write & delete/);
-    assert.match(hint()!, /Always deletable: temp, hidden ~\/\.directories and worktree folders/);
     h.press(Key.down);
-    assert.equal(hint(), undefined, "credentials are editable again");
+    assert.match(hint()!, /Known credential files follow this row independently of Outside project/);
     assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s*$/);
-    h.press(Key.up);
-    h.press(Key.space); await settle(); h.press(Key.space, Key.space); await settle(); h.press(Key.space, Key.space); await settle();
-    assert.equal(h.current.subagents.outsideProject, "write");
-    const before = h.changes.length;
-    h.press(Key.down, Key.space);
+    h.press(Key.space);
     await settle();
-    assert.equal(h.changes.length, before, "Space does not change a fixed credential row");
-    assert.match(plain(h.page.render(120).at(-1)!), /always hides credential files/);
+    assert.equal(h.current.subagents.storedCredentials, "read", "Read → Read / write waits for confirmation");
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.subagents.storedCredentials, "read-write");
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.subagents.storedCredentials, "off", "Read / write → Off tightens immediately");
+    assert.equal(h.current.subagents.outsideProject, "write");
 });
 
 test("a looser value applies only on a second Space; a tighter one applies at once", async () => {

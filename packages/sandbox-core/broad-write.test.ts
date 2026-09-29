@@ -61,11 +61,11 @@ describe("broad-write policy compilation", () => {
         });
     });
 
-    it("forces credentials off and decides write, read and removal per path", () => fixture(({ home, project, sibling }) => {
+    it("keeps credential access independent and decides write, read and removal per path", () => fixture(({ home, project, sibling }) => {
         const policy = compileWritePolicy({
             writableRoot: project, home, permissions: broad, denyWrite: [join(home, ".registry")],
         }, { platform: () => "darwin" });
-        assert.equal(policy.permissions?.storedCredentials, "off", "the credential deny list is not optional");
+        assert.equal(policy.permissions?.storedCredentials, "read");
         const darwin: SandboxSeams = { platform: () => "darwin" };
         const write = (path: string) => evaluateWriteAccess(path, policy, darwin).allowed;
         const remove = (path: string) => evaluateDeleteAccess(path, policy, darwin);
@@ -76,8 +76,8 @@ describe("broad-write policy compilation", () => {
         assert.equal(write(join(home, ".pi", "agent", "settings.json")), false);
         assert.equal(write(join(home, ".registry", "state.json")), false);
         assert.equal(write("/etc/hosts"), false, "writes stay inside home and temp");
-        assert.equal(evaluateReadAccess(join(home, ".ssh", "id_ed25519"), policy).allowed, false);
-        assert.equal(evaluateReadAccess(join(home, "Library", "Keychains", "login.keychain-db"), policy).allowed, false);
+        assert.equal(evaluateReadAccess(join(home, ".ssh", "id_ed25519"), policy).allowed, true);
+        assert.equal(evaluateReadAccess(join(home, "Library", "Keychains", "login.keychain-db"), policy).allowed, true);
         assert.equal(evaluateReadAccess(join(home, ".zshrc"), policy).allowed, true, "code that runs later stays readable");
         assert.equal(remove(join(sibling, "README.md")).allowed, false);
         assert.deepEqual(remove(join(sibling, "README.md")), { allowed: false, path: join(sibling, "README.md"), reason: "delete-denied" });
@@ -92,8 +92,12 @@ describe("broad-write policy compilation", () => {
         assert.equal(write(join(home, "projects", "other-repo", ".git", "hooks", "pre-commit")), true, "git hooks are not protected (ADR 0008)");
         assert.equal(write(join(home, "projects", "other-repo", ".git", "config")), true);
         assert.equal(write(join(home, ".local", "bin", "git")), false);
-        assert.equal(evaluateReadAccess(join(home, ".gnupg", "private-keys-v1.d", "k.key"), policy).allowed, false);
-        assert.equal(evaluateReadAccess(join(home, ".codex", "auth.json"), policy).allowed, false);
+        assert.equal(evaluateReadAccess(join(home, ".gnupg", "private-keys-v1.d", "k.key"), policy).allowed, true);
+        assert.equal(evaluateReadAccess(join(home, ".codex", "auth.json"), policy).allowed, true);
+        const off = compileWritePolicy({ writableRoot: project, home, permissions: { ...broad, storedCredentials: "off" } });
+        assert.equal(evaluateReadAccess(join(home, ".npmrc"), off).allowed, false);
+        const writable = compileWritePolicy({ writableRoot: project, home, permissions: { ...broad, storedCredentials: "read-write" } });
+        assert.equal(evaluateWriteAccess(join(home, ".npmrc"), writable).allowed, true);
         assert.equal(remove(join(home, "projects", "repo-worktrees", "feature", "file")).allowed, true);
         assert.equal(remove(join(home, "projects", "repo", ".worktrees", "feature", "file")).allowed, true);
         assert.equal(remove(join(home, "projects", "repo-worktrees")).allowed, false, "only a worktree folder's contents");
@@ -117,7 +121,7 @@ describe("broad-write policy compilation", () => {
         // Existing components: the kernel folds `.SSH` to `.ssh`, so must the pre-check.
         assert.equal(write(join(home, ".SSH", "id_ed25519")).allowed, false);
         assert.equal(write(join(home, ".SSH", "new_key")).allowed, false);
-        assert.equal(evaluateReadAccess(join(home, ".SSH", "ID_ED25519"), policy, darwin).allowed, false);
+        assert.equal(evaluateReadAccess(join(home, ".SSH", "ID_ED25519"), policy, darwin).allowed, true);
         assert.equal(evaluateDeleteAccess(join(home, ".Ssh", "id_ed25519"), policy, darwin).allowed, false);
         // A missing tail keeps the caller's case, and the kernel still treats it as the protected name.
         assert.equal(existsSync(join(home, ".zshrc")), false);
@@ -139,7 +143,7 @@ describe("broad-write policy compilation", () => {
         // darwin: a case variant is the protected entry, and the workspace, as the kernel sees them.
         assert.deepEqual(evaluateWriteAccess(join(home, ".ZSHRC"), policy, darwin),
             { allowed: false, path: join(home, ".zshrc"), reason: "write-denied", deniedBy: join(home, ".zshrc") });
-        assert.equal(evaluateReadAccess(join(home, ".SSH", "id_ed25519"), policy, darwin).allowed, false);
+        assert.equal(evaluateReadAccess(join(home, ".SSH", "id_ed25519"), policy, darwin).allowed, true);
         assert.deepEqual(evaluateWriteAccess(join(upperProject, "a.ts"), policy, darwin), { allowed: true, path: join(project, "a.ts") });
         assert.equal(evaluateDeleteAccess(join(upperProject, "a.ts"), policy, darwin).allowed, true, "workspace removal rights, as the kernel grants");
         // Linux: case is significant, so a variant is a different, unrelated path.
@@ -227,12 +231,13 @@ describe("broad-write policy compilation", () => {
         const deny = at("(deny file-write-unlink)\n");
         assert.ok(at(`(allow file-write* (subpath "${home}"))`) < deny);
         assert.ok(deny < at(`(deny file-write* (subpath "${join(home, ".zshrc")}"))`));
-        assert.ok(at(`(deny file-read* (subpath "${join(home, ".ssh")}"))`) > deny);
+        assert.equal(profile.includes(`(deny file-read* (subpath "${join(home, ".ssh")}"))`), false);
+        assert.ok(at(`(deny file-write* (subpath "${join(home, ".ssh")}"))`) > deny);
         assert.ok(at(`(deny file-write* (subpath "${join(home, ".registry")}"))`) > deny);
         assert.ok(at(`(deny file-write-unlink (literal "${home}"))`) > at(`(deny file-write* (subpath "${join(home, ".registry")}"))`));
     }));
 
-    it("plans Linux mounts: read-only root, writable dot entries and workspace, masked credentials", () => fixture(({ base, home, project }) => {
+    it("plans Linux mounts: read-only root, writable dot entries and read-only credentials", () => fixture(({ base, home, project }) => {
         mkdirSync(join(home, ".cache"));
         mkdirSync(join(home, ".ssh"));
         mkdirSync(join(home, ".config", "gh"), { recursive: true });
@@ -251,8 +256,8 @@ describe("broad-write policy compilation", () => {
         assert.ok(mount("--bind", project) > 0);
         assert.ok(mount("--bind", join(home, "projects", "repo-worktrees")) > 0);
         assert.equal(mount("--bind", join(home, "projects")), -1, "ordinary folders stay read-only");
-        assert.ok(mount("--ro-bind", mask.directory, join(home, ".ssh")) > 0);
-        assert.ok(mount("--ro-bind", mask.directory, join(home, ".config", "gh")) > mount("--bind", join(home, ".config")));
+        assert.ok(mount("--ro-bind", join(home, ".ssh")) > 0);
+        assert.ok(mount("--ro-bind", join(home, ".config", "gh")) > mount("--bind", join(home, ".config")));
         assert.ok(mount("--ro-bind", join(home, ".zshrc")) > 0);
         assert.ok(argv.includes("--unshare-net"));
     }));
@@ -302,8 +307,8 @@ describe("broad-write policy compilation", () => {
         assert.equal(decidingMount(rows, join(config, "settings.json")), "--bind-try");
         assert.equal(rows.some(([, target]) => target === join(config, "git") || target === join(config, "evil")), false,
             "symlink entries are never bound");
-        assert.deepEqual(rows.filter(([, target]) => target === join(config, "gh")), [["--ro-bind", join(config, "gh"), join(base, "mask-dir")]],
-            "a protected sibling keeps only its mask");
+        assert.deepEqual(rows.filter(([, target]) => target === join(config, "gh")), [["--ro-bind", join(config, "gh"), join(config, "gh")]],
+            "a credential sibling stays readable but not writable");
         assert.equal(decidingMount(rows, join(home, ".cache", "x")), "--bind", "unrelated dot dirs are untouched");
     }));
 
@@ -461,6 +466,19 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
         assert.equal(existsSync(join(gradle, "wrapper", "dists", "gradle-8.14.3-bin", "gradle-8.14.3-bin.zip.lck")), false);
     }));
 
+    it("honors Stored credentials independently under Outside project = Write", () => fixture((paths) => {
+        const npmrc = join(paths.home, ".npmrc");
+        writeFileSync(npmrc, "registry=https://registry.example.test/\n");
+        const readable = run(paths, `cat '${npmrc}'`);
+        assert.equal(readable.status, 0, output(readable));
+        assert.match(readable.stdout ?? "", /registry\.example\.test/);
+        assert.notEqual(run(paths, `printf changed > '${npmrc}'`).status, 0, "Read must still deny credential writes");
+        assert.notEqual(run(paths, `cat '${npmrc}'`, { ...broad, storedCredentials: "off" }).status, 0, "Off must deny credential reads");
+        const writable = run(paths, `printf changed > '${npmrc}'`, { ...broad, storedCredentials: "read-write" });
+        assert.equal(writable.status, 0, output(writable));
+        assert.equal(readFileSync(npmrc, "utf8"), "changed");
+    }));
+
     it("refuses rm, rm -rf and mv of a sibling repo and keeps its data", () => fixture((paths) => {
         const readme = join(paths.sibling, "README.md");
         for (const script of [
@@ -511,7 +529,7 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
         }
     }));
 
-    it("keeps deny-list paths unreadable or unwritable and harness state unwritable", () => fixture((paths) => {
+    it("keeps credentials readable but unwritable and harness state unwritable", () => fixture((paths) => {
         mkdirSync(join(paths.home, ".ssh"));
         writeFileSync(join(paths.home, ".ssh", "id_ed25519"), "synthetic-secret");
         writeFileSync(join(paths.home, ".zshrc"), "# rc");
@@ -520,8 +538,10 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
         mkdirSync(join(registry, "task-runtime"), { recursive: true });
         writeFileSync(join(registry, "task-runtime", "sa_1.json"), "{}");
         const secret = join(paths.home, ".ssh", "id_ed25519");
+        const credentialRead = run(paths, `cat '${secret}'`);
+        assert.equal(credentialRead.status, 0, output(credentialRead));
+        assert.match(credentialRead.stdout ?? "", /synthetic-secret/);
         const cases: [string, string][] = [
-            [`cat '${secret}'`, "read a credential"],
             [`printf x > '${secret}'`, "write a credential"],
             [`printf x > '${join(paths.home, ".ssh", "authorized_keys")}'`, "create inside a credential dir"],
             [`printf 'curl evil' >> '${join(paths.home, ".zshrc")}'`, "append to a shell rc"],
@@ -601,7 +621,6 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
             [`rm '${home}/.npmrc' && printf 'registry=https://evil/' > '${home}/.npmrc'`, "replace a symlinked credential file"],
             [`rm '${home}/.gitconfig' && printf '[core]\\n\\thooksPath=/tmp/x' > '${home}/.gitconfig'`, "replace symlinked git config"],
             [`rm '${home}/.config' && mkdir -p '${home}/.config/gh' && printf evil > '${home}/.config/gh/hosts.yml'`, "replace a symlinked ~/.config"],
-            [`cat '${dot}/ssh/id_ed25519'`, "read a credential through its target"],
             [`printf evil >> '${dot}/zshrc'`, "append to an rc through its target"],
             [`rm '${registry}' && mkdir '${registry}' && printf forged > '${registry}/sa_1.json'`, "replace a symlinked registry"],
             [`printf forged > '${registry}/sa_1.json'`, "forge through a symlinked registry"],
@@ -611,6 +630,9 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
             assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
             assert.doesNotMatch(result.stdout ?? "", /synthetic-secret/, label);
         }
+        const credentialRead = run(paths, `cat '${dot}/ssh/id_ed25519'`);
+        assert.equal(credentialRead.status, 0, output(credentialRead));
+        assert.match(credentialRead.stdout ?? "", /synthetic-secret/);
         for (const [, name] of links) assert.equal(lstatSync(join(home, name)).isSymbolicLink(), true, name);
         assert.equal(lstatSync(registry).isSymbolicLink(), true);
         assert.equal(readFileSync(join(dot, "zshrc"), "utf8"), "# rc");
@@ -624,15 +646,11 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
         mkdirSync(join(home, ".codex"));
         writeFileSync(join(home, ".codex", "auth.json"), "synthetic-secret");
         mkdirSync(join(home, ".local", "bin"), { recursive: true });
-        for (const [script, label] of [
-            [`cat '${home}/.gnupg/secring'`, "read GnuPG"],
-            [`cat '${home}/.codex/auth.json'`, "read Codex auth"],
-            [`printf x > '${home}/.local/bin/git'`, "shadow a command in ~/.local/bin"],
-        ] as const) {
-            const result = run(paths, script);
-            assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
-            assert.doesNotMatch(result.stdout ?? "", /synthetic-secret/, label);
-        }
+        const read = run(paths, `cat '${home}/.gnupg/secring' && cat '${home}/.codex/auth.json'`);
+        assert.equal(read.status, 0, output(read));
+        assert.match(read.stdout ?? "", /synthetic-secret/);
+        const write = run(paths, `printf x > '${home}/.local/bin/git'`);
+        assert.notEqual(write.status, 0, `shadow a command in ~/.local/bin must be refused: ${output(write)}`);
     }));
 
     it("follows every hop of a symlink chain: 2- and 3-hop file and directory links", () => fixture((paths) => {
@@ -661,7 +679,6 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
             [`mv '${home}/.dotfiles' '${home}/.dotfiles-old' && mkdir '${home}/.dotfiles' && printf evil > '${home}/.dotfiles/zshrc'`, "move the directory holding a hop"],
             [`rm '${home}/.stow/inner/ssh' && mkdir '${home}/.stow/inner/ssh' && printf x > '${home}/.stow/inner/ssh/config'`, "replace the third hop of a credential chain"],
             [`rm '${home}/.dotfiles/ssh' && ln -s '${home}/.cache' '${home}/.dotfiles/ssh'`, "retarget the second hop of a credential chain"],
-            [`cat '${home}/.stow/inner/ssh/id_ed25519'`, "read a credential through a hop"],
             [`rm '${home}/.cache/hop' && mkdir '${home}/.cache/hop' && printf forged > '${home}/.cache/hop/sa_1.json'`, "replace a hop to harness state"],
         ];
         for (const [script, label] of cases) {
@@ -669,6 +686,9 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
             assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
             assert.doesNotMatch(result.stdout ?? "", /synthetic-secret/, label);
         }
+        const credentialRead = run(paths, `cat '${home}/.stow/inner/ssh/id_ed25519'`);
+        assert.equal(credentialRead.status, 0, output(credentialRead));
+        assert.match(credentialRead.stdout ?? "", /synthetic-secret/);
         for (const link of [".zshrc", ".dotfiles/zshrc", ".ssh", ".dotfiles/ssh", ".stow/inner/ssh", ".cache/hop", ".cache/registry"]) {
             assert.equal(lstatSync(join(home, link)).isSymbolicLink(), true, link);
         }
@@ -703,7 +723,6 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
             [`mv '${config}/git' '${config}/git-old'`, "move the stow link"],
             [`rm '${home}/.local/bin' && mkdir '${home}/.local/bin' && printf evil > '${home}/.local/bin/git'`, "replace the mise link"],
             [`printf evil > '${home}/.local/share/mise/shims/git'`, "plant a shim"],
-            [`cat '${config}/evil/id_ed25519'`, "read a credential through a sibling link"],
             [`printf x > '${config}/evil/config'`, "write a credential dir through a sibling link"],
             // Linux: each rebound entry is a mount point. macOS allows renames inside dot dirs.
             ...(linuxKernel ? [[`mv '${config}/nvim' '${config}/nvim-old'`, "rename a rebound entry"] as [string, string]] : []),
@@ -713,6 +732,9 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
             assert.notEqual(result.status, 0, `${label} must be refused: ${output(result)}`);
             assert.doesNotMatch(result.stdout ?? "", /synthetic-secret/, label);
         }
+        const credentialRead = run(paths, `cat '${config}/evil/id_ed25519'`);
+        assert.equal(credentialRead.status, 0, output(credentialRead));
+        assert.match(credentialRead.stdout ?? "", /synthetic-secret/);
         const created = run(paths, `mkdir '${config}/new-tool'`);
         if (linuxKernel) assert.notEqual(created.status, 0, "Linux: no new top-level entries beside a protected link");
         else assert.equal(created.status, 0, output(created));

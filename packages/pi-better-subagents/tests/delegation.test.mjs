@@ -5,7 +5,7 @@ import { register } from "node:module";
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
-const { default: extension } = await import("../index.ts");
+const { default: extension, subagentsArgumentCompletions } = await import("../index.ts");
 const { setConfigForTests } = await import("../config.ts");
 const { normalizeDelegationMode, delegationPrompt, DELEGATION_MODE_REQUEST } = await import("../delegation.ts");
 
@@ -39,6 +39,18 @@ test("normalization falls back to adaptive and each prompt expresses its boundar
     assert.match(delegationPrompt("coordinator"), /agents_catalog/);
     assert.match(delegationPrompt("coordinator"), /every nontrivial task covered by an available role/);
     assert.match(delegationPrompt("coordinator"), /unowned or ambiguous work/);
+});
+
+test("/subagents action completions expose complete mode selections with context", () => {
+    assert.deepEqual(subagentsArgumentCompletions(""), [
+        { value: "mode manual", label: "mode manual", description: "Delegate only when explicitly requested" },
+        { value: "mode adaptive", label: "mode adaptive", description: "Delegate substantial independent work" },
+        { value: "mode coordinator", label: "mode coordinator", description: "Delegate role-owned work by default" },
+    ]);
+    assert.deepEqual(subagentsArgumentCompletions(" mode a")?.map((entry) => entry.value), ["mode adaptive"]);
+    assert.equal(subagentsArgumentCompletions("mode invalid"), null);
+    const command = harness().commands.get("subagents");
+    assert.deepEqual(command.getArgumentCompletions("mode c").map((entry) => entry.value), ["mode coordinator"]);
 });
 
 test("/subagents reports config, changes only this session, rejects invalid args and injects current mode", async () => {
