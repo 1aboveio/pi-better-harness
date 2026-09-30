@@ -28,11 +28,10 @@ Network access                    -                On
     Guarded (follows the file rules)
     [x] apply_patch  harness adapter
     Trusted (runs outside the file rules)
-    [x] web_fetch    @juicesharp/rpiv-web-tools · needs Network On
-    [x] web_search   @juicesharp/rpiv-web-tools · needs Network On
-    [ ] <other installed tool>  <its package>
+    > [x] @juicesharp/rpiv-web-tools  2/2
+    > [ ] <other installed package>  0/1
 
-↑↓ Select row   ←→ Select column   Space Change
+↑↓ Select row   ←→ Select column / expand / collapse   Enter Fold   Space Change
 Save as defaults
 ```
 
@@ -44,9 +43,21 @@ Save as defaults
   full before any file changes.
 - **Trusted** tools are the other tools your Pi has loaded, listed with their
   package. A ticked one is loaded into the subagent and runs in its Pi process,
-  **outside the file rules**. Ticking one needs a second Space. It is admitted
+  **outside the file rules**. One Space toggles it immediately. It is admitted
   only from the package you ticked. Known network tool names are refused while
   Network access is Off: `web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name. That is a name list, not a network sandbox.
+
+Trusted tools use two levels: a package/provider group, then its individual tools.
+Non-MCP tools are grouped by exact owning package; `mcp__<provider>__...` tools
+are grouped by provider and owning package together. Groups start collapsed.
+`>` means collapsed and `v` means expanded. Their checkbox shows `[x]` when
+all children are selected, `[-]` when some are selected, and `[ ]` when none
+are; the count is selected/total. Right expands a group. Left collapses a group,
+or moves from a child to its parent and collapses it. Enter folds the selected
+group. Space on a group selects all children when none or only some are selected,
+or deselects them all when all are selected. Every toggle applies on one Space;
+saving looser defaults still needs a second Enter. Only individual tool
+entries are saved, never a package/provider wildcard or the open/closed state.
 
 Defaults: `apply_patch`, `web_fetch`, and `web_search` on; everything else off.
 See [ADR 0009](../../docs/adr/0009-guarded-and-trusted-subagent-tools.md).
@@ -109,9 +120,11 @@ repository's `.git/hooks` or `.git/config` (`core.hooksPath`, `core.fsmonitor`,
 `~/.gitconfig`, `~/.config/git`, and `~/.git-templates` themselves stay protected. Add your own paths to the deny list with `/sandbox deny add <path>`. Under
 Write, those paths are also protected from removal and renaming.
 
-A looser value (a higher level, a capability switched on, or a sandbox switched
-off) takes effect only on a second Space, and saving looser defaults needs a
-second Enter. Each prompt lists what would loosen. No model
+Space applies every change immediately, including higher permission levels,
+capabilities switched on, and a sandbox switched off. Saving looser defaults
+still needs a second Enter, with a prompt listing what would loosen. The focused
+row has a full-width background and bold text; the selected Main/Subagents cell
+also uses inverse styling. No model
 tool can change these settings. Other rows toggle Off/On. Detail cells under an
 Off sandbox display a dimmed `-` and cannot be changed; their values return when
 the sandbox is enabled again.

@@ -2,7 +2,7 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
 import { isNetworkTool, packageLabel, type DiscoveredTool } from "./shared-task-tools.ts";
-import { defaultSandboxPermissions, describeLoosening, type CredentialAccess, type FileAccess, type SandboxPermissionProfile as PermissionProfile, type SandboxPermissionSettings as PermissionSettings } from "./permissions.ts";
+import { defaultSandboxPermissions, type CredentialAccess, type FileAccess, type SandboxPermissionProfile as PermissionProfile, type SandboxPermissionSettings as PermissionSettings } from "./permissions.ts";
 export type { PermissionProfile, PermissionSettings };
 
 export interface PermissionPageHandlers {
@@ -15,9 +15,12 @@ export interface PermissionPageHandlers {
     discoverTools?(): readonly Pick<DiscoveredTool, "name" | "package">[];
 }
 
+type TrustedItem = { kind: "trusted"; name: string; package: string; loaded: boolean; group: string };
+type ToolGroup = { kind: "group"; id: string; label: string; tools: TrustedItem[] };
 type ToolItem =
     | { kind: "guarded"; name: "apply_patch" }
-    | { kind: "trusted"; name: string; package: string; loaded: boolean };
+    | TrustedItem
+    | ToolGroup;
 
 const GUARDED_HINT = "apply_patch goes through the guarded file operations: Project files and Outside project apply to it.";
 const TRUSTED_HINT = "Trusted tools run in the subagent's Pi process, outside the file rules. Tick only tools you trust.";
@@ -66,7 +69,7 @@ function cell(text: string, width: number): string {
     return cut + " ".repeat(Math.max(0, width - visibleWidth(cut)));
 }
 
-/** A flat, keyboard-driven view; handlers own the effective policy and persistence. */
+/** Keyboard-driven profiles and a foldable package/provider tool tree. */
 export function createPermissionsPage(
     theme: Theme,
     handlers: PermissionPageHandlers,
@@ -91,24 +94,41 @@ export function createPermissionsPage(
     }
     const isTicked = (item: { name: string; package: string }) =>
         !!settings?.subagentTools.trusted.some((tool) => tool.name === item.name && tool.package === item.package);
-    /** Guarded first, then discovered and ticked trusted tools, by name. */
-    function toolItems(): ToolItem[] {
-        const trusted = new Map<string, ToolItem & { kind: "trusted" }>();
-        for (const tool of discovered) trusted.set(`${tool.name}\0${tool.package}`, { kind: "trusted", name: tool.name, package: tool.package, loaded: true });
-        for (const tool of settings?.subagentTools.trusted ?? []) {
-            const key = `${tool.name}\0${tool.package}`;
-            if (!trusted.has(key)) trusted.set(key, { kind: "trusted", name: tool.name, package: tool.package, loaded: false });
+    const expanded = new Set<string>();
+    function toolGroups(): ToolGroup[] {
+        const trusted = new Map<string, TrustedItem>();
+        const add = (tool: { name: string; package: string }, loaded: boolean) => {
+            const provider = /^mcp__(.+?)__/.exec(tool.name)?.[1];
+            const group = JSON.stringify([tool.package, provider ?? ""]);
+            const key = JSON.stringify([tool.name, tool.package]);
+            if (!trusted.has(key)) trusted.set(key, { ...tool, kind: "trusted", loaded, group });
+        };
+        for (const tool of discovered) add(tool, true);
+        for (const tool of settings?.subagentTools.trusted ?? []) add(tool, false);
+        const groups = new Map<string, ToolGroup>();
+        for (const tool of trusted.values()) {
+            if (!groups.has(tool.group)) {
+                const provider = JSON.parse(tool.group)[1] as string;
+                groups.set(tool.group, { kind: "group", id: tool.group,
+                    label: provider ? `${provider} (${packageLabel(tool.package)})` : packageLabel(tool.package), tools: [] });
+            }
+            groups.get(tool.group)!.tools.push(tool);
         }
-        return [{ kind: "guarded", name: "apply_patch" },
-            ...[...trusted.values()].sort((a, b) => a.name.localeCompare(b.name) || a.package.localeCompare(b.package))];
+        for (const group of groups.values()) group.tools.sort((a, b) => a.name.localeCompare(b.name));
+        return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
     }
+    function toolItems(): ToolItem[] {
+        return [{ kind: "guarded", name: "apply_patch" }, ...toolGroups().flatMap((group): ToolItem[] =>
+            [group, ...(expanded.has(group.id) ? group.tools : [])])];
+    }
+    const itemKey = (item: ToolItem) => item.kind === "group" ? item.id
+        : item.kind === "guarded" ? "apply_patch" : JSON.stringify([item.name, item.package]);
     let items = toolItems();
     const saveRow = () => rows.length + items.length;
     let row = 0;
     let column = 0;
     let busy = false;
     let pendingConfirmation: string | undefined;
-    let pendingChange: string | undefined;
 
     function report(error: unknown): void {
         message = errorText(error);
@@ -122,7 +142,14 @@ export function createPermissionsPage(
         if (row >= rows.length) {
             const item = items[row - rows.length]!;
             if (item.kind === "guarded") next.subagentTools.applyPatch = !next.subagentTools.applyPatch;
-            else if (isTicked(item)) {
+            else if (item.kind === "group") {
+                const all = item.tools.every(isTicked);
+                for (const tool of item.tools) {
+                    if (all) next.subagentTools.trusted = next.subagentTools.trusted.filter((entry) =>
+                        !(entry.name === tool.name && entry.package === tool.package));
+                    else if (!isTicked(tool)) next.subagentTools.trusted.push({ name: tool.name, package: tool.package });
+                }
+            } else if (isTicked(item)) {
                 next.subagentTools.trusted = next.subagentTools.trusted.filter((tool) => !(tool.name === item.name && tool.package === item.package));
             } else next.subagentTools.trusted.push({ name: item.name, package: item.package });
             return apply(next);
@@ -144,22 +171,18 @@ export function createPermissionsPage(
 
     async function apply(next: PermissionSettings): Promise<void> {
         if (!settings) return;
-        // A looser value is applied only on a second Space, like a looser Save.
-        const loosened = describeLoosening(settings, next);
-        const nextKey = JSON.stringify(next);
-        if (loosened.length && pendingChange !== nextKey) {
-            pendingChange = nextKey;
-            message = `Looser (${loosened.join("; ")}). Press Space again to apply.`;
-            isError = false;
-            requestRender();
-            return;
-        }
-        pendingChange = undefined;
         busy = true;
         try {
             await handlers.change(snapshot(next));
+            const selected = row >= rows.length && row < saveRow() ? items[row - rows.length] : undefined;
+            const wasSave = row === saveRow();
+            const successors = selected ? items.slice(row - rows.length + 1).map(itemKey) : [];
             settings = next;
             items = toolItems();
+            const index = selected ? items.findIndex((item) => itemKey(item) === itemKey(selected)) : -1;
+            const successor = successors.map((key) => items.findIndex((item) => itemKey(item) === key)).find((at) => at >= 0);
+            row = wasSave ? saveRow() : index >= 0 ? rows.length + index
+                : successor !== undefined ? rows.length + successor : Math.min(row, saveRow());
             message = "";
             isError = false;
             requestRender();
@@ -201,11 +224,21 @@ export function createPermissionsPage(
         }
     }
 
+    function fold(open?: boolean): void {
+        const item = row >= rows.length && row < saveRow() ? items[row - rows.length] : undefined;
+        const id = item?.kind === "group" ? item.id : item?.kind === "trusted" && open === false ? item.group : undefined;
+        if (!id) return;
+        if (open ?? !expanded.has(id)) expanded.add(id);
+        else expanded.delete(id);
+        items = toolItems();
+        row = rows.length + items.findIndex((entry) => entry.kind === "group" && entry.id === id);
+        requestRender();
+    }
+
     return {
         invalidate() {},
         handleInput(data: string) {
             if (!matchesKey(data, Key.enter)) pendingConfirmation = undefined;
-            if (!matchesKey(data, Key.space)) pendingChange = undefined;
             if (matchesKey(data, Key.escape)) {
                 close();
             } else if (matchesKey(data, Key.up)) {
@@ -215,15 +248,19 @@ export function createPermissionsPage(
                 row = Math.min(saveRow(), row + 1);
                 requestRender();
             } else if (matchesKey(data, Key.left)) {
-                column = 0;
+                if (row >= rows.length && row < saveRow()) fold(false);
+                else column = 0;
                 requestRender();
             } else if (matchesKey(data, Key.right)) {
-                column = 1;
+                if (row >= rows.length && row < saveRow()) fold(true);
+                else column = 1;
                 requestRender();
             } else if (matchesKey(data, Key.space)) {
                 void change();
             } else if (matchesKey(data, Key.enter) && row === saveRow()) {
                 void save();
+            } else if (matchesKey(data, Key.enter)) {
+                fold();
             }
         },
         render(width: number): string[] {
@@ -235,14 +272,16 @@ export function createPermissionsPage(
             const available = Math.max(0, w - prefix - labelWidth - gap);
             const mainWidth = Math.ceil(available / 2);
             const subWidth = available - mainWidth;
+            const highlight = (text: string, selected: boolean): string => selected
+                ? theme.bg("selectedBg", theme.bold(cell(text, w))) : text;
             const line = (label: string, main: string, sub: string, selected: boolean, dimMain = false, dimSub = false) => {
                 const marker = prefix ? (selected ? "> " : "  ") : "";
                 const labelPart = cell(label, labelWidth);
-                const mainPart = cell(main, mainWidth);
-                const subPart = cell(sub, subWidth);
-                return theme.fg(selected ? "accent" : "text", marker + labelPart) + " ".repeat(gap) +
-                    theme.fg(dimMain ? "dim" : selected && column === 0 ? "accent" : "text", mainPart) +
-                    theme.fg(dimSub ? "dim" : selected && column === 1 ? "accent" : "text", subPart);
+                const mainPart = theme.fg(dimMain ? "dim" : "text", cell(main, mainWidth));
+                const subPart = theme.fg(dimSub ? "dim" : "text", cell(sub, subWidth));
+                return highlight(theme.fg(selected ? "accent" : "text", marker + labelPart) + " ".repeat(gap) +
+                    (selected && column === 0 ? theme.inverse(mainPart) : mainPart) +
+                    (selected && column === 1 ? theme.inverse(subPart) : subPart), selected);
             };
             const output = [line("Sandbox permissions", "Main", "Subagents", false), ""];
             for (let i = 0; i < rows.length; i++) {
@@ -261,16 +300,25 @@ export function createPermissionsPage(
             }
             // Subagents · Tools: which extension tools a confined subagent may use.
             output.push("", theme.fg("text", truncateToWidth(`${prefix ? "  " : ""}Subagents · Tools`, w, "")));
-            const nameWidth = Math.min(24, Math.max(...items.map((item) => visibleWidth(item.name))), Math.max(0, w - prefix - 8));
+            const toolNames = items.flatMap((item) => item.kind === "group" ? [] : [visibleWidth(item.name)]);
+            const nameWidth = Math.min(24, Math.max(...toolNames), Math.max(0, w - prefix - 10));
             items.forEach((item, index) => {
                 if (index === 0) output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Guarded (follows the file rules)`, w, "")));
                 if (index === 1) output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Trusted (runs outside the file rules)`, w, "")));
                 const selected = row === rows.length + index;
-                const ticked = item.kind === "guarded" ? !!settings?.subagentTools.applyPatch : isTicked(item);
-                const detail = item.kind === "guarded" ? "harness adapter" : [packageLabel(item.package),
-                    ...(isNetworkTool(item.name) ? ["needs Network On"] : []), ...(item.loaded ? [] : ["not loaded"])].join(" · ");
-                const text = `${prefix ? (selected ? "> " : "  ") : ""}  [${ticked ? "x" : " "}] ${cell(item.name, nameWidth)} ${detail}`;
-                output.push(theme.fg(selected ? "accent" : settings ? "text" : "dim", truncateToWidth(text, w, "")));
+                let text: string;
+                if (item.kind === "group") {
+                    const count = item.tools.filter(isTicked).length;
+                    const tick = count === item.tools.length ? "x" : count ? "-" : " ";
+                    text = `  ${expanded.has(item.id) ? "v" : ">"} [${tick}] ${item.label} ${count}/${item.tools.length}`;
+                } else {
+                    const ticked = item.kind === "guarded" ? !!settings?.subagentTools.applyPatch : isTicked(item);
+                    const detail = item.kind === "guarded" ? "harness adapter" : [
+                        ...(isNetworkTool(item.name) ? ["needs Network On"] : []), ...(item.loaded ? [] : ["not loaded"])].join(" · ");
+                    text = `${item.kind === "guarded" ? "  " : "      "}[${ticked ? "x" : " "}] ${cell(item.name, nameWidth)} ${detail}`;
+                }
+                output.push(highlight(theme.fg(selected ? "accent" : settings ? "text" : "dim",
+                    truncateToWidth(`${prefix ? (selected ? "> " : "  ") : ""}${text}`, w, "")), selected));
             });
             if (items.length === 1) {
                 output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Trusted (runs outside the file rules)`, w, "")),
@@ -282,13 +330,18 @@ export function createPermissionsPage(
             const contextual = tool ? (tool.kind === "guarded" ? GUARDED_HINT : TRUSTED_HINT)
                 : selected && settings ? cellHint(selected, settings[columns[column]!]) : undefined;
             for (const hint of [
-                "↑↓ Select row · ←→ Select column · Space Change · Enter Save · Esc Back",
+                "↑↓ Select · ←→ Column/fold · Space Toggle tool/group · Enter Fold/Save · Esc Back",
                 "Changes apply to new launches. Background tasks follow their launcher.",
                 "Stored credentials: known files only; excludes OS vaults and environment tokens.",
                 "Trusted tools run outside the file rules.",
                 ...(contextual ? [contextual] : []),
             ]) output.push(theme.fg("dim", truncateToWidth(hint, w, "")));
-            if (message) output.push(theme.fg(isError ? "error" : "muted", truncateToWidth(message.replace(/[\r\n]+/g, " "), w, "")));
+            if (message) {
+                const clean = message.replace(/[\r\n]+/g, " ");
+                const confirmation = /^(.*) (Press Enter again to save\.)$/.exec(clean);
+                const messages = confirmation && visibleWidth(clean) > w ? [confirmation[1]!, confirmation[2]!] : [clean];
+                for (const text of messages) output.push(theme.fg(isError ? "error" : "muted", truncateToWidth(text, w, "")));
+            }
             return output;
         },
     };
