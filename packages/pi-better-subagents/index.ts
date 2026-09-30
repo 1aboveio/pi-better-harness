@@ -103,7 +103,8 @@ import {
 } from "./health.ts";
 import {
     assignBatchJobNames,
-    formatBatchLaunchResponse,
+    batchLaunchOutputSchema,
+    batchLaunchResult,
     mergeJobOptions,
     nextBatchId,
     planBatchLaunches,
@@ -1902,7 +1903,12 @@ export default function (pi: ExtensionAPI) {
         description:
             "Launch several independent background pi subagents at once. Each job becomes a " +
             "normal subagent run with its own run id, process, log, and metadata. " +
-            "'shared' options are applied to every job; per-job options override them.",
+            "'shared' options are applied to every job; per-job options override them. " +
+            "Codemode callers receive a structured launch receipt: status, batchId when assigned, " +
+            "and launched, failed, skipped arrays with 1-based effective job positions (after any confirmed role split). Inspect all arrays; " +
+            "a returned receipt is not proof that every job launched or completed. " +
+            "Await the launch call and preserve its receipt. Script cancellation does not stop launched runs; use subagent_stop.",
+        outputSchema: batchLaunchOutputSchema,
         promptSnippet: "Launch a batch of background subagents at once",
         promptGuidelines: [
             "When delegation is permitted by the active mode, use subagent_spawn_batch for several independent assigned tasks. It returns immediately with a batch id and one run id per launched job.",
@@ -1993,7 +1999,17 @@ export default function (pi: ExtensionAPI) {
                     p.jobs.map((job) => mergeJobOptions(p.shared, job) as CatalogJobFields),
                     { hasUI: catalogHost.hasUI === true, select: catalogHost.select },
                 );
-                if (clarified.status === "clarification-needed") return catalogResult(clarified) as ReturnType<typeof text>;
+                if (clarified.status === "clarification-needed") return {
+                    ...catalogResult(clarified),
+                    structuredContent: {
+                        status: "clarification-needed",
+                        message: clarified.message,
+                        choices: [...clarified.choices],
+                        launched: [],
+                        failed: [],
+                        skipped: [],
+                    },
+                };
                 p.jobs = clarified.jobs as typeof p.jobs;
                 validateBatchPlan({ shared: undefined, jobs: p.jobs, onCapacity: p.onCapacity, config: cfg });
             }
@@ -2023,9 +2039,9 @@ export default function (pi: ExtensionAPI) {
 
             const names = assignBatchJobNames(p.jobs);
             const batchId = nextBatchId();
-            const launched: { name: string; id: string; modelNote?: string }[] = [];
-            const failed: { name: string; reason: string }[] = [];
-            const skipped: { name: string }[] = [];
+            const launched: { job: number; name: string; id: string; modelNote?: string }[] = [];
+            const failed: { job: number; name: string; reason: string }[] = [];
+            const skipped: { job: number; name: string }[] = [];
             // How many reject-mode reserved slots are still held (not yet committed/released).
             let reservedRemaining = launchAvailable ? 0 : p.jobs.length;
 
@@ -2039,7 +2055,7 @@ export default function (pi: ExtensionAPI) {
                 if (launchAvailable) {
                     if (!gate.tryReserve(1, maxConcurrent)) {
                         for (let j = i; j < p.jobs.length; j++) {
-                            skipped.push({ name: names[j] });
+                            skipped.push({ job: j + 1, name: names[j] });
                         }
                         break;
                     }
@@ -2064,12 +2080,12 @@ export default function (pi: ExtensionAPI) {
                     const { id, modelNote } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
                     gate.commit(1);
                     if (!launchAvailable) reservedRemaining -= 1;
-                    launched.push({ name, id, ...(modelNote ? { modelNote } : {}) });
+                    launched.push({ job: i + 1, name, id, ...(modelNote ? { modelNote } : {}) });
                 } catch (err) {
                     gate.release(1);
                     if (!launchAvailable) reservedRemaining -= 1;
                     const reason = err instanceof Error ? err.message : String(err);
-                    failed.push({ name, reason });
+                    failed.push({ job: i + 1, name, reason });
                     if (!launchAvailable) {
                         // reject mode: leave already-launched runs running, release any
                         // still-held later reservations, and report every later job as failed.
@@ -2079,13 +2095,14 @@ export default function (pi: ExtensionAPI) {
                         }
                         for (let j = i + 1; j < p.jobs.length; j++) {
                             failed.push({
+                                job: j + 1,
                                 name: names[j],
                                 reason: "not launched due to earlier job failure in reject mode",
                             });
                         }
-                        return text(formatBatchLaunchResponse({
+                        return batchLaunchResult({
                             batchId, batchName: p.batchName, launched, skipped, failed,
-                        }));
+                        });
                     }
                     // launch-available: failure did not consume a slot — continue so
                     // later jobs can use remaining capacity (backfill).
@@ -2098,7 +2115,7 @@ export default function (pi: ExtensionAPI) {
                 reservedRemaining = 0;
             }
 
-            return text(formatBatchLaunchResponse({ batchId, batchName: p.batchName, launched, skipped, failed }));
+            return batchLaunchResult({ batchId, batchName: p.batchName, launched, skipped, failed });
         },
     });
 

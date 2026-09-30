@@ -77,6 +77,54 @@ thresholds continue to take precedence for subagent health.
 | `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
 | `subagent_stop` | never | SIGTERM a running run's process group. |
 
+## Codemode batch launches
+
+On Pi 0.99.1 or newer, enable native codemode alongside the existing direct
+tools with `defaultTools: ["+codemode"]` and `codemode.mode: "on"`. SDK sessions
+must also load Pi's `createCodemodeExtension()`. This support is for the
+foreground coordinator; it does not enable codemode in confined children or
+change sandbox admission.
+
+`subagent_spawn_batch` returns the same readable text to direct callers and a
+structured launch receipt to codemode scripts. No text parsing is needed:
+
+```javascript
+const receipt = await tools.subagent_spawn_batch({
+  batchName: "inspection",
+  shared: { tools: "read,bash" },
+  jobs: [
+    { role: "explorer", prompt: "Map the request handling path." },
+    { role: "reviewer", prompt: "Review the current changes for regressions." }
+  ]
+});
+store("inspection-launch", receipt);
+text(receipt);
+```
+
+| Field | Meaning |
+|-------|---------|
+| `status` | `launched`: every effective job launched; `partial`: some launched and some failed or were skipped; `not-launched`: none launched; `clarification-needed`: selection needs a human decision and nothing launched. These are launch outcomes, never completion outcomes. |
+| `batchId`, `batchName` | Assigned batch identity and optional label. No batch ID is assigned for clarification. |
+| `launched` | `{ job, name, id, modelNote? }` for each created run. |
+| `failed` | `{ job, name, reason }` for launch failures, including later jobs not attempted after a reject-mode launch failure. |
+| `skipped` | `{ job, name }` for jobs omitted because capacity was full in `launch-available` mode. |
+| `message`, `choices` | Explanation and selection options on a clarification receipt. |
+
+`job` is a 1-based position in the effective batch order, after any confirmed
+role split. All three job lists are always present. Invalid input and whole-batch
+capacity rejection still throw, so codemode callers must catch those errors.
+Returned partial or no-launch receipts do not throw; inspect `status` and every
+list instead of treating a fulfilled promise as complete success.
+
+Await the launch call and print or retain its receipt before returning from the
+script. Codemode `store()` writes persist only if the script succeeds; launched
+runs are not rolled back if the script later fails, times out, or is interrupted.
+Use the durable run registry to recover IDs when needed, and `subagent_stop` to
+stop a run. Script cancellation is not a stop request. Collect results after
+completion callbacks with `subagent_result`; do not poll or keep a script open
+waiting for completion. Callbacks and capacity/catalog guarantees remain owned
+by the existing harness runtime.
+
 ## Run timing (deadline, ceiling, stuck)
 
 Timeout control belongs to the harness, not to the prompt or the skill that

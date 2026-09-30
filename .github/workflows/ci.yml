@@ -117,6 +117,15 @@ jobs:
           # The sandbox ships no launcher: users keep running ordinary `pi`.
           node -e 'const d = require("/tmp/pi-harness-pack.json"); const pack = Array.isArray(d) ? d[0] : Object.values(d)[0]; const launcher = pack.files.find((file) => file.path.startsWith("node_modules/pi-better-sandbox/bin/")); if (launcher) throw new Error(`pi-better-sandbox must ship no launcher, found ${launcher.path}`);'
 
+      # Run last: replace installed peers only, preserving baseline checks and the lockfile.
+      - name: Native codemode batch compatibility (Pi 0.99.1)
+        timeout-minutes: 5
+        env:
+          PI_CODEMODE_TEST_REQUIRED: "1"
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ @earendil-works/pi-coding-agent@0.99.1 @earendil-works/pi-ai@0.99.1 @earendil-works/pi-tui@0.99.1
+          node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test packages/pi-better-subagents/tests/codemode_batch.test.mjs
+
   macos-sandbox:
     name: macos-sandbox
     runs-on: macos-latest
