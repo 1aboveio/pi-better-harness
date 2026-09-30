@@ -1,6 +1,6 @@
 {
   "name": "pi-better-sandbox",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "description": "Pi extension with independent Main and Subagents permission profiles, file guards, and OS sandbox enforcement.",
   "license": "MIT",
   "type": "module",
