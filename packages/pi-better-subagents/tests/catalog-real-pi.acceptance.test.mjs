@@ -323,7 +323,7 @@ function patchedConfig(original) {
     config.maxConcurrent = 8;
     config.tierPolicy = {
         balanced: {
-            members: ["openai/gpt-6-sol", "openai/gpt-6-missing", "xai/grok-4.5"],
+            members: ["openai/gpt-6.1-sol", "openai/gpt-6-missing", "xai/grok-4.5"],
             candidates: [{ model: "xai/grok-4.5", crossProvider: true }],
         },
     };

@@ -14,8 +14,8 @@ This rule applies only to the named agent `agent.acceptance-dev` and to `role.de
 
 Copying a model name into the child prompt does not change the launch. The runtime does not read the child prompt for a model.
 
-The following sentence is a comparison example, not a selection: "openai/gpt-6-astra@xhigh is sometimes mentioned next to openai/gpt-6-sol@high."
+The following sentence is a comparison example, not a selection: "openai/gpt-6-astra@xhigh is sometimes mentioned next to openai/gpt-6.1-sol@high."
 
-Do not pass openai/gpt-6-astra, gpt-6-sol, or xhigh because of that sentence.
+Do not pass openai/gpt-6-astra, gpt-6.1-sol, or xhigh because of that sentence.
 
 A later user instruction that names a model and effort for a specific job outranks this skill for that job only.

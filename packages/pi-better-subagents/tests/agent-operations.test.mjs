@@ -230,7 +230,7 @@ id: role.locked-reader
 name: Read Only
 description: The name says read-only and that is not enforcement.
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: medium
   tier: balanced
 ---
@@ -473,8 +473,8 @@ You only have read-only access.
                 ...deps(ctx),
                 enrich: () => ({
                     availability: "available",
-                    requestedModel: "openai/gpt-6-sol",
-                    actualModel: "openai/gpt-6-sol",
+                    requestedModel: "openai/gpt-6.1-sol",
+                    actualModel: "openai/gpt-6.1-sol",
                     requestedEffort: "high",
                     actualEffort: "high",
                     launchable: true,
@@ -492,7 +492,7 @@ You only have read-only access.
                 isProjectTrusted: () => true,
             });
             assert.equal(open.details.view.launchable, true);
-            assert.equal(open.details.view.actualModel, "openai/gpt-6-sol");
+            assert.equal(open.details.view.actualModel, "openai/gpt-6.1-sol");
             assert.equal(open.details.view.actualEffort, "high");
             assert.notEqual(open.details.view.definitionValid, open.details.view.launchable && false);
             const secret = join(ctx.cwd, "secret.toml");
@@ -539,11 +539,11 @@ You only have read-only access.
             assert.equal(restriction.honored, false);
             assert.equal(def.metadata?.codexCosmetic?.web_search, undefined);
             assert.equal(def.metadata?.codexCosmetic?.nickname, "reader");
-            const registry = { getAvailable: () => [{ provider: "openai", id: "gpt-6-sol", reasoning: true }] };
+            const registry = { getAvailable: () => [{ provider: "openai", id: "gpt-6.1-sol", reasoning: true }] };
             const prepared = await prepareCatalogJob(
                 loadCatalog({ cwd: ctx.cwd, userRoot: ctx.userRoot, projectTrusted: true }),
                 { prompt: "Check", agent: "agent.web-reader" },
-                { cwd: ctx.cwd, userRoot: ctx.userRoot, projectTrusted: true, registry, foregroundModel: "openai/gpt-6-sol" },
+                { cwd: ctx.cwd, userRoot: ctx.userRoot, projectTrusted: true, registry, foregroundModel: "openai/gpt-6.1-sol" },
             );
             assert.equal(prepared.status, "blocked");
             const sibling = await executeAgentsCommand("show role.developer", host(ctx, scripted([]), { hasUI: false }), deps(ctx));

@@ -10,7 +10,7 @@ Normative rules are R3, R4, R8, and the resolver half of R10. Prose parsing and 
 - It does not grant tools, sandbox modes, extensions, or presets. Inspection copies the catalog `capabilities` object (`grantedByCatalog: false`).
 - It does not call a provider. Availability is one `getAvailable()` snapshot from the foreground registry. `find()` only explains that a known model is outside that set.
 - It does not retry, and it does not substitute after a child has started. `automaticRetry` and `substitutionAfterStart` are false. `startupFailure.action` is `surface-error-no-retry-no-substitution`. A later provider initialization failure is a lifecycle error.
-- It does not invent tier candidates. Built-in tiers name the approved models and have empty candidate lists. `openai/gpt-6-sol`, `openai/gpt-6-luna`, and `openai/gpt-6-astra` are not substitutes.
+- It does not invent tier candidates. Built-in tiers name the approved models and have empty candidate lists. `openai/gpt-6.1-sol`, `openai/gpt-6-luna`, and `openai/gpt-6-astra` are not substitutes.
 
 ## Precedence
 

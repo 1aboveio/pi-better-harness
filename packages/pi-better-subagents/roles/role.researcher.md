@@ -5,7 +5,7 @@ id: role.researcher
 name: Researcher
 description: Owns external-source evidence and factual uncertainty; excludes repo mapping and changes.
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: medium
   tier: balanced
 ---

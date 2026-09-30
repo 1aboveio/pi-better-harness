@@ -38,7 +38,7 @@ function ctxWith(registry) {
         cwd: root,
         hasUI: false,
         isProjectTrusted: () => true,
-        model: { provider: "openai", id: "gpt-6-sol" },
+        model: { provider: "openai", id: "gpt-6.1-sol" },
         modelRegistry: registry,
         ui: { select: async () => undefined },
     };
@@ -56,13 +56,13 @@ describe("review runtime P1", () => {
     });
 
     it("reflects registry availability and the default tool allowlist on inspection", async () => {
-        const models = [{ provider: "openai", id: "gpt-6-sol", reasoning: true }];
+        const models = [{ provider: "openai", id: "gpt-6.1-sol", reasoning: true }];
         const registry = { getAvailable: () => models };
         const ctx = ctxWith(registry);
         const inspect = () => tools.agents_catalog.execute("inspect", { action: "inspect", id: "role.developer" }, undefined, undefined, ctx);
         const first = await inspect();
         assert.equal(first.details.view.launchable, true);
-        assert.equal(first.details.view.actualModel, "openai/gpt-6-sol");
+        assert.equal(first.details.view.actualModel, "openai/gpt-6.1-sol");
         assert.equal(first.details.view.capabilities.grantedByCatalog, false);
         assert.equal(first.details.view.capabilities.sameAsLegacySpawn, true);
         assert.deepEqual([...first.details.view.capabilities.extraGrants], []);
@@ -127,14 +127,14 @@ describe("review runtime P1", () => {
 
         const before = runNames();
         const single = await tools.subagent_spawn.execute("call", spawnArgs, undefined, undefined, ctxWith({
-            getAvailable: () => [{ provider: "openai", id: "gpt-6-sol", reasoning: true }],
+            getAvailable: () => [{ provider: "openai", id: "gpt-6.1-sol", reasoning: true }],
         }));
         assert.equal(single.details.status, "clarification-needed");
         assert.equal(single.details.launched, false);
         assert.equal(single.details.wrote, false);
         assert.match(single.content[0].text, /Nothing was launched/);
         const batch = await tools.subagent_spawn_batch.execute("call", batchArgs, undefined, undefined, ctxWith({
-            getAvailable: () => [{ provider: "openai", id: "gpt-6-sol", reasoning: true }],
+            getAvailable: () => [{ provider: "openai", id: "gpt-6.1-sol", reasoning: true }],
         }));
         assert.equal(batch.details.status, "clarification-needed");
         assert.equal(batch.details.launched, false);

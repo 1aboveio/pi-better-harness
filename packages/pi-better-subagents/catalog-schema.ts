@@ -72,10 +72,10 @@ export const PARSER_LIMITS = {
  * runtime already uses. Tiers are catalog policy, not benchmark rankings.
  */
 export const APPROVED_ROLE_DEFAULTS = [
-    { id: "role.researcher", name: "Researcher", model: "openai/gpt-6-sol", effort: "medium", tier: "balanced" },
+    { id: "role.researcher", name: "Researcher", model: "openai/gpt-6.1-sol", effort: "medium", tier: "balanced" },
     { id: "role.explorer", name: "Explorer", model: "openai/gpt-6-luna", effort: "medium", tier: "efficient" },
-    { id: "role.product-manager", name: "Product Manager", model: "openai/gpt-6-sol", effort: "medium", tier: "balanced" },
-    { id: "role.developer", name: "Developer", model: "openai/gpt-6-sol", effort: "high", tier: "balanced" },
+    { id: "role.product-manager", name: "Product Manager", model: "openai/gpt-6.1-sol", effort: "medium", tier: "balanced" },
+    { id: "role.developer", name: "Developer", model: "openai/gpt-6.1-sol", effort: "high", tier: "balanced" },
     { id: "role.reviewer", name: "Reviewer", model: "openai/gpt-6-astra", effort: "medium", tier: "frontier" },
     { id: "role.architect", name: "Architect", model: "openai/gpt-6-astra", effort: "high", tier: "frontier" },
 ] as const;

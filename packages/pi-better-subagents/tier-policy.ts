@@ -49,13 +49,13 @@ export interface NormalizedTierPolicy {
 }
 
 /**
- * Approved model membership only. `openai/gpt-6-sol`, `openai/gpt-6-luna`, and
+ * Approved model membership only. `openai/gpt-6.1-sol`, `openai/gpt-6-luna`, and
  * `openai/gpt-6-astra` are not fallbacks for each other.
  */
 export const DEFAULT_TIER_POLICY = {
     tiers: {
         efficient: { members: ["openai/gpt-6-luna"], candidates: [] },
-        balanced: { members: ["openai/gpt-6-sol"], candidates: [] },
+        balanced: { members: ["openai/gpt-6.1-sol"], candidates: [] },
         frontier: { members: ["openai/gpt-6-astra"], candidates: [] },
     },
 } as const satisfies TierPolicy;

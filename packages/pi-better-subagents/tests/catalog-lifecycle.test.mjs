@@ -57,10 +57,10 @@ function fixture() {
                 foregroundModel: "openai/gpt-6-luna",
                 configuredDefaultModel: null,
                 registry: registryOf(
-                    model("openai", "gpt-6-sol"),
+                    model("openai", "gpt-6.1-sol"),
                     model("openai", "gpt-6-luna"),
                     model("openai", "gpt-6-astra"),
-                    model("openai", "gpt-6-sol-backup"),
+                    model("openai", "gpt-6.1-sol-backup"),
                 ),
                 ...extra,
             };
@@ -101,26 +101,26 @@ describe("catalog runtime", () => {
         });
         assert.equal(catalogDefaultNote(undefined, "openai/gpt-6-astra", "high"), undefined);
         assert.equal(catalogDefaultNote(record("role", null, null), "openai/gpt-6-astra", "high"), undefined);
-        assert.equal(catalogDefaultNote(record("role", "openai/gpt-6-sol", "high"), "openai/gpt-6-sol", "high"), undefined);
+        assert.equal(catalogDefaultNote(record("role", "openai/gpt-6.1-sol", "high"), "openai/gpt-6.1-sol", "high"), undefined);
         // A providerless default matches its resolved provider/id, including a nested id.
-        assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null), "openai/gpt-6-sol", "low"), undefined);
-        assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null), "openrouter/openai/gpt-6-sol", "low"), undefined);
-        assert.equal(catalogDefaultNote(record("role", "gpt-6-sol", null, "role-default"), "openrouter/openai/gpt-6-sol", undefined), undefined);
+        assert.equal(catalogDefaultNote(record("role", "gpt-6.1-sol", null), "openai/gpt-6.1-sol", "low"), undefined);
+        assert.equal(catalogDefaultNote(record("role", "gpt-6.1-sol", null), "openrouter/openai/gpt-6.1-sol", "low"), undefined);
+        assert.equal(catalogDefaultNote(record("role", "gpt-6.1-sol", null, "role-default"), "openrouter/openai/gpt-6.1-sol", undefined), undefined);
         assert.equal(
-            catalogDefaultNote(record("role", "openai/gpt-6-sol", "high", "tier-candidate"), "openai/gpt-6-sol-backup", "high"),
-            "model openai/gpt-6-sol-backup@high (role default openai/gpt-6-sol@high unavailable; same-tier fallback)",
+            catalogDefaultNote(record("role", "openai/gpt-6.1-sol", "high", "tier-candidate"), "openai/gpt-6.1-sol-backup", "high"),
+            "model openai/gpt-6.1-sol-backup@high (role default openai/gpt-6.1-sol@high unavailable; same-tier fallback)",
         );
         assert.equal(
-            catalogDefaultNote(record("role", "openai/gpt-6-sol", "xhigh", "role-default", true), "openai/gpt-6-sol", "high"),
-            "model openai/gpt-6-sol@high (role default openai/gpt-6-sol@xhigh; effort capped at high by the model)",
+            catalogDefaultNote(record("role", "openai/gpt-6.1-sol", "xhigh", "role-default", true), "openai/gpt-6.1-sol", "high"),
+            "model openai/gpt-6.1-sol@high (role default openai/gpt-6.1-sol@xhigh; effort capped at high by the model)",
         );
         assert.equal(
-            catalogDefaultNote(record("agent", "openai/gpt-6-sol", "xhigh", "configured-default", true), "openai/gpt-6-luna", "high"),
-            "model openai/gpt-6-luna@high (agent default openai/gpt-6-sol@xhigh unavailable; configured-default fallback; effort capped at high by the model)",
+            catalogDefaultNote(record("agent", "openai/gpt-6.1-sol", "xhigh", "configured-default", true), "openai/gpt-6-luna", "high"),
+            "model openai/gpt-6-luna@high (agent default openai/gpt-6.1-sol@xhigh unavailable; configured-default fallback; effort capped at high by the model)",
         );
         assert.equal(
-            catalogDefaultNote(record("agent", "openai/gpt-6-sol", null), "openai/gpt-6-astra", undefined),
-            "model openai/gpt-6-astra (agent default openai/gpt-6-sol)",
+            catalogDefaultNote(record("agent", "openai/gpt-6.1-sol", null), "openai/gpt-6-astra", undefined),
+            "model openai/gpt-6-astra (agent default openai/gpt-6.1-sol)",
         );
         assert.equal(
             catalogDefaultNote(record("role", null, "high"), "openai/gpt-6-astra", "low"),
@@ -176,14 +176,14 @@ describe("catalog runtime", () => {
         writeFileSync(reviewPath, readFileSync(reviewPath, "utf8").replace("name: Payments Developer", "name: Review Agent"));
         const h = fx.host();
         const first = loadLaunchSnapshot(h);
-        const developer = await prepareCatalogJob(first, { prompt: "Implement.", agent: "agent.payments", model: "openai/gpt-6-sol", thinking: "high" }, h);
+        const developer = await prepareCatalogJob(first, { prompt: "Implement.", agent: "agent.payments", model: "openai/gpt-6.1-sol", thinking: "high" }, h);
         const reviewer = await prepareCatalogJob(first, { prompt: "Review.", agent: "agent.review", model: "openai/gpt-6-astra", thinking: "medium" }, h);
         assert.equal(developer.status, "ready", developer.message);
         assert.equal(reviewer.status, "ready", reviewer.message);
         assert.equal(developer.assign.catalog.snapshotDigest, reviewer.assign.catalog.snapshotDigest);
         assert.equal(developer.assign.name, "Payments Developer");
         assert.equal(reviewer.assign.name, "Review Agent");
-        assert.equal(developer.assign.model, "openai/gpt-6-sol");
+        assert.equal(developer.assign.model, "openai/gpt-6.1-sol");
         assert.equal(reviewer.assign.model, "openai/gpt-6-astra");
         const roleFile = join(fx.userRoot, "agents", "roles", "role.developer.md");
         mkdirSync(join(roleFile, ".."), { recursive: true });
@@ -194,7 +194,7 @@ id: role.developer
 name: Developer
 description: Edited after admission.
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: low
   tier: balanced
 ---
@@ -263,27 +263,27 @@ Edited instructions.
         const policy = tiersForLaunch({
             tierPolicy: {
                 balanced: {
-                    members: ["openai/gpt-6-sol", "openai/gpt-6-sol-backup"],
-                    candidates: ["openai/gpt-6-sol-backup"],
+                    members: ["openai/gpt-6.1-sol", "openai/gpt-6.1-sol-backup"],
+                    candidates: ["openai/gpt-6.1-sol-backup"],
                 },
             },
         });
         assert.deepEqual(policy, configureTierPolicy({
             balanced: {
-                members: ["openai/gpt-6-sol", "openai/gpt-6-sol-backup"],
-                candidates: ["openai/gpt-6-sol-backup"],
+                members: ["openai/gpt-6.1-sol", "openai/gpt-6.1-sol-backup"],
+                candidates: ["openai/gpt-6.1-sol-backup"],
             },
         }));
         const fx = fixture();
         writeAgent(fx.userRoot, "agent.payments", "role.developer", "Look at payments.");
         const h = fx.host({
             tiers: policy,
-            registry: registryOf(model("openai", "gpt-6-luna"), model("openai", "gpt-6-sol-backup")),
+            registry: registryOf(model("openai", "gpt-6-luna"), model("openai", "gpt-6.1-sol-backup")),
         });
         const snapshot = loadCatalog({ cwd: h.cwd, projectTrusted: true, userRoot: h.userRoot });
         const prepared = await prepareCatalogJob(snapshot, { prompt: "Fallback.", agent: "agent.payments" }, h);
         assert.equal(prepared.status, "ready", prepared.message);
-        assert.equal(prepared.assign.model, "openai/gpt-6-sol-backup");
+        assert.equal(prepared.assign.model, "openai/gpt-6.1-sol-backup");
         assert.equal(prepared.assign.catalog.modelSelection.source, "tier-candidate");
         assert.equal(prepared.assign.catalog.effortSelection.actual, "high");
     });
@@ -305,7 +305,7 @@ Edited instructions.
             snapshotDigest: snapshot.digest,
         });
         assert.equal(developer.launchable, true);
-        assert.equal(developer.actualModel, "openai/gpt-6-sol");
+        assert.equal(developer.actualModel, "openai/gpt-6.1-sol");
         assert.equal(developer.capabilities.grantedByCatalog, false);
         assert.ok(developer.capabilities.enforcedExistingControls.includes("tool selection"));
         assert.equal(enrich({
@@ -320,10 +320,10 @@ Edited instructions.
     });
 
     it("re-reads registry availability and tool config on every inspection", () => {
-        const models = [model("openai", "gpt-6-sol")];
+        const models = [model("openai", "gpt-6.1-sol")];
         const h = fixture().host({
             registry: { getAvailable: () => models, find: () => undefined },
-            foregroundModel: "openai/gpt-6-sol",
+            foregroundModel: "openai/gpt-6.1-sol",
             configuredDefaultModel: null,
         });
         noteCatalogHost(h);
@@ -489,7 +489,7 @@ fi
             mode: "tui",
             model: { provider: "openai", id: "gpt-6-luna" },
             modelRegistry: registryOf(
-                model("openai", "gpt-6-sol"),
+                model("openai", "gpt-6.1-sol"),
                 model("openai", "gpt-6-luna"),
                 model("openai", "gpt-6-astra"),
             ),
@@ -513,7 +513,7 @@ fi
         }, null, null, ctx());
         const text = textOf(result);
         assert.match(text, /Payments Developer/);
-        assert.match(text, /^Model openai\/gpt-6-astra@high \(agent default openai\/gpt-6-sol@high\)\.$/m);
+        assert.match(text, /^Model openai\/gpt-6-astra@high \(agent default openai\/gpt-6\.1-sol@high\)\.$/m);
         const id = text.match(/id=(sa_\S+)/)[1];
         const run = join(runtimeTmp, "pi-better-subagents", "runs", id);
         const meta = JSON.parse(readFileSync(join(run, "meta.json"), "utf8"));
@@ -560,8 +560,8 @@ fi
         const namedId = runIdFrom(namedResult);
         const roleId = runIdFrom(roleResult);
         // A fallback is worded as a fallback, so the parent does not mistake it for an override to undo.
-        assert.match(textOf(namedResult), /^Model xai\/grok-4\.7@high \(agent default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
-        assert.match(textOf(roleResult), /^Model xai\/grok-4\.7@high \(role developer default openai\/gpt-6-sol@high unavailable; foreground fallback\)\.$/m);
+        assert.match(textOf(namedResult), /^Model xai\/grok-4\.7@high \(agent default openai\/gpt-6\.1-sol@high unavailable; foreground fallback\)\.$/m);
+        assert.match(textOf(roleResult), /^Model xai\/grok-4\.7@high \(role developer default openai\/gpt-6\.1-sol@high unavailable; foreground fallback\)\.$/m);
         const named = metaOf(namedId);
         const role = metaOf(roleId);
         const roleInstructions = loadCatalog({
@@ -575,7 +575,7 @@ fi
         assert.equal(named.catalog.roleId, "role.developer");
         assert.equal(named.model, "xai/grok-4.7");
         assert.equal(named.effort, "high");
-        assert.equal(named.catalog.modelSelection.requested, "openai/gpt-6-sol");
+        assert.equal(named.catalog.modelSelection.requested, "openai/gpt-6.1-sol");
         assert.equal(named.catalog.modelSelection.requestedSource, "role-default");
         assert.equal(named.catalog.modelSelection.source, "foreground");
         assert.equal(named.catalog.effortSelection.source, "role-default");
@@ -585,7 +585,7 @@ fi
         assert.equal(role.catalog.roleId, "role.developer");
         assert.equal(role.model, "xai/grok-4.7");
         assert.equal(role.effort, "high");
-        assert.equal(role.catalog.modelSelection.requested, "openai/gpt-6-sol");
+        assert.equal(role.catalog.modelSelection.requested, "openai/gpt-6.1-sol");
         assert.equal(role.catalog.modelSelection.requestedSource, "role-default");
         assert.equal(role.catalog.modelSelection.source, "foreground");
         assert.equal(role.catalog.effortSelection.source, "role-default");
@@ -644,7 +644,7 @@ fi
         writeFileSync(reviewPath, readFileSync(reviewPath, "utf8").replace("name: Payments Developer", "name: Review Agent"));
         const result = await tools.subagent_spawn_batch.execute("tc", {
             jobs: [
-                { prompt: "Implement.", agent: "agent.payments", model: "openai/gpt-6-sol", thinking: "high" },
+                { prompt: "Implement.", agent: "agent.payments", model: "openai/gpt-6.1-sol", thinking: "high" },
                 { prompt: "Review.", agent: "agent.review", model: "openai/gpt-6-astra", thinking: "medium" },
             ],
             shared: { tools: "read,bash", sandbox: false },
@@ -657,7 +657,7 @@ fi
         assert.match(text, /• Review Agent → sa_[a-z0-9_]+$/m);
         const metas = ids.map((id) => JSON.parse(readFileSync(join(runtimeTmp, "pi-better-subagents", "runs", id, "meta.json"), "utf8")));
         assert.equal(metas[0].catalog.snapshotDigest, metas[1].catalog.snapshotDigest);
-        assert.equal(metas[0].model, "openai/gpt-6-sol");
+        assert.equal(metas[0].model, "openai/gpt-6.1-sol");
         assert.equal(metas[1].model, "openai/gpt-6-astra");
         assert.equal(metas[0].effort, "high");
         assert.equal(metas[1].effort, "medium");
@@ -676,7 +676,7 @@ fi
         const text = textOf(result);
         assert.doesNotMatch(text, /default openai/);
         const meta = metaOf(runIdFrom(result));
-        assert.equal(meta.model, "openai/gpt-6-sol");
+        assert.equal(meta.model, "openai/gpt-6.1-sol");
         assert.equal(meta.effort, "high");
     });
 
@@ -690,7 +690,7 @@ fi
             tools: "read,bash",
             sandbox: false,
         }, null, null, ctx());
-        assert.match(textOf(result), /^Model openai\/gpt-6-sol@low \(role developer default openai\/gpt-6-sol@high\)\.$/m);
+        assert.match(textOf(result), /^Model openai\/gpt-6\.1-sol@low \(role developer default openai\/gpt-6\.1-sol@high\)\.$/m);
     });
 
     it("notes a batch shared model override on every job it changes", async (t) => {
@@ -707,8 +707,8 @@ fi
         const text = textOf(result);
         const lines = text.split("\n").filter((line) => line.startsWith("• "));
         assert.equal(lines.length, 3, text);
-        assert.match(lines[0], /^• \S*dev-a\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6-sol@high\)$/);
-        assert.match(lines[1], /^• \S*dev-b\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6-sol@high\)$/);
+        assert.match(lines[0], /^• \S*dev-a\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6\.1-sol@high\)$/);
+        assert.match(lines[1], /^• \S*dev-b\S* → sa_[a-z0-9_]+ · model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6\.1-sol@high\)$/);
         // The reviewer default is astra@medium, so the shared model changes nothing there.
         assert.match(lines[2], /^• \S*rev\S* → sa_[a-z0-9_]+$/);
     });
@@ -786,7 +786,7 @@ fi
         for (const meta of metas) {
             assert.equal(meta.catalog.identity.label, meta.name);
             assert.equal(meta.catalog.roleId, "role.developer");
-            assert.equal(meta.model, "openai/gpt-6-sol");
+            assert.equal(meta.model, "openai/gpt-6.1-sol");
             assert.equal(meta.effort, "high");
             assert.equal(meta.catalog.modelSelection.source, "role-default");
             assert.equal(meta.catalog.effortSelection.actual, "high");
@@ -800,7 +800,7 @@ fi
         assert.notEqual(finished.status, "running");
         assert.equal(finished.name, metas[0].name);
         assert.equal(finished.catalog.identity.label, metas[0].name);
-        assert.equal(finished.catalog.modelSelection.actual, "openai/gpt-6-sol");
+        assert.equal(finished.catalog.modelSelection.actual, "openai/gpt-6.1-sol");
         const stale = readMeta(ids[0]);
         stale.name = "job-1";
         stale.catalog = { identity: { label: "stale" }, modelSelection: { actual: "stale" } };
@@ -810,7 +810,7 @@ fi
         assert.equal(kept.name, metas[0].name);
         assert.equal(kept.status, "failed");
         assert.equal(kept.catalog.identity.label, metas[0].name);
-        assert.equal(kept.catalog.modelSelection.actual, "openai/gpt-6-sol");
+        assert.equal(kept.catalog.modelSelection.actual, "openai/gpt-6.1-sol");
         const dropped = readMeta(ids[0]);
         delete dropped.name;
         delete dropped.catalog;
@@ -830,12 +830,12 @@ fi
         assert.equal(detail.id, ids[1]);
         assert.equal(detail.name, metas[1].name);
         assert.equal(detail.role, "developer");
-        assert.equal(detail.model, "openai/gpt-6-sol");
+        assert.equal(detail.model, "openai/gpt-6.1-sol");
         assert.equal(detail.effort, "high");
         const lines = buildDetailLines(detail, { width: 120, truncate: (line) => line }).join("\n");
         assert.match(lines, new RegExp(ids[1]));
         assert.match(lines, /^   role +developer$/m);
-        assert.match(lines, /gpt-6-sol/);
+        assert.match(lines, /gpt-6\.1-sol/);
         assert.match(lines, /high/);
     });
 
@@ -859,8 +859,8 @@ fi
         assert.match(metas[1].name, /^developer-\d+$/);
         assert.notEqual(metas[0].name, metas[1].name);
         assert.match(metas[2].name, /^reviewer-/);
-        assert.equal(metas[0].model, "openai/gpt-6-sol");
-        assert.equal(metas[1].model, "openai/gpt-6-sol");
+        assert.equal(metas[0].model, "openai/gpt-6.1-sol");
+        assert.equal(metas[1].model, "openai/gpt-6.1-sol");
         assert.equal(metas[2].model, "openai/gpt-6-astra");
         assert.equal(metas[0].effort, "high");
         assert.equal(metas[2].effort, "medium");
@@ -885,7 +885,7 @@ fi
             sandbox: false,
         }, null, null, ctx());
         const meta = metaOf(runIdFrom(result));
-        assert.equal(meta.model, "openai/gpt-6-sol");
+        assert.equal(meta.model, "openai/gpt-6.1-sol");
         assert.equal(meta.effort, "high");
         assert.equal(meta.catalog.modelSelection.source, "role-default");
     });
@@ -896,23 +896,23 @@ fi
             maxConcurrent: 8,
             tierPolicy: {
                 balanced: {
-                    members: ["openai/gpt-6-sol", "openai/gpt-6-sol-backup"],
-                    candidates: ["openai/gpt-6-sol-backup"],
+                    members: ["openai/gpt-6.1-sol", "openai/gpt-6.1-sol-backup"],
+                    candidates: ["openai/gpt-6.1-sol-backup"],
                 },
             },
         });
         try {
             const host = ctx();
-            host.modelRegistry = registryOf(model("openai", "gpt-6-luna"), model("openai", "gpt-6-sol-backup"));
+            host.modelRegistry = registryOf(model("openai", "gpt-6-luna"), model("openai", "gpt-6.1-sol-backup"));
             const result = await tools.subagent_spawn.execute("tc", {
                 prompt: "Fallback through config.",
                 role: "role.developer",
                 tools: "read,bash",
                 sandbox: false,
             }, null, null, host);
-            assert.match(textOf(result), /^Model openai\/gpt-6-sol-backup@high \(role developer default openai\/gpt-6-sol@high unavailable; same-tier fallback\)\.$/m);
+            assert.match(textOf(result), /^Model openai\/gpt-6\.1-sol-backup@high \(role developer default openai\/gpt-6\.1-sol@high unavailable; same-tier fallback\)\.$/m);
             const meta = metaOf(runIdFrom(result));
-            assert.equal(meta.model, "openai/gpt-6-sol-backup");
+            assert.equal(meta.model, "openai/gpt-6.1-sol-backup");
             assert.equal(meta.effort, "high");
             assert.equal(meta.catalog.modelSelection.source, "tier-candidate");
             assert.equal(meta.catalog.effortSelection.actual, "high");
@@ -927,15 +927,15 @@ fi
             id: "role.developer",
         }, null, null, ctx());
         assert.equal(inspected.details.view.launchable, true);
-        assert.equal(inspected.details.view.actualModel, "openai/gpt-6-sol");
+        assert.equal(inspected.details.view.actualModel, "openai/gpt-6.1-sol");
         assert.equal(inspected.details.view.actualEffort, "high");
-        assert.deepEqual(inspected.details.view.defaults, { model: "openai/gpt-6-sol", effort: "high", label: "openai/gpt-6-sol@high" });
-        assert.match(inspected.content[0].text.split("\n")[0], / default openai\/gpt-6-sol@high$/);
+        assert.deepEqual(inspected.details.view.defaults, { model: "openai/gpt-6.1-sol", effort: "high", label: "openai/gpt-6.1-sol@high" });
+        assert.match(inspected.content[0].text.split("\n")[0], / default openai\/gpt-6\.1-sol@high$/);
         const listed = await tools.agents_catalog.execute("tc", { action: "list" }, null, null, ctx());
         const agentLine = listed.content[0].text.split("\n").find((line) => line.startsWith("agent agent.payments "));
-        assert.ok(agentLine?.endsWith(" default openai/gpt-6-sol@high"), agentLine);
+        assert.ok(agentLine?.endsWith(" default openai/gpt-6.1-sol@high"), agentLine);
         const agentEntry = listed.details.entries.find((entry) => entry.id === "agent.payments");
-        assert.equal(agentEntry.defaults.label, "openai/gpt-6-sol@high");
+        assert.equal(agentEntry.defaults.label, "openai/gpt-6.1-sol@high");
         assert.equal(inspected.details.view.capabilities.grantedByCatalog, false);
         assert.equal(inspected.details.wrote, false);
     });
@@ -968,7 +968,7 @@ fi
                 assert.equal(meta.catalog.kind, "role", role);
                 assert.equal(meta.catalog.id, "role.developer", role);
                 assert.equal(meta.catalog.roleId, "role.developer", role);
-                assert.equal(meta.model, "openai/gpt-6-sol", role);
+                assert.equal(meta.model, "openai/gpt-6.1-sol", role);
                 assert.equal(meta.effort, "high", role);
             }
         });
@@ -1026,13 +1026,13 @@ fi
             assert.equal(ids.length, 2, textOf(result));
             const metas = await Promise.all(ids.map(settledMeta));
             assert.deepEqual(metas.map((meta) => meta.catalog.roleId), ["role.reviewer", "role.developer"]);
-            assert.deepEqual(metas.map((meta) => meta.model), ["openai/gpt-6-astra", "openai/gpt-6-sol"]);
+            assert.deepEqual(metas.map((meta) => meta.model), ["openai/gpt-6-astra", "openai/gpt-6.1-sol"]);
             // A per-job override names the short role in its default note.
             const noted = await tools.subagent_spawn_batch.execute("tc", {
                 jobs: [{ prompt: "Build.", role: "developer", model: "openai/gpt-6-astra@high", name: "noted" }],
                 shared: { tools: "read,bash", sandbox: false },
             }, null, null, ctx());
-            assert.match(textOf(noted), /· model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6-sol@high\)$/m);
+            assert.match(textOf(noted), /· model openai\/gpt-6-astra@high \(role developer default openai\/gpt-6\.1-sol@high\)$/m);
             await settledMeta(runIdFrom(noted));
         });
 
@@ -1108,7 +1108,7 @@ fi
         it("lists roles by short name and inspects by short name with the full id in details", async () => {
             const listed = await tools.agents_catalog.execute("tc", { action: "list" }, null, null, ctx());
             const lines = listed.content[0].text.split("\n");
-            assert.ok(lines.some((line) => line.startsWith('role developer "Developer" ') && line.endsWith(" default openai/gpt-6-sol@high")), listed.content[0].text);
+            assert.ok(lines.some((line) => line.startsWith('role developer "Developer" ') && line.endsWith(" default openai/gpt-6.1-sol@high")), listed.content[0].text);
             assert.equal(lines.some((line) => /^role role\./.test(line)), false);
             assert.ok(lines.some((line) => line.startsWith("agent agent.payments ")));
             assert.ok(listed.details.entries.some((entry) => entry.id === "role.developer" && entry.identity.id === "role.developer"));

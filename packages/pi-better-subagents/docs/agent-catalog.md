@@ -16,7 +16,7 @@ id: role.developer
 name: Developer
 description: Implements a requested change in the existing system.
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: high
   tier: balanced
 ---
@@ -100,10 +100,10 @@ Model availability, same-tier fallback, and nearest-effort adjustment are not de
 
 | Role | Stored id | Name | Model | Effort | Tier |
 | --- | --- | --- | --- | --- | --- |
-| `researcher` | `role.researcher` | Researcher | `openai/gpt-6-sol` | medium | balanced |
+| `researcher` | `role.researcher` | Researcher | `openai/gpt-6.1-sol` | medium | balanced |
 | `explorer` | `role.explorer` | Explorer | `openai/gpt-6-luna` | medium | efficient |
-| `product-manager` | `role.product-manager` | Product Manager | `openai/gpt-6-sol` | medium | balanced |
-| `developer` | `role.developer` | Developer | `openai/gpt-6-sol` | high | balanced |
+| `product-manager` | `role.product-manager` | Product Manager | `openai/gpt-6.1-sol` | medium | balanced |
+| `developer` | `role.developer` | Developer | `openai/gpt-6.1-sol` | high | balanced |
 | `reviewer` | `role.reviewer` | Reviewer | `openai/gpt-6-astra` | medium | frontier |
 | `architect` | `role.architect` | Architect | `openai/gpt-6-astra` | high | frontier |
 

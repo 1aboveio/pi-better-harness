@@ -256,9 +256,9 @@ export async function clarifyCatalogRequest(
  * Launch-line note for a catalog run whose effective model or effort differs
  * from the role or agent default. The wording names the cause, so a fallback
  * or a capped effort is not mistaken for a caller override:
- * - override: `model openai/gpt-6-astra@high (role developer default openai/gpt-6-sol@high)`
- * - fallback: `model xai/grok-4.7@high (role developer default openai/gpt-6-sol@high unavailable; foreground fallback)`
- * - capped effort: `model openai/gpt-6-sol@medium (role developer default openai/gpt-6-sol@high; effort capped at medium by the model)`
+ * - override: `model openai/gpt-6-astra@high (role developer default openai/gpt-6.1-sol@high)`
+ * - fallback: `model xai/grok-4.7@high (role developer default openai/gpt-6.1-sol@high unavailable; foreground fallback)`
+ * - capped effort: `model openai/gpt-6.1-sol@medium (role developer default openai/gpt-6.1-sol@high; effort capped at medium by the model)`
  * Undefined for a non-catalog run, a definition with no default, or a launch
  * that matches the default. Only the fields the definition sets are compared.
  */

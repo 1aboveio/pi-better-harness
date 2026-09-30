@@ -59,7 +59,7 @@ function writeDefinition(directory, filename, markdown) {
 }
 
 function roleMarkdown(id, name, extra = "") {
-    return `---\nschema: pi-agent/v1\nkind: role\nid: ${id}\nname: ${name}\ndefaults:\n  model: openai/gpt-6-sol\n  effort: medium\n  tier: balanced\n${extra}---\nRole ${name} instructions.\n`;
+    return `---\nschema: pi-agent/v1\nkind: role\nid: ${id}\nname: ${name}\ndefaults:\n  model: openai/gpt-6.1-sol\n  effort: medium\n  tier: balanced\n${extra}---\nRole ${name} instructions.\n`;
 }
 
 function launchHost(ctx, extra = {}) {
@@ -69,12 +69,12 @@ function launchHost(ctx, extra = {}) {
         userRoot: ctx.userRoot,
         bundledRoot: ctx.bundledRoot,
         hasUI: false,
-        foregroundModel: "openai/gpt-6-sol",
+        foregroundModel: "openai/gpt-6.1-sol",
         configuredDefaultModel: null,
         registryDir: join(ctx.root, "registry"),
         registry: {
             getAvailable: () => [
-                { provider: "openai", id: "gpt-6-sol", reasoning: true },
+                { provider: "openai", id: "gpt-6.1-sol", reasoning: true },
                 { provider: "openai", id: "gpt-6-luna", reasoning: true },
                 { provider: "openai", id: "gpt-6-astra", reasoning: true },
             ],
@@ -95,7 +95,7 @@ schema: pi-agent/v1
 kind: role
 id: role.alias
 name: Alias
-shared: &model openai/gpt-6-sol
+shared: &model openai/gpt-6.1-sol
 defaults:
   model: *model
   effort: medium
@@ -104,8 +104,8 @@ defaults:
 Use the anchored model.
 `);
         assert.equal(parsed.ok, true);
-        assert.equal(parsed.definition.defaults.model, "openai/gpt-6-sol");
-        assert.equal(parsed.definition.extensions.shared, "openai/gpt-6-sol");
+        assert.equal(parsed.definition.defaults.model, "openai/gpt-6.1-sol");
+        assert.equal(parsed.definition.extensions.shared, "openai/gpt-6.1-sol");
     });
 
     it("accepts a merge key without dropping the explicit effort", () => {
@@ -115,7 +115,7 @@ kind: role
 id: role.merge
 name: Merge
 base: &base
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: medium
   tier: balanced
 defaults:
@@ -125,7 +125,7 @@ defaults:
 Merged defaults.
 `);
         assert.equal(parsed.ok, true, parsed.diagnostics.map((item) => item.message).join("\n"));
-        assert.equal(parsed.definition.defaults.model, "openai/gpt-6-sol");
+        assert.equal(parsed.definition.defaults.model, "openai/gpt-6.1-sol");
         assert.equal(parsed.definition.defaults.effort, "high");
         assert.equal(parsed.definition.defaults.tier, "balanced");
     });
@@ -278,7 +278,7 @@ id: role.developer
 name: Developer
 self: *root
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: high
   tier: balanced
 ---
@@ -309,7 +309,7 @@ kind: role
 id: role.shared
 name: Shared
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: medium
   tier: balanced
 metadata:
@@ -421,7 +421,7 @@ kind: role
 id: role.secret
 name: Secret
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: medium
   tier: balanced
 apiKey: super-secret-value
@@ -561,7 +561,7 @@ describe("catalog discovery and inheritance", () => {
             assert.match(left.effective.instructions, /Implement the requested change/);
             assert.equal(left.effective.effort.value, "low");
             assert.equal(left.effective.effort.explicit, true);
-            assert.equal(left.effective.model.value, "openai/gpt-6-sol");
+            assert.equal(left.effective.model.value, "openai/gpt-6.1-sol");
             assert.equal(left.effective.model.explicit, false);
             assert.match(right.effective.instructions, /Second instructions/);
             assert.equal(right.effective.model.value, "openai/gpt-6-luna");
@@ -577,7 +577,7 @@ describe("catalog discovery and inheritance", () => {
         const ctx = fixture("real");
         try {
             writeDefinition(join(ctx.userRoot, "agents", "roles"), "custom.md", roleMarkdown("role.developer", "Personal Developer").replace("effort: medium", "effort: low"));
-            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "ignored-name.md", roleMarkdown("role.developer", "Project Developer").replace("effort: medium", "effort: high").replace("model: openai/gpt-6-sol", "model: openai/gpt-6-luna"));
+            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "ignored-name.md", roleMarkdown("role.developer", "Project Developer").replace("effort: medium", "effort: high").replace("model: openai/gpt-6.1-sol", "model: openai/gpt-6-luna"));
             writeDefinition(join(ctx.cwd, ".codex", "agents"), "role.developer.md", roleMarkdown("role.codex", "Codex"));
             writeDefinition(join(ctx.userRoot, ".codex", "agents"), "extra.md", roleMarkdown("role.home-codex", "Home Codex"));
             const snapshot = load(ctx);
@@ -758,12 +758,12 @@ ${name}
             assert.equal(createDefinition({ definition: pinned.definition, cwd: ctx.cwd, userRoot: ctx.userRoot, projectTrusted: true }).ok, true);
             const original = load(ctx);
             const originalInherit = resolveSelection(original, { agentId: "agent.inherit" });
-            assert.equal(originalInherit.effective.model.value, "openai/gpt-6-sol");
+            assert.equal(originalInherit.effective.model.value, "openai/gpt-6.1-sol");
             assert.match(originalInherit.effective.instructions, /Role Worker instructions/);
 
-            writeFileSync(rolePath, roleMarkdown("role.worker", "Worker").replace("model: openai/gpt-6-sol", "model: openai/gpt-6-luna").replace("Role Worker instructions.", "Updated role instructions."));
+            writeFileSync(rolePath, roleMarkdown("role.worker", "Worker").replace("model: openai/gpt-6.1-sol", "model: openai/gpt-6-luna").replace("Role Worker instructions.", "Updated role instructions."));
             const stillOriginal = resolveSelection(original, { agentId: "agent.inherit" });
-            assert.equal(stillOriginal.effective.model.value, "openai/gpt-6-sol");
+            assert.equal(stillOriginal.effective.model.value, "openai/gpt-6.1-sol");
             assert.equal(stillOriginal.effective.snapshotDigest, original.digest);
             const next = load(ctx);
             const inherited = resolveSelection(next, { agentId: "agent.inherit" });
@@ -807,7 +807,7 @@ Replacement text only.
             assert.match(add.effective.instructions, /Added text/);
             assert.equal(replace.effective.instructions.trim(), "Replacement text only.");
             assert.doesNotMatch(replace.effective.instructions, /Role Worker instructions/);
-            assert.equal(replace.effective.model.value, "openai/gpt-6-sol");
+            assert.equal(replace.effective.model.value, "openai/gpt-6.1-sol");
             assert.equal(replace.effective.effort.value, "medium");
             assert.equal(replace.effective.model.source, "role-default");
             const empty = createDefinition({
@@ -889,7 +889,7 @@ instructions:
 ---
 Project instructions.
 `);
-            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "role.developer.md", roleMarkdown("role.developer", "Project Role").replace("model: openai/gpt-6-sol", "model: openai/gpt-6-luna"));
+            writeDefinition(join(ctx.cwd, ".pi", "agents", "roles"), "role.developer.md", roleMarkdown("role.developer", "Project Role").replace("model: openai/gpt-6.1-sol", "model: openai/gpt-6-luna"));
             const snapshot = load(ctx);
             const resolved = resolveSelection(snapshot, { agentId: "agent.worker" });
             assert.equal(resolved.effective.name, "Project");
@@ -958,7 +958,7 @@ id: role.locked
 name: Locked
 description: Claims a host restriction the catalog does not enforce.
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: medium
   tier: balanced
 sandbox_mode: read-only
@@ -971,7 +971,7 @@ kind: role
 id: role.open
 name: Open
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: medium
   tier: balanced
 ---

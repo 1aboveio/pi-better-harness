@@ -20,10 +20,10 @@ import {
 } from "../model-resolution.ts";
 
 const APPROVED = [
-    ["role.researcher", "openai/gpt-6-sol", "medium"],
+    ["role.researcher", "openai/gpt-6.1-sol", "medium"],
     ["role.explorer", "openai/gpt-6-luna", "medium"],
-    ["role.product-manager", "openai/gpt-6-sol", "medium"],
-    ["role.developer", "openai/gpt-6-sol", "high"],
+    ["role.product-manager", "openai/gpt-6.1-sol", "medium"],
+    ["role.developer", "openai/gpt-6.1-sol", "high"],
     ["role.reviewer", "openai/gpt-6-astra", "medium"],
     ["role.architect", "openai/gpt-6-astra", "high"],
 ];
@@ -83,7 +83,7 @@ function openFixture(files = []) {
     };
 }
 
-function roleMarkdown(id, { model: modelId = "openai/gpt-6-sol", effort = "high", tier = "balanced", extra = "" } = {}) {
+function roleMarkdown(id, { model: modelId = "openai/gpt-6.1-sol", effort = "high", tier = "balanced", extra = "" } = {}) {
     return `---
 schema: pi-agent/v1
 kind: role
@@ -126,7 +126,7 @@ function codes(decision) {
 
 describe("tier policy", () => {
     it("ships membership for the approved tiers and no invented candidates", () => {
-        assert.deepEqual([...DEFAULT_TIER_POLICY.tiers.balanced.members], ["openai/gpt-6-sol"]);
+        assert.deepEqual([...DEFAULT_TIER_POLICY.tiers.balanced.members], ["openai/gpt-6.1-sol"]);
         assert.deepEqual([...DEFAULT_TIER_POLICY.tiers.efficient.members], ["openai/gpt-6-luna"]);
         assert.deepEqual([...DEFAULT_TIER_POLICY.tiers.frontier.members], ["openai/gpt-6-astra"]);
         for (const spec of Object.values(DEFAULT_TIER_POLICY.tiers)) assert.deepEqual([...spec.candidates], []);
@@ -144,7 +144,7 @@ describe("T07 approved defaults", () => {
         });
         mkdirSync(join(root, "project"));
         const { registry, calls } = countingRegistry([
-            model("openai", "gpt-6-sol"),
+            model("openai", "gpt-6.1-sol"),
             model("openai", "gpt-6-luna"),
             model("openai", "gpt-6-astra"),
         ]);
@@ -200,7 +200,7 @@ describe("T08 independent model and effort precedence", () => {
             assert.equal(effective.effort.value, "high");
             const decision = resolveModel({
                 effective,
-                registry: registryOf([model("openai", "gpt-6-sol"), model("openai", "gpt-6-luna")]),
+                registry: registryOf([model("openai", "gpt-6.1-sol"), model("openai", "gpt-6-luna")]),
                 foregroundModel: "xai/grok-4.7",
             });
             assert.equal(decision.modelSelection.actual, "openai/gpt-6-luna");
@@ -228,7 +228,7 @@ describe("T08 independent model and effort precedence", () => {
             assert.equal(effective.effort.explicit, true);
             assert.equal(effective.effort.value, "max");
             const registry = registryOf([
-                model("openai", "gpt-6-sol", { thinkingLevelMap: { max: "max", xhigh: "xhigh" } }),
+                model("openai", "gpt-6.1-sol", { thinkingLevelMap: { max: "max", xhigh: "xhigh" } }),
                 model("openai", "gpt-6-luna", { thinkingLevelMap: { max: "max", xhigh: "xhigh" } }),
                 model("openai", "gpt-6-astra", { thinkingLevelMap: { max: "max", xhigh: "xhigh" } }),
             ]);
@@ -264,7 +264,7 @@ describe("T08 independent model and effort precedence", () => {
                 {
                     invocation: {},
                     authoritative: {},
-                    model: "openai/gpt-6-sol",
+                    model: "openai/gpt-6.1-sol",
                     effort: "max",
                     effortSource: "agent-override",
                 },
@@ -297,7 +297,7 @@ describe("T09 T10 T17 fallback", () => {
             const effective = select(fixture.snapshot, { roleId: "role.developer" });
             const tiers = configureTierPolicy({
                 balanced: {
-                    members: ["openai/gpt-6-sol", "openai/gpt-6-luna", "anthropic/claude-sonnet"],
+                    members: ["openai/gpt-6.1-sol", "openai/gpt-6-luna", "anthropic/claude-sonnet"],
                     candidates: [
                         "openai/gpt-6-missing",
                         { model: "anthropic/claude-sonnet" },
@@ -320,7 +320,7 @@ describe("T09 T10 T17 fallback", () => {
                 ]),
             });
             assert.equal(decision.status, "ready");
-            assert.equal(decision.modelSelection.requested, "openai/gpt-6-sol");
+            assert.equal(decision.modelSelection.requested, "openai/gpt-6.1-sol");
             assert.equal(decision.modelSelection.requestedSource, "role-default");
             assert.equal(decision.modelSelection.actual, "openai/gpt-6-luna");
             assert.equal(decision.modelSelection.source, "tier-candidate");
@@ -344,7 +344,7 @@ describe("T09 T10 T17 fallback", () => {
                 effective,
                 tiers: configureTierPolicy({
                     balanced: {
-                        members: ["openai/gpt-6-sol", "anthropic/claude-sonnet"],
+                        members: ["openai/gpt-6.1-sol", "anthropic/claude-sonnet"],
                         candidates: [{ model: "anthropic/claude-sonnet", crossProvider: true }],
                     },
                 }),
@@ -358,7 +358,7 @@ describe("T09 T10 T17 fallback", () => {
                 effective,
                 tiers: configureTierPolicy({
                     balanced: {
-                        members: ["openai/gpt-6-sol"],
+                        members: ["openai/gpt-6.1-sol"],
                         candidates: [{ model: "anthropic/claude-sonnet", crossProvider: true }, "openai/gpt-6-luna"],
                     },
                 }),
@@ -384,7 +384,7 @@ describe("T09 T10 T17 fallback", () => {
             {
                 kind: "role",
                 name: "role.custom.md",
-                markdown: roleMarkdown("role.custom", { model: "openai/gpt-6-sol", tier: "mythic" }),
+                markdown: roleMarkdown("role.custom", { model: "openai/gpt-6.1-sol", tier: "mythic" }),
             },
         ]);
         try {
@@ -432,7 +432,7 @@ describe("T09 T10 T17 fallback", () => {
                     registry,
                     foregroundModel: "xai/grok-4.7",
                     tiers: configureTierPolicy({
-                        balanced: { members: ["openai/gpt-6-sol", "openai/gpt-6-luna"], candidates: ["openai/gpt-6-luna"] },
+                        balanced: { members: ["openai/gpt-6.1-sol", "openai/gpt-6-luna"], candidates: ["openai/gpt-6-luna"] },
                     }),
                 });
                 assert.equal(decision.modelSelection.actual, "xai/grok-4.7");
@@ -456,7 +456,7 @@ describe("T09 T10 T17 fallback", () => {
             const decision = resolveModel({
                 effective: select(fixture.snapshot, { roleId: "role.developer" }),
                 tiers: configureTierPolicy({
-                    balanced: { members: ["openai/gpt-6-sol", "openai/gpt-6-luna"], candidates: ["openai/gpt-6-luna"] },
+                    balanced: { members: ["openai/gpt-6.1-sol", "openai/gpt-6-luna"], candidates: ["openai/gpt-6-luna"] },
                 }),
                 foregroundModel: "xai/grok-4.7",
                 registry: registryOf([]),
@@ -485,7 +485,7 @@ describe("T12 T15 explicit models", () => {
             const decision = resolveModel({
                 effective: select(fixture.snapshot, { roleId: "role.developer" }),
                 invocation: { model: "openai/gpt-6-astra" },
-                registry: registryOf([model("openai", "gpt-6-sol"), model("openai", "gpt-6-astra")]),
+                registry: registryOf([model("openai", "gpt-6.1-sol"), model("openai", "gpt-6-astra")]),
             });
             assert.deepEqual(launchParameters(decision), { model: "openai/gpt-6-astra", thinking: "medium" });
             assert.equal(decision.modelSelection.requested, "openai/gpt-6-astra");
@@ -510,12 +510,12 @@ describe("T12 T15 explicit models", () => {
         try {
             const effective = select(fixture.snapshot, { agentId: "agent.pay" });
             const registry = registryOf([
-                model("openai", "gpt-6-sol"),
+                model("openai", "gpt-6.1-sol"),
                 model("openai", "gpt-6-luna"),
                 model("xai", "grok-4.7"),
             ], { known: [model("openai", "gpt-6-astra")] });
             const { registry: counted, calls } = countingRegistry(
-                [model("openai", "gpt-6-sol"), model("openai", "gpt-6-luna"), model("xai", "grok-4.7")],
+                [model("openai", "gpt-6.1-sol"), model("openai", "gpt-6-luna"), model("xai", "grok-4.7")],
                 [model("openai", "gpt-6-astra")],
             );
             const decision = resolveModel({
@@ -525,7 +525,7 @@ describe("T12 T15 explicit models", () => {
                 authoritative: { model: "openai/gpt-6-luna" },
                 foregroundModel: "xai/grok-4.7",
                 tiers: configureTierPolicy({
-                    balanced: { members: ["openai/gpt-6-sol", "openai/gpt-6-luna"], candidates: ["openai/gpt-6-luna"] },
+                    balanced: { members: ["openai/gpt-6.1-sol", "openai/gpt-6-luna"], candidates: ["openai/gpt-6-luna"] },
                 }),
             });
             assert.equal(decision.status, "blocked");
@@ -561,13 +561,13 @@ describe("T12 T15 explicit models", () => {
             const effective = select(fixture.snapshot, { roleId: "role.developer" });
             const input = {
                 effective,
-                registry: registryOf([model("openai", "gpt-6-sol"), model("openai", "gpt-6-astra"), model("openai", "gpt-6-luna")]),
+                registry: registryOf([model("openai", "gpt-6.1-sol"), model("openai", "gpt-6-astra"), model("openai", "gpt-6-luna")]),
                 prompt: "use openai/gpt-6-astra@high for the implementer",
                 task: "gpt-6-luna is cheaper than gpt-6-astra in this example",
                 foregroundThinking: "max",
             };
             const decision = resolveModel(input);
-            assert.deepEqual(launchParameters(decision), { model: "openai/gpt-6-sol", thinking: "high" });
+            assert.deepEqual(launchParameters(decision), { model: "openai/gpt-6.1-sol", thinking: "high" });
         } finally {
             fixture.cleanup();
         }
@@ -576,7 +576,7 @@ describe("T12 T15 explicit models", () => {
 
 describe("T16 T33 effort support", () => {
     it("rejects unsupported explicit effort and adjusts inherited effort, breaking ties downward", () => {
-        const hole = model("openai", "gpt-6-sol", { thinkingLevelMap: { medium: null } });
+        const hole = model("openai", "gpt-6.1-sol", { thinkingLevelMap: { medium: null } });
         const supported = supportedEfforts(hole);
         assert.deepEqual(supported, getSupportedThinkingLevels(hole));
         assert.equal(nearestSupportedEffort("medium", supported).level, "low");
@@ -598,7 +598,7 @@ describe("T16 T33 effort support", () => {
                 registry: registryOf([hole]),
             });
             assert.equal(adjusted.status, "ready");
-            assert.equal(adjusted.modelSelection.actual, "openai/gpt-6-sol");
+            assert.equal(adjusted.modelSelection.actual, "openai/gpt-6.1-sol");
             assert.equal(adjusted.effortSelection.requested, "medium");
             assert.equal(adjusted.effortSelection.actual, "low");
             assert.equal(adjusted.effortSelection.explicit, false);
@@ -610,21 +610,21 @@ describe("T16 T33 effort support", () => {
             const agent = select(fixture.snapshot, { agentId: "agent.pay" });
             const explicit = resolveModel({
                 effective: agent,
-                registry: registryOf([model("openai", "gpt-6-sol")]),
+                registry: registryOf([model("openai", "gpt-6.1-sol")]),
             });
             assert.equal(explicit.status, "blocked");
             assert.equal(explicit.launch, null);
             assert.equal(explicit.effortSelection.explicit, true);
             assert.equal(explicit.effortSelection.adjusted, false);
             assert.equal(explicit.effortSelection.actual, null);
-            assert.equal(explicit.modelSelection.actual, "openai/gpt-6-sol");
+            assert.equal(explicit.modelSelection.actual, "openai/gpt-6.1-sol");
             assert.match(explicit.effortSelection.reason, /Saved agent overrides stay explicit/);
             assert.match(explicit.effortSelection.reason, /Supported levels/);
 
             const invocation = resolveModel({
                 effective: role,
                 invocation: { thinking: "max" },
-                registry: registryOf([model("openai", "gpt-6-sol")]),
+                registry: registryOf([model("openai", "gpt-6.1-sol")]),
             });
             assert.equal(invocation.status, "blocked");
             assert.equal(invocation.effortSelection.source, "invocation-thinking");
@@ -647,7 +647,7 @@ describe("T16 T33 effort support", () => {
         try {
             const tiers = configureTierPolicy({
                 balanced: {
-                    members: ["openai/gpt-6-sol", "anthropic/claude-sonnet"],
+                    members: ["openai/gpt-6.1-sol", "anthropic/claude-sonnet"],
                     candidates: [{ model: "anthropic/claude-sonnet", crossProvider: true }],
                 },
             });
@@ -687,7 +687,7 @@ describe("T16 T33 effort support", () => {
     });
 
     it("breaks an xhigh hole toward high rather than Pi's upward clamp", () => {
-        const mapped = model("openai", "gpt-6-sol", { thinkingLevelMap: { xhigh: null, max: "max" } });
+        const mapped = model("openai", "gpt-6.1-sol", { thinkingLevelMap: { xhigh: null, max: "max" } });
         const supported = supportedEfforts(mapped);
         assert.equal(nearestSupportedEffort("xhigh", supported).level, "high");
         assert.equal(nearestSupportedEffort("xhigh", supported).tied, true);
@@ -698,14 +698,14 @@ describe("T16 T33 effort support", () => {
 describe("catalog-free legacy chain and inspection guards", () => {
     it("preserves invocation, configured default, then foreground without availability checks", () => {
         const missing = resolveModel({
-            invocation: { model: "openai/gpt-6-sol@high", thinking: "low" },
+            invocation: { model: "openai/gpt-6.1-sol@high", thinking: "low" },
             configuredDefaultModel: "openai/gpt-6-luna@max",
             foregroundModel: "xai/grok-4.7@minimal",
             authoritative: { model: "openai/gpt-6-astra@medium" },
             prompt: "use openai/gpt-6-astra",
         });
         assert.equal(missing.catalogFree, true);
-        assert.deepEqual(launchParameters(missing), { model: "openai/gpt-6-sol", thinking: "low" });
+        assert.deepEqual(launchParameters(missing), { model: "openai/gpt-6.1-sol", thinking: "low" });
         assert.equal(missing.modelSelection.source, "invocation");
         assert.equal(missing.effortSelection.source, "invocation-thinking");
 
@@ -725,7 +725,7 @@ describe("catalog-free legacy chain and inspection guards", () => {
         assert.equal(absent.status, "ready");
         assert.deepEqual(launchParameters(absent), {});
 
-        const invalid = resolveModel({ invocation: { model: "openai/gpt-6-sol@extreme" } });
+        const invalid = resolveModel({ invocation: { model: "openai/gpt-6.1-sol@extreme" } });
         assert.equal(invalid.status, "blocked");
         assert.equal(invalid.launch, null);
     });
@@ -748,7 +748,7 @@ describe("catalog-free legacy chain and inspection guards", () => {
                 configuredDefaultModel: "openai/gpt-6-luna",
                 foregroundModel: "xai/grok-4.7",
                 registry: registryOf([
-                    model("openai", "gpt-6-sol"),
+                    model("openai", "gpt-6.1-sol"),
                     model("openai", "gpt-6-luna"),
                     model("xai", "grok-4.7"),
                 ]),
@@ -801,12 +801,12 @@ describe("catalog-free legacy chain and inspection guards", () => {
             assert.equal(resolved.launchable, false);
             const decision = resolveModel({
                 effective: resolved.effective,
-                registry: registryOf([model("openai", "gpt-6-sol")]),
+                registry: registryOf([model("openai", "gpt-6.1-sol")]),
             });
             assert.equal(decision.status, "blocked");
             assert.equal(decision.launch, null);
             const attachment = assessSelection(fixture.snapshot, { roleId: "role.developer" }, {
-                registry: registryOf([model("openai", "gpt-6-sol")]),
+                registry: registryOf([model("openai", "gpt-6.1-sol")]),
             });
             assert.equal(attachment.launchable, false);
             assert.equal(attachment.availability, "catalog-blocked");
@@ -849,7 +849,7 @@ describe("catalog-free legacy chain and inspection guards", () => {
                 effective: select(fixture.snapshot, { roleId: "role.developer" }),
                 foregroundModel: "xai/grok-4.7",
                 registry: registryOf([
-                    { provider: "openai", id: "gpt-6-sol" },
+                    { provider: "openai", id: "gpt-6.1-sol" },
                     model("xai", "grok-4.7"),
                 ]),
             });
