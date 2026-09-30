@@ -23,7 +23,8 @@
       "extensions/background-tasks/index.ts",
       "extensions/ssh/index.ts",
       "extensions/goal/index.ts",
-      "extensions/plan/index.ts"
+      "extensions/plan/index.ts",
+      "extensions/minimal-output/index.ts"
     ],
     "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-harness.png"
   },
@@ -47,6 +48,7 @@
   ],
   "scripts": {
     "prepack": "node ../../scripts/stage-harness-dependencies.mjs",
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --strict --skipLibCheck --types node extensions/minimal-output/index.ts extensions/minimal-output/hook.ts",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

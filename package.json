@@ -20,7 +20,8 @@
       "./packages/pi-better-background-tasks/src/index.ts",
       "./packages/pi-better-ssh/src/index.ts",
       "./packages/pi-better-goal/src/index.ts",
-      "./packages/pi-better-plan/src/index.ts"
+      "./packages/pi-better-plan/src/index.ts",
+      "./packages/pi-better-harness/extensions/minimal-output/index.ts"
     ]
   },
   "scripts": {

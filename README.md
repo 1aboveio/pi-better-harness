@@ -33,6 +33,32 @@ The backward-compatible bundled installation remains available:
 pi install npm:pi-better-harness
 ```
 
+## Minimal Tool Output
+
+With the bundled harness (`pi install npm:pi-better-harness`), use
+`/tool-output minimal` to hide every collapsed tool result body, including
+extension and MCP results, streaming text, and images. Tool call headers and
+error coloring remain visible. The agent still receives the complete result;
+execution, sandboxing, paging, and execution defaults are unchanged.
+
+`/tool-output normal` restores each tool's ordinary renderer; `/tool-output`
+toggles between the two modes. Ctrl+O reveals expanded results. Fullscreen Pi
+versions with clickable tool rows also support clicking a tool header.
+The preference is saved in the current session and restored on resume/reload;
+new sessions start in normal mode.
+
+This is an **internal TUI adapter**, tested with Pi 0.82.1 and 0.99.1, not a
+public renderer API. Future Pi upgrades may require adapter changes. An
+incompatible display API leaves ordinary output enabled and reports a warning.
+It does not apply to print/RPC mode or exported transcripts.
+
+The standalone-package installer does not install this bundled extension.
+To load it directly from a checkout:
+
+```sh
+pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
+```
+
 ## When To Use
 
 Use this repo when you want Pi to delegate independent work, supervise long shell commands, or keep an explicit objective open until background work has drained.
