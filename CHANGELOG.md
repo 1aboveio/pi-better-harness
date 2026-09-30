@@ -6,6 +6,27 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.13.0] - 2026-09-30
+
+### Added
+
+- Global minimal tool-output toggle to keep tool output compact across the harness. (#382)
+
+### Changed
+
+- Bundle sandbox 0.8.0 with foldable package/provider tool groups, single-Space toggles, and more visible selection styling. (#384)
+
+## [pi-better-sandbox@0.8.0] - 2026-09-30
+
+### Added
+
+- Two-level trusted-tool groups by package/provider, with folding, bulk selection, partial-selection checkboxes, and selected/total counts. Saved permissions remain individual tool/package grants. (#384)
+
+### Changed
+
+- One Space applies every permission toggle immediately. Saving looser defaults still requires a second Enter.
+- Focused rows use a full-width colored background and bold text; the active Main/Subagents cell also uses inverse styling. (#384)
+
 ## [pi-better-harness@0.12.3] - 2026-09-29
 
 ### Changed
