@@ -65,9 +65,9 @@ describe("codex adapter", () => {
             invocationEffort: "low",
             workflowModel: "openai/gpt-6-astra",
             workflowEffort: "high",
-            agentOverrideModel: "openai/gpt-6-sol",
+            agentOverrideModel: "openai/gpt-6.1-sol",
             agentOverrideEffort: "max",
-            roleModel: "openai/gpt-6-sol",
+            roleModel: "openai/gpt-6.1-sol",
             roleEffort: "medium",
         });
         assert.equal(explained.model, "openai/gpt-6-luna");
@@ -77,8 +77,8 @@ describe("codex adapter", () => {
         const workflow = explainCodexImportPrecedence({
             workflowModel: "openai/gpt-6-astra",
             workflowEffort: "high",
-            agentOverrideModel: "openai/gpt-6-sol",
-            roleModel: "openai/gpt-6-sol",
+            agentOverrideModel: "openai/gpt-6.1-sol",
+            roleModel: "openai/gpt-6.1-sol",
             roleEffort: "medium",
         });
         assert.equal(workflow.modelSource, "workflow");

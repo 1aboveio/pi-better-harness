@@ -5,7 +5,7 @@ id: role.product-manager
 name: Product Manager
 description: Owns user-visible requirements and acceptance criteria; excludes technical design and implementation.
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: medium
   tier: balanced
 ---

@@ -5,7 +5,7 @@ id: role.developer
 name: Developer
 description: Owns implementation and focused tests; excludes architecture policy and independent review.
 defaults:
-  model: openai/gpt-6-sol
+  model: openai/gpt-6.1-sol
   effort: high
   tier: balanced
 ---

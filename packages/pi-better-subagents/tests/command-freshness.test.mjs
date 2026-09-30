@@ -146,13 +146,13 @@ describe("current foreground for /agents", { concurrency: false }, () => {
         const first = await commands.agents.handler("inspect role.developer", state.ctx);
         assert.equal(first.data.actualModel, "local/before");
 
-        const backup = { provider: "openai", id: "gpt-6-sol-backup", reasoning: true };
+        const backup = { provider: "openai", id: "gpt-6.1-sol-backup", reasoning: true };
         setConfigForTests({
             ...baseConfig,
             tierPolicy: {
                 balanced: {
-                    members: ["openai/gpt-6-sol", "openai/gpt-6-sol-backup"],
-                    candidates: ["openai/gpt-6-sol-backup"],
+                    members: ["openai/gpt-6.1-sol", "openai/gpt-6.1-sol-backup"],
+                    candidates: ["openai/gpt-6.1-sol-backup"],
                 },
             },
         });
@@ -160,10 +160,10 @@ describe("current foreground for /agents", { concurrency: false }, () => {
         const command = await commands.agents.handler("inspect role.developer", state.ctx);
         const tool = await inspect(state);
 
-        assert.equal(command.data.actualModel, "openai/gpt-6-sol-backup");
+        assert.equal(command.data.actualModel, "openai/gpt-6.1-sol-backup");
         assert.equal(command.data.launchable, true);
         assert.match(command.data.modelReason, /same-tier candidate/);
-        assert.equal(tool.details.view.actualModel, "openai/gpt-6-sol-backup");
+        assert.equal(tool.details.view.actualModel, "openai/gpt-6.1-sol-backup");
         assert.equal(tool.details.view.launchable, true);
         assert.equal(tool.details.view.modelReason, command.data.modelReason);
     });

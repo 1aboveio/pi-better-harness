@@ -253,7 +253,7 @@ const root = baseDir();
 writeMeta({
   id, name: label, status: "completed", pid: 1, spawnPid: 1, cwd: root,
   promptPreview: "retention", startedAt: 1, endedAt: 2, logPath: join(root, id + ".log"), sessionId: id,
-  catalog: { identity: { label }, effective: { model: "openai/gpt-6-sol" }, provenance: { model: "role-default" } },
+  catalog: { identity: { label }, effective: { model: "openai/gpt-6.1-sol" }, provenance: { model: "role-default" } },
 });
 const reservation = join(root, CATALOG_LABEL_DIRECTORY, encodeURIComponent(label));
 const before = readFileSync(reservation, "utf8");
@@ -317,7 +317,7 @@ describe("catalog launch snapshot", () => {
         const id = nextRunId();
         const snapshot = {
             identity: { roleId: "role.developer", roleName: "Developer", label: "developer-1", alias: null },
-            effective: { model: "openai/gpt-6-sol", effort: "high", instructions: "implement the change" },
+            effective: { model: "openai/gpt-6.1-sol", effort: "high", instructions: "implement the change" },
             provenance: { model: "role-default", effort: "role-default", definitionRevision: "rev-1" },
             extra: { sourcePath: "roles/developer.md", note: ["kept", 1] },
         };
