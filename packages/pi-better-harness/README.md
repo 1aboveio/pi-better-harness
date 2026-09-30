@@ -60,6 +60,27 @@ Sandbox state is human-only: `/sandbox`, `/sandbox on`, `/sandbox off`,
 commands with no tool equivalent. `/sandbox off` and `/sandbox default off`
 need interactive confirmation. Full policy: [pi-better-sandbox](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme).
 
+## Minimal Tool Output
+
+The bundled harness also provides `/tool-output minimal`, `/tool-output normal`,
+and `/tool-output` (toggle). Minimal mode hides every collapsed result body,
+including built-in, extension, and MCP text/images, without changing execution,
+sandboxing, or agent-facing payloads. Tool headers and error coloring remain;
+Ctrl+O reveals results, and fullscreen Pi versions with clickable tool rows
+also support clicking headers.
+
+Normal mode is the default. The preference is saved in the current session,
+including resume/reload. This is a version-sensitive internal TUI adapter,
+tested with Pi 0.82.1 and 0.99.1; incompatible APIs produce a warning and leave
+ordinary output enabled. Print/RPC output and exported transcripts are unchanged.
+
+The standalone-package installer does not install this bundled extension.
+Load the bundled harness or run it directly from a checkout:
+
+```sh
+pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
+```
+
 ## When To Use
 
 Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, synchronous SSH, goal tracking, or plans.
