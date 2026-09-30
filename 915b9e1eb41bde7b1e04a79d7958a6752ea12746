@@ -1,0 +1,1 @@
+Fix CI image-fixture module identity: resolve pi-tui from the SDK so capability overrides affect the renderer's nested TUI copy. A clean npm ci with TERM=screen reproduced the 0 !== 1 assertion before the change and now passes all 11 focused tests. Start tests without ambient inline-image capability; runtime code is unchanged.
