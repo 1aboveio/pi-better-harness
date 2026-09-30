@@ -16,6 +16,9 @@ const theme = {
     fg(color: string, text: string) {
         return `\x1b[${color === "dim" ? 2 : color === "error" ? 31 : color === "accent" ? 36 : 0}m${text}\x1b[0m`;
     },
+    bg(_color: string, text: string) { return `\x1b[44m${text}\x1b[49m`; },
+    bold(text: string) { return `\x1b[1m${text}\x1b[22m`; },
+    inverse(text: string) { return `\x1b[7m${text}\x1b[27m`; },
 } as Theme;
 
 function plain(text: string): string {
@@ -61,7 +64,6 @@ async function settle() {
 test("default table has the locked rows and independent Main/Subagents values", () => {
     const h = harness();
     const lines = table(h.page, 84).map(plain);
-    assert.equal(lines.length, 14);
     assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents/);
     assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
     assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
@@ -73,9 +75,29 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[8]!, /Guarded \(follows the file rules\)/);
     assert.match(lines[9]!, /\[x\] apply_patch\s+harness adapter/);
     assert.match(lines[10]!, /Trusted \(runs outside the file rules\)/);
-    assert.match(lines[11]!, /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/);
-    assert.match(lines[12]!, /\[x\] web_search\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/);
-    assert.match(lines[13]!, /Save as defaults/);
+    assert.match(lines[11]!, /> \[x\] @juicesharp\/rpiv-web-tools 2\/2/);
+    assert.match(lines[12]!, /Save as defaults/);
+    assert.ok(!lines.some((line) => /\[x\] web_fetch/.test(line)), "tools are initially folded");
+});
+
+test("selected rows have a full-width background and bold text, with an inverse active cell", () => {
+    const h = harness();
+    const selectedLines = () => h.page.render(100).filter((line) => line.includes("\x1b[44m"));
+    let selected = selectedLines();
+    assert.equal(selected.length, 1);
+    assert.equal(visibleWidth(selected[0]!), 100);
+    assert.match(selected[0]!, /\x1b\[1m/);
+    assert.match(selected[0]!, /\x1b\[7m[\s\S]*Off/);
+    h.press(Key.right);
+    assert.match(selectedLines()[0]!, /\x1b\[7m[\s\S]*On/);
+    h.press(...Array(7).fill(Key.down));
+    selected = selectedLines();
+    assert.equal(selected.length, 1);
+    assert.equal(visibleWidth(selected[0]!), 100);
+    assert.match(plain(selected[0]!), /@juicesharp\/rpiv-web-tools/);
+    assert.match(selected[0]!, /\x1b\[1m/);
+    h.press(...toSave);
+    assert.match(plain(selectedLines()[0]!), /Save as defaults/);
 });
 
 test("disabled details are dimmed and inactive but survive off/on toggles", async () => {
@@ -91,7 +113,7 @@ test("disabled details are dimmed and inactive but survive off/on toggles", asyn
     h.press(Key.down, Key.space);
     await settle();
     assert.equal(h.current.main.projectFiles, "off");
-    h.press(Key.up, Key.space, Key.space);
+    h.press(Key.up, Key.space);
     await settle();
     assert.equal(h.current.main.enabled, false);
     assert.equal(h.current.main.projectFiles, "off");
@@ -106,13 +128,13 @@ test("arrows select rows and columns, Space cycles, Enter saves only on action, 
     h.press(Key.right, Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "off");
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "read");
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "write");
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "read-write");
     h.press(Key.down, Key.down, Key.down, Key.down, Key.space);
@@ -140,32 +162,23 @@ test("file rows cycle four levels and credentials remain independent under Outsi
     assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s*$/);
     h.press(Key.space);
     await settle();
-    assert.equal(h.current.subagents.storedCredentials, "read", "Read → Read / write waits for confirmation");
-    h.press(Key.space);
-    await settle();
-    assert.equal(h.current.subagents.storedCredentials, "read-write");
+    assert.equal(h.current.subagents.storedCredentials, "read-write", "one Space grants Read / write");
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "off", "Read / write → Off tightens immediately");
     assert.equal(h.current.subagents.outsideProject, "write");
 });
 
-test("a looser value applies only on a second Space; a tighter one applies at once", async () => {
+test("a single Space applies both looser and tighter permission changes", async () => {
     const h = harness();
     h.press(Key.right, Key.down, Key.down, Key.space);
     await settle();
-    assert.equal(h.changes.length, 0, "Write → Write & delete waits for confirmation");
-    assert.equal(h.current.subagents.outsideProject, "write");
-    assert.match(plain(h.page.render(140).at(-1)!), /Looser \(Subagents: outsideProject write → read-write\)\. Press Space again to apply/);
-    h.press(Key.up, Key.down, Key.space);
-    await settle();
-    assert.equal(h.changes.length, 0, "moving away cancels the pending change");
-    h.press(Key.space);
-    await settle();
+    assert.equal(h.changes.length, 1);
     assert.equal(h.current.subagents.outsideProject, "read-write");
+    assert.ok(!h.page.render(140).map(plain).join("\n").includes("Press Space again"));
     h.press(Key.space);
     await settle();
-    assert.equal(h.current.subagents.outsideProject, "off", "tightening applies immediately");
+    assert.equal(h.current.subagents.outsideProject, "off");
 });
 
 test("saving looser defaults needs a second Enter; any other key cancels it", async () => {
@@ -193,12 +206,12 @@ test("change and save failures stay inline without optimistic state or closing",
         change: () => { if (failChange) throw new Error("change failed"); },
         save: () => { if (failSave) throw new Error("save failed"); },
     });
-    h.press(Key.right, Key.space, Key.space);
+    h.press(Key.right, Key.space);
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /change failed/);
     assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/);
     failChange = false;
-    h.press(Key.space, Key.space);
+    h.press(Key.space);
     await settle();
     assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
     h.press(...toSave);
@@ -258,50 +271,194 @@ test("open uses custom only for interactive TUI and resolves on Escape", async (
     assert.equal(factory, undefined);
 });
 
-test("Tools section lists guarded and discovered trusted tools; ticking a trusted tool needs a second Space", async () => {
+test("Tools groups fold, bulk-select with one Space, and retain per-tool choices", async () => {
     const discovered = [
         { name: "web_fetch", package: "npm:@juicesharp/rpiv-web-tools" },
         { name: "web_search", package: "npm:@juicesharp/rpiv-web-tools" },
         { name: "ask_user_question", package: "npm:@juicesharp/rpiv-ask-user-question" },
+        { name: "answer", package: "npm:@juicesharp/rpiv-ask-user-question" },
     ];
     const h = harness({ discoverTools: () => discovered });
-    const lines = h.page.render(120).map(plain);
-    const at = (pattern: RegExp) => lines.findIndex((line) => pattern.test(line));
-    assert.ok(at(/Subagents · Tools/) > at(/Network access/));
-    assert.ok(at(/Guarded \(follows the file rules\)/) < at(/\[x\] apply_patch\s+harness adapter/));
-    assert.ok(at(/Trusted \(runs outside the file rules\)/) < at(/\[ \] ask_user_question\s+@juicesharp\/rpiv-ask-user-question$/));
-    assert.match(lines[at(/web_fetch/)]!, /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On$/);
-    assert.ok(lines.some((line) => /Trusted tools run outside the file rules/.test(line)));
-    // Rows after Network access: apply_patch, ask_user_question, web_fetch, web_search.
-    h.press(Key.right, ...Array(7).fill(Key.down), Key.space);
-    await settle();
-    assert.equal(h.changes.length, 0, "ticking a trusted tool waits for confirmation");
-    assert.match(plain(h.page.render(160).at(-1)!), /Looser \(Subagents: trusted tool ask_user_question \(@juicesharp\/rpiv-ask-user-question\) runs outside the file rules\)\. Press Space again/);
-    assert.ok(h.page.render(160).map(plain).some((line) => /Trusted tools run in the subagent's Pi process, outside the file rules/.test(line)));
+    const rendered = () => h.page.render(160).map(plain).join("\n");
+    h.press(...Array(7).fill(Key.down));
+    assert.match(rendered(), />\s+> \[ \] @juicesharp\/rpiv-ask-user-question 0\/2/);
     h.press(Key.space);
     await settle();
-    assert.deepEqual(h.current.subagentTools.trusted.at(-1), { name: "ask_user_question", package: "npm:@juicesharp/rpiv-ask-user-question" });
-    // Unticking a trusted tool and the guarded adapter are tighter: they apply at once.
+    assert.equal(h.changes.length, 1);
+    assert.deepEqual(h.current.subagentTools.trusted.slice(2), [discovered[3], discovered[2]]);
+    assert.match(rendered(), /> \[x\] @juicesharp\/rpiv-ask-user-question 2\/2/);
+    h.press(Key.right);
+    assert.match(rendered(), /v \[x\] @juicesharp\/rpiv-ask-user-question/);
     h.press(Key.down, Key.space);
     await settle();
-    assert.deepEqual(h.current.subagentTools.trusted.map((tool) => tool.name), ["web_search", "ask_user_question"]);
-    h.press(Key.up, Key.up, Key.space);
-    await settle();
-    assert.equal(h.current.subagentTools.applyPatch, false);
+    assert.deepEqual(h.current.subagentTools.trusted.slice(2), [discovered[2]]);
+    assert.match(rendered(), /v \[-\] @juicesharp\/rpiv-ask-user-question 1\/2/);
+    h.press(Key.left);
+    assert.match(rendered(), />\s+> \[-\] @juicesharp\/rpiv-ask-user-question/);
+    assert.ok(!/\[ \] answer/.test(rendered()), "Left from child folds and focuses its group");
     h.press(Key.space);
     await settle();
-    assert.equal(h.current.subagentTools.applyPatch, true);
+    assert.equal(h.current.subagentTools.trusted.length, 4, "mixed group selects every tool without duplicates");
+    h.press(Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted, discovered.slice(0, 2), "all-selected group clears immediately");
+    h.press(Key.enter);
+    assert.match(rendered(), /v \[ \] @juicesharp\/rpiv-ask-user-question/);
+    h.press(Key.enter);
+    assert.match(rendered(), /> \[ \] @juicesharp\/rpiv-ask-user-question/);
+    h.press(Key.up, Key.space);
+    await settle();
+    assert.equal(h.current.subagentTools.applyPatch, false);
     h.press(...toSave, Key.enter);
     await settle();
     assert.deepEqual(h.saved.at(-1)!.subagentTools, h.current.subagentTools);
+    const reopened = harness({ getConfig: () => h.saved.at(-1)!, discoverTools: () => discovered });
+    assert.match(reopened.page.render(160).map(plain).join("\n"), /> \[ \] @juicesharp\/rpiv-ask-user-question 0\/2/);
 });
 
-test("a ticked tool that is not loaded stays listed so it can be unticked", async () => {
+test("a ticked tool that is not loaded stays grouped so it can be unticked", async () => {
     const h = harness({ discoverTools: () => [] });
+    h.press(...Array(7).fill(Key.down), Key.right);
     const lines = h.page.render(120).map(plain);
-    assert.ok(lines.some((line) => /\[x\] web_fetch\s+@juicesharp\/rpiv-web-tools · needs Network On · not loaded/.test(line)));
-    h.press(...Array(7).fill(Key.down), Key.space);
+    assert.ok(lines.some((line) => /\[x\] web_fetch\s+needs Network On · not loaded/.test(line)));
+    h.press(Key.down, Key.space);
     await settle();
     assert.deepEqual(h.current.subagentTools.trusted.map((tool) => tool.name), ["web_search"]);
     assert.ok(!h.page.render(120).map(plain).some((line) => /web_fetch/.test(line)), "an unticked, unloaded tool disappears");
+    h.press(Key.left, Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted, []);
+    assert.match(h.page.render(120).map(plain).join("\n"), />\s*Save as defaults/, "removing the last unloaded group clamps focus to Save");
+});
+
+test("MCP providers are separate groups and identical names in other packages stay independent", async () => {
+    const discovered = [
+        { name: "mcp__linear__get_issue", package: "npm:mcp" },
+        { name: "mcp__linear__list_issues", package: "npm:mcp" },
+        { name: "mcp__worldpay_docs__search", package: "npm:mcp" },
+        { name: "mcp__linear__get_issue", package: "npm:other" },
+    ];
+    const h = harness({ discoverTools: () => discovered });
+    const rendered = () => h.page.render(160).map(plain).join("\n");
+    assert.match(rendered(), /> \[ \] linear \(mcp\) 0\/2/);
+    assert.match(rendered(), /> \[ \] linear \(other\) 0\/1/);
+    assert.match(rendered(), /> \[ \] worldpay_docs \(mcp\) 0\/1/);
+    h.press(...Array(8).fill(Key.down), Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted.slice(2), discovered.slice(0, 2));
+    assert.match(rendered(), /> \[ \] linear \(other\) 0\/1/);
+    assert.match(rendered(), /> \[ \] worldpay_docs \(mcp\) 0\/1/);
+});
+
+test("folding preserves tool choices and narrow render bounds", async () => {
+    const discovered = [{ name: "very_long_tool_name", package: "npm:a-very-long-package-name" }];
+    const h = harness({ discoverTools: () => discovered });
+    h.press(...Array(8).fill(Key.down), Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted.at(-1), discovered[0]);
+    h.press(Key.right);
+    assert.match(h.page.render(120).map(plain).join("\n"), /\[x\] very_long_tool_name/);
+    h.press(Key.left);
+    assert.equal(h.changes.length, 1, "folding never changes permission choices");
+    for (const width of [0, 1, 8, 20, 40, 80]) {
+        for (const line of h.page.render(width)) assert.ok(visibleWidth(line) <= width);
+    }
+});
+
+test("individual children toggle with one Space and reopening does not grant new tools", async () => {
+    const tool = { name: "first", package: "npm:zzz" };
+    const h = harness({ discoverTools: () => [tool] });
+    h.press(...Array(8).fill(Key.down), Key.right, Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.subagentTools.trusted.length, 3);
+    assert.deepEqual(h.current.subagentTools.trusted.at(-1), tool);
+    h.press(...toSave, Key.enter);
+    await settle();
+    const reopened = harness({ getConfig: () => h.saved.at(-1)!, discoverTools: () => [tool, { name: "new", package: "npm:zzz" }] });
+    assert.match(reopened.page.render(160).map(plain).join("\n"), /> \[-\] zzz 1\/2/);
+    reopened.press(...Array(8).fill(Key.down), Key.right);
+    assert.match(reopened.page.render(160).map(plain).join("\n"), /\[ \] new/);
+});
+
+test("async bulk completion preserves focus after an unloaded group disappears", async () => {
+    let release!: () => void;
+    const initial = structuredClone(DEFAULT_PERMISSION_SETTINGS);
+    initial.subagentTools.trusted = [{ name: "old", package: "npm:aaa" }];
+    const h = harness({
+        getConfig: () => initial,
+        discoverTools: () => [{ name: "new", package: "npm:zzz" }],
+        change: () => new Promise<void>((resolve) => { release = resolve; }),
+    });
+    h.press(...Array(7).fill(Key.down), Key.space, Key.down);
+    release();
+    await settle();
+    const rendered = h.page.render(160).map(plain).join("\n");
+    assert.ok(!rendered.includes("aaa"));
+    assert.match(rendered, />\s+> \[ \] zzz 0\/1/, "focus stays on the same package, not its old row index");
+});
+
+test("removing the last unavailable child focuses the next surviving group", async () => {
+    const initial = structuredClone(DEFAULT_PERMISSION_SETTINGS);
+    initial.subagentTools.trusted = [{ name: "old", package: "npm:aaa" }];
+    const next = { name: "next", package: "npm:bbb" };
+    const h = harness({ getConfig: () => initial, discoverTools: () => [next, { name: "last", package: "npm:ccc" }] });
+    h.press(...Array(7).fill(Key.down), Key.right, Key.down, Key.space);
+    await settle();
+    assert.match(h.page.render(160).map(plain).join("\n"), />\s+> \[ \] bbb 0\/1/);
+    h.press(Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted, [next], "the next Space targets bbb, not ccc");
+});
+
+test("looser save confirmations remain visible within narrow bounds", async () => {
+    const h = harness({
+        discoverTools: () => [{ name: "one", package: "npm:zzz" }, { name: "two", package: "npm:zzz" }],
+        loosening: () => ["Subagents: two additional trusted tools run outside file rules"],
+    });
+    const check = (instruction: RegExp) => {
+        assert.match(h.page.render(40).map(plain).join("\n"), instruction);
+        for (const width of [0, 1, 8, 20, 40, 80]) {
+            for (const line of h.page.render(width)) assert.ok(visibleWidth(line) <= width);
+        }
+    };
+    h.press(...Array(8).fill(Key.down), Key.space);
+    await settle();
+    h.press(...toSave, Key.enter);
+    await settle();
+    assert.equal(h.saved.length, 0);
+    check(/Press Enter again to save\./);
+});
+
+test("deferred bulk failures retain state, suppress duplicate changes, and allow retry", async () => {
+    let reject!: (error: Error) => void;
+    let calls = 0;
+    const h = harness({
+        discoverTools: () => [{ name: "tool", package: "npm:zzz" }],
+        change: () => {
+            calls++;
+            if (calls === 1) return new Promise<void>((_resolve, fail) => { reject = fail; });
+        },
+    });
+    h.press(...Array(8).fill(Key.down), Key.space, Key.right, Key.space, Key.space);
+    assert.equal(calls, 1, "input while busy cannot submit another change");
+    reject(new Error("async bulk failed"));
+    await settle();
+    assert.match(h.page.render(160).map(plain).join("\n"), /v \[ \] zzz 0\/1/);
+    assert.match(plain(h.page.render(160).at(-1)!), /async bulk failed/);
+    h.press(Key.space);
+    await settle();
+    assert.equal(calls, 2);
+    assert.match(h.page.render(160).map(plain).join("\n"), /v \[x\] zzz 1\/1/);
+});
+
+test("failed bulk changes do not update group checkbox state", async () => {
+    const h = harness({
+        discoverTools: () => [{ name: "tool", package: "npm:zzz" }],
+        change: () => { throw new Error("bulk failed"); },
+    });
+    h.press(...Array(8).fill(Key.down), Key.space);
+    await settle();
+    assert.match(h.page.render(160).map(plain).join("\n"), /> \[ \] zzz 0\/1/);
+    assert.match(plain(h.page.render(160).at(-1)!), /bulk failed/);
+    assert.equal(h.current.subagentTools.trusted.length, 2);
 });
