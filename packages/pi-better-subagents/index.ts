@@ -35,7 +35,7 @@ import {
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
-import { loadConfig, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
+import { loadConfig, writeDelegationMode, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
     decideTiming,
@@ -165,6 +165,7 @@ const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
     { value: "mode manual", label: "mode manual", description: "Delegate only when explicitly requested" },
     { value: "mode adaptive", label: "mode adaptive", description: "Delegate substantial independent work" },
     { value: "mode coordinator", label: "mode coordinator", description: "Delegate role-owned work by default" },
+    { value: "save", label: "save", description: "Write the current mode as the next session's default" },
 ];
 
 export function subagentsArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
@@ -1181,8 +1182,16 @@ const DELEGATION_BLURB: Record<DelegationMode, string> = {
     adaptive: "substantial independent work",
     coordinator: "every role-owned task",
 };
+const DELEGATION_SAVE_ARM_MS = 3000;
 let readDelegation = (): { mode: DelegationMode; source: "session" | "config" } => ({ mode: "adaptive", source: "config" });
 let cycleDelegation = (): void => {};
+let saveDelegationDefault: (mode: DelegationMode) => { ok: boolean; message: string } = () => ({ ok: false, message: "Saving the delegation default is unavailable." });
+let delegationSaveArm: { mode: DelegationMode; at: number } | undefined;
+
+function delegationSaveHint(now = Date.now()): string | undefined {
+    if (!delegationSaveArm || now - delegationSaveArm.at >= DELEGATION_SAVE_ARM_MS) return undefined;
+    return `S again to save ${delegationSaveArm.mode} as the default`;
+}
 
 function mainAgentWorkRow(now: number): BackgroundWorkRow {
     let running = mainAgentStartedAt !== undefined;
@@ -1237,9 +1246,14 @@ function mainAgentWorkDetail(now: number): BackgroundWorkDetail {
         ],
         evidence: {
             label: "delegation",
-            text: `${delegation.mode}: ${DELEGATION_BLURB[delegation.mode]}. m cycles this session. x does not stop the main agent.`,
+            text: [
+                `${delegation.mode}: ${DELEGATION_BLURB[delegation.mode]}.`,
+                "m cycles this session. S saves that mode as the next session's default.",
+                "x does not stop the main agent.",
+                delegationSaveHint(),
+            ].filter(Boolean).join(" "),
         },
-        footerActions: ["m mode"],
+        footerActions: ["m mode", "S save"],
     };
 }
 
@@ -1339,8 +1353,21 @@ function ensureSubagentProvider(): void {
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
         handleDetailInput: (id, data) => {
-            if (id !== "main" || (data !== "m" && data !== "M")) return false;
-            cycleDelegation();
+            if (id !== "main") return false;
+            if (data === "m" || data === "M") {
+                delegationSaveArm = undefined;
+                cycleDelegation();
+                return true;
+            }
+            if (data !== "s" && data !== "S") return false;
+            const mode = readDelegation().mode;
+            const now = Date.now();
+            if (delegationSaveArm?.mode === mode && now - delegationSaveArm.at < DELEGATION_SAVE_ARM_MS) {
+                delegationSaveArm = undefined;
+                saveDelegationDefault(mode);
+                return true;
+            }
+            delegationSaveArm = { mode, at: now };
             return true;
         },
         armCloseLabel: (row) => row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
@@ -1496,6 +1523,16 @@ export default function (pi: ExtensionAPI) {
         delegationOverride = next;
         pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: next });
     };
+    saveDelegationDefault = (mode) => {
+        try {
+            writeDelegationMode(mode);
+        } catch (error) {
+            return { ok: false, message: `Could not save the delegation default: ${error instanceof Error ? error.message : String(error)}` };
+        }
+        delegationOverride = undefined;
+        pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: null });
+        return { ok: true, message: `Delegation default saved: ${mode}.` };
+    };
     const restoreDelegationMode = (ctx: ExtensionContext): void => {
         delegationOverride = undefined;
         const branch = ctx.sessionManager?.getBranch?.();
@@ -1503,7 +1540,9 @@ export default function (pi: ExtensionAPI) {
         for (const entry of branch) {
             if (entry.type !== "custom" || entry.customType !== "pi-better-subagents-delegation") continue;
             const data = entry.data as { version?: unknown; mode?: unknown } | null;
-            if (data?.version === 1 && isDelegationMode(data.mode)) delegationOverride = data.mode;
+            if (data?.version !== 1) continue;
+            if (data.mode === null) delegationOverride = undefined;
+            else if (isDelegationMode(data.mode)) delegationOverride = data.mode;
         }
     };
     const unsubscribeDelegationRequest = pi.events?.on?.(DELEGATION_MODE_REQUEST, (data: unknown) => {
@@ -2212,7 +2251,7 @@ export default function (pi: ExtensionAPI) {
     if (typeof pi.registerCommand === "function") {
         agentOperations.registerCommands(pi);
         pi.registerCommand("subagents", {
-            description: "[mode manual|adaptive|coordinator] — Show or change the current-session delegation mode",
+            description: "[mode manual|adaptive|coordinator|save] — Session mode, or save it as the next session's default",
             getArgumentCompletions: subagentsArgumentCompletions,
             async handler(args, ctx) {
                 const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -2221,12 +2260,20 @@ export default function (pi: ExtensionAPI) {
                     return;
                 }
                 const requested = tokens[1];
-                if (tokens.length === 2 && tokens[0] === "mode" && isDelegationMode(requested)) {
+                if (tokens.length === 1 && tokens[0] === "save") {
+                    const mode = activeDelegationMode();
+                    if (ctx.hasUI && !(await ctx.ui.confirm("Save delegation default?", `Future sessions will start in ${mode}.`))) {
+                        ctx.ui.notify("Delegation default unchanged.", "info");
+                        return;
+                    }
+                    const saved = saveDelegationDefault(mode);
+                    ctx.ui.notify(saved.message, saved.ok ? "info" : "warning");
+                } else if (tokens.length === 2 && tokens[0] === "mode" && isDelegationMode(requested)) {
                     delegationOverride = requested;
                     pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: delegationOverride });
                     ctx.ui.notify(`Delegation mode: ${delegationOverride} (current session).`, "info");
                 } else {
-                    ctx.ui.notify("Usage: /subagents [mode manual|adaptive|coordinator]", "warning");
+                    ctx.ui.notify("Usage: /subagents [mode manual|adaptive|coordinator|save]", "warning");
                 }
             },
         });

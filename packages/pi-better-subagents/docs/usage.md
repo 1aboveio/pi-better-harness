@@ -18,9 +18,12 @@ Set `delegationMode` in this package's `config.json` to `manual`, `adaptive`, or
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents` reports the active
 mode; `/subagents mode manual|adaptive|coordinator` overrides it for the current
-session without editing config. Other arguments show usage. `/reload` retains
-this override; new sessions use config, while resuming a session restores that
-session's override.
+session without editing config. `/subagents save` writes the current mode into
+`config.json` after confirmation when a UI is available, and clears the session
+override so the next session starts there. On the navigator `main` sheet, `m`
+cycles the session mode and `S` twice within three seconds saves that default.
+Other arguments show usage. `/reload` retains a session override; new sessions
+use config, while resuming a session restores that session's override.
 
 - **Manual:** no proactive delegation, including in plan mode. A user request or
   explicit workflow requirement may still delegate.
@@ -517,9 +520,11 @@ is unchanged in every mode.
 - While the main-window list is focused, the title hint changes to
   `Enter to view · x to stop`; the selected row is marked with `›`. Press
   `↓` from the bottom row to return to the input line.
-- The Subagents lane pins an informational `main` row above child runs. It
-  shows the foreground model, effort, active tool, context tokens, and active
-  elapsed time. It is not selectable and can never become an `x` stop target.
+- The Subagents lane pins a `main` row above child runs. It shows the
+  foreground model, effort, active tool, context tokens, elapsed time, and
+  delegation mode. Enter opens its detail sheet. `m` cycles the session mode.
+  `S` twice within three seconds saves that mode as the config default. `x`
+  never stops it.
 - `↑` moves to the previous row when multiple running rows are shown. `↓`
   moves toward the input line, returning to normal input from the bottom row.
 - `Enter` opens the selected run's live detail view. `x` stops the selected
