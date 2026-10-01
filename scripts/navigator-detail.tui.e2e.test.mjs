@@ -16,6 +16,7 @@ const closeSession = `pi-navigator-close-e2e-${process.pid}`;
 const refocusSession = `pi-navigator-refocus-e2e-${process.pid}`;
 const replaceSession = `pi-navigator-replace-e2e-${process.pid}`;
 const wrapSession = `pi-navigator-wrap-e2e-${process.pid}`;
+const diagnosticSession = `pi-navigator-diagnostic-e2e-${process.pid}`;
 // Each test drives its own private tmux server; these point at the active one.
 let session = goldenSession;
 let tmuxArgs = ["-L", session];
@@ -33,7 +34,7 @@ const skip = hasTmux || process.env.CI || process.env.PI_NAVIGATOR_REQUIRE_TMUX
   : "requires tmux for a real terminal session (test:golden requires it)";
 
 after(() => {
-  for (const name of [goldenSession, closeSession, refocusSession, replaceSession, wrapSession]) spawnSync("tmux", ["-L", name, "kill-server"], { stdio: "ignore" });
+  for (const name of [goldenSession, closeSession, refocusSession, replaceSession, wrapSession, diagnosticSession]) spawnSync("tmux", ["-L", name, "kill-server"], { stdio: "ignore" });
   for (const worker of dummyWorkers) {
     try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
@@ -279,13 +280,44 @@ test("when another extension wraps the editor, Esc from the reused overlay retur
   saveScreen("wrapped-editor-typed", typed);
 });
 
-function launchPi(name) {
+// @covers navigator.detail-overlay
+// @level e2e
+test("switching full-page details with multiline diagnostics keeps exactly one title bar", { skip }, () => {
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "navigator regression requires tmux");
+  mkdirSync(evidenceDir, { recursive: true });
+  const { state, piPid } = launchPi(diagnosticSession, { multilineDiagnostic: true });
+  execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-x", "132", "-y", "54"]);
+  const ids = [`sa_diagnostic_alpha_${process.pid}`, `sa_diagnostic_beta_${process.pid}`];
+  for (const id of ids) seedNavigatorState({ cwd: state.cwd, sessionId: state.sessionId, piPid, subagentId: id });
+
+  sendKey("Left");
+  waitForScreen((screen) => screen.includes("subagent golden path") && !screen.includes("provider Subagents"));
+  sendKey("Down");
+  let screen = waitForScreen((value) => value.includes("provider Subagents") && hasSettledInputFrame(value));
+  const firstId = ids.find((id) => screen.includes(id));
+  assert.ok(firstId, "initial detail must show one of the seeded runs");
+  const secondId = ids.find((id) => id !== firstId);
+  for (let index = 0; index < 6; index++) {
+    sendKey(index % 2 ? "Up" : "Down");
+    const id = index % 2 ? firstId : secondId;
+    screen = waitForScreen((value) => value.includes(id) && hasSettledInputFrame(value));
+    saveScreen(`multiline-diagnostic-${index}`, screen);
+    assert.equal(screen.split(/\r?\n/).filter((line) => /^━━ /u.test(line)).length, 1,
+      `switch ${index}: previous detail title must not remain visible:\n${screen}`);
+    assert.match(screen, /^\s+No failures need action \(history\)$/m);
+    assert.match(screen, /^\s+Showing the latest 2\.0 MB of the transcript\.$/m);
+    assertSingleInputFrame(screen, `multiline diagnostic switch ${index}`);
+  }
+});
+
+function launchPi(name, { multilineDiagnostic = false } = {}) {
   session = name;
   tmuxArgs = ["-L", name];
   const probeStatePath = join(fixtures, `${name}-session-state.json`);
   const focusStealPath = join(fixtures, `${name}-steal-focus`);
   const replacePath = join(fixtures, `${name}-replace-editor`);
-  writeFileSync(probePath, probeExtension(probeStatePath, focusStealPath, replacePath));
+  writeFileSync(probePath, probeExtension(probeStatePath, focusStealPath, replacePath, multilineDiagnostic));
   startPiSession();
   const state = waitForJson(probeStatePath);
   const piPid = Number(execFileSync("tmux", [...tmuxArgs, "display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8" }).trim());
@@ -341,7 +373,7 @@ function startPiSession() {
   execFileSync("tmux", [...tmuxArgs, "new-session", "-d", "-s", session, "-x", "100", "-y", "40", command]);
 }
 
-function probeExtension(path, focusStealPath, replacePath) {
+function probeExtension(path, focusStealPath, replacePath, multilineDiagnostic) {
   // Besides reporting the session, the probe re-installs the current editor when the
   // test creates focusStealPath, the way any extension that wraps the editor does (with
   // "wrap" in the file, inside its own proxy component), and restores Pi's default
@@ -350,6 +382,15 @@ function probeExtension(path, focusStealPath, replacePath) {
   pi.on("session_start", async (_event, ctx) => {
     const fs = await import("node:fs");
     fs.writeFileSync(${JSON.stringify(path)}, JSON.stringify({ cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() }, null, 2));
+    if (${JSON.stringify(multilineDiagnostic)}) {
+      const provider = globalThis[Symbol.for("pi-better-harness.navigator.state")]?.providers.get("subagents");
+      if (!provider) throw new Error("navigator diagnostic fixture: subagent provider missing");
+      const detail = provider.detail.bind(provider);
+      provider.detail = (...args) => {
+        const value = detail(...args);
+        return value ? { ...value, transcriptDiagnostic: "No failures need action (history)\\nShowing the latest 2.0 MB of the transcript." } : value;
+      };
+    }
     const timer = setInterval(() => {
       if (!fs.existsSync(${JSON.stringify(focusStealPath)})) return;
       const mode = fs.readFileSync(${JSON.stringify(focusStealPath)}, "utf8").trim();

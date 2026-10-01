@@ -1150,7 +1150,11 @@ function buildTranscriptDetailLines(
     ...detail.metadata.map((item) => `   ${item.label.padEnd(8, " ").slice(0, 8)} ${item.value}`),
   ];
   const transcriptHeader = ["", dim(section(`transcript · latest ${tailRows} rows`, width), fg)];
-  if (detail.transcriptDiagnostic) transcriptHeader.push(`   ${dim(detail.transcriptDiagnostic, fg)}`);
+  if (detail.transcriptDiagnostic) {
+    for (const diagnosticRow of detail.transcriptDiagnostic.split(/\r\n|\r|\n/)) {
+      transcriptHeader.push(`   ${dim(diagnosticRow, fg)}`);
+    }
+  }
   // Metadata always renders; the transcript tail takes only the rows left over (the tail size is a cap, not a guarantee).
   lines.push(...optionalMetadata);
   if (options.maxRows !== undefined) {
