@@ -61,7 +61,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("tool-output", {
-    description: "Tool output: minimal | normal (no argument toggles). Display only; agent results are unchanged.",
+    description: "[minimal|normal] — Fold finished tool runs, or restore normal output. No argument toggles. Display only.",
     getArgumentCompletions: (argumentPrefix) => {
       const prefix = argumentPrefix.trimStart().toLowerCase();
       const matches = [

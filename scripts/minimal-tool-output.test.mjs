@@ -157,6 +157,7 @@ test("slash-command argument completion offers both modes and filters partial ar
   assert.deepEqual(complete("   MI").map((option) => option.value), ["minimal"]);
   assert.equal(complete("unknown"), null);
   assert.equal(complete("minimal extra"), null);
+  assert.match(command.description, /^\[minimal\|normal\] — /);
 });
 
 test("print and RPC modes refuse the toggle without changing saved preferences", async () => {

@@ -51,6 +51,7 @@ test("/subagents action completions expose complete mode selections with context
     assert.equal(subagentsArgumentCompletions("mode invalid"), null);
     const command = harness().commands.get("subagents");
     assert.deepEqual(command.getArgumentCompletions("mode c").map((entry) => entry.value), ["mode coordinator"]);
+    assert.match(command.description, /^\[mode manual\|adaptive\|coordinator\] — /);
 });
 
 test("/subagents reports config, changes only this session, rejects invalid args and injects current mode", async () => {
