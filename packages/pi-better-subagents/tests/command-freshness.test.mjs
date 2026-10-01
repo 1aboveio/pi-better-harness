@@ -67,6 +67,9 @@ async function inspect(state) {
 }
 
 describe("current foreground for /agents", { concurrency: false }, () => {
+    it("shows catalog options in the slash-menu subtitle", () => {
+        assert.match(commands.agents.description, /^\[list\|show\|create\|reload\|import-codex\] — /);
+    });
     after(() => {
         setConfigForTests(undefined);
         rmSync(root, { recursive: true, force: true });

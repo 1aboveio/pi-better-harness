@@ -123,7 +123,7 @@ interface ParsedArgs {
 
 export function registerAgentCommands(pi: Pick<ExtensionAPI, "registerCommand">, deps: AgentCommandDeps = {}): void {
     pi.registerCommand("agents", {
-        description: "List, inspect, create, reload, or import Codex agent definitions",
+        description: "[list|show|create|reload|import-codex] — List, inspect, create, reload, or import agent definitions",
         getArgumentCompletions(prefix: string) {
             const commands = ["list", "inspect", "show", "create", "reload", "import-codex", "help"];
             const first = prefix.trim().split(/\s+/)[0] ?? "";
