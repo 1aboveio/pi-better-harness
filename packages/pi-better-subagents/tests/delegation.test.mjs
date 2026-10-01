@@ -1,12 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { register } from "node:module";
 
 register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 
 const { default: extension, subagentsArgumentCompletions } = await import("../index.ts");
-const { setConfigForTests } = await import("../config.ts");
+const { setConfigForTests, setConfigPathForTests } = await import("../config.ts");
 const { normalizeDelegationMode, delegationPrompt, DELEGATION_MODE_REQUEST } = await import("../delegation.ts");
 
 function harness() {
@@ -46,12 +49,43 @@ test("/subagents action completions expose complete mode selections with context
         { value: "mode manual", label: "mode manual", description: "Delegate only when explicitly requested" },
         { value: "mode adaptive", label: "mode adaptive", description: "Delegate substantial independent work" },
         { value: "mode coordinator", label: "mode coordinator", description: "Delegate role-owned work by default" },
+        { value: "save", label: "save", description: "Write the current mode as the next session's default" },
     ]);
     assert.deepEqual(subagentsArgumentCompletions(" mode a")?.map((entry) => entry.value), ["mode adaptive"]);
     assert.equal(subagentsArgumentCompletions("mode invalid"), null);
     const command = harness().commands.get("subagents");
     assert.deepEqual(command.getArgumentCompletions("mode c").map((entry) => entry.value), ["mode coordinator"]);
-    assert.match(command.description, /^\[mode manual\|adaptive\|coordinator\] — /);
+    assert.match(command.description, /^\[mode manual\|adaptive\|coordinator\|save\] — /);
+});
+
+test("/subagents save confirms, preserves other config, and clears the session override", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "delegation-save-"));
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify({ defaultTools: "read", delegationMode: "adaptive" }));
+    setConfigPathForTests(path);
+    try {
+        const h = harness();
+        const command = h.commands.get("subagents");
+        await command.handler("mode coordinator", h.ctx);
+        h.ctx.hasUI = true;
+        h.ctx.ui.confirm = async () => false;
+        await command.handler("save", h.ctx);
+        assert.equal(JSON.parse(readFileSync(path, "utf8")).delegationMode, "adaptive");
+        assert.match(h.notifications.at(-1).message, /unchanged/);
+        h.ctx.ui.confirm = async () => true;
+        await command.handler("save", h.ctx);
+        const saved = JSON.parse(readFileSync(path, "utf8"));
+        assert.equal(saved.delegationMode, "coordinator");
+        assert.equal(saved.defaultTools, "read");
+        assert.equal(h.entries.at(-1).data.mode, null);
+        assert.equal(h.mode(), "coordinator");
+        await h.handlers.get("session_start")({ reason: "reload" }, { ...h.ctx, mode: "print", hasUI: false, cwd: process.cwd(), sessionManager: h.ctx.sessionManager, isIdle: () => true });
+        assert.equal(h.mode(), "coordinator", "a saved default survives reload after the session override is cleared");
+    } finally {
+        setConfigPathForTests(undefined);
+        setConfigForTests(undefined);
+        rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test("/subagents reports config, changes only this session, rejects invalid args and injects current mode", async () => {

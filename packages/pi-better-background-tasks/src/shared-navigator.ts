@@ -1066,7 +1066,7 @@ function createOverlayComponent(
           requestRender();
         }
       }
-      else if (data === "m" || data === "M") {
+      else if (data === "m" || data === "M" || data === "s" || data === "S") {
         const row = selectedRow();
         const provider = row ? state().providers.get(row.providerId) : undefined;
         if (!row || !provider?.handleDetailInput?.(row.id, data)) return;

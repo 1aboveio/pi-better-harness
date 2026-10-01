@@ -8,12 +8,12 @@
  * `defaultTools` absent → the built-in SAFE_DEFAULT_TOOLS.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { SELF_SPEC } from "./extensions.ts";
-import type { DelegationMode } from "./delegation.ts";
+import { isDelegationMode, type DelegationMode } from "./delegation.ts";
 import type { TimingSettings } from "./timing.ts";
 
 export interface SubagentConfig extends TimingSettings {
@@ -80,22 +80,47 @@ export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetc
 export const SAFE_CLEAN_TOOLS = "read, bash";
 
 let cached: SubagentConfig | undefined;
+let configPathForTests: string | undefined;
 
 /** Test seam. Pass undefined to reload config.json on the next loadConfig call. */
 export function setConfigForTests(next: SubagentConfig | undefined): void {
     cached = next;
 }
 
+/** Test seam. Save and load use this file instead of the package config.json. */
+export function setConfigPathForTests(path: string | undefined): void {
+    configPathForTests = path;
+    cached = undefined;
+}
+
+export function configPath(): string {
+    return configPathForTests ?? join(dirname(fileURLToPath(import.meta.url)), "config.json");
+}
+
 /** Load config.json from the extension directory. Missing/invalid → {}. */
 export function loadConfig(): SubagentConfig {
     if (cached) return cached;
     try {
-        const dir = dirname(fileURLToPath(import.meta.url));
-        cached = JSON.parse(readFileSync(join(dir, "config.json"), "utf-8")) as SubagentConfig;
+        cached = JSON.parse(readFileSync(configPath(), "utf-8")) as SubagentConfig;
     } catch {
         cached = {};
     }
     return cached;
+}
+
+/** Write delegationMode into config.json, preserving every other key. */
+export function writeDelegationMode(mode: DelegationMode, path = configPath()): void {
+    if (!isDelegationMode(mode)) throw new Error(`Invalid delegation mode: ${String(mode)}`);
+    let current: SubagentConfig = {};
+    try {
+        const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) current = parsed as SubagentConfig;
+    } catch { /* missing file starts as an empty config */ }
+    current.delegationMode = mode;
+    const pending = `${path}.${process.pid}.tmp`;
+    writeFileSync(pending, `${JSON.stringify(current, null, 2)}\n`);
+    renameSync(pending, path);
+    if (path === configPath()) cached = current;
 }
 
 /** Normalize a comma/space tool list to pi's bare comma form: "a, b" → "a,b". */

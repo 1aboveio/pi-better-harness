@@ -38,8 +38,10 @@ Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or ne
 `config.json` sets `delegationMode` to `manual`, `adaptive` (default), or
 `coordinator`. `/subagents` displays the active mode, and
 `/subagents mode manual|adaptive|coordinator` changes it for the current
-session without changing config. The navigator's `main` row opens the same
-control: `m` cycles the session mode, and `x` does not stop it. Manual delegates only on explicit user or workflow request, even with a
+session without changing config. `/subagents save` writes the current mode as
+the next session's default. The navigator's `main` row opens the same control:
+`m` cycles the session mode, `S` twice saves that default, and `x` does not
+stop it. Manual delegates only on explicit user or workflow request, even with a
 plan. Adaptive delegates substantial independent work when useful. Coordinator
 uses `agents_catalog` to discover current role descriptions and delegates every
 nontrivial role-owned task, while the foreground coordinates, integrates, and
