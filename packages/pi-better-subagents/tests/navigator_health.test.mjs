@@ -5,8 +5,8 @@
  * - Navigator row scan order: name/id · model [· effort] · elapsed [· tool]
  *   [· spend] · status [· ≤2 health facts]
  * - Healthy/quiet rows stay low-noise (no health facts)
- * - Degraded rows append compact facts (compacting, long tool, model error,
- *   stale, …) capped at two after status
+ * - Degraded rows append operational facts (compacting, long tool, stale, …)
+ *   capped at two after status; child model errors remain outside navigator chrome
  * - Durable statuses colorize semantically (width-safe / visible-width aware)
  * - Detail view sections: status, model/effort, process, liveness, activity,
  *   compaction, active tool, model, log, thresholds, callbacks, output —
@@ -224,7 +224,7 @@ describe("navigator health row order", () => {
 
     // @covers navigator.health
     // @level unit
-    it("degraded rows show compact facts (compacting, long tool, model error, stale)", () => {
+    it("degraded rows show operational facts (compacting, long tool, stale)", () => {
         const cases = [
             {
                 label: "compacting",
@@ -242,18 +242,6 @@ describe("navigator health row order", () => {
                     activeTools: [{ toolName: "bash", startedAt: NOW - 90_000 }],
                 })),
                 expect: /long bash|bash/,
-            },
-            {
-                label: "model error",
-                obs: obsFor("running", emptyFacts({
-                    lastMeaningfulAt: NOW - 10_000,
-                    model: {
-                        state: "error",
-                        lastError: { message: "timeout", at: NOW - 2_000 },
-                        errorHistory: [{ message: "timeout", at: NOW - 2_000 }],
-                    },
-                })),
-                expect: /model error/,
             },
             {
                 label: "stale",
@@ -276,6 +264,29 @@ describe("navigator health row order", () => {
             });
             assert.ok(text.endsWith(facts.join(" · ")) || text.includes(`running · ${facts[0]}`), text);
         }
+    });
+    // @covers navigator.health
+    // @level unit
+    it("hides model errors in rows without changing health evidence or lifecycle", () => {
+        const obs = obsFor("failed", emptyFacts({
+            lastMeaningfulAt: NOW - 10_000,
+            model: {
+                state: "error",
+                lastError: { message: "timeout", at: NOW - 2_000 },
+                errorHistory: [{ message: "timeout", at: NOW - 2_000 }],
+            },
+        }));
+        const before = structuredClone(obs);
+        const [row] = buildNavigatorRows([meta({ status: "failed" })], {
+            effectiveStatus: (m) => m.status,
+            shortModel, fmtElapsed, spendFor: () => "", healthFor: () => obs, now: NOW,
+        });
+        const text = formatNavigatorRowText(row);
+        assert.match(text, /failed/);
+        assert.doesNotMatch(text, /model error|timeout/);
+        assert.deepEqual(obs, before, "presentation must not mutate the health observation");
+        assert.equal(obs.model.state, "error");
+        assert.equal(obs.model.lastError.message, "timeout");
     });
 });
 
@@ -456,7 +467,8 @@ describe("navigator detail health sections", () => {
         const modelIdx = sectionIdx("model");
         assert.ok(compactIdx > 0 && toolIdx > compactIdx && modelIdx > toolIdx, text);
         assert.ok(/long_running|bash/.test(text), text);
-        assert.ok(/state error|model error|net down/.test(text), text);
+        assert.doesNotMatch(text, /state error|model error|net down|history earlier/);
+        assert.equal(d.health.model.lastError.message, "net down", "detail retains original evidence");
         assert.ok(text.includes("log"), text);
         assert.ok(/last write/.test(text), text);
         assert.ok(text.includes("thresholds"), text);

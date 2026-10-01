@@ -543,7 +543,6 @@ export function buildDetailLines(detail, opts = {}) {
             const bits = [];
             if (c.last.reason) bits.push(c.last.reason);
             if (c.last.aborted) bits.push("aborted");
-            if (c.last.errorMessage) bits.push(c.last.errorMessage);
             if (bits.length) lines.push(`   last ${bits.join(" · ")}`);
         }
     } else {
@@ -566,27 +565,16 @@ export function buildDetailLines(detail, opts = {}) {
         lines.push("   idle");
     }
 
-    // Model call / error, separate from tool state.
+    // Model activity only; incident summaries stay in result tools and logs.
     lines.push(sectionRule("model", width));
     if (h?.model) {
         const m = h.model;
-        lines.push(`   state ${m.state}`);
-        if (m.listWarning) lines.push(`   warning ${m.listWarning}`);
+        if (m.state !== "error") lines.push(`   state ${m.state}`);
+        if (m.state !== "error" && m.listWarning) lines.push(`   warning ${m.listWarning}`);
         if (m.retry) {
             const a = m.retry.attempt != null ? String(m.retry.attempt) : "?";
             const max = m.retry.maxAttempts != null ? String(m.retry.maxAttempts) : "?";
             lines.push(`   retry ${a}/${max}`);
-        }
-        if (m.lastError) {
-            const age = m.lastError.at != null ? ` · ${fmtDetailTs(m.lastError.at, now)}` : "";
-            lines.push(`   last error ${m.lastError.message}${age}`);
-        }
-        if (Array.isArray(m.errorHistory) && m.errorHistory.length > 0) {
-            const recent = m.errorHistory.slice(-3);
-            for (const e of recent) {
-                const age = e.at != null ? ` · ${fmtDetailTs(e.at, now)}` : "";
-                lines.push(`   history ${e.message}${age}`);
-            }
         }
         if (m.longModelCall) {
             const age = m.longModelCall.ageMs != null ? ` · ${fmtDetailAge(m.longModelCall.ageMs)}` : "";

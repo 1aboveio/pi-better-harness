@@ -162,6 +162,7 @@ export function formatNavigatorHealthFacts(obs) {
     if (!obs || !isActionableHealth(obs)) return [];
     const facts = [];
     for (const f of surfaceableCompactFacts(obs)) {
+        if (obs.model?.state === "error" && f === obs.model.listWarning) continue;
         if (f && f !== obs.status && !facts.includes(f)) facts.push(f);
     }
     if (obs.activity === "stale" && !facts.some((f) => /\bstale\b/i.test(f))) {

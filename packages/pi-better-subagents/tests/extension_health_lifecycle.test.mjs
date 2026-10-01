@@ -228,7 +228,8 @@ describe("structured failure attention", () => {
                 assert.match(list, /incident/i);
                 assert.doesNotMatch(list, /assertion failed/);
                 const detail = renderRegisteredWorkDetail("subagents", id, 120);
-                assert.match(detail.lines.join("\n"), /Action required/);
+                assert.doesNotMatch(detail.lines.join("\n"), /Action required/);
+                assert.ok(detail.detail.transcript.some((entry) => entry.type === "tool" && entry.isError), "original error results stay in the transcript");
                 mock.timers.tick(HEALTH_TICK_MS);
                 await new Promise((resolve) => setImmediate(resolve));
                 assert.equal(pendingFailureAttention(readRunFailures(id), Date.now())?.incidents.length, 1);
@@ -423,9 +424,9 @@ describe("#325 failed launches", () => {
     });
 });
 
-describe("#332 navigator rows lead with failure text only when something needs action", () => {
+describe("navigator rows keep incident summaries out of the work rail", () => {
     const providerRows = () => globalThis[Symbol.for("pi-better-harness.navigator.state")].providers.get("subagents").listRows(Date.now());
-    it("history-only failures keep the model/tool/tokens columns; an actionable incident still leads the row", async () => {
+    it("keeps model/tool/tokens columns for both history-only and actionable failures", async () => {
         const h = makeHarness();
         try {
             const { id, pid } = await spawnRun(h, { model: "openai/gpt-test" });
@@ -443,11 +444,17 @@ describe("#332 navigator rows lead with failure text only when something needs a
             assert.ok(!row.facts?.some((fact) => /No failures need action/.test(fact)));
             const detail = renderRegisteredWorkDetail("subagents", id, 120).detail;
             assert.doesNotMatch(detail.subtitle ?? "", /No failures need action/, "nor the detail subtitle");
-            // Two more failures of the same command: repeated, so it needs action and leads the row.
+            // Repeated command failures need action, but navigator columns stay stable.
             appendFileSync(log, [...fail("twice"), ...fail("thrice")].map((e) => JSON.stringify(e)).join("\n") + "\n");
             row = providerRows().find((x) => x.id === id);
-            assert.match(row.primary, /Action required/);
-            assert.match(row.secondary ?? "", /gpt-test/);
+            assert.match(row.primary, /gpt-test/);
+            assert.doesNotMatch(row.primary, /Action required/);
+            assert.equal(row.secondary, undefined);
+            assert.ok(!row.facts?.some((fact) => /Action required|1 failing/.test(fact)));
+            const failedDetail = renderRegisteredWorkDetail("subagents", id, 120).detail;
+            assert.ok(!failedDetail.metadata.some((item) => item.label === "failure"));
+            assert.doesNotMatch(failedDetail.subtitle ?? "", /Action required/);
+            assert.doesNotMatch(failedDetail.transcriptDiagnostic ?? "", /Action required|unclassified|history/);
             await reapRun({ id, pid });
         } finally { h.shutdown(); }
     });

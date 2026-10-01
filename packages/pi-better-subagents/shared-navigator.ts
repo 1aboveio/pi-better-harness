@@ -559,7 +559,7 @@ function rowSummary(row: InternalRow): string {
     const parts: string[] = [];
     if (row.statusTone !== "running" && row.kind !== "main agent") parts.push(singleLine(row.status));
     if (row.model) parts.push(row.effort ? `${singleLine(row.model)} ${singleLine(row.effort)}` : singleLine(row.model));
-    if (row.tool) parts.push(`tool ${singleLine(row.tool)}`);
+    if (row.tool) parts.push(singleLine(row.tool));
     if (row.tokens) parts.push(singleLine(row.tokens));
     else if (row.primary) parts.push(singleLine(row.primary));
     if (parts.length) return parts.join(" · ");

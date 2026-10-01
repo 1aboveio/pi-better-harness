@@ -117,7 +117,7 @@ import {
 import { buildHealthCallbackDelivery } from "./completion.ts";
 import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
 import { completionCallbackFields, failureAttentionFields, healthCallbackFields } from "./callback-fields.ts";
-import { collectRunFailures, failurePath, failureView, markFailureAttentionDelivered, pendingFailureAttention, prependFailureSummary } from "./failures.ts";
+import { collectRunFailures, failurePath, markFailureAttentionDelivered, pendingFailureAttention } from "./failures.ts";
 import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
 import {
     text,
@@ -1149,9 +1149,6 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
         if (row.model) bits.push(row.effort ? `${row.model} ${row.effort}` : row.model);
         if (row.tool) bits.push(row.tool);
         if (row.spend) bits.push(row.spend);
-        const failure = failureView(row.id, metaById.get(row.id)?.cwd ?? "", row.status !== "running" && row.status !== "orphaned");
-        // Only a failure that needs action replaces the row's columns; history stays in the detail view.
-        const firstFailure = failure.actionable ? failure.text.split("\n")[0] || "" : "";
         return {
             providerId: "subagents",
             id: row.id,
@@ -1164,9 +1161,8 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             statusTone: statusTone(row.status),
             kind: "subagent",
             elapsed: row.elapsed,
-            primary: firstFailure || bits.join(" · ") || "subagent run",
-            secondary: firstFailure ? bits.join(" · ") : undefined,
-            facts: [firstFailure, ...row.healthFacts].filter(Boolean).slice(0, 2),
+            primary: bits.join(" · ") || "subagent run",
+            facts: row.healthFacts,
             sortStartedAt: metaById.get(row.id)?.startedAt ?? now,
             expiresAt: (() => {
                 const meta = metaById.get(row.id);
@@ -1190,7 +1186,7 @@ function mainAgentWorkRow(now: number): BackgroundWorkRow {
     const tokens = typeof contextTokens === "number" ? `${fmtTokens(contextTokens)} tok` : undefined;
     const bits = [
         effort ? `${model} ${effort}` : model,
-        tool ? `tool ${tool}` : undefined,
+        tool,
         tokens,
     ].filter((bit): bit is string => Boolean(bit));
     return {
@@ -1215,10 +1211,7 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
     if (!detail) return null;
     void options;
     const transcript = readRunTranscript(id);
-    const view = failureView(id, readMeta(id)?.cwd ?? "", detail.status !== "running" && detail.status !== "orphaned");
-    const failure = view.text;
     const metadata = [
-        ...(failure ? [{ label: "failure", value: failure.split("\n")[0]! }] : []),
         { label: "provider", value: "Subagents" },
         { label: "id", value: detail.id },
         ...(detail.role ? [{ label: "role", value: String(detail.role) }] : []),
@@ -1235,11 +1228,11 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         title: detail.name || detail.id,
         status: detail.status,
         statusTone: statusTone(detail.status),
-        subtitle: (view.actionable && failure.split("\n")[0]) || (detail.currentTool ? `current tool ${detail.currentTool}` : undefined),
+        subtitle: detail.currentTool || undefined,
         metadata,
-        evidence: { label: "transcript", text: prependFailureSummary(detail.output || "(no transcript yet)", failure) },
+        evidence: { label: "transcript", text: detail.output || "(no transcript yet)" },
         transcript: transcript.entries,
-        transcriptDiagnostic: failure ? prependFailureSummary(transcript.diagnostic ?? "", failure) : transcript.diagnostic,
+        transcriptDiagnostic: transcript.diagnostic,
         footerActions: [detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
     };
 }

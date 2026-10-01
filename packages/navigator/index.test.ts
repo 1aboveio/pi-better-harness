@@ -488,17 +488,18 @@ describe("shared background work navigator", () => {
       assert.match(text, /^background tasks$/m);
       assert.match(text, /← work navigator/);
       assert.doesNotMatch(text, /shortcuts/);
-      assert.match(text, /●\s+reviewer\s+grok-4\.5 high · tool bash · 18\.2k tok/);
+      assert.match(text, /●\s+reviewer\s+grok-4\.5 high · bash · 18\.2k tok/);
+      assert.doesNotMatch(text, /\btool bash\b/);
 
-      const subagentRow = lines.find((line) => /●\s+reviewer\s+grok-4\.5 high · tool bash · 18\.2k tok/.test(line));
+      const subagentRow = lines.find((line) => /●\s+reviewer\s+grok-4\.5 high · bash · 18\.2k tok/.test(line));
       assert.ok(subagentRow, text);
       assert.ok(subagentRow.startsWith("  ●"), "unselected subagent rows reserve the selection-arrow gutter");
       assert.ok(subagentRow.indexOf("●") < subagentRow.indexOf("reviewer"));
       assert.ok(subagentRow.indexOf("reviewer") < subagentRow.indexOf("grok-4.5 high"));
-      assert.ok(subagentRow.indexOf("grok-4.5 high") < subagentRow.indexOf("tool bash"));
-      assert.ok(subagentRow.indexOf("tool bash") < subagentRow.indexOf("18.2k tok"));
+      assert.ok(subagentRow.indexOf("grok-4.5 high") < subagentRow.indexOf("bash"));
+      assert.ok(subagentRow.indexOf("bash") < subagentRow.indexOf("18.2k tok"));
       assert.ok(subagentRow.indexOf("18.2k tok") < subagentRow.indexOf("1m 04s"));
-      assert.match(subagentRow, /reviewer\s{10,}grok-4\.5 high · tool bash · 18\.2k tok/);
+      assert.match(subagentRow, /reviewer\s{10,}grok-4\.5 high · bash · 18\.2k tok/);
 
       const bgRow = lines.find((line) => /✕\s+watch-pr-14-merge\s+failed, inspect log/.test(line));
       assert.ok(bgRow, text);
@@ -521,13 +522,13 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("puts unhealthy subagent evidence ahead of model and spend in the work rail", () => {
+  it("keeps operational health facts ahead of model and spend in the work rail", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("subagents", "Subagents", 10, 100, () => undefined),
       listRows: () => [{
         providerId: "subagents", id: "sa-failed", name: "reviewer", model: "grok-4.5",
         tokens: "$0.08", status: "failed", statusTone: "failed", kind: "subagent",
-        elapsed: "2m", primary: "grok-4.5 · $0.08", facts: ["tool bash exited 1"], sortStartedAt: 100,
+        elapsed: "2m", primary: "grok-4.5 · $0.08", facts: ["long bash 1m"], sortStartedAt: 100,
       }],
     });
     const widgets: unknown[] = [];
@@ -544,7 +545,7 @@ describe("shared background work navigator", () => {
         truncate: (text, width) => text.slice(0, width),
       });
       const text = renderWidget(widgets.at(-1), 100, ui.theme).join("\n");
-      assert.match(text, /reviewer\s+failed · tool bash exited 1/);
+      assert.match(text, /reviewer\s+failed · long bash 1m/);
       assert.doesNotMatch(text, /reviewer\s+grok-4\.5 · \$0\.08/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
@@ -674,7 +675,8 @@ describe("shared background work navigator", () => {
       });
 
       const list = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
-      assert.match(list, /●\s+main\s+gpt-5\.6 high · tool read · 109\.3k tok/);
+      assert.match(list, /●\s+main\s+gpt-5\.6 high · read · 109\.3k tok/);
+      assert.doesNotMatch(list, /\btool read\b/);
       assert.ok(list.indexOf("main") < list.indexOf("Subagents row"), list);
 
       const editor = ui.factory({}, {}, {});

@@ -72,6 +72,10 @@ A completed run with no incident needing action still printed `10 active failure
 
 ## Scope and limits
 
+### Navigator presentation exception
+
+The subagent navigator omits child tool/model incident summaries and history from compact rows and detail chrome. It retains lifecycle statuses (including failed and lost), operational health facts, transcript-read diagnostics, and the original transcript, which can contain error results. This presentation exception does not change observation collection, actionability, notification delivery, durable journals, or the failure-first reporting contract of result/output/status tools. Background-task navigator diagnostics are unchanged.
+
 This provides assurance for supported structured evidence. It cannot prove semantic task correctness from exit zero, detect failures a producer never reports, or declare an arbitrary prose claim verified. Lifecycle remains independent of the observations. Per-consumer adapters must explicitly document which evidence they support, and classify gaps instead of silently treating unsupported evidence as success.
 
 The shared module does not kill processes, infer arbitrary stdout errors, change task acceptance criteria, or parse prompt text into runtime deadlines.
