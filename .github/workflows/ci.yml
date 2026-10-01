@@ -125,6 +125,7 @@ jobs:
         run: |
           npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ @earendil-works/pi-coding-agent@0.99.1 @earendil-works/pi-ai@0.99.1 @earendil-works/pi-tui@0.99.1
           node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test packages/pi-better-subagents/tests/codemode_batch.test.mjs
+          node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/goal-retry-runtime.test.mjs
 
   macos-sandbox:
     name: macos-sandbox

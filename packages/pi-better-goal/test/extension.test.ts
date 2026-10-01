@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import type {
   ExtensionAPI,
@@ -9,7 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
-import extension, { goalArgumentCompletions } from "./extension-fixture.js";
+import extension, { goalArgumentCompletions, toolContext } from "./extension-fixture.js";
 
 interface SessionEntry {
   type: string;
@@ -237,7 +237,7 @@ test("only the slash command creates a goal and installs an observability-safe w
 
   const getGoal = tools.get("get_goal");
   assert.ok(getGoal);
-  const result = await getGoal.execute("test", {}, undefined, undefined, ctx);
+  const result = await getGoal.execute("test", {}, undefined, undefined, toolContext(ctx));
   assert.equal((result.details as { goal: { objective: string } }).goal.objective, "Ship slash-only goals");
 
   const rendered = component.render(80);
@@ -473,25 +473,30 @@ test("identical autonomous outcomes pause continuation until interactive input r
     ],
   };
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  // The first outcome is new evidence; each identical retry after it waits
+  // one more 30s grace period than the last.
+  for (let attempt = 0; attempt <= 10; attempt += 1) {
     await handlers.get("agent_start")?.({}, ctx);
     await handlers.get("agent_end")?.(identicalOutcome, ctx);
     await handlers.get("agent_settled")?.({}, ctx);
-    t.mock.timers.tick(30_000);
+    const delay = 30_000 * (attempt + 1);
+    const before: number = messages.length;
+    if (attempt === 10) break;
+    t.mock.timers.tick(delay - 1);
     await flushPromises();
+    assert.equal(messages.length, before, `retry ${attempt} waits the full ${delay}ms`);
+    t.mock.timers.tick(1);
+    await flushPromises();
+    assert.equal(messages.length, before + 1, `retry ${attempt} fires after ${delay}ms`);
   }
-  assert.equal(messages.length, 4, "the initial turn plus three no-progress retries are allowed");
-
-  await handlers.get("agent_start")?.({}, ctx);
-  await handlers.get("agent_end")?.(identicalOutcome, ctx);
-  await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(30_000);
+  assert.equal(messages.length, 11, "the initial turn plus ten no-progress retries are allowed");
+  t.mock.timers.tick(30_000 * 12);
   await flushPromises();
-  assert.equal(messages.length, 4, "the fourth identical outcome holds automatic continuation");
+  assert.equal(messages.length, 11, "the eleventh identical outcome holds automatic continuation");
 
   const blocked = latestContinuationState(entries);
   assert.equal(blocked?.blocked, true);
-  assert.equal(blocked?.noProgressRetries, 3);
+  assert.equal(blocked?.noProgressRetries, 10);
 
   await handlers.get("input")?.({ source: "interactive" }, ctx);
   const reset = latestContinuationState(entries);
@@ -503,7 +508,440 @@ test("identical autonomous outcomes pause continuation until interactive input r
   await handlers.get("agent_settled")?.({}, ctx);
   t.mock.timers.tick(30_000);
   await flushPromises();
-  assert.equal(messages.length, 5, "interactive input reopens the autonomous loop");
+  assert.equal(messages.length, 12, "interactive input reopens the loop at the base delay");
+});
+
+test("/goal resume reopens an active no-progress hold without replacing the goal", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("wait for network recovery", h.ctx);
+  await exhaustNoProgressRetries(h, t);
+  assert.equal(latestContinuationState(h.entries)?.blocked, true);
+  const before = h.messages.length;
+
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+
+  assert.equal(latestGoal(h.entries)?.status, "active");
+  assert.equal(latestGoal(h.entries)?.objective, "wait for network recovery");
+  assert.equal(latestContinuationState(h.entries)?.blocked, false);
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+  assert.equal(h.messages.length, before + 1, "explicit resume queues one new turn");
+  await settleNetworkFailure(h);
+  const afterResume = h.messages.length;
+  t.mock.timers.tick(29_999);
+  await flushPromises();
+  assert.equal(h.messages.length, afterResume);
+  t.mock.timers.tick(1);
+  await flushPromises();
+  assert.equal(h.messages.length, afterResume + 1, "resumed retry uses the base delay");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("held resumes preserve active time across repeated holds and later pause/completion", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 1_000_000 });
+  const h = createContinuationHarness();
+  const clock = async () => {
+    const result = await h.tools.get("get_goal")!.execute("clock", {}, undefined, undefined, toolContext(h.ctx));
+    return (result.details as { timing: { activeSeconds: number; elapsedSeconds: number } }).timing;
+  };
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("preserve the clock", h.ctx);
+  for (let cycle = 0; cycle < 2; cycle += 1) {
+    await exhaustNoProgressRetries(h, t);
+    const before = await clock();
+    assert.ok(before.activeSeconds > 0);
+    assert.equal(before.activeSeconds, before.elapsedSeconds);
+    await h.commands.get("goal")?.handler("resume", h.ctx);
+    assert.deepEqual(await clock(), before, "reopening a hold is not an active-state transition");
+  }
+  const resumed = await clock();
+  await h.commands.get("goal")?.handler("pause", h.ctx);
+  t.mock.timers.tick(20_000);
+  assert.deepEqual(await clock(), { activeSeconds: resumed.activeSeconds, elapsedSeconds: resumed.elapsedSeconds + 20 });
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  t.mock.timers.tick(5_000);
+  await h.commands.get("goal")?.handler("complete", h.ctx);
+  assert.deepEqual(await clock(), { activeSeconds: resumed.activeSeconds + 5, elapsedSeconds: resumed.elapsedSeconds + 25 });
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("/goal resume does not restart a non-held active or completed goal", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("keep working", h.ctx);
+  const before = h.messages.length;
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  assert.equal(h.messages.length, before);
+  await h.commands.get("goal")?.handler("complete", h.ctx);
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  assert.equal(latestGoal(h.entries)?.status, "complete");
+  assert.equal(h.messages.length, before);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("background drain resets a held ledger before a callback can cancel its wake", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  let active = false;
+  h.events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => ({ providerId: "fixture", items: active ? [{ id: "work", status: "running", active: true }] : [] }),
+  });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("wait for recovery", h.ctx);
+  await exhaustNoProgressRetries(h, t);
+  assert.equal(latestContinuationState(h.entries)?.blocked, true);
+
+  active = true;
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  active = false;
+  await h.handlers.get("tool_execution_start")?.({ toolName: "ask_user_question", toolCallId: "question" }, h.ctx);
+  assert.equal(latestContinuationState(h.entries)?.blocked, false, "drain progress persists while foreground is busy");
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+  await h.handlers.get("agent_end")?.(networkFailureOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  t.mock.timers.tick(100);
+  await flushPromises();
+  await settleNetworkFailure(h);
+
+  assert.equal(latestContinuationState(h.entries)?.blocked, false);
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1, "only the post-drain repetition counts");
+  const before = h.messages.length;
+  t.mock.timers.tick(59_999);
+  await flushPromises();
+  assert.equal(h.messages.length, before);
+  t.mock.timers.tick(1);
+  await flushPromises();
+  assert.equal(h.messages.length, before + 1, "callback cancellation cannot leave the goal held");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("each background active-to-idle cycle resets backoff even for the same task identity", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  let active = false;
+  h.events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => ({ providerId: "fixture", items: active ? [{ id: "work", status: "running", active: true }] : [] }),
+  });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("watch recurring work", h.ctx);
+  for (let cycle = 0; cycle < 2; cycle += 1) {
+    await settleNetworkFailure(h);
+    await settleNetworkFailure(h);
+    assert.ok((latestContinuationState(h.entries)?.noProgressRetries ?? 0) > 0);
+    active = true;
+    await h.handlers.get("agent_start")?.({}, h.ctx);
+    active = false;
+    await h.handlers.get("tool_execution_start")?.({ toolName: "ask_user_question", toolCallId: `question-${cycle}` }, h.ctx);
+    assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0, `cycle ${cycle} resets the durable ledger`);
+    await h.handlers.get("agent_end")?.(networkFailureOutcome, h.ctx);
+    await h.handlers.get("agent_settled")?.({}, h.ctx);
+  }
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("an idle background drain keeps its base-delay harvest wake without resetting again at handoff", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  let active = false;
+  h.events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => ({ providerId: "fixture", items: active ? [{ id: "work", status: "running", active: true }] : [] }),
+  });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("harvest completed work", h.ctx);
+  await settleNetworkFailure(h);
+  await settleNetworkFailure(h);
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1);
+  active = true;
+  await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx);
+  active = false;
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+  const entriesBeforeWake = h.entries.length;
+  const before = h.messages.length;
+  t.mock.timers.tick(29_999);
+  await flushPromises();
+  assert.equal(h.messages.length, before);
+  t.mock.timers.tick(1);
+  await flushPromises();
+  assert.equal(h.messages.length, before + 1);
+  assert.equal((h.messages.at(-1) as { details: { kind: string } }).details.kind, "background-drained");
+  assert.equal(h.entries.length, entriesBeforeWake, "sending a wake must not erase newer evidence again");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("background drains do not resume explicitly paused goals", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  let active = false;
+  h.events.emit("pi-better-goal:register-provider", {
+    id: "fixture",
+    getActivity: () => ({ providerId: "fixture", items: active ? [{ id: "work", status: "running", active: true }] : [] }),
+  });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("watch work", h.ctx);
+  await settleNetworkFailure(h);
+  await settleNetworkFailure(h);
+  await h.commands.get("goal")?.handler("pause", h.ctx);
+  const before = h.messages.length;
+  active = true;
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  active = false;
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  t.mock.timers.tick(360_000);
+  await flushPromises();
+  assert.equal(latestGoal(h.entries)?.status, "paused");
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1);
+  assert.equal(h.messages.length, before);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("changed evidence resets accumulated backoff to the base delay", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("wait for recovery", h.ctx);
+  await settleNetworkFailure(h);
+  await settleNetworkFailure(h);
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.(answeredOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+  const before = h.messages.length;
+  t.mock.timers.tick(29_999);
+  await flushPromises();
+  assert.equal(h.messages.length, before);
+  t.mock.timers.tick(1);
+  await flushPromises();
+  assert.equal(h.messages.length, before + 1);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("enlarged backoff is cancelled by background work or an interrupt", async (t) => {
+  for (const cause of ["background", "interrupt"] as const) {
+    await t.test(cause, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const controller = new AbortController();
+      const h = createContinuationHarness(controller.signal);
+      let active = false;
+      h.events.emit("pi-better-goal:register-provider", {
+        id: "fixture",
+        getActivity: () => ({ providerId: "fixture", items: active ? [{ id: "work", status: "running", active: true }] : [] }),
+      });
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("wait for recovery", h.ctx);
+      await settleNetworkFailure(h);
+      await settleNetworkFailure(h);
+      assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1);
+      const before = h.messages.length;
+      if (cause === "background") active = true;
+      else controller.abort();
+      subtest.mock.timers.tick(60_000);
+      await flushPromises();
+      assert.equal(h.messages.length, before);
+      assert.equal(latestGoal(h.entries)?.status, cause === "interrupt" ? "paused" : "active");
+      await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    });
+  }
+});
+
+test("a drain invalidates cached evidence until a fresh post-drain turn settles", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  let active = false;
+  h.events.emit("pi-better-goal:register-provider", {
+    id: "fixture", getActivity: () => fixtureActivity(active),
+  });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("harvest fresh evidence", h.ctx);
+  await settleNetworkFailure(h);
+  active = true;
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.(answeredOutcome, h.ctx);
+  active = false;
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(latestContinuationState(h.entries)?.lastEvidenceSignature, null);
+  const beforeMissingEvidence = h.entries.length;
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(h.entries.length, beforeMissingEvidence, "missing evidence cannot establish a synthetic baseline");
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.(answeredOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(typeof latestContinuationState(h.entries)?.lastEvidenceSignature, "string");
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("an outcome from the replaced goal cannot become the new goal's baseline", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("old objective", h.ctx);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("new objective", h.ctx);
+  await h.handlers.get("agent_end")?.(answeredOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(latestContinuationState(h.entries)?.lastEvidenceSignature, null);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.(answeredOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+  assert.equal(typeof latestContinuationState(h.entries)?.lastEvidenceSignature, "string");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("drain reset is durable before activity listeners can pause the goal", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  let active = false;
+  h.events.emit("pi-better-goal:register-provider", { id: "fixture", getActivity: () => fixtureActivity(active) });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("harvest work", h.ctx);
+  await settleNetworkFailure(h);
+  await settleNetworkFailure(h);
+  active = true;
+  await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx);
+  let observedReset = false;
+  h.events.once("pi-better-goal:activity", () => {
+    observedReset = latestContinuationState(h.entries)?.noProgressRetries === 0;
+    void h.commands.get("goal")?.handler("pause", h.ctx);
+  });
+  active = false;
+  const before = h.messages.length;
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(observedReset, true);
+  assert.equal(latestGoal(h.entries)?.status, "paused");
+  t.mock.timers.tick(300_000);
+  await flushPromises();
+  assert.equal(h.messages.length, before);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("obsolete concurrent provider results neither publish nor rearm a drain", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  const pending = deferred<ReturnType<typeof fixtureActivity>>();
+  let holdNext = false;
+  h.events.emit("pi-better-goal:register-provider", {
+    id: "fixture", getActivity: () => {
+      if (!holdNext) return fixtureActivity(false);
+      holdNext = false;
+      return pending.promise;
+    },
+  });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("compare snapshots", h.ctx);
+  await settleNetworkFailure(h);
+  await settleNetworkFailure(h);
+  const published: boolean[] = [];
+  h.events.on("pi-better-goal:activity", (snapshot) => published.push(snapshot.backgroundRunning));
+  holdNext = true;
+  const tool = h.tools.get("get_background_activity")!;
+  const first = tool.execute("old", {}, undefined, undefined, toolContext(h.ctx));
+  await flushPromises();
+  const second = await tool.execute("new", {}, undefined, undefined, toolContext(h.ctx));
+  assert.equal((second.details as { backgroundRunning: boolean }).backgroundRunning, false);
+  pending.resolve(fixtureActivity(true));
+  assert.equal(((await first).details as { backgroundRunning: boolean }).backgroundRunning, false);
+  await tool.execute("fresh", {}, undefined, undefined, toolContext(h.ctx));
+  assert.ok(published.length > 0 && published.every((active) => !active));
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("wake-disabled observation resets a held ledger without automatic handoffs", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const overrides = {
+    PI_BETTER_GOAL_DISABLE_WAKE: "1",
+    PI_BETTER_GOAL_IDLE_CONTINUATION_DELAY_MS: "0",
+    PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES: "1",
+  };
+  const previous = new Map(Object.keys(overrides).map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, overrides);
+    const fresh = await import(`${new URL("../src/index.ts", import.meta.url).href}?wake-disabled`);
+    const h = createContinuationHarness(undefined, { factory: fresh.default });
+    let active = false;
+    h.events.emit("pi-better-goal:register-provider", { id: "fixture", getActivity: () => fixtureActivity(active) });
+    await h.handlers.get("session_start")?.({}, h.ctx);
+    await h.commands.get("goal")?.handler("observe without waking", h.ctx);
+    await settleNetworkFailure(h);
+    await settleNetworkFailure(h);
+    assert.equal(latestContinuationState(h.entries)?.blocked, true);
+    active = true;
+    await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx);
+    active = false;
+    await h.handlers.get("agent_settled")?.({}, h.ctx);
+    assert.equal(latestContinuationState(h.entries)?.blocked, false);
+    assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+    const before = h.messages.length;
+    t.mock.timers.tick(10_000);
+    await flushPromises();
+    assert.equal(h.messages.length, before);
+    await h.handlers.get("session_shutdown")?.({}, h.ctx);
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("in-flight wake audits cannot survive pause, resume, replacement, completion, interactive input, foreground start, session replacement or shutdown", async (t) => {
+  for (const cause of ["pause", "resume", "replace", "complete", "input", "foreground", "session", "shutdown"] as const) {
+    await t.test(cause, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const h = createContinuationHarness();
+      let delayed = false;
+      const pending: Array<ReturnType<typeof deferred<ReturnType<typeof fixtureActivity>>>> = [];
+      h.events.emit("pi-better-goal:register-provider", {
+        id: "fixture", getActivity: () => {
+          if (!delayed) return fixtureActivity(false);
+          const gate = deferred<ReturnType<typeof fixtureActivity>>();
+          pending.push(gate);
+          return gate.promise;
+        },
+      });
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("original objective", h.ctx);
+      await settleNetworkFailure(h);
+      subtest.mock.timers.tick(29_999);
+      await flushPromises();
+      delayed = true;
+      subtest.mock.timers.tick(1);
+      await flushPromises();
+      assert.ok(pending.length > 0, "the audit must be awaiting an external provider");
+      let changed: unknown;
+      if (cause === "foreground" || cause === "session") {
+        changed = h.handlers.get(cause === "session" ? "session_start" : "agent_start")?.({}, h.ctx);
+      } else if (cause === "input") {
+        await h.handlers.get("input")?.({ text: "new instruction", source: "interactive" }, h.ctx);
+      } else if (cause === "shutdown") {
+        await h.handlers.get("session_shutdown")?.({}, h.ctx);
+        Object.defineProperty(h.ctx, "isIdle", { value: () => { throw new Error("stale context read"); } });
+      } else {
+        await h.commands.get("goal")?.handler(cause === "replace" ? "replacement objective" : cause === "complete" ? "complete" : "pause", h.ctx);
+        if (cause === "resume") await h.commands.get("goal")?.handler("resume", h.ctx);
+      }
+      await flushPromises();
+      const afterChange = h.messages.length;
+      const goalAfterChange = latestGoal(h.entries);
+      assert.ok(goalAfterChange?.goalId);
+      delayed = false;
+      for (const gate of pending) gate.resolve(fixtureActivity(false));
+      await changed;
+      await flushPromises();
+      assert.equal(h.messages.length, afterChange, "an obsolete audit cannot enqueue a turn");
+      assert.equal(latestGoal(h.entries)?.goalId, goalAfterChange?.goalId);
+      assert.equal(latestGoal(h.entries)?.status, goalAfterChange?.status);
+      if (cause !== "shutdown") await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    });
+  }
 });
 
 test("an aborted run pauses the active goal and suppresses pokes while paused", async (t) => {
@@ -630,7 +1068,7 @@ test("goal_resume resumes an escape-paused goal and its continuation runs", asyn
 
   await handlers.get("input")?.({ source: "interactive", text: "go" }, ctx);
   await handlers.get("agent_start")?.({}, ctx);
-  const result = await tools.get("goal_resume")!.execute("call", { reason: "user said go" }, undefined, undefined, ctx);
+  const result = await tools.get("goal_resume")!.execute("call", { reason: "user said go" }, undefined, undefined, toolContext(ctx));
   assert.equal((result.details as { ok: boolean }).ok, true);
   assert.equal(latestGoal(entries)?.status, "active");
   assert.equal(latestGoal(entries)?.pauseReason, undefined);
@@ -645,18 +1083,18 @@ test("goal_resume is absent and refused unless the goal is escape-paused", async
   await handlers.get("session_start")?.({}, ctx);
   const goalResume = tools.get("goal_resume")!;
   assert.equal(activeTools().includes("goal_resume"), false, "no goal: the tool is not offered");
-  const noGoal = await goalResume.execute("call", {}, undefined, undefined, ctx);
+  const noGoal = await goalResume.execute("call", {}, undefined, undefined, toolContext(ctx));
   assert.equal((noGoal.details as { ok: boolean }).ok, false);
 
   await commands.get("goal")?.handler("keep watching", ctx);
   assert.equal(activeTools().includes("goal_resume"), false, "active goal: the tool is not offered");
-  const whileActive = await goalResume.execute("call", {}, undefined, undefined, ctx);
+  const whileActive = await goalResume.execute("call", {}, undefined, undefined, toolContext(ctx));
   assert.equal((whileActive.details as { ok: boolean }).ok, false);
 
   await commands.get("goal")?.handler("pause", ctx);
   messages.length = 0;
   assert.equal(activeTools().includes("goal_resume"), false, "/goal pause: only the user resumes");
-  const afterPause = await goalResume.execute("call", {}, undefined, undefined, ctx);
+  const afterPause = await goalResume.execute("call", {}, undefined, undefined, toolContext(ctx));
   assert.equal((afterPause.details as { ok: boolean }).ok, false);
   assert.match((afterPause.content[0] as { text: string }).text, /\/goal resume/);
   assert.equal(latestGoal(entries)?.status, "paused");
@@ -897,8 +1335,25 @@ test("running background work warns the agent that a blocking question holds com
 
 const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] };
 const answeredOutcome = { messages: [{ role: "assistant", content: [{ type: "text", text: "Here is the answer." }], stopReason: "stop" }] };
+const networkFailureOutcome = { messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "fetch failed" }] };
 
-function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: boolean } = {}) {
+async function settleNetworkFailure(h: ReturnType<typeof createContinuationHarness>): Promise<void> {
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.(networkFailureOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+}
+
+async function exhaustNoProgressRetries(h: ReturnType<typeof createContinuationHarness>, t: TestContext): Promise<void> {
+  for (let attempt = 0; attempt <= 10; attempt += 1) {
+    await settleNetworkFailure(h);
+    if (attempt < 10) {
+      t.mock.timers.tick(30_000 * (attempt + 1));
+      await flushPromises();
+    }
+  }
+}
+
+function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: boolean; factory?: typeof extension } = {}) {
   const entries: SessionEntry[] = [];
   const tools = new Map<string, ToolDefinition>();
   let active: string[] = [];
@@ -959,7 +1414,7 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
     },
   } as unknown as ExtensionAPI;
 
-  extension(pi);
+  (options.factory ?? extension)(pi);
   return {
     commands,
     handlers,
@@ -980,34 +1435,43 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
 }
 
 function latestGoal(entries: SessionEntry[]) {
-  let goal: { status?: string; objective?: string; pauseReason?: string } | undefined;
+  let goal: { goalId?: string; status?: string; objective?: string; pauseReason?: string } | undefined;
   for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== "pi-better-goal" || !entry.data || typeof entry.data !== "object") {
       continue;
     }
     const data = entry.data as { kind?: unknown; goal?: unknown };
     if (data.kind === "set" && data.goal && typeof data.goal === "object") {
-      goal = data.goal as { status?: string; objective?: string; pauseReason?: string };
+      goal = data.goal as { goalId?: string; status?: string; objective?: string; pauseReason?: string };
     }
   }
   return goal;
 }
 
 function latestContinuationState(entries: SessionEntry[]) {
-  let state: { blocked?: boolean; noProgressRetries?: number } | undefined;
+  let state: { blocked?: boolean; noProgressRetries?: number; lastEvidenceSignature?: string | null } | undefined;
   for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== "pi-better-goal" || !entry.data || typeof entry.data !== "object") {
       continue;
     }
     const data = entry.data as { kind?: unknown; state?: unknown };
     if (data.kind === "continuation-state" && data.state && typeof data.state === "object") {
-      state = data.state as { blocked?: boolean; noProgressRetries?: number };
+      state = data.state as { blocked?: boolean; noProgressRetries?: number; lastEvidenceSignature?: string | null };
     }
   }
   return state;
 }
 
+function fixtureActivity(active: boolean) {
+  return { providerId: "fixture", items: active ? [{ id: "work", status: "running", active: true }] : [] };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
 async function flushPromises(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }

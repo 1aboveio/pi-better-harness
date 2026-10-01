@@ -120,21 +120,46 @@ fingerprint. Only the SHA-256 digest and tool-name summary are persisted; raw
 arguments and results are not copied into extension state.
 
 When a turn produces the same fingerprint as the prior autonomous turn, it
-counts as a no-progress retry. By default, the original turn plus three
-identical retries are allowed. The next identical outcome keeps the goal
+counts as a no-progress retry. By default, the original turn plus ten
+identical retries are allowed. Retries back off linearly: each identical
+outcome waits one more grace period than the last (30s, 60s, 90s, and so on
+with the default grace period). The next identical outcome keeps the goal
 active but holds further automatic continuations and reports `waiting: no
 progress` in the status area. It never marks the goal complete.
 
 Any changed result, an interactive user input, `/goal resume`, or a
-background-drained wake resets the retry ledger. Configure the number of
-identical retries after the initial outcome with:
+background active-to-idle transition resets the retry ledger. `/goal resume`
+also reopens an active goal held for no progress, without replacing its
+objective or changing its active-time accounting. It does not restart a non-held active or completed goal, and
+`goal_resume` remains restricted to escape-paused goals.
+
+The background-drain reset is persisted as soon as the transition is observed,
+even during a foreground turn or while automatic wakes are disabled. Cancelling
+the delayed wake does not undo that progress. Each new active-to-idle cycle can
+reset the ledger, including repeated cycles with the same task identity. Paused
+goals remain paused; background activity cannot resume them. The reset is
+committed before activity listeners run. Cached pre-drain evidence is invalidated;
+only a fresh completed turn establishes the next baseline. Late collections and
+in-flight wake audits cannot act on a replaced goal, turn, or session.
+
+Configure the number of identical retries after the initial outcome with:
 
 ```sh
-PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES=3
+PI_BETTER_GOAL_MAX_NO_PROGRESS_RETRIES=10
 ```
 
 Set it to `0` to hold after the first repeated identical outcome. Invalid or
 negative values fall back to the default.
+
+Configure the base delay with `PI_BETTER_GOAL_IDLE_CONTINUATION_DELAY_MS`.
+Calculated delays saturate at Node's timer limit, 2,147,483,647 ms, so a large
+base or multiplier cannot overflow into an immediate retry. A zero base keeps
+immediate continuations enabled.
+
+These are outer Goal continuations, not model-request retries. Pi completes its
+own network retry loop before Goal evaluates a settled turn. Goal does not
+change Pi's retry configuration or request timeouts; a new outer continuation
+receives a fresh Pi retry budget.
 
 ## Observable Progress
 

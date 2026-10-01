@@ -1,3 +1,5 @@
+import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+
 // The extension snapshots wake configuration when its module loads. Exercise
 // the documented defaults regardless of the invoking developer's Pi settings.
 const wakeSettings = [
@@ -19,3 +21,14 @@ try {
 }
 export default loaded.default;
 export const goalArgumentCompletions = loaded.goalArgumentCompletions;
+
+export function toolContext(ctx: ExtensionContext): Parameters<ToolDefinition["execute"]>[4] {
+  const context = {
+    ...ctx,
+    tools: [],
+    async executeTool(): Promise<never> {
+      throw new Error("Unexpected nested tool execution in the test fixture.");
+    },
+  };
+  return context;
+}

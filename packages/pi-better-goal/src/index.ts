@@ -51,7 +51,8 @@ import {
 
 const POLL_INTERVAL_MS = 2_000;
 const DEFAULT_IDLE_CONTINUATION_DELAY_MS = 30_000;
-const DEFAULT_MAX_NO_PROGRESS_RETRIES = 3;
+const DEFAULT_MAX_NO_PROGRESS_RETRIES = 10;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const WAKE_DISABLED =
   process.env.PI_BETTER_GOAL_DISABLE_WAKE === "1" ||
   process.env.PI_BETTER_EXTENSION_DISABLE_WAKE === "1";
@@ -119,6 +120,14 @@ function parseDurationEnv(raw: string | undefined, fallback: number): number {
   }
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+/**
+ * Linear backoff for no-progress retries: each identical outcome waits one more
+ * grace period than the last (30s, 60s, 90s, ... by default).
+ */
+export function idleContinuationDelay(noProgressRetries: number, baseMs = IDLE_CONTINUATION_DELAY_MS): number {
+  return Math.min(MAX_TIMER_DELAY_MS, baseMs * (1 + Math.max(0, noProgressRetries)));
 }
 
 function parseRetryLimit(raw: string | undefined, fallback: number): number {
@@ -257,13 +266,18 @@ export default function (pi: ExtensionAPI): void {
   });
 
   let currentCtx: ExtensionContext | undefined;
+  let executionGeneration = 0;
+  let agentGeneration = -1;
+  let sessionGeneration = 0;
+  let wakeGeneration = 0;
+  let snapshotSequence = 0;
+  let lastAppliedSnapshotSequence = 0;
   let foregroundRunning = false;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let collecting = false;
   let collectionPending = false;
   let latestSnapshot: ActivitySnapshot | null = null;
   let backgroundDrainTracker: BackgroundDrainTracker | null = null;
-  let lastWakeSignature = "";
   let lastAttentionSignature = "";
   let continuationQueuedFor: string | null = null;
   let idleContinuationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -330,6 +344,8 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const setGoal = (goal: GoalSnapshot, ctx: ExtensionContext, source: GoalEntrySource): void => {
+    executionGeneration += 1;
+    lastAgentEvidence = null;
     const previous = getGoal(ctx);
     const wasVisible = previous !== null && isGoalClockVisible(previous);
     pi.appendEntry(EXTENSION_NAME, goalSetEntry(goal, source));
@@ -344,6 +360,8 @@ export default function (pi: ExtensionAPI): void {
   };
 
   const clearGoal = (ctx: ExtensionContext, source: GoalEntrySource): void => {
+    executionGeneration += 1;
+    lastAgentEvidence = null;
     const current = getGoal(ctx);
     const wasVisible = current !== null && isGoalClockVisible(current);
     pi.appendEntry(EXTENSION_NAME, goalClearEntry(current?.goalId ?? null, source));
@@ -385,21 +403,22 @@ export default function (pi: ExtensionAPI): void {
 
   /**
    * The one resume path shared by `/goal resume`, the hotkey, and `goal_resume`:
-   * reactivate the paused goal and queue its continuation.
+   * reactivate a paused goal or reopen an active no-progress hold.
    */
   const resumeGoal = (
     ctx: ExtensionContext,
     source: GoalEntrySource,
   ): { ok: true; goal: GoalSnapshot } | { ok: false; message: string } => {
     const current = getGoal(ctx);
-    if (!current || current.status !== "paused") {
-      return { ok: false, message: "Only paused goals can be resumed." };
+    const held = current?.status === "active" && currentContinuationState(ctx, current.goalId)?.blocked === true;
+    if (!current || (current.status !== "paused" && !held)) {
+      return { ok: false, message: "Only paused or no-progress-held goals can be resumed." };
     }
     const blocker = resumeBlocker(current);
     if (blocker) {
       return { ok: false, message: blocker };
     }
-    const goal = goalWithStatus(current, "active");
+    const goal = held ? current : goalWithStatus(current, "active");
     setGoal(goal, ctx, source);
     queueGoalContinuation(goal, ctx);
     return { ok: true, goal };
@@ -437,6 +456,7 @@ export default function (pi: ExtensionAPI): void {
   };
 
   function clearIdleContinuation(): void {
+    wakeGeneration += 1;
     if (idleContinuationTimer) {
       clearTimeout(idleContinuationTimer);
       idleContinuationTimer = undefined;
@@ -457,7 +477,8 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     const signature = `${goal.goalId}:${kind}`;
-    if (idleContinuationTimer && idleContinuationSignature === signature) {
+    if (idleContinuationTimer && (idleContinuationSignature === signature ||
+        (kind === "continuation" && idleContinuationSignature === `${goal.goalId}:background-drained`))) {
       return;
     }
     clearIdleContinuation();
@@ -466,7 +487,7 @@ export default function (pi: ExtensionAPI): void {
       idleContinuationTimer = undefined;
       idleContinuationSignature = "";
       void sendIdleContinuationAfterAudit(goal.goalId, ctx, kind, snapshot);
-    }, IDLE_CONTINUATION_DELAY_MS);
+    }, idleContinuationDelay(kind === "continuation" ? currentContinuationState(ctx, goal.goalId)?.noProgressRetries ?? 0 : 0));
     idleContinuationTimer.unref?.();
   };
 
@@ -476,22 +497,20 @@ export default function (pi: ExtensionAPI): void {
     kind: "continuation" | "background-drained",
     priorSnapshot?: ActivitySnapshot,
   ): Promise<void> => {
+    const execution = executionGeneration;
+    const wake = wakeGeneration;
+    const auditIsCurrent = (): boolean => {
+      if (execution !== executionGeneration || wake !== wakeGeneration) return false;
+      const current = currentGoalSnapshot(ctx);
+      return isPokeable(current) && current.goalId === goalId &&
+        continuationQueuedFor !== goalId && !isForegroundBusy(ctx);
+    };
     const goal = currentGoalSnapshot(ctx);
-    if (!isPokeable(goal) || goal.goalId !== goalId || continuationQueuedFor === goal.goalId || foregroundRunning) {
-      return;
-    }
+    if (!auditIsCurrent() || !isPokeable(goal)) return;
     if (!boundCommandReady(goal, ctx)) return;
-    const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
-    latestSnapshot = snapshot;
-    pi.events.emit(EVENT_ACTIVITY, snapshot);
-    if (snapshot.foregroundRunning || snapshot.backgroundRunning) {
-      return;
-    }
+    const snapshot = await publishSnapshot(ctx);
+    if (!snapshot || !auditIsCurrent() || snapshot.foregroundRunning || snapshot.backgroundRunning) return;
 
-    // A background drain is a meaningful external state transition and reopens a held goal.
-    if (kind === "background-drained") {
-      resetContinuationState(goal);
-    }
     continuationQueuedFor = goal.goalId;
     const content = kind === "background-drained"
       ? "Background activity for the active goal is no longer running. Inspect any subagent callbacks or final results, then continue the completion audit before marking the goal complete.\n\n" +
@@ -534,34 +553,38 @@ export default function (pi: ExtensionAPI): void {
     return goal;
   };
 
-  const publishSnapshot = async (ctx: ExtensionContext): Promise<ActivitySnapshot> => {
+  const publishSnapshot = async (ctx: ExtensionContext): Promise<ActivitySnapshot | null> => {
+    const execution = executionGeneration;
+    const sequence = ++snapshotSequence;
     const snapshot = await collectActivitySnapshot(ctx, providers.values(), foregroundRunning);
+    if (execution !== executionGeneration) return null;
+    if (sequence < lastAppliedSnapshotSequence) return latestSnapshot;
+    lastAppliedSnapshotSequence = sequence;
     latestSnapshot = snapshot;
-    pi.events.emit(EVENT_ACTIVITY, snapshot);
 
-    const attention = terminalAttentionSignature(snapshot);
-    if (attention && attention !== lastAttentionSignature) {
-      lastAttentionSignature = attention;
-      pi.events.emit(EVENT_TERMINAL_ATTENTION, snapshot);
-    }
-
-    if (!WAKE_DISABLED) {
-      const goal = currentGoalSnapshot(ctx);
-      const wakePlan = planBackgroundDrainWake(backgroundDrainTracker, goal, snapshot);
-      backgroundDrainTracker = wakePlan.nextTracker;
-      if (isPokeable(goal) && wakePlan.wakeSignature) {
-        const wakeSignature = wakePlan.wakeSignature;
-        if (wakeSignature !== lastWakeSignature) {
-          lastWakeSignature = wakeSignature;
-          scheduleIdleContinuation(goal, ctx, "background-drained", snapshot);
-        }
-      }
+    const goal = currentGoalSnapshot(ctx);
+    const wakePlan = planBackgroundDrainWake(backgroundDrainTracker, goal, snapshot);
+    backgroundDrainTracker = wakePlan.nextTracker;
+    if (isPokeable(goal) && wakePlan.wakeSignature) {
+      // Persist external progress now: a foreground/callback turn may cancel its delayed wake.
+      clearIdleContinuation();
+      resetContinuationState(goal);
+      lastAgentEvidence = null;
+      scheduleIdleContinuation(goal, ctx, "background-drained", snapshot);
     }
 
     if (snapshot.foregroundRunning || snapshot.backgroundRunning) {
       clearIdleContinuation();
     }
 
+    pi.events.emit(EVENT_ACTIVITY, snapshot);
+    if (execution !== executionGeneration) return null;
+    const attention = terminalAttentionSignature(snapshot);
+    if (attention && attention !== lastAttentionSignature) {
+      lastAttentionSignature = attention;
+      pi.events.emit(EVENT_TERMINAL_ATTENTION, snapshot);
+      if (execution !== executionGeneration) return null;
+    }
     applyStatus(ctx);
 
     return snapshot;
@@ -628,7 +651,9 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     collecting = true;
+    const session = sessionGeneration;
     void publishSnapshot(ctx).finally(() => {
+      if (session !== sessionGeneration) return;
       collecting = false;
       if (collectionPending) {
         collectionPending = false;
@@ -910,7 +935,8 @@ export default function (pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       currentCtx = ctx;
       const snapshot = await publishSnapshot(ctx);
-      ctx.ui.notify(formatSnapshot(snapshot), snapshot.backgroundRunning ? "info" : "info");
+      if (!snapshot) return;
+      ctx.ui.notify(formatSnapshot(snapshot), "info");
     },
   });
 
@@ -949,6 +975,9 @@ export default function (pi: ExtensionAPI): void {
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       currentCtx = ctx;
       const snapshot = await publishSnapshot(ctx);
+      if (!snapshot) {
+        return { content: [{ type: "text", text: "Activity changed during collection; inspect again." }], details: { stale: true } };
+      }
       return {
         content: [{ type: "text", text: formatSnapshot(snapshot) }],
         details: snapshot,
@@ -957,6 +986,14 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    executionGeneration += 1;
+    sessionGeneration += 1;
+    clearIdleContinuation();
+    continuationQueuedFor = null;
+    backgroundDrainTracker = null;
+    lastAgentEvidence = null;
+    collecting = false;
+    collectionPending = false;
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
     const restoredGoal = getGoal(ctx);
@@ -967,9 +1004,10 @@ export default function (pi: ExtensionAPI): void {
     pi.events.emit(EVENT_READY, { version: EXTENSION_VERSION });
     syncResumeTool(getGoal(ctx));
     installGoalWidget(ctx);
-    latestSnapshot = await publishSnapshot(ctx);
+    const snapshot = await publishSnapshot(ctx);
+    if (!snapshot) return;
     syncPollingState();
-    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !latestSnapshot.backgroundRunning) {
+    if (restoredGoal?.status === "active" && restoredGoal.command && boundCommandReady(restoredGoal, ctx) && !foregroundRunning && !snapshot.backgroundRunning) {
       scheduleIdleContinuation(restoredGoal, ctx, "continuation");
     }
   });
@@ -995,6 +1033,9 @@ export default function (pi: ExtensionAPI): void {
     // conversation. Only /goal resume, the hotkey, or goal_resume resume it.
     const goal = getGoal(ctx);
     if (goal?.status === "active") {
+      executionGeneration += 1;
+      clearIdleContinuation();
+      lastAgentEvidence = null;
       resetContinuationState(goal);
     }
   });
@@ -1004,6 +1045,7 @@ export default function (pi: ExtensionAPI): void {
     const goal = currentGoalSnapshot(ctx);
     const owner = getWorkflow(ctx);
     const snapshot = await publishSnapshot(ctx);
+    if (!snapshot) return;
     const pausedInstruction = agentResumable(goal) ? pausedGoalPrompt(goal!) : "";
     if (!isPokeable(goal) && !owner) {
       return pausedInstruction ? { systemPrompt: `${event.systemPrompt}\n\n${pausedInstruction}` } : undefined;
@@ -1049,6 +1091,8 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_start", async (_event, ctx) => {
+    executionGeneration += 1;
+    agentGeneration = executionGeneration;
     currentCtx = ctx;
     foregroundRunning = true;
     clearIdleContinuation();
@@ -1066,7 +1110,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", async (event, ctx) => {
-    lastAgentEvidence = continuationEvidence(event.messages);
+    lastAgentEvidence = agentGeneration === executionGeneration ? continuationEvidence(event.messages) : null;
     // `escape` is a pi-reserved built-in shortcut (`app.interrupt`), so extensions
     // cannot register it. Observe the interrupt instead: when a running turn is
     // aborted (escape / ctrl+c while streaming), pause the active goal so it does
@@ -1080,6 +1124,7 @@ export default function (pi: ExtensionAPI): void {
     if (!BLOCKING_QUESTION_TOOLS.has(event.toolName)) return;
     currentCtx = ctx;
     const snapshot = await publishSnapshot(ctx);
+    if (!snapshot) return;
     const active = activeItemsByKey(snapshot);
     if (active.size > 0) pendingQuestions.set(event.toolCallId, active);
   });
@@ -1090,6 +1135,7 @@ export default function (pi: ExtensionAPI): void {
     pendingQuestions.delete(event.toolCallId);
     currentCtx = ctx;
     const snapshot = await publishSnapshot(ctx);
+    if (!snapshot) return;
     const finished = finishedSinceQuestion(activeAtStart, snapshot);
     if (finished.length === 0) return;
     // Steering is drained right after this tool batch, so the model sees the
@@ -1103,15 +1149,21 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    executionGeneration += 1;
     currentCtx = ctx;
     foregroundRunning = false;
     const snapshot = await publishSnapshot(ctx);
+    if (!snapshot) return;
     const goal = getGoal(ctx);
     if (!isPokeable(goal) || snapshot.backgroundRunning) {
       return;
     }
+    const evidence = lastAgentEvidence;
+    if (!evidence) {
+      scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
+      return;
+    }
     const previous = currentContinuationState(ctx, goal.goalId) ?? createContinuationState(goal.goalId);
-    const evidence = lastAgentEvidence ?? continuationEvidence([]);
     const repeated = previous.lastEvidenceSignature === evidence.signature;
     const noProgressRetries = repeated ? previous.noProgressRetries + 1 : 0;
     const blocked = repeated && noProgressRetries >= MAX_NO_PROGRESS_RETRIES;
@@ -1142,6 +1194,8 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    executionGeneration += 1;
+    sessionGeneration += 1;
     stopPolling();
     foregroundRunning = false;
     pendingQuestions.clear();
