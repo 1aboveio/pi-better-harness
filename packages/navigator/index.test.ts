@@ -1367,7 +1367,8 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("keeps every metadata line and the newest transcript rows that fit in constrained detail viewports", () => {
+  it("keeps metadata, multiline diagnostics, and the newest transcript rows within constrained detail viewports", () => {
+    let transcriptDiagnostic: string | undefined;
     const transcriptRows = Array.from({ length: 30 }, (_, i) => ` transcript-${String(i + 1).padStart(2, "0")}`);
     const unregister = registerBackgroundWorkProvider({
       id: "subagents",
@@ -1389,6 +1390,7 @@ describe("shared background work navigator", () => {
         providerId: "subagents",
         id: "sa-structured-transcript",
         title: "structured-tail-reader",
+        transcriptDiagnostic,
         status: "running",
         statusTone: "running",
         metadata: [
@@ -1452,6 +1454,10 @@ describe("shared background work navigator", () => {
         const renderedLines: string[] = component.render(80);
         const rendered = renderedLines.join("\n");
         assert.equal(renderedLines.length, height);
+        for (const line of renderedLines) {
+          assert.doesNotMatch(line, /[\r\n]/, "each rendered row must occupy exactly one physical terminal row");
+          assert.ok(visibleWidth(line) <= 80, "each rendered row must fit the terminal width");
+        }
         assert.match(rendered, header);
         assert.doesNotMatch(rendered, /fallback should not render/);
         for (const label of metadataLabels) {
@@ -1471,6 +1477,19 @@ describe("shared background work navigator", () => {
       component.handleInput("l");
       assertTail(60, /transcript · latest 10 rows/, 10);
       assertTail(24, /transcript · latest 10 rows/, 3);
+
+      for (const separator of ["\n", "\r\n", "\r"]) {
+        transcriptDiagnostic = `No failures need action (history)${separator}Showing the latest 2.0 MB of the transcript.`;
+        component.showDetail("subagents:sa-structured-transcript");
+        assertTail(24, /transcript · latest 10 rows/, 1);
+        assertTail(40, /transcript · latest 10 rows/, 10);
+        const lines: string[] = component.render(80);
+        const diagnosticIndex = lines.findIndex((line) => line.includes("No failures need action"));
+        assert.equal(lines[diagnosticIndex], "   No failures need action (history)");
+        assert.equal(lines[diagnosticIndex + 1], "   Showing the latest 2.0 MB of the transcript.");
+      }
+      component.handleInput("l");
+      assertTail(40, /transcript · latest 25 rows/, 17);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
