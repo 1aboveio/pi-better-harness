@@ -631,7 +631,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("selects the main parent row first and Enter returns to the foreground", () => {
+  it("selects the main parent row first and Enter opens its detail sheet", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("subagents", "Subagents", 10, 100, () => undefined),
       parentRow: () => ({
@@ -684,18 +684,69 @@ describe("shared background work navigator", () => {
       const focused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
       assert.match(focused, /^› ●\s+main/m, "navigation should start on main");
       editor.handleInput("enter");
-      const unfocused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
-      assert.doesNotMatch(unfocused, /^› /m, "Enter on main returns focus to the foreground");
-      assert.equal(component, undefined, "main must not open a detail overlay");
+      assert.ok(component, "Enter on main opens its detail sheet");
+      const sheet = component.render(100).join("\n");
+      assert.match(sheet, /main/);
+      assert.match(sheet, /← back/);
+      component.handleInput("x");
+      assert.match(component.render(100).join("\n"), /main/, "x does not stop or dismiss the main sheet");
 
-      editor.handleInput("left");
-      editor.handleInput("down");
-      const subagentFocused = renderWidget(widgets.at(-1), 120, ui.theme).join("\n");
-      assert.match(subagentFocused, /^› ●\s+Subagents row/m);
-      editor.handleInput("enter");
-      const openedComponent: any = component;
-      assert.ok(openedComponent, "subagent selection opens its detail overlay");
-      assert.match(openedComponent.render(100).join("\n"), /Subagents detail/);
+      component.handleInput("down");
+      assert.match(component.render(100).join("\n"), /Subagents detail/);
+      assert.match(renderWidget(widgets.at(-1), 120, ui.theme).join("\n"), /^› ●\s+Subagents row/m);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("refreshes a parent detail when its provider handles m", () => {
+    let mode = "adaptive";
+    const unregister = registerBackgroundWorkProvider({
+      ...provider("subagents", "Subagents", 10, 100, () => undefined),
+      parentRow: () => ({
+        providerId: "subagents", id: "main", name: "main", status: "running", statusTone: "running",
+        kind: "main agent", elapsed: "1m", primary: mode, sortStartedAt: 0,
+      }),
+      detail: (id) => id === "main" ? {
+        providerId: "subagents", id, title: "main", status: "running", statusTone: "running",
+        metadata: [{ label: "mode", value: mode }],
+        evidence: { label: "delegation", text: "m cycles this session" },
+        footerActions: ["m mode"],
+      } : null,
+      handleDetailInput: (id, data) => {
+        if (id !== "main" || data !== "m") return false;
+        mode = "coordinator";
+        return true;
+      },
+    });
+    let component: any;
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget() {},
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any) {
+        component = factory({ requestRender() {} }, this.theme, {}, () => undefined);
+        return Promise.resolve(null);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      ui.factory({}, {}, {}).handleInput("left");
+      ui.factory({}, {}, {}).handleInput("enter");
+      assert.match(component.render(80).join("\n"), /adaptive/);
+      assert.match(component.render(80).join("\n"), /m mode/);
+      component.handleInput("m");
+      assert.match(component.render(80).join("\n"), /coordinator/);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();
@@ -765,7 +816,8 @@ describe("shared background work navigator", () => {
 
       component.handleInput("up");
       component.handleInput("up");
-      assert.equal(overlayCloses, 1, "selecting main closes only the replaceable content overlay");
+      assert.equal(overlayCloses, 0, "selecting main keeps the sheet open");
+      assert.match(component.render(100).join("\n"), /main/);
       assert.match(renderWidget(installedWidget, 100, ui.theme).join("\n"), /^› ●\s+main/m);
       assert.equal(widgets.length, widgetCalls, "the navigator widget remains the same mounted component");
     } finally {

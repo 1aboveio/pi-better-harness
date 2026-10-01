@@ -66,6 +66,8 @@ export type BackgroundWorkProvider = {
   detail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null;
   armCloseLabel(row: BackgroundWorkRow): string;
   close(id: string): BackgroundWorkCloseOutcome;
+  /** Return true when this detail handled the key. The navigator refreshes the sheet. */
+  handleDetailInput?(id: string, data: string): boolean;
   onVisibleChanged?(notify: () => void): () => void;
 };
 
@@ -703,12 +705,7 @@ function handleMainListInput(data: string, deps: HostDeps): boolean {
     return true;
   }
   if (deps.matchKey(data, "enter")) {
-    const selected = selectedMainListRow();
-    if (selected?.parentRow) {
-      unfocusMainList();
-      dismissOverlay();
-    }
-    else openNavigator();
+    openNavigator();
     return true;
   }
   if (data === "x" || data === "X" || deps.matchKey(data, "x") || deps.matchKey(data, "X")) {
@@ -851,7 +848,8 @@ function createOverlayComponent(
   let logTailRows: number = DEFAULT_LOG_TAIL_ROWS;
   const expandedSections = new Set<string>();
   let detailId: string = initialDetailId;
-  let detail: BackgroundWorkDetail | null = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? null;
+  const initialRow = initialRows.find((row) => row.navigatorId === detailId);
+  let detail: BackgroundWorkDetail | null = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? (initialRow ? fallbackDetail(initialRow) : null);
   applyDefaultExpandedSections(detail, expandedSections);
   {
     const idx = overlayState.rows.findIndex((row) => row.navigatorId === detailId);
@@ -891,8 +889,7 @@ function createOverlayComponent(
   }
 
   function activateSelectedRow(): void {
-    if (selectedRow()?.parentRow) close();
-    else openDetail();
+    openDetail();
   }
 
   function clearCloseArm(): void {
@@ -922,10 +919,6 @@ function createOverlayComponent(
   function openDetail(): void {
     const row = selectedRow();
     if (!row) return;
-    if (row.parentRow) {
-      close();
-      return;
-    }
     clearCloseArm();
     detailId = row.navigatorId;
     expandedSections.clear();
@@ -1073,6 +1066,14 @@ function createOverlayComponent(
           requestRender();
         }
       }
+      else if (data === "m" || data === "M") {
+        const row = selectedRow();
+        const provider = row ? state().providers.get(row.providerId) : undefined;
+        if (!row || !provider?.handleDetailInput?.(row.id, data)) return;
+        detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
+        refreshMainListWidget();
+        requestRender();
+      }
       else if (data === "l" || data === "L") {
         logTailRows = cycleLogTailRows(logTailRows);
         if (detailId) detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
@@ -1091,8 +1092,7 @@ function createOverlayComponent(
       if (idx < 0) return;
       overlayState.selected = idx;
       state().mainListSelectedId = navigatorId;
-      if (overlayState.rows[idx]!.parentRow) close();
-      else openDetail();
+      openDetail();
     },
     /** Close the overlay (done), e.g. when the navigator is disposed. */
     dismiss() { close(); },
