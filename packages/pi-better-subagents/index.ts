@@ -1182,16 +1182,9 @@ const DELEGATION_BLURB: Record<DelegationMode, string> = {
     adaptive: "substantial independent work",
     coordinator: "every role-owned task",
 };
-const DELEGATION_SAVE_ARM_MS = 3000;
 let readDelegation = (): { mode: DelegationMode; source: "session" | "config" } => ({ mode: "adaptive", source: "config" });
 let cycleDelegation = (): void => {};
 let saveDelegationDefault: (mode: DelegationMode) => { ok: boolean; message: string } = () => ({ ok: false, message: "Saving the delegation default is unavailable." });
-let delegationSaveArm: { mode: DelegationMode; at: number } | undefined;
-
-function delegationSaveHint(now = Date.now()): string | undefined {
-    if (!delegationSaveArm || now - delegationSaveArm.at >= DELEGATION_SAVE_ARM_MS) return undefined;
-    return `S again to save ${delegationSaveArm.mode} as the default`;
-}
 
 function mainAgentWorkRow(now: number): BackgroundWorkRow {
     let running = mainAgentStartedAt !== undefined;
@@ -1248,12 +1241,11 @@ function mainAgentWorkDetail(now: number): BackgroundWorkDetail {
             label: "delegation",
             text: [
                 `${delegation.mode}: ${DELEGATION_BLURB[delegation.mode]}.`,
-                "m cycles this session. S saves that mode as the next session's default.",
+                "m cycles this session. ctrl+s saves that mode as the next session's default.",
                 "x does not stop the main agent.",
-                delegationSaveHint(),
             ].filter(Boolean).join(" "),
         },
-        footerActions: ["m mode", "S save"],
+        footerActions: ["m mode", "ctrl+s save"],
     };
 }
 
@@ -1354,20 +1346,12 @@ function ensureSubagentProvider(): void {
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
         handleDetailInput: (id, data) => {
             if (id !== "main") return false;
-            if (data === "m" || data === "M") {
-                delegationSaveArm = undefined;
+            if (data === "m") {
                 cycleDelegation();
                 return true;
             }
-            if (data !== "s" && data !== "S") return false;
-            const mode = readDelegation().mode;
-            const now = Date.now();
-            if (delegationSaveArm?.mode === mode && now - delegationSaveArm.at < DELEGATION_SAVE_ARM_MS) {
-                delegationSaveArm = undefined;
-                saveDelegationDefault(mode);
-                return true;
-            }
-            delegationSaveArm = { mode, at: now };
+            if (data !== "ctrl+s") return false;
+            saveDelegationDefault(readDelegation().mode);
             return true;
         },
         armCloseLabel: (row) => row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",

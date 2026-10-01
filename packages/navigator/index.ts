@@ -1066,10 +1066,11 @@ function createOverlayComponent(
           requestRender();
         }
       }
-      else if (data === "m" || data === "M" || data === "s" || data === "S") {
+      else if (data === "m" || data === "M" || data === "\x13" || deps.matchKey(data, "ctrl+s")) {
         const row = selectedRow();
         const provider = row ? state().providers.get(row.providerId) : undefined;
-        if (!row || !provider?.handleDetailInput?.(row.id, data)) return;
+        const key = data === "m" || data === "M" ? "m" : "ctrl+s";
+        if (!row || !provider?.handleDetailInput?.(row.id, key)) return;
         detail = detailFor(detailId, Date.now(), { logTailLines: logTailRows }) ?? detail;
         refreshMainListWidget();
         requestRender();

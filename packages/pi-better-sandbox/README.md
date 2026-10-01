@@ -121,8 +121,9 @@ repository's `.git/hooks` or `.git/config` (`core.hooksPath`, `core.fsmonitor`,
 Write, those paths are also protected from removal and renaming.
 
 Space applies every change immediately, including higher permission levels,
-capabilities switched on, and a sandbox switched off. Saving looser defaults
-still needs a second Enter, with a prompt listing what would loosen. The focused
+capabilities switched on, and a sandbox switched off. `ctrl+s` saves the
+defaults from any row on the first press, and the note names anything that
+loosened. Enter on the Save row still saves. The focused
 row has a full-width background and bold text; the selected Main/Subagents cell
 also uses inverse styling. No model
 tool can change these settings. Other rows toggle Off/On. Detail cells under an

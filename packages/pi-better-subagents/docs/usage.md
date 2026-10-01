@@ -21,7 +21,7 @@ mode; `/subagents mode manual|adaptive|coordinator` overrides it for the current
 session without editing config. `/subagents save` writes the current mode into
 `config.json` after confirmation when a UI is available, and clears the session
 override so the next session starts there. On the navigator `main` sheet, `m`
-cycles the session mode and `S` twice within three seconds saves that default.
+cycles the session mode and `ctrl+s` saves that default.
 Other arguments show usage. `/reload` retains a session override; new sessions
 use config, while resuming a session restores that session's override.
 
@@ -383,6 +383,7 @@ top.
   foreground model).
 - `delegationMode` — foreground policy (`manual`, `adaptive`, or `coordinator`;
   default `adaptive`). `/subagents mode ...` changes only the current session.
+  `/subagents save` writes that mode as the config default.
 - `maxConcurrent` — how many subagents may run at once (**default 4**). A spawn
   past the cap is rejected until a running one finishes.
 
@@ -523,8 +524,8 @@ is unchanged in every mode.
 - The Subagents lane pins a `main` row above child runs. It shows the
   foreground model, effort, active tool, context tokens, elapsed time, and
   delegation mode. Enter opens its detail sheet. `m` cycles the session mode.
-  `S` twice within three seconds saves that mode as the config default. `x`
-  never stops it.
+  `ctrl+s` saves that mode as the config default. `x` still stops
+  a child run; it never stops main.
 - `↑` moves to the previous row when multiple running rows are shown. `↓`
   moves toward the input line, returning to normal input from the bottom row.
 - `Enter` opens the selected run's live detail view. `x` stops the selected

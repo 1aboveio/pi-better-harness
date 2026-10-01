@@ -58,8 +58,8 @@ test("sandbox permission table edits both profiles and saves inactive values in 
         wait(/Subagents · Tools[\s\S]*\[x\] apply_patch\s+harness adapter[\s\S]*Trusted \(runs outside the file rules\)[\s\S]*\[x\].*@juicesharp\/rpiv-web-tools\s+2\/2/);
         for (let i = 0; i < 80; i++) key("Down");
         // Saving a looser default asks first.
-        key("Enter"); wait(/Looser defaults \(Subagents: outsideProject write → read-write\)\. Press Enter again/);
-        key("Enter"); wait(/Defaults saved/);
+        key("Enter"); wait(/Defaults saved\. Looser: Subagents: outsideProject write → read-write/);
+        wait(/Defaults saved/);
         const saved = JSON.parse(readFileSync(join(fixture, "agent/extensions/pi-better-sandbox-permissions.json"), "utf8"));
         assert.equal(saved.permissions.main.enabled, false);
         assert.equal(saved.permissions.main.projectFiles, "off");
@@ -155,8 +155,8 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         key("Enter"); wait(/^(?![\s\S]*mcp__atlas__read)/);
         moveTo(/Save as defaults/);
         assert.match(selected(), /Save as defaults/);
-        key("Enter"); wait(/Looser defaults [\s\S]*Press Enter again to save/);
         key("Enter"); wait(/Defaults saved/);
+        wait(/Looser:/);
         const saved = JSON.parse(readFileSync(join(agent, "extensions/pi-better-sandbox-permissions.json"), "utf8"));
         assert.equal(saved.permissions.subagentTools.applyPatch, true);
         assert.deepEqual(Object.keys(saved.permissions.subagentTools).sort(), ["applyPatch", "trusted"]);
