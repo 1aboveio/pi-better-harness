@@ -14,6 +14,64 @@ import { assertTimingParams } from "./timing.ts";
 
 const VALID_CAPACITY_MODES = new Set(["reject", "launch-available"]);
 
+/** Public codemode receipt; details alone are not returned to nested callers. */
+export const batchLaunchOutputSchema = {
+    type: "object",
+    properties: {
+        status: { type: "string", enum: ["launched", "partial", "not-launched", "clarification-needed"] },
+        batchId: { type: "string" },
+        batchName: { type: "string" },
+        launched: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: { job: { type: "integer", minimum: 1 }, name: { type: "string" }, id: { type: "string" }, modelNote: { type: "string" } },
+                required: ["job", "name", "id"],
+                additionalProperties: false,
+            },
+        },
+        failed: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: { job: { type: "integer", minimum: 1 }, name: { type: "string" }, reason: { type: "string" } },
+                required: ["job", "name", "reason"],
+                additionalProperties: false,
+            },
+        },
+        skipped: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: { job: { type: "integer", minimum: 1 }, name: { type: "string" } },
+                required: ["job", "name"],
+                additionalProperties: false,
+            },
+        },
+        message: { type: "string" },
+        choices: { type: "array", items: { type: "string" } },
+    },
+    required: ["status", "launched", "failed", "skipped"],
+    additionalProperties: false,
+};
+
+/** Launch success is not run completion; partial receipts retain every created run. */
+export function batchLaunchResult({ batchId, batchName, launched, skipped, failed }) {
+    const receipt = {
+        status: launched.length === 0 ? "not-launched" : failed.length || skipped.length ? "partial" : "launched",
+        batchId,
+        ...(batchName !== undefined ? { batchName } : {}),
+        launched,
+        failed,
+        skipped,
+    };
+    return {
+        content: [{ type: "text", text: formatBatchLaunchResponse(receipt) }],
+        details: receipt,
+        structuredContent: receipt,
+    };
+}
+
 /**
  * Overlay per-job options on top of shared options. Only defined keys are
  * inherited; booleans keep their false values.

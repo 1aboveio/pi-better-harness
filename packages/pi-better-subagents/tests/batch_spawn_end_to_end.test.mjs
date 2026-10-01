@@ -326,10 +326,21 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.equal(ids.length, 2);
         assert.notEqual(ids[0], ids[1]);
 
+        const receipt = res.structuredContent;
+        assert.equal(receipt.status, "launched");
+        assert.equal(receipt.batchName, "reviewers");
+        assert.deepEqual(receipt.launched.map(({ job, id }) => ({ job, id })), [
+            { job: 1, id: ids[0] }, { job: 2, id: ids[1] },
+        ]);
+        assert.deepEqual(receipt.failed, []);
+        assert.deepEqual(receipt.skipped, []);
+        assert.deepEqual(res.details, receipt);
+
         for (const id of ids) {
             const meta = registry.readMeta(id);
             assert.ok(meta, `meta for ${id} should exist`);
             assert.ok(meta.batchId, `meta.batchId should be set for ${id}`);
+            assert.equal(meta.batchId, receipt.batchId);
             assert.equal(meta.batchName, "reviewers");
             assert.equal(meta.status, "running");
             assert.equal(meta.model, "test/model");
@@ -442,6 +453,21 @@ describe("subagent_spawn_batch end-to-end", () => {
         }
     });
 
+    it("returns a no-launch receipt when launch-available has no capacity", async () => {
+        const { tools } = loadExtension(mod);
+        for (let i = 0; i < 4; i++) writeRunningMeta(registry, `runner-${i}`);
+        const before = registry.listMetas().map(({ id }) => id).sort();
+        const res = await tools.subagent_spawn_batch.execute("tc-full", {
+            jobs: [{ prompt: "no capacity", name: "waiting" }],
+            onCapacity: "launch-available",
+        }, null, null, makeCtx());
+        assert.equal(res.structuredContent.status, "not-launched");
+        assert.deepEqual(res.structuredContent.launched, []);
+        assert.deepEqual(res.structuredContent.failed, []);
+        assert.deepEqual(res.structuredContent.skipped, [{ job: 1, name: "waiting" }]);
+        assert.deepEqual(registry.listMetas().map(({ id }) => id).sort(), before);
+    });
+
     it("launch-available partial launch reports skipped jobs", async () => {
         const { tools } = loadExtension(mod);
         const ctx = makeCtx();
@@ -466,6 +492,9 @@ describe("subagent_spawn_batch end-to-end", () => {
         const text = res.content[0].text;
         assert.match(text, /launched 1 subagent\(s\):/i);
         assert.match(text, /Skipped \(capacity\): job-2/);
+        assert.equal(res.structuredContent.status, "partial");
+        assert.deepEqual(res.structuredContent.skipped, [{ job: 2, name: "job-2" }]);
+        assert.equal(registry.readMeta(res.structuredContent.launched[0].id).batchId, res.structuredContent.batchId);
     });
 
     it("launch-available reports per-job launch failures without stopping successful launches", async () => {
@@ -501,6 +530,10 @@ describe("subagent_spawn_batch end-to-end", () => {
             assert.ok(launchedId);
             const meta = registry.readMeta(launchedId);
             assert.equal(meta.status, "running");
+            assert.equal(res.structuredContent.status, "partial");
+            assert.deepEqual(res.structuredContent.launched.map(({ job, id }) => ({ job, id })), [{ job: 1, id: launchedId }]);
+            assert.deepEqual(res.structuredContent.failed.map(({ job, name }) => ({ job, name })), [{ job: 2, name: "job-2" }]);
+            assert.match(res.structuredContent.failed[0].reason, /@juicesharp\/rpiv-web-tools/);
         } finally {
             if (origAgentDir === undefined) {
                 delete process.env.PI_CODING_AGENT_DIR;

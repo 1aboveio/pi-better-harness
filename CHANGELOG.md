@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.13.1] - 2026-09-30
+
+### Changed
+
+- Bundle subagents 0.10.0 with typed foreground native Pi codemode batch launch receipts. Publish the component before this bundle; confined-child codemode and busy-period callback coalescing remain unchanged.
+
 ## [pi-better-harness@0.13.0] - 2026-09-30
 
 ### Added
@@ -26,6 +32,14 @@ All notable changes to this project are documented in this file. The format is b
 
 - One Space applies every permission toggle immediately. Saving looser defaults still requires a second Enter.
 - Focused rows use a full-width colored background and bold text; the active Main/Subagents cell also uses inverse styling. (#384)
+
+## [pi-better-subagents@0.10.0] - 2026-09-30
+
+### Added
+
+- Native Pi codemode launch receipts for foreground `subagent_spawn_batch` calls on Pi 0.99.1+: typed launch status, batch identity, and launched, failed, and skipped job lists. Direct-call text, catalog snapshots, capacity reservations, and per-run callbacks remain unchanged. Codemode cancellation does not stop launched children.
+- Real native-codemode integration coverage for durable run IDs, partial launches, capacity skips, clarification, and permission-hook denial, with a pinned SDK compatibility check in CI.
+- Package the usage guide documenting codemode setup and launch receipt handling. Codemode in confined children and busy-period callback coalescing are not enabled by this release.
 
 ## [pi-better-harness@0.12.3] - 2026-09-29
 
