@@ -7,7 +7,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,6 +18,7 @@ process.env.TMPDIR = tempDir;
 
 const { default: betterSubagents } = await import("../index.ts");
 const { disposeBackgroundWorkNavigator } = await import("../shared-navigator.ts");
+const { setConfigPathForTests, setConfigForTests } = await import("../config.ts");
 const { logPathFor, runDir, writeMeta } = await import("../registry.ts");
 
 after(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -128,9 +129,19 @@ test("subagent details render a structured Pi-style transcript", async () => {
         mainSheet = component.render(120).join("\n");
         assert.match(mainSheet, /coordinator · session/);
         assert.match(mainSheet, /m cycles this session/);
+        assert.match(mainSheet, /ctrl\+s saves that mode/);
+        const configPath = join(tempDir, "delegation-config.json");
+        writeFileSync(configPath, JSON.stringify({ defaultTools: "read", delegationMode: "adaptive" }));
+        setConfigPathForTests(configPath);
+        component.handleInput("\x13");
+        const saved = JSON.parse(readFileSync(configPath, "utf8"));
+        assert.equal(saved.delegationMode, "coordinator");
+        assert.equal(saved.defaultTools, "read");
         component.handleInput("x");
-        assert.match(component.render(120).join("\n"), /coordinator · session/, "x does not leave the main sheet");
+        assert.match(component.render(120).join("\n"), /coordinator · config/, "x does not leave the main sheet");
     } finally {
+        setConfigPathForTests(undefined);
+        setConfigForTests(undefined);
         disposeBackgroundWorkNavigator(ctx);
     }
 });
