@@ -2159,7 +2159,7 @@ export default function (pi: ExtensionAPI) {
     if (typeof pi.registerCommand === "function") {
         agentOperations.registerCommands(pi);
         pi.registerCommand("subagents", {
-            description: "Show or change the current-session delegation mode",
+            description: "[mode manual|adaptive|coordinator] — Show or change the current-session delegation mode",
             getArgumentCompletions: subagentsArgumentCompletions,
             async handler(args, ctx) {
                 const tokens = args.trim().split(/\s+/).filter(Boolean);
