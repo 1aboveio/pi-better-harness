@@ -84,6 +84,7 @@ test("subagent details render a structured Pi-style transcript", async () => {
         registerTool() {},
         on(event, handler) { handlers.set(event, handler); },
         sendMessage() {},
+        appendEntry() {},
     };
 
     betterSubagents(pi);
@@ -118,6 +119,17 @@ test("subagent details render a structured Pi-style transcript", async () => {
         rendered = narrowLines.join("\n");
         assert.match(rendered, /shared-navigator\.ts/);
         assert.ok(narrowLines.every((line) => line.length <= 54), rendered);
+
+        component.handleInput("up");
+        let mainSheet = component.render(120).join("\n");
+        assert.match(mainSheet, /m mode/);
+        assert.match(mainSheet, /adaptive · config/);
+        component.handleInput("m");
+        mainSheet = component.render(120).join("\n");
+        assert.match(mainSheet, /coordinator · session/);
+        assert.match(mainSheet, /m cycles this session/);
+        component.handleInput("x");
+        assert.match(component.render(120).join("\n"), /coordinator · session/, "x does not leave the main sheet");
     } finally {
         disposeBackgroundWorkNavigator(ctx);
     }
