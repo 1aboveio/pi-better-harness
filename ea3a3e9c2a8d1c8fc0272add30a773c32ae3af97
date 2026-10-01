@@ -1,0 +1,1 @@
+Release metadata only: Goal 0.6.0 and harness 0.14.0; preserve the reviewed PR387 source tree, synchronize workspace pins and lockfile, and retain package-scoped release notes. Publish the Goal component first using GitHub OIDC, verify registry and release provenance, then publish and smoke-test the harness bundle. Callback-inbox work remains excluded.
