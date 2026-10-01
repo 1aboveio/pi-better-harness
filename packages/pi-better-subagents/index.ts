@@ -1175,6 +1175,15 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
     });
 }
 
+const DELEGATION_MODES = ["manual", "adaptive", "coordinator"] as const;
+const DELEGATION_BLURB: Record<DelegationMode, string> = {
+    manual: "only when you or a workflow asks",
+    adaptive: "substantial independent work",
+    coordinator: "every role-owned task",
+};
+let readDelegation = (): { mode: DelegationMode; source: "session" | "config" } => ({ mode: "adaptive", source: "config" });
+let cycleDelegation = (): void => {};
+
 function mainAgentWorkRow(now: number): BackgroundWorkRow {
     let running = mainAgentStartedAt !== undefined;
     try { running ||= uiCtx?.isIdle() === false; } catch { /* use event state */ }
@@ -1184,10 +1193,12 @@ function mainAgentWorkRow(now: number): BackgroundWorkRow {
     let contextTokens: number | null | undefined;
     try { contextTokens = uiCtx?.getContextUsage()?.tokens; } catch { contextTokens = undefined; }
     const tokens = typeof contextTokens === "number" ? `${fmtTokens(contextTokens)} tok` : undefined;
+    const delegation = readDelegation();
     const bits = [
         effort ? `${model} ${effort}` : model,
         tool,
         tokens,
+        delegation.source === "session" ? `${delegation.mode} · session` : delegation.mode,
     ].filter((bit): bit is string => Boolean(bit));
     return {
         providerId: "subagents",
@@ -1206,7 +1217,34 @@ function mainAgentWorkRow(now: number): BackgroundWorkRow {
     };
 }
 
+function mainAgentWorkDetail(now: number): BackgroundWorkDetail {
+    const row = mainAgentWorkRow(now);
+    const delegation = readDelegation();
+    return {
+        providerId: "subagents",
+        id: "main",
+        title: "main",
+        status: row.status,
+        statusTone: row.statusTone,
+        subtitle: row.primary,
+        metadata: [
+            { label: "kind", value: "main agent" },
+            { label: "model", value: row.effort ? `${row.model} · effort ${row.effort}` : (row.model || "-") },
+            { label: "tool", value: row.tool || "-" },
+            { label: "context", value: row.tokens || "-" },
+            { label: "elapsed", value: row.elapsed },
+            { label: "mode", value: `${delegation.mode} · ${delegation.source}` },
+        ],
+        evidence: {
+            label: "delegation",
+            text: `${delegation.mode}: ${DELEGATION_BLURB[delegation.mode]}. m cycles this session. x does not stop the main agent.`,
+        },
+        footerActions: ["m mode"],
+    };
+}
+
 function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: number }): BackgroundWorkDetail | null {
+    if (id === "main") return mainAgentWorkDetail(now);
     const detail = navigatorDetail(id, now);
     if (!detail) return null;
     void options;
@@ -1300,6 +1338,11 @@ function ensureSubagentProvider(): void {
         parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
+        handleDetailInput: (id, data) => {
+            if (id !== "main" || (data !== "m" && data !== "M")) return false;
+            cycleDelegation();
+            return true;
+        },
         armCloseLabel: (row) => row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
         close: (id) => {
             const outcome = navigatorCloseRun(id) as { action: string; id: string; status?: string };
@@ -1443,6 +1486,16 @@ function catalogRoleSchema(purpose: string) {
 export default function (pi: ExtensionAPI) {
     let delegationOverride: DelegationMode | undefined;
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
+    readDelegation = () => ({
+        mode: activeDelegationMode(),
+        source: delegationOverride ? "session" : "config",
+    });
+    cycleDelegation = () => {
+        const current = activeDelegationMode();
+        const next = DELEGATION_MODES[(DELEGATION_MODES.indexOf(current) + 1) % DELEGATION_MODES.length]!;
+        delegationOverride = next;
+        pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: next });
+    };
     const restoreDelegationMode = (ctx: ExtensionContext): void => {
         delegationOverride = undefined;
         const branch = ctx.sessionManager?.getBranch?.();
