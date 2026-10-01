@@ -10,7 +10,8 @@ import { installMinimalOutputHook } from "../packages/pi-better-harness/extensio
 const sdk = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 // The SDK may have its own TUI copy; override capabilities on the renderer's instance.
 const sdkRequire = createRequire(pathToFileURL(join(sdk, "index.js")));
-const { Text, getCapabilities, setCapabilities } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
+const { Container, Text, getCapabilities, setCapabilities } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
+const { AssistantMessageComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/assistant-message.js")).href);
 const { ToolExecutionComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/tool-execution.js")).href);
 const { initTheme } = await import(pathToFileURL(join(sdk, "modes/interactive/theme/theme.js")).href);
 const prototype = ToolExecutionComponent.prototype;
@@ -211,4 +212,69 @@ test("the command toggles existing rows, persists session preference, and restor
   assert.match(rendered(existing), /RESULT_BODY_SENTINEL/);
   assert.equal(entries.at(-1).data.enabled, false);
   assert.match(notices.at(-1), /Normal tool output restored/);
+  assert.match(notices.find((message) => message.startsWith("Minimal tool output on")), /fold after the next model text/);
+});
+
+function modelText(text, extra = []) {
+  return new AssistantMessageComponent({
+    role: "assistant",
+    content: [{ type: "text", text }, ...extra],
+    stopReason: "stop",
+  });
+}
+function placedTool(name, ui, result = payload) {
+  const component = new ToolExecutionComponent(name, `call-${name}`, { path: `/tmp/${name}-arg` }, {}, undefined, ui, process.cwd());
+  component.updateResult(result, false);
+  component.setExpanded(false);
+  return component;
+}
+
+test("minimal mode folds finished tool runs after later model text and leaves the live run open", () => {
+  const hook = installMinimalOutputHook(prototype, Container.prototype);
+  handles.push(hook);
+  const ui = { requestRender() {}, children: [] };
+  const chat = new Container();
+  ui.children.push(chat);
+  const read = placedTool("read", ui);
+  const edit = placedTool("edit", ui, { content: [{ type: "text", text: "EDIT_BODY" }], isError: true });
+  const live = placedTool("live_probe", ui, { content: [{ type: "text", text: "LIVE_BODY" }], isError: false });
+  chat.addChild(modelText("FIRST_MODEL_TEXT"));
+  chat.addChild(new AssistantMessageComponent({ role: "assistant", content: [{ type: "thinking", thinking: "ONLY_THINKING" }], stopReason: "toolUse" }));
+  chat.addChild(read);
+  chat.addChild(edit);
+  chat.addChild(modelText("SECOND_MODEL_TEXT"));
+  chat.addChild(live);
+  hook.setEnabled(true);
+
+  const folded = chat.render(100).join("\n");
+  assert.match(folded, /FIRST_MODEL_TEXT/);
+  assert.match(folded, /SECOND_MODEL_TEXT/);
+  assert.match(folded, /▸ 2 tools · 1 error · read, edit/);
+  assert.match(folded, /\/tmp\/live_probe-arg/);
+  assert.doesNotMatch(folded, /\/tmp\/read-arg|\/tmp\/edit-arg|RESULT_BODY_SENTINEL|EDIT_BODY|LIVE_BODY/);
+  assert.equal(read.result, payload);
+
+  const summary = chat.mouseLayout.children.map((entry) => entry.component).find((component) => typeof component.handleMouse === "function");
+  assert.equal(summary.handleMouse({ type: "click", button: "left" }).handled, true);
+  const opened = chat.render(100).join("\n");
+  assert.match(opened, /▾ 2 tools · 1 error · read, edit/);
+  assert.match(opened, /\/tmp\/read-arg/);
+  assert.match(opened, /\/tmp\/edit-arg/);
+  assert.doesNotMatch(opened, /RESULT_BODY_SENTINEL|EDIT_BODY/);
+  summary.handleMouse({ type: "click", button: "left" });
+  assert.match(chat.render(100).join("\n"), /▸ 2 tools · 1 error · read, edit/);
+  assert.doesNotMatch(chat.render(20).join("\n"), /read, edit/);
+
+  read.setExpanded(true);
+  edit.setExpanded(true);
+  const expanded = chat.render(100).join("\n");
+  assert.match(expanded, /RESULT_BODY_SENTINEL/);
+  assert.match(expanded, /EDIT_BODY/);
+  assert.doesNotMatch(expanded, /▸ 2 tools/);
+
+  hook.dispose();
+  const restored = chat.render(100).join("\n");
+  assert.match(restored, /RESULT_BODY_SENTINEL/);
+  assert.match(restored, /\/tmp\/read-arg/);
+  assert.doesNotMatch(restored, /▸ 2 tools/);
 });

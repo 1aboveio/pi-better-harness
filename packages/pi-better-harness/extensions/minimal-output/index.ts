@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { installMinimalOutputHook, loadToolPrototype, type MinimalOutputHook } from "./hook.ts";
+import { installMinimalOutputHook, loadContainerPrototype, loadMutedText, loadToolPrototype, type MinimalOutputHook } from "./hook.ts";
 
 const ENTRY = "pi-better-harness-tool-output";
 
@@ -24,7 +24,12 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     }
     if (hook) return true;
     try {
-      hook = installMinimalOutputHook(await loadToolPrototype());
+      const [toolPrototype, containerPrototype, muted] = await Promise.all([
+        loadToolPrototype(),
+        loadContainerPrototype().catch(() => undefined),
+        loadMutedText().catch(() => undefined),
+      ]);
+      hook = installMinimalOutputHook(toolPrototype, containerPrototype, muted);
       return true;
     } catch (error) {
       ctx.ui.notify(`Minimal tool output is unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
@@ -60,7 +65,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     getArgumentCompletions: (argumentPrefix) => {
       const prefix = argumentPrefix.trimStart().toLowerCase();
       const matches = [
-        { value: "minimal", label: "minimal", description: "Hide collapsed tool result bodies" },
+        { value: "minimal", label: "minimal", description: "Fold finished tool runs after the next model text" },
         { value: "normal", label: "normal", description: "Restore ordinary tool output" },
       ].filter((option) => option.value.startsWith(prefix));
       return matches.length > 0 ? matches : null;
@@ -78,7 +83,9 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
       pi.appendEntry(ENTRY, { version: 1, enabled });
       status(ctx);
       ctx.ui.notify(enabled
-        ? "Minimal tool output on. Click a tool in fullscreen mode or use Ctrl+O to reveal results."
+        ? hook!.foldsTurns
+          ? "Minimal tool output on. Finished tool runs fold after the next model text. Ctrl+O reveals them; click a folded run when the terminal supports it."
+          : "Minimal tool output on, but turn folding is unavailable in this Pi version. Ctrl+O reveals results."
         : "Normal tool output restored.", "info");
     },
   });

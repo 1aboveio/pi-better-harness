@@ -36,16 +36,19 @@ pi install npm:pi-better-harness
 ## Minimal Tool Output
 
 With the bundled harness (`pi install npm:pi-better-harness`), use
-`/tool-output minimal` to hide every collapsed tool result body, including
-extension and MCP results, streaming text, and images. Tool call headers and
-error coloring remain visible. The agent still receives the complete result;
-execution, sandboxing, paging, and execution defaults are unchanged.
+`/tool-output minimal` to keep the conversation readable. A tool run stays
+visible while it is the latest thing on screen. Once later model text is
+written, that run — every tool call and result between model texts — folds
+into one line such as `▸ 4 tools · read ×2, bash`. The live run at the bottom
+stays open, with result bodies hidden. Extension and MCP calls fold the same
+way. The agent still receives the complete result; execution, sandboxing,
+paging, and execution defaults are unchanged.
 
 `/tool-output normal` restores each tool's ordinary renderer; `/tool-output`
-toggles between the two modes. Ctrl+O reveals expanded results. Fullscreen Pi
-versions with clickable tool rows also support clicking a tool header.
-The preference is saved in the current session and restored on resume/reload;
-new sessions start in normal mode.
+toggles between the two modes. Ctrl+O unfolds runs and reveals results. On a
+Pi build with clickable rows, click a folded line to open that run, and click
+again to fold it. The preference is saved in the current session and restored
+on resume/reload; new sessions start in normal mode.
 
 This is an **internal TUI adapter**, tested with Pi 0.82.1 and 0.99.1, not a
 public renderer API. Future Pi upgrades may require adapter changes. An

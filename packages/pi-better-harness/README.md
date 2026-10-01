@@ -63,11 +63,11 @@ need interactive confirmation. Full policy: [pi-better-sandbox](https://github.c
 ## Minimal Tool Output
 
 The bundled harness also provides `/tool-output minimal`, `/tool-output normal`,
-and `/tool-output` (toggle). Minimal mode hides every collapsed result body,
-including built-in, extension, and MCP text/images, without changing execution,
-sandboxing, or agent-facing payloads. Tool headers and error coloring remain;
-Ctrl+O reveals results, and fullscreen Pi versions with clickable tool rows
-also support clicking headers.
+and `/tool-output` (toggle). Minimal mode leaves the current tool run visible,
+then folds every finished run between model texts into one line. Built-in,
+extension, and MCP calls are included. Execution, sandboxing, and agent-facing
+payloads are unchanged. Ctrl+O unfolds runs and reveals results. Clickable Pi
+builds can also open one folded run by clicking its summary.
 
 Normal mode is the default. The preference is saved in the current session,
 including resume/reload. This is a version-sensitive internal TUI adapter,
