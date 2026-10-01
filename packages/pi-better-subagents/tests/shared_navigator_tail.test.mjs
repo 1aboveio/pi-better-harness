@@ -98,7 +98,8 @@ test("subagent details render a structured Pi-style transcript", async () => {
         await handlers.get("agent_start")({}, ctx);
         await handlers.get("tool_execution_start")({ toolCallId: "main-tool-1", toolName: "read" }, ctx);
         mainList = renderMainList();
-        assert.match(mainList, /●\s+main\s+test high · tool read · 109\.3k tok/);
+        assert.match(mainList, /●\s+main\s+test high · read · 109\.3k tok/);
+        assert.doesNotMatch(mainList, /\btool read\b/);
 
         const editor = ui.factory({}, {}, {});
         editor.handleInput("<left>");

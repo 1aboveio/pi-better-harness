@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- Subagent navigator: hide child tool/model incident summaries and history from rows and detail chrome while retaining run status, original transcripts, result-tool diagnostics, and callbacks.
+- Navigator: show plain tool names such as `bash` and `read` instead of the `tool` prefix, including the main-agent row.
+
 ## [pi-better-harness@0.14.0] - 2026-10-01
 
 ### Changed

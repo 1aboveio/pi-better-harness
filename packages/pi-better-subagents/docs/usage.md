@@ -637,6 +637,10 @@ health model:
   orphaned, lost, and degraded running runs; #65 orphaned/lost result bodies kept.
 - **Passive live widget** — healthy/quiet unchanged; degraded (and orphaned) may
   show a short suffix. Still `setWidget` only — never focusable.
+- **Navigator** — lifecycle status and operational health facts remain visible;
+  child tool/model incident summaries and history are omitted from rows and detail
+  chrome. Tool labels show just their name (for example, `bash`). The original
+  transcript, including error results, and transcript-read diagnostics remain available.
 - **`callback:false`** suppresses coordinator follow-up only; human `ui.notify` and
   TUI/passive visibility remain.
 

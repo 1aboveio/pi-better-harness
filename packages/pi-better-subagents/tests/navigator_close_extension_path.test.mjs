@@ -161,6 +161,7 @@ async function waitFor(pred, timeoutMs = 3000) {
  */
 function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     const handlers = {};
+    const tools = new Map();
     const statusCalls = [];
     const widgetCalls = [];
     const closedOutcomes = [];
@@ -198,7 +199,7 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
     };
 
     const pi = {
-        registerTool() {},
+        registerTool(tool) { tools.set(tool.name, tool); },
         on(event, fn) { handlers[event] = fn; },
         sendMessage() {},
     };
@@ -238,6 +239,8 @@ function bootRegisteredNavigator(mod, { writeMeta, metaBase, sessionId }) {
             return Symbol.for("missing");
         },
         pressX() { overlayComponent ? overlayComponent.handleInput("x") : editor.handleInput("x"); },
+        async shutdown() { await handlers.session_shutdown({}, ctx); },
+        tools,
         statusCalls,
         widgetCalls,
         closedOutcomes,
@@ -294,6 +297,74 @@ describe("registered extension path: main-window navigator actions", () => {
             try { rmSync(registry.runDir(id), { recursive: true, force: true }); } catch { /* best-effort */ }
         }
         try { rmSync(RUNTIME, { recursive: true, force: true }); } catch { /* best-effort */ }
+    });
+
+    // @covers navigator.incident-presentation
+    // @level integration
+    it("hides incident summaries in registered rows and detail while preserving results and transcripts", async () => {
+        const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
+        const now = Date.now();
+        const id = nav.seedRun({
+            name: "quiet-failure", status: "failed", startedAt: now - 1000, endedAt: now,
+            model: "test/model", exitCode: 1,
+        });
+        const logPath = registry.logPathFor(id);
+        const liveId = nav.seedRun({
+            name: "live-affordance", status: "running", pid: spawnSleeper(), startedAt: now - 2000,
+        });
+        writeFileSync(registry.logPathFor(liveId), "");
+        const events = [];
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const toolCallId = `bad-${attempt}`;
+            events.push(
+                { type: "tool_execution_start", toolCallId, toolName: "bash", args: { command: "npm test" } },
+                { type: "tool_execution_end", toolCallId, toolName: "bash", isError: true,
+                    result: { content: [{ type: "text", text: "ORIGINAL_CHILD_ERROR" }] } },
+            );
+        }
+        events.push(
+            { type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "MODEL_FAILURE" } },
+            { type: "agent_end" },
+        );
+        writeFileSync(logPath, events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+        const { failureView } = await import("../failures.ts");
+        assert.equal(failureView(id, RUNTIME, true).actionable, true, "fixture must need action");
+        try {
+            await nav.start();
+            const { renderRegisteredWorkDetail, refreshBackgroundWorkNavigator } = await import("../shared-navigator.ts");
+            const rail = renderWidgetValue(nav.lastWidget("background-work-list"));
+            assert.match(rail, /quiet-failure\s+failed/);
+            assert.doesNotMatch(rail, /Action required|ORIGINAL_CHILD_ERROR|model error|MODEL_FAILURE/);
+            const rendered = renderRegisteredWorkDetail("subagents", id, 120);
+            assert.ok(rendered.listedIds.includes(id));
+            assert.match(rendered.rowLine, /failed/);
+            assert.doesNotMatch(rendered.rowLine, /Action required|ORIGINAL_CHILD_ERROR|model error|MODEL_FAILURE/);
+            assert.equal(rendered.detail.status, "failed");
+            assert.ok(!rendered.detail.metadata.some((entry) => entry.label === "failure"));
+            assert.equal(rendered.detail.subtitle, undefined);
+            assert.equal(rendered.detail.transcriptDiagnostic, undefined);
+            assert.doesNotMatch(rendered.detail.evidence.text, /Action required|active failure observations/);
+            const transcriptTools = rendered.detail.transcript.filter((entry) => entry.type === "tool");
+            assert.equal(transcriptTools.length, 3);
+            assert.ok(transcriptTools.every((entry) => entry.isError && entry.result.content[0].text === "ORIGINAL_CHILD_ERROR"));
+            const result = await nav.tools.get("subagent_result").execute("result", { id, all: true, max_bytes: 8192 });
+            assert.match(result.content.map((entry) => entry.text ?? "").join("\n"), /Action required/);
+            assert.equal(failureView(id, RUNTIME, true).actionable, true, "navigator cannot dispose incidents");
+            registry.writeMeta({ ...registry.readMeta(id), status: "lost", lostAt: now });
+            refreshBackgroundWorkNavigator(nav.ctx);
+            const lostRail = renderWidgetValue(nav.lastWidget("background-work-list"));
+            assert.match(lostRail, /quiet-failure\s+lost/);
+            assert.doesNotMatch(lostRail, /Action required|ORIGINAL_CHILD_ERROR|model error|MODEL_FAILURE/);
+            rmSync(logPath);
+            const unreadable = renderRegisteredWorkDetail("subagents", id, 120).detail;
+            assert.equal(unreadable.status, "lost");
+            assert.match(unreadable.transcriptDiagnostic, /Log unreadable/);
+            assert.doesNotMatch(unreadable.transcriptDiagnostic, /Action required|active failure observations/);
+        } finally {
+            await nav.shutdown();
+            registry.dismissRun(id);
+            registry.dismissRun(liveId);
+        }
     });
 
     // @covers navigator.close
