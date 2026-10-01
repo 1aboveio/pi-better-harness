@@ -9,7 +9,7 @@ export interface PermissionPageHandlers {
     getConfig(): PermissionSettings;
     change(settings: PermissionSettings): void | Promise<void>;
     save(settings: PermissionSettings): void | Promise<void>;
-    /** What saving `settings` would loosen versus the saved defaults; non-empty requires a confirming second Enter. */
+    /** What saving `settings` would loosen versus the saved defaults. Reported after the save. */
     loosening?(settings: PermissionSettings): string[];
     /** Trusted-tool candidates registered in the running Pi (builtins and harness tools excluded). */
     discoverTools?(): readonly Pick<DiscoveredTool, "name" | "package">[];
@@ -128,7 +128,6 @@ export function createPermissionsPage(
     let row = 0;
     let column = 0;
     let busy = false;
-    let pendingConfirmation: string | undefined;
 
     function report(error: unknown): void {
         message = errorText(error);
@@ -202,19 +201,10 @@ export function createPermissionsPage(
             report(error);
             return;
         }
-        const key = JSON.stringify(settings);
-        if (loosened.length && pendingConfirmation !== key) {
-            pendingConfirmation = key;
-            message = `Looser defaults (${loosened.join("; ")}). Press Enter again to save.`;
-            isError = false;
-            requestRender();
-            return;
-        }
-        pendingConfirmation = undefined;
         busy = true;
         try {
             await handlers.save(snapshot(settings));
-            message = "Defaults saved.";
+            message = loosened.length ? `Defaults saved. Looser: ${loosened.join("; ")}.` : "Defaults saved.";
             isError = false;
             requestRender();
         } catch (error) {
@@ -238,7 +228,6 @@ export function createPermissionsPage(
     return {
         invalidate() {},
         handleInput(data: string) {
-            if (!matchesKey(data, Key.enter)) pendingConfirmation = undefined;
             if (matchesKey(data, Key.escape)) {
                 close();
             } else if (matchesKey(data, Key.up)) {
@@ -257,6 +246,8 @@ export function createPermissionsPage(
                 requestRender();
             } else if (matchesKey(data, Key.space)) {
                 void change();
+            } else if (matchesKey(data, "ctrl+s")) {
+                void save();
             } else if (matchesKey(data, Key.enter) && row === saveRow()) {
                 void save();
             } else if (matchesKey(data, Key.enter)) {
@@ -330,7 +321,7 @@ export function createPermissionsPage(
             const contextual = tool ? (tool.kind === "guarded" ? GUARDED_HINT : TRUSTED_HINT)
                 : selected && settings ? cellHint(selected, settings[columns[column]!]) : undefined;
             for (const hint of [
-                "↑↓ Select · ←→ Column/fold · Space Toggle tool/group · Enter Fold/Save · Esc Back",
+                "↑↓ Select · ←→ Column/fold · Space Toggle · ctrl+s Save · Enter Fold · Esc Back",
                 "Changes apply to new launches. Background tasks follow their launcher.",
                 "Stored credentials: known files only; excludes OS vaults and environment tokens.",
                 "Trusted tools run outside the file rules.",
@@ -338,8 +329,7 @@ export function createPermissionsPage(
             ]) output.push(theme.fg("dim", truncateToWidth(hint, w, "")));
             if (message) {
                 const clean = message.replace(/[\r\n]+/g, " ");
-                const confirmation = /^(.*) (Press Enter again to save\.)$/.exec(clean);
-                const messages = confirmation && visibleWidth(clean) > w ? [confirmation[1]!, confirmation[2]!] : [clean];
+                const messages = visibleWidth(clean) > w && clean.includes(". ") ? clean.split(/(?<=\. )/) : [clean];
                 for (const text of messages) output.push(theme.fg(isError ? "error" : "muted", truncateToWidth(text, w, "")));
             }
             return output;

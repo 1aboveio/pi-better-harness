@@ -181,22 +181,27 @@ test("a single Space applies both looser and tighter permission changes", async 
     assert.equal(h.current.subagents.outsideProject, "off");
 });
 
-test("saving looser defaults needs a second Enter; any other key cancels it", async () => {
+test("ctrl+s saves the current defaults from any row", async () => {
+    const h = harness();
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press("\x13");
+    await settle();
+    assert.equal(h.saved.length, 1);
+    assert.equal(h.saved[0]!.subagents.enabled, false);
+    assert.match(h.page.render(100).map(plain).join("\n"), /ctrl\+s Save/);
+});
+
+test("saving looser defaults happens on the first Enter and names what loosened", async () => {
     const h = harness({ loosening: (next) => next.subagents.network ? [] : ["Subagents: network on"] });
     h.press(Key.right, ...Array(5).fill(Key.down), Key.space);
     await settle();
     assert.equal(h.current.subagents.network, false);
     h.press(...toSave, Key.enter);
     await settle();
-    assert.equal(h.saved.length, 0);
-    assert.match(plain(h.page.render(120).at(-1)!), /Looser defaults \(Subagents: network on\)\. Press Enter again to save/);
-    h.press(Key.up, Key.down, Key.enter);
-    await settle();
-    assert.equal(h.saved.length, 0, "moving away cancels the pending confirmation");
-    h.press(Key.enter);
-    await settle();
     assert.equal(h.saved.length, 1);
-    assert.match(plain(h.page.render(120).at(-1)!), /Defaults saved/);
+    assert.match(plain(h.page.render(120).at(-1)!), /Defaults saved\. Looser: Subagents: network on/);
+    assert.ok(!h.page.render(120).map(plain).join("\n").includes("Press Enter again"));
 });
 
 test("change and save failures stay inline without optimistic state or closing", async () => {
@@ -410,23 +415,20 @@ test("removing the last unavailable child focuses the next surviving group", asy
     assert.deepEqual(h.current.subagentTools.trusted, [next], "the next Space targets bbb, not ccc");
 });
 
-test("looser save confirmations remain visible within narrow bounds", async () => {
+test("a looser save note remains visible within narrow bounds", async () => {
     const h = harness({
         discoverTools: () => [{ name: "one", package: "npm:zzz" }, { name: "two", package: "npm:zzz" }],
         loosening: () => ["Subagents: two additional trusted tools run outside file rules"],
     });
-    const check = (instruction: RegExp) => {
-        assert.match(h.page.render(40).map(plain).join("\n"), instruction);
-        for (const width of [0, 1, 8, 20, 40, 80]) {
-            for (const line of h.page.render(width)) assert.ok(visibleWidth(line) <= width);
-        }
-    };
     h.press(...Array(8).fill(Key.down), Key.space);
     await settle();
     h.press(...toSave, Key.enter);
     await settle();
-    assert.equal(h.saved.length, 0);
-    check(/Press Enter again to save\./);
+    assert.equal(h.saved.length, 1);
+    assert.match(h.page.render(40).map(plain).join("\n"), /Defaults saved/);
+    for (const width of [0, 1, 8, 20, 40, 80]) {
+        for (const line of h.page.render(width)) assert.ok(visibleWidth(line) <= width);
+    }
 });
 
 test("deferred bulk failures retain state, suppress duplicate changes, and allow retry", async () => {
