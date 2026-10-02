@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { installMinimalOutputHook, loadContainerPrototype, loadMutedText, loadToolPrototype, type MinimalOutputHook } from "./hook.ts";
+import { installMinimalOutputHook, loadToolPrototype, type MinimalOutputHook } from "./hook.ts";
 
 const ENTRY = "pi-better-harness-tool-output";
 
@@ -24,12 +24,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     }
     if (hook) return true;
     try {
-      const [toolPrototype, containerPrototype, muted] = await Promise.all([
-        loadToolPrototype(),
-        loadContainerPrototype().catch(() => undefined),
-        loadMutedText().catch(() => undefined),
-      ]);
-      hook = installMinimalOutputHook(toolPrototype, containerPrototype, muted);
+      hook = installMinimalOutputHook(await loadToolPrototype());
       return true;
     } catch (error) {
       ctx.ui.notify(`Minimal tool output is unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
@@ -61,11 +56,11 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("tool-output", {
-    description: "[minimal|normal] — Fold finished tool runs, or restore normal output. No argument toggles. Display only.",
+    description: "[minimal|normal] — Hide tool blocks entirely, or restore normal output. No argument toggles. Display only.",
     getArgumentCompletions: (argumentPrefix) => {
       const prefix = argumentPrefix.trimStart().toLowerCase();
       const matches = [
-        { value: "minimal", label: "minimal", description: "Fold finished tool runs after the next model text" },
+        { value: "minimal", label: "minimal", description: "Hide all tool blocks, including running tools" },
         { value: "normal", label: "normal", description: "Restore ordinary tool output" },
       ].filter((option) => option.value.startsWith(prefix));
       return matches.length > 0 ? matches : null;
@@ -83,9 +78,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
       pi.appendEntry(ENTRY, { version: 1, enabled });
       status(ctx);
       ctx.ui.notify(enabled
-        ? hook!.foldsTurns
-          ? "Minimal tool output on. Finished tool runs fold after the next model text. Ctrl+O reveals them; click a folded run when the terminal supports it."
-          : "Minimal tool output on, but turn folding is unavailable in this Pi version. Ctrl+O reveals results."
+        ? "Minimal tool output on. Tool blocks are hidden. Ctrl+O reveals them."
         : "Normal tool output restored.", "info");
     },
   });
