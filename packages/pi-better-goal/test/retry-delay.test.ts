@@ -8,10 +8,10 @@ import { idleContinuationDelay } from "../src/index.js";
 // https://nodejs.org/api/timers.html#settimeoutcallback-delay-args
 const NODE_TIMER_LIMIT_MS = 2_147_483_647;
 
-test("the 30-second base retains the linear 30s through 300s schedule", () => {
-  const expectedDelays = [30_000, 60_000, 90_000, 120_000, 150_000, 180_000, 210_000, 240_000, 270_000, 300_000];
+test("the default base follows the linear 60s through 600s schedule", () => {
+  const expectedDelays = [60_000, 120_000, 180_000, 240_000, 300_000, 360_000, 420_000, 480_000, 540_000, 600_000];
   assert.deepEqual(
-    expectedDelays.map((_, retries) => idleContinuationDelay(retries, 30_000)),
+    expectedDelays.map((_, retries) => idleContinuationDelay(retries)),
     expectedDelays,
   );
 });

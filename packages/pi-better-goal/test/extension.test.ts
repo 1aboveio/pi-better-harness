@@ -396,7 +396,7 @@ test("external active background providers suppress idle goal continuation", asy
   messages.length = 0;
 
   await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
 
   assert.equal(messages.length, 0, "active background tasks must not trigger idle continuation");
@@ -414,7 +414,7 @@ test("idle goal continuation waits for the inactivity grace period", async (t) =
   await handlers.get("agent_settled")?.({}, ctx);
   assert.equal(messages.length, 0);
 
-  t.mock.timers.tick(29_999);
+  t.mock.timers.tick(59_999);
   await flushPromises();
   assert.equal(messages.length, 0);
 
@@ -443,7 +443,7 @@ test("idle goal continuation rechecks background activity before waking", async 
 
   await handlers.get("agent_settled")?.({}, ctx);
   active = true;
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
 
   assert.equal(messages.length, 0, "new background activity during the grace period cancels the wake");
@@ -474,12 +474,12 @@ test("identical autonomous outcomes pause continuation until interactive input r
   };
 
   // The first outcome is new evidence; each identical retry after it waits
-  // one more 30s grace period than the last.
+  // one more 60s grace period than the last.
   for (let attempt = 0; attempt <= 10; attempt += 1) {
     await handlers.get("agent_start")?.({}, ctx);
     await handlers.get("agent_end")?.(identicalOutcome, ctx);
     await handlers.get("agent_settled")?.({}, ctx);
-    const delay = 30_000 * (attempt + 1);
+    const delay = 60_000 * (attempt + 1);
     const before: number = messages.length;
     if (attempt === 10) break;
     t.mock.timers.tick(delay - 1);
@@ -490,7 +490,7 @@ test("identical autonomous outcomes pause continuation until interactive input r
     assert.equal(messages.length, before + 1, `retry ${attempt} fires after ${delay}ms`);
   }
   assert.equal(messages.length, 11, "the initial turn plus ten no-progress retries are allowed");
-  t.mock.timers.tick(30_000 * 12);
+  t.mock.timers.tick(60_000 * 12);
   await flushPromises();
   assert.equal(messages.length, 11, "the eleventh identical outcome holds automatic continuation");
 
@@ -506,7 +506,7 @@ test("identical autonomous outcomes pause continuation until interactive input r
   await handlers.get("agent_start")?.({}, ctx);
   await handlers.get("agent_end")?.(identicalOutcome, ctx);
   await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(messages.length, 12, "interactive input reopens the loop at the base delay");
 });
@@ -529,7 +529,7 @@ test("/goal resume reopens an active no-progress hold without replacing the goal
   assert.equal(h.messages.length, before + 1, "explicit resume queues one new turn");
   await settleNetworkFailure(h);
   const afterResume = h.messages.length;
-  t.mock.timers.tick(29_999);
+  t.mock.timers.tick(59_999);
   await flushPromises();
   assert.equal(h.messages.length, afterResume);
   t.mock.timers.tick(1);
@@ -609,7 +609,7 @@ test("background drain resets a held ledger before a callback can cancel its wak
   assert.equal(latestContinuationState(h.entries)?.blocked, false);
   assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1, "only the post-drain repetition counts");
   const before = h.messages.length;
-  t.mock.timers.tick(59_999);
+  t.mock.timers.tick(119_999);
   await flushPromises();
   assert.equal(h.messages.length, before);
   t.mock.timers.tick(1);
@@ -663,7 +663,7 @@ test("an idle background drain keeps its base-delay harvest wake without resetti
   assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
   const entriesBeforeWake = h.entries.length;
   const before = h.messages.length;
-  t.mock.timers.tick(29_999);
+  t.mock.timers.tick(59_999);
   await flushPromises();
   assert.equal(h.messages.length, before);
   t.mock.timers.tick(1);
@@ -713,7 +713,7 @@ test("changed evidence resets accumulated backoff to the base delay", async (t) 
   await h.handlers.get("agent_settled")?.({}, h.ctx);
   assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
   const before = h.messages.length;
-  t.mock.timers.tick(29_999);
+  t.mock.timers.tick(59_999);
   await flushPromises();
   assert.equal(h.messages.length, before);
   t.mock.timers.tick(1);
@@ -741,7 +741,7 @@ test("enlarged backoff is cancelled by background work or an interrupt", async (
       const before = h.messages.length;
       if (cause === "background") active = true;
       else controller.abort();
-      subtest.mock.timers.tick(60_000);
+      subtest.mock.timers.tick(120_000);
       await flushPromises();
       assert.equal(h.messages.length, before);
       assert.equal(latestGoal(h.entries)?.status, cause === "interrupt" ? "paused" : "active");
@@ -910,7 +910,7 @@ test("in-flight wake audits cannot survive pause, resume, replacement, completio
       await h.handlers.get("session_start")?.({}, h.ctx);
       await h.commands.get("goal")?.handler("original objective", h.ctx);
       await settleNetworkFailure(h);
-      subtest.mock.timers.tick(29_999);
+      subtest.mock.timers.tick(59_999);
       await flushPromises();
       delayed = true;
       subtest.mock.timers.tick(1);
@@ -959,7 +959,7 @@ test("an aborted run pauses the active goal and suppresses pokes while paused", 
 
   await handlers.get("agent_start")?.({}, ctx);
   await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(messages.length, 0, "paused goals are never poked");
 });
@@ -980,7 +980,7 @@ test("an aborted run cancels an already-scheduled idle continuation", async (t) 
   await handlers.get("agent_end")?.(abortedOutcome, ctx);
   assert.equal(latestGoal(entries)?.status, "paused");
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(messages.length, 0, "pausing before the grace period elapses cancels the poke");
 });
@@ -1049,7 +1049,7 @@ test("an escape pause stays paused while the user asks a question; no continuati
   await handlers.get("agent_start")?.({}, ctx);
   await handlers.get("agent_end")?.(answeredOutcome, ctx);
   await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(messages.length, 0, "the goal loop does not restart after the answer");
   assert.equal(latestGoal(entries)?.status, "paused");
@@ -1114,7 +1114,7 @@ test("an escape pause persisted by an older version stays paused after reload un
   await second.handlers.get("session_start")?.({}, second.ctx);
   assert.equal(latestGoal(second.entries)?.status, "paused");
   assert.ok(second.activeTools().includes("goal_resume"), "a restored escape pause offers goal_resume");
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(second.messages.length, 0, "a reloaded paused goal is not poked on its own");
 
@@ -1196,7 +1196,7 @@ test("an explicit /goal pause is not undone by later user messages", async (t) =
   await handlers.get("agent_start")?.({}, ctx);
   await handlers.get("agent_end")?.(answeredOutcome, ctx);
   await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(messages.length, 0, "an explicitly paused goal is never poked");
 
@@ -1232,7 +1232,7 @@ test("a completed goal stays complete after user messages and interrupts", async
   await handlers.get("agent_end")?.(abortedOutcome, ctx);
   await handlers.get("input")?.({ source: "interactive", text: "thanks" }, ctx);
   await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(latestGoal(entries)?.status, "complete");
   assert.equal(messages.length, 0);
@@ -1256,7 +1256,7 @@ test("non-conversational commands leave an active goal and its continuation unto
   await commands.get("goal")?.handler("", ctx);
   assert.equal(latestGoal(entries)?.status, "active");
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(messages.length, 1, "the scheduled continuation still fires");
 });
@@ -1347,7 +1347,7 @@ async function exhaustNoProgressRetries(h: ReturnType<typeof createContinuationH
   for (let attempt = 0; attempt <= 10; attempt += 1) {
     await settleNetworkFailure(h);
     if (attempt < 10) {
-      t.mock.timers.tick(30_000 * (attempt + 1));
+      t.mock.timers.tick(60_000 * (attempt + 1));
       await flushPromises();
     }
   }

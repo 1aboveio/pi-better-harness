@@ -50,7 +50,7 @@ import {
 } from "./types.js";
 
 const POLL_INTERVAL_MS = 2_000;
-const DEFAULT_IDLE_CONTINUATION_DELAY_MS = 30_000;
+const DEFAULT_IDLE_CONTINUATION_DELAY_MS = 60_000;
 const DEFAULT_MAX_NO_PROGRESS_RETRIES = 10;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const WAKE_DISABLED =
@@ -124,7 +124,7 @@ function parseDurationEnv(raw: string | undefined, fallback: number): number {
 
 /**
  * Linear backoff for no-progress retries: each identical outcome waits one more
- * grace period than the last (30s, 60s, 90s, ... by default).
+ * grace period than the last (60s, 120s, 180s, ... by default).
  */
 export function idleContinuationDelay(noProgressRetries: number, baseMs = IDLE_CONTINUATION_DELAY_MS): number {
   return Math.min(MAX_TIMER_DELAY_MS, baseMs * (1 + Math.max(0, noProgressRetries)));

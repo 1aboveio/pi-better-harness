@@ -122,7 +122,7 @@ arguments and results are not copied into extension state.
 When a turn produces the same fingerprint as the prior autonomous turn, it
 counts as a no-progress retry. By default, the original turn plus ten
 identical retries are allowed. Retries back off linearly: each identical
-outcome waits one more grace period than the last (30s, 60s, 90s, and so on
+outcome waits one more grace period than the last (60s, 120s, 180s, and so on
 with the default grace period). The next identical outcome keeps the goal
 active but holds further automatic continuations and reports `waiting: no
 progress` in the status area. It never marks the goal complete.
