@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.15.1] - 2026-10-02
+
+### Fixed
+
+- Minimal tool output patches the running bundled Pi renderer instead of a separate unbundled SDK class. Tool results now hide and finished runs fold in Pi 1.0.0's bundled CLI; Ctrl+O and normal mode still reveal the original results.
+
 ## [pi-better-harness@0.15.0] - 2026-10-02
 
 ### Added

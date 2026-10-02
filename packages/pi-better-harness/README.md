@@ -71,8 +71,9 @@ builds can also open one folded run by clicking its summary.
 
 Normal mode is the default. The preference is saved in the current session,
 including resume/reload. This is a version-sensitive internal TUI adapter,
-tested with Pi 0.82.1 and 0.99.1; incompatible APIs produce a warning and leave
-ordinary output enabled. Print/RPC output and exported transcripts are unchanged.
+tested with Pi 0.82.1, 0.99.1, and the bundled Pi 1.0.0 CLI; incompatible APIs
+produce a warning and leave ordinary output enabled. Print/RPC output and
+exported transcripts are unchanged.
 
 The standalone-package installer does not install this bundled extension.
 Load the bundled harness or run it directly from a checkout:
