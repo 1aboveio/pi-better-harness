@@ -40,7 +40,7 @@ const PlanStepSchema = Type.Object({
 });
 
 const WorkflowRowChangeSchema = Type.Object({
-  id: Type.Optional(Type.String({ description: "Unit id, component id (e.g. C1), or fleet stage (explore, combine, canary, review, cicd). Omit for run-level fields." })),
+  id: Type.Optional(Type.String({ description: "Unit id, component id (e.g. C1), or fleet stage (explore, implement, review, ci, canary). Omit for run-level fields." })),
   target: Type.Optional(StringEnum(["unit", "component", "fleet", "run"] as const, { description: "Required with add. Otherwise only needed when the same id names two kinds of row." })),
   set: Type.Optional(Type.Object({}, {
     additionalProperties: true,

@@ -15,7 +15,7 @@ test("Rush plan is a read-only workflow projection across revisions and session 
   mkdirSync(join(cwd, ".resolve-issues", "rush", "run-1"), { recursive: true });
   const file = (revision: number, status: string) => writeFileSync(path, JSON.stringify({
     runId: "run-1", planRevision: revision, warehouseCanaryRequired: false,
-    fleet: { explore: { status: "succeeded" }, combine: { status: "pending" } },
+    fleet: { explore: { status: "succeeded" }, implement: { status: "pending" } },
     issues: [
       { id: "214", title: "Extract shared core", stage: "self-review", status, dependsOn: [], note: "validated" },
       { id: "215", title: "Add mux support", stage: "pending", status: "pending", dependsOn: ["214"] },
@@ -139,7 +139,7 @@ test("Rush plan reader accepts live units and string fleet states", () => {
       runId: "issue-1147-20260923T094324Z",
       planRevision: 1,
       warehouseCanaryRequired: false,
-      fleet: { explore: "pending", combine: "pending", canary: "not-applicable" },
+      fleet: { explore: "pending", implement: "pending", canary: "not-applicable" },
       units: [
         { id: "U1", title: "Explore contracts", stage: "explore", status: "in_progress", dependsOn: [] },
         { id: "U2", title: "Implement authority", stage: "pending", status: "pending", dependsOn: ["U1"] },

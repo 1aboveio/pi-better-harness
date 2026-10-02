@@ -4,7 +4,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 
 import { replacePlan } from "../src/plan-state.js";
 import { renderCompactPlan, renderFullPlan, createFullPlanComponent } from "../src/plan-render.js";
-import { renderRushPlan, createRushPlanComponent, type RushPlan } from "../src/workflow-plan.js";
+import { renderRushPlan, createRushPlanComponent, projectRushPlan, type RushPlan } from "../src/workflow-plan.js";
 
 const theme = { fg: (_color: string, value: string) => value };
 
@@ -45,7 +45,7 @@ test("compact and full plan rendering name blocked state and obey width", () => 
 function rushFixture(): RushPlan {
   return {
     runId: "style", planRevision: 2, warehouseCanaryRequired: false,
-    fleet: { explore: { status: "succeeded" }, combine: { status: "in-flight" } },
+    fleet: { explore: { status: "succeeded" }, implement: { status: "in-flight" } },
     issues: [
       { id: "863", title: "Completed", stage: "done", status: "succeeded", dependsOn: [] },
       { id: "864", title: "Implement", stage: "build", status: "in-flight", worker: 0, dependsOn: ["863"], note: "Keep the evidence" },
@@ -76,7 +76,9 @@ test("native and workflow plans share summary, colors, glyphs and title columns"
     assert.equal(right.slice(0, right.indexOf(" ", 3)), left.slice(0, left.indexOf(" ", 3)));
   }
   assert.match(b.join("\n"), /explore ✓/);
-  assert.match(b.join("\n"), /canary —/);
+  assert.match(b.join("\n"), /implement ●/);
+  assert.doesNotMatch(b.join("\n"), /combine|cicd/);
+  assert.doesNotMatch(b.join("\n"), /canary/, "no data work, no canary cell");
   assert.notEqual(b.at(-1), "");
   const full = renderRushPlan(workflow, 100, true).join("\n");
   assert.match(full, /build · in-flight · worker 0/);
@@ -139,4 +141,20 @@ test("both full components use the same selection and return keys", () => {
     component.handleInput?.("\x1b[D");
   }
   assert.equal(closed, 2);
+});
+test("the canary cell shows, last, only when a unit carries warehouse canary work", () => {
+  const raw = (warehouseCanary?: unknown) => ({
+    runId: "canary", planRevision: 3,
+    fleet: { explore: "succeeded", implement: "in-flight", canary: "pending" },
+    units: [
+      { id: "1", title: "Data job", stage: "implement", status: "in-flight", ...(warehouseCanary === undefined ? {} : { warehouseCanary }) },
+      { id: "2", title: "UI", stage: "pending", status: "pending" },
+    ],
+  });
+  const header = (data: unknown) => renderRushPlan(projectRushPlan(data, "canary"), 120, false).join("\n");
+  const data = header(raw({ reason: "changes the settlement job", result: null }));
+  assert.match(data, /explore ✓\s+implement ●\s+review ○\s+ci ○\s+canary ○/);
+  assert.doesNotMatch(header(raw()), /canary/);
+  assert.doesNotMatch(header(raw(false)), /canary/);
+  assert.match(header({ ...raw(), warehouseCanaryRequired: true }), /canary ○/, "the run-level flag still works");
 });
