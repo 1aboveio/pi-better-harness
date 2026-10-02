@@ -5,6 +5,8 @@ const { createBashToolDefinition, createReadToolDefinition, createWriteToolDefin
     createEditToolDefinition, createLocalBashOperations, getShellConfig } = PiCodingAgent;
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { unlink } from "node:fs/promises";
 import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
@@ -116,42 +118,51 @@ export function createTaskBashOperations(
             const scratch = plan.policy.runtimeWrite?.[0];
             const taskEnv = { ...process.env, ...options.env,
                 ...(scratch ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : {}) };
-            const wrapped = maybeBuildSandboxCommand({
-                policy: plan.policy, profilePath: plan.profilePath,
-                execPath: "/usr/bin/env", execArgs: ["-i", "--", ...Object.entries(taskEnv)
-                    .filter((entry): entry is [string, string] => entry[1] !== undefined)
-                    .map(([key, value]) => `${key}=${value}`), shell.shell, ...shell.args, command],
-            }, { sandboxEnabled: true, explicitSandbox: true });
-            if (!wrapped) throw new Error("Sandbox: no task execution backend is available.");
-            for (const line of wrapped.notices ?? []) options.onData(Buffer.from(`${line}\n`));
             if (options.signal?.aborted) throw new Error("aborted");
             if (options.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout <= 0 || options.timeout * 1000 > 2147483647)) {
                 throw new Error("Invalid timeout: must be a positive, supported number of seconds");
             }
-            // No shell or caller-controlled loader environment runs before the boundary.
-            return new Promise((resolve, reject) => {
-                const child = spawn(wrapped.file, wrapped.fileArgs, { cwd, detached: true,
-                    env: { PATH: "/usr/bin:/bin", HOME: plan.policy.home }, stdio: ["ignore", "pipe", "pipe"] });
-                let timedOut = false;
-                const kill = () => { if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); } } };
-                const timer = options.timeout === undefined ? undefined : setTimeout(() => { timedOut = true; kill(); }, options.timeout * 1000);
-                if (child.pid) trackDetachedChildPid(child.pid);
-                const cleanup = () => {
-                    if (child.pid) untrackDetachedChildPid(child.pid);
-                    if (timer) clearTimeout(timer);
-                    options.signal?.removeEventListener("abort", kill);
-                };
-                child.stdout.on("data", options.onData);
-                child.stderr.on("data", options.onData);
-                options.signal?.addEventListener("abort", kill, { once: true });
-                if (options.signal?.aborted) kill();
-                void waitForChildProcess(child).then((exitCode: number | null) => {
-                    cleanup();
-                    if (options.signal?.aborted) reject(new Error("aborted"));
-                    else if (timedOut) reject(new Error(`timeout:${options.timeout}`));
-                    else resolve({ exitCode });
-                }, (error: unknown) => { cleanup(); reject(error); });
-            });
+            // A sibling launch must never rewrite a profile another process is reading.
+            const profilePath = `${plan.profilePath}.${randomUUID()}.bash.sb`;
+            try {
+                const wrapped = maybeBuildSandboxCommand({
+                    policy: plan.policy, profilePath,
+                    execPath: "/usr/bin/env", execArgs: ["-i", "--", ...Object.entries(taskEnv)
+                        .filter((entry): entry is [string, string] => entry[1] !== undefined)
+                        .map(([key, value]) => `${key}=${value}`), shell.shell, ...shell.args, command],
+                }, { sandboxEnabled: true, explicitSandbox: true });
+                if (!wrapped) throw new Error("Sandbox: no task execution backend is available.");
+                for (const line of wrapped.notices ?? []) options.onData(Buffer.from(`${line}\n`));
+                if (options.signal?.aborted) throw new Error("aborted");
+                // No shell or caller-controlled loader environment runs before the boundary.
+                return await new Promise<{ exitCode: number | null }>((resolve, reject) => {
+                    const child = spawn(wrapped.file, wrapped.fileArgs, { cwd, detached: true,
+                        env: { PATH: "/usr/bin:/bin", HOME: plan.policy.home }, stdio: ["ignore", "pipe", "pipe"] });
+                    let timedOut = false;
+                    const kill = () => { if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); } } };
+                    const timer = options.timeout === undefined ? undefined : setTimeout(() => { timedOut = true; kill(); }, options.timeout * 1000);
+                    if (child.pid) trackDetachedChildPid(child.pid);
+                    const cleanup = () => {
+                        if (child.pid) untrackDetachedChildPid(child.pid);
+                        if (timer) clearTimeout(timer);
+                        options.signal?.removeEventListener("abort", kill);
+                    };
+                    child.stdout.on("data", options.onData);
+                    child.stderr.on("data", options.onData);
+                    options.signal?.addEventListener("abort", kill, { once: true });
+                    if (options.signal?.aborted) kill();
+                    void waitForChildProcess(child).then((exitCode: number | null) => {
+                        cleanup();
+                        if (options.signal?.aborted) reject(new Error("aborted"));
+                        else if (timedOut) reject(new Error(`timeout:${options.timeout}`));
+                        else resolve({ exitCode });
+                    }, (error: unknown) => { cleanup(); reject(error); });
+                });
+            } finally {
+                await unlink(profilePath).catch((error: NodeJS.ErrnoException) => {
+                    if (error.code !== "ENOENT") throw error;
+                });
+            }
         },
     };
 }
