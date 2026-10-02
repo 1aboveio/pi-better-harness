@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.15.2] - 2026-10-02
+
+### Changed
+
+- `/tool-output minimal` hides tool blocks completely, including running calls, errors, headers, summaries, and blank tool spacers. Ctrl+O and normal mode still reveal the original output; agent-facing results are unchanged.
+
 ## [pi-better-harness@0.15.1] - 2026-10-02
 
 ### Fixed

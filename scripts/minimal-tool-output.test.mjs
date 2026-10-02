@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
 
 import minimalOutputExtension from "../packages/pi-better-harness/extensions/minimal-output/index.ts";
-import { installMinimalOutputHook, loadContainerPrototype, loadToolPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
+import { installMinimalOutputHook, loadToolPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
 
 const sdk = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 // The SDK may have its own TUI copy; override capabilities on the renderer's instance.
@@ -16,7 +16,7 @@ const { AssistantMessageComponent } = await import(pathToFileURL(join(sdk, "mode
 const { ToolExecutionComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/tool-execution.js")).href);
 const { initTheme } = await import(pathToFileURL(join(sdk, "modes/interactive/theme/theme.js")).href);
 const prototype = ToolExecutionComponent.prototype;
-const originals = Object.fromEntries(["updateDisplay", "getResultRenderer", "getTextOutput"].map((name) => [name, prototype[name]]));
+const originals = Object.fromEntries(["updateDisplay", "getResultRenderer", "getTextOutput", "render"].map((name) => [name, prototype[name]]));
 const capabilities = getCapabilities();
 const handles = [];
 const shutdowns = [];
@@ -62,8 +62,7 @@ for (const [name, definition] of [
     component.setExpanded(false);
     const normalView = rendered(component);
     hook.setEnabled(true);
-    assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL|second line/);
-    assert.match(rendered(component), /read|SUBAGENT_HEADER|MCP_HEADER|unknown_external_tool/);
+    assert.deepEqual(component.render(100), [], "hidden tools must consume zero transcript rows");
     assert.equal(component.result, payload, "the agent-facing result object must remain untouched");
     component.setExpanded(true);
     assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
@@ -85,7 +84,7 @@ test("minimal mode suppresses streaming error bodies and inline images without d
   assert.equal(component.imageComponents.length, 1);
   hook.setEnabled(true);
   component.updateResult(imageResult, true);
-  assert.doesNotMatch(rendered(component), /ERROR_BODY_SENTINEL/);
+  assert.deepEqual(component.render(100), []);
   assert.equal(component.imageComponents.length, 0);
   assert.equal(component.result, imageResult);
   assert.equal(component.result.isError, true);
@@ -109,7 +108,7 @@ test("new tool rows and streaming updates stay hidden, and custom renderer reuse
     },
   };
   const component = tool("stateful_extension", definition);
-  assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+  assert.deepEqual(component.render(100), []);
   assert.equal(seenComponents.length, 0, "hidden result renderers should not run");
   component.setExpanded(true);
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
@@ -122,6 +121,20 @@ test("new tool rows and streaming updates stay hidden, and custom renderer reuse
   component.setExpanded(true);
   assert.equal(seenComponents.at(-1), cached);
   assert.match(rendered(component), /STREAMING_UPDATE_SENTINEL/);
+});
+
+test("minimal mode hides a running tool before any result arrives", () => {
+  const hook = install();
+  hook.setEnabled(true);
+  const component = new ToolExecutionComponent("bash", "running-bash", { command: "ls -la" }, {}, undefined, { requestRender() {} }, process.cwd());
+  assert.deepEqual(component.render(100), []);
+  component.updateResult(payload, true);
+  assert.deepEqual(component.render(100), []);
+  component.setExpanded(true);
+  assert.match(rendered(component), /ls -la/);
+  assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
+  component.setExpanded(false);
+  assert.deepEqual(component.render(100), []);
 });
 
 test("duplicate hook owners do not stack wrappers and the last disposal restores ordinary output", () => {
@@ -214,11 +227,11 @@ test("the command toggles existing rows, persists session preference, and restor
   assert.match(rendered(existing), /RESULT_BODY_SENTINEL/);
   assert.equal(entries.at(-1).data.enabled, false);
   assert.match(notices.at(-1), /Normal tool output restored/);
-  assert.match(notices.find((message) => message.startsWith("Minimal tool output on")), /fold after the next model text/);
+  assert.match(notices.find((message) => message.startsWith("Minimal tool output on")), /Tool blocks are hidden/);
 });
 
 const bundledCli = process.env.PI_MINIMAL_OUTPUT_HOST_CLI ?? join(sdk, "bundle/cli.js");
-test("minimal mode patches the running bundled host and folds its bash output", {
+test("minimal mode patches the running bundled host and removes its bash block entirely", {
   skip: !process.env.PI_MINIMAL_OUTPUT_HOST_CLI && !existsSync(bundledCli)
     ? "This SDK has no bundled CLI; set PI_MINIMAL_OUTPUT_HOST_CLI to test one" : false,
 }, async () => {
@@ -230,10 +243,9 @@ test("minimal mode patches the running bundled host and folds its bash output", 
     host.initTheme("dark", false);
     const toolPrototype = await loadToolPrototype();
     assert.equal(toolPrototype, host.ToolExecutionComponent.prototype, "patch the class actually used by the CLI");
-    const containerPrototype = await loadContainerPrototype();
+    const originalRender = toolPrototype.render;
     const HostContainer = Object.getPrototypeOf(host.ToolExecutionComponent.prototype).constructor;
-    assert.equal(containerPrototype, HostContainer.prototype);
-    hook = installMinimalOutputHook(toolPrototype, containerPrototype);
+    hook = installMinimalOutputHook(toolPrototype);
     const chat = new HostContainer();
     const ui = { requestRender() {}, children: [chat] };
     const component = new host.ToolExecutionComponent("bash", "bundled-bash", { command: "ls -la" }, {}, host.createBashToolDefinition(process.cwd()), ui, process.cwd());
@@ -241,17 +253,22 @@ test("minimal mode patches the running bundled host and folds its bash output", 
     chat.addChild(component);
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     hook.setEnabled(true);
-    assert.doesNotMatch(rendered(chat), /RESULT_BODY_SENTINEL|second line/);
-    assert.match(rendered(chat), /ls -la/);
-    chat.addChild(new host.AssistantMessageComponent({ role: "assistant", content: [{ type: "text", text: "BUNDLED_MODEL_TEXT" }], stopReason: "stop" }));
-    assert.match(rendered(chat), /▸ 1 tool · bash/);
-    assert.doesNotMatch(rendered(chat), /ls -la|RESULT_BODY_SENTINEL/);
+    assert.deepEqual(chat.render(100), [], "no header, result, summary, or spacer survives");
+    const message = new host.AssistantMessageComponent({ role: "assistant", content: [{ type: "text", text: "BUNDLED_MODEL_TEXT" }], stopReason: "stop" });
+    chat.addChild(message);
+    assert.deepEqual(chat.render(100), message.render(100));
     component.setExpanded(true);
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     component.setExpanded(false);
     hook.setEnabled(false);
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     assert.equal(component.result, payload);
+    hook.dispose();
+    assert.equal(toolPrototype.render, originalRender);
+    assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+    hook = installMinimalOutputHook(await loadToolPrototype());
+    hook.setEnabled(true);
+    assert.deepEqual(chat.render(100), message.render(100), "reinstalling after reload must still hide restored tools");
   } finally {
     hook?.dispose();
     process.argv[1] = argv;
@@ -272,8 +289,8 @@ function placedTool(name, ui, result = payload) {
   return component;
 }
 
-test("minimal mode folds finished tool runs after later model text and leaves the live run open", () => {
-  const hook = installMinimalOutputHook(prototype, Container.prototype);
+test("minimal mode removes completed and live tool rows without adding summaries or spacers", () => {
+  const hook = installMinimalOutputHook(prototype);
   handles.push(hook);
   const ui = { requestRender() {}, children: [] };
   const chat = new Container();
@@ -281,43 +298,28 @@ test("minimal mode folds finished tool runs after later model text and leaves th
   const read = placedTool("read", ui);
   const edit = placedTool("edit", ui, { content: [{ type: "text", text: "EDIT_BODY" }], isError: true });
   const live = placedTool("live_probe", ui, { content: [{ type: "text", text: "LIVE_BODY" }], isError: false });
-  chat.addChild(modelText("FIRST_MODEL_TEXT"));
-  chat.addChild(new AssistantMessageComponent({ role: "assistant", content: [{ type: "thinking", thinking: "ONLY_THINKING" }], stopReason: "toolUse" }));
-  chat.addChild(read);
-  chat.addChild(edit);
-  chat.addChild(modelText("SECOND_MODEL_TEXT"));
-  chat.addChild(live);
+  const first = modelText("FIRST_MODEL_TEXT");
+  const thinking = new AssistantMessageComponent({ role: "assistant", content: [{ type: "thinking", thinking: "ONLY_THINKING" }], stopReason: "toolUse" });
+  const second = modelText("SECOND_MODEL_TEXT");
+  for (const component of [first, thinking, read, edit, second, live]) chat.addChild(component);
+  const normal = chat.render(100);
   hook.setEnabled(true);
 
-  const folded = chat.render(100).join("\n");
-  assert.match(folded, /FIRST_MODEL_TEXT/);
-  assert.match(folded, /SECOND_MODEL_TEXT/);
-  assert.match(folded, /▸ 2 tools · 1 error · read, edit/);
-  assert.match(folded, /\/tmp\/live_probe-arg/);
-  assert.doesNotMatch(folded, /\/tmp\/read-arg|\/tmp\/edit-arg|RESULT_BODY_SENTINEL|EDIT_BODY|LIVE_BODY/);
+  for (const width of [20, 100]) {
+    assert.deepEqual(chat.render(width), [first, thinking, second].flatMap((component) => component.render(width)), "tool rows must add no transcript height");
+  }
   assert.equal(read.result, payload);
-
-  const summary = chat.mouseLayout.children.map((entry) => entry.component).find((component) => typeof component.handleMouse === "function");
-  assert.equal(summary.handleMouse({ type: "click", button: "left" }).handled, true);
-  const opened = chat.render(100).join("\n");
-  assert.match(opened, /▾ 2 tools · 1 error · read, edit/);
-  assert.match(opened, /\/tmp\/read-arg/);
-  assert.match(opened, /\/tmp\/edit-arg/);
-  assert.doesNotMatch(opened, /RESULT_BODY_SENTINEL|EDIT_BODY/);
-  summary.handleMouse({ type: "click", button: "left" });
-  assert.match(chat.render(100).join("\n"), /▸ 2 tools · 1 error · read, edit/);
-  assert.doesNotMatch(chat.render(20).join("\n"), /read, edit/);
+  assert.equal(edit.result.isError, true);
 
   read.setExpanded(true);
   edit.setExpanded(true);
-  const expanded = chat.render(100).join("\n");
-  assert.match(expanded, /RESULT_BODY_SENTINEL/);
-  assert.match(expanded, /EDIT_BODY/);
-  assert.doesNotMatch(expanded, /▸ 2 tools/);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+  assert.match(rendered(chat), /EDIT_BODY/);
+  assert.doesNotMatch(rendered(chat), /LIVE_BODY|live_probe-arg/);
+  read.setExpanded(false);
+  edit.setExpanded(false);
+  assert.deepEqual(chat.render(100), [first, thinking, second].flatMap((component) => component.render(100)));
 
   hook.dispose();
-  const restored = chat.render(100).join("\n");
-  assert.match(restored, /RESULT_BODY_SENTINEL/);
-  assert.match(restored, /\/tmp\/read-arg/);
-  assert.doesNotMatch(restored, /▸ 2 tools/);
+  assert.deepEqual(chat.render(100), normal);
 });
