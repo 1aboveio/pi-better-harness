@@ -91,7 +91,9 @@ export function projectRushPlan(data: unknown, runId: string): RushPlan {
     planRevision: data.planRevision as number,
     issues,
     fleet,
-    warehouseCanaryRequired: data.warehouseCanaryRequired === true,
+    // The skill marks canary work per unit (`warehouseCanary`); older plans set a run-level flag.
+    warehouseCanaryRequired: data.warehouseCanaryRequired === true ||
+      persistedUnits.some((unit: unknown) => isRecord(unit) && unit.warehouseCanary != null && unit.warehouseCanary !== false),
     spec: isRecord(data.spec) && typeof data.spec.title === "string" ? { title: data.spec.title } : undefined,
   };
 }
@@ -132,9 +134,10 @@ function workflowStatus(status: string): DisplayStatus {
 }
 
 function presentRushPlan(plan: RushPlan): PlanPresentation {
-  const fleet = ["explore", "combine", "canary", "review", "cicd"].map((stage) => {
-    const status = stage === "canary" && !plan.warehouseCanaryRequired
-      ? "not-applicable" : plan.fleet[stage]?.status ?? "pending";
+  // The warehouse canary only applies to data work; hide it otherwise.
+  const stages = ["explore", "implement", "review", "ci", ...(plan.warehouseCanaryRequired ? ["canary"] : [])];
+  const fleet = stages.map((stage) => {
+    const status = plan.fleet[stage]?.status ?? "pending";
     const display = workflowStatus(status);
     const style = statusStyle(display);
     return { color: style.color, text: `  ${stage} ${style.glyph}${display === "unknown" ? ` ${planText(status)}` : ""}` };

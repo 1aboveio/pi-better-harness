@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- The rush-issues plan board names its fleet stages as the skill records them: `implement` instead of `combine`, and `ci` instead of `cicd` (the skill has no deploy stage). `workflow_plan_update` accepts `ci` as a delivery status; `cicd` stays valid for older plans.
+- The board hides the `canary` cell unless the run has warehouse (data) work: a unit with `warehouseCanary` set, or the run-level `warehouseCanaryRequired` flag. When shown, it comes last, after `ci`, where the canary runs.
+
 ## [pi-better-harness@0.15.2] - 2026-10-02
 
 ### Changed

@@ -32,7 +32,7 @@ function planFixture(overrides: Record<string, unknown> = {}): Record<string, un
     warehouseCanaryRequired: false,
     combinedPr: null,
     decisions: [{ id: "d-1", timestamp: "2026-09-27T09:01:00Z", humanWords: "Split into 3 runs.", changes: "units 1-3 only", supersedes: null }],
-    fleet: { explore: { status: "succeeded", attempt: 1 }, combine: "pending", canary: "not-applicable", review: { status: "pending" }, cicd: { status: "pending" } },
+    fleet: { explore: { status: "succeeded", attempt: 1 }, combine: "pending", canary: "not-applicable", review: { status: "pending" }, ci: { status: "pending" } },
     units: [
       { id: "1201", title: "Fix queue stall", stage: "validate", status: "in-flight", dependsOn: [], attempt: 1, retries: 0, diagnoses: 0, worker: 1, clock: { attemptStartedAt: "2026-09-27T09:10:00Z" }, note: "running", acceptanceCriteria: "keep me" },
       { id: "1202", title: "Parse rename edges", stage: "pending", status: "pending", dependsOn: ["1201"], attempt: 0, retries: 0, diagnoses: 0, worker: null },
@@ -264,12 +264,12 @@ test("fleet statuses follow the contract set and n/a is saved as not-applicable"
   try {
     const result = await h.update({ workflow: { event: "fleet", changes: [
       { id: "canary", set: { status: "n/a" } },
-      { id: "cicd", set: { status: "merged" } },
+      { id: "ci", set: { status: "merged" } },
       { id: "review", set: { status: "failed", note: "timed out" } },
     ] } });
     const plan = h.plan();
     assert.equal(plan.fleet.canary, "not-applicable", "the alias is normalized and a string stage stays a string");
-    assert.equal(plan.fleet.cicd.status, "merged");
+    assert.equal(plan.fleet.ci.status, "merged");
     assert.deepEqual(plan.fleet.review, { status: "failed", note: "timed out" });
     const event = readEvents(result.details.profilingPath).at(-1);
     assert.deepEqual(event.changes[0].set, { status: "not-applicable" }, "the profiling event carries the saved value, not the alias");

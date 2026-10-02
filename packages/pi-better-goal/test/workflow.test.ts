@@ -166,7 +166,7 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   const planPath = join(runDir, "task-plan.json");
   writeFileSync(planPath, JSON.stringify({
     runId: "run-1", planRevision: 1, warehouseCanaryRequired: false,
-    fleet: { explore: { status: "pending" }, combine: { status: "pending" } },
+    fleet: { explore: { status: "pending" }, implement: { status: "pending" } },
     issues: [{ id: "1", title: "Unit", stage: "pending", status: "pending", dependsOn: [] }],
   }));
   type Command = { handler(args: string, ctx: ExtensionContext): Promise<void> | void };

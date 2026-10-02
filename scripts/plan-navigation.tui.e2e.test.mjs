@@ -59,7 +59,7 @@ test("golden path: Rush-owned units appear in the real plan widget", () => {
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "task-plan.json"), JSON.stringify({
     runId: "e2e-run", planRevision: 7, warehouseCanaryRequired: false,
-    fleet: { explore: { status: "succeeded" }, combine: { status: "pending" } },
+    fleet: { explore: { status: "succeeded" }, implement: { status: "pending" } },
     issues: [
       { id: "214", title: "Extract shared core", stage: "self-review", status: "in-flight", dependsOn: [] },
       { id: "215", title: "Add mux support", stage: "pending", status: "pending", dependsOn: ["214"] },

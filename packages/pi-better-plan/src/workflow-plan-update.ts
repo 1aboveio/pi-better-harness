@@ -43,7 +43,7 @@ export interface RushPlanUpdateResult {
 /** Contract values from rush-issues references/task-plan.md. */
 export const RUSH_UNIT_STATUSES = ["pending", "in-flight", "diagnosing", "succeeded", "blocked", "cancelled"] as const;
 export const RUSH_UNIT_STAGES = ["pending", "implement", "validate", "self-review", "diagnose", "done"] as const;
-export const RUSH_COMPONENT_STATUSES = ["building", "combining", "review", "cicd", "merged", "blocked"] as const;
+export const RUSH_COMPONENT_STATUSES = ["building", "combining", "review", "ci", "cicd", "merged", "blocked"] as const;
 export const RUSH_FLEET_STATUSES = [
   "pending", "in-flight", "diagnosing", "succeeded", "failed", "blocked", "cancelled", "not-applicable", "merged",
 ] as const;
