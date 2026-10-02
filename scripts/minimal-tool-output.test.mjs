@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
 
 import minimalOutputExtension from "../packages/pi-better-harness/extensions/minimal-output/index.ts";
-import { installMinimalOutputHook } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
+import { installMinimalOutputHook, loadContainerPrototype, loadToolPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
 
 const sdk = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 // The SDK may have its own TUI copy; override capabilities on the renderer's instance.
@@ -214,6 +215,47 @@ test("the command toggles existing rows, persists session preference, and restor
   assert.equal(entries.at(-1).data.enabled, false);
   assert.match(notices.at(-1), /Normal tool output restored/);
   assert.match(notices.find((message) => message.startsWith("Minimal tool output on")), /fold after the next model text/);
+});
+
+const bundledCli = process.env.PI_MINIMAL_OUTPUT_HOST_CLI ?? join(sdk, "bundle/cli.js");
+test("minimal mode patches the running bundled host and folds its bash output", {
+  skip: !process.env.PI_MINIMAL_OUTPUT_HOST_CLI && !existsSync(bundledCli)
+    ? "This SDK has no bundled CLI; set PI_MINIMAL_OUTPUT_HOST_CLI to test one" : false,
+}, async () => {
+  const argv = process.argv[1];
+  let hook;
+  try {
+    process.argv[1] = bundledCli;
+    const host = await import(pathToFileURL(join(dirname(bundledCli), "index.js")).href);
+    host.initTheme("dark", false);
+    const toolPrototype = await loadToolPrototype();
+    assert.equal(toolPrototype, host.ToolExecutionComponent.prototype, "patch the class actually used by the CLI");
+    const containerPrototype = await loadContainerPrototype();
+    const HostContainer = Object.getPrototypeOf(host.ToolExecutionComponent.prototype).constructor;
+    assert.equal(containerPrototype, HostContainer.prototype);
+    hook = installMinimalOutputHook(toolPrototype, containerPrototype);
+    const chat = new HostContainer();
+    const ui = { requestRender() {}, children: [chat] };
+    const component = new host.ToolExecutionComponent("bash", "bundled-bash", { command: "ls -la" }, {}, host.createBashToolDefinition(process.cwd()), ui, process.cwd());
+    component.updateResult(payload, false);
+    chat.addChild(component);
+    assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+    hook.setEnabled(true);
+    assert.doesNotMatch(rendered(chat), /RESULT_BODY_SENTINEL|second line/);
+    assert.match(rendered(chat), /ls -la/);
+    chat.addChild(new host.AssistantMessageComponent({ role: "assistant", content: [{ type: "text", text: "BUNDLED_MODEL_TEXT" }], stopReason: "stop" }));
+    assert.match(rendered(chat), /▸ 1 tool · bash/);
+    assert.doesNotMatch(rendered(chat), /ls -la|RESULT_BODY_SENTINEL/);
+    component.setExpanded(true);
+    assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+    component.setExpanded(false);
+    hook.setEnabled(false);
+    assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+    assert.equal(component.result, payload);
+  } finally {
+    hook?.dispose();
+    process.argv[1] = argv;
+  }
 });
 
 function modelText(text, extra = []) {

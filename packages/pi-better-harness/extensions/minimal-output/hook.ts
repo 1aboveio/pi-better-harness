@@ -74,20 +74,31 @@ function hostRequire(): NodeRequire {
   return require;
 }
 
+/** Bundled CLI classes are distinct from the SDK's unbundled deep imports. */
+function bundledHostEntry(entry: string): string | undefined {
+  if (!process.argv[1]) return undefined;
+  try {
+    const directory = dirname(realpathSync(process.argv[1]));
+    if (directory === join(dirname(entry), "bundle")) return join(directory, "index.js");
+  } catch { /* An embedded host may not have a filesystem launcher. */ }
+  return undefined;
+}
+
 /** Resolve the running host's SDK, not a second SDK bundled beside the extension. */
 export async function loadToolPrototype(): Promise<ToolPrototype> {
   const entry = sdkEntry(hostRequire());
-  const path = join(dirname(entry), "modes/interactive/components/tool-execution.js");
+  const bundle = bundledHostEntry(entry);
+  const path = bundle ?? join(dirname(entry), "modes/interactive/components/tool-execution.js");
   const module = await import(pathToFileURL(path).href);
+  if (!module.ToolExecutionComponent?.prototype) {
+    throw new Error("Pi's runtime does not expose its tool display class. Normal output remains enabled.");
+  }
   return module.ToolExecutionComponent.prototype;
 }
 
-/** Chat rows are Container children. Patch that host class, not a second copy. */
+/** Use the actual tool class's Container base, including in bundled hosts. */
 export async function loadContainerPrototype(): Promise<ContainerPrototype> {
-  const entry = sdkEntry(hostRequire());
-  const tuiPath = createRequire(entry).resolve("@earendil-works/pi-tui");
-  const tui = await import(pathToFileURL(tuiPath).href);
-  const prototype = tui.Container?.prototype;
+  const prototype = Object.getPrototypeOf(await loadToolPrototype());
   if (typeof prototype?.addChild !== "function" || typeof prototype?.render !== "function") {
     throw new Error("Pi's chat container API is incompatible: missing Container.addChild. Turn folding is unavailable.");
   }
@@ -96,6 +107,8 @@ export async function loadContainerPrototype(): Promise<ContainerPrototype> {
 
 export async function loadMutedText(): Promise<(text: string) => string> {
   const entry = sdkEntry(hostRequire());
+  // The bundled SDK does not export its live theme singleton.
+  if (bundledHostEntry(entry)) return (text) => text;
   const theme = await import(pathToFileURL(join(dirname(entry), "modes/interactive/theme/theme.js")).href);
   return (text) => {
     try { return theme.theme.fg("muted", text); } catch { return text; }

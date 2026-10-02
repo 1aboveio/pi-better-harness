@@ -82,6 +82,20 @@ npm test
 npm run test:cross-session
 ```
 
+### Minimal tool output compatibility
+
+The renderer regression suite covers result hiding, expansion, restoration,
+and folding. When the workspace SDK includes a bundled CLI, it also exercises
+that CLI's actual renderer and Container classes. To test a separately installed
+bundled Pi build:
+
+```sh
+PI_MINIMAL_OUTPUT_HOST_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js \
+  node --import tsx --test scripts/minimal-tool-output.test.mjs
+```
+
+The bundled-host case reports a skip when the selected SDK has no bundled CLI.
+
 ### Navigator golden path
 
 `docs/tests/navigator.smoke.manifest.json` defines the navigator's release-blocking
