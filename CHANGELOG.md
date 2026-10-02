@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.15.3] - 2026-10-02
+
+### Changed
+
+- Bundle `pi-better-plan@0.5.2` with corrected rush-issues fleet stages and warehouse-only canary display. (#402)
+
+## [pi-better-plan@0.5.2] - 2026-10-02
+
 ### Changed
 
 - The rush-issues plan board names its fleet stages as the skill records them: `implement` instead of `combine`, and `ci` instead of `cicd` (the skill has no deploy stage). `workflow_plan_update` accepts `ci` as a delivery status; `cicd` stays valid for older plans.
