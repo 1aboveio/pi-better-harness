@@ -6,10 +6,39 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.15.0] - 2026-10-02
+
+### Added
+
+- `/tool-output minimal` folds each finished tool run into one line after later model text is on screen. The live run stays open. Ctrl+O and a click still reveal results.
+
 ### Changed
 
-- Subagent navigator: hide child tool/model incident summaries and history from rows and detail chrome while retaining run status, original transcripts, result-tool diagnostics, and callbacks.
-- Navigator: show plain tool names such as `bash` and `read` instead of the `tool` prefix, including the main-agent row.
+- Bundle sandbox 0.8.1, subagents 0.11.0, and background-tasks 0.6.3.
+
+## [pi-better-sandbox@0.8.1] - 2026-10-02
+
+### Changed
+
+- `ctrl+s` saves `/sandbox` settings from any row on the first press. Enter on Save also saves immediately, including looser defaults, and the note names what loosened.
+
+## [pi-better-subagents@0.11.0] - 2026-10-02
+
+### Added
+
+- The navigator `main` row opens a detail sheet. `m` cycles the session delegation mode. `ctrl+s` saves that mode as the next session's default. `x` does not stop main.
+- `/subagents save` writes the current mode into `config.json` after confirmation when a UI is available.
+
+### Changed
+
+- `/tool-output`, `/subagents`, and `/agents` show their options in the slash-menu subtitle.
+- Child tool and model incident summaries stay out of navigator rows and detail chrome. Run status, transcripts, result-tool diagnostics, and callbacks are unchanged. Tool names render as `bash` and `read`, without a `tool` prefix.
+
+## [pi-better-background-tasks@0.6.3] - 2026-10-02
+
+### Changed
+
+- Bundle the navigator that hides incident summaries from row chrome, shows plain tool names, and forwards `ctrl+s` on a detail sheet.
 
 ## [pi-better-harness@0.14.0] - 2026-10-01
 
