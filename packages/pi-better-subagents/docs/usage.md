@@ -18,8 +18,10 @@ Set `delegationMode` in this package's `config.json` to `manual`, `adaptive`, or
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents settings` (or simply
 `/subagents`) opens the terminal settings page with mode and concurrent-subagent
-cap controls, saved defaults, Save as defaults, and Reset to defaults. Changes
-apply immediately to this session; Escape closes the page without undoing them.
+cap controls and Reset to defaults. The page uses the same selected-row and
+active-cell styling as `/sandbox`, with one editable value column.
+Edits automatically persist for this session, including across reloads; Escape
+closes the page without undoing them.
 Enter edits the cap as a positive whole number; Escape cancels an unfinished edit.
 Ctrl+S saves both settings as defaults. Sandbox permissions remain in `/sandbox`.
 

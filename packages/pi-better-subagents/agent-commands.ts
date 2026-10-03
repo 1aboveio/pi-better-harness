@@ -47,6 +47,7 @@ import {
     type CodexDocument,
 } from "./codex-import.ts";
 import { resolveRoleAssignment } from "./role-assignment.ts";
+import { saveAgentSessionDefaults, withAgentSessionSettings, type AgentSessionOverrides, type AgentSessionSettings } from "./agent-session-settings.ts";
 
 const MODEL_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const TIER_PATTERN = /^[a-z][a-z0-9-]{0,32}$/;
@@ -68,6 +69,9 @@ export interface AgentCommandDeps {
     now?: () => string;
     /** Resolution unit injects availability, actual model/effort, and launchability. */
     enrich?: LaunchEnricher;
+    sessionSettings?: AgentSessionSettings;
+    /** Available foreground registry models, as provider/id. */
+    editableModels?: () => readonly string[];
     /**
      * Live slash-command context, before list/inspect/create/reload/import.
      * Lifecycle refreshes the foreground model and settings here. Direct
@@ -112,6 +116,7 @@ interface CatalogLocation {
     projectTrusted: boolean;
     projectConfigDirName?: string;
     bundledRoot?: string;
+    sessionSettings?: AgentSessionOverrides;
 }
 
 interface ParsedArgs {
@@ -149,6 +154,7 @@ export function registerAgentCommands(pi: Pick<ExtensionAPI, "registerCommand">,
 
 export async function executeAgentsCommand(args: string, host: AgentCommandHost, deps: AgentCommandDeps = {}): Promise<AgentCommandResult> {
     const parsed = parseCommandArgs(args);
+    if (parsed.positionals.length === 0 && parsed.flags.size === 0 && host.mode === "tui" && host.hasUI && host.ui.custom) parsed.positionals.push("list");
     if (parsed.unknown.length > 0 || parsed.missing.length > 0) {
         const detail = [
             ...parsed.unknown.map((flag) => `Unknown flag --${flag}.`),
@@ -161,8 +167,8 @@ export async function executeAgentsCommand(args: string, host: AgentCommandHost,
     }
     const command = parsed.positionals[0]!;
     const loc = location(host, deps);
-    if (command === "list") return finishInspection(host, await runList(parsed, loc, deps));
-    if (command === "show" || command === "inspect") return finishInspection(host, await runShow(command, parsed, host, loc, deps));
+    if (command === "list") return finishInspection(host, await runList(parsed, loc, deps), deps);
+    if (command === "show" || command === "inspect") return finishInspection(host, await runShow(command, parsed, host, loc, deps), deps);
     if (command === "reload") return finish(host, await runReload(parsed, loc, deps));
     if (command === "create") return finish(host, await runCreate(parsed, host, loc, deps));
     if (command === "import-codex") return finish(host, await runImport(parsed, host, loc, deps));
@@ -215,7 +221,7 @@ async function runList(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentComm
 
 async function runReload(parsed: ParsedArgs, loc: CatalogLocation, deps: AgentCommandDeps): Promise<AgentCommandResult> {
     if (parsed.positionals.length > 1) return result("error", "reload", false, "reload does not take extra arguments.");
-    const listed = presentCatalog(refreshCatalog(loc), deps.enrich);
+    const listed = presentCatalog(withAgentSessionSettings(refreshCatalog(loc), loc.sessionSettings), deps.enrich);
     return {
         ...result("ok", "reload", false, `Reloaded revision ${listed.revision} for inspection. The next launch reads the files again on its own; this command is not a prerequisite.\n${listed.text}`),
         diagnostics: listed.diagnostics,
@@ -662,11 +668,12 @@ function location(host: AgentCommandHost, deps: AgentCommandDeps): CatalogLocati
         projectTrusted: host.isProjectTrusted(),
         projectConfigDirName: deps.projectConfigDirName,
         bundledRoot: deps.bundledRoot,
+        sessionSettings: deps.sessionSettings?.snapshot(),
     };
 }
 
 function readCatalog(loc: CatalogLocation): CatalogSnapshot {
-    return loadCatalog(loc);
+    return withAgentSessionSettings(loadCatalog(loc), loc.sessionSettings);
 }
 
 function untrusted(command: string): AgentCommandResult {
@@ -707,16 +714,37 @@ function finish(host: AgentCommandHost, commandResult: AgentCommandResult): Agen
     return commandResult;
 }
 
-async function finishInspection(host: AgentCommandHost, commandResult: AgentCommandResult): Promise<AgentCommandResult> {
+async function finishInspection(host: AgentCommandHost, commandResult: AgentCommandResult, deps: AgentCommandDeps): Promise<AgentCommandResult> {
     if (commandResult.ok && host.mode === "tui" && host.hasUI && host.ui.custom) {
         const catalog = commandResult.data && typeof commandResult.data === "object" && "entries" in commandResult.data
             ? commandResult.data as ReturnType<typeof presentCatalog> : undefined;
         const view = catalog ? undefined : commandResult.data as OperationView;
-        const entries = catalog ?? { entries: [view], diagnostics: commandResult.diagnostics, revision: "", text: "" };
+        const entries = catalog ?? { entries: [view!], diagnostics: commandResult.diagnostics, revision: "", text: "" };
         try {
             host.ui.setWidget?.("agents-catalog", undefined);
             await host.ui.custom<void>((tui, theme, _keys, done) =>
-                createCatalogComponent(entries, theme, () => tui.requestRender(), () => done(), view?.id), { overlay: true });
+                createCatalogComponent(entries, theme, () => tui.requestRender(), () => done(), view?.id, deps.sessionSettings ? {
+                    get: () => presentCatalog(readCatalog(location(host, deps)), deps.enrich),
+                    models: () => deps.editableModels?.() ?? [],
+                    settings: () => deps.sessionSettings!.snapshot(),
+                    change: (id, key, value) => deps.sessionSettings!.change(id, key, value),
+                    save(id) {
+                        const loc = location(host, deps);
+                        const saved = saveAgentSessionDefaults(loadCatalog(loc), id, deps.sessionSettings!.snapshot(), loc);
+                        if (saved.ok) {
+                            commandResult.wrote = true;
+                            commandResult.path = saved.path;
+                            commandResult.scope = saved.scope;
+                        }
+                        return { ok: saved.ok, message: saved.ok ? `Defaults saved (${saved.scope}): ${id}.` : saved.diagnostics.map((item) => item.message).join(" ") };
+                    },
+                } : undefined), { overlay: true });
+            if (deps.sessionSettings) {
+                const current = readCatalog(location(host, deps));
+                const refreshed = view ? presentCatalogEntry(current, view.id, deps.enrich) : presentCatalog(current, deps.enrich);
+                commandResult.data = refreshed;
+                commandResult.message = refreshed.text;
+            }
             return commandResult;
         } catch {
             // A non-interactive host may expose custom() without supporting overlays.

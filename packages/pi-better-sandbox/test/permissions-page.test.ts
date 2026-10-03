@@ -27,9 +27,10 @@ function plain(text: string): string {
 
 function table(page: Component, width = 80): string[] {
     const lines = page.render(width).filter((line) => plain(line).trim());
-    const save = lines.findIndex((line) => plain(line).includes("Save as defaults"));
-    assert.ok(save >= 0, "the table must have a save action");
-    return lines.slice(0, save + 1);
+    const footer = lines.findIndex((line) => plain(line).includes("ctrl+s Save default"));
+    assert.ok(footer >= 0, "the footer must expose the save-default shortcut");
+    assert.ok(!lines.some((line) => plain(line).includes("Save as defaults")), "saving is not a selectable row");
+    return lines.slice(0, footer);
 }
 
 function harness(overrides: Partial<PermissionPageHandlers> = {}) {
@@ -54,8 +55,8 @@ function harness(overrides: Partial<PermissionPageHandlers> = {}) {
     return { page, press, changes, saved, initial, get current() { return current; }, get renders() { return renders; }, get closes() { return closes; } };
 }
 
-/** Down is clamped at the Save row, so enough presses always land there. */
-const toSave: string[] = Array(30).fill(Key.down);
+/** Down is clamped at the final tool row. */
+const toBottom: string[] = Array(30).fill(Key.down);
 
 async function settle() {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -76,7 +77,6 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[9]!, /\[x\] apply_patch\s+harness adapter/);
     assert.match(lines[10]!, /Trusted \(runs outside the file rules\)/);
     assert.match(lines[11]!, /> \[x\] @juicesharp\/rpiv-web-tools 2\/2/);
-    assert.match(lines[12]!, /Save as defaults/);
     assert.ok(!lines.some((line) => /\[x\] web_fetch/.test(line)), "tools are initially folded");
 });
 
@@ -96,8 +96,8 @@ test("selected rows have a full-width background and bold text, with an inverse 
     assert.equal(visibleWidth(selected[0]!), 100);
     assert.match(plain(selected[0]!), /@juicesharp\/rpiv-web-tools/);
     assert.match(selected[0]!, /\x1b\[1m/);
-    h.press(...toSave);
-    assert.match(plain(selectedLines()[0]!), /Save as defaults/);
+    h.press(...toBottom);
+    assert.match(plain(selectedLines()[0]!), /@juicesharp\/rpiv-web-tools/);
 });
 
 test("disabled details are dimmed and inactive but survive off/on toggles", async () => {
@@ -123,7 +123,7 @@ test("disabled details are dimmed and inactive but survive off/on toggles", asyn
     assert.match(plain(table(h.page)[2]!), /Project files\s+Off\s+Write & delete/);
 });
 
-test("arrows select rows and columns, Space cycles, Enter saves only on action, Escape closes", async () => {
+test("arrows select profiles, Space cycles, Enter folds only, Ctrl+S saves, Escape closes", async () => {
     const h = harness();
     h.press(Key.right, Key.down, Key.space);
     await settle();
@@ -140,10 +140,10 @@ test("arrows select rows and columns, Space cycles, Enter saves only on action, 
     h.press(Key.down, Key.down, Key.down, Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagents.network, false);
-    h.press(Key.enter, ...toSave, Key.space);
+    h.press(Key.enter, ...toBottom, Key.enter);
     await settle();
     assert.equal(h.saved.length, 0);
-    h.press(Key.enter);
+    h.press("\x13");
     await settle();
     assert.deepEqual(h.saved, [h.current]);
     assert.match(plain(h.page.render(80).at(-1)!), /Defaults saved/);
@@ -189,15 +189,15 @@ test("ctrl+s saves the current defaults from any row", async () => {
     await settle();
     assert.equal(h.saved.length, 1);
     assert.equal(h.saved[0]!.subagents.enabled, false);
-    assert.match(h.page.render(100).map(plain).join("\n"), /ctrl\+s Save/);
+    assert.match(h.page.render(100).map(plain).join("\n"), /ctrl\+s Save default/);
 });
 
-test("saving looser defaults happens on the first Enter and names what loosened", async () => {
+test("saving looser defaults happens on the first Ctrl+S and names what loosened", async () => {
     const h = harness({ loosening: (next) => next.subagents.network ? [] : ["Subagents: network on"] });
     h.press(Key.right, ...Array(5).fill(Key.down), Key.space);
     await settle();
     assert.equal(h.current.subagents.network, false);
-    h.press(...toSave, Key.enter);
+    h.press("\x13");
     await settle();
     assert.equal(h.saved.length, 1);
     assert.match(plain(h.page.render(120).at(-1)!), /Defaults saved\. Looser: Subagents: network on/);
@@ -219,13 +219,13 @@ test("change and save failures stay inline without optimistic state or closing",
     h.press(Key.space);
     await settle();
     assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
-    h.press(...toSave);
-    h.press(Key.enter);
+    h.press("\x13");
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /save failed/);
+    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/, "failed defaults save preserves the edit");
     assert.equal(h.closes, 0);
     failSave = false;
-    h.press(Key.enter);
+    h.press("\x13");
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /Defaults saved/);
 });
@@ -238,14 +238,14 @@ test("getConfig failures are inline and prevent mutation or save", async () => {
         save: () => { called++; },
     });
     assert.match(plain(h.page.render(40).at(-1)!), /config unavailable/);
-    h.press(Key.space, ...Array(6).fill(Key.down), Key.enter);
+    h.press(Key.space, ...Array(6).fill(Key.down), "\x13");
     await settle();
     assert.equal(called, 0);
 });
 
 test("render obeys cell widths including narrow terminals, Unicode and long errors", async () => {
     const h = harness({ save: () => { throw new Error("保存失敗: very long message 🧪".repeat(8)); } });
-    h.press(...toSave, Key.enter);
+    h.press("\x13");
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /保存失敗/);
     for (const width of [0, 1, 2, 7, 8, 12, 20, 32, 40, 80]) {
@@ -314,7 +314,7 @@ test("Tools groups fold, bulk-select with one Space, and retain per-tool choices
     h.press(Key.up, Key.space);
     await settle();
     assert.equal(h.current.subagentTools.applyPatch, false);
-    h.press(...toSave, Key.enter);
+    h.press("\x13");
     await settle();
     assert.deepEqual(h.saved.at(-1)!.subagentTools, h.current.subagentTools);
     const reopened = harness({ getConfig: () => h.saved.at(-1)!, discoverTools: () => discovered });
@@ -333,7 +333,7 @@ test("a ticked tool that is not loaded stays grouped so it can be unticked", asy
     h.press(Key.left, Key.space);
     await settle();
     assert.deepEqual(h.current.subagentTools.trusted, []);
-    assert.match(h.page.render(120).map(plain).join("\n"), />\s*Save as defaults/, "removing the last unloaded group clamps focus to Save");
+    assert.match(h.page.render(120).map(plain).join("\n"), />\s*\[x\] apply_patch/, "removing the last unloaded group clamps focus to the guarded tool");
 });
 
 test("MCP providers are separate groups and identical names in other packages stay independent", async () => {
@@ -377,7 +377,7 @@ test("individual children toggle with one Space and reopening does not grant new
     await settle();
     assert.equal(h.current.subagentTools.trusted.length, 3);
     assert.deepEqual(h.current.subagentTools.trusted.at(-1), tool);
-    h.press(...toSave, Key.enter);
+    h.press("\x13");
     await settle();
     const reopened = harness({ getConfig: () => h.saved.at(-1)!, discoverTools: () => [tool, { name: "new", package: "npm:zzz" }] });
     assert.match(reopened.page.render(160).map(plain).join("\n"), /> \[-\] zzz 1\/2/);
@@ -422,7 +422,7 @@ test("a looser save note remains visible within narrow bounds", async () => {
     });
     h.press(...Array(8).fill(Key.down), Key.space);
     await settle();
-    h.press(...toSave, Key.enter);
+    h.press("\x13");
     await settle();
     assert.equal(h.saved.length, 1);
     assert.match(h.page.render(40).map(plain).join("\n"), /Defaults saved/);

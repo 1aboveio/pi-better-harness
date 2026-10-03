@@ -1,7 +1,17 @@
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { OperationField, OperationList, OperationView } from "./agent-inspection.ts";
+import { EFFORT_LEVELS } from "./catalog-schema.ts";
+import type { AgentSessionOverrides, AgentSettingKey } from "./agent-session-settings.ts";
 
-type Theme = { fg(color: string, text: string): string };
+type Theme = { fg(color: string, text: string): string; bg?(color: string, text: string): string; bold?(text: string): string; inverse?(text: string): string };
+
+export interface CatalogEditor {
+    get(): OperationList;
+    models(): readonly string[];
+    settings(): AgentSessionOverrides;
+    change(id: string, key: AgentSettingKey, value: string | null): void;
+    save(id: string): { ok: boolean; message: string };
+}
 
 function stateLabel(entry: OperationView): string {
     if (entry.launchable === false) return "blocked";
@@ -84,11 +94,65 @@ export function createCatalogComponent(
     requestRender: () => void,
     close: () => void,
     initialId?: string,
+    editor?: CatalogEditor,
 ) {
     let selectedId = initialId ?? catalog.entries[0]?.id;
-    let mode: "list" | "detail" | "prompt" = initialId ? "detail" : "list";
+    let mode: "list" | "detail" | "prompt" | "settings" = initialId ? "detail" : "list";
     let query = "";
     let scroll = 0;
+    let settingRow = 0;
+    let picker: SelectList | undefined;
+    let filterPicker: ((filter: string) => void) | undefined;
+    let pickerKey: AgentSettingKey | undefined;
+    const search = new Input();
+    let focused = false;
+    let message = "";
+    let error = false;
+    const highlight = (text: string, width: number) => theme.bg?.("selectedBg", theme.bold?.(cell(text, width)) ?? cell(text, width)) ?? theme.fg("accent", text);
+    function report(text: string, failed = false) { message = text; error = failed; requestRender(); }
+    function refresh() { if (editor) catalog = editor.get(); }
+    function save() {
+        if (!editor || !selected()) return;
+        try {
+            const result = editor.save(selected()!.id);
+            refresh();
+            report(result.message, !result.ok);
+        } catch (cause) { report(String(cause instanceof Error ? cause.message : cause), true); }
+    }
+    function edit() {
+        const current = selected();
+        if (!current || !editor) return;
+        if (!current.definitionValid) { report("Repair the catalog definition before editing.", true); return; }
+        const key: AgentSettingKey = settingRow === 0 ? "model" : "effort";
+        const values = key === "model" ? [...new Set([...(editor.models()), ...(current.fields?.model.value ? [current.fields.model.value] : [])])].sort() : [...EFFORT_LEVELS];
+        const items = [{ value: "", label: "Inherit" }, ...values.map((value) => ({ value, label: value }))];
+        pickerKey = key;
+        search.setValue("");
+        search.focused = focused && key === "model";
+        const pickerTheme: ConstructorParameters<typeof SelectList>[2] = {
+            selectedPrefix: (text) => theme.fg("accent", text),
+            selectedText: (text) => theme.inverse?.(text) ?? theme.fg("accent", text),
+            description: (text) => theme.fg("dim", text),
+            scrollInfo: (text) => theme.fg("dim", text),
+            noMatch: (text) => theme.fg("warning", text),
+        };
+        const onSelect = (item: { value: string }) => {
+            try {
+                editor.change(current.id, key, item.value || null);
+                refresh();
+                picker = undefined;
+                search.focused = false;
+                report("Session settings updated.");
+            } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
+        };
+        filterPicker = (filter) => {
+            picker = new SelectList(items.filter((item) => item.label.toLowerCase().includes(filter.toLowerCase())), 12, pickerTheme);
+            picker.onCancel = () => { picker = undefined; search.focused = false; };
+            picker.onSelect = onSelect;
+        };
+        filterPicker("");
+        picker!.setSelectedIndex(Math.max(0, items.findIndex((item) => item.value === current.fields?.[key].value)));
+    }
     const filtered = () => catalog.entries.filter((entry) =>
         [entry.id, entry.identity.name, entry.identity.description, entry.role?.id]
             .some((value) => value?.toLowerCase().includes(query.toLowerCase())));
@@ -100,6 +164,8 @@ export function createCatalogComponent(
     let lastDetailWidth = 80;
 
     return {
+        get focused() { return focused; },
+        set focused(value: boolean) { focused = value; search.focused = value && !!picker && pickerKey === "model"; },
         render(width: number): string[] {
             const safeWidth = Math.max(1, width);
             lastDetailWidth = safeWidth;
@@ -109,9 +175,32 @@ export function createCatalogComponent(
             const detailLines = current ? detailRows(current, safeWidth) : [];
             const selectedIndex = rows.findIndex((entry) => entry.id === selectedId);
             const start = Math.max(0, Math.min(selectedIndex - 6, rows.length - 14));
-            const lines = mode !== "list" && current ? [
+            if (picker) return [
+                theme.fg("accent", `Agents / ${pickerKey}`), "",
+                ...(pickerKey === "model" ? search.render(safeWidth) : []),
+                ...picker.render(safeWidth),
+                ...(message ? [theme.fg(error ? "error" : "muted", message)] : []),
+            ].map(line);
+            const lines = mode === "settings" && current ? [
+                theme.fg("accent", `Agents / ${current.identity.name || current.id}`), "",
+                ...["Model", "Effort"].flatMap((label, index) => {
+                    const key = index === 0 ? "model" : "effort";
+                    const field = current.fields?.[key];
+                    const own = editor?.settings()[current.id];
+                    const ownSession = Object.hasOwn(own ?? {}, key);
+                    const roleSession = field?.inherited && Object.hasOwn(editor?.settings()[current.role?.id ?? ""] ?? {}, key);
+                    const origin = ownSession && own?.[key] === null ? "inherit / session" : ownSession ? "session" : roleSession ? "inherited / session" : field?.inherited ? "inherited" : "catalog";
+                    const value = `${field?.value ?? "(unset)"}  ${origin}`;
+                    const text = `${settingRow === index ? "> " : "  "}${label.padEnd(18)} ${value}`;
+                    if (safeWidth < 42) {
+                        const title = `${settingRow === index ? "> " : "  "}${label}`;
+                        return [settingRow === index ? highlight(title, safeWidth) : title, ...wrapLine(value, Math.max(1, safeWidth - 2)).map((line) => `  ${line}`)];
+                    }
+                    return [settingRow === index ? highlight(text, safeWidth) : text];
+                }),
+            ] : mode !== "list" && current ? [
                 theme.fg("accent", mode === "prompt" ? "Agents / prompt" : "Agents / inspect"),
-                theme.fg("dim", mode === "prompt" ? "← details  ·  ↑↓ scroll  ·  Esc close" : "p prompt  ·  ← list  ·  ↑↓ scroll  ·  Esc close"),
+                theme.fg("dim", mode === "prompt" ? "← details  ·  ↑↓ scroll  ·  Esc close" : `${editor ? "e settings  ·  " : ""}p prompt  ·  ← list  ·  ↑↓ scroll  ·  Esc close`),
                 "",
                 ...detailLines.slice(scroll, scroll + 22).map((text, i) =>
                     i === 0 && scroll === 0 ? theme.fg("accent", text) : text),
@@ -127,25 +216,37 @@ export function createCatalogComponent(
                     const active = selectedId === entry.id;
                     const marker = active ? "›" : " ";
                     const text = `${marker} ${catalogColumns(entry, safeWidth)}`;
-                    return active ? theme.fg("accent", text) : text;
+                    return active ? highlight(text, safeWidth) : text;
                 }),
                 ...(rows.length === 0 ? ["  No matching definitions"] : []),
                 ...(rows.length > 14 ? [theme.fg("dim", `  ${start + 1}-${Math.min(start + 14, rows.length)} of ${rows.length}`)] : []),
                 ...catalog.diagnostics.slice(0, 2).map((diagnostic) => theme.fg("warning", `! ${diagnostic.message}`)),
                 ...(catalog.diagnostics.length > 2 ? [theme.fg("warning", `! ${catalog.diagnostics.length - 2} more catalog diagnostics`)] : []),
             ];
+            if (editor && mode !== "prompt") lines.push("", theme.fg("dim", mode === "settings" ? "Up/Down Select · Enter Change · ctrl+s Save defaults · Esc Back" : "ctrl+s Save selected defaults"));
+            if (message) lines.push("", theme.fg(error ? "error" : "muted", message));
             return lines.map(line);
         },
         handleInput(data: string): void {
             const rows = filtered();
+            if (picker) {
+                if (pickerKey === "model" && !(["up", "down", "enter", "escape"] as const).some((key) => matchesKey(data, key))) {
+                    search.handleInput(data);
+                    filterPicker?.(search.getValue());
+                } else picker.handleInput(data);
+                requestRender();
+                return;
+            }
+            if (editor && matchesKey(data, "ctrl+s")) { save(); return; }
             if (matchesKey(data, "escape") || matchesKey(data, "left")) {
-                if (mode === "prompt") { mode = "detail"; scroll = 0; }
+                if (mode === "prompt" || mode === "settings") { mode = "detail"; scroll = 0; }
                 else if (mode === "detail") { mode = "list"; scroll = 0; }
                 else if (query) { query = ""; selectedId = catalog.entries[0]?.id; }
                 else { close(); return; }
             } else if (matchesKey(data, "up") || matchesKey(data, "down")) {
                 const delta = matchesKey(data, "down") ? 1 : -1;
-                if (mode !== "list" && selected()) scroll = Math.max(0, Math.min(detailRows(selected()!, lastDetailWidth).length - 1, scroll + delta));
+                if (mode === "settings") settingRow = Math.max(0, Math.min(1, settingRow + delta));
+                else if (mode !== "list" && selected()) scroll = Math.max(0, Math.min(detailRows(selected()!, lastDetailWidth).length - 1, scroll + delta));
                 else if (rows.length) selectedId = rows[Math.max(0, Math.min(rows.length - 1, rows.findIndex((entry) => entry.id === selectedId) + delta))]?.id;
             } else if (matchesKey(data, "enter") && mode === "list" && selected()) {
                 mode = "detail";
@@ -153,6 +254,11 @@ export function createCatalogComponent(
             } else if ((data === "p" || data === "P") && mode === "detail" && selected()) {
                 mode = "prompt";
                 scroll = 0;
+            } else if (editor && (data === "e" || data === "E") && mode === "detail" && selected()) {
+                mode = "settings";
+                settingRow = 0;
+            } else if (mode === "settings" && (matchesKey(data, "enter") || data === " ")) {
+                try { edit(); } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
             } else if (mode === "list" && matchesKey(data, "backspace")) {
                 query = query.slice(0, -1);
                 selectedId = filtered()[0]?.id;
@@ -162,6 +268,6 @@ export function createCatalogComponent(
             }
             requestRender();
         },
-        invalidate() {},
+        invalidate() { picker?.invalidate(); search.invalidate(); },
     };
 }

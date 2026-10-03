@@ -55,8 +55,8 @@ const DISABLE_TITLE = "Disable the foreground write sandbox?";
 
 const DISABLE_MESSAGE = [
     "The built-in bash, write, and edit tools and user-entered ! / !! commands",
-    "will run with normal host write access for the rest of this session. The",
-    "next session applies your persisted foreground sandbox default.",
+    "will run with normal host write access on this session branch, including",
+    "after resume or reload. New sessions apply your saved sandbox default.",
 ].join("\n");
 
 const NO_UI_REJECTION =
@@ -80,6 +80,8 @@ export type SandboxCommandDeps = {
     onStateChange: (status: ForegroundSandboxStatus) => void;
     /** Persist a default and apply it to the current session. */
     setDefault: (enabled: boolean) => ForegroundSandboxStatus;
+    /** Persist the session change before mutating enforcement. */
+    setSessionEnabled?: (enabled: boolean) => ForegroundSandboxStatus;
     openPermissions?: (ctx: ExtensionCommandContext) => Promise<void>;
 };
 
@@ -89,6 +91,7 @@ export function createSandboxCommandHandler({
     denyRules,
     onStateChange,
     setDefault,
+    setSessionEnabled,
     openPermissions,
 }: SandboxCommandDeps) {
     return async function handleSandboxCommand(
@@ -112,7 +115,12 @@ export function createSandboxCommandHandler({
         }
 
         if (subcommand === "on") {
-            const status = controller.enable();
+            let status: ForegroundSandboxStatus;
+            try { status = setSessionEnabled ? setSessionEnabled(true) : controller.enable(); }
+            catch (error) {
+                ctx.ui.notify(`Sandbox state unchanged: ${error instanceof Error ? error.message : String(error)}`, "error");
+                return;
+            }
             onStateChange(status);
             ctx.ui.notify(
                 status.state === "enabled"
@@ -140,7 +148,12 @@ export function createSandboxCommandHandler({
                 ctx.ui.notify("Foreground sandbox left on.", "info");
                 return;
             }
-            const status = controller.disable();
+            let status: ForegroundSandboxStatus;
+            try { status = setSessionEnabled ? setSessionEnabled(false) : controller.disable(); }
+            catch (error) {
+                ctx.ui.notify(`Sandbox state unchanged: ${error instanceof Error ? error.message : String(error)}`, "error");
+                return;
+            }
             onStateChange(status);
             ctx.ui.notify(
                 "Foreground sandbox OFF for this session. Shell commands can now write anywhere.",

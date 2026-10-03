@@ -6,9 +6,8 @@
  * the *effective* status derived from live runtime evidence (which backend this
  * platform actually resolves, not what the package intended).
  *
- * Session overrides are deliberately in-memory only. Every session start —
- * startup, new, resume, fork, reload — calls `beginSession` with the persisted
- * default and clears the previous override.
+ * The extension persists permission snapshots in Pi custom entries and restores
+ * the active branch after `beginSession` resets this in-memory controller.
  */
 
 import { getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent";
@@ -132,7 +131,7 @@ export class ForegroundSandboxController {
 
     /**
      * Capture the canonical launch directory and apply the persisted default.
-     * A session override never survives a new, resumed, forked, or reloaded session.
+     * The extension then restores any permissions on the active session branch.
      */
     beginSession(cwd: string, defaultEnabled = false): ForegroundSandboxStatus {
         const projectRoot = canonicalizePath(cwd, this.#seams);
@@ -156,7 +155,7 @@ export class ForegroundSandboxController {
         return this.status();
     }
 
-    /** Turn protection off for this session only. Never persisted. */
+    /** Turn protection off for this session; persistence belongs to the extension. */
     disable(): ForegroundSandboxStatus {
         this.#sessionOverride = false;
         this.#policyProblem = undefined;

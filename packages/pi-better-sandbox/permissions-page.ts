@@ -124,7 +124,7 @@ export function createPermissionsPage(
     const itemKey = (item: ToolItem) => item.kind === "group" ? item.id
         : item.kind === "guarded" ? "apply_patch" : JSON.stringify([item.name, item.package]);
     let items = toolItems();
-    const saveRow = () => rows.length + items.length;
+    const lastRow = () => rows.length + items.length - 1;
     let row = 0;
     let column = 0;
     let busy = false;
@@ -136,7 +136,7 @@ export function createPermissionsPage(
     }
 
     async function change(): Promise<void> {
-        if (!settings || busy || row === saveRow()) return;
+        if (!settings || busy) return;
         const next = snapshot(settings);
         if (row >= rows.length) {
             const item = items[row - rows.length]!;
@@ -173,15 +173,14 @@ export function createPermissionsPage(
         busy = true;
         try {
             await handlers.change(snapshot(next));
-            const selected = row >= rows.length && row < saveRow() ? items[row - rows.length] : undefined;
-            const wasSave = row === saveRow();
+            const selected = row >= rows.length ? items[row - rows.length] : undefined;
             const successors = selected ? items.slice(row - rows.length + 1).map(itemKey) : [];
             settings = next;
             items = toolItems();
             const index = selected ? items.findIndex((item) => itemKey(item) === itemKey(selected)) : -1;
             const successor = successors.map((key) => items.findIndex((item) => itemKey(item) === key)).find((at) => at >= 0);
-            row = wasSave ? saveRow() : index >= 0 ? rows.length + index
-                : successor !== undefined ? rows.length + successor : Math.min(row, saveRow());
+            row = index >= 0 ? rows.length + index
+                : successor !== undefined ? rows.length + successor : Math.min(row, lastRow());
             message = "";
             isError = false;
             requestRender();
@@ -215,7 +214,7 @@ export function createPermissionsPage(
     }
 
     function fold(open?: boolean): void {
-        const item = row >= rows.length && row < saveRow() ? items[row - rows.length] : undefined;
+        const item = row >= rows.length ? items[row - rows.length] : undefined;
         const id = item?.kind === "group" ? item.id : item?.kind === "trusted" && open === false ? item.group : undefined;
         if (!id) return;
         if (open ?? !expanded.has(id)) expanded.add(id);
@@ -234,21 +233,19 @@ export function createPermissionsPage(
                 row = Math.max(0, row - 1);
                 requestRender();
             } else if (matchesKey(data, Key.down)) {
-                row = Math.min(saveRow(), row + 1);
+                row = Math.min(lastRow(), row + 1);
                 requestRender();
             } else if (matchesKey(data, Key.left)) {
-                if (row >= rows.length && row < saveRow()) fold(false);
+                if (row >= rows.length) fold(false);
                 else column = 0;
                 requestRender();
             } else if (matchesKey(data, Key.right)) {
-                if (row >= rows.length && row < saveRow()) fold(true);
+                if (row >= rows.length) fold(true);
                 else column = 1;
                 requestRender();
             } else if (matchesKey(data, Key.space)) {
                 void change();
             } else if (matchesKey(data, "ctrl+s")) {
-                void save();
-            } else if (matchesKey(data, Key.enter) && row === saveRow()) {
                 void save();
             } else if (matchesKey(data, Key.enter)) {
                 fold();
@@ -315,13 +312,13 @@ export function createPermissionsPage(
                 output.push(theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}  Trusted (runs outside the file rules)`, w, "")),
                     theme.fg("dim", truncateToWidth(`${prefix ? "  " : ""}    No other extension tools are installed.`, w, "")));
             }
-            output.push("", line("Save as defaults", "", "", row === saveRow()));
+            output.push("");
             const selected = row < rows.length ? rows[row]!.key : undefined;
-            const tool = row >= rows.length && row < saveRow() ? items[row - rows.length] : undefined;
+            const tool = row >= rows.length ? items[row - rows.length] : undefined;
             const contextual = tool ? (tool.kind === "guarded" ? GUARDED_HINT : TRUSTED_HINT)
                 : selected && settings ? cellHint(selected, settings[columns[column]!]) : undefined;
             for (const hint of [
-                "↑↓ Select · ←→ Column/fold · Space Toggle · ctrl+s Save · Enter Fold · Esc Back",
+                "↑↓ Select · ←→ Column/fold · Space Toggle · ctrl+s Save default · Enter Fold · Esc Back",
                 "Changes apply to new launches. Background tasks follow their launcher.",
                 "Stored credentials: known files only; excludes OS vaults and environment tokens.",
                 "Trusted tools run outside the file rules.",

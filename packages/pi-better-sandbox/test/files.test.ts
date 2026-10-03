@@ -71,6 +71,7 @@ function sessionContext(cwd: string): ExtensionContext {
         cwd,
         hasUI: false,
         mode: "print",
+        sessionManager: { getBranch: () => [] },
         ui: {
             theme: { fg: (_tone: string, text: string) => text },
             notify() {},
@@ -705,10 +706,12 @@ test("the registrations pi actually loads enforce the same policy on real files"
     assert.ok(extension);
 
     // Pi binds the loader's registered tool inventory before session_start.
+    const session = SessionManager.inMemory(root);
     const runner = new ExtensionRunner(
-        loaded.extensions, loaded.runtime, root, SessionManager.inMemory(root), {} as never,
+        loaded.extensions, loaded.runtime, root, session, {} as never,
     );
     runner.bindCore({
+        appendEntry: (customType, data) => { session.appendCustomEntry(customType, data); },
         refreshTools: () => {},
         getAllTools: () => [...extension.tools.values()].map(({ definition, sourceInfo }) => ({
             name: definition.name, description: definition.description,
@@ -719,10 +722,11 @@ test("the registrations pi actually loads enforce the same policy on real files"
 
     const sessionStart = extension.handlers.get("session_start")?.[0];
     assert.ok(sessionStart, "the extension must handle session_start");
-    await sessionStart({ type: "session_start", reason: "startup" }, sessionContext(root));
+    const ctx = { ...sessionContext(root), sessionManager: session } as unknown as ExtensionContext;
+    await sessionStart({ type: "session_start", reason: "startup" }, ctx);
     await extension.commands
         .get("sandbox")
-        ?.handler("on", sessionContext(root) as unknown as ExtensionCommandContext);
+        ?.handler("on", ctx as unknown as ExtensionCommandContext);
 
     const write = extension.tools.get("write")?.definition as unknown as Tools["write"] | undefined;
     const edit = extension.tools.get("edit")?.definition as unknown as Tools["edit"] | undefined;

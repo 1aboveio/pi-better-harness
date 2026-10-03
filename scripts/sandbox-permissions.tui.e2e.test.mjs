@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,7 @@ import test from "node:test";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
-test("sandbox permission table edits both profiles and saves inactive values in the real TUI", { skip: !hasTmux }, () => {
+test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the real TUI", { skip: !hasTmux }, () => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-permission-tui-"));
     const server = `pi-permission-${process.pid}`;
     const args = ["-L", server];
@@ -34,6 +34,8 @@ test("sandbox permission table edits both profiles and saves inactive values in 
         wait(/sandbox/);
         literal("/sandbox"); key("Enter");
         let text = wait(/Sandbox permissions\s+Main\s+Subagents/);
+        assert.doesNotMatch(text, /Save as defaults/);
+        assert.match(text, /ctrl\+s Save default/);
         assert.match(text, /Sandbox\s+Off\s+On/);
         const focused = tmux("capture-pane", "-t", "permissions", "-e", "-p").split("\n")
             .find((line) => line.replace(/\x1b\[[0-9;]*m/g, "").startsWith("> Sandbox"));
@@ -56,21 +58,30 @@ test("sandbox permission table edits both profiles and saves inactive values in 
         wait(/Outside project\s+-\s+Write & delete/);
         // The guarded adapter stays a direct row; trusted tools start folded by package.
         wait(/Subagents · Tools[\s\S]*\[x\] apply_patch\s+harness adapter[\s\S]*Trusted \(runs outside the file rules\)[\s\S]*\[x\].*@juicesharp\/rpiv-web-tools\s+2\/2/);
-        for (let i = 0; i < 80; i++) key("Down");
-        // Saving a looser default asks first.
-        key("Enter"); wait(/Defaults saved\. Looser: Subagents: outsideProject write → read-write/);
+        const defaultsPath = join(fixture, "agent/extensions/pi-better-sandbox-permissions.json");
+        assert.equal(existsSync(defaultsPath), false, "editing must not write global defaults");
+        key("Enter"); // Not a save command.
+        key("Escape"); wait(/^(?![\s\S]*Sandbox permissions\s+Main)/);
+        literal("/reload"); key("Enter"); wait(/Reloaded/);
+        literal("/sandbox"); key("Enter");
+        wait(/Outside project\s+-\s+Write & delete/);
+        assert.equal(existsSync(defaultsPath), false, "reload restores the session without writing defaults");
+        key("Space"); wait(/Project files\s+Off\s+Write & delete/);
+        key("Space"); wait(/Sandbox\s+Off\s+On/);
+        key("C-s"); wait(/Defaults saved\. Looser: Subagents: outsideProject write → read-write/);
         wait(/Defaults saved/);
-        const saved = JSON.parse(readFileSync(join(fixture, "agent/extensions/pi-better-sandbox-permissions.json"), "utf8"));
+        const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
         assert.equal(saved.permissions.main.enabled, false);
         assert.equal(saved.permissions.main.projectFiles, "off");
         assert.equal(saved.permissions.subagents.outsideProject, "read-write");
         assert.equal(saved.permissions.subagentTools.applyPatch, true);
+        key("Space"); wait(/Project files\s+Off\s+Write & delete/); // Session-only Main on.
         key("Escape");
-        wait(/^(?![\s\S]*Save as defaults)/);
-        literal("/reload"); key("Enter"); wait(/Reloaded/);
+        wait(/^(?![\s\S]*Sandbox permissions\s+Main)/);
+        literal("/new"); key("Enter"); wait(/New session/);
         literal("/sandbox"); key("Enter");
+        wait(/Sandbox\s+Off\s+On/);
         wait(/Outside project\s+-\s+Write & delete/);
-        key("Space"); wait(/Project files\s+Off\s+Write & delete/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
         rmSync(fixture, { recursive: true, force: true });
@@ -117,8 +128,8 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
     const selected = () => screen().match(/^> (.*)$/m)?.[1] ?? "";
     const moveTo = (pattern, direction = "Down") => {
         for (let i = 0; i < 60; i++) {
-            if (pattern.test(selected())) return;
             const before = selected();
+            if (pattern.test(before)) return;
             key(direction);
             wait((text) => (text.match(/^> (.*)$/m)?.[1] ?? "") !== before);
         }
@@ -153,9 +164,9 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         key("Left"); wait(/^(?![\s\S]*mcp__atlas__read)/);
         key("Enter"); wait(/mcp__atlas__read/);
         key("Enter"); wait(/^(?![\s\S]*mcp__atlas__read)/);
-        moveTo(/Save as defaults/);
-        assert.match(selected(), /Save as defaults/);
-        key("Enter"); wait(/Defaults saved/);
+        assert.equal(existsSync(join(agent, "extensions/pi-better-sandbox-permissions.json")), false);
+        assert.doesNotMatch(screen(), /Save as defaults/);
+        key("C-s"); wait(/Defaults saved/);
         wait(/Looser:/);
         const saved = JSON.parse(readFileSync(join(agent, "extensions/pi-better-sandbox-permissions.json"), "utf8"));
         assert.equal(saved.permissions.subagentTools.applyPatch, true);
@@ -164,7 +175,7 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
             ["mcp__atlas__read", alpha], ["mcp__atlas__write", alpha],
             ["web_fetch", "npm:@juicesharp/rpiv-web-tools"], ["web_search", "npm:@juicesharp/rpiv-web-tools"],
         ]);
-        key("Escape"); wait(/^(?![\s\S]*Save as defaults)/);
+        key("Escape"); wait(/^(?![\s\S]*Sandbox permissions\s+Main)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
         literal("/sandbox"); key("Enter"); wait(/Subagents · Tools/);
         assert.match(screen(), /atlas \([^\n]*fixture-alpha\).*2\/2/);

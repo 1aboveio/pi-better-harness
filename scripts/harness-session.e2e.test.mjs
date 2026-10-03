@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { join, resolve } from "node:path";
 import test, { after, before } from "node:test";
 
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describeSandboxSupport } from "../packages/sandbox-core/index.ts";
 process.env.PI_SANDBOX_RECOVERY_SNAPSHOT ??= "off"; // never create real APFS snapshots from tests
 
@@ -85,6 +86,7 @@ const userBashHandlers = [];
 const events = new EventEmitter();
 const notifications = [];
 let initialForegroundPolicy;
+const sessionManager = SessionManager.inMemory(projectRoot);
 
 const ctx = {
   cwd: projectRoot,
@@ -92,12 +94,7 @@ const ctx = {
   mode: "tui",
   model: { provider: "test-provider", id: "test-model" },
   thinkingLevel: "off",
-  sessionManager: {
-    getSessionId: () => "harness-session",
-    getSessionFile: () => join(fixtures, "harness-session.jsonl"),
-    getBranch: () => [],
-    getMessages: () => [],
-  },
+  sessionManager,
   isIdle: () => true,
   ui: {
     theme: { fg: (_color, text) => text },
@@ -112,6 +109,7 @@ const ctx = {
 };
 
 const pi = {
+  appendEntry: (customType, data) => { sessionManager.appendCustomEntry(customType, data); },
   events: {
     emit: (channel, payload) => events.emit(channel, payload),
     on: (channel, handler) => {
@@ -195,6 +193,9 @@ test("the harness loads the sandbox alongside every other default extension", { 
 // @level e2e
 test("the harness starts inactive, then one opt-in policy governs the whole session", { skip }, async () => {
   assert.equal(initialForegroundPolicy.state, "disabled");
+  const sessionPolicy = sessionManager.getBranch().find((entry) =>
+    entry.type === "custom" && entry.customType === "pi-better-sandbox-permissions");
+  assert.equal(sessionPolicy?.data.permissions.main.enabled, true, "opt-in must be persisted before enforcement changes");
   assert.match(initialForegroundPolicy.reason, /inactive by default/);
 
   notifications.length = 0;

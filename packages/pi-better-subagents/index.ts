@@ -146,6 +146,7 @@ import {
 import { enforceRegistrySizeCapOnce, runDailyCleanupOnce } from "./cleanup.ts";
 import { assertThinkingLevel, parseModelThinking, type ThinkingLevel } from "./thinking.ts";
 import { createAgentOperations } from "./agent-operations.ts";
+import { createAgentSessionSettings } from "./agent-session-settings.ts";
 import {
     clarifyCatalogRequest,
     createLaunchEnricher,
@@ -1498,6 +1499,8 @@ function catalogRoleSchema(purpose: string) {
 }
 
 export default function (pi: ExtensionAPI) {
+    const agentSessionSettings = createAgentSessionSettings(pi);
+    let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;
     let delegationOverride: DelegationMode | undefined;
     let capOverride: number | undefined;
     const activeConcurrencyCap = (): number => capOverride ?? normalizeConcurrencyCap(loadConfig().maxConcurrent);
@@ -1588,8 +1591,12 @@ export default function (pi: ExtensionAPI) {
     }
 
     function catalogHostFrom(ctx: ExtensionContext): CatalogHost {
+        if (typeof ctx.sessionManager?.getBranch === "function") agentSessionSettings.restore(ctx);
+        catalogModelRegistry = ctx.modelRegistry;
         const cfg = loadConfig();
         return {
+            sessionSettings: agentSessionSettings.snapshot(),
+            getSessionSettings: () => agentSessionSettings.snapshot(),
             cwd: ctx.cwd,
             projectTrusted: typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : false,
             userRoot: defaultUserRoot(),
@@ -2245,6 +2252,8 @@ export default function (pi: ExtensionAPI) {
 
     const agentOperations = createAgentOperations({
         projectConfigDirName,
+        sessionSettings: agentSessionSettings,
+        editableModels: () => catalogModelRegistry?.getAvailable().map((model) => `${model.provider}/${model.id}`) ?? [],
         propagateCommandContext(commandCtx) {
             noteCatalogHost(catalogHostFrom(commandCtx));
         },
@@ -2255,6 +2264,7 @@ export default function (pi: ExtensionAPI) {
                 hasUI: full.hasUI === true,
                 model: full.model,
                 modelRegistry: full.modelRegistry,
+                sessionManager: full.sessionManager,
                 ui: full.ui ?? { select: async () => undefined },
                 isProjectTrusted: () => full.isProjectTrusted(),
             } as ExtensionContext));
@@ -2263,6 +2273,7 @@ export default function (pi: ExtensionAPI) {
                 projectTrusted: full.isProjectTrusted(),
                 userRoot: defaultUserRoot(),
                 projectConfigDirName,
+                sessionSettings: agentSessionSettings.snapshot(),
             };
         },
         enrich: createLaunchEnricher(),
@@ -2367,6 +2378,8 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("session_tree", async (_event, ctx) => {
+        agentSessionSettings.restore(ctx);
+        try { noteCatalogHost(catalogHostFrom(ctx)); } catch { /* catalog inspection stays undecided */ }
         restoreDelegationMode(ctx);
     });
 
@@ -2374,6 +2387,7 @@ export default function (pi: ExtensionAPI) {
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
+        agentSessionSettings.restore(ctx);
         restoreDelegationMode(ctx);
         uiCtx = ctx;
         try { noteCatalogHost(catalogHostFrom(ctx)); } catch { /* catalog inspection stays undecided */ }
@@ -2413,6 +2427,8 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("session_before_switch", () => {
+        agentSessionSettings.clear();
+        catalogModelRegistry = undefined;
         activeCallbackOrigin = undefined;
         cancelCallbackBatch(pi);
         mainAgentStartedAt = undefined;
@@ -2426,6 +2442,8 @@ export default function (pi: ExtensionAPI) {
         // running/orphaned children before dropping the session origin, so they
         // cannot become live process groups with no coordinator.
         stopCurrentSessionSubagents(ctx);
+        agentSessionSettings.clear();
+        catalogModelRegistry = undefined;
         activeCallbackOrigin = undefined;
         if (typeof unsubscribeDelegationRequest === "function") unsubscribeDelegationRequest();
         cancelCallbackBatch(pi);

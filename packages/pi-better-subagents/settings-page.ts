@@ -20,7 +20,12 @@ export interface SubagentSettingsHandlers {
     reset(): void;
 }
 
-const labels = ["Delegation mode", "Concurrent subagents", "Save as defaults", "Reset to defaults"];
+const labels = ["Delegation mode", "Concurrent subagents", "Reset to defaults"];
+
+function cell(text: string, width: number): string {
+    const clipped = Tui.truncateToWidth(text, width, "");
+    return clipped + " ".repeat(Math.max(0, width - Tui.visibleWidth(clipped)));
+}
 
 export function createSubagentSettingsPage(
     theme: Theme,
@@ -52,9 +57,6 @@ export function createSubagentSettingsPage(
                 input.handleInput("\x05");
                 input.focused = focused;
                 report("");
-            } else if (row === 2) {
-                const result = handlers.save();
-                report(result.message, !result.ok);
             } else {
                 handlers.reset();
                 report("Session settings reset to saved defaults.");
@@ -98,31 +100,41 @@ export function createSubagentSettingsPage(
             else if (Tui.matchesKey(data, Tui.Key.down)) row = Math.min(labels.length - 1, row + 1);
             else if (Tui.matchesKey(data, Tui.Key.enter) || data === " ") action();
             else if (Tui.matchesKey(data, "ctrl+s")) {
-                const selected = row;
-                row = 2;
-                action();
-                row = selected;
+                const result = handlers.save();
+                report(result.message, !result.ok);
             }
             requestRender();
         },
         render(width: number) {
             const settings = handlers.get();
-            const values = [
-                `${settings.mode} (${settings.modeSource})`,
-                `${settings.maxConcurrent} (${settings.capSource})`,
-                "",
-                "",
-            ];
-            const lines = [theme.fg("accent", theme.bold("Subagent settings")), ""];
+            const w = Math.max(1, Math.floor(width));
+            const compact = w < 40;
+            const labelWidth = 26;
+            const valueWidth = Math.max(1, w - labelWidth - 1);
+            const current = [settings.mode, String(settings.maxConcurrent)];
+            const highlight = (text: string, selected: boolean): string => selected
+                ? theme.bg("selectedBg", theme.bold(cell(text, w))) : text;
+            const marker = (selected: boolean) => selected ? "> " : "  ";
+            const lines: string[] = [theme.fg("accent", theme.bold("  Subagent settings")), ""];
             labels.forEach((label, index) => {
-                const text = `${index === row ? ">" : " "} ${label}${values[index] ? `: ${values[index]}` : ""}`;
-                lines.push(index === row ? theme.fg("accent", theme.bold(text)) : text);
+                const selected = index === row;
+                if (index === 2) lines.push("");
+                const title = theme.fg(selected ? "accent" : "text", marker(selected) + label);
+                if (index >= 2) {
+                    lines.push(highlight(title, selected));
+                } else if (compact) {
+                    lines.push(highlight(title, selected));
+                    const active = editing && index === 1 ? input.render(Math.max(1, w - 2))[0]! : current[index]!;
+                    lines.push("  " + (selected && !editing ? theme.inverse(active) : active));
+                } else {
+                    const active = editing && index === 1 ? input.render(valueWidth)[0]! : cell(current[index]!, valueWidth);
+                    lines.push(highlight(cell(title, labelWidth) + " " +
+                        (selected && !editing ? theme.inverse(active) : theme.fg("text", active)), selected));
+                }
             });
-            if (editing) lines.push("", ...input.render(Math.max(1, width)));
-            lines.push("", theme.fg("muted", `Saved defaults: ${settings.defaultMode}, cap ${settings.defaultCap}`));
-            if (message) lines.push(theme.fg(error ? "error" : "success", message));
-            lines.push("", theme.fg("dim", editing ? "Enter apply  Esc cancel" : "Up/Down select  Enter change  Ctrl+S save  Esc close"));
-            return lines.map((line) => Tui.truncateToWidth(line, Math.max(1, width), ""));
+            if (message) lines.push("", theme.fg(error ? "error" : "muted", message));
+            lines.push("", theme.fg("dim", editing ? "Enter Apply · Esc Cancel" : "Up/Down Select · Space/Enter Change · ctrl+s Save default · Esc Back"));
+            return lines.map((line) => Tui.truncateToWidth(line, w, ""));
         },
     };
 }

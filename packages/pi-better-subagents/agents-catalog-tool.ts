@@ -6,6 +6,7 @@
 import { presentCatalog, presentCatalogEntry, type LaunchEnricher } from "./agent-inspection.ts";
 import { canonicalCatalogId } from "./catalog-schema.ts";
 import { defaultUserRoot, loadCatalog } from "./catalog-store.ts";
+import { withAgentSessionSettings, type AgentSessionOverrides, type AgentSessionSettings } from "./agent-session-settings.ts";
 
 type TypeModule = {
     Object: (value: unknown) => unknown;
@@ -19,6 +20,7 @@ export interface DiscoveryHost {
     userRoot: string;
     projectConfigDirName?: string;
     bundledRoot?: string;
+    sessionSettings?: AgentSessionOverrides;
 }
 
 export interface DiscoveryDeps {
@@ -26,6 +28,7 @@ export interface DiscoveryDeps {
     bundledRoot?: string;
     projectConfigDirName?: string;
     enrich?: LaunchEnricher;
+    sessionSettings?: AgentSessionSettings;
     resolveHost?: (ctx: { cwd: string; isProjectTrusted(): boolean }) => DiscoveryHost;
 }
 
@@ -67,15 +70,16 @@ export function agentsCatalogTool(Type: TypeModule, deps: DiscoveryDeps = {}) {
                 return toolError(`agents_catalog action must be list or inspect, got ${JSON.stringify(action ?? "")}. It does not create, import, reload, or launch. Nothing was written.`);
             }
             const host = resolveHost(ctx, deps);
+            const snapshot = withAgentSessionSettings(loadCatalog(host), host.sessionSettings ?? deps.sessionSettings?.snapshot());
             if (action === "list") {
-                const listed = presentCatalog(loadCatalog(host), deps.enrich);
+                const listed = presentCatalog(snapshot, deps.enrich);
                 return {
                     content: [{ type: "text" as const, text: listed.text }],
                     details: { action, wrote: false, revision: listed.revision, entries: listed.entries, diagnostics: listed.diagnostics },
                 };
             }
             if (!params.id?.trim()) return toolError("inspect needs a role name or agent id. Call agents_catalog with action list to see them. Nothing was written.");
-            const view = presentCatalogEntry(loadCatalog(host), canonicalCatalogId(params.id), deps.enrich);
+            const view = presentCatalogEntry(snapshot, canonicalCatalogId(params.id), deps.enrich);
             return {
                 content: [{ type: "text" as const, text: view.text }],
                 details: { action, wrote: false, view },

@@ -1,3 +1,5 @@
+export class Input {}
+export class SelectList {}
 export const Key = {
     Enter: 'enter',
     Escape: 'escape',
