@@ -172,6 +172,8 @@ setMetaWriteBarrierForTests(() => {
   while (!existsSync(${JSON.stringify(go)})) Atomics.wait(park, 0, 0, 30);
 });
 writeMeta(${JSON.stringify(baseMeta(id, { name: "proc-A", catalog: { marker: "A" } }))});
+// Exercise a waiter that can exit before its holder.
+await new Promise((resolve) => setTimeout(resolve, 500));
 `;
         const waiterScript = `
 import { writeMeta } from ${JSON.stringify(REGISTRY)};
@@ -182,6 +184,7 @@ writeMeta(${JSON.stringify(baseMeta(id, { name: "proc-B", status: "failed", cata
             cwd: REPO_ROOT,
             env: { ...process.env, ...env },
         });
+        const holderClosed = new Promise((resolve) => holder.once("close", resolve));
         try {
             const started = Date.now();
             while (!existsSync(held)) {
@@ -194,6 +197,7 @@ writeMeta(${JSON.stringify(baseMeta(id, { name: "proc-B", status: "failed", cata
                 env: { ...process.env, ...env },
                 stdio: ["ignore", "pipe", "pipe"],
             });
+            const waiterClosed = new Promise((resolve) => waiter.once("close", resolve));
             let waiterErr = "";
             waiter.stderr.setEncoding("utf8");
             waiter.stderr.on("data", (chunk) => { waiterErr += chunk; });
@@ -202,8 +206,8 @@ writeMeta(${JSON.stringify(baseMeta(id, { name: "proc-B", status: "failed", cata
             const mid = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, "utf8")) : null;
             writeFileSync(go, "1");
             process.kill(holder.pid, "SIGCONT");
-            const holderCode = await new Promise((resolve) => holder.on("close", resolve));
-            const waiterCode = await new Promise((resolve) => waiter.on("close", resolve));
+            const holderCode = await holderClosed;
+            const waiterCode = await waiterClosed;
             const finalMeta = JSON.parse(readFileSync(metaPath, "utf8"));
             assert.equal(holderCode, 0, waiterErr);
             assert.equal(waiterCode, 0, waiterErr);
