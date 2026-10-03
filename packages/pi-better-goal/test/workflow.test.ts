@@ -75,7 +75,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   assert.deepEqual(userMessages[0]?.options, { deliverAs: "followUp", expandPromptTemplates: true });
   assert.equal(messages.length, 0);
   await handlers.get("session_start")?.({ reason: "resume" }, ctx);
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.match(userMessages[1]?.content ?? "", /Continue the existing goal/);
   await commands.get("goal")?.handler("pause", ctx);

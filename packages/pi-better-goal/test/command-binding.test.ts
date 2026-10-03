@@ -48,7 +48,7 @@ test("extension commands dispatch once, then resume as goal supervision", async 
   await commands.get("goal")?.handler("/publish report", ctx);
   assert.deepEqual(sent, ["/publish report"]);
   assert.equal(currentGoalSnapshot(ctx)?.command?.source, "extension");
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(60_000);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.match(followups.at(-1) ?? "", /Goal: \/publish report/);
   assert.equal(sent.length, 1);

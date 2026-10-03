@@ -1,5 +1,7 @@
 export type DelegationMode = "manual" | "adaptive" | "coordinator";
 
+export const DELEGATION_MODES = ["manual", "adaptive", "coordinator"] as const;
+
 export const DELEGATION_MODE_REQUEST = "pi-better-subagents:delegation-mode-request";
 
 export function isDelegationMode(value: unknown): value is DelegationMode {

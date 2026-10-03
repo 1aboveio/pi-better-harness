@@ -35,7 +35,8 @@ import {
 import { spawnDetached, type SpawnResult } from "./spawn.ts";
 import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
-import { loadConfig, writeDelegationMode, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS, DEFAULT_MAX_CONCURRENT } from "./config.ts";
+import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
+import { createSubagentSettingsPage } from "./settings-page.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
     decideTiming,
@@ -52,7 +53,7 @@ import {
     type TimingStopReason,
 } from "./timing.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
-import { DELEGATION_MODE_REQUEST, delegationPrompt, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
+import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, delegationPrompt, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime } from "./task-policy.ts";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
@@ -162,10 +163,13 @@ import {
 import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
+    { value: "settings", label: "settings", description: "Open delegation mode and concurrency settings" },
+    { value: "cap", label: "cap <number>", description: "Set a positive concurrent subagent limit for this session" },
+    { value: "reset", label: "reset", description: "Reset session mode and cap to saved defaults" },
     { value: "mode manual", label: "mode manual", description: "Delegate only when explicitly requested" },
     { value: "mode adaptive", label: "mode adaptive", description: "Delegate substantial independent work" },
     { value: "mode coordinator", label: "mode coordinator", description: "Delegate role-owned work by default" },
-    { value: "save", label: "save", description: "Write the current mode as the next session's default" },
+    { value: "save", label: "save", description: "Save the current mode and cap as defaults" },
 ];
 
 export function subagentsArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
@@ -1176,7 +1180,6 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
     });
 }
 
-const DELEGATION_MODES = ["manual", "adaptive", "coordinator"] as const;
 const DELEGATION_BLURB: Record<DelegationMode, string> = {
     manual: "only when you or a workflow asks",
     adaptive: "substantial independent work",
@@ -1496,7 +1499,33 @@ function catalogRoleSchema(purpose: string) {
 
 export default function (pi: ExtensionAPI) {
     let delegationOverride: DelegationMode | undefined;
+    let capOverride: number | undefined;
+    const activeConcurrencyCap = (): number => capOverride ?? normalizeConcurrencyCap(loadConfig().maxConcurrent);
+    const changeCap = (cap: number): void => {
+        if (!isConcurrencyCap(cap)) throw new Error("Concurrent subagents must be a positive whole number.");
+        capOverride = cap;
+        pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: cap });
+    };
+    const changeMode = (mode: DelegationMode): void => {
+        delegationOverride = mode;
+        pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode });
+    };
+    const resetSettings = (): void => {
+        capOverride = undefined;
+        delegationOverride = undefined;
+        pi.appendEntry("pi-better-subagents-cap", { version: 1, maxConcurrent: null });
+        pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: null });
+    };
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
+    const saveSettings = (): { ok: boolean; message: string } => {
+        try {
+            writeSubagentSettings({ delegationMode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap() });
+            resetSettings();
+            return { ok: true, message: "Subagent defaults saved." };
+        } catch (error) {
+            return { ok: false, message: `Could not save subagent defaults: ${error instanceof Error ? error.message : String(error)}` };
+        }
+    };
     readDelegation = () => ({
         mode: activeDelegationMode(),
         source: delegationOverride ? "session" : "config",
@@ -1504,8 +1533,7 @@ export default function (pi: ExtensionAPI) {
     cycleDelegation = () => {
         const current = activeDelegationMode();
         const next = DELEGATION_MODES[(DELEGATION_MODES.indexOf(current) + 1) % DELEGATION_MODES.length]!;
-        delegationOverride = next;
-        pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: next });
+        changeMode(next);
     };
     saveDelegationDefault = (mode) => {
         try {
@@ -1519,9 +1547,17 @@ export default function (pi: ExtensionAPI) {
     };
     const restoreDelegationMode = (ctx: ExtensionContext): void => {
         delegationOverride = undefined;
+        capOverride = undefined;
         const branch = ctx.sessionManager?.getBranch?.();
         if (!Array.isArray(branch)) return;
         for (const entry of branch) {
+            if (entry.type === "custom" && entry.customType === "pi-better-subagents-cap") {
+                const data = entry.data as { version?: unknown; maxConcurrent?: unknown } | null;
+                if (data?.version === 1) {
+                    if (data.maxConcurrent === null) capOverride = undefined;
+                    else if (isConcurrencyCap(data.maxConcurrent)) capOverride = data.maxConcurrent;
+                }
+            }
             if (entry.type !== "custom" || entry.customType !== "pi-better-subagents-delegation") continue;
             const data = entry.data as { version?: unknown; mode?: unknown } | null;
             if (data?.version !== 1) continue;
@@ -1905,8 +1941,7 @@ export default function (pi: ExtensionAPI) {
             const blankSelector = blankCatalogSelector(p);
             if (blankSelector) throw new Error(blankSelector);
 
-            const cfg = loadConfig();
-            const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+            const maxConcurrent = activeConcurrencyCap();
             const countRunning = () =>
                 listActiveMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
             // Shared with batch-spawn: reserve before any async work so an interleaved
@@ -1926,7 +1961,7 @@ export default function (pi: ExtensionAPI) {
                 }
                 if (catalog.jobs.length > 1) {
                     const extra = catalog.jobs.length - 1;
-                    if (extra > 0 && !gate.tryReserve(extra, maxConcurrent)) {
+                    if (extra > 0 && !gate.tryReserve(extra, activeConcurrencyCap())) {
                         gate.release(1);
                         reserved = 0;
                         throw new Error(`Choosing split needs ${catalog.jobs.length} subagent slots, but only one was free. Nothing was launched.`);
@@ -2044,7 +2079,6 @@ export default function (pi: ExtensionAPI) {
             };
 
             const cfg = loadConfig();
-            const maxConcurrent = cfg.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
             const countRunning = () =>
                 listActiveMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
             const launchAvailable = p.onCapacity === "launch-available";
@@ -2087,6 +2121,7 @@ export default function (pi: ExtensionAPI) {
             // until each job commits (or the unused remainder is released) closes the
             // interleaving oversubscribe class — a stale plan alone is not enough.
             if (!launchAvailable) {
+                const maxConcurrent = activeConcurrencyCap();
                 // planBatchLaunches still produces the public error text (incl. pending).
                 planBatchLaunches({
                     jobs: p.jobs,
@@ -2122,7 +2157,7 @@ export default function (pi: ExtensionAPI) {
                 const merged = mergeJobOptions(p.shared, job);
 
                 if (launchAvailable) {
-                    if (!gate.tryReserve(1, maxConcurrent)) {
+                    if (!gate.tryReserve(1, activeConcurrencyCap())) {
                         for (let j = i; j < p.jobs.length; j++) {
                             skipped.push({ job: j + 1, name: names[j] });
                         }
@@ -2235,30 +2270,53 @@ export default function (pi: ExtensionAPI) {
     if (typeof pi.registerCommand === "function") {
         agentOperations.registerCommands(pi);
         pi.registerCommand("subagents", {
-            description: "[mode manual|adaptive|coordinator|save] — Session mode, or save it as the next session's default",
+            description: "[settings|mode manual|adaptive|coordinator|cap <number>|save|reset] — Subagent settings",
             getArgumentCompletions: subagentsArgumentCompletions,
             async handler(args, ctx) {
                 const tokens = args.trim().split(/\s+/).filter(Boolean);
-                if (tokens.length === 0) {
-                    ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}.`, "info");
+                if (tokens.length === 0 || (tokens.length === 1 && tokens[0] === "settings")) {
+                    if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.custom === "function") {
+                        await ctx.ui.custom<void>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
+                            get: () => ({
+                                mode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap(),
+                                modeSource: delegationOverride ? "session" : "config",
+                                capSource: capOverride !== undefined ? "session" : "config",
+                                defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
+                                defaultCap: normalizeConcurrencyCap(loadConfig().maxConcurrent),
+                            }),
+                            changeMode, changeCap, save: saveSettings, reset: resetSettings,
+                        }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done()));
+                    } else {
+                        ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Use /subagents mode <mode> or /subagents cap <number>; /subagents save persists both.`, "info");
+                    }
                     return;
                 }
                 const requested = tokens[1];
                 if (tokens.length === 1 && tokens[0] === "save") {
-                    const mode = activeDelegationMode();
-                    if (ctx.hasUI && !(await ctx.ui.confirm("Save delegation default?", `Future sessions will start in ${mode}.`))) {
-                        ctx.ui.notify("Delegation default unchanged.", "info");
+                    if (ctx.hasUI && !(await ctx.ui.confirm("Save subagent defaults?", `Future sessions will start in ${activeDelegationMode()} with a cap of ${activeConcurrencyCap()}.`))) {
+                        ctx.ui.notify("Subagent defaults unchanged.", "info");
                         return;
                     }
-                    const saved = saveDelegationDefault(mode);
+                    const saved = saveSettings();
                     ctx.ui.notify(saved.message, saved.ok ? "info" : "warning");
+                } else if (tokens.length === 1 && tokens[0] === "reset") {
+                    resetSettings();
+                    ctx.ui.notify("Session subagent settings reset to saved defaults.", "info");
                 } else if (tokens.length === 2 && tokens[0] === "mode" && isDelegationMode(requested)) {
-                    delegationOverride = requested;
-                    pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: delegationOverride });
-                    ctx.ui.notify(`Delegation mode: ${delegationOverride} (current session).`, "info");
+                    changeMode(requested);
+                    ctx.ui.notify(`Delegation mode: ${activeDelegationMode()} (current session).`, "info");
+                } else if (tokens.length === 2 && tokens[0] === "cap") {
+                    const cap = /^\d+$/.test(requested!) ? Number(requested) : NaN;
+                    if (!isConcurrencyCap(cap)) {
+                        ctx.ui.notify("Concurrent subagents must be a positive whole number. Nothing changed.", "warning");
+                        return;
+                    }
+                    changeCap(cap);
+                    ctx.ui.notify(`Concurrent subagents: ${cap} (current session). Running subagents are unchanged.`, "info");
                 } else {
-                    ctx.ui.notify("Usage: /subagents [mode manual|adaptive|coordinator|save]", "warning");
+                    ctx.ui.notify("Usage: /subagents [settings|mode manual|adaptive|coordinator|cap <number>|save|reset]", "warning");
                 }
+                refreshBackgroundWorkNavigator(ctx);
             },
         });
     }

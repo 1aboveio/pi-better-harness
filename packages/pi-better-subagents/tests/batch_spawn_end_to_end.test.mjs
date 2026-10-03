@@ -171,6 +171,9 @@ function writeRunningMeta({ writeMeta, nextRunId }, name) {
 function fakePiScript() {
     return `#!/bin/bash
 original_args=("$@")
+if [ -n "$PI_CHILD_WAIT_FIFO" ]; then
+  read -r release < "$PI_CHILD_WAIT_FIFO"
+fi
 if [ -n "$PI_SLEEP_SECONDS" ]; then
   sleep "$PI_SLEEP_SECONDS"
 fi
@@ -217,19 +220,65 @@ function loadExtension(mod, permissionSnapshot) {
     const events = new EventEmitter();
     if (permissionSnapshot) events.on("pi-better-sandbox:policy-request", () => events.emit("pi-better-sandbox:policy", permissionSnapshot));
     const tools = {};
+    const commands = {};
+    const handlers = {};
+    const entries = [];
     const messages = [];
     const pi = {
         events,
         registerTool(def) {
             tools[def.name] = def;
         },
-        on() {},
+        registerCommand(name, command) {
+            commands[name] = command;
+        },
+        appendEntry(customType, data) {
+            entries.push({ type: "custom", customType, data });
+        },
+        on(name, handler) {
+            handlers[name] = handler;
+        },
         sendMessage(msg, opts) {
             messages.push({ msg, opts });
         },
     };
     mod.default(pi);
-    return { tools, messages };
+    return { tools, commands, handlers, entries, events, messages };
+}
+
+function sessionHarness(mod) {
+    const harness = loadExtension(mod);
+    const ctx = makeCtx();
+    ctx.sessionManager = { getBranch: () => harness.entries };
+    return { ...harness, ctx };
+}
+
+async function withHeldChildren(registry, tools, ctx, run) {
+    const fifo = join(mkdtempSync(join(RUNTIME, "held-children-")), "release");
+    const created = spawnSync("mkfifo", [fifo], { encoding: "utf8" });
+    assert.equal(created.status, 0, created.stderr);
+    const original = process.env.PI_CHILD_WAIT_FIFO;
+    process.env.PI_CHILD_WAIT_FIFO = fifo;
+    try {
+        await run();
+    } finally {
+        if (original === undefined) delete process.env.PI_CHILD_WAIT_FIFO;
+        else process.env.PI_CHILD_WAIT_FIFO = original;
+        // Stop the real children even when an admission assertion fails.
+        for (const meta of registry.listMetas().filter((meta) =>
+            meta.pid !== process.pid && registry.effectiveStatus(meta) === "running")) {
+            await tools.subagent_stop.execute(`cleanup-${meta.id}`, { id: meta.id }, null, null, ctx);
+        }
+    }
+}
+
+async function assertBothCapacityBlocked({ tools, ctx }, label, cap) {
+    await assert.rejects(() => tools.subagent_spawn.execute(`${label}-single`, {
+        prompt: "must not launch", tools: "read,bash", sandbox: false,
+    }, null, null, ctx), new RegExp(`Max concurrent subagents \\(${cap}\\)`));
+    await assert.rejects(() => tools.subagent_spawn_batch.execute(`${label}-batch`, {
+        shared: { tools: "read,bash", sandbox: false }, jobs: [{ prompt: "must not launch" }],
+    }, null, null, ctx), new RegExp(`Batch of 1 jobs exceeds available capacity \\(0/${cap} subagent slots free\\)`));
 }
 
 function countOwnedRunning(listMetas, effectiveStatus, ownedByThisParent) {
@@ -250,6 +299,7 @@ describe("subagent_spawn_batch end-to-end", () => {
     let mod;
     let registry;
     let capacity;
+    let config;
 
     before(async () => {
         origPath = process.env.PATH;
@@ -260,6 +310,7 @@ describe("subagent_spawn_batch end-to-end", () => {
         mod = await import("../index.ts");
         registry = await import("../registry.ts");
         capacity = await import("../capacity.mjs");
+        config = await import("../config.ts");
         assertCheckoutNodeModulesUntouched();
     });
 
@@ -271,6 +322,7 @@ describe("subagent_spawn_batch end-to-end", () => {
             .map((meta) => waitForFinished(registry.readMeta, meta.id)));
         clearRuns();
         capacity._resetSharedCapacityGateForTests();
+        config.setConfigForTests(undefined);
     });
 
     after(async () => {
@@ -278,6 +330,7 @@ describe("subagent_spawn_batch end-to-end", () => {
             .filter((meta) => meta.status === "running" && meta.pid !== process.pid)
             .map((meta) => waitForFinished(registry.readMeta, meta.id)));
         process.env.PATH = origPath;
+        config.setConfigForTests(undefined);
         // Cleanup owns only the temp RUNTIME tree created by this suite.
         rmSync(RUNTIME, { recursive: true, force: true });
         assertCheckoutNodeModulesUntouched();
@@ -368,6 +421,139 @@ describe("subagent_spawn_batch end-to-end", () => {
             /Batch of 1 jobs exceeds available capacity \(0\/4 subagent slots free\)/,
         );
     });
+
+    it("session cap immediately governs single and batch admission and survives branch restoration", async () => {
+        const h = sessionHarness(mod);
+        await withHeldChildren(registry, h.tools, h.ctx, async () => {
+            await h.commands.subagents.handler("cap 2", h.ctx);
+            const single = await h.tools.subagent_spawn.execute("cap-single", {
+                prompt: "hold single", tools: "read,bash", sandbox: false,
+            }, null, null, h.ctx);
+            const singleId = single.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(singleId, "the first slot must admit a single launch");
+            const batch = await h.tools.subagent_spawn_batch.execute("cap-batch", {
+                shared: { tools: "read,bash", sandbox: false }, jobs: [{ prompt: "hold batch" }],
+            }, null, null, h.ctx);
+            assert.equal(batch.structuredContent.status, "launched");
+            assert.equal(batch.structuredContent.launched.length, 1);
+            const ids = [singleId, batch.structuredContent.launched[0].id];
+            assert.notEqual(ids[0], ids[1]);
+            await assertBothCapacityBlocked(h, "immediate-cap", 2);
+            assert.deepEqual(registry.listMetas().map(({ id }) => id).sort(), ids.sort());
+
+            const restored = sessionHarness(mod);
+            restored.ctx.sessionManager.getBranch = () => h.entries;
+            await restored.handlers.session_tree({ reason: "branch-change" }, restored.ctx);
+            await assertBothCapacityBlocked(restored, "restored-cap", 2);
+            assert.deepEqual(registry.listMetas().map(({ id }) => id).sort(), ids);
+        });
+    });
+
+    it("launch-available rechecks a lowered cap before reserving later jobs", async () => {
+        const h = sessionHarness(mod);
+        await withHeldChildren(registry, h.tools, h.ctx, async () => {
+            await h.commands.subagents.handler("cap 4", h.ctx);
+            let changed;
+            h.events.once("pi-better-sandbox:policy-request", () => {
+                changed = h.commands.subagents.handler("cap 1", h.ctx);
+            });
+            const batch = await h.tools.subagent_spawn_batch.execute("mid-launch-cap", {
+                shared: { tools: "read,bash", sandbox: false },
+                jobs: [{ prompt: "reserved before change" }, { prompt: "not yet reserved" }],
+                onCapacity: "launch-available",
+            }, null, null, h.ctx);
+            await changed;
+            assert.equal(batch.structuredContent.launched.length, 1);
+            assert.deepEqual(batch.structuredContent.skipped.map(({ job }) => job), [2]);
+            assert.equal(countOwnedRunning(registry.listMetas, registry.effectiveStatus, registry.ownedByThisParent), 1);
+        });
+    });
+
+    it("reject batch reads the new cap after asynchronous catalog clarification", async () => {
+        const h = sessionHarness(mod);
+        let answer;
+        let started;
+        const selecting = new Promise((resolve) => { started = resolve; });
+        h.ctx.hasUI = true;
+        h.ctx.ui.select = async (_title, choices) => {
+            started();
+            return new Promise((resolve) => { answer = () => resolve(choices[0]); });
+        };
+        await h.commands.subagents.handler("cap 4", h.ctx);
+        const batch = h.tools.subagent_spawn_batch.execute("clarification-cap", {
+            shared: { tools: "read,bash", sandbox: false },
+            jobs: [{ prompt: "choose role", role: ["developer", "reviewer"] }, { prompt: "plain job" }],
+        }, null, null, h.ctx);
+        await selecting;
+        await h.commands.subagents.handler("cap 1", h.ctx);
+        const rejected = assert.rejects(batch, /Batch of 2 jobs exceeds available capacity \(1\/1 subagent slots free\)/);
+        answer();
+        await rejected;
+        assert.equal(registry.listMetas().length, 0);
+    });
+
+    it("lowering session cap preserves running children and blocks both tools until a raise admits a launch", async () => {
+        const h = sessionHarness(mod);
+        await withHeldChildren(registry, h.tools, h.ctx, async () => {
+            await h.commands.subagents.handler("cap 3", h.ctx);
+            const batch = await h.tools.subagent_spawn_batch.execute("lower-start", {
+                shared: { tools: "read,bash", sandbox: false },
+                jobs: [{ prompt: "hold a" }, { prompt: "hold b" }, { prompt: "hold c" }],
+            }, null, null, h.ctx);
+            assert.equal(batch.structuredContent.status, "launched");
+            assert.equal(batch.structuredContent.launched.length, 3);
+            const before = batch.structuredContent.launched.map(({ id }) => registry.readMeta(id));
+            for (const meta of before) {
+                assert.equal(meta.status, "running");
+                process.kill(meta.pid, 0);
+            }
+
+            await h.commands.subagents.handler("cap 1", h.ctx);
+            await assertBothCapacityBlocked(h, "lowered-cap", 1);
+            assert.deepEqual(registry.listMetas().map(({ id }) => id).sort(), before.map(({ id }) => id).sort());
+            for (const original of before) {
+                const current = registry.readMeta(original.id);
+                assert.equal(current.status, "running", "lowering a cap must not mark running work terminal");
+                assert.equal(current.pid, original.pid, "lowering a cap must preserve the launched process");
+                process.kill(current.pid, 0);
+            }
+
+            await h.commands.subagents.handler("cap 4", h.ctx);
+            const admitted = await h.tools.subagent_spawn.execute("raised-cap", {
+                prompt: "newly available slot", tools: "read,bash", sandbox: false,
+            }, null, null, h.ctx);
+            const id = admitted.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(id, "raising the session cap must immediately admit a launch");
+            assert.equal(registry.readMeta(id).status, "running");
+            assert.equal(countOwnedRunning(registry.listMetas, registry.effectiveStatus, registry.ownedByThisParent), 4);
+        });
+    });
+
+    for (const configuredCap of [2, undefined]) {
+        const expectedCap = configuredCap ?? 4;
+        it(`reset restores configured mode and ${configuredCap === undefined ? "fallback" : "configured"} cap ${expectedCap} for both tools`, async () => {
+            config.setConfigForTests({ delegationMode: "manual", maxConcurrent: configuredCap });
+            const h = sessionHarness(mod);
+            for (let i = 0; i < expectedCap - 1; i++) writeRunningMeta(registry, `reset-prefill-${i}`);
+            await withHeldChildren(registry, h.tools, h.ctx, async () => {
+                await h.commands.subagents.handler("mode coordinator", h.ctx);
+                await h.commands.subagents.handler("cap 1", h.ctx);
+                await assertBothCapacityBlocked(h, "before-reset", 1);
+                await h.commands.subagents.handler("reset", h.ctx);
+                const request = {};
+                h.events.emit("pi-better-subagents:delegation-mode-request", request);
+                assert.equal(request.mode, "manual", "reset must clear the mode override together with the cap");
+                const batch = await h.tools.subagent_spawn_batch.execute("after-reset", {
+                    shared: { tools: "read,bash", sandbox: false }, jobs: [{ prompt: "reset slot" }],
+                }, null, null, h.ctx);
+                assert.equal(batch.structuredContent.status, "launched");
+                assert.equal(batch.structuredContent.launched.length, 1);
+                assert.equal(registry.readMeta(batch.structuredContent.launched[0].id).status, "running");
+                assert.equal(countOwnedRunning(registry.listMetas, registry.effectiveStatus, registry.ownedByThisParent), expectedCap);
+                await assertBothCapacityBlocked(h, "reset-default-full", expectedCap);
+            });
+        });
+    }
 
     it("reject-mode batch + concurrent single-spawn never exceeds maxConcurrent", async () => {
         // Class counterexample: maxConcurrent free slots = 2. A two-job reject

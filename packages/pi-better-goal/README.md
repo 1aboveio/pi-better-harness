@@ -17,7 +17,7 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 - Background work that finishes while an `ask_user_question` is pending is handed to the agent right after the answer.
 - A compact goal widget that does not replace Pi's footer.
 - Background activity tracking for subagents and other registered providers.
-- A progress-aware follow-up loop with ten identical no-progress retries and linear backoff (30s through 300s by default), followed by a hold recoverable with `/goal resume`. Delays saturate at Node's timer limit, and observed background drains reset progress before callback turns can cancel the wake. Pi's network retry policy remains independent.
+- A progress-aware follow-up loop with ten identical no-progress retries and linear backoff (60s through 600s by default), followed by a hold recoverable with `/goal resume`. Delays saturate at Node's timer limit, and observed background drains reset progress before callback turns can cancel the wake. Pi's network retry policy remains independent.
 - An observable-progress stall state for active goals.
 
 ## Skill-Owned Workflows

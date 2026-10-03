@@ -16,14 +16,33 @@ launch is the result · completion triggers fetch · the foreground never blocks
 
 Set `delegationMode` in this package's `config.json` to `manual`, `adaptive`, or
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
-not child permissions or catalog definitions. `/subagents` reports the active
-mode; `/subagents mode manual|adaptive|coordinator` overrides it for the current
-session without editing config. `/subagents save` writes the current mode into
-`config.json` after confirmation when a UI is available, and clears the session
-override so the next session starts there. On the navigator `main` sheet, `m`
-cycles the session mode and `ctrl+s` saves that default.
-Other arguments show usage. `/reload` retains a session override; new sessions
-use config, while resuming a session restores that session's override.
+not child permissions or catalog definitions. `/subagents settings` (or simply
+`/subagents`) opens the terminal settings page with mode and concurrent-subagent
+cap controls, saved defaults, Save as defaults, and Reset to defaults. Changes
+apply immediately to this session; Escape closes the page without undoing them.
+Enter edits the cap as a positive whole number; Escape cancels an unfinished edit.
+Ctrl+S saves both settings as defaults. Sandbox permissions remain in `/sandbox`.
+
+Command equivalents also work outside the terminal UI:
+
+```text
+/subagents mode manual|adaptive|coordinator
+/subagents cap 6
+/subagents save
+/subagents reset
+```
+
+The cap defaults to 4 and applies to both single and batch launches. Lowering it
+below the running count leaves existing work untouched and blocks new admissions
+until capacity becomes available. Slots already reserved by an in-flight launch
+remain admitted. Settings apply to this parent Pi process, not
+all Pi sessions on the machine. Saving preserves unrelated config keys and
+clears both session overrides. The command form asks for confirmation when a UI
+is available. Reset restores saved defaults without changing config.
+
+`/reload` retains session overrides; new sessions use config, while resuming or
+navigating a branch restores its settings. On the navigator `main` sheet, `m`
+cycles the session mode and `ctrl+s` saves only that mode default.
 
 - **Manual:** no proactive delegation, including in plan mode. A user request or
   explicit workflow requirement may still delegate.
@@ -383,9 +402,12 @@ top.
   foreground model).
 - `delegationMode` — foreground policy (`manual`, `adaptive`, or `coordinator`;
   default `adaptive`). `/subagents mode ...` changes only the current session.
-  `/subagents save` writes that mode as the config default.
-- `maxConcurrent` — how many subagents may run at once (**default 4**). A spawn
-  past the cap is rejected until a running one finishes.
+  `/subagents save` saves mode and cap together as config defaults.
+- `maxConcurrent` — positive whole-number concurrency cap (**default 4**).
+  `/subagents cap <number>` overrides it for this session. Both single and batch
+  admissions respect the cap; existing runs are never stopped by a cap change.
+  Use `/subagents settings` to edit both controls or `/subagents reset` to return
+  to saved defaults.
 
 ## The allowlist also decides what LOADS
 

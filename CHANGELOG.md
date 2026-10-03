@@ -6,6 +6,34 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.16.0] - 2026-10-03
+
+### Changed
+
+- Bundle Sandbox 0.8.2, Subagents 0.12.0, and Goal 0.6.1: independent shell sandbox profiles, unified subagent settings, and a 60-second default continuation delay.
+
+## [pi-better-subagents@0.12.0] - 2026-10-03
+
+### Added
+
+- A unified `/subagents` settings page for delegation mode and concurrency, with session-local changes and saved defaults.
+
+### Fixed
+
+- Give each confined shell invocation its own profile so overlapping launches cannot rewrite a profile another sandbox process is reading. Retire profiles after execution, spawn failure, timeout, or cancellation without changing permission rules. Historical sandbox profile-reading failures remain unconfirmed as instances of this race.
+
+## [pi-better-sandbox@0.8.2] - 2026-10-03
+
+### Fixed
+
+- Use independent per-invocation shell profiles for the Main task executor and clean them up after execution or launch failure. Concurrent calls retain the same sandbox policy and protected-path rules.
+
+## [pi-better-goal@0.6.1] - 2026-10-03
+
+### Changed
+
+- Increase the default automatic continuation delay from 30 seconds to 60 seconds. Existing explicit delay configuration still takes precedence.
+
 ## [pi-better-harness@0.15.3] - 2026-10-02
 
 ### Changed

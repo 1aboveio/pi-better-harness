@@ -21,7 +21,7 @@ export interface SubagentConfig extends TimingSettings {
     delegationMode?: DelegationMode | null;
     defaultModel?: string | null;
     defaultTools?: string | null;
-    /** Max subagents allowed to run at once. */
+    /** Default concurrency cap; /subagents cap overrides it for the current session. */
     maxConcurrent?: number | null;
     /**
      * Tool name → extension package(s) that provide it. Drives which extension
@@ -74,6 +74,14 @@ export interface SubagentConfig extends TimingSettings {
 /** Concurrency cap when config.json sets none. */
 export const DEFAULT_MAX_CONCURRENT = 4;
 
+export function isConcurrencyCap(value: unknown): value is number {
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+export function normalizeConcurrencyCap(value: unknown): number {
+    return isConcurrencyCap(value) ? value : DEFAULT_MAX_CONCURRENT;
+}
+
 /** Built-in default tool set when config.json sets nothing. */
 export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch";
 /** Safe default for a hermetic (clean) child where extension tools don't exist. */
@@ -121,6 +129,25 @@ export function writeDelegationMode(mode: DelegationMode, path = configPath()): 
     writeFileSync(pending, `${JSON.stringify(current, null, 2)}\n`);
     renameSync(pending, path);
     if (path === configPath()) cached = current;
+}
+
+/** Save human-facing defaults together, preserving unrelated configuration. */
+export function writeSubagentSettings(settings: { delegationMode: DelegationMode; maxConcurrent: number }, path = configPath()): void {
+    if (!isDelegationMode(settings.delegationMode)) throw new Error("Invalid delegation mode.");
+    if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
+    let current: Record<string, unknown> = {};
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Config must be a JSON object.");
+        current = parsed as Record<string, unknown>;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    Object.assign(current, settings);
+    const pending = `${path}.${process.pid}.tmp`;
+    writeFileSync(pending, `${JSON.stringify(current, null, 2)}\n`);
+    renameSync(pending, path);
+    if (path === configPath()) cached = current as SubagentConfig;
 }
 
 /** Normalize a comma/space tool list to pi's bare comma form: "a, b" → "a,b". */
