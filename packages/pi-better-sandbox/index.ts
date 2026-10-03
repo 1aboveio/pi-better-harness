@@ -83,21 +83,10 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     });
 
     let paintFooter: ((status: ForegroundSandboxStatus) => void) | undefined;
-    let sessionContext: ExtensionContext | undefined;
 
     const announce = (status: ForegroundSandboxStatus): void => {
         publishForegroundSandboxPolicy(pi.events, status);
         paintFooter?.(status);
-    };
-
-    const persistAndAnnounce = (status: ForegroundSandboxStatus): void => {
-        try {
-            const settings = controller.permissionSettings();
-            if (settings) appendSessionPermissions(pi, settings);
-        } catch (error) {
-            sessionContext?.ui.notify(`Sandbox session permissions could not be saved: ${error instanceof Error ? error.message : String(error)}`, "error");
-        }
-        announce(status);
     };
 
     // A consumer that loaded after the last publication can ask for the current
@@ -111,7 +100,6 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     const denyRules = new DenyRuleManager({ controller, onStateChange: announce });
 
     const restorePermissions = (ctx: ExtensionContext): void => {
-        sessionContext = ctx;
         paintFooter = (status) => {
             ctx.ui.setStatus(
                 FOOTER_KEY,
@@ -187,12 +175,19 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         handler: createSandboxCommandHandler({
             controller,
             denyRules,
-            onStateChange: persistAndAnnounce,
+            onStateChange: announce,
+            setSessionEnabled: (enabled) => {
+                const settings = controller.permissionSettings() ?? defaultSandboxPermissions();
+                settings.main.enabled = enabled;
+                appendSessionPermissions(pi, settings);
+                return enabled ? controller.enable() : controller.disable();
+            },
             setDefault: (enabled) => {
                 const settings = controller.permissionSettings() ?? defaultSandboxPermissions();
                 settings.main.enabled = enabled;
                 writePermissionSettings(settings);
                 writeSandboxDefault(enabled ? "on" : "off");
+                appendSessionPermissions(pi, settings);
                 return controller.setPermissionSettings(settings);
             },
             openPermissions: async (ctx) => {

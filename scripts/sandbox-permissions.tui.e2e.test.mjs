@@ -128,8 +128,8 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
     const selected = () => screen().match(/^> (.*)$/m)?.[1] ?? "";
     const moveTo = (pattern, direction = "Down") => {
         for (let i = 0; i < 60; i++) {
-            if (pattern.test(selected())) return;
             const before = selected();
+            if (pattern.test(before)) return;
             key(direction);
             wait((text) => (text.match(/^> (.*)$/m)?.[1] ?? "") !== before);
         }

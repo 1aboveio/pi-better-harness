@@ -684,6 +684,41 @@ test("a session append failure is visible, leaves the UI and enforcement unchang
     });
 });
 
+for (const verb of ["on", "off"] as const) test(`/sandbox ${verb} keeps enforcement unchanged when session persistence fails and retries durably`, async (t) => {
+    forgetSandboxPreference();
+    const initial = defaultSandboxPermissions();
+    initial.main.enabled = verb === "off";
+    initial.main.network = false;
+    const recorded = record([sessionEntry({ version: 1, permissions: initial })]);
+    piBetterSandbox(recorded.pi);
+    const root = project(`command-append-failure-${verb}`);
+    const started = await startSession(recorded, root, "resume", false, false);
+    t.mock.method(started.ctx.ui, "confirm", async () => true);
+    const before = structuredClone(recorded.published.at(-1));
+    const history = structuredClone(recorded.branch);
+    const append = t.mock.method(recorded.pi, "appendEntry", () => { throw new Error("session append failed"); });
+    await runSandbox(recorded, verb, started.ctx);
+    assert.deepEqual(recorded.published.at(-1), before);
+    assert.deepEqual(recorded.branch, history);
+    assert.equal(started.notifications.at(-1)?.kind, "error");
+    assert.match(started.notifications.at(-1)?.text ?? "", /state unchanged.*session append failed/);
+    const blocked = () => (recorded.handlers.get("tool_call")!({ toolName: "web_fetch", input: {} }, started.ctx) as { block: boolean } | undefined)?.block === true;
+    assert.equal(blocked(), initial.main.enabled);
+    await startSession(recorded, root, "reload", false, false);
+    assert.equal(recorded.published.at(-1)?.permissions?.enabled, initial.main.enabled);
+    assert.equal(blocked(), initial.main.enabled);
+    append.mock.restore();
+    await runSandbox(recorded, verb, started.ctx);
+    assert.equal(recorded.published.at(-1)?.permissions?.enabled, !initial.main.enabled);
+    assert.equal(blocked(), !initial.main.enabled);
+    assert.equal(recorded.branch.length, history.length + 1);
+    await startSession(recorded, root, "reload", false, false);
+    assert.equal(recorded.published.at(-1)?.permissions?.enabled, !initial.main.enabled);
+    assert.equal(blocked(), !initial.main.enabled);
+    assert.equal(existsSync(permissionSettingsPath()), false);
+    assert.equal(existsSync(sandboxPreferencesPath()), false);
+});
+
 test("session policy survives fresh extension resume, fork and reload; new sessions inherit saved defaults", async () => {
     forgetSandboxPreference();
     const initial = defaultSandboxPermissions();
@@ -758,7 +793,9 @@ test("invalid latest session policies fail closed on start and tree navigation r
         assert.ok(started.notifications.some((note) => note.kind === "error" && /could not be loaded/.test(note.text)));
         await assert.rejects(() => writeThrough(recorded.tools.get("write")!, "blocked.txt", "no"), /blocked rather than run unconfined/);
         await assert.rejects(() => recorded.tools.get("read")!.execute("read", { path: join(root, "blocked.txt") }, undefined, undefined, started.ctx), /blocked rather than run unconfined/);
-        assert.equal((recorded.handlers.get("tool_call")!({ toolName: "bash", input: {} }, started.ctx) as { block: boolean }).block, true);
+        for (const toolName of ["bash", "subagent_spawn", "subagent_spawn_batch"]) {
+            assert.equal((recorded.handlers.get("tool_call")!({ toolName, input: {} }, started.ctx) as { block: boolean }).block, true);
+        }
         recorded.branch = [];
         await recorded.handlers.get("session_tree")!({}, started.ctx);
         assert.equal(recorded.published.at(-1)?.state, "disabled");
