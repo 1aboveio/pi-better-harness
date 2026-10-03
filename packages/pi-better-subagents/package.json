@@ -1,6 +1,6 @@
 {
   "name": "pi-better-subagents",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Pi extension for detached, sandboxed subagent runs that keep the foreground session free.",
   "license": "MIT",
   "type": "module",
