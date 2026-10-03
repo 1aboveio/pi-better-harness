@@ -128,10 +128,13 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
     const selected = () => screen().match(/^> (.*)$/m)?.[1] ?? "";
     const moveTo = (pattern, direction = "Down") => {
         for (let i = 0; i < 60; i++) {
-            const before = selected();
+            const before = wait((text) => /^> /m.test(text)).match(/^> (.*)$/m)[1];
             if (pattern.test(before)) return;
             key(direction);
-            wait((text) => (text.match(/^> (.*)$/m)?.[1] ?? "") !== before);
+            wait((text) => {
+                const current = text.match(/^> (.*)$/m)?.[1];
+                return current !== undefined && current !== before;
+            });
         }
         assert.fail(`Could not select ${pattern}:\n${screen()}`);
     };
