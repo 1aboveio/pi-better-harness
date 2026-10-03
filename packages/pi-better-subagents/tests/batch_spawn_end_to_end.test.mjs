@@ -83,6 +83,8 @@ export function getSupportedThinkingLevels(model) {
     writeStubPackage("@earendil-works/pi-tui", {
         "index.js": `
 export const Key = { left: "left" };
+export class Input {}
+export class SelectList {}
 export function matchesKey() { return false; }
 export function visibleWidth(s) { return String(s ?? "").length; }
 export function truncateToWidth(s) { return s; }
@@ -447,6 +449,40 @@ describe("subagent_spawn_batch end-to-end", () => {
             await assertBothCapacityBlocked(restored, "restored-cap", 2);
             assert.deepEqual(registry.listMetas().map(({ id }) => id).sort(), ids);
         });
+    });
+
+    it("session catalog model and effort apply to discovery and launches after branch restoration", async () => {
+        const h = sessionHarness(mod);
+        h.ctx.isProjectTrusted = () => false;
+        h.ctx.modelRegistry = { getAvailable: () => [{ provider: "test", id: "model", reasoning: true }], find: () => undefined };
+        h.entries.push(
+            { type: "custom", customType: "pi-better-subagents-agent-settings", data: { version: 1, id: "role.developer", key: "model", value: "test/model" } },
+            { type: "custom", customType: "pi-better-subagents-agent-settings", data: { version: 1, id: "role.developer", key: "effort", value: "low" } },
+        );
+        await h.handlers.session_tree({}, h.ctx);
+        const discovery = await h.tools.agents_catalog.execute("session-discovery", { action: "inspect", id: "developer" }, null, null, h.ctx);
+        assert.equal(discovery.details.view.fields.model.value, "test/model");
+        assert.equal(discovery.details.view.fields.effort.value, "low");
+        await withHeldChildren(registry, h.tools, h.ctx, async () => {
+            const single = await h.tools.subagent_spawn.execute("session-model", {
+                role: "developer", prompt: "use session preferences", tools: "read,bash", sandbox: false,
+            }, null, null, h.ctx);
+            const id = single.content[0].text.match(/id=(sa_[a-z0-9_]+)/)?.[1];
+            assert.ok(id);
+            const meta = registry.readMeta(id);
+            assert.equal(meta.model, "test/model");
+            assert.equal(meta.effort, "low");
+            const batch = await h.tools.subagent_spawn_batch.execute("session-batch", {
+                shared: { role: "developer", tools: "read,bash", sandbox: false }, jobs: [{ prompt: "also use session preferences" }],
+            }, null, null, h.ctx);
+            const batchMeta = registry.readMeta(batch.structuredContent.launched[0].id);
+            assert.equal(batchMeta.model, "test/model");
+            assert.equal(batchMeta.effort, "low");
+        });
+        h.entries.length = 0;
+        await h.handlers.session_tree({}, h.ctx);
+        const baseline = await h.tools.agents_catalog.execute("baseline-discovery", { action: "inspect", id: "developer" }, null, null, h.ctx);
+        assert.notEqual(baseline.details.view.fields.model.value, "test/model");
     });
 
     it("launch-available rechecks a lowered cap before reserving later jobs", async () => {

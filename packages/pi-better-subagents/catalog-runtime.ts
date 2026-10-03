@@ -23,6 +23,7 @@ import { allocateCatalogLabel } from "./catalog-identity.ts";
 import { resolveRoleAssignment, type RoleAssignment } from "./role-assignment.ts";
 import { configureTierPolicy, DEFAULT_TIER_POLICY, type TierPolicy, type TierSpec } from "./tier-policy.ts";
 import { canonicalAgentId, canonicalRoleId, shortRoleName, type Diagnostic, type ThinkingLevel } from "./catalog-schema.ts";
+import { withAgentSessionSettings, type AgentSessionOverrides } from "./agent-session-settings.ts";
 
 export interface CatalogHost {
     cwd: string;
@@ -38,6 +39,9 @@ export interface CatalogHost {
     select?: (title: string, options: string[]) => Promise<string | undefined>;
     /** Passed through only when the caller already has a registry root. Omitted in production. */
     registryDir?: string;
+    sessionSettings?: AgentSessionOverrides;
+    /** Live UI edits; read once when admitting a launch snapshot. */
+    getSessionSettings?: () => AgentSessionOverrides;
 }
 
 export interface CatalogJobFields {
@@ -142,17 +146,19 @@ export function noteCatalogHost(next: CatalogHost): void {
         foregroundModel: "foregroundModel" in next ? next.foregroundModel : previous?.foregroundModel,
         configuredDefaultModel: "configuredDefaultModel" in next ? next.configuredDefaultModel : previous?.configuredDefaultModel,
         tiers: "tiers" in next ? next.tiers : previous?.tiers,
+        sessionSettings: next.sessionSettings,
+        getSessionSettings: next.getSessionSettings,
     };
 }
 
 export function loadLaunchSnapshot(host: CatalogHost): CatalogSnapshot {
-    return loadCatalog({
+    return withAgentSessionSettings(loadCatalog({
         cwd: host.cwd,
         projectTrusted: host.projectTrusted,
         userRoot: host.userRoot ?? defaultUserRoot(),
         bundledRoot: host.bundledRoot,
         projectConfigDirName: host.projectConfigDirName,
-    });
+    }), host.getSessionSettings?.() ?? host.sessionSettings);
 }
 
 export function createLaunchEnricher(): LaunchEnricher {

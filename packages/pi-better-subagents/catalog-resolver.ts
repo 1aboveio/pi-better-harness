@@ -18,6 +18,7 @@ import {
     type ThinkingLevel,
 } from "./catalog-schema.ts";
 import type { CatalogEntry, CatalogScope, CatalogSnapshot } from "./catalog-store.ts";
+import { sessionPreferences } from "./agent-session-settings.ts";
 
 export interface FieldValue<T> {
     value: T | null;
@@ -223,6 +224,7 @@ function resolveRole(snapshot: CatalogSnapshot, roleId: string): Resolution {
         return blockedEntry(snapshot, entry, entry.diagnostics);
     }
     const definition = entry.definition;
+    const preferences = sessionPreferences(definition, snapshot.sessionSettings);
     const launchable = entry.schemaLaunchable;
     const diagnostics = launchable
         ? [...entry.diagnostics]
@@ -245,9 +247,9 @@ function resolveRole(snapshot: CatalogSnapshot, roleId: string): Resolution {
             description: definition.description,
             instructionMode: "role",
             instructions: definition.body,
-            model: fieldFromRole(definition.defaults.model),
-            effort: fieldFromRole(definition.defaults.effort),
-            tier: fieldFromRole(definition.defaults.tier),
+            model: fieldFromRole(preferences.model),
+            effort: fieldFromRole(preferences.effort),
+            tier: fieldFromRole(preferences.tier),
             launchable,
             diagnostics,
             source: originOf(entry),
@@ -332,6 +334,8 @@ function baseEffective(
     } | undefined,
 ): EffectiveDefinition {
     const mode = agent.instructionMode;
+    const overrides = sessionPreferences(agent, snapshot.sessionSettings);
+    const defaults = inheritance ? sessionPreferences(inheritance.role, snapshot.sessionSettings) : {};
     const instructions = inheritance
         ? combineInstructions(inheritance.role.body, agent.body, mode)
         : agent.body;
@@ -343,9 +347,9 @@ function baseEffective(
         roleId: agent.roleId,
         instructionMode: mode,
         instructions,
-        model: inheritance ? inheritField(agent.overrides, inheritance.role.defaults, "model") : absentField(),
-        effort: inheritance ? inheritField(agent.overrides, inheritance.role.defaults, "effort") : absentField(),
-        tier: inheritance ? inheritField(agent.overrides, inheritance.role.defaults, "tier") : absentField(),
+        model: inheritance ? inheritField(overrides, defaults, "model") : absentField(),
+        effort: inheritance ? inheritField(overrides, defaults, "effort") : absentField(),
+        tier: inheritance ? inheritField(overrides, defaults, "tier") : absentField(),
         launchable: inheritance?.launchable ?? false,
         diagnostics,
         source: originOf(entry),

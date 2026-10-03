@@ -37,10 +37,12 @@ test("settings page changes session mode and numeric cap, saves both, and resets
     const h = harness();
     h.page.handleInput("\r");
     assert.equal(h.settings().mode, "coordinator");
+    assert.equal(h.saved(), 0, "editing applies only to the session");
     h.page.handleInput("\x1b[B");
     enterCap(h.page, "7");
     assert.equal(h.settings().maxConcurrent, 7);
     assert.equal(h.settings().capSource, "session");
+    assert.equal(h.saved(), 0, "cap changes do not save defaults");
     h.page.handleInput("\x13");
     assert.equal(h.saved(), 1);
     assert.equal(h.settings().defaultCap, 7);
@@ -68,14 +70,14 @@ test("numeric cap validation and cancel leave the active cap unchanged", () => {
     }
 });
 
-test("table compares session and saved values and stacks them on narrow terminals", () => {
+test("single value column keeps current settings readable without showing saved values", () => {
     const h = harness();
     h.page.handleInput("\r");
     const wide = h.page.render(100).join("\n");
-    assert.match(wide, /Subagent settings\s+Session\s+Default/);
-    assert.match(wide, /Delegation mode\s+coordinator\s+adaptive/);
-    const narrow = h.page.render(40).join("\n");
-    assert.match(narrow, /Delegation mode\s+Session\s+coordinator\s+Default\s+adaptive/);
+    assert.match(wide, /Delegation mode\s+coordinator/);
+    assert.doesNotMatch(wide, /adaptive|Session\s+Default|Save as defaults/);
+    const narrow = h.page.render(30).join("\n");
+    assert.match(narrow, /Delegation mode\s+coordinator/);
     h.page.handleInput("\x1b[B");
     h.page.handleInput("\r");
     const editing = h.page.render(100);

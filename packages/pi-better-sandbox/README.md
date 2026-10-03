@@ -11,7 +11,8 @@ pi install npm:pi-better-sandbox
 Either way you keep starting Pi the way you always have — `pi`. There is
 no launcher or wrapper command. Main starts inactive; Subagents start confined.
 Open `/sandbox` to change either column, or use `/sandbox on` for the current
-Main session. **Save as defaults** persists both profiles.
+Main session. Edits apply immediately and are saved to the current session branch.
+**Ctrl+S** saves both profiles as defaults for new sessions.
 
 ```text
 Sandbox permissions               Main             Subagents
@@ -31,8 +32,7 @@ Network access                    -                On
     > [x] @juicesharp/rpiv-web-tools  2/2
     > [ ] <other installed package>  0/1
 
-↑↓ Select row   ←→ Select column / expand / collapse   Enter Fold   Space Change
-Save as defaults
+↑↓ Select · ←→ Column/fold · Space Toggle · ctrl+s Save default · Enter Fold · Esc Back
 ```
 
 **Subagents · Tools** picks the extension tools a confined subagent may use:
@@ -56,7 +56,7 @@ are; the count is selected/total. Right expands a group. Left collapses a group,
 or moves from a child to its parent and collapses it. Enter folds the selected
 group. Space on a group selects all children when none or only some are selected,
 or deselects them all when all are selected. Every toggle applies on one Space;
-saving looser defaults still needs a second Enter. Only individual tool
+Ctrl+S saves defaults and reports anything loosened. Only individual tool
 entries are saved, never a package/provider wildcard or the open/closed state.
 
 Defaults: `apply_patch`, `web_fetch`, and `web_search` on; everything else off.
@@ -123,7 +123,7 @@ Write, those paths are also protected from removal and renaming.
 Space applies every change immediately, including higher permission levels,
 capabilities switched on, and a sandbox switched off. `ctrl+s` saves the
 defaults from any row on the first press, and the note names anything that
-loosened. Enter on the Save row still saves. The focused
+loosened. Enter only folds tool groups; it never saves defaults. The focused
 row has a full-width background and bold text; the selected Main/Subagents cell
 also uses inverse styling. No model
 tool can change these settings. Other rows toggle Off/On. Detail cells under an
@@ -319,7 +319,7 @@ in your rule set but is held out in that project, with a message saying so.
 Nothing is migrated on disk. A saved `pi-better-sandbox-permissions.json` keeps
 its values: a saved `read-write` is now shown as Write & delete, and a saved
 Subagents Outside project = Read stays Read. Only a fresh configuration, or
-**Save as defaults** after you choose Write, uses the new Subagents default. To
+**Ctrl+S** after you choose Write, uses the new Subagents default. To
 adopt it, open `/sandbox`, set Subagents → Outside project to Write, and save.
 
 `~/.pi/agent/sandbox.json` (`filesystem.allowWrite`, `allowRead`,
@@ -328,12 +328,19 @@ package never reads it, and it has no effect on the harness.
 
 ## Lifecycle
 
-The foreground sandbox is inactive by default. Session overrides do not survive
-startup, new session, resume, fork, or reload. Save as defaults writes both
+The foreground sandbox is inactive by default. Permission edits, including
+Sandbox switches and `/sandbox on|off`, auto-persist as Pi custom entries on the
+current session branch, not as global defaults. Resume, fork, reload and session
+tree navigation restore the latest policy on the active branch. A branch with
+no permission entry and a new session inherit saved global settings. Invalid
+persisted session policy fails closed rather than falling back to defaults.
+Ctrl+S writes both
 profiles to `~/.pi/agent/extensions/pi-better-sandbox-permissions.json` (or the
 corresponding `$PI_CODING_AGENT_DIR`). Existing activation preferences in
 `pi-better-sandbox-preferences.json` migrate when no profile file exists.
 `/sandbox default on|off` remains available and updates Main's saved switch.
+Failed default saves leave the current session's edits intact. Write-deny rules
+retain their separate global persistence through `/sandbox deny` and `/sandbox rules`.
 
 Toggles apply to operations launched after the change. A command already running
 keeps the policy it launched with.

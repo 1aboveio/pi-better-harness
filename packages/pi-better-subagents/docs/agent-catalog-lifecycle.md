@@ -39,3 +39,26 @@ Navigator rows keep the display name, model, and effort. Details include the run
 ## Inspection
 
 The extension registers `/agents` and `agents_catalog` through `createAgentOperations`. The launch enricher calls `assessCatalog` / `assessSelection` with the current model registry, project trust, and user catalog root. It reports the existing spawn controls and `grantedByCatalog: false`. If the registry or snapshot is not the one just loaded, launchability stays unknown instead of being reported as launchable.
+
+## Session Settings
+
+`createAgentSessionSettings` restores model and effort overrides from the active
+Pi session branch. The extension restores before catalog-dependent work and on
+`session_start` and `session_tree`; switch and shutdown clear transient state
+without appending reset entries. Edits survive reload, resume, and fork, while
+new sessions start from catalog defaults.
+
+The catalog host supplies a live `getSessionSettings` getter so inspection
+reflects edits made while the overlay is open. `loadLaunchSnapshot` reads that
+getter once and freezes the overlay for each batch. Later edits cannot alter
+already-admitted jobs. Model choices come from the current Pi model registry.
+
+Ctrl+S saves only the selected definition's own preferences, never flattened
+inherited settings. Bundled roles are copied to user scope; existing user and
+project definitions are saved in their own scope with the store's trust,
+validation, and atomic-write checks. Plain `loadCatalog` remains disk-only so
+saving selects the current winning definition rather than a stale overlay.
+
+Headless callers can inject a session controller or immutable
+`CatalogHost.sessionSettings`. Hosts without these hooks retain inspection-only
+UI and the prior launch behavior.

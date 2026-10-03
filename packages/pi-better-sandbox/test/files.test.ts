@@ -71,6 +71,7 @@ function sessionContext(cwd: string): ExtensionContext {
         cwd,
         hasUI: false,
         mode: "print",
+        sessionManager: { getBranch: () => [] },
         ui: {
             theme: { fg: (_tone: string, text: string) => text },
             notify() {},

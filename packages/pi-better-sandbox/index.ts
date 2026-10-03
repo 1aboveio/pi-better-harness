@@ -38,6 +38,7 @@ import { writeSandboxDefault } from "./preferences.ts";
 import { readPermissionSettings, writePermissionSettings } from "./permission-settings.ts";
 import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSettings } from "./permissions.ts";
 import { openPermissionsPage } from "./permissions-page.ts";
+import { appendSessionPermissions, readSessionPermissions } from "./session-permissions.ts";
 
 import { footerTone, formatFooterStatus } from "./status.ts";
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
@@ -82,10 +83,21 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     });
 
     let paintFooter: ((status: ForegroundSandboxStatus) => void) | undefined;
+    let sessionContext: ExtensionContext | undefined;
 
     const announce = (status: ForegroundSandboxStatus): void => {
         publishForegroundSandboxPolicy(pi.events, status);
         paintFooter?.(status);
+    };
+
+    const persistAndAnnounce = (status: ForegroundSandboxStatus): void => {
+        try {
+            const settings = controller.permissionSettings();
+            if (settings) appendSessionPermissions(pi, settings);
+        } catch (error) {
+            sessionContext?.ui.notify(`Sandbox session permissions could not be saved: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        announce(status);
     };
 
     // A consumer that loaded after the last publication can ask for the current
@@ -98,9 +110,8 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     // `/sandbox deny ...` and the `/sandbox rules` page.
     const denyRules = new DenyRuleManager({ controller, onStateChange: announce });
 
-    pi.on("session_start", (_event, ctx: ExtensionContext) => {
-        shellPath = resolveShellPath(ctx.cwd);
-        boundary.register(ctx.cwd);
+    const restorePermissions = (ctx: ExtensionContext): void => {
+        sessionContext = ctx;
         paintFooter = (status) => {
             ctx.ui.setStatus(
                 FOOTER_KEY,
@@ -108,11 +119,14 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             );
         };
 
-        // Re-read saved profiles on each session. Malformed policy blocks protected
-        // operations rather than silently widening a restricted session.
+        // Session policy takes precedence over global defaults. Never skip an
+        // invalid latest entry to recover an older, potentially broader policy.
         let settings = defaultSandboxPermissions();
+        let hasSessionPolicy = false;
         try {
-            settings = readPermissionSettings();
+            const sessionPermissions = readSessionPermissions(ctx);
+            hasSessionPolicy = sessionPermissions !== undefined;
+            settings = sessionPermissions ?? readPermissionSettings();
         } catch (error) {
             controller.beginSession(ctx.cwd, true);
             const message = `Sandbox permissions could not be loaded: ${error instanceof Error ? error.message : String(error)}`;
@@ -130,7 +144,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             .map((tool) => tool.sourceInfo?.path).filter((path): path is string => typeof path === "string" && isAbsolute(path))
             .map(runtimeCodeRoot));
         controller.setPermissionSettings(settings);
-        controller.applyDefault(settings.main.enabled);
+        if (!hasSessionPolicy) controller.applyDefault(settings.main.enabled);
 
         // Then the rules are re-read and re-resolved, because the same global
         // template set means different absolute paths in a different project.
@@ -154,7 +168,14 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
                 status.state === "disabled" ? "info" : "warning",
             );
         }
+    };
+
+    pi.on("session_start", (_event, ctx) => {
+        shellPath = resolveShellPath(ctx.cwd);
+        boundary.register(ctx.cwd);
+        restorePermissions(ctx);
     });
+    pi.on("session_tree", (_event, ctx) => restorePermissions(ctx));
 
     pi.on("session_shutdown", () => {
         controller.dispose();
@@ -166,7 +187,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         handler: createSandboxCommandHandler({
             controller,
             denyRules,
-            onStateChange: announce,
+            onStateChange: persistAndAnnounce,
             setDefault: (enabled) => {
                 const settings = controller.permissionSettings() ?? defaultSandboxPermissions();
                 settings.main.enabled = enabled;
@@ -179,9 +200,12 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
                     getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
                     // Trusted-tool candidates: what this Pi has actually registered, by owning package.
                     discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
-                    change: (settings) => announce(controller.setPermissionSettings(settings)),
+                    change: (settings) => {
+                        appendSessionPermissions(pi, settings);
+                        announce(controller.setPermissionSettings(settings));
+                    },
                     save: (settings) => writePermissionSettings(settings),
-                    // Persisting a looser default needs a second, explicit Enter.
+                    // Report every capability loosened by saving these defaults.
                     loosening: (settings) => {
                         let previous: SandboxPermissionSettings;
                         try { previous = readPermissionSettings(); } catch { previous = defaultSandboxPermissions(); }

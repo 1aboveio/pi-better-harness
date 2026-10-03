@@ -38,7 +38,8 @@ Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or ne
 `config.json` sets `delegationMode` to `manual`, `adaptive` (default), or
 `coordinator`. `/subagents settings` (or `/subagents`) opens a settings page
 for delegation mode and the concurrent-subagent cap (default 4). Edits apply to
-this session; Save as defaults persists both, and Reset to defaults clears
+this session and persist across reloads; Ctrl+S saves both as defaults, and
+Reset to defaults clears
 session overrides. `/subagents mode manual|adaptive|coordinator` and
 `/subagents cap <number>` are command equivalents; `/subagents save` persists
 both. Lowering the cap blocks new single and batch launches without stopping

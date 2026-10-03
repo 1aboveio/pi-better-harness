@@ -55,8 +55,8 @@ const DISABLE_TITLE = "Disable the foreground write sandbox?";
 
 const DISABLE_MESSAGE = [
     "The built-in bash, write, and edit tools and user-entered ! / !! commands",
-    "will run with normal host write access for the rest of this session. The",
-    "next session applies your persisted foreground sandbox default.",
+    "will run with normal host write access on this session branch, including",
+    "after resume or reload. New sessions apply your saved sandbox default.",
 ].join("\n");
 
 const NO_UI_REJECTION =

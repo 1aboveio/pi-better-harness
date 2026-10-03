@@ -31,11 +31,14 @@ import type {
     ToolDefinition,
     Theme,
     UserBashEventResult,
+    SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
 import piBetterSandbox from "../index.ts";
 import { permissionSettingsPath, writePermissionSettings } from "../permission-settings.ts";
 import { defaultSandboxPermissions } from "../permissions.ts";
+import { SESSION_PERMISSION_ENTRY } from "../session-permissions.ts";
+import type { Component } from "@earendil-works/pi-tui";
 import { sandboxArgumentCompletions } from "../commands.ts";
 import { denyRuleOverridePath } from "../deny-rules.ts";
 import { sandboxPreferencesPath, writeSandboxDefault } from "../preferences.ts";
@@ -101,10 +104,11 @@ type Recorded = {
     toolCallHandlers: Array<(event: unknown, ctx: ExtensionContext) => unknown>;
     published: ForegroundSandboxPolicyEvent[];
     events: EventBus;
+    branch: SessionEntry[];
 };
 
 /** A recorder shaped like Pi's ExtensionAPI, driving the real extension factory. */
-function record(): Recorded {
+function record(branch: SessionEntry[] = []): Recorded {
     const tools = new Map<string, ToolDefinition>();
     const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
     const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
@@ -132,7 +136,13 @@ function record(): Recorded {
         published.push(data as ForegroundSandboxPolicyEvent);
     });
 
+    const recorded = { branch };
     const pi = {
+        appendEntry: nodeTest.mock.fn((customType: string, data: unknown) => {
+            recorded.branch.push({ type: "custom", customType, data: structuredClone(data),
+                id: `entry-${recorded.branch.length}`, parentId: recorded.branch.at(-1)?.id ?? null,
+                timestamp: "2026-01-01T00:00:00.000Z" });
+        }),
         events,
         registerTool(tool: ToolDefinition) {
             tools.set(tool.name, tool);
@@ -153,7 +163,7 @@ function record(): Recorded {
         },
     } as unknown as ExtensionAPI;
 
-    return { pi, tools, commands, handlers, toolCallHandlers, published, events };
+    return Object.assign(recorded, { pi, tools, commands, handlers, toolCallHandlers, published, events });
 }
 
 function assertProtectedPolicy(recorded: Recorded, root: string, rules: string[] = [...PACKAGED_DENY_WRITE_TEMPLATES]): void {
@@ -175,6 +185,7 @@ function assertProtectedPolicy(recorded: Recorded, root: string, rules: string[]
 type UiCall = { kind: string; text: string };
 
 type ContextOptions = {
+    branch?: () => SessionEntry[];
     hasUI?: boolean;
     confirm?: boolean;
     /** Answers the rules page's selector. Returning undefined is pressing escape. */
@@ -193,6 +204,7 @@ function context(cwd: string, options: ContextOptions = {}) {
         cwd,
         hasUI: options.hasUI ?? true,
         mode: "tui",
+        sessionManager: { getBranch: options.branch ?? (() => []) },
         ui: {
             theme: { fg: (_color: string, text: string) => text },
             notify(message: string, type = "info") {
@@ -226,7 +238,8 @@ async function startSession(
     resetPreference = true,
 ) {
     if (resetPreference) forgetSandboxPreference();
-    const started = context(cwd);
+    if (reason === "new") recorded.branch = [];
+    const started = context(cwd, { branch: () => recorded.branch });
     const handler = recorded.handlers.get("session_start");
     assert.ok(handler, "the extension must handle session_start");
     await handler({ type: "session_start", reason }, started.ctx);
@@ -534,7 +547,7 @@ test("a malformed persisted preference blocks the session instead of broadening 
     );
 });
 
-test("a session override never survives the next session start", async () => {
+test("command activation persists across resume but not into a new session", async () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("no-persist");
@@ -542,10 +555,251 @@ test("a session override never survives the next session start", async () => {
     assert.equal(recorded.published.at(-1)?.state, "disabled");
     await recorded.commands.get("sandbox")?.handler("on", context(root).ctx);
     assert.equal(recorded.published.at(-1)?.state, "enabled");
+    assert.equal(existsSync(permissionSettingsPath()), false);
+    assert.equal(existsSync(sandboxPreferencesPath()), false);
 
     await startSession(recorded, root, "resume", false);
 
+    assert.equal(recorded.published.at(-1)?.state, "enabled");
+    await startSession(recorded, root, "new", false);
     assert.equal(recorded.published.at(-1)?.state, "disabled");
+});
+
+test("confirmed command off persists its switch and retains permission details across reload", async () => {
+    forgetSandboxPreference();
+    const settings = defaultSandboxPermissions();
+    settings.main.enabled = true;
+    settings.main.network = false;
+    settings.subagents.outsideProject = "off";
+    const recorded = record([sessionEntry({ version: 1, permissions: settings })]);
+    piBetterSandbox(recorded.pi);
+    const root = project("command-off-reload");
+    await startSession(recorded, root, "resume", false);
+    await runSandbox(recorded, "off", context(root, { confirm: true }).ctx);
+    const restored = record(structuredClone(recorded.branch));
+    piBetterSandbox(restored.pi);
+    const reloaded = await startSession(restored, root, "reload", false);
+    assert.equal(restored.published.at(-1)?.permissions?.enabled, false);
+    assert.equal(reloaded.statuses.at(-1), "sandbox · OFF");
+    assert.equal(restored.published.at(-1)?.permissions?.network, false);
+    assert.equal(restored.published.at(-1)?.subagentPermissions?.outsideProject, "off");
+    assert.equal(existsSync(permissionSettingsPath()), false);
+    assert.equal(existsSync(sandboxPreferencesPath()), false);
+});
+
+/** Run the real page through Pi's custom-UI boundary, awaiting render completion. */
+async function permissionsPage(recorded: Recorded, cwd: string,
+    interact: (page: Component, press: (key: string) => Promise<void>) => Promise<void>) {
+    const shown = context(cwd, { branch: () => recorded.branch });
+    shown.ctx.ui.custom = nodeTest.mock.fn(async (factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
+        let rendered: (() => void) | undefined;
+        const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text,
+            bold: (text: string) => text, inverse: (text: string) => text } as Theme;
+        const page = await factory({ requestRender: () => rendered?.() } as never, theme, {} as never, () => {});
+        const press = (key: string) => new Promise<void>((resolve) => {
+            rendered = resolve;
+            page.handleInput?.(key);
+        });
+        await interact(page, press);
+        page.handleInput?.("\x1b");
+        return null;
+    }) as ExtensionContext["ui"]["custom"];
+    await recorded.commands.get("sandbox")!.handler("", shown.ctx);
+}
+
+function sessionEntry(data: unknown, id = "policy", parentId: string | null = null): SessionEntry {
+    return { type: "custom", customType: SESSION_PERMISSION_ENTRY, data,
+        id, parentId, timestamp: "2026-01-01T00:00:00.000Z" };
+}
+
+test("UI edits persist both profiles and tools to session only and immediately enforce restrictions", async () => {
+    forgetDenyOverride();
+    forgetSandboxPreference();
+    writePermissionSettings(defaultSandboxPermissions());
+    writeSandboxDefault("off");
+    const defaults = readFileSync(permissionSettingsPath(), "utf8");
+    const activation = readFileSync(sandboxPreferencesPath(), "utf8");
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("session-edit-enforcement");
+    const started = await startSession(recorded, root, "startup", false, false);
+    await permissionsPage(recorded, root, async (page, press) => {
+        await press(" "); // Main on.
+        await press("\x1b[B");
+        await press(" "); // Project files off.
+        for (let i = 0; i < 3; i++) await press("\x1b[B");
+        await press(" "); // Main commands off.
+        await press("\x1b[B");
+        await press(" "); // Main network off.
+        await press("\x1b[C");
+        await press(" "); // Subagents network off.
+        await press("\x1b[B");
+        await press(" "); // Guarded apply_patch off.
+        await press("\x1b[B");
+        await press(" "); // Default trusted group off.
+        assert.doesNotMatch(page.render(120).join("\n"), /Save as defaults/);
+        page.handleInput?.("\r"); // Fold, not save.
+    });
+    const expected = defaultSandboxPermissions();
+    Object.assign(expected.main, { enabled: true, projectFiles: "off", commands: false, network: false });
+    expected.subagents.network = false;
+    expected.subagentTools = { applyPatch: false, trusted: [] };
+    assert.equal(recorded.branch.length, 7, "each policy edit creates one custom entry");
+    const last = recorded.branch.at(-1)!;
+    assert.equal(last.type, "custom");
+    assert.deepEqual((last as { data: unknown }).data, { version: 1, permissions: expected });
+    assert.deepEqual(recorded.published.at(-1)?.permissions, expected.main);
+    assert.deepEqual(recorded.published.at(-1)?.subagentPermissions, expected.subagents);
+    assert.deepEqual(recorded.published.at(-1)?.subagentTools, expected.subagentTools);
+    assert.equal(readFileSync(permissionSettingsPath(), "utf8"), defaults);
+    assert.equal(readFileSync(sandboxPreferencesPath(), "utf8"), activation);
+    const file = join(root, "private.txt");
+    writeFileSync(file, "unchanged");
+    await assert.rejects(() => recorded.tools.get("read")!.execute("read", { path: file }, undefined, undefined, started.ctx), /refused to read/);
+    await assert.rejects(() => writeThrough(recorded.tools.get("write")!, file, "changed"), /permission-denied/);
+    assert.equal(readFileSync(file, "utf8"), "unchanged");
+    assert.equal((recorded.handlers.get("tool_call")!({ toolName: "bash", input: {} }, started.ctx) as { block: boolean }).block, true);
+    assert.equal((recorded.handlers.get("tool_call")!({ toolName: "web_fetch", input: {} }, started.ctx) as { block: boolean }).block, true);
+});
+
+test("a session append failure is visible, leaves the UI and enforcement unchanged, and permits retry", async (t) => {
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("session-append-failure");
+    await startSession(recorded, root, "startup", false);
+    const append = t.mock.method(recorded.pi, "appendEntry", () => { throw new Error("session append failed"); });
+    await permissionsPage(recorded, root, async (page, press) => {
+        const before = structuredClone(recorded.published.at(-1));
+        await press(" ");
+        assert.match(page.render(120).join("\n"), /session append failed/);
+        assert.match(page.render(120).join("\n"), /Sandbox\s+Off\s+On/);
+        assert.deepEqual(recorded.published.at(-1), before);
+        assert.deepEqual(recorded.branch, []);
+        assert.equal(existsSync(permissionSettingsPath()), false);
+        append.mock.restore();
+        await press(" ");
+        assert.match(page.render(120).join("\n"), /Sandbox\s+On\s+On/);
+        assert.equal(recorded.published.at(-1)?.permissions?.enabled, true);
+        assert.equal(recorded.branch.length, 1);
+    });
+});
+
+test("session policy survives fresh extension resume, fork and reload; new sessions inherit saved defaults", async () => {
+    forgetSandboxPreference();
+    const initial = defaultSandboxPermissions();
+    initial.main.enabled = true;
+    initial.main.network = false;
+    initial.subagents.enabled = false;
+    initial.subagentTools = { applyPatch: false, trusted: [{ name: "helper", package: "npm:fixture" }] };
+    const branch = [sessionEntry({ version: 1, permissions: initial })];
+    const defaults = defaultSandboxPermissions();
+    defaults.subagents.outsideProject = "off";
+    writePermissionSettings(defaults);
+    const root = project("session-reconstruction");
+    for (const reason of ["resume", "fork", "reload"] as const) {
+        const recorded = record(structuredClone(branch));
+        piBetterSandbox(recorded.pi);
+        await startSession(recorded, root, reason, false, false);
+        assert.deepEqual(recorded.published.at(-1)?.permissions, initial.main, reason);
+        assert.deepEqual(recorded.published.at(-1)?.subagentPermissions, initial.subagents, reason);
+        assert.deepEqual(recorded.published.at(-1)?.subagentTools, initial.subagentTools, reason);
+        assert.deepEqual(recorded.branch, branch, "restoring never appends an entry");
+        await startSession(recorded, root, "new", false, false);
+        assert.deepEqual(recorded.published.at(-1)?.permissions, defaults.main);
+        assert.deepEqual(recorded.published.at(-1)?.subagentPermissions, defaults.subagents);
+        assert.equal(recorded.branch.length, 0);
+    }
+});
+
+test("tree navigation restores only the active branch's latest policy and its enabled switches", async () => {
+    forgetSandboxPreference();
+    forgetDenyOverride();
+    const a = defaultSandboxPermissions();
+    a.main.enabled = true;
+    a.main.commands = false;
+    const b = structuredClone(a);
+    b.main.enabled = false;
+    b.subagents.enabled = false;
+    b.subagentTools.trusted = [];
+    const ancestor = sessionEntry({ version: 1, permissions: a }, "ancestor");
+    const child = sessionEntry({ version: 1, permissions: b }, "child", "ancestor");
+    const recorded = record([ancestor, child]);
+    piBetterSandbox(recorded.pi);
+    const root = project("tree-session-policy");
+    const started = await startSession(recorded, root, "resume", false);
+    await runSandbox(recorded, "deny add build", started.ctx);
+    const tree = recorded.handlers.get("session_tree")!;
+    for (const [branch, expected] of [[[ancestor], a], [[ancestor, child], b], [[], defaultSandboxPermissions()]] as const) {
+        recorded.branch = [...branch];
+        await tree({ type: "session_tree", newLeafId: branch.at(-1)?.id ?? null, oldLeafId: "child" }, started.ctx);
+        assert.deepEqual(recorded.published.at(-1)?.permissions, expected.main);
+        assert.deepEqual(recorded.published.at(-1)?.subagentPermissions, expected.subagents);
+        assert.deepEqual(recorded.published.at(-1)?.subagentTools, expected.subagentTools);
+        assert.ok(recorded.published.at(-1)?.denyWrite.includes(join(root, "build")), "deny rules remain global");
+        assert.deepEqual(recorded.branch, branch);
+    }
+});
+
+test("invalid latest session policies fail closed on start and tree navigation rather than falling back", async () => {
+    forgetSandboxPreference();
+    const valid = defaultSandboxPermissions();
+    const invalids = [undefined, { version: 2, permissions: valid }, { version: 1, permissions: { main: valid.main, subagents: valid.subagents } },
+        { version: 1, permissions: { ...valid, main: { ...valid.main, network: "on" } } },
+        { version: 1, permissions: { ...valid, subagentTools: { applyPatch: true, trusted: [{ name: "write", package: "npm:evil" }] } } }];
+    const root = project("invalid-session-policy");
+    for (const data of invalids) {
+        const branch = [sessionEntry({ version: 1, permissions: valid }, "valid"), sessionEntry(data, "invalid", "valid")];
+        const recorded = record(branch);
+        piBetterSandbox(recorded.pi);
+        const started = await startSession(recorded, root, "reload", false);
+        assert.equal(recorded.published.at(-1)?.state, "failed");
+        assert.deepEqual(recorded.published.at(-1)?.subagentTools?.trusted, []);
+        assert.equal(recorded.published.at(-1)?.subagentPermissions?.commands, false);
+        assert.ok(started.notifications.some((note) => note.kind === "error" && /could not be loaded/.test(note.text)));
+        await assert.rejects(() => writeThrough(recorded.tools.get("write")!, "blocked.txt", "no"), /blocked rather than run unconfined/);
+        await assert.rejects(() => recorded.tools.get("read")!.execute("read", { path: join(root, "blocked.txt") }, undefined, undefined, started.ctx), /blocked rather than run unconfined/);
+        assert.equal((recorded.handlers.get("tool_call")!({ toolName: "bash", input: {} }, started.ctx) as { block: boolean }).block, true);
+        recorded.branch = [];
+        await recorded.handlers.get("session_tree")!({}, started.ctx);
+        assert.equal(recorded.published.at(-1)?.state, "disabled");
+        recorded.branch = branch;
+        await recorded.handlers.get("session_tree")!({}, started.ctx);
+        assert.equal(recorded.published.at(-1)?.state, "failed");
+        assert.equal(existsSync(join(root, "blocked.txt")), false);
+    }
+});
+
+test("Ctrl+S alone saves global defaults; a failed save retains session edits and reload policy", async () => {
+    forgetSandboxPreference();
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("save-defaults-session");
+    await startSession(recorded, root, "startup", false);
+    await permissionsPage(recorded, root, async (page, press) => {
+        await press("\x1b[C");
+        await press(" "); // Disable Subagents, a loosening.
+        assert.equal(existsSync(permissionSettingsPath()), false);
+        const branch = structuredClone(recorded.branch);
+        mkdirSync(permissionSettingsPath(), { recursive: true }); // Atomic rename cannot replace this directory.
+        await press("\x13");
+        assert.doesNotMatch(page.render(120).join("\n"), /Defaults saved/);
+        assert.match(page.render(120).join("\n"), /EISDIR|ENOTEMPTY/);
+        assert.deepEqual(recorded.branch, branch);
+        assert.equal(recorded.published.at(-1)?.subagentPermissions?.enabled, false);
+        const restored = record(structuredClone(branch));
+        piBetterSandbox(restored.pi);
+        await startSession(restored, root, "reload", false, false);
+        assert.equal(restored.published.at(-1)?.subagentPermissions?.enabled, false, "valid session policy does not read broken global defaults");
+        rmSync(permissionSettingsPath(), { recursive: true });
+        await press("\x13");
+        assert.match(page.render(120).join("\n"), /Defaults saved\. Looser: Subagents: sandbox off/);
+        assert.deepEqual(recorded.branch, branch, "saving defaults does not alter session history");
+    });
+    const next = record();
+    piBetterSandbox(next.pi);
+    await startSession(next, root, "new", false, false);
+    assert.equal(next.published.at(-1)?.subagentPermissions?.enabled, false);
+    assert.equal(existsSync(sandboxPreferencesPath()), false, "Ctrl+S does not overwrite the legacy activation preference");
 });
 
 test("an unknown /sandbox subcommand explains the usage instead of changing state", async () => {
@@ -963,7 +1217,7 @@ test("rule management is reachable only from the slash command, never from a too
     assert.equal(existsSync(denyRuleOverridePath()), false);
 });
 
-test("every session start re-reads rules and reapplies a persisted opt-in", async () => {
+test("session restore retains activation overrides and re-reads global deny rules", async () => {
     forgetDenyOverride();
     forgetSandboxPreference();
     writeSandboxDefault("on");
@@ -980,7 +1234,7 @@ test("every session start re-reads rules and reapplies a persisted opt-in", asyn
         await startSession(recorded, root, reason, false, false);
 
         const policy = recorded.published.at(-1);
-        assert.equal(policy?.state, "enabled", `the persisted opt-in is applied after ${reason}`);
+        assert.equal(policy?.state, reason === "new" ? "enabled" : "disabled", `activation after ${reason}`);
         assert.ok(
             policy?.denyWrite.includes(join(root, "build")),
             `the rules are re-read after ${reason}`,

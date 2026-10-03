@@ -109,6 +109,7 @@ const ctx = {
     model: { provider: "test-provider", id: "test-model" },
     thinkingLevel: "off",
     sessionManager: {
+        getBranch: () => [],
         getSessionId: () => "kernel-session",
         getSessionFile: () => join(fixtures, "kernel-session.jsonl"),
     },
@@ -126,6 +127,7 @@ before(async () => {
     // does when pi is launched from a project directory.
     process.chdir(projectRoot);
     const pi = {
+        appendEntry() {},
         events: { emit: () => undefined, on: () => () => undefined },
         registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
         registerCommand: (name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) =>

@@ -99,6 +99,8 @@ export function getMarkdownTheme() { return {}; }
     });
     writeStubPackage("@earendil-works/pi-tui", {
         "index.js": `
+export class Input {}
+export class SelectList {}
 export const Key = { left: "left", x: "x", X: "X", up: "up", down: "down", enter: "enter", escape: "escape" };
 export function matchesKey(data, key) {
     if (data == null || key == null) return false;

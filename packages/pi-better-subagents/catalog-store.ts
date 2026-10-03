@@ -28,6 +28,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { AgentSessionOverrides } from "./agent-session-settings.ts";
 import {
     CATALOG_SCHEMA_VERSION,
     DiagnosticCodes,
@@ -108,6 +109,8 @@ export interface CatalogSnapshot {
     /** Same-scope duplicates. They occupy the id without selecting a filesystem-order winner. */
     blocked: readonly CatalogEntry[];
     diagnostics: readonly Diagnostic[];
+    /** Immutable, branch-local preferences; never written by loadCatalog. */
+    sessionSettings?: AgentSessionOverrides;
 }
 
 export interface SaveResult {
