@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createSubagentSettingsPage } from "../settings-page.ts";
 
-const theme = { fg: (_color, text) => text, bold: (text) => text };
+const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, inverse: (text) => text };
 
 function harness() {
     let current = { mode: "adaptive", maxConcurrent: 4, modeSource: "config", capSource: "config", defaultMode: "adaptive", defaultCap: 4 };
@@ -68,6 +68,21 @@ test("numeric cap validation and cancel leave the active cap unchanged", () => {
     }
 });
 
+test("table compares session and saved values and stacks them on narrow terminals", () => {
+    const h = harness();
+    h.page.handleInput("\r");
+    const wide = h.page.render(100).join("\n");
+    assert.match(wide, /Subagent settings\s+Session\s+Default/);
+    assert.match(wide, /Delegation mode\s+coordinator\s+adaptive/);
+    const narrow = h.page.render(40).join("\n");
+    assert.match(narrow, /Delegation mode\s+Session\s+coordinator\s+Default\s+adaptive/);
+    h.page.handleInput("\x1b[B");
+    h.page.handleInput("\r");
+    const editing = h.page.render(100);
+    const capLine = editing.find((line) => line.includes("Concurrent subagents"));
+    assert.ok(capLine.includes("4"), "the cap input stays in its table row");
+});
+
 test("failed save keeps session choices and narrow rendering fits the terminal", () => {
     const h = harness();
     h.page.handleInput("\r");
@@ -77,7 +92,7 @@ test("failed save keeps session choices and narrow rendering fits the terminal",
     assert.equal(h.settings().mode, "coordinator");
     assert.equal(h.settings().modeSource, "session");
     assert.match(h.page.render(80).join("\n"), /Read-only config/);
-    for (const width of [20, 40, 80, 120]) {
+    for (const width of [1, 10, 20, 40, 59, 60, 80, 120]) {
         for (const line of h.page.render(width)) assert.ok(visibleWidth(line) <= width);
     }
     h.page.handleInput("\x1b[B");
