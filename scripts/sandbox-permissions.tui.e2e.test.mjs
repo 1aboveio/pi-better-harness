@@ -9,6 +9,19 @@ import test from "node:test";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
+function selectedRow(text) {
+    const value = text.match(/^> (.*)$/m)?.[1];
+    return value?.trim() ? value : undefined;
+}
+
+test("selection synchronization rejects absent and blank redraw rows", () => {
+    for (const frame of ["", "Other row\n", "> \n", ">    \n", "> \t \n"]) {
+        assert.equal(selectedRow(frame), undefined, JSON.stringify(frame));
+    }
+    const value = "  > [ ] atlas (fixture-alpha) 0/2";
+    assert.equal(selectedRow(`Other row\n> ${value}\nFooter`), value);
+});
+
 test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the real TUI", { skip: !hasTmux }, () => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-permission-tui-"));
     const server = `pi-permission-${process.pid}`;
@@ -125,13 +138,16 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         }
         assert.fail(`Missing ${pattern}:\n${text}`);
     };
-    const selected = () => screen().match(/^> (.*)$/m)?.[1] ?? "";
+    const selected = () => selectedRow(screen()) ?? "";
     const moveTo = (pattern, direction = "Down") => {
         for (let i = 0; i < 60; i++) {
-            const before = selected();
+            const before = selectedRow(wait((text) => selectedRow(text) !== undefined));
             if (pattern.test(before)) return;
             key(direction);
-            wait((text) => (text.match(/^> (.*)$/m)?.[1] ?? "") !== before);
+            wait((text) => {
+                const current = selectedRow(text);
+                return current !== undefined && current !== before;
+            });
         }
         assert.fail(`Could not select ${pattern}:\n${screen()}`);
     };
