@@ -6,6 +6,36 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.17.0] - 2026-10-03
+
+### Changed
+
+- Bundle subagents 0.13.0 and sandbox 0.9.0 with session-persisted settings and Ctrl+S default saving.
+- Keep Goal 0.6.1, including its 60-second default continuation delay.
+
+## [pi-better-subagents@0.13.0] - 2026-10-03
+
+### Added
+
+- Edit agent and role model and effort from `/agents`; changes persist on the active session branch and affect discovery and new single and batch launches. Ctrl+S saves the selected definition's own defaults without flattening inheritance or modifying bundled roles.
+
+### Changed
+
+- Simplify `/subagents` settings to one editable value column styled like `/sandbox`. Edits persist for the session; Ctrl+S saves mode and concurrency defaults, and reset restores saved defaults.
+- Remove selectable save rows from the subagent and agent settings pages.
+
+## [pi-better-sandbox@0.9.0] - 2026-10-03
+
+### Changed
+
+- Persist permission edits and confirmed `/sandbox on|off` changes on the active session branch across resume, reload, fork, and tree navigation. New sessions inherit saved defaults.
+- Save defaults with Ctrl+S only in the permissions page; Enter folds tool groups. Keep independent Main and Subagents permission profiles and existing default and deny-rule commands.
+
+### Fixed
+
+- Reject malformed session permissions without falling back to a broader policy.
+- Preserve enforcement and session history when activation persistence fails; successful retries remain durable.
+
 ## [pi-better-harness@0.16.0] - 2026-10-03
 
 ### Changed
