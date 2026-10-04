@@ -5,13 +5,20 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
-import * as sdk from "@earendil-works/pi-coding-agent";
-import * as ai from "@earendil-works/pi-ai";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
 import { getCallbackBatcher } from "../packages/pi-better-background-tasks/src/shared-callback-batcher.ts";
 import { getCallbackBatcher as getSubagentCallbackBatcher } from "../packages/pi-better-subagents/shared-callback-batcher.ts";
+
+const sdkUrl = process.env.PI_CODEMODE_TEST_SDK_DIR
+  ? pathToFileURL(join(process.env.PI_CODEMODE_TEST_SDK_DIR, "dist/index.js")).href
+  : import.meta.resolve("@earendil-works/pi-coding-agent");
+const sdk = await import(sdkUrl);
+const ai = await import(process.env.PI_CODEMODE_TEST_SDK_DIR
+  ? new URL("../../pi-ai/dist/index.js", sdkUrl).href
+  : import.meta.resolve("@earendil-works/pi-ai"));
 
 test("#409 real Pi runs one aggregate after settlement and holds arrivals during that run", { timeout: 10_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pi-callback-availability-"));
@@ -20,6 +27,10 @@ test("#409 real Pi runs one aggregate after settlement and holds arrivals during
   let host;
   let subagentHost;
   const requests = [];
+  const settledEntered = Promise.withResolvers();
+  const releaseSettled = Promise.withResolvers();
+  const firstHandoff = Promise.withResolvers();
+  let heldSettlement = false;
   const started = Array.from({ length: 4 }, () => Promise.withResolvers());
   const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const provider = {
@@ -41,6 +52,7 @@ test("#409 real Pi runs one aggregate after settlement and holds arrivals during
     },
   };
   t.after(async () => {
+    releaseSettled.resolve();
     for (const request of requests) request.finish();
     if (session) {
       await session.abort();
@@ -65,6 +77,12 @@ test("#409 real Pi runs one aggregate after settlement and holds arrivals during
     } }, { name: "subagents-under-test", factory(pi) {
       subagentHost = pi;
       subagentsExtension(pi);
+      pi.on("agent_settled", async () => {
+        if (heldSettlement) return;
+        heldSettlement = true;
+        settledEntered.resolve();
+        await releaseSettled.promise;
+      });
     } }],
   });
   await loader.reload();
@@ -78,6 +96,7 @@ test("#409 real Pi runs one aggregate after settlement and holds arrivals during
   const sendCustomMessage = session.sendCustomMessage.bind(session);
   session.sendCustomMessage = (message, options) => {
     sent.push({ message, idleAtSend: session.isIdle });
+    if (sent.length === 1) firstHandoff.resolve();
     return sendCustomMessage(message, options);
   };
   const batcher = getCallbackBatcher(host);
@@ -95,7 +114,14 @@ test("#409 real Pi runs one aggregate after settlement and holds arrivals during
   assert.equal(await batcher.flush(), false);
   assert.equal(sent.length, 0, "busy completions never enter Pi's follow-up queue");
   first.finish();
-  await foreground;
+  await settledEntered.promise;
+  await firstHandoff.promise;
+  enqueue("bg_during_callback");
+  await batcher.flush();
+  await new Promise((resolve) => setImmediate(resolve));
+  await batcher.flush();
+  assert.equal(sent.length, 1, "a held settled handler cannot cause multiple deferred runs");
+  releaseSettled.resolve();
 
   const aggregate = await started[1].promise;
   assert.equal(sent.length, 1);
@@ -103,9 +129,6 @@ test("#409 real Pi runs one aggregate after settlement and holds arrivals during
   assert.match(sent[0].message.content, /^2 background completions are ready:/);
   assert.match(sent[0].message.content, /bg_first/);
   assert.match(sent[0].message.content, /sa_second/);
-  enqueue("bg_during_callback");
-  assert.equal(await batcher.flush(), false);
-  assert.equal(sent.length, 1);
   aggregate.finish();
 
   const next = await started[2].promise;
@@ -115,6 +138,7 @@ test("#409 real Pi runs one aggregate after settlement and holds arrivals during
   assert.match(sent[1].message.content, /bg_during_callback/);
   assert.doesNotMatch(sent[1].message.content, /bg_first|sa_second/);
   next.finish();
+  await foreground;
   await session.waitForIdle();
   assert.equal(requests.length, 3, "one foreground run plus one aggregate and one later arrival run");
   assert.equal(batcher.pendingCount(), 0);

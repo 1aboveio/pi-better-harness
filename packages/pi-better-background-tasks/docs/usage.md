@@ -208,7 +208,10 @@ accumulation window; invalid values use 100 ms. A single event flushes when that
 bounded window expires while Pi is idle. During a foreground run, ordinary
 completions stay in the harness queue without sending Pi follow-ups. After
 `agent_settled`, pending completions share one bounded aggregate and one model
-run. New completions and overflow wait for the next available boundary while
+run. A handoff guard prevents additional sends while Pi defers that run during
+settlement. Availability is rechecked on a lightweight timer while events are
+pending, so manual compaction does not strand them. New completions and overflow
+wait for the next available boundary while
 that run is active. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 

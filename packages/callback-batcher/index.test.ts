@@ -227,6 +227,53 @@ test("a foreground run starting inside the debounce window prevents the schedule
   } finally { batcher.cancel(); }
 });
 
+test("a deferred model run permits only one handoff even while Pi still reports idle (#409)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let idle = true;
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 0, retryMs: 10, maxBytes: 700, isAvailable: () => idle });
+  try {
+    for (const id of ["sa_first", "sa_overflow", "sa_last"]) {
+      batcher.enqueue(event(id, { label: "x".repeat(160) }));
+    }
+    await batcher.flush();
+    assert.equal(messages.length, 1);
+    assert.ok(batcher.pendingCount() > 0);
+    batcher.enqueue(event("sa_concurrent"));
+    // Another extension's settled handler can refresh the idle predicate while
+    // Pi is still deferring the first model run.
+    batcher.setAvailability(() => idle);
+    t.mock.timers.tick(100);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 1, "overflow and arrivals cannot create additional deferred runs");
+    idle = false;
+    batcher.setAvailability(() => idle);
+    idle = true;
+    batcher.setAvailability(() => idle);
+    assert.equal(await batcher.flush(), true);
+    assert.equal(messages.length, 2, "a genuine busy-to-idle transition permits the next handoff");
+  } finally { batcher.cancel(); }
+});
+
+test("pending completions recover when availability returns without a lifecycle event (#409)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let idle = false;
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 25, retryMs: 100, isAvailable: () => idle });
+  try {
+    batcher.enqueue(event("sa_during_compaction"));
+    t.mock.timers.tick(25);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 0);
+    idle = true;
+    // Manual compaction can restore idle without emitting agent_settled.
+    t.mock.timers.tick(100);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 1);
+    assert.equal(batcher.pendingCount(), 0);
+  } finally { batcher.cancel(); }
+});
+
 test("bounds event text and excludes caller-supplied result and log payloads", () => {
   const resultSentinel = "FULL_RESULT_SENTINEL";
   const logSentinel = "RAW_LOG_SENTINEL";

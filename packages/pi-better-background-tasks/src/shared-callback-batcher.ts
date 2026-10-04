@@ -3,7 +3,7 @@ export type CallbackSource = "subagent" | "background-task";
 export type CallbackDetailTool = "subagent_result" | "bg_task_status";
 
 export interface CallbackBatchHost {
-  /** Pi gives each extension its own API wrapper around one session event bus. */
+  /** Older Pi shares this object; newer Pi supplies per-extension wrappers. */
   events?: object;
   sendMessage(
     message: { customType: string; content: string; display: boolean },
@@ -103,6 +103,7 @@ interface PendingEvent {
 
 interface SharedCallbackBatcherState {
   byHost: WeakMap<object, CallbackBatcher>;
+  bySession?: WeakMap<object, CallbackBatcher>;
 }
 
 const GLOBAL_STATE_KEY = Symbol.for("@1aboveio/pi-better-harness/callback-batcher");
@@ -444,9 +445,17 @@ export function createCallbackBatcher(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let flushPromise: Promise<boolean> | undefined;
   let isAvailable = options.isAvailable ?? (() => true);
+  let gated = options.isAvailable !== undefined;
+  let awaitingRun = false;
 
   const available = (): boolean => {
-    try { return isAvailable(); } catch { return false; }
+    try {
+      if (!isAvailable()) {
+        awaitingRun = false;
+        return false;
+      }
+      return !awaitingRun;
+    } catch { return false; }
   };
 
   const cancelTimer = (): void => {
@@ -455,11 +464,13 @@ export function createCallbackBatcher(
   };
 
   const schedule = (delayMs: number): void => {
-    if (timer || pending.size === 0 || !available()) return;
+    if (timer || pending.size === 0) return;
+    // Some idle transitions (manual compaction) have no agent_settled event.
+    const delay = available() ? delayMs : retryMs;
     timer = setTimeout(() => {
       timer = undefined;
       void api.flush();
-    }, Math.max(0, delayMs));
+    }, Math.max(1, delay));
     timer.unref?.();
   };
 
@@ -474,7 +485,10 @@ export function createCallbackBatcher(
 
   const performFlush = async (): Promise<boolean> => {
     cancelTimer();
-    if (!available()) return false;
+    if (!available()) {
+      schedule(retryMs);
+      return false;
+    }
     const snapshot = [...pending.entries()]
       .sort((a, b) => a[1].sequence - b[1].sequence);
     pending.clear();
@@ -523,6 +537,9 @@ export function createCallbackBatcher(
     const overflowItems = deliverable.filter(([, item]) => !representedSet.has(item.event));
 
     try {
+      // Pi may defer the requested run while settled handlers finish, leaving
+      // isIdle() true. Permit no second handoff until a run starts.
+      awaitingRun = gated;
       await host.sendMessage(
         {
           customType: "background-completion-batch",
@@ -532,6 +549,7 @@ export function createCallbackBatcher(
         { deliverAs: "followUp", triggerTurn: true },
       );
     } catch {
+      awaitingRun = false;
       for (const [key] of deliverable) inFlight.delete(key);
       const retryItems = [...deliverable, ...pending.entries()]
         .sort((a, b) => a[1].sequence - b[1].sequence);
@@ -612,7 +630,9 @@ export function createCallbackBatcher(
     flush,
     setHost(next) { host = next; },
     setAvailability(check) {
+      gated = true;
       isAvailable = check;
+      available();
       cancelTimer();
       schedule(windowMs);
     },
@@ -620,6 +640,7 @@ export function createCallbackBatcher(
     cancel() {
       cancelTimer();
       pending.clear();
+      awaitingRun = false;
     },
     pendingCount() {
       return pending.size;
@@ -653,11 +674,18 @@ export function cancelCallbackBatch(host: CallbackBatchHost): void {
 /** Called on session_start, agent_start and agent_settled by both extensions. */
 export function setCallbackBatchContext(
   host: CallbackBatchHost,
-  ctx: { isIdle(): boolean },
+  ctx: { isIdle(): boolean; sessionManager?: object },
 ): void {
+  const state = globalState();
+  const bySession = state.bySession ??= new WeakMap<object, CallbackBatcher>();
+  const shared = ctx.sessionManager ? bySession.get(ctx.sessionManager) : undefined;
+  const batcher = shared ?? getCallbackBatcher(host);
+  if (ctx.sessionManager) bySession.set(ctx.sessionManager, batcher);
+  state.byHost.set(host.events ?? host, batcher);
+  batcher.setHost(host);
   // Schedule rather than await delivery inside agent_settled: its handlers are
   // still settling the previous run, and sendMessage may start a new one.
-  getCallbackBatcher(host).setAvailability(() => ctx.isIdle());
+  batcher.setAvailability(() => ctx.isIdle());
 }
 
 function globalState(): SharedCallbackBatcherState {
