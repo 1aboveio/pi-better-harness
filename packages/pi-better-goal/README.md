@@ -13,7 +13,8 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 ## Core Features
 
 - `/goal` runtime for starting, pausing, resuming, completing, and clearing the current objective.
-- `escape` pauses the active goal, and it stays paused while you talk to the agent. Say "go" (the agent then calls `goal_resume`), or use `/goal resume` or `alt+g`. `/goal pause` resumes only through `/goal resume` or `alt+g`. The status line shows `goal paused · say "go" or /goal resume`, and paused goals are never poked. On a macOS terminal without Option-as-Meta, `alt+g` types `©`; use `/goal resume` there.
+- `/goal settings` opens an interactive settings page in the TUI. Select a row with Up/Down and toggle with Space/Enter; changes save immediately, and Escape closes the page. Both controls default to `on`. Automatic continuation controls idle and background-drain wakes; conversational resume controls the agent's Escape-pause resume tool. Goal kickoff, `/goal resume`, and `alt+g` remain available with either control off. For scripts or non-interactive sessions, use `/goal settings auto-continue on|off` and `/goal settings conversational-resume on|off`; bare `/goal settings` prints the saved values outside the TUI.
+- `escape` pauses the active goal, and it stays paused while you talk to the agent. With conversational resume enabled, say "go" (the agent then calls `goal_resume`), or use `/goal resume` or `alt+g`. `/goal pause` resumes only through `/goal resume` or `alt+g`. The status line shows the available resume path, and paused goals are never poked. On a macOS terminal without Option-as-Meta, `alt+g` types `©`; use `/goal resume` there.
 - Background work that finishes while an `ask_user_question` is pending is handed to the agent right after the answer.
 - A compact goal widget that does not replace Pi's footer.
 - Background activity tracking for subagents and other registered providers.

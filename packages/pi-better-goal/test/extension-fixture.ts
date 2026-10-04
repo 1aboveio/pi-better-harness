@@ -1,4 +1,12 @@
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Never consume or modify the developer's persistent goal preferences.
+const agentDir = mkdtempSync(join(tmpdir(), "pi-goal-test-agent-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+process.on("exit", () => rmSync(agentDir, { recursive: true, force: true }));
 
 // The extension snapshots wake configuration when its module loads. Exercise
 // the documented defaults regardless of the invoking developer's Pi settings.
