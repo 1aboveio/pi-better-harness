@@ -34,6 +34,7 @@ const rows = [
     { label: "Stored credentials", key: "storedCredentials" },
     { label: "Run commands & applications", key: "commands" },
     { label: "Network access", key: "network" },
+    { label: "Process access", key: "processAccess" },
 ] as const;
 const fileValues: readonly FileAccess[] = ["off", "read", "write", "read-write"];
 const credentialValues: readonly CredentialAccess[] = ["off", "read", "read-write"];
@@ -49,6 +50,7 @@ function cellHint(key: string, profile: PermissionProfile | undefined): string |
             : "Always deletable: temp, hidden ~/.directories and worktree folders (.worktrees/, *-worktrees/).";
     }
     if (key === "storedCredentials") return "Known credential files follow this row independently of Outside project.";
+    if (key === "processAccess") return "process_list only: current-user PIDs and names. No process control; shell access is unchanged.";
     return undefined;
 }
 const columns = ["main", "subagents"] as const;
@@ -157,6 +159,8 @@ export function createPermissionsPage(
         if (key !== "enabled" && !settings[profile].enabled) return;
         if (key === "enabled" || key === "commands" || key === "network") {
             next[profile][key] = !next[profile][key];
+        } else if (key === "processAccess") {
+            next[profile][key] = next[profile][key] === "off" ? "read" : "off";
         } else if (key === "storedCredentials") {
             const current = next[profile][key];
             next[profile][key] = credentialValues[(credentialValues.indexOf(current) + 1) % credentialValues.length]!;

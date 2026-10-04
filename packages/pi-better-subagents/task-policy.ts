@@ -39,7 +39,8 @@ export type TaskExtensionTool = Readonly<{
  * the fixed deny list). Matches `pi-better-sandbox`'s default Subagents column.
  */
 export const DEFAULT_TASK_PERMISSIONS: Readonly<SandboxPermissions> = Object.freeze({
-    projectFiles: "read-write", outsideProject: "write", storedCredentials: "read", commands: true, network: true,
+    projectFiles: "read-write", outsideProject: "write", storedCredentials: "read-write", commands: true, network: true,
+    processAccess: "off",
 });
 
 export function parseTaskPolicy(value: unknown): TaskPolicy {
@@ -57,6 +58,7 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {
     }
     if (!["off", "read", "read-write"].includes(String(p.storedCredentials))) throw new Error("Invalid task sandbox storedCredentials.");
     if (typeof p.commands !== "boolean" || typeof p.network !== "boolean") throw new Error("Invalid task sandbox capabilities.");
+    if (p.processAccess !== undefined && p.processAccess !== "off" && p.processAccess !== "read") throw new Error("Invalid task sandbox processAccess.");
     if (!Array.isArray(v.denyWrite) || !v.denyWrite.every((path) => typeof path === "string" && isAbsolute(path))) throw new Error("Invalid task sandbox protected paths.");
     if (!Array.isArray(v.tools) || !v.tools.every((name) => typeof name === "string" && name.length > 0)) throw new Error("Invalid task sandbox tool selection.");
     if (v.applyPatch !== undefined && typeof v.applyPatch !== "boolean") throw new Error("Invalid task sandbox apply_patch setting.");
@@ -71,6 +73,7 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {
         permissions: Object.freeze({
             projectFiles: p.projectFiles, outsideProject: p.outsideProject, storedCredentials: p.storedCredentials,
             commands: p.commands, network: p.network,
+            processAccess: p.processAccess ?? "off",
         } as SandboxPermissions),
         denyWrite: Object.freeze([...v.denyWrite]), tools: Object.freeze([...v.tools]),
         applyPatch: v.applyPatch === true,

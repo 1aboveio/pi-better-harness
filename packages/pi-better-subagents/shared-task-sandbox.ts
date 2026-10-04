@@ -14,8 +14,9 @@ import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:p
 import { canonicalizePath, compileWritePolicy, isRemovableUnderWrite, maybeBuildSandboxCommand, type SandboxPermissions } from "./shared-sandbox-core.ts";
 import { createTaskFileOperations, type TaskFileController } from "./shared-task-files.ts";
 import { APPLY_PATCH_TOOL, createApplyPatchToolDefinition } from "./shared-task-apply-patch.ts";
+import { createProcessListToolDefinition, PROCESS_LIST_TOOL } from "./shared-task-process-list.ts";
 
-export const TASK_BUILTINS = Object.freeze(["read", "write", "edit", "bash"] as const);
+export const TASK_BUILTINS = Object.freeze(["read", "write", "edit", "bash", PROCESS_LIST_TOOL] as const);
 /** Harness adapters that follow the file rules; each is a task builtin only when the profile enables it. */
 export const GUARDED_TASK_TOOLS = Object.freeze([APPLY_PATCH_TOOL] as const);
 
@@ -182,6 +183,8 @@ export function installTaskTools(pi: ExtensionAPI, options: {
     admitExtensionTool?: (name: string, input: unknown, sourcePath: string | undefined) => boolean;
     /** Register the guarded apply_patch adapter as a task builtin. */
     applyPatch?: boolean;
+    /** Human-controlled access to the fixed read-only inventory adapter. */
+    processAccess?: () => "off" | "read";
     /** Build the admitted bash definition from the confined operations (default: the SDK bash tool). */
     bashDefinition?: (cwd: string, operations: BashOperations) => ReturnType<typeof createBashToolDefinition>;
 }) {
@@ -205,6 +208,7 @@ export function installTaskTools(pi: ExtensionAPI, options: {
         pi.registerTool(own(createWriteToolDefinition(cwd, { operations: files.write })));
         pi.registerTool(own(createEditToolDefinition(cwd, { operations: files.edit })));
         pi.registerTool(own(options.bashDefinition ? options.bashDefinition(cwd, bash) : createBashToolDefinition(cwd, { operations: bash })));
+        pi.registerTool(own(createProcessListToolDefinition(cwd, controller, options.processAccess ?? (() => "off"))) as any);
         if (options.applyPatch) {
             pi.registerTool(own(createApplyPatchToolDefinition(cwd, {
                 readFile: files.read.readFile, writeFile: files.write.writeFile, mkdir: files.write.mkdir,
@@ -225,6 +229,9 @@ export function installTaskTools(pi: ExtensionAPI, options: {
                 }
                 if (event.toolName === "bash" && plan.policy.permissions?.commands === false) {
                     return { block: true, reason: "Sandbox: Run commands & applications is Off." };
+                }
+                if (event.toolName === PROCESS_LIST_TOOL && options.processAccess?.() !== "read") {
+                    return { block: true, reason: "Sandbox: Process access is Off. Enable Read in /sandbox." };
                 }
                 return;
             }

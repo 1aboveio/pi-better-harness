@@ -12,6 +12,7 @@ export type PermissionProfile = Readonly<{
     storedCredentials: CredentialAccess;
     commands: boolean;
     network: boolean;
+    processAccess?: "off" | "read";
 }>;
 export type PermissionSnapshot = Readonly<{
     permissions?: PermissionProfile;
@@ -38,12 +39,14 @@ function profile(value: unknown): PermissionProfile {
     const credential = (v: unknown): v is CredentialAccess => v === "off" || v === "read" || v === "read-write";
     const access = (v: unknown): v is Access => credential(v) || v === "write";
     if (typeof p.enabled !== "boolean" || typeof p.commands !== "boolean" || typeof p.network !== "boolean" ||
-        !access(p.projectFiles) || !access(p.outsideProject) || !credential(p.storedCredentials)) {
+        !access(p.projectFiles) || !access(p.outsideProject) || !credential(p.storedCredentials) ||
+        (p.processAccess !== undefined && p.processAccess !== "off" && p.processAccess !== "read")) {
         throw new Error("Invalid sandbox permission profile; update permissions in the sandbox UI.");
     }
     return Object.freeze({
         enabled: p.enabled, commands: p.commands, network: p.network,
         projectFiles: p.projectFiles, outsideProject: p.outsideProject, storedCredentials: p.storedCredentials,
+        ...(p.processAccess === undefined ? {} : { processAccess: p.processAccess }),
     });
 }
 

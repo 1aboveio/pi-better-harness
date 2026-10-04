@@ -2,11 +2,12 @@
 // @level integration
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, createWriteToolDefinition } from '@earendil-works/pi-coding-agent';
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { describeSandboxSupport } from '../shared-sandbox-core.ts';
@@ -37,6 +38,23 @@ function fixture(t, permissions = {}, fixtureParent = process.platform === 'win3
 }
 
 const supported = describeSandboxSupport().supported;
+
+test('standalone launch defaults allow credential maintenance but keep process inventory Off', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control, tools: ['read'],
+        piBin: fileURLToPath(new URL('./cli.js', import.meta.resolve('@earendil-works/pi-coding-agent'))) });
+    t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
+    assert.equal(prepared.policy.permissions.storedCredentials, 'read-write');
+    assert.equal(prepared.policy.permissions.processAccess, 'off');
+    assert.ok(Object.isFrozen(prepared.policy.permissions));
+});
+
+test('old task policies retain inventory Off and invalid process levels fail closed', (t) => {
+    const f = fixture(t);
+    assert.equal(parseTaskPolicy(f.policy).permissions.processAccess, 'off');
+    f.policy.permissions.processAccess = 'write';
+    assert.throws(() => parseTaskPolicy(f.policy), /Invalid task sandbox processAccess/);
+});
 
 test('real Pi RPC startup takes runtime locks with task network and commands disabled', { skip: !supported }, (t) => {
     const f = fixture(t, { commands: false, network: false, storedCredentials: 'off' });
@@ -130,6 +148,52 @@ test('SDK-loaded guarded tools confine writes and reject unclassified extension 
     await assert.rejects(execute(session, 'escape', { path: 'unused', content: 'unused' }), /verified task execution adapter/);
     assert.equal(escaped, false);
     assert.equal(existsSync(join(f.base, 'outside.txt')), false);
+});
+
+test('Process access activates the fixed inventory without general commands and stays immutable', { skip: !supported }, async (t) => {
+    const f = fixture(t, { processAccess: 'read', commands: false, network: false,
+        storedCredentials: process.platform === 'linux' ? 'read' : 'off' });
+    f.policy.tools = ['process_list', 'bash'];
+    const session = await sessionFixture(t, f);
+    const name = 'pi-task-proc';
+    const executable = join(f.project, name);
+    copyFileSync('/bin/sleep', executable);
+    const owned = spawn(executable, ['60'], { stdio: 'ignore' });
+    t.after(async () => {
+        if (owned.pid && owned.exitCode === null && owned.signalCode === null) {
+            const closed = once(owned, 'close');
+            owned.kill('SIGKILL');
+            await closed;
+        }
+    });
+    await once(owned, 'spawn');
+    const listed = await execute(session, 'process_list', { name, limit: 200 });
+    const details = JSON.parse(listed.content.find((part) => part.type === 'text').text);
+    assert.equal(details.scope, 'current-user');
+    assert.ok(details.processes.some((row) => row.pid === owned.pid && row.name === name), 'the confined inventory sees its owned fixture process');
+    assert.ok(details.processes.every((row) => Object.keys(row).sort().join(',') === 'name,pid'));
+    await assert.rejects(execute(session, 'bash', { command: 'true' }), /commands.*Off/i);
+    f.policy.permissions.processAccess = 'off';
+    const captured = await execute(session, 'process_list', { name: 'pi-no-such-inventory-process', limit: 1 });
+    assert.deepEqual(JSON.parse(captured.content[0].text).processes, [], 'the captured Read policy is not changed by later edits');
+});
+
+test('Linux inventory refuses an unsupported credential mask without relaxing the launch policy', { skip: !supported || process.platform !== 'linux' }, async (t) => {
+    const f = fixture(t, { processAccess: 'read', commands: false, network: false, storedCredentials: 'off' });
+    f.policy.tools = ['process_list'];
+    const session = await sessionFixture(t, f);
+    await assert.rejects(execute(session, 'process_list', {}), /cannot hide stored credentials in a read-only whole-root bind/);
+    assert.equal(f.policy.permissions.storedCredentials, 'off');
+    assert.equal(f.policy.permissions.commands, false);
+});
+
+test('Process access Off does not activate inventory and cannot be bypassed by selecting its name', { skip: !supported }, async (t) => {
+    const f = fixture(t, { processAccess: 'off' });
+    f.policy.tools = ['read', 'process_list'];
+    const session = await sessionFixture(t, f);
+    assert.equal(session.agent.state.tools.some((tool) => tool.name === 'process_list'), false);
+    session.setActiveToolsByName(['process_list']);
+    await assert.rejects(execute(session, 'process_list', {}), /Process access is Off/);
 });
 
 test('late replacement with a copied guarded schema still fails source verification', { skip: !supported }, async (t) => {

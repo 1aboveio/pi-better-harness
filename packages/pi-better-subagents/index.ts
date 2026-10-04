@@ -1761,14 +1761,19 @@ export default function (pi: ExtensionAPI) {
             if (p.tools === undefined) names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
             allow = [...new Set(names)].join(",");
         }
+        if (sandboxEnabled && p.tools === undefined && permissionPlan.permissions?.processAccess === "read") {
+            allow = [...new Set([...allow.split(","), "process_list"])].join(",");
+        }
         const taskTools = sandboxEnabled ? planTaskTools({
             requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name)),
             settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
+            processAccess: permissionPlan.permissions?.processAccess ?? "off",
             builtins: TASK_BUILTINS, registered: pi.getAllTools?.() ?? [],
             toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
         }) : undefined;
         const resolution = resolveExtensions({
-            tools: sandboxEnabled ? allow.split(",").filter((name) => (TASK_BUILTINS as readonly string[]).includes(name)).join(",") : allow,
+            // process_list is installed by the mandatory task guard, not an SDK builtin or extension mapping.
+            tools: sandboxEnabled ? allow.split(",").filter((name) => name !== "process_list" && (TASK_BUILTINS as readonly string[]).includes(name)).join(",") : allow,
             model, clean, allowNested: sandboxEnabled ? false : p.allow_nested, config: cfg,
         });
         const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);

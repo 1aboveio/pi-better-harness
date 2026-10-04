@@ -251,7 +251,7 @@ test("the extension registers the built-in overrides, user_bash routing, and the
     const recorded = record();
     piBetterSandbox(recorded.pi);
 
-    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
+    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "write"]);
     assert.ok(recorded.handlers.has("user_bash"));
     assert.ok(recorded.handlers.has("session_start"));
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
@@ -633,6 +633,7 @@ test("UI edits persist both profiles and tools to session only and immediately e
         await press(" "); // Main network off.
         await press("\x1b[C");
         await press(" "); // Subagents network off.
+        await press("\x1b[B"); // Skip the independent Process access row.
         await press("\x1b[B");
         await press(" "); // Guarded apply_patch off.
         await press("\x1b[B");
@@ -874,7 +875,7 @@ test("pi loads the published entry point and registers the same surface", async 
     assert.equal(result.extensions.length, 1);
     const extension = result.extensions[0];
     assert.ok(extension);
-    assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
+    assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "write"]);
     assert.deepEqual([...extension.commands.keys()], ["sandbox"]);
     assert.ok(extension.handlers.has("session_start"));
     assert.ok(extension.handlers.has("user_bash"));
@@ -1238,7 +1239,7 @@ test("rule management is reachable only from the slash command, never from a too
 
     // The whole registered tool surface is pi's own built-ins, overridden. There
     // is nothing here the model could call to read or change a rule.
-    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "read", "write"]);
+    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "write"]);
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
 
     // Nor can the events contract be used to push a rule set in: publishing a
@@ -1356,6 +1357,15 @@ test("saved permissions reach file tools, command gates, and consumer snapshots"
     await recorded.commands.get("sandbox")!.handler("off", context(root, { confirm: true }).ctx);
     assert.equal(call({ toolName: "bash", input: { command: "true" } }, started.ctx), undefined);
     forgetSandboxPreference();
+});
+
+test("Process access remains Off even when Main confinement is inactive", async () => {
+    forgetSandboxPreference();
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const started = await startSession(recorded, project("process-off"), "startup", false, false);
+    assert.equal(recorded.published.at(-1)?.permissions?.processAccess, "off");
+    await assert.rejects(() => recorded.tools.get("process_list")!.execute("process-off", {}, undefined, undefined, started.ctx), /Process access is Off/);
 });
 
 test("completions cover activation defaults and deny actions", () => {
