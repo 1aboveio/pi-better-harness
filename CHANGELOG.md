@@ -6,6 +6,51 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.18.0] - 2026-10-04
+
+### Changed
+
+- Bundle Goal 0.7.0 with the interactive `/goal settings` page and independent automatic continuation and conversational resume controls. (#412)
+- Bundle Background Tasks 0.6.4 and Subagents 0.13.1 so ordinary completions accumulate while Pi is busy and produce one bounded aggregate when it becomes available. (#410)
+- Bundle Sandbox 0.9.1, SSH 0.1.2, and Plan 0.5.4 with updated package gallery metadata and documentation.
+
+## [pi-better-goal@0.7.0] - 2026-10-04
+
+### Added
+
+- Open an interactive settings page with `/goal settings`. Toggle automatic idle/background-drain continuation independently from conversational resume after Escape; both settings persist immediately and default to enabled. Text commands remain available outside the TUI. (#412)
+- Preserve goal kickoff, explicit `/goal resume`, and `alt+g` with either or both settings disabled.
+
+## [pi-better-background-tasks@0.6.4] - 2026-10-04
+
+### Fixed
+
+- Keep ordinary completion callbacks queued while Pi is busy, aggregate them with subagent completions on availability, and hold new arrivals until the next run settles. Preserve urgent alert delivery and reload continuity. (#410)
+
+## [pi-better-subagents@0.13.1] - 2026-10-04
+
+### Fixed
+
+- Aggregate ordinary subagent completions with background-task completions only when Pi is available; avoid separate deferred turns and hold arrivals during callback runs. Support shared lifecycle identity across Pi versions and reload. (#410)
+
+## [pi-better-sandbox@0.9.1] - 2026-10-04
+
+### Changed
+
+- Include package gallery preview metadata and document macOS Seatbelt's setuid/setgid process-inspection limitation without weakening sandbox permissions.
+
+## [pi-better-ssh@0.1.2] - 2026-10-04
+
+### Changed
+
+- Include package gallery preview metadata and strengthen packed-extension, output-capture, process-termination, and session-isolation regression coverage.
+
+## [pi-better-plan@0.5.4] - 2026-10-04
+
+### Changed
+
+- Include package gallery preview metadata in the manifest and README.
+
 ## [pi-better-harness@0.17.1] - 2026-10-04
 
 ### Fixed
