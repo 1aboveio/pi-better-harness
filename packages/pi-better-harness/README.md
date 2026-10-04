@@ -1,5 +1,7 @@
 # pi-better-harness
 
+<img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/brand/logo.png" alt="Pi Better Harness logo" width="128" height="128" />
+
 `pi-better-harness` is a Pi meta package that installs the core Pi Better Harness extensions: an opt-in foreground write sandbox, delegated subagents, durable background tasks, synchronous SSH commands, goal tracking, and structured plans.
 
 ## Quick Answer

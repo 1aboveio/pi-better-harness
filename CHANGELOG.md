@@ -6,6 +6,46 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.19.0] - 2026-10-04
+
+### Changed
+
+- Adopt the refined pi monogram in the project and npm README headers and all eight package gallery previews.
+- Bundle Goal 0.8.0, Sandbox 0.10.0, Subagents 0.14.0, and Background Tasks 0.6.5, including the newly merged goal and sandbox settings.
+- Keep Plan 0.5.4 and SSH 0.1.2 unchanged.
+
+## [pi-better-goal@0.8.0] - 2026-10-04
+
+### Added
+
+- Make Escape pausing configurable in `/goal settings`, with session persistence and Ctrl+S default saving. (#416)
+
+## [pi-better-sandbox@0.10.0] - 2026-10-04
+
+### Added
+
+- A human-controlled Process access setting and fixed read-only `process_list` adapter for current-user process names and PIDs. Process access remains Off by default and does not grant arbitrary commands or process control. (#417)
+
+### Changed
+
+- Use Write & delete consistently for full file permissions and default new Subagents profiles to writable stored credential files, retaining saved profile values. (#414)
+
+## [pi-better-subagents@0.14.0] - 2026-10-04
+
+### Added
+
+- Admit the guarded `process_list` adapter under the launcher-selected Process access permission without exposing arbitrary shell commands. (#417)
+
+### Changed
+
+- Carry the updated sandbox settings, labels, and new-profile credential defaults. (#414)
+
+## [pi-better-background-tasks@0.6.5] - 2026-10-04
+
+### Changed
+
+- Synchronize the shared sandbox policy type with the optional Process access field; omitted legacy profiles remain Off. (#417)
+
 ## [pi-better-harness@0.18.0] - 2026-10-04
 
 ### Changed

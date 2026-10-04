@@ -1,5 +1,7 @@
 # Pi Better Harness
 
+<img src="docs/images/brand/logo.png" alt="Pi Better Harness logo" width="128" height="128" />
+
 `pi-better-harness` is a Pi extension bundle for an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, goal tracking, and structured plans.
 
 ## Quick Answer
