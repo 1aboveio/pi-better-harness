@@ -110,6 +110,7 @@ function makeHarness(options = {}) {
     };
     const ctx = {
         cwd,
+        isIdle: () => true,
         hasUI: false,
         ui: { notify: (msg, level) => notes.push({ msg, level }), setWidget: () => {} },
         model: undefined,
@@ -729,26 +730,39 @@ describe("completion callback batching", () => {
     // @covers subagent.completion-callback
     // @level integration
     // @fails-without-fix subagent.completion-callback
-    it("batches real child exits and keeps callback:false silent in a mixed group", async () => {
+    it("#409 holds time-separated real child exits while busy and batches them when settled, keeping callback:false silent", async () => {
         const previousWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
         process.env.PI_BETTER_CALLBACK_BATCH_MS = "5000";
         const h = makeHarness({ cwd: tmpdir(), sessionId: "completion-batch" });
+        let idle = false;
+        h.ctx.isIdle = () => idle;
         let runs = [];
         try {
+            await h.handlers.get("session_start")({}, h.ctx);
+            await h.handlers.get("agent_start")({}, h.ctx);
             const first = await spawnRun(h, { name: "first", callback: true });
             const second = await spawnRun(h, { name: "second", callback: true });
             const quiet = await spawnRun(h, { name: "quiet", callback: false });
             runs = [first, second, quiet];
 
-            for (const run of runs) killProcessTree(run.pid, "SIGKILL");
             const batcher = getCallbackBatcher(h.pi);
+            killProcessTree(first.pid, "SIGKILL");
+            assert.equal(await waitFor(() => batcher.pendingCount() === 1), true);
+            assert.equal(await batcher.flush(), false, "first completion stays in the harness while busy");
+            assert.equal(readMeta(first.id).completionCallbackSentAt, undefined);
+            for (const run of [second, quiet]) killProcessTree(run.pid, "SIGKILL");
             const terminal = await waitFor(() => {
                 const metas = runs.map((run) => readMeta(run.id));
                 return metas.every((meta) => meta && meta.status !== "running" && meta.status !== "orphaned")
                     && batcher.pendingCount() === 2;
             });
             assert.equal(terminal, true, "two callback-enabled terminal runs enter the shared batch");
-            assert.equal(h.sent.length, 0, "long test window holds the aggregate until explicit flush");
+            assert.equal(await batcher.flush(), false, "foreground run still blocks both completions");
+            assert.equal(h.sent.length, 0);
+
+            idle = true;
+            await h.handlers.get("agent_settled")({}, h.ctx);
+            assert.equal(h.sent.length, 0, "settled handler only schedules delivery");
 
             assert.equal(await batcher.flush(), true);
             const completionMessages = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");

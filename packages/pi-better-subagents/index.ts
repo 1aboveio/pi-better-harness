@@ -116,7 +116,7 @@ import {
     getSharedCapacityGate,
 } from "./capacity.mjs";
 import { buildHealthCallbackDelivery } from "./completion.ts";
-import { cancelCallbackBatch, getCallbackBatcher } from "./shared-callback-batcher.ts";
+import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.ts";
 import { completionCallbackFields, failureAttentionFields, healthCallbackFields } from "./callback-fields.ts";
 import { collectRunFailures, failurePath, markFailureAttentionDelivered, pendingFailureAttention } from "./failures.ts";
 import { failureAttentionHandled, observeFailures } from "./shared-failure-observations.ts";
@@ -2340,6 +2340,7 @@ export default function (pi: ExtensionAPI) {
 
     // ---- live-status lifecycle -----------------------------------------
     pi.on("agent_start", async (_event, ctx) => {
+        setCallbackBatchContext(pi, ctx);
         uiCtx = ctx;
         mainAgentStartedAt = Date.now();
         mainAgentTools.clear();
@@ -2372,6 +2373,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("agent_settled", async (_event, ctx) => {
+        setCallbackBatchContext(pi, ctx);
         mainAgentStartedAt = undefined;
         mainAgentTools.clear();
         refreshBackgroundWorkNavigator(ctx);
@@ -2387,6 +2389,7 @@ export default function (pi: ExtensionAPI) {
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
+        setCallbackBatchContext(pi, ctx);
         agentSessionSettings.restore(ctx);
         restoreDelegationMode(ctx);
         uiCtx = ctx;

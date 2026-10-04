@@ -3,6 +3,8 @@ export type CallbackSource = "subagent" | "background-task";
 export type CallbackDetailTool = "subagent_result" | "bg_task_status";
 
 export interface CallbackBatchHost {
+  /** Pi gives each extension its own API wrapper around one session event bus. */
+  events?: object;
   sendMessage(
     message: { customType: string; content: string; display: boolean },
     options: Record<string, unknown>,
@@ -66,6 +68,8 @@ export interface UrgentCallbackEvent {
 export interface CallbackBatcherOptions {
   windowMs?: number;
   retryMs?: number;
+  /** Ordinary callbacks stay here, not in Pi's follow-up queue, while unavailable. */
+  isAvailable?: () => boolean;
   /** UTF-8 byte cap for one sendMessage payload. Defaults to 2 KiB. */
   maxBytes?: number;
 }
@@ -73,6 +77,10 @@ export interface CallbackBatcherOptions {
 export interface CallbackBatcher {
   enqueue(event: CallbackBatchEvent): boolean;
   flush(): Promise<boolean>;
+  /** Refresh the API wrapper after reload without losing handoff receipts. */
+  setHost(host: CallbackBatchHost): void;
+  /** Update the session predicate and schedule an asynchronous drain when available. */
+  setAvailability(isAvailable: () => boolean): void;
   deliverUrgent(event: UrgentCallbackEvent): boolean | Promise<boolean>;
   cancel(): void;
   pendingCount(): number;
@@ -435,6 +443,11 @@ export function createCallbackBatcher(
   let sequence = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let flushPromise: Promise<boolean> | undefined;
+  let isAvailable = options.isAvailable ?? (() => true);
+
+  const available = (): boolean => {
+    try { return isAvailable(); } catch { return false; }
+  };
 
   const cancelTimer = (): void => {
     if (timer) clearTimeout(timer);
@@ -442,7 +455,7 @@ export function createCallbackBatcher(
   };
 
   const schedule = (delayMs: number): void => {
-    if (timer || pending.size === 0) return;
+    if (timer || pending.size === 0 || !available()) return;
     timer = setTimeout(() => {
       timer = undefined;
       void api.flush();
@@ -461,6 +474,7 @@ export function createCallbackBatcher(
 
   const performFlush = async (): Promise<boolean> => {
     cancelTimer();
+    if (!available()) return false;
     const snapshot = [...pending.entries()]
       .sort((a, b) => a[1].sequence - b[1].sequence);
     pending.clear();
@@ -596,6 +610,12 @@ export function createCallbackBatcher(
   const api: CallbackBatcher = {
     enqueue,
     flush,
+    setHost(next) { host = next; },
+    setAvailability(check) {
+      isAvailable = check;
+      cancelTimer();
+      schedule(windowMs);
+    },
     deliverUrgent,
     cancel() {
       cancelTimer();
@@ -613,16 +633,31 @@ export function getCallbackBatcher(
   options: CallbackBatcherOptions = {},
 ): CallbackBatcher {
   const state = globalState();
-  const key = host as object;
+  const key = host.events ?? host;
   const existing = state.byHost.get(key);
-  if (existing) return existing;
+  if (existing) {
+    existing.setHost(host);
+    return existing;
+  }
   const created = createCallbackBatcher(host, options);
   state.byHost.set(key, created);
   return created;
 }
 
 export function cancelCallbackBatch(host: CallbackBatchHost): void {
-  globalState().byHost.get(host as object)?.cancel();
+  const batcher = globalState().byHost.get(host.events ?? host);
+  batcher?.setAvailability(() => false);
+  batcher?.cancel();
+}
+
+/** Called on session_start, agent_start and agent_settled by both extensions. */
+export function setCallbackBatchContext(
+  host: CallbackBatchHost,
+  ctx: { isIdle(): boolean },
+): void {
+  // Schedule rather than await delivery inside agent_settled: its handlers are
+  // still settling the previous run, and sendMessage may start a new one.
+  getCallbackBatcher(host).setAvailability(() => ctx.isIdle());
 }
 
 function globalState(): SharedCallbackBatcherState {

@@ -114,6 +114,119 @@ test("debounces a single completion and flushes it after the bounded window", as
   assert.deepEqual(delivered, ["sa_single"]);
 });
 
+test("busy completions wait for availability and aggregate across debounce windows (#409)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let idle = false;
+  const { host, messages } = recordingHost();
+  const delivered: string[] = [];
+  const batcher = createCallbackBatcher(host, { windowMs: 25, isAvailable: () => idle });
+  try {
+    for (const id of ["sa_first", "sa_second", "sa_third"]) {
+      batcher.enqueue(event(id, { onDelivered: () => delivered.push(id) }));
+      t.mock.timers.tick(100);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(await batcher.flush(), false, "explicit flush cannot bypass foreground availability");
+    assert.equal(messages.length, 0);
+    assert.deepEqual(delivered, []);
+    assert.equal(batcher.pendingCount(), 3);
+
+    idle = true;
+    batcher.setAvailability(() => idle);
+    assert.equal(messages.length, 0, "availability notification must not start a reentrant model run");
+    t.mock.timers.tick(25);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 1);
+    assert.match(messages[0]!.message.content, /^3 background completions are ready:/);
+    assert.deepEqual(delivered, ["sa_first", "sa_second", "sa_third"]);
+    assert.equal(batcher.pendingCount(), 0);
+  } finally { batcher.cancel(); }
+});
+
+test("arrivals and overflow during a completion-driven run wait for the next availability (#409)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let idle = false;
+  const messages: string[] = [];
+  const delivered: string[] = [];
+  const batcher = createCallbackBatcher({ sendMessage(message) {
+    messages.push(message.content);
+    idle = false;
+  } }, { windowMs: 25, maxBytes: 700, isAvailable: () => idle });
+  try {
+    for (const id of ["sa_a", "sa_b", "sa_c", "sa_d"]) {
+      batcher.enqueue(event(id, { label: "x".repeat(160), onDelivered: () => delivered.push(id) }));
+    }
+    idle = true;
+    batcher.setAvailability(() => idle);
+    t.mock.timers.tick(25);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 1);
+    assert.ok(batcher.pendingCount() > 0, "bounded overflow stays queued");
+    batcher.enqueue(event("sa_during_run"));
+    t.mock.timers.tick(1000);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 1, "neither overflow nor concurrent arrivals preload future turns");
+    while (batcher.pendingCount() > 0) {
+      const before: number = messages.length;
+      idle = true;
+      batcher.setAvailability(() => idle);
+      t.mock.timers.tick(25);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(messages.length, before + 1);
+    }
+    assert.equal(new Set(delivered).size, 4);
+    assert.equal(delivered.length, 4);
+    assert.equal(messages.filter((message) => message.includes("id=sa_during_run |")).length, 1);
+  } finally { batcher.cancel(); }
+});
+
+test("availability errors defer sends and suppression is rechecked after the busy run (#409)", async () => {
+  const { host, messages } = recordingHost();
+  let unreadable = true;
+  let cancelled = false;
+  const suppressed: string[] = [];
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, isAvailable: () => {
+    if (unreadable) throw new Error("session availability unavailable");
+    return true;
+  } });
+  try {
+    batcher.enqueue(event("sa_cancelled", {
+      getSuppressionReason: () => cancelled ? "cancelled while foreground was busy" : undefined,
+      onSuppressed: (reason) => suppressed.push(reason),
+    }));
+    batcher.enqueue(event("sa_remaining"));
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 0);
+    cancelled = true;
+    unreadable = false;
+    assert.equal(await batcher.flush(), true);
+    assert.equal(messages.length, 1);
+    assert.doesNotMatch(messages[0]!.message.content, /sa_cancelled/);
+    assert.deepEqual(suppressed, ["cancelled while foreground was busy"]);
+  } finally { batcher.cancel(); }
+});
+
+test("a foreground run starting inside the debounce window prevents the scheduled handoff (#409)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let idle = true;
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 25, isAvailable: () => idle });
+  try {
+    batcher.enqueue(event("sa_before_foreground"));
+    idle = false;
+    t.mock.timers.tick(25);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 0);
+    assert.equal(batcher.pendingCount(), 1);
+    idle = true;
+    batcher.setAvailability(() => idle);
+    t.mock.timers.tick(25);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 1);
+    assert.equal(batcher.pendingCount(), 0);
+  } finally { batcher.cancel(); }
+});
+
 test("bounds event text and excludes caller-supplied result and log payloads", () => {
   const resultSentinel = "FULL_RESULT_SENTINEL";
   const logSentinel = "RAW_LOG_SENTINEL";

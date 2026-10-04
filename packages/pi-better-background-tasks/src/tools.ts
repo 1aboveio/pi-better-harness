@@ -13,7 +13,7 @@ import {
   type OutputOptions,
 } from "./output.js";
 import { readOutputControls } from "./shared-log-utils.js";
-import { cancelCallbackBatch } from "./shared-callback-batcher.js";
+import { cancelCallbackBatch, setCallbackBatchContext } from "./shared-callback-batcher.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
@@ -194,6 +194,7 @@ export function registerTools(pi: ExtensionAPI): void {
   const getActiveSession = () => activeSession;
 
   pi.on("session_start", async (_event, ctx) => {
+    setCallbackBatchContext(pi, ctx);
     activeSession = getCallbackOrigin(ctx);
     for (const meta of listMetasForOrigin(activeSession)) {
       if (meta.status === "running" || (meta.callback !== false && !meta.callbackSentAt && !meta.callbackSuppressedAt)) {
@@ -202,6 +203,8 @@ export function registerTools(pi: ExtensionAPI): void {
     }
     runTaskMaintenance({ activeOrigin: activeSession });
   });
+  pi.on("agent_start", (_event, ctx) => { setCallbackBatchContext(pi, ctx); });
+  pi.on("agent_settled", (_event, ctx) => { setCallbackBatchContext(pi, ctx); });
   pi.on("session_before_switch", () => {
     activeSession = undefined;
     cancelCallbackBatch(pi);
