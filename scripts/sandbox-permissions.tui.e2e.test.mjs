@@ -57,6 +57,7 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         assert.match(focused, /\x1b\[(?:\d+;)*1(?:;\d+)*m/, "selected row is bold");
         assert.match(focused, /\x1b\[(?:\d+;)*7(?:;\d+)*m/, "active cell has inverse styling");
         assert.match(text, /Project files\s+-\s+Write & delete/);
+        assert.match(text, /Stored credentials\s+-\s+Write & delete/);
         key("Space"); wait(/Sandbox\s+On\s+On/);
         key("Down"); key("Space"); wait(/Project files\s+Off\s+Write & delete/);
         key("Up"); key("Space"); wait(/Project files\s+-\s+Write & delete/);
@@ -87,6 +88,7 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         assert.equal(saved.permissions.main.enabled, false);
         assert.equal(saved.permissions.main.projectFiles, "off");
         assert.equal(saved.permissions.subagents.outsideProject, "read-write");
+        assert.equal(saved.permissions.subagents.storedCredentials, "read-write");
         assert.equal(saved.permissions.subagentTools.applyPatch, true);
         key("Space"); wait(/Project files\s+Off\s+Write & delete/); // Session-only Main on.
         key("Escape");

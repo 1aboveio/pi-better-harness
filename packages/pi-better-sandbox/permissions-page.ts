@@ -38,7 +38,6 @@ const rows = [
 const fileValues: readonly FileAccess[] = ["off", "read", "write", "read-write"];
 const credentialValues: readonly CredentialAccess[] = ["off", "read", "read-write"];
 const FILE_LABELS: Record<FileAccess, string> = { off: "Off", read: "Read", write: "Write", "read-write": "Write & delete" };
-const CREDENTIAL_LABELS: Record<CredentialAccess, string> = { off: "Off", read: "Read", "read-write": "Read / write" };
 
 /** The context line for the highlighted cell, or undefined. */
 function cellHint(key: string, profile: PermissionProfile | undefined): string | undefined {
@@ -276,9 +275,6 @@ export function createPermissionsPage(
                 const entry = rows[i]!;
                 const value = (profile: PermissionProfile): string => {
                     if (entry.key !== "enabled" && !profile.enabled) return "-";
-                    if (entry.key === "storedCredentials") {
-                        return CREDENTIAL_LABELS[profile.storedCredentials];
-                    }
                     const current = profile[entry.key];
                     return typeof current === "boolean" ? (current ? "On" : "Off") : FILE_LABELS[current];
                 };

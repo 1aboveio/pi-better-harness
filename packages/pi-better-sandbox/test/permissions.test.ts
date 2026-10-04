@@ -6,14 +6,26 @@ test("permission defaults preserve independent Main and Subagents columns", () =
     const settings = defaultSandboxPermissions();
     assert.equal(settings.main.enabled, false);
     assert.equal(settings.subagents.enabled, true);
-    // Subagents default to Outside project = Write; Main keeps Read.
-    assert.deepEqual(settings.subagents, { ...settings.main, enabled: true, outsideProject: "write" });
+    assert.deepEqual(settings.subagents, { ...settings.main, enabled: true, outsideProject: "write", storedCredentials: "read-write" });
+    assert.equal(settings.main.storedCredentials, "read");
+    settings.main.storedCredentials = "off";
+    assert.equal(settings.subagents.storedCredentials, "read-write");
     settings.main.outsideProject = "read-write";
     assert.equal(settings.subagents.outsideProject, "write");
     assert.equal(defaultSandboxPermissions().main.outsideProject, "read");
 });
 
-test("decoding accepts Write for file rows only and keeps saved Read / write as Write & delete", () => {
+test("decoding preserves explicitly saved credential restrictions instead of applying new defaults", () => {
+    for (const storedCredentials of ["off", "read", "read-write"] as const) {
+        const settings = defaultSandboxPermissions();
+        settings.subagents.storedCredentials = storedCredentials;
+        const decoded = parseSandboxPermissions(settings);
+        assert.equal(decoded.subagents.storedCredentials, storedCredentials);
+        assert.equal(decoded.main.storedCredentials, "read");
+    }
+});
+
+test("decoding accepts Write for file rows only and keeps saved read-write as Write & delete", () => {
     const settings = defaultSandboxPermissions();
     settings.main.projectFiles = "write";
     settings.subagents.outsideProject = "read-write";

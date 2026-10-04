@@ -69,7 +69,7 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
     assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
     assert.match(lines[3]!, /Outside project\s+-\s+Write\s*$/);
-    assert.match(lines[4]!, /Stored credentials\s+-\s+Read\s*$/);
+    assert.match(lines[4]!, /Stored credentials\s+-\s+Write & delete\s*$/);
     assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
     assert.match(lines[6]!, /Network access\s+-\s+On/);
     assert.match(lines[7]!, /Subagents · Tools/);
@@ -159,13 +159,19 @@ test("file rows cycle four levels and credentials remain independent under Outsi
     assert.match(hint()!, /Write: git and rename-based saves fail outside the project except in worktree folders/);
     h.press(Key.down);
     assert.match(hint()!, /Known credential files follow this row independently of Outside project/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s*$/);
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.subagents.storedCredentials, "off", "Write & delete to Off tightens immediately");
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Off\s*$/);
+    h.press(Key.space);
+    await settle();
+    assert.equal(h.current.subagents.storedCredentials, "read");
     assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s*$/);
     h.press(Key.space);
     await settle();
-    assert.equal(h.current.subagents.storedCredentials, "read-write", "one Space grants Read / write");
-    h.press(Key.space);
-    await settle();
-    assert.equal(h.current.subagents.storedCredentials, "off", "Read / write → Off tightens immediately");
+    assert.equal(h.current.subagents.storedCredentials, "read-write", "credentials skip unsupported Write");
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s*$/);
     assert.equal(h.current.subagents.outsideProject, "write");
 });
 
