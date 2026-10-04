@@ -9,7 +9,8 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import extension from "../src/index.js";
 import { readRushPlan } from "../src/workflow-plan.js";
 
-test("Rush plan is a read-only workflow projection across revisions and session restore", async () => {
+for (const owner of ["rush-issues", "resolve-issues", "fixture-workflow"])
+test(`${owner} plan projects revisions and restores its owner-bound session`, async () => {
   const cwd = mkdtempSync(join(tmpdir(), "rush-plan-"));
   const path = join(cwd, ".resolve-issues", "rush", "run-1", "task-plan.json");
   mkdirSync(join(cwd, ".resolve-issues", "rush", "run-1"), { recursive: true });
@@ -55,9 +56,9 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     const update = tools.get("update_plan")!;
     await update.execute("generic", { plan: [{ step: "Old generic step", status: "in_progress" }] }, undefined, undefined, ctx);
     entries.push({ type: "custom", customType: "pi-better-workflow", data: {
-      version: 1, kind: "set", owner: { name: "rush-issues", planOwner: "workflow" },
+      version: 1, kind: "set", owner: { name: owner, planOwner: "workflow" },
     } });
-    pi.events.emit("pi-better-workflow:changed", { name: "rush-issues" });
+    pi.events.emit("pi-better-workflow:changed", { name: owner });
     const renderWidgetLines = (styled = false): string[] => widget(
       { requestRender() {} },
       { fg: (color: string, value: string) => styled ? `<${color}>${value}</${color}>` : value },
@@ -71,7 +72,7 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     await sync.execute("bind", { path, revision: 1 }, undefined, undefined, ctx);
     assert.equal(renderWidgetLines()[0], "", "the Rush section is separated from the preceding widget");
     assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>plan<\/warning><dim>  0\/2 complete/);
-    assert.match(renderWidgetLines(true)[2] ?? "", /rush-issues · rev 1/);
+    assert.ok((renderWidgetLines(true)[2] ?? "").includes(`${owner} · rev 1`));
     assert.match(renderWidget(), /Extract shared core.*active/);
     assert.match(renderWidget(), /Add mux support/);
     await commands.get("plan")!.handler("", ctx);
@@ -79,6 +80,8 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     assert.match(fullView, /after: #214/);
     assert.doesNotMatch(fullView, /Old generic step/);
     const result = await tools.get("get_plan")!.execute("get", {}, undefined, undefined, ctx);
+    assert.equal((result.details as any).workflowOwner, owner);
+    assert.ok(fullView.includes(`${owner} · rev 1`));
     assert.equal((result.details as any).plan.planRevision, 1);
     await commands.get("plan")!.handler("clear", ctx);
     assert.match(notification, /workflow owns its plan/);
@@ -93,10 +96,21 @@ test("Rush plan is a read-only workflow projection across revisions and session 
     await sync.execute("reconciled", { path, revision: 3 }, undefined, undefined, ctx);
     await handlers.get("session_tree")?.({}, ctx);
     assert.match(renderWidget(), /rev 3/, "session restore reopens the bound run");
-    entries.push({ type: "custom", customType: "pi-better-workflow", data: {
-      version: 1, kind: "set", owner: { name: "rush-issues", planOwner: "workflow" },
+    entries.push({ type: "custom", customType: "pi-better-workflow-plan", data: {
+      version: 1, kind: "set", owner: "different-workflow", path, runId: "run-1",
     } });
-    pi.events.emit("pi-better-workflow:changed", { name: "rush-issues" });
+    await handlers.get("session_tree")?.({}, ctx);
+    assert.equal(renderWidget(), "", "restore refuses a binding belonging to another owner");
+    const mismatched = await tools.get("get_plan")!.execute("mismatched", {}, undefined, undefined, ctx);
+    assert.equal((mismatched.details as any).hasPlan, false);
+    await assert.rejects(update.execute("mismatched", {
+      workflow: { event: "advance", changes: [{ id: "214", set: { note: "wrong owner" } }] },
+    }, undefined, undefined, ctx), /No .* plan is bound/);
+    await sync.execute("rebind", { path, revision: 3 }, undefined, undefined, ctx);
+    entries.push({ type: "custom", customType: "pi-better-workflow", data: {
+      version: 1, kind: "set", owner: { name: owner, planOwner: "workflow" },
+    } });
+    pi.events.emit("pi-better-workflow:changed", { name: owner });
     await handlers.get("session_tree")?.({}, ctx);
     assert.equal(renderWidget(), "", "a new Rush invocation stays hidden and cannot inherit a previous run");
     await sync.execute("new-run", { path, revision: 3 }, undefined, undefined, ctx);
