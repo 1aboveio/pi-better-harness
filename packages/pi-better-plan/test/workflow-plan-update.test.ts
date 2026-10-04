@@ -408,9 +408,11 @@ test(`${owner} updates require a matching binding and leave generic plans unaffe
     h.entries.push({ type: "custom", customType: "pi-better-workflow", data: {
       version: 1, kind: "set", owner: { name: "different-workflow", planOwner: "workflow" },
     } });
+    assert.equal(h.widget(), "", "persisted ownership hides the previous owner's cached view even without an event");
     await assert.rejects(h.update(change), /No different-workflow plan is bound/);
     const other = await h.tools.get("get_plan")!.execute("other", {}, undefined, undefined, h.ctx);
     assert.equal((other.details as any).hasPlan, false);
+    assert.equal(h.widget(), "", "reading the unmatched plan cannot revive the old widget");
     assert.equal(h.plan().planRevision, 13);
 
     h.own(null);

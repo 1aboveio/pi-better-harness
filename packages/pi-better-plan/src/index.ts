@@ -214,7 +214,7 @@ export default function planExtension(pi: ExtensionAPI): void {
         refreshWidget = localRefresh;
         return {
           render(width: number): string[] {
-            if (displayMode === "hidden") return [];
+            if (displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
             if (displayedWorkflowOwner) {
               if (rushBinding?.owner !== displayedWorkflowOwner) return [];
               const fg = typeof theme?.fg === "function"
