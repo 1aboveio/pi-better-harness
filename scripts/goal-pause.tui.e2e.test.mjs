@@ -8,11 +8,15 @@ import { fileURLToPath } from "node:url";
 
 // Real Pi in tmux with a scripted model provider: escape pauses the goal, a
 // question is answered without restarting the goal loop, and "go" makes the
-// model call goal_resume, after which the continuation runs.
+// model call goal_resume, after which the continuation runs. Idle Escape also
+// respects Pause on Esc, while menu/dialog cancellation and reload remain intact.
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const piBin = join(repoRoot, "node_modules", ".bin", "pi");
+const packagePiBin = join(repoRoot, "packages", "pi-better-goal", "node_modules", ".bin", "pi");
+const piBin = process.env.PI_GOAL_PAUSE_HOST_CLI ||
+  (existsSync(packagePiBin) ? packagePiBin : join(repoRoot, "node_modules", ".bin", "pi"));
 const extensionPath = join(repoRoot, "packages", "pi-better-goal", "src", "index.ts");
-const piAiPath = join(repoRoot, "node_modules", "@earendil-works", "pi-ai", "dist", "index.js");
+const piAiPath = process.env.PI_GOAL_PAUSE_AI_ENTRY ||
+  join(repoRoot, "node_modules", "@earendil-works", "pi-ai", "dist", "index.js");
 const fixtures = mkdtempSync(join(tmpdir(), "pi-goal-pause-"));
 const probePath = join(fixtures, "scripted-model.mjs");
 const readyPath = join(fixtures, "ready");
@@ -45,10 +49,16 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendKey("Down");
   sendKey("Enter");
   waitForScreen((screen) => /Conversational resume\s+Off/.test(screen));
+  sendKey("Down");
+  sendKey("Space");
+  waitForScreen((screen) => /Pause on Esc\s+Off/.test(screen));
   const preferencesFile = join(fixtures, "agent", "extensions", "pi-better-goal-preferences.json");
   assert.deepEqual(JSON.parse(readFileSync(preferencesFile, "utf8")), {
-    version: 1, autoContinue: false, conversationalResume: false,
+    version: 1, autoContinue: false, conversationalResume: false, pauseOnEscape: false,
   });
+  sendKey("Space");
+  waitForScreen((screen) => /Pause on Esc\s+On/.test(screen));
+  sendKey("Up");
   sendKey("Enter");
   waitForScreen((screen) => /Conversational resume\s+On/.test(screen));
   sendKey("Up");
@@ -81,6 +91,90 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForScreen((screen) => screen.includes("goal complete"), 15_000);
   const kinds = modelCalls().map((call) => call.kind);
   assert.deepEqual(kinds, ["slow-continuation", "question", "go", "after-resume", "continuation", "after-complete"]);
+
+  sendLiteral("/goal idle pause fixture");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Waiting between turns."));
+  waitForFile(join(fixtures, "idle-settled"));
+
+  sendLiteral("/goal ");
+  waitForScreen((screen) => screen.includes("Pause the active goal"));
+  sendKey("Escape");
+  waitForScreen((screen) => !screen.includes("Pause the active goal") && screen.includes("goal active"));
+  sendKey("C-u");
+
+  sendLiteral("/settings");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Auto-compact"));
+  sendKey("Escape");
+  waitForScreen((screen) => !screen.includes("Auto-compact") && screen.includes("goal active"));
+
+  sendLiteral("/goal settings");
+  sendKey("Tab");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Goal settings"));
+  sendKey("Escape");
+  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+
+  sendLiteral("/goal-dialog");
+  sendKey("Tab");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Escape dialog probe?"));
+  sendKey("Escape");
+  waitForScreen((screen) => screen.includes("Dialog cancelled.") && screen.includes("goal active"));
+
+  sendLiteral("/reload");
+  sendKey("Tab");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Reloaded") && screen.includes("goal active"));
+  sendLiteral("/goal settings");
+  sendKey("Tab");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Goal settings"));
+  sendKey("Down");
+  sendKey("Down");
+  sendKey("Space");
+  waitForScreen((screen) => /Pause on Esc\s+Off/.test(screen));
+  sendKey("Escape");
+  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+  sendKey("Escape");
+  assertScreenStays((screen) => screen.includes("goal active") && !screen.includes("goal paused"), 1_000);
+  assert.equal(JSON.parse(readFileSync(preferencesFile, "utf8")).pauseOnEscape, false);
+
+  sendLiteral("/goal settings");
+  sendKey("Tab");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Goal settings"));
+  sendKey("Down");
+  sendKey("Down");
+  sendKey("Space");
+  waitForScreen((screen) => /Pause on Esc\s+On/.test(screen));
+  sendKey("Escape");
+  waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
+  const beforeIdlePause = modelCalls().length;
+  sendKey("Escape");
+  waitForScreen((screen) => screen.includes('goal paused · say "go" or /goal resume'));
+  sendLiteral("why is that step needed?");
+  sendKey("Enter");
+  waitForScreen((screen) => modelCalls().length === beforeIdlePause + 1 && screen.includes("Because the widget needs it."));
+  assertScreenStays((screen) => screen.includes("goal paused"), 2_000);
+  assert.equal(modelCalls().length, beforeIdlePause + 1, "idle Escape survives reload and ordinary questions cannot restart it");
+
+  sendLiteral("/goal clear");
+  sendKey("Tab");
+  sendKey("Enter");
+  waitForScreen((screen) => !screen.includes("goal paused"));
+  sendLiteral("/goal settings pause-on-escape off");
+  sendKey("Tab");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Pause on Esc setting: off"));
+  sendLiteral("/goal streaming off fixture");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("goal active") && screen.includes("native interrupt probe"), 15_000);
+  sendKey("Escape");
+  waitForFile(join(fixtures, "off-stream-settled"));
+  assert.equal(readFileSync(join(fixtures, "off-stream-end"), "utf8"), "aborted", "Off preserves Pi's native streaming interruption");
+  assertScreenStays((screen) => screen.includes("goal active") && !screen.includes("goal paused"), 1_000);
 });
 
 function modelCalls() {
@@ -94,7 +188,7 @@ function startPiSession() {
     "&& exec env",
     `PI_CODING_AGENT_DIR=${shellQuote(join(fixtures, "agent"))}`,
     "PI_OFFLINE=1",
-    "PI_BETTER_GOAL_IDLE_CONTINUATION_DELAY_MS=200",
+    "PI_BETTER_GOAL_IDLE_CONTINUATION_DELAY_MS=60000",
     "OPENAI_API_KEY=sk-goal-e2e-placeholder",
     shellQuote(piBin),
     `-e ${shellQuote(extensionPath)}`,
@@ -111,10 +205,12 @@ function startPiSession() {
 
 function scriptedModelExtension() {
   return `import { appendFileSync, writeFileSync } from "node:fs";
-import { createFauxCore, fauxAssistantMessage, fauxToolCall } from ${JSON.stringify(piAiPath)};
+import * as ai from ${JSON.stringify(piAiPath)};
+const { createFauxCore, fauxAssistantMessage, fauxToolCall } = ai;
 
 const LOG = ${JSON.stringify(logPath)};
 let continuations = 0;
+let lastKind;
 
 function textOf(message) {
   if (!message) return "";
@@ -124,7 +220,8 @@ function textOf(message) {
 
 function respond(context) {
   const last = context.messages.at(-1);
-  const tools = (context.tools ?? []).map((tool) => tool.name);
+  const tools = (context.tools ?? ai.getCurrentTools?.(context.messages) ?? []).map((tool) => tool.name);
+  const system = context.systemPrompt ?? ai.getCurrentSystemPrompt?.(context.messages) ?? "";
   let kind;
   let reply;
   if (last?.role === "toolResult" && last.toolName === "goal_resume") {
@@ -135,7 +232,13 @@ function respond(context) {
     reply = fauxAssistantMessage("Goal finished.");
   } else if (textOf(last).includes("Continue working toward the active thread goal")) {
     continuations += 1;
-    if (continuations === 1) {
+    if (textOf(last).includes("streaming off fixture")) {
+      kind = "off-slow-continuation";
+      reply = fauxAssistantMessage("native interrupt probe " + "one two three four five six seven eight ".repeat(200));
+    } else if (textOf(last).includes("idle pause fixture")) {
+      kind = "idle-continuation";
+      reply = fauxAssistantMessage("Waiting between turns.");
+    } else if (continuations === 1) {
       kind = "slow-continuation";
       reply = fauxAssistantMessage("working through step " + "one two three four five six seven eight ".repeat(200));
     } else {
@@ -149,7 +252,8 @@ function respond(context) {
     kind = "question";
     reply = fauxAssistantMessage("Because the widget needs it.");
   }
-  appendFileSync(LOG, JSON.stringify({ kind, tools, system: context.systemPrompt ?? "" }) + "\\n");
+  appendFileSync(LOG, JSON.stringify({ kind, tools, system }) + "\\n");
+  lastKind = kind;
   return reply;
 }
 
@@ -157,6 +261,23 @@ const core = createFauxCore({ api: "scripted-api", provider: "scripted", models:
 core.setResponses(Array.from({ length: 50 }, () => respond));
 
 export default function (pi) {
+  pi.registerCommand("goal-dialog", {
+    description: "Probe Escape dialog cancellation",
+    handler: async (_args, ctx) => {
+      const accepted = await ctx.ui.confirm("Escape dialog probe?", "Continue?");
+      ctx.ui.notify(accepted ? "Dialog accepted." : "Dialog cancelled.", "info");
+    },
+  });
+  pi.on("agent_end", (event) => {
+    if (lastKind === "off-slow-continuation") {
+      const final = event.messages.filter((message) => message.role === "assistant").at(-1);
+      writeFileSync(${JSON.stringify(join(fixtures, "off-stream-end"))}, final?.stopReason ?? "missing");
+    }
+  });
+  pi.on("agent_settled", () => {
+    if (lastKind === "idle-continuation") writeFileSync(${JSON.stringify(join(fixtures, "idle-settled"))}, "settled");
+    if (lastKind === "off-slow-continuation") writeFileSync(${JSON.stringify(join(fixtures, "off-stream-settled"))}, "settled");
+  });
   pi.registerProvider("scripted", {
     baseUrl: "http://localhost:0",
     apiKey: "scripted-key",

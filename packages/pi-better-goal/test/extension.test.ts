@@ -37,7 +37,7 @@ test("goal action completions expose selectable actions with context", () => {
     { value: "resume", label: "resume", description: "Resume the paused goal" },
     { value: "clear", label: "clear", description: "Remove the current goal" },
     { value: "complete", label: "complete", description: "Mark the current goal complete" },
-    { value: "settings", label: "settings", description: "Inspect or persist goal continuation and conversational resume controls" },
+    { value: "settings", label: "settings", description: "Inspect or persist goal continuation, conversational resume, and Escape pause controls" },
   ]);
   assert.deepEqual(
     goalArgumentCompletions("  c")?.map((entry) => entry.value),
@@ -45,10 +45,13 @@ test("goal action completions expose selectable actions with context", () => {
   );
   assert.equal(goalArgumentCompletions("ship the release"), null);
   assert.deepEqual(goalArgumentCompletions("settings ")?.map((item) => item.value), [
-    "settings auto-continue", "settings conversational-resume",
+    "settings auto-continue", "settings conversational-resume", "settings pause-on-escape",
   ]);
   assert.deepEqual(goalArgumentCompletions("settings auto-continue o")?.map((item) => item.value), [
     "settings auto-continue on", "settings auto-continue off",
+  ]);
+  assert.deepEqual(goalArgumentCompletions("settings pause-on-escape o")?.map((item) => item.value), [
+    "settings pause-on-escape on", "settings pause-on-escape off",
   ]);
 });
 
@@ -905,12 +908,12 @@ test("wake-disabled observation resets a held ledger without automatic handoffs"
   }
 });
 
-test("in-flight wake audits cannot survive pause, resume, replacement, completion, interactive input, foreground start, session replacement, settings disable or shutdown", async (t) => {
-  for (const cause of ["pause", "resume", "replace", "complete", "input", "foreground", "session", "settings", "shutdown"] as const) {
+test("in-flight wake audits cannot survive pause, Escape, resume, replacement, completion, interactive input, foreground start, session replacement, settings disable or shutdown", async (t) => {
+  for (const cause of ["pause", "escape", "resume", "replace", "complete", "input", "foreground", "session", "settings", "shutdown"] as const) {
     await t.test(cause, async (subtest) => {
       subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
       if (cause === "settings") isolatePreferences(subtest);
-      const h = createContinuationHarness();
+      const h = createContinuationHarness(undefined, cause === "escape" ? { hasUI: true, mode: "tui" } : {});
       let delayed = false;
       const pending: Array<ReturnType<typeof deferred<ReturnType<typeof fixtureActivity>>>> = [];
       h.events.emit("pi-better-goal:register-provider", {
@@ -940,6 +943,8 @@ test("in-flight wake audits cannot survive pause, resume, replacement, completio
       } else if (cause === "shutdown") {
         await h.handlers.get("session_shutdown")?.({}, h.ctx);
         Object.defineProperty(h.ctx, "isIdle", { value: () => { throw new Error("stale context read"); } });
+      } else if (cause === "escape") {
+        h.terminalInput("\x1b");
       } else {
         await h.commands.get("goal")?.handler(cause === "replace" ? "replacement objective" : cause === "complete" ? "complete" : "pause", h.ctx);
         if (cause === "resume") await h.commands.get("goal")?.handler("resume", h.ctx);
@@ -978,6 +983,242 @@ test("an aborted run pauses the active goal and suppresses pokes while paused", 
   t.mock.timers.tick(60_000);
   await flushPromises();
   assert.equal(messages.length, 0, "paused goals are never poked");
+});
+
+test("terminal Escape pauses an idle goal, cancels its wake, and passes through unchanged", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 1_000_000 });
+  const h = createContinuationHarness(undefined, { hasUI: true, mode: "tui" });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.(answeredOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  t.mock.timers.tick(5_000);
+  const timing = async () => (await h.tools.get("get_goal")!.execute("clock", {}, undefined, undefined, toolContext(h.ctx))).details as { timing: { activeSeconds: number } };
+  const before = await timing();
+  const messagesBefore = h.messages.length;
+
+  assert.equal(h.terminalListeners.size, 1);
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined], "the observer neither consumes nor rewrites Escape");
+  assert.equal(h.getAborts(), 0, "Pi, not the observer, owns interrupting the agent");
+  assert.equal(latestGoal(h.entries)?.status, "paused");
+  assert.equal(latestGoal(h.entries)?.pauseReason, "interrupt");
+  assert.ok(h.activeTools().includes("goal_resume"));
+  await h.handlers.get("input")?.({ source: "interactive", text: "why this step?" }, h.ctx);
+  t.mock.timers.tick(120_000);
+  await flushPromises();
+  assert.equal(h.messages.length, messagesBefore, "Escape cancels the scheduled between-turn continuation");
+  assert.equal(latestGoal(h.entries)?.status, "paused", "an ordinary question does not resume it");
+  assert.equal((await timing()).timing.activeSeconds, before.timing.activeSeconds, "the active clock stops");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("Escape pause Off preserves idle wakes, manual pauses, and toggles back On immediately", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const h = createContinuationHarness(undefined, { hasUI: true, mode: "tui" });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  await settleNetworkFailure(h);
+  await h.commands.get("goal")?.handler("settings pause-on-escape off", h.ctx);
+  const before = h.entries.length;
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+  assert.equal(h.entries.length, before, "idle Off does not mutate the goal");
+  assert.equal(latestGoal(h.entries)?.status, "active");
+  t.mock.timers.tick(60_000);
+  await flushPromises();
+  assert.equal(h.messages.length, 2, "Escape Off leaves automatic continuation enabled");
+  assert.equal(h.activeTools().includes("goal_resume"), false);
+  await h.commands.get("goal")?.handler("pause", h.ctx);
+  h.terminalInput("\x1b");
+  assert.equal(latestGoal(h.entries)?.status, "paused", "Off never overrides a manual pause");
+  assert.equal(latestGoal(h.entries)?.pauseReason, undefined);
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  await h.commands.get("goal")?.handler("settings pause-on-escape on", h.ctx);
+  assert.equal(latestGoal(h.entries)?.status, "active", "changing the option itself does not pause");
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+  assert.equal(latestGoal(h.entries)?.pauseReason, "interrupt");
+  assert.ok(h.activeTools().includes("goal_resume"), "Escape pause does not disable conversational resume");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("streaming Escape Off exempts its signal and aborted agent_end, not the next unrelated abort", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const controller = new AbortController();
+  const h = createContinuationHarness(controller.signal, { hasUI: true, mode: "tui" });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  await h.commands.get("goal")?.handler("settings pause-on-escape off", h.ctx);
+  h.setBusy(true);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  assert.deepEqual(h.terminalInput("\x1b[27u"), [undefined]);
+  assert.equal(h.getAborts(), 0, "the observer leaves native interruption to Pi");
+  // A later setting change must not reclassify an already-observed Escape.
+  await h.commands.get("goal")?.handler("settings pause-on-escape on", h.ctx);
+  controller.abort();
+  assert.equal(latestGoal(h.entries)?.status, "active", "the associated signal cannot pause");
+  await h.handlers.get("agent_end")?.(abortedOutcome, h.ctx);
+  assert.equal(latestGoal(h.entries)?.status, "active", "the associated final message cannot pause either");
+  h.setBusy(false);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("settings pause-on-escape off", h.ctx);
+  const next = new AbortController();
+  Object.assign(h.ctx, { signal: next.signal });
+  h.setBusy(true);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  next.abort();
+  assert.equal(latestGoal(h.entries)?.status, "paused", "Off does not disable unrelated signal interrupts");
+  await h.handlers.get("agent_end")?.(abortedOutcome, h.ctx);
+  assert.equal(latestGoal(h.entries)?.pauseReason, "interrupt");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("idle Escape Off and unavailable focus inspection do not suppress unknown abort fallbacks", async (t) => {
+  for (const cause of ["idle", "unknown-editor", "menu", "prompt", "overlay"] as const) {
+    await t.test(cause, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      isolatePreferences(subtest);
+      const h = createContinuationHarness(undefined, { hasUI: true, mode: "tui" });
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("keep watching", h.ctx);
+      await h.commands.get("goal")?.handler("settings pause-on-escape off", h.ctx);
+      if (cause !== "idle") {
+        h.setBusy(true);
+        await h.handlers.get("agent_start")?.({}, h.ctx);
+      }
+      if (cause === "unknown-editor") h.setTerminalFocus({ render: () => [] });
+      if (cause === "menu") h.setAutocomplete(true);
+      if (cause === "prompt") await h.handlers.get("ui_prompt_start")?.({}, h.ctx);
+      if (cause === "overlay") h.setOverlay(true);
+      assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+      assert.equal(latestGoal(h.entries)?.status, "active");
+      await h.handlers.get("agent_end")?.(abortedOutcome, h.ctx);
+      assert.equal(latestGoal(h.entries)?.status, "paused", "an unassociated aborted outcome retains the safety fallback");
+      await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    });
+  }
+});
+
+test("Escape suppression and stale signal callbacks cannot leak across runs or sessions", async (t) => {
+  for (const boundary of ["run", "session"] as const) {
+    await t.test(boundary, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      isolatePreferences(subtest);
+      const old = new AbortController();
+      const h = createContinuationHarness(old.signal, { hasUI: true, mode: "tui" });
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("keep watching", h.ctx);
+      await h.commands.get("goal")?.handler("settings pause-on-escape off", h.ctx);
+      h.setBusy(true);
+      await h.handlers.get("agent_start")?.({}, h.ctx);
+      h.terminalInput("\x1b");
+      if (boundary === "session") await h.handlers.get("session_start")?.({}, h.ctx);
+      const next = new AbortController();
+      Object.assign(h.ctx, { signal: next.signal });
+      if (boundary === "run") await h.handlers.get("agent_start")?.({}, h.ctx);
+      old.abort();
+      assert.equal(latestGoal(h.entries)?.status, "active", "an obsolete turn signal cannot pause current work");
+      await h.handlers.get("agent_end")?.(abortedOutcome, h.ctx);
+      assert.equal(latestGoal(h.entries)?.status, "paused", "old Escape suppression cannot exempt a new aborted outcome");
+      await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    });
+  }
+});
+
+test("replacing a goal after Escape Off does not exempt that goal from the current turn's abort", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const controller = new AbortController();
+  const h = createContinuationHarness(controller.signal, { hasUI: true, mode: "tui" });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  await h.commands.get("goal")?.handler("settings pause-on-escape off", h.ctx);
+  h.setBusy(true);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  h.terminalInput("\x1b");
+  await h.commands.get("goal")?.handler("replacement goal", h.ctx);
+  controller.abort();
+  assert.equal(latestGoal(h.entries)?.objective, "replacement goal");
+  assert.equal(latestGoal(h.entries)?.status, "paused", "the live turn's signal still protects a replacement goal");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("Escape observer ignores non-press input and menu/dialog input ownership", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness(undefined, { hasUI: true, mode: "tui" });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  const before = h.entries.length;
+  for (const data of ["x", "\x1b[A", "\x1bg", "\x1b[27;1:3u", "\x1b[200~\x1b\x1b[201~"]) {
+    assert.deepEqual(h.terminalInput(data), [undefined]);
+  }
+  h.setAutocomplete(true);
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+  h.setAutocomplete(false);
+  h.setTerminalFocus(null);
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+  h.setTerminalFocus({ render: () => [], invalidate() {}, handleInput() {} });
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+  h.restoreEditorFocus();
+  h.setOverlay(true);
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+  h.setOverlay(false);
+  await h.handlers.get("ui_prompt_start")?.({}, h.ctx);
+  await h.handlers.get("ui_prompt_start")?.({}, h.ctx);
+  await h.handlers.get("ui_prompt_end")?.({}, h.ctx);
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined], "nested prompts keep Escape dialog-owned");
+  assert.equal(h.entries.length, before, "non-interrupt keys and modal cancellation do not change goal state");
+  await h.handlers.get("ui_prompt_end")?.({}, h.ctx);
+  assert.deepEqual(h.terminalInput("\x1b[27u"), [undefined], "Kitty Escape presses also pass through");
+  assert.equal(latestGoal(h.entries)?.status, "paused");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("terminal Escape creates no goal and leaves manual/interrupt pauses and completion unchanged", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness(undefined, { hasUI: true, mode: "tui" });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+  assert.equal(h.entries.length, 0);
+  for (const state of ["manual", "interrupt", "complete"] as const) {
+    await h.commands.get("goal")?.handler("keep watching", h.ctx);
+    if (state === "interrupt") h.terminalInput("\x1b");
+    else await h.commands.get("goal")?.handler(state === "manual" ? "pause" : "complete", h.ctx);
+    const before: number = h.entries.length;
+    assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+    assert.equal(h.entries.length, before, `${state} is unchanged by repeated Escape`);
+    assert.equal(latestGoal(h.entries)?.status, state === "complete" ? "complete" : "paused");
+    assert.equal(latestGoal(h.entries)?.pauseReason, state === "interrupt" ? "interrupt" : undefined);
+  }
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("terminal observer detaches on restart/shutdown and does not attach outside the TUI", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness(undefined, { hasUI: true, mode: "tui" });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  const stale = [...h.terminalListeners][0]!;
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  assert.equal(h.terminalListeners.size, 1, "session replacement never accumulates observers");
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  const before = h.entries.length;
+  assert.equal(stale("\x1b"), undefined);
+  assert.equal(h.entries.length, before, "an obsolete listener cannot change the new session");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+  assert.equal(h.terminalListeners.size, 0, "shutdown is idempotent");
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  assert.equal(h.terminalListeners.size, 1, "a reloaded runtime attaches again");
+  h.terminalInput("\x1b");
+  assert.equal(latestGoal(h.entries)?.status, "paused");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+  for (const mode of ["rpc", "print", "json"] as const) {
+    const other = createContinuationHarness(undefined, { hasUI: true, mode });
+    await other.handlers.get("session_start")?.({}, other.ctx);
+    assert.equal(other.terminalListeners.size, 0);
+    await other.handlers.get("session_shutdown")?.({}, other.ctx);
+  }
 });
 
 test("an aborted run cancels an already-scheduled idle continuation", async (t) => {
@@ -1375,6 +1616,9 @@ test("TUI goal settings opens the interactive page and its toggles persist", asy
       page.handleInput("\x1b[B");
       page.handleInput("\r");
       await new Promise<void>((resolve) => setImmediate(resolve));
+      page.handleInput("\x1b[B");
+      page.handleInput(" ");
+      await new Promise<void>((resolve) => setImmediate(resolve));
       page.handleInput("\x1b");
     },
   });
@@ -1384,29 +1628,31 @@ test("TUI goal settings opens the interactive page and its toggles persist", asy
   const next = createContinuationHarness();
   await next.handlers.get("session_start")?.({}, next.ctx);
   const inspected = await next.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(next.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
   assert.equal(h.entries.length, 0);
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
   await next.handlers.get("session_shutdown")?.({}, next.ctx);
 });
 
-test("both settings persist across extension recreation without disabling kickoff or explicit resumes", async (t) => {
+test("all settings persist across extension recreation without disabling kickoff or explicit resumes", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   isolatePreferences(t);
   const first = createContinuationHarness();
   await first.handlers.get("session_start")?.({}, first.ctx);
   await first.commands.get("goal")?.handler("settings auto-continue off", first.ctx);
   await first.commands.get("goal")?.handler("settings conversational-resume off", first.ctx);
+  await first.commands.get("goal")?.handler("settings pause-on-escape off", first.ctx);
   assert.equal(first.entries.length, 0, "configuring controls does not create a goal");
   await first.handlers.get("session_shutdown")?.({}, first.ctx);
 
   const h = createContinuationHarness();
   await h.handlers.get("session_start")?.({}, h.ctx);
   const inspected = await h.tools.get("get_goal")!.execute("settings", {}, undefined, undefined, toolContext(h.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false, pauseOnEscape: false });
   await h.commands.get("goal")?.handler("settings", h.ctx);
   assert.match(h.notifications.at(-1)?.message ?? "", /Automatic continuation setting: off/);
   assert.match(h.notifications.at(-1)?.message ?? "", /Conversational resume setting: off/);
+  assert.match(h.notifications.at(-1)?.message ?? "", /Pause on Esc setting: off/);
   await h.commands.get("goal")?.handler("keep watching", h.ctx);
   assert.equal(h.messages.length, 1, "goal kickoff remains explicit intent");
   const original = latestGoal(h.entries)?.goalId;
@@ -1546,7 +1792,7 @@ test("invalid settings commands cannot replace the goal or modify preferences", 
   }
   assert.equal(h.entries.length, before);
   const inspected = await h.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
-  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: true, conversationalResume: true });
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: true, conversationalResume: true, pauseOnEscape: true });
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
 });
 
@@ -1597,7 +1843,7 @@ async function exhaustNoProgressRetries(h: ReturnType<typeof createContinuationH
   }
 }
 
-function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: boolean; factory?: typeof extension } = {}) {
+function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: boolean; mode?: ExtensionContext["mode"]; factory?: typeof extension } = {}) {
   const entries: SessionEntry[] = [];
   const tools = new Map<string, ToolDefinition>();
   let active: string[] = [];
@@ -1611,9 +1857,15 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
   const shortcuts = new Map<string, { handler(ctx: ExtensionContext): Promise<void> | void }>();
   let idle = true;
   let aborts = 0;
+  const terminalListeners = new Set<Parameters<ExtensionContext["ui"]["onTerminalInput"]>[0]>();
+  let autocomplete = false;
+  let overlay = false;
+  const editor = { render: () => [], invalidate() {}, onEscape() {}, isShowingAutocomplete: () => autocomplete };
+  let terminalFocus: unknown = editor;
 
   const ctx = {
     hasUI: options.hasUI ?? false,
+    mode: options.mode,
     isIdle: () => idle,
     signal,
     abort: () => {
@@ -1626,7 +1878,15 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
       setStatus: (_key: string, value: string | undefined) => {
         statuses.push(value);
       },
-      setWidget: () => undefined,
+      setWidget(_key: string, factory: unknown) {
+        if (options.mode === "tui" && typeof factory === "function") {
+          factory({ requestRender() {}, getFocusedComponent: () => terminalFocus, hasOverlay: () => overlay }, { fg: (_color: string, text: string) => text });
+        }
+      },
+      onTerminalInput(handler: Parameters<ExtensionContext["ui"]["onTerminalInput"]>[0]) {
+        terminalListeners.add(handler);
+        return () => { terminalListeners.delete(handler); };
+      },
     },
   } as unknown as ExtensionContext;
 
@@ -1672,6 +1932,12 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
     tools,
     statuses,
     notifications,
+    terminalListeners,
+    terminalInput: (data: string) => [...terminalListeners].map((handler) => handler(data)),
+    setAutocomplete: (value: boolean) => { autocomplete = value; },
+    setOverlay: (value: boolean) => { overlay = value; },
+    setTerminalFocus: (value: unknown) => { terminalFocus = value; },
+    restoreEditorFocus: () => { terminalFocus = editor; },
     activeTools: () => [...active],
     setBusy: (busy: boolean) => {
       idle = !busy;
