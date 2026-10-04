@@ -59,6 +59,8 @@ export type SandboxPermissions = {
     storedCredentials: "off" | "read" | "read-write";
     commands: boolean;
     network: boolean;
+    /** Fixed process_list adapter only; omitted legacy profiles keep it Off. */
+    processAccess?: "off" | "read";
 };
 
 /** Whether a file access level allows creating and overwriting files. */

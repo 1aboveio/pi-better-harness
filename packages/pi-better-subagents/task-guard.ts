@@ -47,6 +47,7 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
         // Structured command intent (#315): validated before the confined command runs.
         bashDefinition: (cwd, operations) => intentBashDefinition(cwd, operations) as any,
         applyPatch: policy.applyPatch,
+        processAccess: () => policy.permissions.processAccess ?? "off",
         // The disposition tool performs no file or command I/O; only this inline registration is admitted.
         // Trusted tools are admitted by name and package (ADR 0009).
         admitExtensionTool: (name, _input, sourcePath) => (name === DISPOSITION_TOOL && sourcePath === TRUSTED_INLINE_SOURCE) ||
@@ -68,7 +69,8 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
             currentCwd = ctx.cwd;
             boundary.register(ctx.cwd);
             const builtins: readonly string[] = policy.applyPatch ? [...TASK_BUILTINS, ...GUARDED_TASK_TOOLS] : TASK_BUILTINS;
-            const selected = policy.tools.filter((name) => builtins.includes(name));
+            const selected = policy.tools.filter((name) => builtins.includes(name) &&
+                (name !== "process_list" || policy.permissions.processAccess === "read"));
             boundary.assertInstalled(selected);
             const inventory = pi.getAllTools();
             const trusted: string[] = [];

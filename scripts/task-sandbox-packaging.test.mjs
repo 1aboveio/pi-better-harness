@@ -19,7 +19,7 @@ test('standalone consumers include the task executor and mandatory child launche
     const pack = Array.isArray(output) ? output[0] : Object.values(output)[0];
     assert.ok(pack?.files, `${name}: npm pack returned no file manifest`);
     const files = new Set(pack.files.map((entry) => entry.path));
-    for (const path of ['shared-task-sandbox.ts', 'shared-task-files.ts', 'shared-task-apply-patch.ts', 'shared-task-tools.ts']) assert.ok(files.has(path), `${name} missing ${path}`);
+    for (const path of ['shared-task-sandbox.ts', 'shared-task-files.ts', 'shared-task-apply-patch.ts', 'shared-task-tools.ts', 'shared-task-process-list.ts']) assert.ok(files.has(path), `${name} missing ${path}`);
     if (name === 'pi-better-subagents') {
       for (const path of ['task-runtime.mjs', 'task-guard.ts', 'task-policy.ts']) assert.ok(files.has(path), `${name} missing ${path}`);
     }

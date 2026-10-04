@@ -279,7 +279,8 @@ it does not depend on any other extension being installed.
   denials retain precedence. See the permission details below.
 - **Tool allowlist.** Confined children admit only verified read/write/edit/bash
   implementations, the guarded `apply_patch`, and the trusted tools ticked in
-  `/sandbox`. Other requested tools are reported as unavailable, with the reason.
+  `/sandbox`. The fixed `process_list` adapter is available with Process access
+  set to Read. Other requested tools are reported as unavailable, with the reason.
 - **No runaway recursion.** Confined children cannot spawn nested agents.
   `allow_nested:true` loads nested-agent support only for unconfined children.
 
@@ -291,9 +292,10 @@ use Project files = Write & delete and Outside project = **Write**: tasks write
 across home and temp (tool caches such as `~/.gradle` and `~/.npm` just work), but
 outside the workspace they can only remove or rename files in temp, hidden home
 entries, and worktree folders (`.worktrees/`, `*-worktrees/`). Credential files
-default to readable but not writable, so npm, git over SSH, and authenticated
-CLIs can reuse their normal user configuration. This exposes known file-based
-credentials to confined subagents; set Stored credentials to Off to hide them.
+default to Write & delete, so authenticated CLIs can maintain their credential
+databases and token state. Tasks can also modify or delete these credentials,
+subject to stricter protected-path rules. Set Stored credentials to Read to
+deny writes or Off to hide them. Explicit saved profiles keep their values.
 Shell startup files, `~/.pi`, `~/.claude`,
 `~/.agents`, and harness state cannot be written, removed, or renamed. Rename-based
 saves and git commits in a sibling repository fail under Write; set Outside
@@ -312,6 +314,15 @@ credential-file rules; there are no writable lock exceptions. Runtime code,
 configuration, and control files remain protected from task writes.
 
 Commands Off still permits file tools according to their file permissions.
+Process access defaults to Off. Set it to Read for the fixed `process_list`
+tool, which returns current-user PIDs and names only, even with Commands Off.
+It accepts a literal name filter and a bounded limit, not shell commands or
+process-control actions. It does not expose arguments or environments, and
+does not start an emulator or allocate test resources. The setting governs
+the fixed adapter only, not every OS process operation available through bash
+or trusted tools. New launches capture changes; running children retain their
+launch-time setting. Raw macOS `/bin/ps` remains subject to setuid execution
+restrictions. See [ADR 0011](../../../docs/adr/0011-fixed-read-only-process-inventory.md).
 Network Off blocks task network access while Pi's provider transport remains
 available. The confined file worker has an 8 MiB file limit and rejects larger
 files explicitly; use confined commands for larger files when commands are On.

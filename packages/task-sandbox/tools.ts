@@ -40,7 +40,7 @@ export function isNetworkTool(name: string): boolean {
 }
 
 /** Names never offered as trusted: builtins and the guarded adapters. */
-export const RESERVED_TOOL_NAMES = Object.freeze(["read", "write", "edit", "bash", "grep", "find", "ls", "powershell", "apply_patch"]);
+export const RESERVED_TOOL_NAMES = Object.freeze(["read", "write", "edit", "bash", "grep", "find", "ls", "powershell", "apply_patch", "process_list"]);
 
 /** Packages that are this harness: their tools are never offered as trusted tools. */
 const HARNESS_PACKAGES = /(^|[/:])pi-better-[a-z-]+$/;

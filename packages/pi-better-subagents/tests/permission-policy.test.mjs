@@ -65,6 +65,18 @@ describe("subagent permission policy", () => {
         assert.throws(() => currentSandboxPermissions(pi), /Invalid sandbox permission profile/);
     });
 
+    it("captures Process access per launch and rejects unsupported process levels", () => {
+        const { pi, publish } = fixture();
+        publish({ state: "enabled", permissions: main, subagentPermissions: { ...child, processAccess: "read" } });
+        const readPlan = resolveSubagentPermissions(pi, undefined);
+        assert.equal(readPlan.permissions.processAccess, "read");
+        publish({ state: "enabled", permissions: main, subagentPermissions: { ...child, processAccess: "off" } });
+        assert.equal(resolveSubagentPermissions(pi, undefined).permissions.processAccess, "off");
+        assert.equal(readPlan.permissions.processAccess, "read", "a launched policy cannot change retroactively");
+        publish({ state: "enabled", permissions: main, subagentPermissions: { ...child, processAccess: "write" } });
+        assert.throws(() => resolveSubagentPermissions(pi, undefined), /Invalid sandbox permission profile/);
+    });
+
     it("does not allow a tool opt-out to bypass the human-enabled profile", () => {
         const { pi } = fixture();
         assert.throws(() => resolveSubagentPermissions(pi, false), /sandbox:false cannot bypass/);

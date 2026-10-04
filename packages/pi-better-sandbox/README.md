@@ -26,6 +26,7 @@ Outside project                   -                Write
 Stored credentials                -                Write & delete
 Run commands & applications       -                On
 Network access                    -                On
+Process access                    -                Off
 
   Subagents · Tools
     Guarded (follows the file rules)
@@ -178,6 +179,26 @@ OS vault services such as Keychain and Secret Service, and tokens inherited in
 environment variables, are excluded. Write & delete may be needed by a CLI that
 refreshes a token or updates its credential database. This row applies
 independently of Project files and Outside project.
+
+**Process access** controls the fixed `process_list` tool: **Off** (default) or
+**Read**. Read returns current-user process IDs and names only, with optional
+literal name filtering and a bounded result limit. It does not expose command
+arguments, environment variables, debugger attachment, signals, termination,
+or emulator/ADB operations. Legacy saved profiles stay Off until a human
+enables Read; subagents snapshot the setting at launch.
+
+The inventory helper uses a fixed system `pgrep` command under the existing
+kernel policy, without a shell or model-controlled arguments. It can work with
+Run commands & applications Off because it is a fixed read-only adapter, not
+general command execution. No sandbox restrictions are relaxed. The control
+governs this adapter only: it does not make arbitrary shell process inspection
+impossible when commands are enabled. Windows has no supported inventory backend.
+Linux still requires a supported permission profile with visible process metadata;
+hidden-root profiles without `/proc` fail rather than gaining a new host mount.
+
+On macOS, `/bin/ps` is setuid and can be refused at execution by Seatbelt even
+when process information reads are allowed. Enabling Process access provides
+`process_list`; it does not authorize raw `/bin/ps` or an unconfined workaround.
 
 File and shell operations use the kernel: macOS uses Seatbelt (`sandbox-exec`)
 and Linux uses Bubblewrap (`bwrap`). `read`, `write`, and `edit` keep Pi's normal

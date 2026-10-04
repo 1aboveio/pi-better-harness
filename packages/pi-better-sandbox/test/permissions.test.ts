@@ -34,6 +34,19 @@ test("decoding accepts Write for file rows only and keeps saved read-write as Wr
         /explicit permission values/);
 });
 
+test("legacy profiles keep Process access Off and malformed values fail closed", () => {
+    const settings = defaultSandboxPermissions();
+    const { processAccess: _main, ...main } = settings.main;
+    const { processAccess: _child, ...subagents } = settings.subagents;
+    const decoded = parseSandboxPermissions({ ...settings, main, subagents });
+    assert.equal(decoded.main.processAccess, "off");
+    assert.equal(decoded.subagents.processAccess, "off");
+    assert.throws(() => parseSandboxPermissions({ ...settings, subagents: { ...settings.subagents, processAccess: "write" } }), /explicit permission values/);
+    settings.subagents.processAccess = "read";
+    assert.equal(parseSandboxPermissions(settings).subagents.processAccess, "read");
+    assert.deepEqual(describeLoosening(decoded, settings), ["Subagents: processAccess off → read"]);
+});
+
 test("describes only the changes that grant more", () => {
     const before = defaultSandboxPermissions();
     const after = defaultSandboxPermissions();

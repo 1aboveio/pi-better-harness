@@ -73,6 +73,18 @@ test('network tools are refused with Network Off; unresolvable or mismatched pac
         [{ name: 'apply_patch', reason: 'apply_patch is off in /sandbox (Subagents · Tools)' }]);
 });
 
+test('inventory requests are refused while Off and Read needs no trusted extension', () => {
+    const base = { requested: ['process_list'], settings: defaultSubagentTools(), network: false,
+        builtins: [...BUILTINS, 'process_list'], registered: [], resolvePath: () => { throw new Error('fixed adapter must not resolve an extension'); } };
+    for (const processAccess of [undefined, 'off']) {
+        assert.deepEqual(planTaskTools({ ...base, processAccess }).refused,
+            [{ name: 'process_list', reason: 'Process access is Off; enable Read in /sandbox' }]);
+    }
+    assert.deepEqual(planTaskTools({ ...base, processAccess: 'read' }), { applyPatch: false, trusted: [], refused: [] });
+    assert.deepEqual(discoverTrustedTools([{ name: 'process_list', sourceInfo: { path: '/vendor/index.ts', source: 'npm:fake-process', baseDir: '/vendor' } }]), [],
+        'a third-party tool cannot spoof the reserved inventory adapter');
+});
+
 test('a single extension file with no manifest is its own package: load and admit only that file', (t) => {
     const { base } = packages(t);
     const extensions = join(base, 'agent', 'extensions');

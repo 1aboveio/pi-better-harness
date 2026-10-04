@@ -17,6 +17,7 @@ export interface SandboxPermissionProfile {
     storedCredentials: CredentialAccess;
     commands: boolean;
     network: boolean;
+    processAccess: "off" | "read";
 }
 export interface SandboxPermissionSettings {
     main: SandboxPermissionProfile;
@@ -38,6 +39,7 @@ export function defaultSandboxPermissions(): SandboxPermissionSettings {
         storedCredentials: "read",
         commands: true,
         network: true,
+        processAccess: "off",
     });
     return { main: profile(), subagents: { ...profile(), enabled: true, outsideProject: "write", storedCredentials: "read-write" }, subagentTools: defaultSubagentTools() };
 }
@@ -49,7 +51,8 @@ function isProfile(value: unknown): value is SandboxPermissionProfile {
     const access = (v: unknown): boolean => credential(v) || v === "write";
     return typeof p.enabled === "boolean" && typeof p.commands === "boolean" &&
         typeof p.network === "boolean" && access(p.projectFiles) &&
-        access(p.outsideProject) && credential(p.storedCredentials);
+        access(p.outsideProject) && credential(p.storedCredentials) &&
+        (p.processAccess === undefined || p.processAccess === "off" || p.processAccess === "read");
 }
 
 const FILE_RANK: Record<FileAccess, number> = { off: 0, read: 1, write: 2, "read-write": 3 };
@@ -72,6 +75,7 @@ export function describeLoosening(previous: SandboxPermissionSettings, next: San
         for (const key of ["commands", "network"] as const) {
             if (b[key] && !a[key]) changes.push(`${label}: ${key} on`);
         }
+        if (a.processAccess !== "read" && b.processAccess === "read") changes.push(`${label}: processAccess off → read`);
     }
     // A trusted tool runs outside the file rules: ticking one loosens the profile.
     for (const tool of next.subagentTools.trusted) {
@@ -92,6 +96,7 @@ export function parseSandboxPermissions(value: unknown): SandboxPermissionSettin
     const copy = (p: SandboxPermissionProfile): SandboxPermissionProfile => ({
         enabled: p.enabled, projectFiles: p.projectFiles, outsideProject: p.outsideProject,
         storedCredentials: p.storedCredentials, commands: p.commands, network: p.network,
+        processAccess: p.processAccess ?? "off",
     });
     // Files written before the Tools section existed get the default tool set.
     return { main: copy(settings.main), subagents: copy(settings.subagents), subagentTools: parseSubagentTools(settings.subagentTools) };

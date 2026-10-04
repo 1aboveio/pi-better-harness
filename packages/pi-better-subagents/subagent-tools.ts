@@ -30,6 +30,7 @@ export function planTaskTools(options: {
     requested: readonly string[];
     settings: SubagentToolSettings;
     network: boolean;
+    processAccess?: "off" | "read";
     builtins: readonly string[];
     /** Tools registered in the parent Pi (`pi.getAllTools()`), used to find a ticked tool's package. */
     registered: readonly ToolSource[];
@@ -38,6 +39,10 @@ export function planTaskTools(options: {
 }): TaskToolPlan {
     const plan: TaskToolPlan = { applyPatch: false, trusted: [], refused: [] };
     for (const name of options.requested) {
+        if (name === "process_list" && options.processAccess !== "read") {
+            plan.refused.push({ name, reason: "Process access is Off; enable Read in /sandbox" });
+            continue;
+        }
         if (options.builtins.includes(name)) continue;
         if (name === APPLY_PATCH) {
             if (options.settings.applyPatch) plan.applyPatch = true;

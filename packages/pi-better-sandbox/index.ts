@@ -53,6 +53,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     let shellPath: string | undefined;
     const ownEntry = fileURLToPath(import.meta.url);
     const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
+        processAccess: () => controller.permissionSettings()?.main.processAccess ?? "off",
         trustedSources: [ownEntry,
             join(dirname(ownEntry), "../../extensions/sandbox/index.ts"),
             join(dirname(ownEntry), "../pi-better-harness/extensions/sandbox/index.ts")],
