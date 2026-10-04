@@ -2,6 +2,8 @@
 
 Sandbox permissions for Pi's foreground tools and detached subagents.
 
+![Pi Better Sandbox package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-sandbox.png)
+
 It is installed by default with [`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme), and can be installed on its own:
 
 ```sh

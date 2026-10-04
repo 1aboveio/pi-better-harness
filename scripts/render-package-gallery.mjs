@@ -1,15 +1,18 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { createPermissionsPage } from "../packages/pi-better-sandbox/permissions-page.ts";
+import { defaultSandboxPermissions } from "../packages/pi-better-sandbox/permissions.ts";
+import { formatSshProfileChip } from "../packages/pi-better-ssh/src/profile.ts";
+import { renderCompactPlan } from "../packages/pi-better-plan/src/plan-render.ts";
 
 import { renderGoalClockLine } from "../packages/pi-better-goal/src/goal-clock.ts";
-import { summarizeActiveBackground } from "../packages/pi-better-goal/src/activity.ts";
-import { buildWidgetLines, fmtElapsed, fmtSpend, shortModel } from "../packages/pi-better-subagents/widget.mjs";
+import { buildWidgetLines, fmtElapsed, shortModel } from "../packages/pi-better-subagents/widget.mjs";
 import {
-  buildDetailLines as buildSubagentDetailLines,
   buildNavigatorLines as buildSubagentNavigatorLines,
   buildNavigatorRows,
   createNavigatorState,
@@ -23,78 +26,206 @@ import {
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUT_DIR = join(ROOT, "docs/images/package-gallery");
 const WIDTH = 1200;
-const HEIGHT = 675;
+const HEIGHT = 750;
 const TERMINAL_COLUMNS = 76;
 const NOW = 1_800_000;
 const NOW_SECONDS = 1_800;
 
-mkdirSync(OUT_DIR, { recursive: true });
-
 const packages = [
   {
     id: "pi-better-harness",
-    command: "pi -e npm:pi-better-harness",
-    title: "full bundle",
-    status: "subagents + tasks + goal",
+    accent: "#67e8c3",
+
+    title: "One session. Work in parallel.",
+    status: "Sandbox / subagents / background tasks / SSH / goals / plans",
     blocks: [
       { label: "goal rail", lines: goalLines(TERMINAL_COLUMNS) },
-      { label: "background-work navigator", lines: backgroundWorkLines("harness", TERMINAL_COLUMNS) },
-      { label: "activity summary", lines: activityLines() },
+      { label: "background-work navigator", lines: compactNavigator("harness") },
     ],
-    footer: "← work · 4     /goal active",
+    footer: "← work · 5     /goal active",
   },
   {
     id: "pi-better-subagents",
-    command: "pi -e npm:pi-better-subagents",
-    title: "detached subagents",
-    status: "live widget + navigator",
+    accent: "#c4b5fd",
+
+    title: "Delegate. Keep moving.",
+    status: "Detached agents / live progress / completion callbacks",
     blocks: [
-      { label: "subagent widget", lines: subagentWidgetLines() },
       { label: "subagent navigator", lines: subagentNavigatorLines(TERMINAL_COLUMNS) },
-      { label: "detail view", lines: subagentDetailLines(TERMINAL_COLUMNS) },
+      { label: "live widget", lines: subagentWidgetLines() },
     ],
     footer: "← subagents · 3     ↑↓ select · Enter view · x stop · Esc close",
   },
   {
     id: "pi-better-background-tasks",
-    command: "pi -e npm:pi-better-background-tasks",
-    title: "durable shell tasks",
-    status: "processes + watchers",
+    accent: "#fbbf24",
+
+    title: "Long jobs. A responsive session.",
+    status: "Durable processes / condition watchers / logs / callbacks",
     blocks: [
-      { label: "background-work navigator", lines: backgroundWorkLines("background", TERMINAL_COLUMNS) },
-      { label: "task detail", lines: backgroundTaskDetailLines() },
-      { label: "tool result", lines: bgStatusLines() },
+      { label: "background-work navigator", lines: compactNavigator("background") },
+      { label: "task detail · example", lines: backgroundTaskDetailLines() },
     ],
     footer: "← work · 3     ↑↓ select · Enter detail · x stop · Esc unfocus",
   },
   {
     id: "pi-better-goal",
-    command: "pi -e npm:pi-better-goal",
-    title: "goal tracking",
-    status: "background-aware continuation",
+    accent: "#fb7185",
+
+    title: "Keep the objective in view.",
+    status: "Session goals / active time / background-aware continuation",
     blocks: [
       { label: "goal rail", lines: goalLines(TERMINAL_COLUMNS) },
-      { label: "get_goal", lines: getGoalLines() },
-      { label: "background activity", lines: activityLines() },
+      { label: "get_goal · example", lines: getGoalLines() },
     ],
     footer: "background drains to zero → follow-up wakes the completion audit",
   },
+  {
+    id: "pi-better-sandbox",
+    accent: "#a3e635",
+
+    title: "Permissions you control.",
+    status: "Independent Main and Subagents profiles / OS-backed file rules",
+    blocks: [{ label: "/sandbox · default profiles", lines: sandboxLines() }],
+    footer: "Main starts off · Subagents start confined · trusted tools run outside file rules",
+  },
+  {
+    id: "pi-better-ssh",
+    accent: "#38bdf8",
+
+    title: "Remote commands. Local clarity.",
+    status: "Explicit remote tools / saved host profiles / reusable connections",
+    blocks: [
+      { label: "ssh_profile · example", lines: [
+        '* staging', '- production', '',
+        `Active SSH profile: ${formatSshProfileChip({ host: "staging", workdir: "/srv/app" }, "up")}`,
+      ] },
+      { label: "remote_bash · example", lines: [
+        'host: staging', 'command: node --version', '',
+        'v22.16.0', '', 'ssh_mux status',
+        'staging: mux up - Master running',
+      ] },
+    ],
+    footer: "Pi bash stays local · remote_bash is synchronous · no interactive shell",
+  },
+  {
+    id: "pi-better-plan",
+    accent: "#f0abfc",
+
+    title: "A plan with explicit progress.",
+    status: "Structured steps / dependencies / persistent session state",
+    blocks: [
+      { label: "plan widget", lines: planLines() },
+      { label: "get_plan · example", lines: [
+        'Checklist progress: 2/5 completed',
+        'Current step: Run the regression suite',
+        'Ready: none · release waits for verification',
+      ] },
+    ],
+    footer: "/plan · inspect the complete checklist · progress changes only through updates",
+  },
+  {
+    id: "pi-better-read-aloud",
+    accent: "#fdba74",
+    command: "pi -e ./packages/pi-better-read-aloud",
+    title: "Listen to the response.",
+    status: "OpenAI-compatible speech / local playback / unpublished extension",
+    blocks: [
+      { label: "/read-aloud · example", lines: [
+        'The regression suite passed. Ready for review.', '',
+        'Started read-aloud playback',
+        '(model tts-1, voice alloy, player afplay).',
+      ] },
+      { label: "playback controls", lines: [
+        'read_aloud       Speak explicit text',
+        'read_aloud_last  Speak the latest response',
+        'read_aloud_stop  Stop current playback',
+      ] },
+    ],
+    footer: "Local extension preview · not published to npm or included in the harness",
+  },
 ];
 
-for (const pkg of packages) {
-  const svg = renderScreenshot(pkg);
-  const svgPath = join(OUT_DIR, `${pkg.id}.svg`);
-  const pngPath = join(OUT_DIR, `${pkg.id}.png`);
-  writeFileSync(svgPath, svg);
-  execFileSync("sips", ["-s", "format", "png", svgPath, "--out", pngPath], { stdio: "ignore" });
-  console.log(`${pkg.id}: ${svgPath} -> ${pngPath}`);
+if (!process.argv.includes("--check")) {
+  mkdirSync(OUT_DIR, { recursive: true });
+  for (const pkg of packages) {
+    const svg = renderScreenshot(pkg);
+    const svgPath = join(OUT_DIR, `${pkg.id}.svg`);
+    const pngPath = join(OUT_DIR, `${pkg.id}.png`);
+    writeFileSync(svgPath, svg);
+    execFileSync("sips", ["-s", "format", "png", svgPath, "--out", pngPath], { stdio: "ignore" });
+    console.log(`${pkg.id}: ${svgPath} -> ${pngPath}`);
+  }
+  renderContactSheet();
+}
+checkGallery();
+
+function renderContactSheet() {
+  const tiles = packages.map((pkg, index) => {
+    const data = readFileSync(join(OUT_DIR, `${pkg.id}.png`)).toString("base64");
+    return `<image x="${index % 2 * WIDTH / 2}" y="${Math.floor(index / 2) * HEIGHT / 2}" width="${WIDTH / 2}" height="${HEIGHT / 2}" href="data:image/png;base64,${data}"/>`;
+  });
+  const height = Math.ceil(packages.length / 2) * HEIGHT / 2;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}">${tiles.join("")}</svg>`;
+  const temp = mkdtempSync(join(tmpdir(), "pi-gallery-"));
+  try {
+    const source = join(temp, "contact-sheet.svg");
+    writeFileSync(source, svg);
+    execFileSync("sips", ["-s", "format", "png", source, "--out", join(OUT_DIR, "contact-sheet.png")], { stdio: "ignore" });
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+function checkGallery() {
+  for (const entry of readdirSync(join(ROOT, "packages"), { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const manifest = JSON.parse(readFileSync(join(ROOT, "packages", entry.name, "package.json"), "utf8"));
+    if (manifest.private || !manifest.pi?.extensions) continue;
+    const expected = `https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/${manifest.name}.png`;
+    if (manifest.pi.image !== expected) throw new Error(`${manifest.name}: missing or unexpected pi.image URL`);
+    if (!packages.some((pkg) => pkg.id === manifest.name)) throw new Error(`${manifest.name}: no reproducible preview`);
+    const png = readFileSync(join(OUT_DIR, `${manifest.name}.png`));
+    if (!png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+        png.toString("ascii", 12, 16) !== "IHDR" ||
+        png.readUInt32BE(16) !== WIDTH || png.readUInt32BE(20) !== HEIGHT) {
+      throw new Error(`${manifest.name}: expected a ${WIDTH}x${HEIGHT} PNG`);
+    }
+    console.log(`${manifest.name}: gallery metadata and PNG OK${manifest.keywords?.includes("pi-package") ? "" : " (not gallery-discoverable yet)"}`);
+  }
+}
+
+function compactNavigator(kind) {
+  return backgroundWorkLines(kind, TERMINAL_COLUMNS).filter((line) => line.trim() && !line.includes("to navigate"));
+}
+
+function sandboxLines() {
+  const theme = { fg: (_color, value) => value, bg: (_color, value) => value, bold: (value) => value, inverse: (value) => value };
+  const page = createPermissionsPage(theme, {
+    getConfig: defaultSandboxPermissions,
+    change() {}, save() {},
+    discoverTools: () => [
+      { name: "web_fetch", package: "npm:@juicesharp/rpiv-web-tools" },
+      { name: "web_search", package: "npm:@juicesharp/rpiv-web-tools" },
+    ],
+  }, () => {}, () => {});
+  return page.render(TERMINAL_COLUMNS).filter((line) => line.trim()).slice(0, 12);
+}
+
+function planLines() {
+  return renderCompactPlan({ steps: [
+    { step: "Inspect the release requirements", status: "completed" },
+    { step: "Implement the scoped changes", status: "completed" },
+    { step: "Run the regression suite", status: "in_progress" },
+    { step: "Review the results", status: "pending" },
+    { step: "Publish the release", status: "pending" },
+  ] }, TERMINAL_COLUMNS, { fg: (_color, value) => value });
 }
 
 function subagentWidgetLines() {
   return buildWidgetLines({
     running: [
       { id: "sa_review", name: "reviewer", model: "xai/grok-4.5", startedAt: NOW - 128_000 },
-      { id: "sa_tests", name: "test scout", model: "openai/gpt-5", startedAt: NOW - 47_000 },
     ],
     frame: 2,
     now: NOW,
@@ -102,7 +233,7 @@ function subagentWidgetLines() {
     selectedId: "sa_review",
     spendById: {
       sa_review: { tool: "bash", usage: { total: 12400, input: 9100, output: 3300, costUSD: 0.042 } },
-      sa_tests: { tool: "read", usage: { total: 2800, input: 2200, output: 600, costUSD: 0.0087 } },
+
     },
   });
 }
@@ -112,7 +243,7 @@ function subagentNavigatorLines(width) {
     effectiveStatus: (meta) => meta.status,
     shortModel,
     fmtElapsed,
-    spendFor: (meta) => fmtSpend(meta.usage),
+    spendFor: (meta) => `${(meta.usage.total / 1000).toFixed(1)}k tok`,
     toolFor: (meta) => meta.tool,
     effortFor: (meta) => meta.effort,
     now: NOW,
@@ -120,20 +251,6 @@ function subagentNavigatorLines(width) {
   const state = createNavigatorState(rows);
   state.selected = 0;
   return buildSubagentNavigatorLines(state, { width, truncate: truncatePlain });
-}
-
-function subagentDetailLines(width) {
-  return buildSubagentDetailLines({
-    id: "sa_review",
-    name: "reviewer",
-    status: "running",
-    model: "grok-4.5",
-    elapsed: "2m 08s",
-    currentTool: "bash",
-    tools: "read, bash",
-    spend: "12.4k tok (↑9.1k ↓3.3k) · $0.04",
-    output: "Reviewing README claims against package metadata\nChecking npm tarball contents\nWaiting for CI result",
-  }, { width, truncate: truncatePlain }).slice(0, 8);
 }
 
 function subagentMetas() {
@@ -290,19 +407,9 @@ function backgroundTaskDetailLines() {
     "status     running",
     "kind       process",
     "elapsed    6m 12s",
-    "cwd        /Users/exoulster/projects/pi-better-harness",
+    "cwd        /workspace/app",
     "command    npm run dev",
     "log tail   ready in 842ms · http://localhost:5173",
-  ];
-}
-
-function bgStatusLines() {
-  return [
-    "bg_task_status bg_server",
-    "status: running",
-    "kind: process",
-    "elapsed: 6m 12s",
-    "log: .../tasks/bg_server/output.log",
   ];
 }
 
@@ -334,43 +441,6 @@ function goalSnapshot() {
     activeStartedAt: NOW_SECONDS - 240,
     completedAt: null,
   };
-}
-
-function activityLines() {
-  const snapshot = {
-    version: 1,
-    category: "background-running",
-    foregroundRunning: false,
-    backgroundRunning: true,
-    activeBackgroundCount: 3,
-    unhealthyBackgroundCount: 0,
-    terminalAttentionCount: 1,
-    generatedAt: NOW,
-    providers: [
-      {
-        providerId: "subagents",
-        label: "Subagents",
-        items: [
-          { id: "sa_review", label: "reviewer", status: "running", active: true },
-          { id: "sa_tests", label: "test scout", status: "completed", active: false, terminal: true, attention: true },
-        ],
-      },
-      {
-        providerId: "background-tasks",
-        label: "Background Tasks",
-        items: [
-          { id: "bg_server", label: "dev server", status: "running", active: true },
-          { id: "bg_ci", label: "CI workflow", status: "running", active: true },
-        ],
-      },
-    ],
-  };
-  return [
-    `Activity: ${snapshot.category}`,
-    `Background active: ${snapshot.activeBackgroundCount}`,
-    `Terminal attention: ${snapshot.terminalAttentionCount}`,
-    summarizeActiveBackground(snapshot),
-  ];
 }
 
 function createFakeUi() {
@@ -408,81 +478,43 @@ function stripStyle(value) {
 
 function renderScreenshot(pkg) {
   const lines = [];
-  lines.push(`$ ${pkg.command}`);
-  lines.push("pi session ready · package preview uses rendered extension state");
-  lines.push("");
   for (const block of pkg.blocks) {
-    lines.push(`[${block.label}]`);
-    for (const line of block.lines) lines.push(stripStyle(line));
-    lines.push("");
+    if (lines.length) lines.push("");
+    lines.push(`[${block.label}]`, ...block.lines.map(stripStyle));
   }
-  const clipped = fitToRows(lines, 18);
-  const text = clipped.map((line, i) => renderTextLine(line, 98, 162 + i * 24, i)).join("\n");
+  if (lines.length > 17) throw new Error(`${pkg.id}: ${lines.length} rows exceed the preview frame`);
+  const text = lines.map((line, i) => renderTextLine(line, 60, 210 + i * 26, pkg.accent)).join("\n");
+  const command = pkg.id === "pi-better-read-aloud"
+    ? pkg.command : `pi install npm:${pkg.id}`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#07111d"/>
-      <stop offset="0.55" stop-color="#101827"/>
-      <stop offset="1" stop-color="#172033"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000" flood-opacity="0.34"/>
-    </filter>
-    <clipPath id="bodyClip"><rect x="82" y="108" width="1036" height="468" rx="8"/></clipPath>
-  </defs>
-  <rect width="${WIDTH}" height="${HEIGHT}" fill="url(#bg)"/>
-  <g opacity="0.08">
-    ${gridLines()}
-  </g>
-  <g filter="url(#shadow)">
-    <rect x="58" y="48" width="1084" height="578" rx="16" fill="#090f1a" stroke="#334155" stroke-width="2"/>
-  </g>
-  <rect x="58" y="48" width="1084" height="52" rx="16" fill="#111827"/>
-  <path d="M58 100 H1142" stroke="#263244"/>
-  <circle cx="92" cy="74" r="7" fill="#ef4444"/>
-  <circle cx="118" cy="74" r="7" fill="#f59e0b"/>
-  <circle cx="144" cy="74" r="7" fill="#22c55e"/>
-  <text x="174" y="80" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="15" font-weight="700" fill="#cbd5e1">${escapeXml(pkg.id)}</text>
-  <text x="990" y="80" text-anchor="end" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="14" font-weight="600" fill="#94a3b8">${escapeXml(pkg.title)}</text>
-  <rect x="1002" y="59" width="110" height="30" rx="15" fill="#172554" stroke="#60a5fa"/>
-  <text x="1057" y="79" text-anchor="middle" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="13" font-weight="700" fill="#bfdbfe">actual UI</text>
-  <text x="94" y="132" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="18" font-weight="700" fill="#e5e7eb">${escapeXml(pkg.status)}</text>
-  <g clip-path="url(#bodyClip)">
+  <title>${escapeXml(pkg.id)} package preview</title>
+  <desc>${escapeXml(pkg.status)}. Rendered with deterministic demonstration data.</desc>
+  <rect width="${WIDTH}" height="${HEIGHT}" fill="#151718"/>
+  <rect width="8" height="${HEIGHT}" fill="${pkg.accent}"/>
+  <text x="48" y="46" font-family="Menlo" font-size="22" font-weight="700" fill="${pkg.accent}">${escapeXml(pkg.id)}</text>
+  <text x="1152" y="46" text-anchor="end" font-family="Menlo" font-size="18" fill="#a1a1aa">pi / extensions</text>
+  <text x="48" y="94" font-family="Helvetica" font-size="34" font-weight="700" fill="#fafafa">${escapeXml(pkg.title)}</text>
+  <text x="48" y="128" font-family="Helvetica" font-size="19" fill="#b4b4bc">${escapeXml(pkg.status)}</text>
+  <path d="M48 150 H1152" stroke="#3f3f46"/>
   ${text}
-  </g>
-  <rect x="82" y="584" width="1036" height="34" rx="8" fill="#0f172a" stroke="#243044"/>
-  <text x="98" y="606" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="16" fill="#93c5fd">${escapeXml(pkg.footer)}</text>
+  <path d="M48 675 H1152" stroke="#3f3f46"/>
+  <text x="48" y="706" font-family="Menlo" font-size="20" fill="${pkg.accent}">$ ${escapeXml(command)}</text>
+  <text x="48" y="733" font-family="Helvetica" font-size="16" fill="#b4b4bc">${escapeXml(pkg.footer)}</text>
 </svg>
 `;
 }
 
-function fitToRows(lines, maxRows) {
-  const out = [];
-  for (const line of lines) {
-    if (out.length >= maxRows) break;
-    out.push(line.length > 86 ? `${line.slice(0, 85)}…` : line);
-  }
-  return out;
-}
-
-function renderTextLine(line, x, y, index) {
-  const fill = line.startsWith("[") ? "#7dd3fc"
-    : line.startsWith("$") ? "#f8fafc"
-      : line.trim() === "" ? "#94a3b8"
-        : line.includes("running") || line.includes("active") ? "#d1fae5"
-          : line.includes("completed") || line.includes("succeeded") ? "#bbf7d0"
-            : "#dbeafe";
-  const weight = line.startsWith("[") || line.startsWith("$") ? 800 : 500;
-  const bg = line.startsWith("[") ? `<rect x="82" y="${y - 19}" width="1036" height="27" rx="7" fill="#0f172a" opacity="0.9"/>` : "";
-  return `${bg}<text x="${x}" y="${y}" font-family="SFMono-Regular, ui-monospace, Menlo, Consolas, monospace" font-size="17" font-weight="${weight}" fill="${fill}">${escapeXml(line)}</text>`;
-}
-
-function gridLines() {
-  const parts = [];
-  for (let x = 78; x < WIDTH; x += 96) parts.push(`<path d="M${x} 0 V${HEIGHT}" stroke="#94a3b8"/>`);
-  for (let y = 86; y < HEIGHT; y += 78) parts.push(`<path d="M0 ${y} H${WIDTH}" stroke="#94a3b8"/>`);
-  return parts.join("\n    ");
+function renderTextLine(line, x, y, accent) {
+  const heading = line.startsWith("[");
+  const cut = stripStyle(truncateToWidth(line, TERMINAL_COLUMNS));
+  const fill = heading ? accent
+    : /completed|succeeded|✓/.test(line) ? "#86efac"
+      : /running|active|●/.test(line) ? "#fafafa" : "#c7c7cf";
+  // Explicit advance keeps terminal columns aligned in SVG rasterizers as well as browsers.
+  const length = visibleWidth(cut) * 12;
+  const spacing = length ? ` textLength="${length}" lengthAdjust="spacingAndGlyphs"` : "";
+  return `<text x="${x}" y="${y}" font-family="Menlo" font-size="20" font-weight="${heading ? 700 : 400}" fill="${fill}" xml:space="preserve"${spacing}>${escapeXml(cut)}</text>`;
 }
 
 function escapeXml(value) {

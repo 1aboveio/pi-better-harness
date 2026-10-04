@@ -2,6 +2,8 @@
 
 `pi-better-plan` keeps a structured execution plan visible while Pi works.
 
+![Pi Better Plan package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-plan.png)
+
 ## What It Does
 
 - Gives models `update_plan` and `get_plan` tools for atomic, explicit progress updates.

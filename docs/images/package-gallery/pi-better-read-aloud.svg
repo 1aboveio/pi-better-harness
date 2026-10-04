@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="750" viewBox="0 0 1200 750">
+  <title>pi-better-read-aloud package preview</title>
+  <desc>OpenAI-compatible speech / local playback / unpublished extension. Rendered with deterministic demonstration data.</desc>
+  <rect width="1200" height="750" fill="#151718"/>
+  <rect width="8" height="750" fill="#fdba74"/>
+  <text x="48" y="46" font-family="Menlo" font-size="22" font-weight="700" fill="#fdba74">pi-better-read-aloud</text>
+  <text x="1152" y="46" text-anchor="end" font-family="Menlo" font-size="18" fill="#a1a1aa">pi / extensions</text>
+  <text x="48" y="94" font-family="Helvetica" font-size="34" font-weight="700" fill="#fafafa">Listen to the response.</text>
+  <text x="48" y="128" font-family="Helvetica" font-size="19" fill="#b4b4bc">OpenAI-compatible speech / local playback / unpublished extension</text>
+  <path d="M48 150 H1152" stroke="#3f3f46"/>
+  <text x="60" y="210" font-family="Menlo" font-size="20" font-weight="700" fill="#fdba74" xml:space="preserve" textLength="276" lengthAdjust="spacingAndGlyphs">[/read-aloud · example]</text>
+<text x="60" y="236" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="552" lengthAdjust="spacingAndGlyphs">The regression suite passed. Ready for review.</text>
+<text x="60" y="262" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve"></text>
+<text x="60" y="288" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="324" lengthAdjust="spacingAndGlyphs">Started read-aloud playback</text>
+<text x="60" y="314" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="504" lengthAdjust="spacingAndGlyphs">(model tts-1, voice alloy, player afplay).</text>
+<text x="60" y="340" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve"></text>
+<text x="60" y="366" font-family="Menlo" font-size="20" font-weight="700" fill="#fdba74" xml:space="preserve" textLength="228" lengthAdjust="spacingAndGlyphs">[playback controls]</text>
+<text x="60" y="392" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="432" lengthAdjust="spacingAndGlyphs">read_aloud       Speak explicit text</text>
+<text x="60" y="418" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="504" lengthAdjust="spacingAndGlyphs">read_aloud_last  Speak the latest response</text>
+<text x="60" y="444" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="456" lengthAdjust="spacingAndGlyphs">read_aloud_stop  Stop current playback</text>
+  <path d="M48 675 H1152" stroke="#3f3f46"/>
+  <text x="48" y="706" font-family="Menlo" font-size="20" fill="#fdba74">$ pi -e ./packages/pi-better-read-aloud</text>
+  <text x="48" y="733" font-family="Helvetica" font-size="16" fill="#b4b4bc">Local extension preview · not published to npm or included in the harness</text>
+</svg>
