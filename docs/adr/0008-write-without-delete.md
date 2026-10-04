@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Amends [ADR 0005](0005-sandbox-permission-table.md) (file levels, Subagents default) and extends [ADR 0007](0007-trusted-runtime-task-boundary.md)'s protected-path rules. Issue #341.
+Accepted. Amends [ADR 0005](0005-sandbox-permission-table.md) (file levels, Subagents default) and extends [ADR 0007](0007-trusted-runtime-task-boundary.md)'s protected-path rules. Issue #341. [ADR 0010](0010-unified-file-permission-labels.md) later unifies credential labels and changes the built-in Subagents credential default; the historical decision below remains as recorded.
 
 ## Problem
 

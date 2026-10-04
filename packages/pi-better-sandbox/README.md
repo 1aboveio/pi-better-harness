@@ -23,7 +23,7 @@ Sandbox                           Off              On
 
 Project files                     -                Write & delete
 Outside project                   -                Write
-Stored credentials                -                Read
+Stored credentials                -                Write & delete
 Run commands & applications       -                On
 Network access                    -                On
 
@@ -70,8 +70,13 @@ Project files and Outside project cycle through four levels:
 | ----- | ------- |
 | Off | No access. |
 | Read | Read only. |
-| Write | Read, create, and overwrite in place. Nothing can be removed or renamed away. |
+| Write | Read, create, and overwrite in place; removal is restricted, with the exceptions below. |
 | Write & delete | Full access, including removal. This was called "Read / write"; saved settings keep it. |
+
+Stored credentials uses the same labels but offers only **Off**, **Read**, and
+**Write & delete**. Subagents default to Write & delete; Main retains Read.
+Explicit saved defaults and session profiles are preserved, including Read and
+Off. Changing the built-in default does not upgrade existing profiles.
 
 Whatever these rows say, removal is always allowed in **temp**, **hidden
 directories and files directly under your home** (`~/.cache`, `~/.gradle`,
@@ -89,12 +94,16 @@ select the row.
 home directory and temp, so tool caches just work with no per-tool setup. It
 retains fixed protections that are not configurable per tool:
 
-- **Credentials** follow the independent Stored credentials row. The default
-  `Read` setting exposes the files listed below plus `~/Library/Keychains`,
+- **Credentials** follow the independent Stored credentials row. The Subagents
+  `Write & delete` default permits reading, modifying, and removing the files
+  listed below plus `~/Library/Keychains`,
   `~/.claude/.credentials.json`, `~/.claude.json`, `~/.gnupg`,
   `~/.codex/auth.json`, `~/.cargo/credentials(.toml)`, `~/.pgpass`, and
-  `~/.config/rclone` to confined subagents, while denying writes. Set the row to
-  Off to hide them or Read / write when a CLI must refresh credential state.
+  `~/.config/rclone`, subject to stricter protected-path rules. Set the row to
+  Read to deny credential writes or Off to hide them. Writable credentials let
+  CLIs such as `gcloud` update database permissions and refresh token state even
+  for read-only cloud queries. This also lets tasks alter or delete credentials;
+  it is not a read-only authentication capability.
 - **Code that runs later** cannot be written, removed, or renamed: shell startup
   files (`.bashrc`, `.zshrc`, `.profile`, and the rest), `~/.config/fish`,
   `~/.gitconfig`, `~/.config/git`, `~/.config/systemd/user`,
@@ -108,7 +117,7 @@ retains fixed protections that are not configurable per tool:
   control directories, and task-runtime provenance) cannot be written, removed,
   or renamed.
 
-Every entry is protected under the literal path under home, every symlink hop
+Every protected entry is guarded under the literal path under home, every symlink hop
 on the way to its target, and the target itself. So a dotfiles manager's links
 (stow, chezmoi), including chains of links, can't be swapped or retargeted. A
 link whose target is missing protects that target too: it can't be created.
@@ -166,7 +175,7 @@ could likely delete these snapshots. Restore from one with Time Machine or
 AWS, GitHub CLI, Google Cloud CLI, Azure, Kubernetes, Docker, npm, netrc, Git
 credentials, and Pi's file-based auth. These rules override ordinary file access.
 OS vault services such as Keychain and Secret Service, and tokens inherited in
-environment variables, are excluded. Read / write may be needed by a CLI that
+environment variables, are excluded. Write & delete may be needed by a CLI that
 refreshes a token or updates its credential database. This row applies
 independently of Project files and Outside project.
 
@@ -187,7 +196,7 @@ commands & applications Off. The fixed file worker remains available according
 to the file permissions even when task commands are Off.
 
 The task executor provides private scratch through `TMPDIR`, `TMP`, and `TEMP`.
-Outside Read and Read/write also retain explicit runtime write exceptions for
+Outside Read and Write & delete also retain explicit runtime write exceptions for
 `/tmp` (canonical `/private/tmp` on macOS), the current user's macOS temporary
 directory, and that user's Security.framework MDS cache. MDS access lets CLI
 Keychain retrieval initialize and refresh its cache; it does not restrict the

@@ -9,7 +9,7 @@ export type { SubagentToolSettings } from "./shared-task-tools.ts";
  */
 export type FileAccess = "off" | "read" | "write" | "read-write";
 /** Stored credentials keeps its three levels. */
-export type CredentialAccess = "off" | "read" | "read-write";
+export type CredentialAccess = Exclude<FileAccess, "write">;
 export interface SandboxPermissionProfile {
     enabled: boolean;
     projectFiles: FileAccess;
@@ -27,7 +27,8 @@ export interface SandboxPermissionSettings {
 
 /**
  * Return fresh profiles so changing one column never changes the other.
- * Subagents default to Outside project = Write; Main keeps Read.
+ * Subagents default to Outside project = Write and credentials = Write & delete.
+ * Main keeps Read for both rows. Explicit saved profiles retain their values.
  */
 export function defaultSandboxPermissions(): SandboxPermissionSettings {
     const profile = (): SandboxPermissionProfile => ({
@@ -38,7 +39,7 @@ export function defaultSandboxPermissions(): SandboxPermissionSettings {
         commands: true,
         network: true,
     });
-    return { main: profile(), subagents: { ...profile(), enabled: true, outsideProject: "write" }, subagentTools: defaultSubagentTools() };
+    return { main: profile(), subagents: { ...profile(), enabled: true, outsideProject: "write", storedCredentials: "read-write" }, subagentTools: defaultSubagentTools() };
 }
 
 function isProfile(value: unknown): value is SandboxPermissionProfile {
