@@ -28,7 +28,7 @@ export interface RushPlan {
 }
 
 export interface WorkflowPlanBinding {
-  owner: "rush-issues";
+  owner: string;
   path: string;
   runId: string;
 }
@@ -113,9 +113,9 @@ export function workflowBinding(entries: Iterable<{ type: string; customType?: s
     const data = entry.data;
     if (!isRecord(data) || data.version !== 1) continue;
     if (data.kind === "clear") binding = null;
-    else if (data.kind === "set" && data.owner === "rush-issues" &&
+    else if (data.kind === "set" && typeof data.owner === "string" && data.owner.length > 0 &&
              typeof data.path === "string" && typeof data.runId === "string") {
-      binding = { owner: "rush-issues", path: data.path, runId: data.runId };
+      binding = { owner: data.owner, path: data.path, runId: data.runId };
     }
   }
   return binding;
@@ -133,7 +133,7 @@ function workflowStatus(status: string): DisplayStatus {
   }
 }
 
-function presentRushPlan(plan: RushPlan): PlanPresentation {
+function presentRushPlan(plan: RushPlan, owner: string): PlanPresentation {
   // The warehouse canary only applies to data work; hide it otherwise.
   const stages = ["explore", "implement", "review", "ci", ...(plan.warehouseCanaryRequired ? ["canary"] : [])];
   const fleet = stages.map((stage) => {
@@ -142,7 +142,7 @@ function presentRushPlan(plan: RushPlan): PlanPresentation {
     const style = statusStyle(display);
     return { color: style.color, text: `  ${stage} ${style.glyph}${display === "unknown" ? ` ${planText(status)}` : ""}` };
   });
-  const metadata = [[{ color: "dim", text: `rush-issues · rev ${plan.planRevision}  ·` }, ...fleet]];
+  const metadata = [[{ color: "dim", text: `${planText(owner)} · rev ${plan.planRevision}  ·` }, ...fleet]];
   if (plan.spec?.title) metadata.push([{ color: "dim", text: plan.spec.title }]);
   return {
     metadata,
@@ -164,16 +164,18 @@ export function renderRushPlan(
   width: number,
   full = false,
   fg?: (color: string, value: string) => string,
+  owner = "rush-issues",
 ): string[] {
   const theme = fg ? { fg } : plainPlanTheme;
-  return renderPlanPresentation(presentRushPlan(plan), width, theme, full);
+  return renderPlanPresentation(presentRushPlan(plan, owner), width, theme, full);
 }
 
 export function createRushPlanComponent(
   plan: RushPlan,
   onClose: () => void,
   fg?: (color: string, value: string) => string,
+  owner = "rush-issues",
 ): Component {
   const theme = fg ? { fg } : plainPlanTheme;
-  return createPlanPresentationComponent(presentRushPlan(plan), theme, onClose);
+  return createPlanPresentationComponent(presentRushPlan(plan, owner), theme, onClose);
 }
