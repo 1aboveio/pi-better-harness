@@ -6,6 +6,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.17.1] - 2026-10-04
+
+### Fixed
+
+- Bundle Plan 0.5.3 so `resolve-issues` and other compatible workflows can display and update owner-bound task plans. (#407)
+
+## [pi-better-plan@0.5.3] - 2026-10-04
+
+### Fixed
+
+- Bind compatible persisted task plans to any active workflow, including `resolve-issues`, instead of requiring the `rush-issues` skill name. Display the actual owner and retain path confinement, revision checks, and the shared task-plan contract. (#407)
+- Reject cross-owner bindings on reads, updates, and session restore; hide cached plan views when persisted ownership changes even if the ownership event is missed.
+
 ## [pi-better-harness@0.17.0] - 2026-10-03
 
 ### Changed
