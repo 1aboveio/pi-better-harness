@@ -21,6 +21,10 @@ const ai = await import(process.env.PI_CODEMODE_TEST_SDK_DIR
   : import.meta.resolve("@earendil-works/pi-ai"));
 
 test("#409 real Pi runs one aggregate after settlement and holds arrivals during that run", { timeout: 10_000 }, async (t) => {
+  // Production wake timers are unref'd; the offline provider's unresolved
+  // promises do not keep Node alive while this test waits for a wake.
+  const keepAlive = setInterval(() => {}, 10_000);
+  t.after(() => clearInterval(keepAlive));
   const root = mkdtempSync(join(tmpdir(), "pi-callback-availability-"));
   const agentDir = join(root, "agent");
   let session;
