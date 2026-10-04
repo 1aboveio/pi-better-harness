@@ -201,7 +201,7 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
                 scan = { offset: 0, head, identity, model: newIncidentModel(false) };
             } else {
                 trustUnknownSince.delete(id);
-                scan = { offset: 0, head, identity, model: newIncidentModel(trust === "trusted") };
+                scan = { offset: 0, head, identity, model: newIncidentModel(trust === "trusted", id) };
                 // The gap is settled after this scan has folded the log (settleMetadataGap), and again after
                 // every later scan, once no leftover of the exact-rule scan that trust would have read
                 // differently is still unresolved (#332).

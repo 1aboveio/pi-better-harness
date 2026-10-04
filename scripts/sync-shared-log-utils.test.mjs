@@ -30,3 +30,22 @@ for (const target of targets) {
     assert.deepEqual([...utils.readOutputInclude(["cost", "tools", "x"]).include], ["cost", "tools"]);
   });
 }
+
+for (const target of [
+  "packages/pi-better-subagents/shared-permission-blocker.ts",
+  "packages/pi-better-sandbox/shared-permission-blocker.ts",
+  "packages/pi-better-background-tasks/src/shared-permission-blocker.ts",
+  "packages/pi-better-goal/src/shared-permission-blocker.js",
+]) {
+  test(`${target}: distributed strict permission contract`, async () => {
+    const contract = await import(resolve(root, target));
+    const blocker = { version: 1, kind: "permission-blocker", context: "worker", resource: "process-inspection",
+      basis: "agent-reported", operation: "synthetic-census", remoteOutcome: "unknown", runId: "sa_fixture",
+      incidentId: "tool:call_9Az0|fc_01aB23" };
+    assert.equal(contract.isPermissionBlocker(blocker), true);
+    assert.equal(contract.isPermissionBlocker({ ...blocker, command: "private command" }), false);
+    assert.equal(contract.isPermissionBlocker({ ...blocker, remoteOutcome: "success" }), false);
+    assert.equal(contract.permissionBlockerKey(blocker), contract.permissionBlockerKey(Object.fromEntries(Object.entries(blocker).reverse())));
+    assert.notEqual(contract.permissionBlockerKey(blocker), contract.permissionBlockerKey({ ...blocker, context: "foreground" }));
+  });
+}

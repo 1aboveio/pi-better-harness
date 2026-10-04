@@ -42,7 +42,10 @@ import {
     unknownRunError,
     type SubagentToolSession,
 } from "./output-payload.ts";
-import { readOutputControls } from "./shared-log-utils.ts";
+import { budgetFor, readOutputControls } from "./shared-log-utils.ts";
+import { readRunFailures } from "./failures.ts";
+import { actionablePermissionBlockers } from "./shared-failure-observations.ts";
+import type { PermissionBlocker } from "./shared-permission-blocker.ts";
 import { describeTiming } from "./timing.ts";
 import {
     extractChildEventFactsFromLog,
@@ -111,6 +114,23 @@ const INCLUDE_DESCRIPTION = "Explicit opt-in facts omitted by default: \"cost\" 
 
 /** pi's tool-result text shape. */
 export const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+
+/** Metadata has its own bounded allowance; it never embeds raw evidence or unbounded history. */
+function permissionDetails(id: string, maxBytes: number): { permissionBlockers?: PermissionBlocker[]; permissionBlockersOmitted?: number } {
+    const all = actionablePermissionBlockers(readRunFailures(id));
+    if (!all.length) return {};
+    const permissionBlockers: PermissionBlocker[] = [];
+    const allowance = Math.min(4096, maxBytes);
+    if (Buffer.byteLength(JSON.stringify({ permissionBlockers, permissionBlockersOmitted: all.length })) > allowance) {
+        throw new Error("Permission blocker metadata cannot fit this budget; retry with a larger max_bytes.");
+    }
+    for (const blocker of all) {
+        if (permissionBlockers.length === 32 || Buffer.byteLength(JSON.stringify({ permissionBlockers: [...permissionBlockers, blocker],
+            permissionBlockersOmitted: all.length - permissionBlockers.length - 1 })) > allowance) break;
+        permissionBlockers.push(blocker);
+    }
+    return { permissionBlockers, ...(all.length > permissionBlockers.length ? { permissionBlockersOmitted: all.length - permissionBlockers.length } : {}) };
+}
 
 const SUBAGENT_RESULT_PREVIEW_LINES = 8;
 
@@ -409,7 +429,9 @@ export function subagentOutputTool(Type: TypeModule, baseSession: SubagentToolSe
             if (access.kind === "denied") return text(access.payload);
             const scopeKey = requestScopeKey(p, session);
             const healthLine = diagnosticLines(access.meta);
-            return text(assembleSubagentOutput(p.id, access.meta, p, healthLine, scopeKey));
+            const result = text(assembleSubagentOutput(p.id, access.meta, p, healthLine, scopeKey));
+            const details = permissionDetails(p.id, budgetFor("log", p.maxBytes));
+            return Object.keys(details).length ? { ...result, details } : result;
         },
     } as ToolDefinition;
 }
@@ -451,20 +473,24 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
             }
             if (access.kind === "denied") return subagentResultText(access.payload);
             const meta = access.meta;
+            const resultText = (body: string) => {
+                const result = subagentResultText(body);
+                return { ...result, details: { ...result.details, ...permissionDetails(p.id, budgetFor("answer", p.maxBytes)) } };
+            };
             const scopeKey = requestScopeKey(p, session);
             const st = effectiveStatus(meta);
             const healthLine = diagnosticLines(meta);
             if (!isFinalResultStatus(st)) {
                 if (st === "orphaned") {
-                    return subagentResultText(assembleOrphanedResult(p.id, meta, healthLine, p, scopeKey));
+                    return resultText(assembleOrphanedResult(p.id, meta, healthLine, p, scopeKey));
                 }
-                return subagentResultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
+                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
             }
             const body = buildSubagentResultPayload(p.id, p, healthLine, scopeKey);
             if (body === null) {
-                return subagentResultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
+                return resultText(assembleRunningResult(p.id, meta, p, scopeKey, describeTiming({ ...meta, status: "running" })?.line));
             }
-            return subagentResultText(body);
+            return resultText(body);
         },
     } as ToolDefinition;
 }
