@@ -27,6 +27,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUT_DIR = join(ROOT, "docs/images/package-gallery");
 const WIDTH = 1200;
 const HEIGHT = 750;
+const LOGO = readFileSync(join(ROOT, "docs/images/brand/logo.png")).toString("base64");
 const TERMINAL_COLUMNS = 76;
 const NOW = 1_800_000;
 const NOW_SECONDS = 1_800;
@@ -209,7 +210,7 @@ function sandboxLines() {
       { name: "web_search", package: "npm:@juicesharp/rpiv-web-tools" },
     ],
   }, () => {}, () => {});
-  return page.render(TERMINAL_COLUMNS).filter((line) => line.trim()).slice(0, 12);
+  return page.render(TERMINAL_COLUMNS).filter((line) => line.trim()).slice(0, 13);
 }
 
 function planLines() {
@@ -493,7 +494,7 @@ function renderScreenshot(pkg) {
   <rect width="${WIDTH}" height="${HEIGHT}" fill="#151718"/>
   <rect width="8" height="${HEIGHT}" fill="${pkg.accent}"/>
   <text x="48" y="46" font-family="Menlo" font-size="22" font-weight="700" fill="${pkg.accent}">${escapeXml(pkg.id)}</text>
-  <text x="1152" y="46" text-anchor="end" font-family="Menlo" font-size="18" fill="#a1a1aa">pi / extensions</text>
+  <image x="1056" y="24" width="96" height="96" href="data:image/png;base64,${LOGO}"/>
   <text x="48" y="94" font-family="Helvetica" font-size="34" font-weight="700" fill="#fafafa">${escapeXml(pkg.title)}</text>
   <text x="48" y="128" font-family="Helvetica" font-size="19" fill="#b4b4bc">${escapeXml(pkg.status)}</text>
   <path d="M48 150 H1152" stroke="#3f3f46"/>
