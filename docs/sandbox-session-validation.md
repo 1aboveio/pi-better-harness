@@ -29,6 +29,41 @@ All inspected policies select Project Read/write, Outside Read, credential files
 | A1 `01a0dfb8-46fe-73d4-8ed7-d9a4b127b289` | `sa_muixz4e3_1`, `call_G1J` | gh GraphQL 401 | Same Keychain regression; replay safe authenticated repository/issue read. |
 | A1 | `sa_muixz4e3_1`, `call_IJjfm0xlMmb5qderwF0ZoFah` | rg over gateway/rule-engine/infra paths returns 2, output contains SQL test text | Search, not database execution. Confirm missing paths; read existing matches safely. |
 
+## macOS process-inspection follow-up
+
+This later investigation is separate from the three-session replay gate above;
+it does not extend that gate's cutoff or claim product/build acceptance.
+
+- Session: `01a1027f-34e7-75b6-89e3-ccb509b83108`, FMM Express.
+- Worker: `sa_musqiow3_11`; original tool call:
+  `call_0mxiUYlhjXFvbtE6owYIWJjH` (provider suffix omitted).
+- At 2026-10-03 18:40:46 UTC, `ps -axo pid,ppid,lstart,command` returned
+  `/bin/bash: /bin/ps: Operation not permitted`, exit 126. The failure
+  observation was recorded at 18:40:51 UTC. The worker withheld #1321's APK
+  build because current exclusive process ownership could not be verified.
+- Saved `control/task-policy.json` had project Read/write, outside Write,
+  stored credentials Read, commands On and network On. Commands were not
+  disabled, and the generated broad profile starts with `(allow default)`.
+- Read-only host probes on 2026-10-04 verified `/bin/ps` and `/usr/bin/top`
+  are setuid-root. Executing `ps` through a shell inside a minimal
+  `(version 1) (allow default)` Seatbelt profile reproduced exit 126;
+  direct `sandbox-exec` execution failed with exit 71. The same narrow query
+  outside Seatbelt succeeded. This isolates the macOS setuid execution
+  limitation from the harness's file/network restrictions.
+- Human decision W24 approved a coordinator handoff. A permitted foreground
+  snapshot at 2026-10-04 00:47:19 UTC found no Java/Gradle/emulator/QEMU
+  process. The pre-existing adb daemon was left untouched. The coordinator
+  granted a serial #1321 build lease and launched `sa_mut3reln_13`; #1325
+  remained queued. Sandbox restrictions were unchanged. This is admission
+  evidence, not proof that either build completed.
+
+Original artifacts live under the evidence root above, in
+`sa_musqiow3_11/{output.log,failures.jsonl,control/task-policy.json}`.
+The parent session JSONL records the inspected result at line 297 and the
+human handoff answer at line 306. No original evidence was modified.
+
+See [the platform limitation and reproduction command](../packages/pi-better-sandbox/README.md#macos-setuid-executable-limitation).
+
 ## Post-fix replay results
 
 All nine recorded roots/policies passed the same bounded probes using the updated task executor (`runtimeCompatibility: true`). Original policy artifacts were only read. A new isolated scratch/profile was used per run; temporary log names and workspace probe files were unique and cleaned up. No original file contents, credentials, session state, findings, build settings, or database were changed.
