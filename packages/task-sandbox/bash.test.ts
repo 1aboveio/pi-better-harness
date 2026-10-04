@@ -124,3 +124,65 @@ test("real shell timeout and cancellation retire profiles after stopping childre
     }), /aborted/);
     assert.deepEqual(readdirSync(f.control), []);
 });
+
+test("confined Git inventory avoids optional locks in linked-worktree metadata (#419)", { skip: !kernel }, async (t) => {
+    // Temp and hidden home entries permit removal; neither reproduces a normal repository's gitdir.
+    const base = realpathSync(mkdtempSync(join(import.meta.dirname, ".git-lock-fixture-")));
+    t.after(() => rmSync(base, { recursive: true, force: true }));
+    const home = join(base, "home"), repo = join(home, "projects", "repo");
+    const root = join(repo, ".worktrees", "task"), control = join(base, "control");
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(control);
+    const env = { PATH: "/usr/bin:/bin", HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+    const git = (cwd: string, args: string[]) => {
+        const result = childProcess.spawnSync("/usr/bin/git", args, { cwd, env, encoding: "utf8" });
+        assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+        return result.stdout.trim();
+    };
+    git(repo, ["init", "-q", "--template="]);
+    git(repo, ["-c", "user.name=fixture", "-c", "user.email=fixture@example.test",
+        "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "fixture"]);
+    git(repo, ["worktree", "add", "-q", "-b", "task", root]);
+    const gitdir = git(root, ["rev-parse", "--absolute-git-dir"]);
+    const lock = join(gitdir, "index.lock");
+    const plan = { confined: true as const, profilePath: join(control, "task.sb"), policy: {
+        writableRoot: root, home, denyWrite: [control], permissions: {
+            projectFiles: "read-write" as const, outsideProject: "write" as const,
+            storedCredentials: "read" as const, commands: true, network: true,
+        },
+    } };
+    const ops = createTaskBashOperations({ requireLaunchPlan: () => plan });
+    const previous = process.env.GIT_OPTIONAL_LOCKS;
+    delete process.env.GIT_OPTIONAL_LOCKS;
+    t.after(() => {
+        if (previous === undefined) delete process.env.GIT_OPTIONAL_LOCKS;
+        else process.env.GIT_OPTIONAL_LOCKS = previous;
+    });
+    const run = async (command: string, overrides: Record<string, string> = {}) => {
+        let output = "";
+        const result = await ops.exec(command, root, { env: { ...env, ...overrides }, onData: (chunk) => { output += chunk.toString(); } });
+        return { ...result, output };
+    };
+    const inventory = await run("git status --short --branch");
+    assert.equal(inventory.exitCode, 0, inventory.output);
+    assert.match(inventory.output, /## task/);
+    assert.doesNotMatch(inventory.output, /unable to unlink|Operation not permitted/);
+    assert.equal(existsSync(lock), false, "read-only inventory must not strand an optional metadata lock");
+
+    const explicit = await run("git status --short --branch", { GIT_OPTIONAL_LOCKS: "1" });
+    assert.equal(explicit.exitCode, 0, explicit.output);
+    assert.match(explicit.output, /unable to unlink .*index\.lock.*Operation not permitted/);
+    assert.equal(readFileSync(lock).length, 0, "Git created an empty lock but the kernel refused its cleanup");
+    const probe = `try { require("node:fs").unlinkSync(${JSON.stringify(lock)}); } catch (e) { console.log(JSON.stringify({code:e.code,syscall:e.syscall,path:e.path})); process.exitCode=1; }`;
+    const denied = await run(`${JSON.stringify(process.execPath)} -e ${JSON.stringify(probe)}`);
+    assert.equal(denied.exitCode, 1, denied.output);
+    assert.deepEqual(JSON.parse(denied.output), { code: "EPERM", syscall: "unlink", path: lock });
+    assert.equal(existsSync(lock), true);
+    rmSync(lock);
+
+    assert.equal(git(root, ["status", "--short"]), "", "unconfined positive control still cleans up normally");
+    assert.equal(existsSync(lock), false);
+    const mutation = await run("mkdir writable && cd writable && git init -q --template= && printf fixture > added.txt && git add added.txt && git diff --cached --name-only");
+    assert.equal(mutation.exitCode, 0, mutation.output);
+    assert.equal(mutation.output.trim(), "added.txt", "the default must not disable required Git index writes");
+});

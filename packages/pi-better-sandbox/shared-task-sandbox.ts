@@ -118,7 +118,8 @@ export function createTaskBashOperations(
             const { trackDetachedChildPid, untrackDetachedChildPid } = await import(pathToFileURL(join(sdkUtils, "shell.js")).href);
             if (shell.commandTransport === "stdin") throw new Error("Sandbox: this shell cannot be confined by the available backend.");
             const scratch = plan.policy.runtimeWrite?.[0];
-            const taskEnv = { ...process.env, ...options.env,
+            // Git inventory otherwise creates optional locks in an outside gitdir it cannot unlink (#419).
+            const taskEnv = { GIT_OPTIONAL_LOCKS: "0", ...process.env, ...options.env,
                 ...(scratch ? { TMPDIR: scratch, TMP: scratch, TEMP: scratch } : {}) };
             if (options.signal?.aborted) throw new Error("aborted");
             if (options.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout <= 0 || options.timeout * 1000 > 2147483647)) {

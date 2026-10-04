@@ -362,6 +362,14 @@ Pi SDK 0.82.1 or newer; it is not a replacement user-facing Pi command.
 
 ### Git-mutating subagents and linked worktrees
 
+Confined bash commands default to `GIT_OPTIONAL_LOCKS=0`, unless the inherited
+environment or the call supplies a value. This keeps inventory commands such as
+`git status` from creating an optional `index.lock` in the parent repository's
+linked-worktree metadata. On macOS, Outside project = Write can permit creation
+there but refuse unlink, leaving an empty lock even when status exits zero.
+The default skips optional index refreshes; it does not disable required locks
+for `git add` or commits, grant metadata removal, or remove existing locks.
+
 A sandboxed subagent that will mutate Git should set **`git_clone_workspace:true`**
 on `subagent_spawn`. The parent prepares a fresh, self-contained Git clone whose
 `.git/` directory lives **inside the sandbox writable root**, then runs the child
