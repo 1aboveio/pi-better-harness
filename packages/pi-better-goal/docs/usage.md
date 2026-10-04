@@ -8,7 +8,7 @@ It ships one extension that:
 - treats current-parent `running` and `orphaned` subagents as active background work
 - owns `/goal` plus the `get_goal` and `update_goal` tools; only `/goal <objective>` can create a goal
 - shows the current goal with active and elapsed clocks in a right-aligned widget above custom footers such as `pi-observability`
-- pauses the active goal on `escape` (while still interrupting a running agent turn), keeps it paused while you talk to the agent, resumes it on a clear go-ahead, and never pokes a paused goal
+- pauses the active goal on `escape` by default (while still interrupting a running agent turn), keeps it paused while you talk to the agent, resumes it on a clear go-ahead, and never pokes a paused goal
 - tells the agent, right after a blocking `ask_user_question` is answered, which background work finished while the question was pending
 - publishes a typed activity snapshot on `pi.events`
 - adds goal-aware prompt context while background work is active, so foreground idleness is not confused with goal completion
@@ -31,6 +31,7 @@ Goal state is stored as `pi-better-goal` custom entries in the Pi session. Exist
 /goal settings
 /goal settings auto-continue on|off
 /goal settings conversational-resume on|off
+/goal settings pause-on-escape on|off
 /better-activity
 ```
 
@@ -43,11 +44,31 @@ Model-callable tools:
 
 ## Pause With Escape
 
-Press `escape` to pause the active goal. The goal moves to `paused`, its
+With **Pause on Esc** enabled (the default), press `escape` to pause the active goal. The goal moves to `paused`, its
 active clock stops, and any pending or future automatic continuation pokes
 are cancelled: a paused goal is never poked. While the agent is still
 streaming, `escape` also interrupts the turn, preserving its built-in
 meaning. `escape` without an active goal does nothing.
+
+Idle and between-turn Escape is observed without consuming or rewriting the
+key. Completion menus, built-in selectors, and extension dialogs/custom screens
+retain Escape for cancellation and do not pause the goal. The observer is
+attached at TUI session start and removed at shutdown/reload. It requires Pi's
+public focused-component API (available in the supported Pi 0.84.4 runtime);
+older hosts retain the existing running-turn abort fallback. Turning **Pause on Esc**
+off leaves an observed editor Escape's active goal unpaused, both idle and
+streaming. Pi still receives the original key and interrupts streaming normally.
+Automatic continuation remains governed independently by `auto-continue`, so an
+interrupted active goal can continue after its normal grace period.
+
+For custom editors, idle Escape observation is limited to components exposing
+the standard `CustomEditor.onEscape` and `isShowingAutocomplete` methods. Unknown
+editors and visible overlays are left untouched. Hosts without terminal input or
+focused-component inspection, non-TUI modes, and unknown custom editors cannot
+reliably distinguish Escape from other abort sources. On those paths, an actual
+turn abort still pauses the goal even with **Pause on Esc** off; the setting does
+not disable the generic interrupt safety fallback. Menu/dialog Escape cancellation
+remains unchanged.
 
 A paused goal stays paused while you talk. Your messages are ordinary
 conversation: the agent answers questions and discusses options, but the
@@ -77,16 +98,18 @@ model as an ordinary message.
 
 ## Persistent User Controls
 
-Both controls default to `on`, preserving the existing behavior. `/goal settings`
-inspects their current values and preference-file location, even with no goal.
-`/goal` and `get_goal` also report both values. Configure them independently:
+All three controls default to `on`, preserving the existing behavior. `/goal settings`
+opens the interactive settings page in the TUI and reports values and the
+preference-file location outside the TUI, even with no goal. `/goal` and
+`get_goal` also report all three values. Configure them independently:
 
 ```text
 /goal settings auto-continue off
 /goal settings conversational-resume off
+/goal settings pause-on-escape off
 ```
 
-Use `on` to enable either control again.
+Use `on` to enable any control again.
 
 - `auto-continue` controls automatic idle continuation and background-drain
   wakes. Turning it off cancels a pending wake and prevents an in-flight wake
@@ -102,8 +125,16 @@ Use `on` to enable either control again.
   but a message such as "go" cannot resume the goal. Turning it on offers the
   tool again for an Escape-paused goal; it does not resume it by itself and
   never makes an explicit `/goal pause` agent-resumable.
+- `pause-on-escape` controls whether an observed editor Escape pauses the active
+  goal. Off preserves native streaming interruption without pausing the goal,
+  including that Escape's abort signal and aborted final assistant message.
+  Its exemption is scoped to the current session, run, and goal generation and
+  does not carry into later interrupts. Changing the setting does not pause or
+  resume a goal. `/goal pause`, unrelated interrupts, and unavailable-command
+  or workflow safety pauses still work. Completion menus and dialogs retain
+  Escape cancellation with either value.
 
-Neither setting disables `/goal <objective>` kickoff, `/goal resume`, or
+None of these settings disables `/goal <objective>` kickoff, `/goal resume`, or
 `alt+g`. An explicit resume queues one continuation even when automation is off;
 later idle turns still respect `auto-continue`. Question-result harvesting and
 other extensions' callback delivery are unchanged.
@@ -122,7 +153,8 @@ does not change the active settings.
 {
   "version": 1,
   "autoContinue": true,
-  "conversationalResume": true
+  "conversationalResume": true,
+  "pauseOnEscape": true
 }
 ```
 

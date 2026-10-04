@@ -1,5 +1,6 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CustomEditor, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
 import { commandAvailable, commandInvocation, resolveGoalCommand } from "./command-binding.js";
@@ -108,10 +109,10 @@ const GOAL_ACTIONS: readonly AutocompleteItem[] = [
   { value: "resume", label: "resume", description: "Resume the paused goal" },
   { value: "clear", label: "clear", description: "Remove the current goal" },
   { value: "complete", label: "complete", description: "Mark the current goal complete" },
-  { value: "settings", label: "settings", description: "Inspect or persist goal continuation and conversational resume controls" },
+  { value: "settings", label: "settings", description: "Inspect or persist goal continuation, conversational resume, and Escape pause controls" },
 ];
 
-const GOAL_SETTINGS = ["auto-continue", "conversational-resume"] as const;
+const GOAL_SETTINGS = ["auto-continue", "conversational-resume", "pause-on-escape"] as const;
 
 export function goalArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   const prefix = argumentPrefix.trimStart().toLowerCase();
@@ -227,7 +228,7 @@ function formatGoal(
   goal: GoalSnapshot | null,
   continuation: ReturnType<typeof currentContinuationState> = null,
   stall = observeGoalStall(goal, continuation),
-  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true },
+  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true },
 ): string {
   const settings = formatPreferences(preferences);
   if (!goal) {
@@ -260,6 +261,7 @@ function formatPreferences(preferences: GoalPreferences): string {
   return [
     `Automatic continuation setting: ${preferences.autoContinue ? "on" : "off"}${WAKE_DISABLED ? " (disabled by environment)" : ""}`,
     `Conversational resume setting: ${preferences.conversationalResume ? "on" : "off"}`,
+    `Pause on Esc setting: ${preferences.pauseOnEscape ? "on" : "off"}`,
   ].join("\n");
 }
 
@@ -291,6 +293,8 @@ export default function (pi: ExtensionAPI): void {
   let currentCtx: ExtensionContext | undefined;
   let executionGeneration = 0;
   let agentGeneration = -1;
+  let turnGeneration = 0;
+  let escapeAbortSuppression: { session: number; turn: number; execution: number } | undefined;
   let sessionGeneration = 0;
   let wakeGeneration = 0;
   let snapshotSequence = 0;
@@ -306,8 +310,11 @@ export default function (pi: ExtensionAPI): void {
   let idleContinuationTimer: ReturnType<typeof setTimeout> | undefined;
   let idleContinuationSignature = "";
   let refreshGoalWidget: ((force?: boolean) => void) | undefined;
+  let terminalInputUnsubscribe: (() => void) | undefined;
+  let terminalInputIsEditor: (() => boolean) | undefined;
+  let uiPromptDepth = 0;
   let lastAgentEvidence: ContinuationEvidence | null = null;
-  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true };
+  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true, pauseOnEscape: true };
   /** Background items active when each pending blocking question started, keyed by tool call id. */
   const pendingQuestions = new Map<string, Map<string, BackgroundWorkItem>>();
 
@@ -415,6 +422,11 @@ export default function (pi: ExtensionAPI): void {
       ? 'Goal paused. Say "go" to resume it, or use /goal resume.'
       : "Goal paused. Use /goal resume or alt+g to resume it.");
   };
+
+  const escapeAbortIsSuppressed = (): boolean =>
+    escapeAbortSuppression?.session === sessionGeneration &&
+    escapeAbortSuppression.turn === turnGeneration &&
+    escapeAbortSuppression.execution === executionGeneration;
 
   /** Why a paused goal cannot become active again, or null when it can. */
   const resumeBlocker = (goal: GoalSnapshot): string | null => {
@@ -723,6 +735,16 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.setWidget(
       EXTENSION_NAME,
       (tui, theme) => {
+        const inputIsEditor = (): boolean => {
+          const focus = tui as typeof tui & { getFocusedComponent?(): Partial<CustomEditor> | null };
+          if (typeof focus.getFocusedComponent !== "function" || tui.hasOverlay()) return false;
+          // Duck typing survives Pi's bundled/jiti module boundaries. Unknown
+          // custom editors and dialog components keep ownership of Escape.
+          const editor = focus.getFocusedComponent();
+          return typeof editor?.onEscape === "function" &&
+            typeof editor.isShowingAutocomplete === "function" && !editor.isShowingAutocomplete();
+        };
+        terminalInputIsEditor = inputIsEditor;
         const requestRender = (force = false): void => {
           try {
             tui.requestRender(force);
@@ -746,6 +768,7 @@ export default function (pi: ExtensionAPI): void {
         return {
           dispose() {
             scheduler.dispose();
+            if (terminalInputIsEditor === inputIsEditor) terminalInputIsEditor = undefined;
             if (refreshGoalWidget === refresh) {
               refreshGoalWidget = undefined;
             }
@@ -818,12 +841,14 @@ export default function (pi: ExtensionAPI): void {
         const [, setting, mode, ...extra] = trimmed.split(/\s+/);
         if (setting !== undefined && (!GOAL_SETTINGS.includes(setting as typeof GOAL_SETTINGS[number]) ||
             (mode !== "on" && mode !== "off") || extra.length > 0)) {
-          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume on|off]", "warning");
+          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume|pause-on-escape on|off]", "warning");
           return;
         }
         if (setting !== undefined) {
           try {
-            await changePreference(setting === "auto-continue" ? "autoContinue" : "conversationalResume", mode === "on");
+            const key = setting === "auto-continue" ? "autoContinue"
+              : setting === "conversational-resume" ? "conversationalResume" : "pauseOnEscape";
+            await changePreference(key, mode === "on");
           } catch (error) {
             notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
             return;
@@ -1058,8 +1083,13 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    terminalInputUnsubscribe?.();
+    terminalInputUnsubscribe = undefined;
+    terminalInputIsEditor = undefined;
+    uiPromptDepth = 0;
     executionGeneration += 1;
     sessionGeneration += 1;
+    escapeAbortSuppression = undefined;
     clearIdleContinuation();
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
@@ -1081,6 +1111,23 @@ export default function (pi: ExtensionAPI): void {
     pi.events.emit(EVENT_READY, { version: EXTENSION_VERSION });
     syncResumeTool(getGoal(ctx));
     installGoalWidget(ctx);
+    if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.onTerminalInput === "function") {
+      const session = sessionGeneration;
+      terminalInputUnsubscribe = ctx.ui.onTerminalInput((data) => {
+        if (session === sessionGeneration && uiPromptDepth === 0 &&
+            !isKeyRelease(data) && matchesKey(data, "escape") && terminalInputIsEditor?.()) {
+          if (preferences.pauseOnEscape) {
+            pauseGoalOnInterrupt(ctx);
+          } else if (foregroundRunning) {
+            // The original key reaches Pi next and may abort this run. Preserve
+            // this keypress's choice through both abort notifications only.
+            escapeAbortSuppression = { session, turn: turnGeneration, execution: executionGeneration };
+          }
+        }
+        // Observe only: Pi must still interrupt streams or handle editor Escape.
+        return undefined;
+      });
+    }
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
     syncPollingState();
@@ -1088,6 +1135,9 @@ export default function (pi: ExtensionAPI): void {
       scheduleIdleContinuation(restoredGoal, ctx, "continuation");
     }
   });
+
+  pi.on("ui_prompt_start", () => { uiPromptDepth += 1; });
+  pi.on("ui_prompt_end", () => { uiPromptDepth = Math.max(0, uiPromptDepth - 1); });
 
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension") {
@@ -1170,6 +1220,8 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("agent_start", async (_event, ctx) => {
     executionGeneration += 1;
+    turnGeneration += 1;
+    escapeAbortSuppression = undefined;
     agentGeneration = executionGeneration;
     currentCtx = ctx;
     foregroundRunning = true;
@@ -1178,10 +1230,16 @@ export default function (pi: ExtensionAPI): void {
     lastAgentEvidence = null;
     const turnSignal = ctx.signal;
     if (turnSignal) {
+      const session = sessionGeneration;
+      const turn = turnGeneration;
+      const onAbort = (): void => {
+        if (session !== sessionGeneration || turn !== turnGeneration) return;
+        if (!escapeAbortIsSuppressed()) pauseGoalOnInterrupt(ctx);
+      };
       if (turnSignal.aborted) {
-        pauseGoalOnInterrupt(ctx);
+        onAbort();
       } else {
-        turnSignal.addEventListener("abort", () => pauseGoalOnInterrupt(ctx), { once: true });
+        turnSignal.addEventListener("abort", onAbort, { once: true });
       }
     }
     await publishSnapshot(ctx);
@@ -1189,13 +1247,12 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("agent_end", async (event, ctx) => {
     lastAgentEvidence = agentGeneration === executionGeneration ? continuationEvidence(event.messages) : null;
-    // `escape` is a pi-reserved built-in shortcut (`app.interrupt`), so extensions
-    // cannot register it. Observe the interrupt instead: when a running turn is
-    // aborted (escape / ctrl+c while streaming), pause the active goal so it does
-    // not auto-continue after the user stopped the agent.
-    if (wasTurnAborted(event.messages)) {
+    // Only an observed editor Escape with pause disabled exempts this abort.
+    // Unknown interrupt sources retain the safety fallback on every host.
+    if (wasTurnAborted(event.messages) && !escapeAbortIsSuppressed()) {
       pauseGoalOnInterrupt(ctx);
     }
+    escapeAbortSuppression = undefined;
   });
 
   pi.on("tool_execution_start", async (event, ctx) => {
@@ -1228,6 +1285,7 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("agent_settled", async (_event, ctx) => {
     executionGeneration += 1;
+    escapeAbortSuppression = undefined;
     currentCtx = ctx;
     foregroundRunning = false;
     const snapshot = await publishSnapshot(ctx);
@@ -1274,6 +1332,11 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     executionGeneration += 1;
     sessionGeneration += 1;
+    escapeAbortSuppression = undefined;
+    terminalInputUnsubscribe?.();
+    terminalInputUnsubscribe = undefined;
+    terminalInputIsEditor = undefined;
+    uiPromptDepth = 0;
     stopPolling();
     foregroundRunning = false;
     pendingQuestions.clear();

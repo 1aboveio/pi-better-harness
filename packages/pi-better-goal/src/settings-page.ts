@@ -5,6 +5,7 @@ import type { GoalPreferences } from "./preferences.js";
 const rows: { key: keyof GoalPreferences; label: string }[] = [
   { key: "autoContinue", label: "Automatic continuation" },
   { key: "conversationalResume", label: "Conversational resume" },
+  { key: "pauseOnEscape", label: "Pause on Esc" },
 ];
 
 export function createGoalSettingsPage(

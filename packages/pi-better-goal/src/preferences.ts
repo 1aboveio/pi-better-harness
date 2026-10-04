@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 export interface GoalPreferences {
   autoContinue: boolean;
   conversationalResume: boolean;
+  pauseOnEscape: boolean;
 }
 
 export interface GoalPreferenceSeams {
@@ -22,7 +23,7 @@ export function readGoalPreferences(seams: GoalPreferenceSeams = {}): GoalPrefer
     raw = readFileSync(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { autoContinue: true, conversationalResume: true };
+      return { autoContinue: true, conversationalResume: true, pauseOnEscape: true };
     }
     throw new Error(`Goal preferences at ${path} could not be read: ${messageOf(error)}`);
   }
@@ -35,16 +36,18 @@ export function readGoalPreferences(seams: GoalPreferenceSeams = {}): GoalPrefer
   const value = parsed as Partial<GoalPreferences> & { version?: unknown } | null;
   if (value?.version !== 1 ||
       (value.autoContinue !== undefined && typeof value.autoContinue !== "boolean") ||
-      (value.conversationalResume !== undefined && typeof value.conversationalResume !== "boolean")) {
-    throw new Error(`Goal preferences at ${path} must contain version 1 and boolean autoContinue/conversationalResume settings.`);
+      (value.conversationalResume !== undefined && typeof value.conversationalResume !== "boolean") ||
+      (value.pauseOnEscape !== undefined && typeof value.pauseOnEscape !== "boolean")) {
+    throw new Error(`Goal preferences at ${path} must contain version 1 and boolean autoContinue/conversationalResume/pauseOnEscape settings.`);
   }
   return {
     autoContinue: value.autoContinue ?? true,
     conversationalResume: value.conversationalResume ?? true,
+    pauseOnEscape: value.pauseOnEscape ?? true,
   };
 }
 
-/** Persist one control without replacing the other session's saved choice. */
+/** Persist one control without replacing another session's saved choices. */
 export function writeGoalPreference(
   key: keyof GoalPreferences,
   enabled: boolean,
