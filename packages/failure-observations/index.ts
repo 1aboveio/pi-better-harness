@@ -1,6 +1,7 @@
 import { appendFileSync, closeSync, existsSync, openSync, readFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
+import { isPermissionBlocker, permissionBlockerKey, type PermissionBlocker } from "./permission-blocker.ts";
 
 /**
  * Explicit, append-only incident dispositions (#315).
@@ -29,6 +30,7 @@ export interface FailureEvent {
   disposition?: IncidentDisposition;
   /** Disposition events only: why the incidents are classified this way. */
   reason?: string;
+  permissionBlockers?: PermissionBlocker[];
 }
 export interface DispositionRecord {
   eventId: string;
@@ -37,6 +39,7 @@ export interface DispositionRecord {
   reason: string;
   evidence?: string;
   at: number;
+  permissionBlockers?: PermissionBlocker[];
 }
 export interface FailureObservation {
   id: string;
@@ -55,6 +58,8 @@ export interface FailureObservation {
   resolvedAt?: number;
   /** Latest explicit disposition applied to this incident. */
   disposition?: DispositionRecord;
+  /** Retained even after recovery; active surfaces filter by current actionability. */
+  permissionBlockers?: PermissionBlocker[];
 }
 export interface FailureState {
   version: 1;
@@ -246,12 +251,26 @@ export function validateDisposition(state: FailureState, event: FailureEvent): s
     if (current.status !== "unresolved") return `Incident ${id} is already disposed (${failureLabel(current).toLowerCase()})`;
     if (event.disposition === "open" && current.disposition?.disposition === "open") return `Incident ${id} is already open`;
   }
+  if (event.permissionBlockers !== undefined) {
+    if (event.disposition !== "open" || !Array.isArray(event.permissionBlockers) || !event.permissionBlockers.length ||
+      event.permissionBlockers.length > 20 || !event.permissionBlockers.every(isPermissionBlocker)) return "Invalid permission blocker metadata";
+    const bound = new Set<string>();
+    for (const blocker of event.permissionBlockers) {
+      const current = blocker.incidentId ? findIncident(state, blocker.incidentId) : undefined;
+      if (!current || !ids.includes(current.id) || current.category !== "tool" || current.operation !== blocker.operation ||
+        blocker.context !== "worker" || blocker.basis !== "agent-reported" || blocker.remoteOutcome !== "unknown" ||
+        blocker.policySnapshotId !== undefined || bound.has(current.id)) return "Permission blocker must name an unresolved failed worker attempt";
+      bound.add(current.id);
+    }
+    if (bound.size !== ids.length) return "Permission blocker metadata must cover every target";
+  }
   return undefined;
 }
 
 /** Pure transition. Lifecycle is deliberately not an input or an output. */
 export function reduceFailure(state: FailureState, event: FailureEvent, observedAt: number): FailureState {
   if (state.seen.includes(event.id)) return state;
+  if (event.permissionBlockers !== undefined && event.kind !== "disposition") return state;
   // Invalid dispositions fail closed: nothing changes and the id is not consumed.
   if (event.kind === "disposition" && validateDisposition(state, event)) return state;
   const next: FailureState = { ...state, seen: [...state.seen, event.id],
@@ -264,11 +283,13 @@ export function reduceFailure(state: FailureState, event: FailureEvent, observed
     const at = event.at ?? observedAt;
     const record: DispositionRecord = { eventId: event.id, disposition: event.disposition!, incidents: [...event.incidents!],
       reason: text(event.reason, ""), ...(event.evidence ? { evidence: text(event.evidence, "") } : {}), at };
+    if (event.permissionBlockers) record.permissionBlockers = event.permissionBlockers.map(x => ({ ...x }));
     for (const id of record.incidents) {
       const [key, current] = Object.entries(next.observations).find(([, item]) => item.id === id)!;
       const status = record.disposition === "recovered" ? "resolved" : record.disposition === "superseded" ? "superseded"
         : record.disposition === "expected" ? "expected" : current.status;
       next.observations[key] = { ...current, status, disposition: record,
+        ...(record.permissionBlockers ? { permissionBlockers: record.permissionBlockers.filter(x => x.incidentId === id) } : {}),
         ...(status === "resolved" || status === "superseded" ? { resolvedAt: at } : {}) };
       if (status === "resolved" || status === "superseded") next.resolved = { ...next.resolved, [id]: at };
     }
@@ -297,6 +318,7 @@ export function reduceFailure(state: FailureState, event: FailureEvent, observed
     lastObservedAt: observedAt, lastSequence: next.seen.length, at: event.at,
     count: active ? previous.count + 1 : 1,
     ...(active && previous.disposition ? { disposition: previous.disposition } : {}),
+    ...(active && previous.permissionBlockers ? { permissionBlockers: previous.permissionBlockers } : {}),
   };
   return next;
 }
@@ -313,6 +335,16 @@ export function activeFailures(state: FailureState): FailureObservation[] {
 /** Incidents that need action now, priority order. */
 export function actionableFailures(state: FailureState): FailureObservation[] {
   return activeFailures(state).filter(needsAction);
+}
+/** Only currently actionable reports, not closed history or arbitrary tool-result claims. */
+export function actionablePermissionBlockers(state: FailureState): PermissionBlocker[] {
+  const unique = new Map<string, PermissionBlocker>();
+  for (const incident of actionableFailures(state)) {
+    for (const blocker of incident.permissionBlockers ?? []) {
+      if (isPermissionBlocker(blocker)) unique.set(permissionBlockerKey(blocker), { ...blocker });
+    }
+  }
+  return [...unique.values()];
 }
 function closedOrder(a: FailureObservation, b: FailureObservation): number {
   return (b.lastSequence ?? 0) - (a.lastSequence ?? 0) || b.lastObservedAt - a.lastObservedAt;
@@ -448,12 +480,20 @@ export function shortEvidence(evidence: string): string {
 function failureRow(x: FailureObservation, detail: IncidentDetail = "compact"): string {
   const time = x.at === undefined ? `observed ${new Date(x.firstObservedAt).toISOString()}` : new Date(x.at).toISOString();
   const compact = detail !== "full";
+  const permission = Boolean(x.permissionBlockers?.length);
+  let annotation = "";
+  if (x.permissionBlockers?.length) {
+    const resources = x.permissionBlockers.map(b => b.resource).join(", ");
+    annotation = ` · Worker permission blocker: ${resources} (agent-reported; remote outcome unknown; not a foreground denial). No remote authorization or successful validation inferred.`;
+    if (needsAction(x)) annotation += " Changed worker settings require a fresh launch.";
+  }
   // Full rows (raw evidence) show the journal summary verbatim; compact rows unwrap and cap it.
-  const summary = compact ? capUtf8(dropLoneSurrogates(unwrapToolResultText(x.summary)).replace(/\s+/g, " ").trim(), COMPACT_EXCERPT_BYTES) : x.summary;
+  const summary = compact && permission ? "Permission access failure" : compact ? capUtf8(dropLoneSurrogates(unwrapToolResultText(x.summary)).replace(/\s+/g, " ").trim(), COMPACT_EXCERPT_BYTES) : x.summary;
   const reason = x.disposition ? text(x.disposition.reason, "") : "";
-  const disposition = x.disposition ? ` · ${x.disposition.disposition}: ${compact ? capUtf8(reason, COMPACT_EXCERPT_BYTES) : reason}` : "";
-  const evidence = x.evidence ? text(x.evidence, "") : "";
-  return `${failureLabel(x)} · ${time} · ${summary}${x.count > 1 ? ` (${x.count} occurrences)` : ""}${disposition}${evidence ? ` · evidence: ${compact ? shortEvidence(evidence) : evidence}` : ""}`;
+  const disposition = x.disposition ? ` · ${x.disposition.disposition}${compact && permission ? "" : `: ${compact ? capUtf8(reason, COMPACT_EXCERPT_BYTES) : reason}`}` : "";
+  const evidence = x.evidence && !(compact && permission) ? text(x.evidence, "") : "";
+  const proof = !compact && permission && x.disposition?.evidence ? ` · disposition evidence: ${text(x.disposition.evidence, "")}` : "";
+  return `${failureLabel(x)} · ${time} · ${summary}${x.count > 1 ? ` (${x.count} occurrences)` : ""}${disposition}${evidence ? ` · evidence: ${compact ? shortEvidence(evidence) : evidence}` : ""}${proof}${annotation}`;
 }
 
 /**
@@ -572,13 +612,15 @@ export interface FailureIncidentPage {
  */
 export function failureRevision(state: FailureState): string {
   return failureIdentity(Object.values(state.observations)
-    .map((item) => [item.id, item.status, item.category, item.count, item.lastSequence ?? 0, item.summary, item.evidence ?? ""])
+    .map((item) => [item.id, item.status, item.category, item.count, item.lastSequence ?? 0, item.summary, item.evidence ?? "",
+      ...(item.permissionBlockers ? [item.permissionBlockers.map(permissionBlockerKey).sort()] : [])])
     .sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 
 /** Digest of the rows a cursor pages. Scope and detail are part of it: the same incidents render different bytes. */
 function incidentRevision(state: FailureState, scope: IncidentScope = "actionable", detail: IncidentDetail = "compact"): string {
-  return failureIdentity(scope, detail, scopedFailures(state, scope).map((item) => [item.id, item.status, item.count, item.summary, item.evidence ?? ""])).slice(0, 16);
+  return failureIdentity(scope, detail, scopedFailures(state, scope).map((item) => [item.id, item.status, item.count, item.summary, item.evidence ?? "",
+    ...(item.permissionBlockers ? [item.permissionBlockers.map(permissionBlockerKey).sort()] : [])])).slice(0, 16);
 }
 
 /** Cursors carry a digest of their resource/scope, not the scope text. */
@@ -998,6 +1040,8 @@ function readStoredState(path: string): FailureState {
           !Number.isFinite(row.observedAt) || Math.abs(row.observedAt) > 8.64e15 ||
           (e.at !== undefined && (!Number.isFinite(e.at) || Math.abs(e.at) > 8.64e15)) ||
           (e.incidents !== undefined && (!Array.isArray(e.incidents) || !e.incidents.every((id: unknown) => typeof id === "string"))) ||
+          (e.permissionBlockers !== undefined && (e.kind !== "disposition" ||
+            (!state.seen.includes(e.id) && validateDisposition(state, e) !== undefined))) ||
           [e.summary, e.category, e.evidence, e.reason].some((v) => v !== undefined && typeof v !== "string")) throw new Error("invalid record");
       state = reduceFailure(state, e, row.observedAt);
     } catch { state = storageProblem(state, "Failure journal contains unreadable records; observations may be incomplete"); }
@@ -1020,6 +1064,7 @@ export function observeFailures(path: string, events: readonly FailureEvent[], n
     }
     // Rejected dispositions are never journaled or marked seen.
     if (raw.kind === "disposition" && validateDisposition(state, raw)) continue;
+    if (raw.permissionBlockers !== undefined && raw.kind !== "disposition") continue;
     const event = { ...raw, ...(raw.summary ? { summary: text(raw.summary, "") } : {}),
       ...(raw.evidence ? { evidence: text(raw.evidence, "") } : {}), ...(raw.reason ? { reason: text(raw.reason, "") } : {}) };
     try {

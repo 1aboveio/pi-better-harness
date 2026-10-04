@@ -71,9 +71,11 @@ export type GoalStatus = "active" | "paused" | "budgetLimited" | "complete";
  * resume a goal on their own. An `interrupt` pause may be resumed by the agent
  * with `goal_resume` when the user clearly says to proceed. A paused goal
  * without a reason (`/goal pause`, an unavailable command or workflow) resumes
- * only through `/goal resume` or the resume hotkey.
+ * only through `/goal resume` or the resume hotkey. `permission-blocker` also
+ * requires those human controls, and releases just one same-scope retry while
+ * keeping its separate blocker/release history.
  */
-export type GoalPauseReason = "interrupt";
+export type GoalPauseReason = "interrupt" | "permission-blocker";
 
 export interface GoalUsage {
   tokensUsed: number;

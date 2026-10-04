@@ -1,9 +1,10 @@
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   ExtensionAPI,
@@ -14,6 +15,8 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
 import extension, { goalArgumentCompletions, toolContext } from "./extension-fixture.js";
 import { goalPreferencesPath } from "../src/preferences.js";
+import type { PermissionHold } from "../src/permission-hold.js";
+import { bundledProducerSource, installedHarnessFixture, registeredProducerTools } from "./permission-producer-fixture.js";
 
 interface SessionEntry {
   type: string;
@@ -550,6 +553,570 @@ test("/goal resume reopens an active no-progress hold without replacing the goal
   await flushPromises();
   assert.equal(h.messages.length, afterResume + 1, "resumed retry uses the base delay");
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("issue #415: unchanged permission blockers hold autonomous continuation despite assistant rephrasing", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 1_000_000 });
+  const h = createContinuationHarness();
+  t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("verify fixture access before completing the goal", h.ctx);
+  assert.equal(h.messages.length, 1, "explicit goal creation starts one turn");
+
+  const rephrasings = [
+    "Credential cache access and process inspection remain denied.",
+    "Neither permission failure has been resolved; verification is blocked.",
+  ];
+  // Actionable parent reports hold immediately. Repeated messages and prose
+  // changes cannot soften that structured hold.
+  for (let attempt = 0; attempt <= 10; attempt += 1) {
+    await settlePermissionFailure(h, rephrasings[attempt % rephrasings.length]!);
+    const inspected = await h.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
+    const { goal } = inspected.details as { goal: { status: string; completedAt: number | null } };
+    assert.equal(goal.status, "paused", "actionable permission reports hold rather than implying completion");
+    assert.equal(goal.completedAt, null, "no successful verification was supplied");
+    const before: number = h.messages.length;
+    t.mock.timers.tick(60_000 * (attempt + 1));
+    await flushPromises();
+    assert.equal(h.messages.length, before, "structured hold suppresses every autonomous retry");
+  }
+
+  const beforeHold = h.messages.length;
+  assert.equal(beforeHold, 1, "only the explicitly requested kickoff ran");
+  t.mock.timers.tick(60_000);
+  await flushPromises();
+  const inspected = await h.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
+  const { continuation } = inspected.details as { continuation: { blocked: boolean; noProgressRetries: number; lastProgressAt: number } };
+  t.diagnostic(`unchanged permission failures: ${JSON.stringify({
+    blocked: continuation.blocked,
+    noProgressRetries: continuation.noProgressRetries,
+    lastProgressAt: continuation.lastProgressAt,
+    queuedTurns: h.messages.length,
+  })}`);
+  assert.equal(h.messages.length, beforeHold, "unchanged permission blockers must not queue another autonomous turn just because the assistant rephrased them");
+  assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+});
+
+test("issue #415: persisted permission-blocked continuation is not rearmed by unrelated activity", async (t) => {
+  for (const cause of ["ordinary question", "background completion"] as const) {
+    await t.test(cause, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 1_000_000 });
+      const first = createContinuationHarness();
+      subtest.after(() => first.handlers.get("session_shutdown")?.({}, first.ctx));
+      await first.handlers.get("session_start")?.({}, first.ctx);
+      await first.commands.get("goal")?.handler("verify fixture access before completing the goal", first.ctx);
+      await settlePermissionFailure(first, "Both fixture permissions remain denied.");
+      assert.equal(latestGoal(first.entries)?.pauseReason, "permission-blocker", "real handlers establish the hold before replay");
+      await first.handlers.get("session_shutdown")?.({}, first.ctx);
+
+      const restored = createContinuationHarness();
+      subtest.after(() => restored.handlers.get("session_shutdown")?.({}, restored.ctx));
+      restored.entries.push(...structuredClone(first.entries));
+      let status = "running";
+      if (cause === "background completion") {
+        restored.events.emit("pi-better-goal:register-provider", {
+          id: "unrelated-fixture",
+          getActivity: () => ({
+            providerId: "unrelated-fixture",
+            items: [{ id: "unrelated-work", label: "format unrelated notes", status, active: status === "running" }],
+          }),
+        });
+      }
+      await restored.handlers.get("session_start")?.({}, restored.ctx);
+      assert.equal(latestGoal(restored.entries)?.pauseReason, "permission-blocker", "session replay preserves the permission hold");
+      subtest.mock.timers.tick(60_000 * 12);
+      await flushPromises();
+      assert.equal(restored.messages.length, 0, "replay alone does not queue a continuation");
+
+      if (cause === "ordinary question") {
+        await restored.handlers.get("input")?.({ source: "interactive", text: "What does the unrelated fixture label mean?" }, restored.ctx);
+        await restored.handlers.get("agent_start")?.({}, restored.ctx);
+        await restored.handlers.get("agent_end")?.(answeredOutcome, restored.ctx);
+        await restored.handlers.get("agent_settled")?.({}, restored.ctx);
+      } else {
+        status = "completed";
+        await restored.commands.get("better-activity")?.handler("", restored.ctx);
+      }
+      subtest.mock.timers.tick(60_000);
+      await flushPromises();
+      const inspected = await restored.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(restored.ctx));
+      const { goal, continuation } = inspected.details as {
+        goal: { status: string; completedAt: number | null };
+        continuation: { blocked: boolean; noProgressRetries: number; lastProgressAt: number };
+      };
+      assert.equal(goal.status, "paused", "an unrelated answer or task completion is not successful permission verification");
+      assert.equal(goal.completedAt, null);
+      subtest.diagnostic(`${cause}: ${JSON.stringify({
+        blocked: continuation.blocked,
+        noProgressRetries: continuation.noProgressRetries,
+        lastProgressAt: continuation.lastProgressAt,
+        queuedTurns: restored.messages.length,
+      })}`);
+      assert.equal(restored.messages.length, 0, `${cause} supplies no permission recovery and must not rearm autonomous goal work`);
+      assert.equal(latestGoal(restored.entries)?.pauseReason, "permission-blocker");
+    });
+  }
+});
+
+test("issue #415: prose-only denials retain the generic retry allowance without rewording progress", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 1_000_000 });
+  const h = createContinuationHarness();
+  t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+  for (let attempt = 0; attempt <= 10; attempt += 1) {
+    await settlePermissionFailure(h, attempt % 2 ? "Neither permission is recovered." : "Both permissions remain denied.", false);
+    if (attempt < 10) {
+      t.mock.timers.tick(60_000 * (attempt + 1));
+      await flushPromises();
+    }
+  }
+  t.mock.timers.tick(720_000);
+  await flushPromises();
+  assert.equal(h.messages.length, 11, "unchanged actions exhaust the existing ten retries despite prose changes");
+  assert.equal(latestContinuationState(h.entries)?.blocked, true);
+  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 10);
+  assert.equal(latestGoal(h.entries)?.status, "active", "EPERM prose is not a structured permission pause");
+  assert.equal((await inspectPermissionHold(h)).blockers.length, 0);
+});
+
+test("issue #415: command and hotkey each release one same-scope retry, never the model tool", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 1_000_000 });
+  const h = createContinuationHarness(undefined, { hasUI: true });
+  t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+  await settlePermissionFailure(h, "Access is blocked.");
+  t.mock.method(h.ctx.ui, "confirm", async () => { throw new Error("Explicit resume must not open an extra dialog."); });
+  const original = structuredClone(permissionRecords(h));
+  const goalId = latestGoal(h.entries)?.goalId;
+  for (const release of ["command", "hotkey"] as const) {
+    const refused = await h.tools.get("goal_resume")!.execute("resume", { reason: "user said go" }, undefined, undefined, toolContext(h.ctx));
+    assert.equal((refused.details as { ok: boolean }).ok, false);
+    assert.equal(h.activeTools().includes("goal_resume"), false);
+    const before = h.messages.length;
+    if (release === "command") await h.commands.get("goal")?.handler("resume", h.ctx);
+    else await h.shortcuts.get("alt+g")?.handler(h.ctx);
+    assert.equal(h.messages.length, before + 1);
+    assert.equal(latestGoal(h.entries)?.goalId, goalId);
+    const released = await inspectPermissionHold(h);
+    assert.equal(released.retryPending, true);
+    assert.deepEqual(released.blockers, fixtureBlockers(), "release neither changes scope nor claims recovery");
+    assert.deepEqual(permissionRecords(h).slice(0, original.length), original, "prior records remain append-only");
+    const prompt = await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx) as { systemPrompt: string };
+    assert.match(prompt.systemPrompt, /ONE bounded retry/);
+    assert.match(prompt.systemPrompt, /fixture-cache-read/);
+    assert.match(prompt.systemPrompt, /Changed worker settings require a fresh worker/);
+    await h.commands.get("goal")?.handler("resume", h.ctx);
+    assert.equal(h.messages.length, before + 1, "an active release cannot be dispatched twice");
+    await settlePermissionFailure(h, "Same denial again.");
+    assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+    assert.equal((await inspectPermissionHold(h)).retryPending, false);
+    t.mock.timers.tick(720_000);
+    await flushPromises();
+    assert.equal(h.messages.length, before + 1, "the unchanged denial re-holds without autonomous retry");
+  }
+  assert.equal(permissionRecords(h).filter((record) => record.kind === "permission-release").length, 2);
+});
+
+test("issue #415: a fresh worker retains logical blocker identity and its new context references", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+  await settlePermissionFailure(h, "Blocked.");
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  const replacement = fixtureBlockers("worker-two", "policy-two").map((blocker) => ({ ...blocker, incidentId: "new-incident" }));
+  await reportPermissionBlockers(h, replacement, "subagent_output");
+  await h.handlers.get("agent_end")?.(answeredOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  const hold = await inspectPermissionHold(h);
+  assert.deepEqual(hold.blockers, replacement, "new run/policy/incident references replace evidence, not logical scope");
+  assert.equal(hold.retryPending, false);
+  assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+  assert.deepEqual(permissionRecords(h).filter((record) => record.kind === "permission-hold").slice(0, 2).map((record) => record.blocker), fixtureBlockers());
+  await reportPermissionBlockers(h, [{ ...replacement[0], basis: "agent-reported" }]);
+  const distinguished = (await inspectPermissionHold(h)).blockers;
+  assert.equal(distinguished.length, 3, "agent-reported and runtime-observed evidence are not merged");
+  assert.deepEqual(distinguished.map((blocker) => blocker.basis), ["os-permission-error", "os-permission-error", "agent-reported"]);
+});
+
+test("issue #415: unrelated success cannot refill a released retry or close unknown remote evidence", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+  await settlePermissionFailure(h, "Blocked.");
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.(answeredOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+  assert.deepEqual((await inspectPermissionHold(h)).blockers, fixtureBlockers());
+  assert.equal((await inspectPermissionHold(h)).retryPending, false);
+  const before = h.messages.length;
+  t.mock.timers.tick(720_000);
+  await flushPromises();
+  assert.equal(h.messages.length, before);
+});
+
+test("issue #415: settings publication, workflow prompts, and Escape cannot soften the hold", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const h = createContinuationHarness(undefined, { hasUI: true, mode: "tui" });
+  t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+  await settlePermissionFailure(h, "Blocked.");
+  const history = structuredClone(permissionRecords(h));
+  const workflow = { version: 1, kind: "set", owner: { name: "fixture", path: "/__fixture__/SKILL.md", role: "coordinator", planOwner: "workflow" } };
+  h.entries.push({ type: "custom", customType: "pi-better-workflow", data: workflow });
+  h.events.emit("pi-better-sandbox:policy", { state: "enabled", subagentPermissions: {
+    enabled: true, projectFiles: "read-write", outsideProject: "read",
+    storedCredentials: "read", commands: true, network: true, processAccess: "read",
+  } });
+  for (const command of ["settings auto-continue off", "settings auto-continue on", "settings conversational-resume off", "settings conversational-resume on", "settings pause-on-escape off", "settings pause-on-escape on"]) {
+    await h.commands.get("goal")?.handler(command, h.ctx);
+  }
+  const prompt = await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx) as { systemPrompt: string };
+  assert.match(prompt.systemPrompt, /do not advance goal or workflow work/);
+  assert.doesNotMatch(prompt.systemPrompt, /Follow the workflow instructions below/);
+  assert.deepEqual(h.entries.filter((entry) => entry.customType === "pi-better-workflow").at(-1)?.data, workflow);
+  assert.deepEqual(h.terminalInput("\x1b"), [undefined]);
+  assert.deepEqual(permissionRecords(h), history);
+  assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+  assert.equal(h.activeTools().includes("goal_resume"), false);
+  t.mock.timers.tick(720_000);
+  await flushPromises();
+  assert.equal(h.messages.length, 1);
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  h.terminalInput("\x1b");
+  assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker", "Escape consumes, not converts, the explicit retry");
+  assert.equal((await inspectPermissionHold(h)).retryPending, false);
+  assert.equal(h.activeTools().includes("goal_resume"), false);
+});
+
+test("issue #415: a permission hold invalidates a pending timer and in-flight wake audit", async (t) => {
+  for (const stage of ["timer", "audit"] as const) {
+    await t.test(stage, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const h = createContinuationHarness();
+      subtest.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+      let delayed = false;
+      const gates: Array<ReturnType<typeof deferred<ReturnType<typeof fixtureActivity>>>> = [];
+      h.events.emit("pi-better-goal:register-provider", { id: "fixture", getActivity: () => {
+        if (!delayed) return fixtureActivity(false);
+        const gate = deferred<ReturnType<typeof fixtureActivity>>();
+        gates.push(gate);
+        return gate.promise;
+      } });
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+      await settleNetworkFailure(h);
+      if (stage === "audit") {
+        subtest.mock.timers.tick(59_999);
+        await flushPromises();
+        delayed = true;
+        subtest.mock.timers.tick(1);
+        await flushPromises();
+        assert.ok(gates.length > 0, "the real wake audit is waiting on the provider");
+      }
+      await reportPermissionBlockers(h, fixtureBlockers());
+      delayed = false;
+      for (const gate of gates) gate.resolve(fixtureActivity(false));
+      subtest.mock.timers.tick(720_000);
+      await flushPromises();
+      assert.equal(h.messages.length, 1, "stale wakes cannot queue held work");
+      assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+    });
+  }
+});
+
+test("issue #415: untrusted, malformed, foreground, and prose reports cannot grant retry authority", async (t) => {
+  const cases = [
+    { name: "wrong owner", producerPath: fileURLToPath(new URL("../src/index.ts", import.meta.url)), blockers: fixtureBlockers() },
+    { name: "unknown tool", toolName: "pretend_subagent_result", blockers: fixtureBlockers() },
+    { name: "invalid resource", blockers: [{ ...fixtureBlockers()[0], resource: "everything" }] },
+    { name: "invalid version", blockers: [{ ...fixtureBlockers()[0], version: 2 }] },
+    { name: "raw path operation", blockers: [{ ...fixtureBlockers()[0], operation: "/private/credential.json" }] },
+    { name: "unknown success", blockers: [{ ...fixtureBlockers()[0], remoteOutcome: "success" }] },
+    { name: "extra data", blockers: [{ ...fixtureBlockers()[0], command: "secret-command" }] },
+    { name: "partial malformed batch", blockers: [fixtureBlockers()[0], { version: 1 }] },
+    { name: "unsupported foreground transport", blockers: [{ ...fixtureBlockers()[0], context: "foreground" }] },
+    { name: "oversized array", blockers: Array.from({ length: 33 }, () => fixtureBlockers()[0]) },
+    { name: "not an array", blockers: fixtureBlockers()[0] },
+    { name: "EPERM prose only", blockers: undefined },
+  ];
+  for (const fixture of cases) {
+    await t.test(fixture.name, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const h = createContinuationHarness(undefined, fixture.producerPath ? { producerPath: fixture.producerPath } : {});
+      subtest.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+      await reportPermissionBlockers(h, fixture.blockers, fixture.toolName);
+      assert.equal(latestGoal(h.entries)?.status, "active", "unsupported reports do not invent a permission pause");
+      assert.equal((await inspectPermissionHold(h)).blockers.length, 0);
+      assert.equal(permissionRecords(h).length, 0);
+      await h.commands.get("goal")?.handler("resume", h.ctx);
+      assert.equal(h.messages.length, 1, "unsupported evidence does not create explicit-release authority");
+    });
+  }
+});
+
+test("issue #415: installed harness and standalone SDK producers preserve structured permission holds", async (t) => {
+  const fixture = installedHarnessFixture();
+  t.after(fixture.cleanup);
+  for (const source of [bundledProducerSource(fixture.installed), join(fixture.installed, "node_modules/pi-better-subagents/index.ts")]) {
+    await t.test(source.includes("extensions/") ? "bundled wrapper" : "standalone entry", async (subtest) => {
+      const registeredTools = await registeredProducerTools(source, fixture.root);
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const h = createContinuationHarness(undefined, { registeredTools });
+      subtest.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+      for (const toolName of ["subagent_result", "subagent_output"]) {
+        assert.equal(registeredTools.find((tool) => tool.name === toolName)?.sourceInfo.path, source, "the SDK assigns the loaded entry, including the wrapper, as source owner");
+        await reportPermissionBlockers(h, fixtureBlockers(), toolName);
+        assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+      }
+      assert.deepEqual((await inspectPermissionHold(h)).blockers, fixtureBlockers());
+      const before = h.messages.length;
+      await h.commands.get("goal")?.handler("resume", h.ctx);
+      assert.equal(h.messages.length, before + 1, "complete trusted scope releases one retry");
+      await h.handlers.get("tool_result")?.({ toolName: "subagent_output", details: { permissionBlockersOmitted: 1 } }, h.ctx);
+      assert.equal((await inspectPermissionHold(h)).saturated, true, "bundled omission handling remains fail closed");
+      await h.commands.get("goal")?.handler("resume", h.ctx);
+      assert.equal(h.messages.length, before + 1);
+    });
+  }
+});
+
+test("issue #415: forged or altered harness sources cannot adopt blocker or omission authority", async (t) => {
+  const body = 'export { default } from "../../node_modules/pi-better-subagents/index.ts";';
+  const cases = [
+    { name: "forged wrapper without owner", owner: null },
+    { name: "wrong owner", owner: "another-harness" },
+    { name: "missing extension declaration", missingExtension: true },
+    { name: "missing dependency declaration", missingDependency: true },
+    { name: "missing bundle declaration", missingBundle: true },
+    { name: "wrong wrapper path", path: "extensions/pretend-subagents/index.ts" },
+    { name: "wrapper has executable suffix", body: `${body}\nthrow new Error("forged");` },
+    { name: "reexport only in prose", body: `// ${body}` },
+    { name: "dynamic import", body: 'export default (await import("../../node_modules/pi-better-subagents/index.ts")).default;' },
+    { name: "different target", body: 'export { default } from "../../node_modules/pi-better-subagents/other.ts";' },
+    { name: "wrong target owner", targetOwner: "another-subagents" },
+    { name: "missing canonical target", missingTarget: true },
+  ];
+  for (const input of cases) {
+    await t.test(input.name, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const root = mkdtempSync(join(tmpdir(), "pi-goal-forged-wrapper-"));
+      subtest.after(() => rmSync(root, { recursive: true, force: true }));
+      const source = join(root, input.path ?? "extensions/subagents/index.ts");
+      mkdirSync(join(source, ".."), { recursive: true });
+      mkdirSync(join(root, "node_modules/pi-better-subagents"), { recursive: true });
+      if (input.owner !== null) writeFileSync(join(root, "package.json"), JSON.stringify({
+        name: input.owner ?? "pi-better-harness",
+        pi: { extensions: input.missingExtension ? [] : ["extensions/subagents/index.ts"] },
+        dependencies: input.missingDependency ? {} : { "pi-better-subagents": "0.13.1" },
+        bundledDependencies: input.missingBundle ? [] : ["pi-better-subagents"],
+      }));
+      writeFileSync(source, input.body ?? body);
+      writeFileSync(join(root, "node_modules/pi-better-subagents/package.json"), JSON.stringify({ name: input.targetOwner ?? "pi-better-subagents" }));
+      if (!input.missingTarget) writeFileSync(join(root, "node_modules/pi-better-subagents/index.ts"), "export default function () {}\n");
+      const h = createContinuationHarness(undefined, { producerPath: source });
+      subtest.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+      await h.handlers.get("tool_result")?.({ toolName: "subagent_result", details: {
+        permissionBlockers: fixtureBlockers(), permissionBlockersOmitted: 1,
+      } }, h.ctx);
+      assert.equal(latestGoal(h.entries)?.status, "active");
+      assert.deepEqual(permissionRecords(h), [], "untrusted source supplies neither blocker nor gap authority");
+    });
+  }
+});
+
+test("issue #415: omitted parent reports hold an incomplete scope rather than authorize a partial retry", async (t) => {
+  for (const blockers of [fixtureBlockers(), []]) {
+    await t.test(blockers.length ? "partial scope" : "omitted-only scope", async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const h = createContinuationHarness();
+      subtest.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+      await h.handlers.get("tool_result")?.({ toolName: "subagent_result", details: {
+        permissionBlockers: blockers, permissionBlockersOmitted: 1,
+      } }, h.ctx);
+      assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+      assert.deepEqual((await inspectPermissionHold(h)).blockers, blockers);
+      assert.equal((await inspectPermissionHold(h)).saturated, true);
+      const before = h.messages.length;
+      await h.commands.get("goal")?.handler("resume", h.ctx);
+      await h.shortcuts.get("alt+g")?.handler(h.ctx);
+      assert.equal(h.messages.length, before, "unknown scope cannot be released");
+      subtest.mock.timers.tick(720_000);
+      await flushPromises();
+      assert.equal(h.messages.length, before, "incomplete reports cannot rearm continuation");
+    });
+  }
+});
+
+test("issue #415: blocker scope and record limits fail closed without dropping prior evidence", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("verify fixture access", h.ctx);
+  const blockers = Array.from({ length: 32 }, (_, index) => ({ ...fixtureBlockers()[0], operation: `operation-${index}` }));
+  await reportPermissionBlockers(h, blockers);
+  await reportPermissionBlockers(h, [{ ...blockers[0], operation: "operation-overflow" }]);
+  const scope = await inspectPermissionHold(h);
+  assert.deepEqual(scope.blockers, blockers);
+  assert.equal(scope.saturated, true);
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  assert.equal(h.messages.length, 1, "truncated scope cannot authorize a broader retry");
+
+  await h.commands.get("goal")?.handler("new explicit fixture objective", h.ctx);
+  await settlePermissionFailure(h, "Blocked.");
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const beforeRelease = h.messages.length;
+    await h.commands.get("goal")?.handler("resume", h.ctx);
+    if (h.messages.length > beforeRelease) {
+      assert.equal((await inspectPermissionHold(h)).retryPending, true, "every accepted release retains its one retry, including the capacity boundary");
+    }
+    await reportPermissionBlockers(h, fixtureBlockers());
+  }
+  const bounded = await inspectPermissionHold(h);
+  assert.equal(bounded.saturated, true);
+  assert.ok(bounded.recordCount <= 128);
+  assert.deepEqual(bounded.blockers, fixtureBlockers());
+  const before = h.messages.length;
+  await h.shortcuts.get("alt+g")?.handler(h.ctx);
+  assert.equal(h.messages.length, before, "full history remains held");
+  const serialized = JSON.stringify(permissionRecords(h));
+  assert.doesNotMatch(serialized, /cache\.json|fixture-process-inspection --pid|EPERM:/, "durable records do not copy raw paths, argv, or output");
+});
+
+test("issue #415: reloading after release does not dispatch or reuse its retry ticket", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const first = createContinuationHarness();
+  await first.handlers.get("session_start")?.({}, first.ctx);
+  await first.commands.get("goal")?.handler("verify fixture access", first.ctx);
+  await settlePermissionFailure(first, "Blocked.");
+  await first.commands.get("goal")?.handler("resume", first.ctx);
+  assert.equal((await inspectPermissionHold(first)).retryPending, true);
+  await first.handlers.get("session_shutdown")?.({}, first.ctx);
+  const restored = createContinuationHarness();
+  t.after(() => restored.handlers.get("session_shutdown")?.({}, restored.ctx));
+  restored.entries.push(...structuredClone(first.entries));
+  await restored.handlers.get("session_start")?.({}, restored.ctx);
+  assert.equal(latestGoal(restored.entries)?.pauseReason, "permission-blocker");
+  assert.equal((await inspectPermissionHold(restored)).retryPending, false);
+  t.mock.timers.tick(720_000);
+  await flushPromises();
+  assert.equal(restored.messages.length, 0);
+  assert.equal(permissionRecords(restored).filter((record) => record.kind === "permission-release").length, 1);
+});
+
+test("issue #415: a restored permission pause with malformed evidence cannot invent a retry scope", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const first = createContinuationHarness();
+  await first.handlers.get("session_start")?.({}, first.ctx);
+  await first.commands.get("goal")?.handler("verify fixture access", first.ctx);
+  await settlePermissionFailure(first, "Blocked.");
+  await first.handlers.get("session_shutdown")?.({}, first.ctx);
+  const restored = createContinuationHarness();
+  t.after(() => restored.handlers.get("session_shutdown")?.({}, restored.ctx));
+  restored.entries.push(...structuredClone(first.entries).map((entry) => {
+    const data = entry.data as { kind?: string };
+    return data?.kind === "permission-hold" ? { ...entry, data: { ...data, blocker: { version: 2 } } } : entry;
+  }));
+  await restored.handlers.get("session_start")?.({}, restored.ctx);
+  await restored.commands.get("goal")?.handler("resume", restored.ctx);
+  assert.equal(restored.messages.length, 0);
+  assert.equal(latestGoal(restored.entries)?.pauseReason, "permission-blocker");
+  const prompt = await restored.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, restored.ctx) as { systemPrompt: string };
+  assert.match(prompt.systemPrompt, /do not invent a retry scope/);
+  assert.equal((await inspectPermissionHold(restored)).blockers.length, 0);
+  assert.equal(restored.activeTools().includes("goal_resume"), false);
+});
+
+test("issue #415: partial corrupt permission history stays incomplete after reload and cannot release", async (t) => {
+  const corruptions = [
+    { name: "hold version", patch: { version: 2 } },
+    { name: "hold blocker", patch: { blocker: { version: 2 } } },
+    { name: "hold timestamp", patch: { at: "invalid" } },
+    { name: "nonfinite timestamp", patch: { at: Infinity } },
+    { name: "release version", patch: { kind: "permission-release", version: 2 } },
+    { name: "release timestamp", patch: { kind: "permission-release", at: null } },
+    { name: "retry-finished timestamp", patch: { kind: "permission-retry-finished", at: null } },
+    { name: "gap version", patch: { kind: "permission-gap", version: 2 } },
+  ];
+  for (const corruption of corruptions) {
+    await t.test(corruption.name, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const first = createContinuationHarness();
+      await first.handlers.get("session_start")?.({}, first.ctx);
+      await first.commands.get("goal")?.handler("verify fixture access", first.ctx);
+      await settlePermissionFailure(first, "Blocked.");
+      await first.handlers.get("session_shutdown")?.({}, first.ctx);
+      let corrupted = false;
+      const history = structuredClone(first.entries).map((entry) => {
+        const data = entry.data as { kind?: string; blocker?: { resource: string } } | undefined;
+        if (data?.kind !== "permission-hold" || data.blocker?.resource !== "process-inspection") return entry;
+        corrupted = true;
+        return { ...entry, data: { ...data, ...corruption.patch } };
+      });
+      assert.equal(corrupted, true);
+      const restored = createContinuationHarness();
+      subtest.after(() => restored.handlers.get("session_shutdown")?.({}, restored.ctx));
+      restored.entries.push(...history);
+      const goalId = latestGoal(history)!.goalId;
+      // A valid later release cannot reverse incomplete authority history.
+      restored.entries.push({ type: "custom", customType: "pi-better-goal", data: { version: 1, kind: "permission-release", goalId, at: 100 } });
+      assert.equal((await inspectPermissionHold(restored)).retryPending, false, "replay itself rejects release authority before startup consumes any ticket");
+      await restored.handlers.get("session_start")?.({}, restored.ctx);
+      const hold = await inspectPermissionHold(restored);
+      assert.deepEqual(hold.blockers, [fixtureBlockers()[0]], "valid scope evidence survives the damaged sibling record");
+      assert.equal(hold.saturated, true);
+      assert.equal(hold.retryPending, false, "neither malformed nor later valid release supplies retry authority");
+      await restored.commands.get("goal")?.handler("resume", restored.ctx);
+      await restored.shortcuts.get("alt+g")?.handler(restored.ctx);
+      subtest.mock.timers.tick(720_000);
+      await flushPromises();
+      assert.equal(restored.messages.length, 0, "a smaller retained scope must not queue any retry");
+      assert.equal(latestGoal(restored.entries)?.pauseReason, "permission-blocker");
+      assert.deepEqual(restored.entries.slice(0, history.length), history, "replay never repairs or rewrites history");
+    });
+  }
+});
+
+test("issue #415: unrelated goal corruption and generic history do not poison a valid permission retry", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const first = createContinuationHarness();
+  await first.handlers.get("session_start")?.({}, first.ctx);
+  await first.commands.get("goal")?.handler("verify fixture access", first.ctx);
+  await settlePermissionFailure(first, "Blocked.");
+  await first.handlers.get("session_shutdown")?.({}, first.ctx);
+  const restored = createContinuationHarness();
+  t.after(() => restored.handlers.get("session_shutdown")?.({}, restored.ctx));
+  restored.entries.push(...structuredClone(first.entries));
+  for (const data of [
+    { version: 2, kind: "permission-hold", goalId: "unrelated-goal", at: null },
+    { version: 2, kind: "permission-release", goalId: "unrelated-goal", at: null },
+    { version: 2, kind: "permission-hold", at: null },
+    { version: 2, kind: "continuation-state", goalId: latestGoal(restored.entries)!.goalId, at: null },
+  ]) restored.entries.push({ type: "custom", customType: "pi-better-goal", data });
+  await restored.handlers.get("session_start")?.({}, restored.ctx);
+  assert.equal((await inspectPermissionHold(restored)).saturated, false);
+  await restored.commands.get("goal")?.handler("resume", restored.ctx);
+  assert.equal(restored.messages.length, 1, "known matching permission authority is unaffected by unrelated records");
+  assert.equal((await inspectPermissionHold(restored)).retryPending, true);
 });
 
 test("held resumes preserve active time across repeated holds and later pause/completion", async (t) => {
@@ -1833,6 +2400,38 @@ async function settleNetworkFailure(h: ReturnType<typeof createContinuationHarne
   await h.handlers.get("agent_settled")?.({}, h.ctx);
 }
 
+async function settlePermissionFailure(h: ReturnType<typeof createContinuationHarness>, assistantText: string, structured = true): Promise<void> {
+  // These are message fixtures, not executed tools: no real credentials or
+  // process inventory are read. Both failures are identical on every turn.
+  const outcome = {
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "fixture-cache", name: "read", arguments: { path: "/__goal_issue_415_fixture__/credentials/cache.json" } },
+          { type: "toolCall", id: "fixture-process", name: "bash", arguments: { command: "fixture-process-inspection --pid 4242" } },
+        ],
+      },
+      {
+        role: "toolResult", toolCallId: "fixture-cache", toolName: "read", isError: true,
+        content: [{ type: "text", text: "EPERM: operation not permitted, open '/__goal_issue_415_fixture__/credentials/cache.json'" }],
+      },
+      {
+        role: "toolResult", toolCallId: "fixture-process", toolName: "bash", isError: true,
+        content: [{ type: "text", text: "Process inspection denied: operation not permitted (EPERM)." }],
+      },
+      { role: "assistant", content: [{ type: "text", text: assistantText }], stopReason: "stop" },
+    ],
+  };
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  if (structured) await h.handlers.get("tool_result")?.({
+    toolName: "subagent_result", toolCallId: "fixture-result", input: { id: "worker-one" }, isError: false,
+    content: [{ type: "text", text: assistantText }], details: { permissionBlockers: fixtureBlockers() },
+  }, h.ctx);
+  await h.handlers.get("agent_end")?.(outcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+}
+
 async function exhaustNoProgressRetries(h: ReturnType<typeof createContinuationHarness>, t: TestContext): Promise<void> {
   for (let attempt = 0; attempt <= 10; attempt += 1) {
     await settleNetworkFailure(h);
@@ -1843,7 +2442,7 @@ async function exhaustNoProgressRetries(h: ReturnType<typeof createContinuationH
   }
 }
 
-function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: boolean; mode?: ExtensionContext["mode"]; factory?: typeof extension } = {}) {
+function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: boolean; mode?: ExtensionContext["mode"]; factory?: typeof extension; producerPath?: string; registeredTools?: ReturnType<ExtensionAPI["getAllTools"]> } = {}) {
   const entries: SessionEntry[] = [];
   const tools = new Map<string, ToolDefinition>();
   let active: string[] = [];
@@ -1892,6 +2491,9 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
 
   const pi = {
     events,
+    getAllTools: () => options.registeredTools ?? ["subagent_result", "subagent_output"].map((name) => ({
+      name, sourceInfo: { path: options.producerPath ?? fileURLToPath(new URL("../../pi-better-subagents/index.ts", import.meta.url)) },
+    })),
     getActiveTools: () => [...active],
     setActiveTools(names: string[]) {
       active = [...names];
@@ -1944,6 +2546,30 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
     },
     getAborts: () => aborts,
   };
+}
+
+function fixtureBlockers(runId = "worker-one", policySnapshotId = "policy-one") {
+  return ["credential-files", "process-inspection"].map((resource) => ({
+    version: 1, kind: "permission-blocker", context: "worker", resource, basis: "os-permission-error",
+    operation: resource === "credential-files" ? "fixture-cache-read" : "fixture-process-inspect",
+    remoteOutcome: "unknown", incidentId: `fixture-${resource}`, runId, policySnapshotId,
+  }));
+}
+
+async function reportPermissionBlockers(h: ReturnType<typeof createContinuationHarness>, permissionBlockers: unknown, toolName = "subagent_result") {
+  await h.handlers.get("tool_result")?.({ toolName, toolCallId: "fixture-result", input: { id: "worker-one" }, isError: false,
+    content: [{ type: "text", text: "EPERM: fixture access is denied." }], details: { permissionBlockers } }, h.ctx);
+}
+
+async function inspectPermissionHold(h: ReturnType<typeof createContinuationHarness>): Promise<PermissionHold> {
+  const result = await h.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
+  return (result.details as { permissionHold: PermissionHold }).permissionHold;
+}
+
+function permissionRecords(h: ReturnType<typeof createContinuationHarness>) {
+  return h.entries.filter((entry) => entry.type === "custom" && entry.customType === "pi-better-goal")
+    .map((entry) => entry.data as { kind: string; blocker?: unknown })
+    .filter((data) => data.kind.startsWith("permission-"));
 }
 
 function latestGoal(entries: SessionEntry[]) {

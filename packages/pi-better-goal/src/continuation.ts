@@ -53,6 +53,10 @@ function resultContent(content: unknown): unknown[] {
 export function continuationEvidence(messages: readonly unknown[]): ContinuationEvidence {
   const records: unknown[] = [];
   const toolNames: string[] = [];
+  const hasActions = messages.some((candidate) => isRecord(candidate) && (
+    candidate.role === "toolResult" || (candidate.role === "assistant" && Array.isArray(candidate.content) &&
+      candidate.content.some((block) => isRecord(block) && block.type === "toolCall"))
+  ));
 
   for (const candidate of messages) {
     if (!isRecord(candidate)) {
@@ -67,7 +71,7 @@ export function continuationEvidence(messages: readonly unknown[]): Continuation
         toolNames.push(block.name);
         return [{ name: block.name, arguments: block.arguments }];
       });
-      const text = message.content.flatMap((block) =>
+      const text = hasActions ? [] : message.content.flatMap((block) =>
         isRecord(block) && block.type === "text" ? [{ text: block.text }] : [],
       );
       if (actions.length > 0 || text.length > 0) {

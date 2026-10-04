@@ -66,6 +66,40 @@ Trust is decided once per scan, when the scan begins. A running trusted run whos
 
 Unconfined children keep the exact-retry rule, and this is intentional: an unconfined child can rewrite its own log and metadata, so the parent cannot trust intent or dispositions it reports. Background tasks, which the parent agent launches itself, accept `operation_id` and `expected_exit_codes` directly (see the background-tasks README).
 
+## Permission Blockers
+
+A trusted worker can attach `permissionResource` to an `open` disposition of
+an unresolved failed tool attempt. Supported categories include
+`credential-files`, `process-inspection`, `project-files`,
+`outside-project-files`, `runtime-control-files`, `command-execution`,
+`network-access`, and `unknown`. For example:
+
+```json
+{
+  "disposition": "open",
+  "targets": ["failed-attempt-id"],
+  "reason": "Local credential-cache access needs human review",
+  "permissionResource": "credential-files"
+}
+```
+
+The parent validates the failed-attempt reference and worker provenance before
+exposing actionable reports in `subagent_result` and `subagent_output` details.
+The report is explicitly **agent-reported**, with **remote outcome unknown**.
+It does not prove sandbox causation, expired login, an IAM denial, a foreground
+restriction, or successful validation. Raw `EPERM` output is not classified
+into this contract. Failed attempts remain failed and history is retained after
+later recovery.
+
+Inspecting an actionable report can permission-hold the active goal. Ordinary
+questions, unrelated completions, and settings changes do not release the hold.
+The human's `/goal resume` or resume shortcut confirms one same-operation,
+same-scope retry; it does not grant additional access or authorize product tests
+or mutations. Changed worker settings require a fresh worker because running
+workers retain their launch policy. See
+[ADR 0012](../../../docs/adr/0012-actionable-permission-blockers.md) for the
+transport limitations and bounded-turn recovery contract.
+
 ## Evidence health
 
 The collector scans complete structured records independently of the finite progress tail. Missing terminal logs, unreadable records, and detected truncation are shown as **observation incomplete**. Failure classification uses structured error and exit fields; output text and domain-specific status codes are not failure signals.

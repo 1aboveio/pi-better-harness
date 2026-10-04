@@ -8,6 +8,7 @@ const navigatorSource = resolve(root, "packages/navigator/index.ts");
 const renderSchedulerSource = resolve(root, "packages/render-scheduler/index.ts");
 const stallDetectorSource = resolve(root, "packages/stall-detector/index.ts");
 const failureObservationsSource = resolve(root, "packages/failure-observations/index.ts");
+const permissionBlockerSource = resolve(root, "packages/failure-observations/permission-blocker.ts");
 const callbackBatcherSource = resolve(root, "packages/callback-batcher/index.ts");
 const banner = "// Generated from packages/log-utils/index.ts. Do not edit directly.\n";
 const logUtilsTargets = [
@@ -38,6 +39,12 @@ const callbackBatcherTargets = [
   resolve(root, "packages/pi-better-subagents/shared-callback-batcher.ts"),
 ];
 const logUtilsContent = `${banner}${readFileSync(logUtilsSource, "utf8")}`;
+const permissionBlockerTargets = [
+  resolve(root, "packages/pi-better-subagents/shared-permission-blocker.ts"),
+  resolve(root, "packages/pi-better-sandbox/shared-permission-blocker.ts"),
+  resolve(root, "packages/pi-better-background-tasks/src/shared-permission-blocker.ts"),
+  resolve(root, "packages/pi-better-goal/src/shared-permission-blocker.ts"),
+];
 const navigatorContent = readFileSync(navigatorSource, "utf8");
 const renderSchedulerContent = `// Generated from packages/render-scheduler/index.ts. Do not edit directly.\n${readFileSync(renderSchedulerSource, "utf8")}`;
 const stallDetectorContent = `// Generated from packages/stall-detector/index.ts. Do not edit directly.\n${readFileSync(stallDetectorSource, "utf8")}`;
@@ -60,7 +67,12 @@ for (const target of stallDetectorTargets) {
 }
 
 for (const target of failureObservationsTargets) {
-  writeFileAtomically(target, `// Generated from packages/failure-observations/index.ts. Do not edit directly.\n${readFileSync(failureObservationsSource, "utf8")}`);
+  const source = readFileSync(failureObservationsSource, "utf8").replaceAll('"./permission-blocker.ts"', '"./shared-permission-blocker.ts"');
+  writeFileAtomically(target, `// Generated from packages/failure-observations/index.ts. Do not edit directly.\n${source}`);
+}
+
+for (const target of permissionBlockerTargets) {
+  writeFileAtomically(target, `// Generated from packages/failure-observations/permission-blocker.ts. Do not edit directly.\n${readFileSync(permissionBlockerSource, "utf8")}`);
 }
 
 for (const target of callbackBatcherTargets) {

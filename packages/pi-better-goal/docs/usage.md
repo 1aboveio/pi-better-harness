@@ -208,7 +208,9 @@ It records a durable per-goal continuation state in the session so repeated
 turns remain bounded across extension reloads and session resumes.
 
 The extension fingerprints each completed turn from its tool names and
-canonicalized arguments, tool results, and final assistant text. Call IDs,
+canonicalized arguments and tool results. Assistant text participates only
+when the turn contains no observable tool action or result: rewording a summary
+of unchanged actions is not progress. Call IDs,
 timestamps, reasoning, usage, and provider metadata do not affect the
 fingerprint. Only the SHA-256 digest and tool-name summary are persisted; raw
 arguments and results are not copied into extension state.
@@ -254,6 +256,61 @@ These are outer Goal continuations, not model-request retries. Pi completes its
 own network retry loop before Goal evaluates a settled turn. Goal does not
 change Pi's retry configuration or request timeouts; a new outer continuation
 receives a fresh Pi retry budget.
+
+### Permission Holds
+
+Actionable structured permission reports from the registered parent-owned
+`subagent_result` and `subagent_output` tools pause the goal with
+`pauseReason: "permission-blocker"`. Goal validates only
+`tool_result.details.permissionBlockers` with the shared version-1 contract.
+It does not parse EPERM prose, child tool errors, or assistant claims. The
+producer must be registered from the canonical entry of the subagent package,
+or the known `pi-better-harness` wrapper at `extensions/subagents/index.ts`.
+The wrapper must contain only the shipped literal default re-export, resolving
+to the canonical subagent package entry. Arbitrary wrappers, dynamic imports,
+and a familiar tool name from another extension are not sufficient. Foreground
+reports are not adopted until a guarded producer establishes that transport.
+The parent owns actionability: this is not escalation of every first child
+tool error.
+
+The hold has a separate append-only session history of compact blockers,
+human releases, and consumed retries. Ordinary questions, unrelated background
+drains, settings changes/publication, workflows, and reload do not reset it.
+`get_goal` reports the hold, retained worker/policy references, and record count.
+The latest references for the same logical operation replace its current
+evidence, not the earlier history. Agent-reported blockers remain distinct
+from runtime-observed refusals. Raw command lines and credential paths are not
+copied into these records.
+
+`/goal resume` or `alt+g` explicitly releases **one bounded retry** of the held
+operation and scope, with no extra confirmation dialog. It does not grant model
+permissions, erase blockers, establish success, switch execution to the
+foreground, copy credentials, or change authentication. Changed worker settings
+require a fresh worker using the same logical operation identity. `goal_resume`
+remains interrupt-only and cannot release a permission hold. Automatic wakes
+remain disabled for that goal during the released retry. An unchanged denial
+re-holds immediately; settling the released turn without a new report also
+returns to the hold rather than inferring recovery from unrelated success or
+an unknown remote outcome. Incident recovery remains the diagnostics producer's
+separate responsibility. Existing explicit goal-completion controls are unchanged.
+
+A release is not a replayable dispatch ticket: reload returns an outstanding
+release to the hold without resending it. There are at most 32 retained logical
+blockers and 128 authority records per goal, with capacity reserved for closing
+a retry and recording incomplete scope. Malformed permission-authority records
+for the matching goal make its scope incomplete while retaining valid evidence;
+neither malformed releases nor later valid releases can reverse that gap.
+Records for other goals and generic history do not affect the hold. A malformed
+record with an unknown or missing goal id cannot be attributed to this goal.
+A full history or incomplete scope refuses further release rather than dropping
+evidence and authorizing a broader retry. Clear or
+replace a goal only through the existing explicit human commands.
+
+These bounds govern autonomous continuation turns. They do **not** enforce
+at most one command inside a model turn, cancel already running children, or
+provide a new task-execution security boundary. Retry-scope constraints are
+passed to the model; the existing task guard remains responsible for actual
+permissions.
 
 ## Observable Progress
 

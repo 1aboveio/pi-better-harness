@@ -11,7 +11,7 @@ const targets = [
 
 test("both failure consumers ship the same shared observation implementation", () => {
   const expected = "// Generated from packages/failure-observations/index.ts. Do not edit directly.\n" +
-    readFileSync(resolve(root, "packages/failure-observations/index.ts"), "utf8");
+    readFileSync(resolve(root, "packages/failure-observations/index.ts"), "utf8").replaceAll('"./permission-blocker.ts"', '"./shared-permission-blocker.ts"');
   for (const target of targets) assert.equal(readFileSync(resolve(root, target), "utf8"), expected, target);
 });
 

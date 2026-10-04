@@ -18,6 +18,7 @@ import { DISPOSITION_TOOL, describeOpenTargets, foldToolEnd, foldToolStart,
     newIncidentModel, readDispositionRequest, resolveDisposition, type IncidentModel, type IncidentSink } from "./incident-model.ts";
 
 const { createBashToolDefinition } = PiCodingAgent;
+import { PERMISSION_RESOURCES } from "./shared-permission-blocker.ts";
 
 // Each intent field also admits `null`, which means "not declared" (withoutAbsentIntent). Models send
 // optional fields as explicit null; accepting it in the schema means Pi hands execute the same raw
@@ -133,6 +134,7 @@ export function failureDispositionTool(cwd: () => string) {
             "expected: the failure was intentional. open: it still needs the parent's action (this asks for attention).",
             "targets: incident ids, the attemptId/operationId you declared on bash, or tool call ids. Unknown or already-disposed incidents are rejected.",
             "Never claim recovery without a successful later attempt as evidence.",
+            "For open only, permissionResource optionally reports a permission blocker on the failed attempt; this is agent-reported, not a proven policy denial or remote authorization outcome.",
         ].join(" "),
         promptSnippet: "Classify handled tool failures (recovered, superseded, expected) or flag one as open for the parent.",
         parameters: {
@@ -141,7 +143,8 @@ export function failureDispositionTool(cwd: () => string) {
                 disposition: { type: "string", enum: ["recovered", "superseded", "expected", "open"] },
                 targets: { type: "array", items: { type: "string", minLength: 1, maxLength: 200 }, minItems: 1, maxItems: 20 },
                 reason: { type: "string", minLength: 1, maxLength: 400 },
-                evidence: { type: "string", minLength: 1, maxLength: 200, description: "attemptId or tool call id of the successful later attempt; required for recovered and superseded." },
+                evidence: { ...nullable({ type: "string", minLength: 1, maxLength: 200 }), description: "attemptId or tool call id of the successful later attempt; required for recovered and superseded." },
+                permissionResource: { ...nullable({ type: "string", enum: [...PERMISSION_RESOURCES] }), description: "Optional permission resource for open only. Bound to an unresolved failed worker attempt; remote outcome remains unknown." },
             },
             required: ["disposition", "targets", "reason"],
             additionalProperties: false,
@@ -158,7 +161,8 @@ export function failureDispositionTool(cwd: () => string) {
             const incidents = outcome.event.incidents ?? [];
             return {
                 content: [{ type: "text" as const, text: `Recorded ${parsed.request.disposition} for ${incidents.length} incident${incidents.length === 1 ? "" : "s"}: ${incidents.join(", ")}.` }],
-                details: { disposition: parsed.request.disposition, incidents },
+                details: { disposition: parsed.request.disposition, incidents,
+                    ...(outcome.event.permissionBlockers ? { permissionBlockers: outcome.event.permissionBlockers } : {}) },
             };
         },
     };

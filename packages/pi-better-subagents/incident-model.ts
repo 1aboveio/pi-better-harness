@@ -10,6 +10,7 @@
  */
 import { failureIdentity, findIncident, validateDisposition, INCIDENT_DISPOSITIONS,
     REJECTED_INTENT_CATEGORY, readCommandIntent, withoutAbsentIntent, type CommandIntent, type FailureEvent, type FailureState, type IncidentDisposition } from "./shared-failure-observations.ts";
+import { isPermissionResource, type PermissionBlocker, type PermissionResource } from "./shared-permission-blocker.ts";
 
 export const DISPOSITION_TOOL = "failure_disposition";
 
@@ -75,6 +76,7 @@ interface Finished extends Attempt {
 export interface IncidentModel {
     /** Honour operationId / attemptId / expectedExitCodes / dispositions (confined runtime only). */
     structuredIntent: boolean;
+    runId?: string;
     sequence: number;
     open: Map<string, Attempt>;
     finished: Map<string, Finished>;
@@ -96,8 +98,8 @@ export interface IncidentModel {
  * (intent bash + failure_disposition). Anywhere else the intent fields and disposition
  * requests are ignored and the exact-retry identity rule applies.
  */
-export function newIncidentModel(structuredIntent = false): IncidentModel {
-    return { structuredIntent, sequence: 0, open: new Map(), finished: new Map(), attemptIds: new Map(), namedAttempts: new Set(), operationIds: new Map(),
+export function newIncidentModel(structuredIntent = false, runId?: string): IncidentModel {
+    return { structuredIntent, ...(runId ? { runId } : {}), sequence: 0, open: new Map(), finished: new Map(), attemptIds: new Map(), namedAttempts: new Set(), operationIds: new Map(),
         failed: new Map(), incidentSequence: new Map(), pendingDispositions: new Map() };
 }
 export interface IncidentSink {
@@ -114,8 +116,11 @@ export interface DispositionRequest {
     targets: string[];
     reason: string;
     evidence?: string;
+    permissionResource?: PermissionResource;
 }
 export function readDispositionRequest(args: unknown): { request?: DispositionRequest; error?: string } {
+    if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key =>
+        !["disposition", "targets", "reason", "evidence", "permissionResource"].includes(key))) return { error: "Unknown disposition fields" };
     const input = (args && typeof args === "object" ? args : {}) as Record<string, unknown>;
     const disposition = input.disposition;
     if (typeof disposition !== "string" || !INCIDENT_DISPOSITIONS.includes(disposition as IncidentDisposition)) {
@@ -126,9 +131,16 @@ export function readDispositionRequest(args: unknown): { request?: DispositionRe
         return { error: "targets must name 1-20 incidents, attempt ids, or operation ids" };
     }
     if (typeof input.reason !== "string" || !input.reason.trim()) return { error: "reason is required" };
-    if (input.evidence !== undefined && (typeof input.evidence !== "string" || !input.evidence.trim())) return { error: "evidence must be an attempt id" };
+    // The SDK may drop optional nulls; the session/process log retains them. Both mean absent.
+    const evidence = input.evidence ?? undefined;
+    const permissionResource = input.permissionResource ?? undefined;
+    if (evidence !== undefined && (typeof evidence !== "string" || !evidence.trim())) return { error: "evidence must be an attempt id" };
+    if (permissionResource !== undefined && (disposition !== "open" || !isPermissionResource(permissionResource))) {
+        return { error: "permissionResource requires open and a supported permission resource" };
+    }
     return { request: { disposition: disposition as IncidentDisposition, targets: [...targets] as string[], reason: input.reason.trim(),
-        ...(typeof input.evidence === "string" ? { evidence: input.evidence.trim() } : {}) } };
+        ...(permissionResource !== undefined ? { permissionResource: permissionResource as PermissionResource } : {}),
+        ...(typeof evidence === "string" ? { evidence: evidence.trim() } : {}) } };
 }
 
 function attemptRef(model: IncidentModel, ref: string): Finished | undefined {
@@ -146,6 +158,9 @@ function attemptLabel(attempt: Finished): string {
  * recovery additionally needs the same operation. Everything else fails closed.
  */
 export function resolveDisposition(model: IncidentModel, state: FailureState, request: DispositionRequest, requestId: string): { event?: FailureEvent; error?: string } {
+    if (request.permissionResource !== undefined && (!model.structuredIntent || request.disposition !== "open" || !isPermissionResource(request.permissionResource))) {
+        return { error: "Permission reports require trusted worker open dispositions" };
+    }
     const incidents: string[] = [];
     for (const target of request.targets) {
         let id: string | undefined;
@@ -189,6 +204,11 @@ export function resolveDisposition(model: IncidentModel, state: FailureState, re
     }
     const event: FailureEvent = { id: `disposition:${requestId}`, operation: "incident-disposition", kind: "disposition",
         disposition: request.disposition, incidents, reason: request.reason, ...(evidence ? { evidence } : {}) };
+    if (request.permissionResource !== undefined) {
+        event.permissionBlockers = incidents.map(id => ({ version: 1, kind: "permission-blocker", context: "worker",
+            resource: request.permissionResource!, basis: "agent-reported", operation: findIncident(state, id)?.operation ?? "unknown",
+            remoteOutcome: "unknown", incidentId: id, ...(model.runId ? { runId: model.runId } : {}) } satisfies PermissionBlocker));
+    }
     const error = validateDisposition(state, event);
     return error ? { error } : { event };
 }
