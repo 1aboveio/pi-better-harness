@@ -3,6 +3,8 @@ export type CallbackSource = "subagent" | "background-task";
 export type CallbackDetailTool = "subagent_result" | "bg_task_status";
 
 export interface CallbackBatchHost {
+  /** Older Pi shares this object; newer Pi supplies per-extension wrappers. */
+  events?: object;
   sendMessage(
     message: { customType: string; content: string; display: boolean },
     options: Record<string, unknown>,
@@ -66,6 +68,8 @@ export interface UrgentCallbackEvent {
 export interface CallbackBatcherOptions {
   windowMs?: number;
   retryMs?: number;
+  /** Ordinary callbacks stay here, not in Pi's follow-up queue, while unavailable. */
+  isAvailable?: () => boolean;
   /** UTF-8 byte cap for one sendMessage payload. Defaults to 2 KiB. */
   maxBytes?: number;
 }
@@ -73,6 +77,10 @@ export interface CallbackBatcherOptions {
 export interface CallbackBatcher {
   enqueue(event: CallbackBatchEvent): boolean;
   flush(): Promise<boolean>;
+  /** Refresh the API wrapper after reload without losing handoff receipts. */
+  setHost(host: CallbackBatchHost): void;
+  /** Update the session predicate and schedule an asynchronous drain when available. */
+  setAvailability(isAvailable: () => boolean): void;
   deliverUrgent(event: UrgentCallbackEvent): boolean | Promise<boolean>;
   cancel(): void;
   pendingCount(): number;
@@ -95,6 +103,7 @@ interface PendingEvent {
 
 interface SharedCallbackBatcherState {
   byHost: WeakMap<object, CallbackBatcher>;
+  bySession?: WeakMap<object, CallbackBatcher>;
 }
 
 const GLOBAL_STATE_KEY = Symbol.for("@1aboveio/pi-better-harness/callback-batcher");
@@ -435,6 +444,19 @@ export function createCallbackBatcher(
   let sequence = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let flushPromise: Promise<boolean> | undefined;
+  let isAvailable = options.isAvailable ?? (() => true);
+  let gated = options.isAvailable !== undefined;
+  let awaitingRun = false;
+
+  const available = (): boolean => {
+    try {
+      if (!isAvailable()) {
+        awaitingRun = false;
+        return false;
+      }
+      return !awaitingRun;
+    } catch { return false; }
+  };
 
   const cancelTimer = (): void => {
     if (timer) clearTimeout(timer);
@@ -443,10 +465,12 @@ export function createCallbackBatcher(
 
   const schedule = (delayMs: number): void => {
     if (timer || pending.size === 0) return;
+    // Some idle transitions (manual compaction) have no agent_settled event.
+    const delay = available() ? delayMs : retryMs;
     timer = setTimeout(() => {
       timer = undefined;
       void api.flush();
-    }, Math.max(0, delayMs));
+    }, Math.max(1, delay));
     timer.unref?.();
   };
 
@@ -461,6 +485,10 @@ export function createCallbackBatcher(
 
   const performFlush = async (): Promise<boolean> => {
     cancelTimer();
+    if (!available()) {
+      schedule(retryMs);
+      return false;
+    }
     const snapshot = [...pending.entries()]
       .sort((a, b) => a[1].sequence - b[1].sequence);
     pending.clear();
@@ -509,6 +537,9 @@ export function createCallbackBatcher(
     const overflowItems = deliverable.filter(([, item]) => !representedSet.has(item.event));
 
     try {
+      // Pi may defer the requested run while settled handlers finish, leaving
+      // isIdle() true. Permit no second handoff until a run starts.
+      awaitingRun = gated;
       await host.sendMessage(
         {
           customType: "background-completion-batch",
@@ -518,6 +549,7 @@ export function createCallbackBatcher(
         { deliverAs: "followUp", triggerTurn: true },
       );
     } catch {
+      awaitingRun = false;
       for (const [key] of deliverable) inFlight.delete(key);
       const retryItems = [...deliverable, ...pending.entries()]
         .sort((a, b) => a[1].sequence - b[1].sequence);
@@ -596,10 +628,19 @@ export function createCallbackBatcher(
   const api: CallbackBatcher = {
     enqueue,
     flush,
+    setHost(next) { host = next; },
+    setAvailability(check) {
+      gated = true;
+      isAvailable = check;
+      available();
+      cancelTimer();
+      schedule(windowMs);
+    },
     deliverUrgent,
     cancel() {
       cancelTimer();
       pending.clear();
+      awaitingRun = false;
     },
     pendingCount() {
       return pending.size;
@@ -613,16 +654,38 @@ export function getCallbackBatcher(
   options: CallbackBatcherOptions = {},
 ): CallbackBatcher {
   const state = globalState();
-  const key = host as object;
+  const key = host.events ?? host;
   const existing = state.byHost.get(key);
-  if (existing) return existing;
+  if (existing) {
+    existing.setHost(host);
+    return existing;
+  }
   const created = createCallbackBatcher(host, options);
   state.byHost.set(key, created);
   return created;
 }
 
 export function cancelCallbackBatch(host: CallbackBatchHost): void {
-  globalState().byHost.get(host as object)?.cancel();
+  const batcher = globalState().byHost.get(host.events ?? host);
+  batcher?.setAvailability(() => false);
+  batcher?.cancel();
+}
+
+/** Called on session_start, agent_start and agent_settled by both extensions. */
+export function setCallbackBatchContext(
+  host: CallbackBatchHost,
+  ctx: { isIdle(): boolean; sessionManager?: object },
+): void {
+  const state = globalState();
+  const bySession = state.bySession ??= new WeakMap<object, CallbackBatcher>();
+  const shared = ctx.sessionManager ? bySession.get(ctx.sessionManager) : undefined;
+  const batcher = shared ?? getCallbackBatcher(host);
+  if (ctx.sessionManager) bySession.set(ctx.sessionManager, batcher);
+  state.byHost.set(host.events ?? host, batcher);
+  batcher.setHost(host);
+  // Schedule rather than await delivery inside agent_settled: its handlers are
+  // still settling the previous run, and sendMessage may start a new one.
+  batcher.setAvailability(() => ctx.isIdle());
 }
 
 function globalState(): SharedCallbackBatcherState {

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="750" viewBox="0 0 1200 750">
+  <title>pi-better-sandbox package preview</title>
+  <desc>Independent Main and Subagents profiles / OS-backed file rules. Rendered with deterministic demonstration data.</desc>
+  <rect width="1200" height="750" fill="#151718"/>
+  <rect width="8" height="750" fill="#a3e635"/>
+  <text x="48" y="46" font-family="Menlo" font-size="22" font-weight="700" fill="#a3e635">pi-better-sandbox</text>
+  <text x="1152" y="46" text-anchor="end" font-family="Menlo" font-size="18" fill="#a1a1aa">pi / extensions</text>
+  <text x="48" y="94" font-family="Helvetica" font-size="34" font-weight="700" fill="#fafafa">Permissions you control.</text>
+  <text x="48" y="128" font-family="Helvetica" font-size="19" fill="#b4b4bc">Independent Main and Subagents profiles / OS-backed file rules</text>
+  <path d="M48 150 H1152" stroke="#3f3f46"/>
+  <text x="60" y="210" font-family="Menlo" font-size="20" font-weight="700" fill="#a3e635" xml:space="preserve" textLength="348" lengthAdjust="spacingAndGlyphs">[/sandbox · default profiles]</text>
+<text x="60" y="236" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="912" lengthAdjust="spacingAndGlyphs">  Sandbox permissions          Main                   Subagents             </text>
+<text x="60" y="262" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="912" lengthAdjust="spacingAndGlyphs">&gt; Sandbox                      Off                    On                    </text>
+<text x="60" y="288" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="912" lengthAdjust="spacingAndGlyphs">  Project files                -                      Write &amp; delete        </text>
+<text x="60" y="314" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="912" lengthAdjust="spacingAndGlyphs">  Outside project              -                      Write                 </text>
+<text x="60" y="340" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="912" lengthAdjust="spacingAndGlyphs">  Stored credentials           -                      Read                  </text>
+<text x="60" y="366" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="912" lengthAdjust="spacingAndGlyphs">  Run commands &amp; applications  -                      On                    </text>
+<text x="60" y="392" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="912" lengthAdjust="spacingAndGlyphs">  Network access               -                      On                    </text>
+<text x="60" y="418" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="228" lengthAdjust="spacingAndGlyphs">  Subagents · Tools</text>
+<text x="60" y="444" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="432" lengthAdjust="spacingAndGlyphs">    Guarded (follows the file rules)</text>
+<text x="60" y="470" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="420" lengthAdjust="spacingAndGlyphs">    [x] apply_patch harness adapter</text>
+<text x="60" y="496" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="492" lengthAdjust="spacingAndGlyphs">    Trusted (runs outside the file rules)</text>
+<text x="60" y="522" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="480" lengthAdjust="spacingAndGlyphs">    &gt; [x] @juicesharp/rpiv-web-tools 2/2</text>
+  <path d="M48 675 H1152" stroke="#3f3f46"/>
+  <text x="48" y="706" font-family="Menlo" font-size="20" fill="#a3e635">$ pi install npm:pi-better-sandbox</text>
+  <text x="48" y="733" font-family="Helvetica" font-size="16" fill="#b4b4bc">Main starts off · Subagents start confined · trusted tools run outside file rules</text>
+</svg>

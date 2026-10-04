@@ -2,6 +2,8 @@
 
 `pi-better-ssh` runs short synchronous remote commands over safe, reusable SSH connections. It adds explicit remote tools; Pi's built-in `bash` remains local and is never overridden.
 
+![Pi Better SSH package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-ssh.png)
+
 ## Install
 
 ```sh

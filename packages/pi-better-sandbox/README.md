@@ -2,6 +2,8 @@
 
 Sandbox permissions for Pi's foreground tools and detached subagents.
 
+![Pi Better Sandbox package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-sandbox.png)
+
 It is installed by default with [`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme), and can be installed on its own:
 
 ```sh
@@ -385,6 +387,41 @@ credential stores under a read-only outside root, a writable outside root
 (Write & delete) with protected paths, and Project files = Write. These launch errors preserve the selected restrictions.
 The macOS permission combinations are covered by real-kernel tests; Linux
 mount behavior requires a Linux runner with Bubblewrap and user namespaces.
+
+### macOS setuid executable limitation
+
+Seatbelt-sandboxed processes cannot execute setuid/setgid binaries, even with
+an `(allow default)` profile. On the verified host, `/bin/ps` and `/usr/bin/top`
+are setuid-root binaries. A shell attempting to run `/bin/ps` reports
+`Operation not permitted` and exits 126. This is an OS-level execution
+restriction, not a harness command deny rule, a filesystem permission failure,
+or evidence that Run commands & applications is Off.
+
+Read-only reproduction (verified on 2026-10-04):
+
+```sh
+ls -l /bin/ps /usr/bin/top
+/usr/bin/sandbox-exec -p '(version 1) (allow default)' \
+  /bin/bash -c '/bin/ps -p $$ -o pid,ppid,comm'
+```
+
+The second command fails with `/bin/bash: /bin/ps: Operation not permitted`
+and exit 126; the same `ps` query outside Seatbelt succeeds. Launching `ps`
+directly through `sandbox-exec` instead reports `execvp()` failure and exit 71.
+Changing the requested output fields or adding a profile allowance for `ps`
+does not remove this limitation.
+
+When process inspection is a prerequisite for safe work, do not interpret the
+denial as an empty process list. Hold the dependent operation until an
+authorized coordinator or environment custodian supplies a fresh snapshot
+and explicit ownership handoff from outside the task sandbox. Prefer
+`pid,ppid,pgid,lstart,comm` over full command arguments, which may expose
+secrets. Do not disable the sandbox or modify/copy privileged executables to
+work around the denial. A trusted process-inspection adapter would require
+separate implementation; this package does not currently provide one.
+
+See the [session evidence](../../docs/sandbox-session-validation.md#macos-process-inspection-follow-up)
+and [documented setuid/setgid limitation](https://github.com/navikt/cplt/blob/main/docs/known-impacts.md).
 
 ## For other extensions
 

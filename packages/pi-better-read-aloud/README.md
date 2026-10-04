@@ -2,6 +2,8 @@
 
 OpenAI-compatible text-to-speech tools for Pi.
 
+![Pi Better Read Aloud package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-read-aloud.png)
+
 ## Configuration
 
 Configure through environment variables:

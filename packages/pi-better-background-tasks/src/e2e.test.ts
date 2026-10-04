@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
 import { recordFailure } from "./failures.js";
@@ -303,6 +303,44 @@ describe("extension e2e", () => {
     } finally { rmSync(taskDir(id), { recursive: true, force: true }); }
   });
 
+  it("#409 holds time-separated completions while busy and drains once after agent_settled", async () => {
+    vi.useFakeTimers();
+    const sessionId = "availability-gated-completions";
+    const harness = createHarness({ sessionId });
+    const ids = ["bg_availability_first", "bg_availability_second"];
+    try {
+      await harness.fireSessionStart();
+      await harness.fireAgentStart();
+      for (const id of ids) {
+        writeMeta({ id, kind: "process", status: "succeeded", startedAt: 1, endedAt: 2,
+          logPath: `${taskDir(id)}/output.log`, callback: true,
+          callbackOrigin: { cwd: process.cwd(), sessionId },
+          command: "build", cwd: process.cwd(), spawnPid: process.pid });
+        await harness.fireSessionStart();
+        await vi.advanceTimersByTimeAsync(200);
+        expect(harness.messages).toHaveLength(0);
+        expect(readMeta(id)?.callbackSentAt).toBeUndefined();
+      }
+      expect(getCallbackBatcher(harness.pi).pendingCount()).toBe(2);
+      await harness.fireAgentSettled();
+      expect(harness.messages).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(harness.messages).toHaveLength(1);
+      expect(harness.messages[0]).toContain("2 background completions are ready");
+      for (const id of ids) {
+        expect(harness.messages[0]).toContain(id);
+        expect(readMeta(id)?.callbackSentAt).toBeDefined();
+      }
+      await harness.fireAgentSettled();
+      await vi.advanceTimersByTimeAsync(200);
+      expect(harness.messages).toHaveLength(1);
+    } finally {
+      getCallbackBatcher(harness.pi).cancel();
+      for (const id of ids) rmSync(taskDir(id), { recursive: true, force: true });
+      vi.useRealTimers();
+    }
+  });
+
   it("shows unresolved sidecar evidence ahead of task progress on every inspection surface", async () => {
     const sessionId = "failure-surface-session";
     const harness = createHarness({ sessionId, mode: "tui", hasUI: true });
@@ -540,7 +578,8 @@ describe("extension e2e", () => {
 
 function createHarness(options: { cwd?: string; sessionId?: string; failUserMessage?: boolean; mode?: string; hasUI?: boolean } = {}) {
   const tools = new Map<string, RegisteredTool>();
-  const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => unknown> = [];
+  const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+  let idle = true;
   const messages: string[] = [];
   const messageAttempts: string[] = [];
   const widgets: Array<[string, unknown]> = [];
@@ -551,6 +590,7 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
   const sessionId = options.sessionId ?? "test-session";
   const context = {
     cwd,
+    isIdle: () => idle,
     mode: options.mode ?? "print",
     hasUI: options.hasUI ?? false,
     ui: {
@@ -571,7 +611,9 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
       tools.set(tool.name, tool);
     },
     on(eventName: string, handler: (event: unknown, ctx: unknown) => unknown) {
-      if (eventName === "session_start") sessionStartHandlers.push(handler);
+      const list = handlers.get(eventName) ?? [];
+      list.push(handler);
+      handlers.set(eventName, list);
     },
     sendMessage(message: { content: string }) {
       messageAttempts.push(message.content);
@@ -603,7 +645,15 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
       return result.content.map((part) => part.text).join("\n");
     },
     async fireSessionStart() {
-      for (const handler of sessionStartHandlers) await handler({ type: "session_start" }, context);
+      for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, context);
+    },
+    async fireAgentStart() {
+      idle = false;
+      for (const handler of handlers.get("agent_start") ?? []) await handler({ type: "agent_start" }, context);
+    },
+    async fireAgentSettled() {
+      idle = true;
+      for (const handler of handlers.get("agent_settled") ?? []) await handler({ type: "agent_settled" }, context);
     },
     lastWidget(key: string) {
       for (let i = widgets.length - 1; i >= 0; i -= 1) {

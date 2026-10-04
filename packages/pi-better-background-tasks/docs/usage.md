@@ -191,7 +191,8 @@ fallback ladders, guaranteed remote kill in direct mode, a remote IDE mode, or
 a first-class Windows OpenSSH matrix.
 
 Callbacks are terminal-only by default. Ordinary callback-enabled terminal
-transitions accumulate for 100 ms and produce one compact follow-up, shared with
+transitions accumulate while the foreground agent is busy, then produce one
+compact follow-up after a 100 ms idle window, shared with
 subagent completions loaded in the same Pi host. Every row includes source, id,
 label, terminal status, and its durable status/result tool. `callback:false`
 never enters the batch and sends no model follow-up.
@@ -204,7 +205,14 @@ still fire callbacks.
 
 Set `PI_BETTER_CALLBACK_BATCH_MS` to `0` through `5000` milliseconds to tune the
 accumulation window; invalid values use 100 ms. A single event flushes when that
-bounded window expires. Failed sends leave all affected events unmarked and
+bounded window expires while Pi is idle. During a foreground run, ordinary
+completions stay in the harness queue without sending Pi follow-ups. After
+`agent_settled`, pending completions share one bounded aggregate and one model
+run. A handoff guard prevents additional sends while Pi defers that run during
+settlement. Availability is rechecked on a lightweight timer while events are
+pending, so manual compaction does not strand them. New completions and overflow
+wait for the next available boundary while
+that run is active. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 
 Each row's `status` is the lifecycle status, plus an attention count when
@@ -227,10 +235,10 @@ status and list responses also carry a `statusCursor` that returns a small
 no-change response until lifecycle, log, or failure facts change. See
 `docs/issue-312-output.md`.
 
-Pi's optional `followUpMode: all` still helps when a later completion arrives
-after an earlier 100 ms aggregate has already flushed: Pi can consume queued
-follow-ups together in one later agent turn. This extension does not change Pi
-core or Pi's default follow-up mode.
+Ordinary batching does not depend on Pi's `followUpMode`: the extension holds
+events until availability rather than preloading follow-ups while Pi is busy.
+Urgent failure alerts retain their existing immediate follow-up behavior.
+This extension does not change Pi core or Pi's default follow-up mode.
 
 ## Write Sandbox
 

@@ -31,6 +31,7 @@
     "sync:task-sandbox": "node scripts/sync-task-sandbox.mjs",
     "gallery:capture-real": "node scripts/capture-real-pi-session-gallery.mjs",
     "gallery:render": "node --import tsx scripts/render-package-gallery.mjs",
+    "gallery:check": "node --import tsx scripts/render-package-gallery.mjs --check",
     "test:tui-e2e": "node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/navigator-detail.tui.e2e.test.mjs scripts/plan-navigation.tui.e2e.test.mjs scripts/goal-pause.tui.e2e.test.mjs",
     "test:golden:sandbox": "npm run sync:shared-sandbox-core && npm run sync:task-sandbox && node scripts/run-sandbox-golden.mjs",
     "test:live-ssh": "PI_LIVE_SSH_REQUIRED=1 node --import tsx --import ./scripts/isolate-registry.mjs --test --test-name-pattern \"live SSH\" scripts/reload-ssh-durability.e2e.test.mjs",

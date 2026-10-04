@@ -246,13 +246,17 @@ given.
   Its context can't clog the parent, its crash can't corrupt parent state, and
   its output is durable in a log file.
 - **Completions trigger one batched turn that fetches durable results.** Ordinary
-  terminal callbacks accumulate for 100 ms and share one
+  terminal callbacks stay in the harness queue while the foreground agent is
+  busy. Once Pi is idle, they accumulate for 100 ms and share one
   `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })` notification
   with background-task completions from the same Pi host. Each row contains only
   source, id, label, terminal status, and the `subagent_result` lookup. Full
   results and logs stay in durable tools and are never embedded in the callback.
   Set `PI_BETTER_CALLBACK_BATCH_MS` to `0` through `5000` milliseconds to tune
-  the accumulation window; invalid values use 100 ms. A failed handoff keeps the
+  the accumulation window; invalid values use 100 ms. `agent_settled` schedules
+  the aggregate without starting a model run inside the lifecycle handler.
+  Completions arriving during that model run, including bounded overflow,
+  stay queued for the next available boundary. A failed handoff keeps the
   pending records retryable, and `/reload` recovers records explicitly marked
   pending. `callback:false` sends no model message; read the durable result later
   with `subagent_result`.
@@ -649,10 +653,11 @@ only after a successful handoff and dedupe across reloads and repeated health ti
 Persisted unmarked orphaned/lost states are recovered on the health ticker after
 `/reload` even when process evidence does not produce a fresh transition.
 
-Pi's optional `followUpMode: all` remains useful when completion groups arrive
-after an earlier 100 ms batch has already flushed: Pi can consume those queued
-follow-ups in one later agent turn. This extension does not change Pi core or
-Pi's default follow-up mode.
+Ordinary completion batching does not depend on Pi's `followUpMode`: events
+stay in the harness until availability rather than becoming separate queued
+follow-ups during the foreground run. Urgent health/failure alerts retain their
+existing immediate follow-up behavior. This extension does not change Pi core
+or Pi's default follow-up mode.
 
 ### Surfacing health (tools + passive widget)
 

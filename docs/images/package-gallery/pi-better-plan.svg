@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="750" viewBox="0 0 1200 750">
+  <title>pi-better-plan package preview</title>
+  <desc>Structured steps / dependencies / persistent session state. Rendered with deterministic demonstration data.</desc>
+  <rect width="1200" height="750" fill="#151718"/>
+  <rect width="8" height="750" fill="#f0abfc"/>
+  <text x="48" y="46" font-family="Menlo" font-size="22" font-weight="700" fill="#f0abfc">pi-better-plan</text>
+  <text x="1152" y="46" text-anchor="end" font-family="Menlo" font-size="18" fill="#a1a1aa">pi / extensions</text>
+  <text x="48" y="94" font-family="Helvetica" font-size="34" font-weight="700" fill="#fafafa">A plan with explicit progress.</text>
+  <text x="48" y="128" font-family="Helvetica" font-size="19" fill="#b4b4bc">Structured steps / dependencies / persistent session state</text>
+  <path d="M48 150 H1152" stroke="#3f3f46"/>
+  <text x="60" y="210" font-family="Menlo" font-size="20" font-weight="700" fill="#f0abfc" xml:space="preserve" textLength="156" lengthAdjust="spacingAndGlyphs">[plan widget]</text>
+<text x="60" y="236" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="408" lengthAdjust="spacingAndGlyphs">plan  2/5 complete · 1 in progress</text>
+<text x="60" y="262" font-family="Menlo" font-size="20" font-weight="400" fill="#86efac" xml:space="preserve" textLength="504" lengthAdjust="spacingAndGlyphs">  ✓ 1     Inspect the release requirements</text>
+<text x="60" y="288" font-family="Menlo" font-size="20" font-weight="400" fill="#86efac" xml:space="preserve" textLength="456" lengthAdjust="spacingAndGlyphs">  ✓ 2     Implement the scoped changes</text>
+<text x="60" y="314" font-family="Menlo" font-size="20" font-weight="400" fill="#fafafa" xml:space="preserve" textLength="912" lengthAdjust="spacingAndGlyphs">  ● 3     Run the regression suite                                    active</text>
+<text x="60" y="340" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="336" lengthAdjust="spacingAndGlyphs">  ○ 4     Review the results</text>
+<text x="60" y="366" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="348" lengthAdjust="spacingAndGlyphs">  ○ 5     Publish the release</text>
+<text x="60" y="392" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve"></text>
+<text x="60" y="418" font-family="Menlo" font-size="20" font-weight="700" fill="#f0abfc" xml:space="preserve" textLength="240" lengthAdjust="spacingAndGlyphs">[get_plan · example]</text>
+<text x="60" y="444" font-family="Menlo" font-size="20" font-weight="400" fill="#86efac" xml:space="preserve" textLength="396" lengthAdjust="spacingAndGlyphs">Checklist progress: 2/5 completed</text>
+<text x="60" y="470" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="456" lengthAdjust="spacingAndGlyphs">Current step: Run the regression suite</text>
+<text x="60" y="496" font-family="Menlo" font-size="20" font-weight="400" fill="#c7c7cf" xml:space="preserve" textLength="528" lengthAdjust="spacingAndGlyphs">Ready: none · release waits for verification</text>
+  <path d="M48 675 H1152" stroke="#3f3f46"/>
+  <text x="48" y="706" font-family="Menlo" font-size="20" fill="#f0abfc">$ pi install npm:pi-better-plan</text>
+  <text x="48" y="733" font-family="Helvetica" font-size="16" fill="#b4b4bc">/plan · inspect the complete checklist · progress changes only through updates</text>
+</svg>
