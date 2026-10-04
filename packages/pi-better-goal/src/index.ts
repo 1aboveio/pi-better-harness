@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { Type } from "typebox";
 import { commandAvailable, commandInvocation, resolveGoalCommand } from "./command-binding.js";
 import { goalPreferencesPath, readGoalPreferences, writeGoalPreference, type GoalPreferences } from "./preferences.js";
+import { createGoalSettingsPage } from "./settings-page.js";
 
 import {
   collectActivitySnapshot,
@@ -793,6 +794,27 @@ export default function (pi: ExtensionAPI): void {
       const current = getGoal(ctx);
 
       if (trimmed === "settings" || trimmed.startsWith("settings ")) {
+        const changePreference = async (key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
+          const previous = preferences;
+          preferences = writeGoalPreference(key, enabled);
+          if (previous.autoContinue !== preferences.autoContinue) clearIdleContinuation();
+          syncResumeTool(getGoal(ctx));
+          applyStatus(ctx);
+          if (!previous.autoContinue && preferences.autoContinue) {
+            const snapshot = await publishSnapshot(ctx);
+            const goal = getGoal(ctx);
+            if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
+              scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
+            }
+          }
+        };
+        if (trimmed === "settings" && ctx.hasUI && ctx.mode !== "rpc" && typeof ctx.ui.custom === "function") {
+          await ctx.ui.custom<void>((tui, theme, _kb, done) => createGoalSettingsPage(theme, {
+            get: () => ({ ...preferences }),
+            change: changePreference,
+          }, () => tui.requestRender(), () => done()));
+          return;
+        }
         const [, setting, mode, ...extra] = trimmed.split(/\s+/);
         if (setting !== undefined && (!GOAL_SETTINGS.includes(setting as typeof GOAL_SETTINGS[number]) ||
             (mode !== "on" && mode !== "off") || extra.length > 0)) {
@@ -801,18 +823,7 @@ export default function (pi: ExtensionAPI): void {
         }
         if (setting !== undefined) {
           try {
-            const previous = preferences;
-            preferences = writeGoalPreference(setting === "auto-continue" ? "autoContinue" : "conversationalResume", mode === "on");
-            if (previous.autoContinue !== preferences.autoContinue) clearIdleContinuation();
-            syncResumeTool(getGoal(ctx));
-            applyStatus(ctx);
-            if (!previous.autoContinue && preferences.autoContinue) {
-              const snapshot = await publishSnapshot(ctx);
-              const goal = getGoal(ctx);
-              if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
-                scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
-              }
-            }
+            await changePreference(setting === "auto-continue" ? "autoContinue" : "conversationalResume", mode === "on");
           } catch (error) {
             notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
             return;

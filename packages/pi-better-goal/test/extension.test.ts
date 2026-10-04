@@ -1353,6 +1353,43 @@ const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason
 const answeredOutcome = { messages: [{ role: "assistant", content: [{ type: "text", text: "Here is the answer." }], stopReason: "stop" }] };
 const networkFailureOutcome = { messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "fetch failed" }] };
 
+test("TUI goal settings opens the interactive page and its toggles persist", async (t) => {
+  isolatePreferences(t);
+  const h = createContinuationHarness();
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+    inverse: (text: string) => text,
+  };
+  let opened = false;
+  let closed = false;
+  Object.assign(h.ctx, { mode: "tui", hasUI: true });
+  Object.assign(h.ctx.ui, {
+    async custom(factory: Function) {
+      opened = true;
+      const page = factory({ requestRender() {} }, theme, {}, () => { closed = true; });
+      assert.match(page.render(80).join("\n"), /Goal settings/);
+      page.handleInput(" ");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      page.handleInput("\x1b[B");
+      page.handleInput("\r");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      page.handleInput("\x1b");
+    },
+  });
+  await h.commands.get("goal")?.handler("settings", h.ctx);
+  assert.equal(opened, true);
+  assert.equal(closed, true);
+  const next = createContinuationHarness();
+  await next.handlers.get("session_start")?.({}, next.ctx);
+  const inspected = await next.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(next.ctx));
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false });
+  assert.equal(h.entries.length, 0);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+  await next.handlers.get("session_shutdown")?.({}, next.ctx);
+});
+
 test("both settings persist across extension recreation without disabling kickoff or explicit resumes", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   isolatePreferences(t);

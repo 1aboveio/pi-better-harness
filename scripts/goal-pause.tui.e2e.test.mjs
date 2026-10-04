@@ -35,6 +35,29 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   startPiSession();
   waitForFile(readyPath);
 
+  sendLiteral("/goal settings");
+  waitForScreen((screen) => screen.includes("/goal settings"));
+  sendKey("Tab");
+  sendKey("Enter");
+  waitForScreen((screen) => screen.includes("Goal settings") && screen.includes("Conversational resume"));
+  sendKey("Space");
+  waitForScreen((screen) => screen.includes("Saved.") && /Automatic continuation\s+Off/.test(screen));
+  sendKey("Down");
+  sendKey("Enter");
+  waitForScreen((screen) => /Conversational resume\s+Off/.test(screen));
+  const preferencesFile = join(fixtures, "agent", "extensions", "pi-better-goal-preferences.json");
+  assert.deepEqual(JSON.parse(readFileSync(preferencesFile, "utf8")), {
+    version: 1, autoContinue: false, conversationalResume: false,
+  });
+  sendKey("Enter");
+  waitForScreen((screen) => /Conversational resume\s+On/.test(screen));
+  sendKey("Up");
+  sendKey("Space");
+  waitForScreen((screen) => /Automatic continuation\s+On/.test(screen));
+  sendKey("Escape");
+  waitForScreen((screen) => !screen.includes("Goal settings"));
+  assert.equal(modelCalls().length, 0, "settings changes must not start a model turn");
+
   sendLiteral("/goal ship the pause widget");
   sendKey("Enter");
   waitForScreen((screen) => screen.includes("goal active") && screen.includes("working through step"), 15_000);
