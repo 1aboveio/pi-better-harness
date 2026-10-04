@@ -1,6 +1,9 @@
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type {
   ExtensionAPI,
@@ -10,6 +13,7 @@ import type {
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
 import extension, { goalArgumentCompletions, toolContext } from "./extension-fixture.js";
+import { goalPreferencesPath } from "../src/preferences.js";
 
 interface SessionEntry {
   type: string;
@@ -33,12 +37,19 @@ test("goal action completions expose selectable actions with context", () => {
     { value: "resume", label: "resume", description: "Resume the paused goal" },
     { value: "clear", label: "clear", description: "Remove the current goal" },
     { value: "complete", label: "complete", description: "Mark the current goal complete" },
+    { value: "settings", label: "settings", description: "Inspect or persist goal continuation and conversational resume controls" },
   ]);
   assert.deepEqual(
     goalArgumentCompletions("  c")?.map((entry) => entry.value),
     ["clear", "complete"],
   );
   assert.equal(goalArgumentCompletions("ship the release"), null);
+  assert.deepEqual(goalArgumentCompletions("settings ")?.map((item) => item.value), [
+    "settings auto-continue", "settings conversational-resume",
+  ]);
+  assert.deepEqual(goalArgumentCompletions("settings auto-continue o")?.map((item) => item.value), [
+    "settings auto-continue on", "settings auto-continue off",
+  ]);
 });
 
 test("active background work adds completion-audit guidance to the agent prompt", async (t) => {
@@ -856,6 +867,7 @@ test("obsolete concurrent provider results neither publish nor rearm a drain", a
 
 test("wake-disabled observation resets a held ledger without automatic handoffs", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
   const overrides = {
     PI_BETTER_GOAL_DISABLE_WAKE: "1",
     PI_BETTER_GOAL_IDLE_CONTINUATION_DELAY_MS: "0",
@@ -869,6 +881,7 @@ test("wake-disabled observation resets a held ledger without automatic handoffs"
     let active = false;
     h.events.emit("pi-better-goal:register-provider", { id: "fixture", getActivity: () => fixtureActivity(active) });
     await h.handlers.get("session_start")?.({}, h.ctx);
+    await h.commands.get("goal")?.handler("settings auto-continue on", h.ctx);
     await h.commands.get("goal")?.handler("observe without waking", h.ctx);
     await settleNetworkFailure(h);
     await settleNetworkFailure(h);
@@ -892,10 +905,11 @@ test("wake-disabled observation resets a held ledger without automatic handoffs"
   }
 });
 
-test("in-flight wake audits cannot survive pause, resume, replacement, completion, interactive input, foreground start, session replacement or shutdown", async (t) => {
-  for (const cause of ["pause", "resume", "replace", "complete", "input", "foreground", "session", "shutdown"] as const) {
+test("in-flight wake audits cannot survive pause, resume, replacement, completion, interactive input, foreground start, session replacement, settings disable or shutdown", async (t) => {
+  for (const cause of ["pause", "resume", "replace", "complete", "input", "foreground", "session", "settings", "shutdown"] as const) {
     await t.test(cause, async (subtest) => {
       subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      if (cause === "settings") isolatePreferences(subtest);
       const h = createContinuationHarness();
       let delayed = false;
       const pending: Array<ReturnType<typeof deferred<ReturnType<typeof fixtureActivity>>>> = [];
@@ -921,6 +935,8 @@ test("in-flight wake audits cannot survive pause, resume, replacement, completio
         changed = h.handlers.get(cause === "session" ? "session_start" : "agent_start")?.({}, h.ctx);
       } else if (cause === "input") {
         await h.handlers.get("input")?.({ text: "new instruction", source: "interactive" }, h.ctx);
+      } else if (cause === "settings") {
+        await h.commands.get("goal")?.handler("settings auto-continue off", h.ctx);
       } else if (cause === "shutdown") {
         await h.handlers.get("session_shutdown")?.({}, h.ctx);
         Object.defineProperty(h.ctx, "isIdle", { value: () => { throw new Error("stale context read"); } });
@@ -1337,6 +1353,197 @@ const abortedOutcome = { messages: [{ role: "assistant", content: [], stopReason
 const answeredOutcome = { messages: [{ role: "assistant", content: [{ type: "text", text: "Here is the answer." }], stopReason: "stop" }] };
 const networkFailureOutcome = { messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "fetch failed" }] };
 
+test("both settings persist across extension recreation without disabling kickoff or explicit resumes", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const first = createContinuationHarness();
+  await first.handlers.get("session_start")?.({}, first.ctx);
+  await first.commands.get("goal")?.handler("settings auto-continue off", first.ctx);
+  await first.commands.get("goal")?.handler("settings conversational-resume off", first.ctx);
+  assert.equal(first.entries.length, 0, "configuring controls does not create a goal");
+  await first.handlers.get("session_shutdown")?.({}, first.ctx);
+
+  const h = createContinuationHarness();
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  const inspected = await h.tools.get("get_goal")!.execute("settings", {}, undefined, undefined, toolContext(h.ctx));
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: false, conversationalResume: false });
+  await h.commands.get("goal")?.handler("settings", h.ctx);
+  assert.match(h.notifications.at(-1)?.message ?? "", /Automatic continuation setting: off/);
+  assert.match(h.notifications.at(-1)?.message ?? "", /Conversational resume setting: off/);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  assert.equal(h.messages.length, 1, "goal kickoff remains explicit intent");
+  const original = latestGoal(h.entries)?.goalId;
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.(abortedOutcome, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(h.activeTools().includes("goal_resume"), false);
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  assert.equal(h.messages.length, 2, "explicit command queues a turn even with both settings off");
+  await h.commands.get("goal")?.handler("pause", h.ctx);
+  await h.shortcuts.get("alt+g")!.handler(h.ctx);
+  assert.equal(h.messages.length, 3, "explicit hotkey queues a turn even with both settings off");
+  assert.equal(latestGoal(h.entries)?.goalId, original);
+  assert.equal(latestGoal(h.entries)?.status, "active");
+  await settleNetworkFailure(h);
+  t.mock.timers.tick(120_000);
+  await flushPromises();
+  assert.equal(h.messages.length, 3, "explicit resume does not re-enable automatic idle continuation");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("automatic continuation off cancels pending idle and drain wakes but preserves drain observation", async (t) => {
+  for (const kind of ["idle", "drain"] as const) {
+    await t.test(kind, async (subtest) => {
+      subtest.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      isolatePreferences(subtest);
+      const h = createContinuationHarness();
+      let active = false;
+      h.events.emit("pi-better-goal:register-provider", { id: "fixture", getActivity: () => fixtureActivity(active) });
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      await h.commands.get("goal")?.handler("watch recurring work", h.ctx);
+      await settleNetworkFailure(h);
+      await settleNetworkFailure(h);
+      assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1);
+      if (kind === "drain") {
+        active = true;
+        await h.commands.get("better-activity")?.handler("", h.ctx);
+        active = false;
+        await h.commands.get("better-activity")?.handler("", h.ctx);
+        assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+      }
+      const before = h.messages.length;
+      await h.commands.get("goal")?.handler("settings auto-continue off", h.ctx);
+      subtest.mock.timers.tick(120_000);
+      await flushPromises();
+      assert.equal(h.messages.length, before, "already scheduled wakes are cancelled");
+      assert.equal(latestGoal(h.entries)?.status, "active", "disabling automation does not pause or complete the goal");
+
+      await settleNetworkFailure(h);
+      await settleNetworkFailure(h);
+      active = true;
+      await h.commands.get("better-activity")?.handler("", h.ctx);
+      active = false;
+      await h.commands.get("better-activity")?.handler("", h.ctx);
+      assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0, "disabled wakes still observe background progress");
+      subtest.mock.timers.tick(120_000);
+      await flushPromises();
+      assert.equal(h.messages.length, before, "new drains cannot wake while the control is off");
+
+      await h.handlers.get("agent_end")?.(abortedOutcome, h.ctx);
+      assert.ok(h.activeTools().includes("goal_resume"), "automatic continuation does not control conversational resume");
+      const resumed = await h.tools.get("goal_resume")!.execute("resume", {}, undefined, undefined, toolContext(h.ctx));
+      assert.equal((resumed.details as { ok: boolean }).ok, true);
+      assert.equal(h.messages.length, before + 1);
+      await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    });
+  }
+});
+
+test("conversational resume off withdraws and refuses the tool while retaining paused conversation guidance", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const h = createContinuationHarness(undefined, { hasUI: true });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  await h.handlers.get("agent_end")?.(abortedOutcome, h.ctx);
+  const otherTools = h.activeTools().filter((name) => name !== "goal_resume");
+  assert.ok(h.activeTools().includes("goal_resume"));
+  await h.commands.get("goal")?.handler("settings conversational-resume off", h.ctx);
+  assert.deepEqual(h.activeTools(), otherTools, "the control changes only the resume tool");
+  assert.equal(h.statuses.at(-1), "goal paused · /goal resume");
+  const before = h.messages.length;
+  await h.handlers.get("input")?.({ source: "interactive", text: "go" }, h.ctx);
+  const refused = await h.tools.get("goal_resume")!.execute("stale-call", { reason: "user said go" }, undefined, undefined, toolContext(h.ctx));
+  assert.equal((refused.details as { ok: boolean }).ok, false, "stale or direct tool calls cannot bypass the control");
+  assert.equal(latestGoal(h.entries)?.status, "paused");
+  assert.equal(h.messages.length, before);
+  const prompt = await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx) as { systemPrompt: string };
+  assert.match(prompt.systemPrompt, /do not continue the goal's work until it is resumed/);
+  assert.doesNotMatch(prompt.systemPrompt, /goal_resume/, "the model is not invited to call a disabled tool");
+  await h.commands.get("goal")?.handler("settings conversational-resume on", h.ctx);
+  assert.ok(h.activeTools().includes("goal_resume"));
+  assert.equal(h.messages.length, before, "enabling the control itself does not resume the goal");
+  await h.commands.get("goal")?.handler("resume", h.ctx);
+  await h.commands.get("goal")?.handler("settings conversational-resume off", h.ctx);
+  await settleNetworkFailure(h);
+  const afterExplicit = h.messages.length;
+  t.mock.timers.tick(60_000);
+  await flushPromises();
+  assert.equal(h.messages.length, afterExplicit + 1, "conversational resume does not disable automatic continuation");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("re-enabling automatic continuation waits the grace period and conversational settings do not cancel it", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const h = createContinuationHarness();
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("settings auto-continue off", h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  await settleNetworkFailure(h);
+  const before = h.messages.length;
+  await h.commands.get("goal")?.handler("settings auto-continue on", h.ctx);
+  t.mock.timers.tick(30_000);
+  await flushPromises();
+  await h.commands.get("goal")?.handler("settings conversational-resume off", h.ctx);
+  await h.commands.get("goal")?.handler("settings", h.ctx);
+  await h.commands.get("goal")?.handler("", h.ctx);
+  t.mock.timers.tick(29_999);
+  await flushPromises();
+  assert.equal(h.messages.length, before);
+  t.mock.timers.tick(1);
+  await flushPromises();
+  assert.equal(h.messages.length, before + 1, "unrelated setting changes and inspection leave the wake deadline alone");
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("invalid settings commands cannot replace the goal or modify preferences", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const h = createContinuationHarness();
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  const before = h.entries.length;
+  for (const args of ["settings unknown off", "settings auto-continue", "settings auto-continue false", "settings conversational-resume on extra"]) {
+    await h.commands.get("goal")?.handler(args, h.ctx);
+  }
+  assert.equal(h.entries.length, before);
+  const inspected = await h.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
+  assert.deepEqual((inspected.details as { preferences: unknown }).preferences, { autoContinue: true, conversationalResume: true });
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("preference save failures report an error without changing runtime settings or the goal", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
+  const h = createContinuationHarness(undefined, { hasUI: true });
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("settings conversational-resume off", h.ctx);
+  await h.commands.get("goal")?.handler("keep watching", h.ctx);
+  await h.handlers.get("agent_end")?.(abortedOutcome, h.ctx);
+  const before = h.entries.length;
+  writeFileSync(goalPreferencesPath(), "{not valid JSON");
+  await h.commands.get("goal")?.handler("settings conversational-resume on", h.ctx);
+  assert.equal(h.notifications.at(-1)?.type, "error");
+  assert.match(h.notifications.at(-1)?.message ?? "", /not valid JSON/);
+  assert.equal(h.entries.length, before);
+  assert.equal(h.activeTools().includes("goal_resume"), false);
+  const inspected = await h.tools.get("get_goal")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
+  assert.equal((inspected.details as { preferences: { conversationalResume: boolean } }).preferences.conversationalResume, false);
+  await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+function isolatePreferences(t: TestContext): void {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const root = mkdtempSync(join(tmpdir(), "pi-goal-preferences-"));
+  process.env.PI_CODING_AGENT_DIR = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  });
+}
+
 async function settleNetworkFailure(h: ReturnType<typeof createContinuationHarness>): Promise<void> {
   await h.handlers.get("agent_start")?.({}, h.ctx);
   await h.handlers.get("agent_end")?.(networkFailureOutcome, h.ctx);
@@ -1358,6 +1565,7 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
   const tools = new Map<string, ToolDefinition>();
   let active: string[] = [];
   const statuses: Array<string | undefined> = [];
+  const notifications: Array<{ message: string; type?: string }> = [];
   const commands = new Map<string, CommandDefinition>();
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const messages: unknown[] = [];
@@ -1377,7 +1585,7 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
     sessionManager: { getBranch: () => entries },
     ui: {
       confirm: async () => true,
-      notify: () => undefined,
+      notify: (message: string, type?: string) => notifications.push({ message, ...(type ? { type } : {}) }),
       setStatus: (_key: string, value: string | undefined) => {
         statuses.push(value);
       },
@@ -1426,6 +1634,7 @@ function createContinuationHarness(signal?: AbortSignal, options: { hasUI?: bool
     shortcuts,
     tools,
     statuses,
+    notifications,
     activeTools: () => [...active],
     setBusy: (busy: boolean) => {
       idle = !busy;

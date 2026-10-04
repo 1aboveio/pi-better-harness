@@ -225,7 +225,13 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
 test("an escape-paused workflow goal puts the paused instruction before, and over, the workflow text", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const dir = mkdtempSync(join(tmpdir(), "pi-workflow-paused-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
+  t.after(() => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
   const skillPath = join(dir, "SKILL.md");
   writeFileSync(skillPath, "---\nname: fixture\nmetadata:\n  workflow-role: coordinator\n---\n# Fixture\nOnly coordinate work.\n");
   const entries: Array<{ type: string; customType?: string; data?: unknown }> = [];
@@ -262,6 +268,15 @@ test("an escape-paused workflow goal puts the paused instruction before, and ove
   assert.ok(paused > 0 && override > paused, "the paused instruction states that it overrides the workflow");
   assert.ok(workflow > override && skillText > workflow, "the workflow text follows the paused instruction");
   assert.match(prompt, /with a choice that means proceed/);
+
+  await commands.get("goal")?.handler("settings conversational-resume off", ctx);
+  await handlers.get("session_start")?.({ reason: "reload" }, ctx);
+  const disabled = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;
+  assert.equal(currentGoalSnapshot(ctx)?.status, "paused", "reloading the saved control never resumes the goal");
+  assert.match(disabled, /do not continue the goal's work until it is resumed/);
+  assert.match(disabled, /this overrides the workflow instructions below/);
+  assert.match(disabled, /Only coordinate work/);
+  assert.doesNotMatch(disabled, /goal_resume/, "disabling the resume tool retains the workflow pause override");
 
   await commands.get("goal")?.handler("resume", ctx);
   const running = (await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string }).systemPrompt;

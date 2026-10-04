@@ -28,6 +28,9 @@ Goal state is stored as `pi-better-goal` custom entries in the Pi session. Exist
 /goal resume
 /goal clear
 /goal complete
+/goal settings
+/goal settings auto-continue on|off
+/goal settings conversational-resume on|off
 /better-activity
 ```
 
@@ -35,7 +38,7 @@ Model-callable tools:
 
 - `get_goal`
 - `update_goal`
-- `goal_resume` (only while a goal is paused by `escape`)
+- `goal_resume` (only while a goal is paused by `escape` and conversational resume is enabled)
 - `get_background_activity`
 
 ## Pause With Escape
@@ -50,11 +53,13 @@ A paused goal stays paused while you talk. Your messages are ordinary
 conversation: the agent answers questions and discusses options, but the
 goal's work loop does not restart. Anything else that aborts the running turn,
 such as `/compact` while streaming or switching sessions, pauses the same way.
-The status line shows `goal paused · say "go" or /goal resume`.
+With conversational resume enabled, the status line shows
+`goal paused · say "go" or /goal resume`; when disabled it shows
+`goal paused · /goal resume`.
 
 To resume an `escape` pause, say so plainly ("go", "continue", "ok do it",
 "approved, proceed"), or answer a decision the agent explicitly asked you for.
-While the goal is paused, the agent has a `goal_resume` tool and is told to
+With conversational resume enabled, while the goal is paused the agent has a `goal_resume` tool and is told to
 call it only for such a clear go-ahead, never for questions, "why...", "what
 about...", "let me think", or discussion. `goal_resume` resumes exactly as
 `/goal resume` does. You can always resume yourself with `/goal resume` or the
@@ -69,6 +74,62 @@ bound command or workflow is unavailable follows the same rule. A later
 and so on) and extension commands never change goal state; note that Pi only
 recognizes a built-in by its exact text, so `/settings session` is sent to the
 model as an ordinary message.
+
+## Persistent User Controls
+
+Both controls default to `on`, preserving the existing behavior. `/goal settings`
+inspects their current values and preference-file location, even with no goal.
+`/goal` and `get_goal` also report both values. Configure them independently:
+
+```text
+/goal settings auto-continue off
+/goal settings conversational-resume off
+```
+
+Use `on` to enable either control again.
+
+- `auto-continue` controls automatic idle continuation and background-drain
+  wakes. Turning it off cancels a pending wake and prevents an in-flight wake
+  audit from sending a continuation. The goal stays active, its clocks and
+  background activity remain observable, and background drains still reset
+  the progress ledger. Turning it on while an active goal is idle schedules a
+  continuation after its normal grace/backoff period, unless it is held for
+  no progress or background work is running. It does not resume a paused goal.
+- `conversational-resume` controls the model's `goal_resume` after an Escape
+  pause. Turning it off removes the tool from the active tool list, refuses
+  stale/direct calls, and removes the conversational resume invitation from
+  the prompt and status. The agent can still answer ordinary conversation,
+  but a message such as "go" cannot resume the goal. Turning it on offers the
+  tool again for an Escape-paused goal; it does not resume it by itself and
+  never makes an explicit `/goal pause` agent-resumable.
+
+Neither setting disables `/goal <objective>` kickoff, `/goal resume`, or
+`alt+g`. An explicit resume queues one continuation even when automation is off;
+later idle turns still respect `auto-continue`. Question-result harvesting and
+other extensions' callback delivery are unchanged.
+
+Changes are saved atomically to
+`~/.pi/agent/extensions/pi-better-goal-preferences.json`, or under
+`$PI_CODING_AGENT_DIR/extensions` when set. They apply immediately in this
+session and are loaded on session start/reload in other sessions. They are
+user-wide preferences, not goal state or project settings. A missing file or
+missing control in a version-1 file uses the enabled default. Read/validation
+errors are reported without overwriting the file; the session retains its
+current settings (enabled defaults for a fresh extension). A failed save
+does not change the active settings.
+
+```json
+{
+  "version": 1,
+  "autoContinue": true,
+  "conversationalResume": true
+}
+```
+
+`PI_BETTER_GOAL_DISABLE_WAKE=1` or `PI_BETTER_EXTENSION_DISABLE_WAKE=1`
+still overrides automatic wakes for the process, even with `auto-continue on`.
+Inspection identifies that environment override. Neither environment switch
+disables goal kickoff, explicit resume, or conversational resume.
 
 ## Blocking Questions And Background Work
 
@@ -104,11 +165,12 @@ lines and confirm dialogs (both reflow the main-screen dock and can stack
 to the footer status instead, and height transitions force a full TUI redraw so
 differential paints stay aligned.
 
-Set `PI_BETTER_GOAL_DISABLE_WAKE=1` to disable hidden background-drain wakeups.
+Use `/goal settings auto-continue off` to disable automatic wakes persistently,
+or `PI_BETTER_GOAL_DISABLE_WAKE=1` for the process.
 
 ## Progress-Aware Continuation
 
-An active goal remains self-sustaining: after an idle foreground turn, the
+With automatic continuation enabled, an active goal remains self-sustaining: after an idle foreground turn, the
 extension schedules a hidden continuation after the configured grace period.
 It records a durable per-goal continuation state in the session so repeated
 turns remain bounded across extension reloads and session resumes.

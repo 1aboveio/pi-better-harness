@@ -3,6 +3,7 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
 import { commandAvailable, commandInvocation, resolveGoalCommand } from "./command-binding.js";
+import { goalPreferencesPath, readGoalPreferences, writeGoalPreference, type GoalPreferences } from "./preferences.js";
 
 import {
   collectActivitySnapshot,
@@ -82,20 +83,20 @@ const GOAL_RESUME_RULE =
   "or answers a decision you explicitly asked for in your previous message with a choice that means proceed. Never call it for questions, \"why...\", \"what about...\", \"let me think\", or discussion.";
 
 /** True when the agent may resume this goal with `goal_resume`. */
-export function agentResumable(goal: GoalSnapshot | null): boolean {
-  return goal?.status === "paused" && goal.pauseReason === "interrupt";
+export function agentResumable(goal: GoalSnapshot | null, conversationalResume = true): boolean {
+  return conversationalResume && goal?.status === "paused" && goal.pauseReason === "interrupt";
 }
 
 /** Footer status for a paused goal, telling the user how to resume it. */
-export function pausedGoalStatus(goal: GoalSnapshot): string {
-  return agentResumable(goal) ? 'goal paused · say "go" or /goal resume' : "goal paused · /goal resume";
+export function pausedGoalStatus(goal: GoalSnapshot, conversationalResume = true): string {
+  return agentResumable(goal, conversationalResume) ? 'goal paused · say "go" or /goal resume' : "goal paused · /goal resume";
 }
 
-function pausedGoalPrompt(goal: GoalSnapshot): string {
+function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean): string {
   return [
     `Pi Better Goal is paused because the user pressed escape. Goal: ${goal.objective}`,
     "Treat the user's messages as ordinary conversation: answer them, but do not continue the goal's work until it is resumed.",
-    GOAL_RESUME_RULE,
+    conversationalResume ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
   ].join("\n");
 }
 
@@ -106,10 +107,21 @@ const GOAL_ACTIONS: readonly AutocompleteItem[] = [
   { value: "resume", label: "resume", description: "Resume the paused goal" },
   { value: "clear", label: "clear", description: "Remove the current goal" },
   { value: "complete", label: "complete", description: "Mark the current goal complete" },
+  { value: "settings", label: "settings", description: "Inspect or persist goal continuation and conversational resume controls" },
 ];
+
+const GOAL_SETTINGS = ["auto-continue", "conversational-resume"] as const;
 
 export function goalArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   const prefix = argumentPrefix.trimStart().toLowerCase();
+  if (prefix.startsWith("settings ")) {
+    const settingPrefix = prefix.slice("settings ".length);
+    const choices = GOAL_SETTINGS.flatMap((setting) => settingPrefix.startsWith(`${setting} `)
+      ? ["on", "off"].map((mode) => `settings ${setting} ${mode}`)
+      : [`settings ${setting}`]);
+    const matches = choices.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
+    return matches.length > 0 ? matches : null;
+  }
   const matches = GOAL_ACTIONS.filter((action) => action.value.startsWith(prefix));
   return matches.length > 0 ? [...matches] : null;
 }
@@ -214,9 +226,11 @@ function formatGoal(
   goal: GoalSnapshot | null,
   continuation: ReturnType<typeof currentContinuationState> = null,
   stall = observeGoalStall(goal, continuation),
+  preferences: GoalPreferences = { autoContinue: true, conversationalResume: true },
 ): string {
+  const settings = formatPreferences(preferences);
   if (!goal) {
-    return "No goal is set.";
+    return `No goal is set.\n${settings}`;
   }
   const budget = goal.tokenBudget === null ? "none" : String(goal.tokenBudget);
   const timing = goalTiming(goal);
@@ -232,11 +246,19 @@ function formatGoal(
     `Elapsed time: ${timing.elapsedSeconds}s`,
     `Observable progress: ${stall?.state ?? "unknown"}`,
     continuationStatus,
+    settings,
     ...(goal.status === "paused"
-      ? [agentResumable(goal)
+      ? [agentResumable(goal, preferences.conversationalResume)
         ? 'Resume: say "go" (the agent calls goal_resume), /goal resume, or alt+g'
         : "Resume: /goal resume or alt+g"]
       : []),
+  ].join("\n");
+}
+
+function formatPreferences(preferences: GoalPreferences): string {
+  return [
+    `Automatic continuation setting: ${preferences.autoContinue ? "on" : "off"}${WAKE_DISABLED ? " (disabled by environment)" : ""}`,
+    `Conversational resume setting: ${preferences.conversationalResume ? "on" : "off"}`,
   ].join("\n");
 }
 
@@ -284,6 +306,7 @@ export default function (pi: ExtensionAPI): void {
   let idleContinuationSignature = "";
   let refreshGoalWidget: ((force?: boolean) => void) | undefined;
   let lastAgentEvidence: ContinuationEvidence | null = null;
+  let preferences: GoalPreferences = { autoContinue: true, conversationalResume: true };
   /** Background items active when each pending blocking question started, keyed by tool call id. */
   const pendingQuestions = new Map<string, Map<string, BackgroundWorkItem>>();
 
@@ -387,7 +410,9 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     setGoal(goalWithStatus(goal, "paused", undefined, "interrupt"), ctx, "runtime");
-    notifyGoal(ctx, 'Goal paused. Say "go" to resume it, or use /goal resume.');
+    notifyGoal(ctx, preferences.conversationalResume
+      ? 'Goal paused. Say "go" to resume it, or use /goal resume.'
+      : "Goal paused. Use /goal resume or alt+g to resume it.");
   };
 
   /** Why a paused goal cannot become active again, or null when it can. */
@@ -470,7 +495,7 @@ export default function (pi: ExtensionAPI): void {
     kind: "continuation" | "background-drained",
     snapshot?: ActivitySnapshot,
   ): void => {
-    if (WAKE_DISABLED || !isPokeable(goal) || continuationQueuedFor === goal.goalId) {
+    if (WAKE_DISABLED || !preferences.autoContinue || !isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
     }
     if (kind === "continuation" && currentContinuationState(ctx, goal.goalId)?.blocked) {
@@ -500,7 +525,7 @@ export default function (pi: ExtensionAPI): void {
     const execution = executionGeneration;
     const wake = wakeGeneration;
     const auditIsCurrent = (): boolean => {
-      if (execution !== executionGeneration || wake !== wakeGeneration) return false;
+      if (WAKE_DISABLED || !preferences.autoContinue || execution !== executionGeneration || wake !== wakeGeneration) return false;
       const current = currentGoalSnapshot(ctx);
       return isPokeable(current) && current.goalId === goalId &&
         continuationQueuedFor !== goalId && !isForegroundBusy(ctx);
@@ -603,7 +628,7 @@ export default function (pi: ExtensionAPI): void {
     const background = snapshot?.backgroundRunning
       ? `bg ${snapshot.activeBackgroundCount}${snapshot.unhealthyBackgroundCount ? `, ${snapshot.unhealthyBackgroundCount} unhealthy` : ""}`
       : undefined;
-    if (goal?.status === "paused") return background ? `${pausedGoalStatus(goal)} · ${background}` : pausedGoalStatus(goal);
+    if (goal?.status === "paused") return background ? `${pausedGoalStatus(goal, preferences.conversationalResume)} · ${background}` : pausedGoalStatus(goal, preferences.conversationalResume);
     if (background) return background;
     const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
     if (continuation?.blocked) return "waiting: no progress";
@@ -633,7 +658,7 @@ export default function (pi: ExtensionAPI): void {
     if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
     try {
       const active = pi.getActiveTools();
-      const wanted = agentResumable(goal);
+      const wanted = agentResumable(goal, preferences.conversationalResume);
       if (active.includes(GOAL_RESUME_TOOL) === wanted) return;
       pi.setActiveTools(wanted ? [...active, GOAL_RESUME_TOOL] : active.filter((name) => name !== GOAL_RESUME_TOOL));
     } catch {
@@ -760,17 +785,47 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("goal", {
-    description: "Create, inspect, pause, resume, clear, or complete the active goal",
+    description: "Create, inspect, pause, resume, clear, or complete the active goal; configure persistent goal settings",
     getArgumentCompletions: goalArgumentCompletions,
     handler: async (args, ctx) => {
       currentCtx = ctx;
       const trimmed = args.trim();
       const current = getGoal(ctx);
 
+      if (trimmed === "settings" || trimmed.startsWith("settings ")) {
+        const [, setting, mode, ...extra] = trimmed.split(/\s+/);
+        if (setting !== undefined && (!GOAL_SETTINGS.includes(setting as typeof GOAL_SETTINGS[number]) ||
+            (mode !== "on" && mode !== "off") || extra.length > 0)) {
+          notifyGoal(ctx, "Usage: /goal settings [auto-continue|conversational-resume on|off]", "warning");
+          return;
+        }
+        if (setting !== undefined) {
+          try {
+            const previous = preferences;
+            preferences = writeGoalPreference(setting === "auto-continue" ? "autoContinue" : "conversationalResume", mode === "on");
+            if (previous.autoContinue !== preferences.autoContinue) clearIdleContinuation();
+            syncResumeTool(getGoal(ctx));
+            applyStatus(ctx);
+            if (!previous.autoContinue && preferences.autoContinue) {
+              const snapshot = await publishSnapshot(ctx);
+              const goal = getGoal(ctx);
+              if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
+                scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
+              }
+            }
+          } catch (error) {
+            notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
+            return;
+          }
+        }
+        ctx.ui.notify(`${formatPreferences(preferences)}\nPreferences: ${goalPreferencesPath()}`, "info");
+        return;
+      }
+
       if (!trimmed) {
         const continuation = current ? currentContinuationState(ctx, current.goalId) : null;
         // Inspection is always explicit user intent; show the full summary even while busy.
-        ctx.ui.notify(formatGoal(current, continuation, observeGoalStall(current, continuation, { foregroundRunning })), "info");
+        ctx.ui.notify(formatGoal(current, continuation, observeGoalStall(current, continuation, { foregroundRunning }), preferences), "info");
         return;
       }
 
@@ -847,8 +902,8 @@ export default function (pi: ExtensionAPI): void {
         backgroundRunning: latestSnapshot?.backgroundRunning ?? false,
       });
       return {
-        content: [{ type: "text", text: formatGoal(goal, continuation, stall) }],
-        details: { goal, continuation, stall, timing: goal ? goalTiming(goal) : null, hasGoal: goal !== null },
+        content: [{ type: "text", text: formatGoal(goal, continuation, stall, preferences) }],
+        details: { goal, continuation, stall, preferences: { ...preferences }, timing: goal ? goalTiming(goal) : null, hasGoal: goal !== null },
       };
     },
   });
@@ -904,7 +959,13 @@ export default function (pi: ExtensionAPI): void {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const reason = (params as { reason?: string }).reason;
       const current = getGoal(ctx);
-      if (!agentResumable(current)) {
+      if (!preferences.conversationalResume) {
+        return {
+          content: [{ type: "text", text: "Conversational goal resume is disabled. Only the user can resume with /goal resume or alt+g." }],
+          details: { ok: false, goal: current },
+        };
+      }
+      if (!agentResumable(current, preferences.conversationalResume)) {
         const text = current?.status === "paused"
           ? "This goal was paused with /goal pause or by the runtime. Only the user can resume it, with /goal resume."
           : "No goal is paused, so there is nothing to resume.";
@@ -996,6 +1057,11 @@ export default function (pi: ExtensionAPI): void {
     collectionPending = false;
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
+    try {
+      preferences = readGoalPreferences();
+    } catch (error) {
+      notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
+    }
     const restoredGoal = getGoal(ctx);
     if (restoredGoal?.status === "active" && !restoredGoal.command && skillCommandName(restoredGoal.objective)) {
       setGoal(goalWithStatus(restoredGoal, "paused"), ctx, "runtime");
@@ -1046,7 +1112,8 @@ export default function (pi: ExtensionAPI): void {
     const owner = getWorkflow(ctx);
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
-    const pausedInstruction = agentResumable(goal) ? pausedGoalPrompt(goal!) : "";
+    const pausedInstruction = goal?.status === "paused" && goal.pauseReason === "interrupt"
+      ? pausedGoalPrompt(goal, preferences.conversationalResume) : "";
     if (!isPokeable(goal) && !owner) {
       return pausedInstruction ? { systemPrompt: `${event.systemPrompt}\n\n${pausedInstruction}` } : undefined;
     }

@@ -32,6 +32,8 @@ const { continuationEvidence } = await import("../packages/pi-better-goal/src/co
 test("Pi retries settle before Goal updates, and resume/reload/callbacks preserve recovery", { timeout: 10_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pi-goal-retry-runtime-"));
   const agentDir = join(root, "agent");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
   let session;
   t.after(async () => {
     if (session) {
@@ -42,6 +44,8 @@ test("Pi retries settle before Goal updates, and resume/reload/callbacks preserv
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(root, { recursive: true, force: true });
   });
   // Shorten only the clock scale. Pi's default retry count remains unchanged.
