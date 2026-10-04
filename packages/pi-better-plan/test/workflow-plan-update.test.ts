@@ -381,7 +381,8 @@ test("a plan edited by someone else after the last sync is re-read, and a stale 
   }
 });
 
-test("workflow updates are gated on rush-issues ownership and a bound plan; generic plans are unaffected", async () => {
+for (const owner of ["rush-issues", "resolve-issues", "fixture-workflow"])
+test(`${owner} updates require a matching binding and leave generic plans unaffected`, async () => {
   const h = await harness();
   try {
     const original = readFileSync(h.path, "utf8");
@@ -391,17 +392,25 @@ test("workflow updates are gated on rush-issues ownership and a bound plan; gene
     const generic = await h.update({ plan: [{ step: "Generic", status: "in_progress" }] });
     assert.equal((generic.details as any).plan.steps[0].step, "Generic");
 
-    h.own("fixture");
-    await assert.rejects(h.update(change), /fixture owns the task plan and does not accept/);
-    h.own(null);
-
-    h.own("rush-issues");
-    await assert.rejects(h.update(change), /No rush-issues plan is bound; call sync_workflow_plan/);
+    await assert.rejects(h.tools.get("sync_workflow_plan")!.execute("unowned", { path: h.path, revision: 12 }, undefined, undefined, h.ctx), /Only an active workflow/);
+    h.own(owner);
+    await assert.rejects(h.update(change), new RegExp(`No ${owner} plan is bound; call sync_workflow_plan`));
     await h.tools.get("sync_workflow_plan")!.execute("bind", { path: h.path, revision: 12 }, undefined, undefined, h.ctx);
     await assert.rejects(h.update({ plan: [{ step: "Wrong", status: "pending" }] }), /Send workflow \(bound with sync_workflow_plan\) instead of plan/);
     await assert.rejects(h.update({ ...change, plan: [{ step: "Both", status: "pending" }] }), /either plan or workflow, not both/);
     assert.equal(readFileSync(h.path, "utf8"), original);
     await h.update(change);
+    assert.equal(h.plan().planRevision, 13);
+    assert.ok(h.widget().includes(`${owner} · rev 13`));
+    assert.equal(readEvents(join(h.runDir, "profiling", "run.jsonl"))[0].planRevision, 13);
+
+    // Even if an ownership event is missed, a different owner cannot use the old binding.
+    h.entries.push({ type: "custom", customType: "pi-better-workflow", data: {
+      version: 1, kind: "set", owner: { name: "different-workflow", planOwner: "workflow" },
+    } });
+    await assert.rejects(h.update(change), /No different-workflow plan is bound/);
+    const other = await h.tools.get("get_plan")!.execute("other", {}, undefined, undefined, h.ctx);
+    assert.equal((other.details as any).hasPlan, false);
     assert.equal(h.plan().planRevision, 13);
 
     h.own(null);
