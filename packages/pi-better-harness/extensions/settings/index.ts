@@ -29,7 +29,8 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
     editor?.clear();
   }
   function install(): void {
-    if (editor || ctx.mode !== "tui") return;
+    if (ctx.mode !== "tui" || (editor && !editor.unsupportedReason())) return;
+    editor?.dispose();
     editor = installGhostEditor(ctx, {
       changed() { revision++; cancel("editor changed"); },
       accepted() { engine?.noteAccepted(); reason = "accepted"; revision++; },
@@ -141,12 +142,14 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
             enabled = !enabled;
             paused = false;
             if (enabled) install();
+            if (enabled && editor?.unsupportedReason()) current.ui.notify(`Prompt suggestions paused: ${editor.unsupportedReason()}`, "warning");
             cancel(enabled ? "waiting for a user turn" : "disabled");
           } else if (selected === "status") {
+            const editorReason = enabled ? editor?.unsupportedReason() : undefined;
             const text = [
-              `Prompt suggestions: ${enabled ? "on" : "off"}${paused ? " (paused)" : ""}`,
+              `Prompt suggestions: ${enabled ? "on" : "off"}${paused || editorReason ? " (paused)" : ""}`,
               `Model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unavailable"}`,
-              `Last state: ${paused ? transportReason ?? reason : reason}`,
+              `Last state: ${editorReason ?? (paused ? transportReason ?? reason : reason)}`,
               `Auxiliary tokens: ${usage.totalTokens ?? "unknown"}`,
               `Input: ${usage.input ?? "unknown"}; output: ${usage.output ?? "unknown"}; cache read: ${usage.cacheRead ?? "unknown"}`,
               `Reported cost: ${usage.cost === undefined ? "unknown" : `$${usage.cost.toFixed(6)}`}`,

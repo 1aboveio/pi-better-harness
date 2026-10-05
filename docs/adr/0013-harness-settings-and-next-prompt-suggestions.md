@@ -27,6 +27,12 @@ boundaries, compaction, new work, and shutdown cancel requests and invalidate
 late output. Suggestions yield to navigator and dialog input. Unsupported
 editor implementations retain their existing behavior.
 
+Shared input-ownership and factory-chain markers let the navigator wrap the
+native editor transparently. An incompatible replacement disables the old
+adapter and reports a status reason. The provider single-flight guard survives
+extension reload and remains held until the public response stream settles,
+even when local cancellation rejects before an abort-insensitive provider ends.
+
 Use the public model transport available on the running Pi version. Skip
 providers that cannot honor the request bounds instead of using private runtime
 objects, hardcoded HTTP, or another model. The inspected stock Codex and Bedrock

@@ -8,6 +8,7 @@ export interface GhostEditor {
   show(text: string): boolean;
   clear(): void;
   available(): boolean;
+  unsupportedReason(): string | undefined;
   dispose(): void;
 }
 
@@ -25,8 +26,19 @@ export function installGhostEditor(ctx: any, callbacks: { changed(): void; accep
     tui?.requestRender();
   }
   function available(): boolean {
-    if (disposed || !inner || inner.getText() !== "" || !inner.focused || inner.isShowingAutocomplete?.() || inner[BLOCKED]?.()) return false;
+    if (unsupportedReason() || !inner || inner.getText() !== "" || !inner.focused || inner.isShowingAutocomplete?.() || inner[BLOCKED]?.()) return false;
     return true;
+  }
+  function unsupportedReason(): string | undefined {
+    if (disposed) return "Custom editor is not supported";
+    let current = ctx.ui.getEditorComponent();
+    const seen = new Set();
+    while (current !== factory) {
+      if (typeof current !== "function" || seen.has(current)) return "Editor was replaced by another extension";
+      seen.add(current);
+      current = current[Symbol.for("pi-better-harness.editor-base-factory")];
+    }
+    return undefined;
   }
   const factory: any = (host: any, theme: any, kb: any) => {
     tui = host;
@@ -87,6 +99,7 @@ export function installGhostEditor(ctx: any, callbacks: { changed(): void; accep
   ctx.ui.setEditorComponent(factory);
   return {
     available,
+    unsupportedReason,
     show(text) { if (!available()) return false; ghost = text; tui.requestRender(); return true; },
     clear() { clear(); },
     dispose() {

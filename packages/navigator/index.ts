@@ -634,6 +634,7 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
     return wrapEditor(inner as any, currentDeps);
   }) as any;
   factory[FACTORY_MARK] = true;
+  factory[Symbol.for("pi-better-harness.editor-base-factory")] = base;
   factory[FACTORY_REFRESH] = (next: HostDeps) => { currentDeps = next; };
   ui.setEditorComponent(factory);
   return factory;

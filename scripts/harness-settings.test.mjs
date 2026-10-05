@@ -94,9 +94,25 @@ test("foreign modal editors are preserved and do not acquire suggestion keys", (
   class ModalEditor extends CustomEditor {}
   const f = editorFixture((tui, theme, kb) => new ModalEditor(tui, theme, kb));
   assert.equal(f.ghost.show("Do not install"), false);
+  assert.match(f.ghost.unsupportedReason(), /Custom editor/);
   f.editor.handleInput("draft");
   assert.equal(f.editor.getText(), "draft");
   f.ghost.dispose();
+});
+
+test("a later editor replacement disables stale suggestions and retains the new editor on disposal", () => {
+  const f = editorFixture();
+  assert.equal(f.ghost.show("Stale suggestion"), true);
+  class ModalEditor extends CustomEditor {}
+  const replacement = (tui, theme, kb) => new ModalEditor(tui, theme, kb);
+  f.ctx.ui.setEditorComponent(replacement);
+  assert.equal(f.ghost.available(), false);
+  assert.equal(f.ghost.show("Must not request or display"), false);
+  assert.match(f.ghost.unsupportedReason(), /replaced/);
+  f.editor.handleInput("my draft");
+  f.ghost.dispose();
+  assert.equal(f.ctx.ui.getEditorComponent(), replacement);
+  assert.equal(f.editor.getText(), "my draft");
 });
 
 test("navigator keys take priority in either native-editor wrapper load order", () => {
