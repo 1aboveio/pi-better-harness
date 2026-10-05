@@ -1,6 +1,23 @@
 # Next-prompt suggestions
 
-Status: user-approved design; implementation and delivery verification underway.
+Status: settings hub approved for delivery; next-prompt inference deferred.
+
+## Integration Gate
+
+On 2026-10-05 the user chose to defer inference rather than ship native-provider-only
+support. [Issue #426](https://github.com/1aboveio/pi-better-harness/issues/426)
+must establish safe public auth/header resolution and pass independent review
+before integration. Pi 0.82.1 and 1.0.0 hide composed raw header configuration;
+command-backed headers can synchronously block auth resolution and the TUI,
+defeating the whole-request deadline. Current config files cannot certify a
+custom path or a stale loaded snapshot.
+
+This delivery includes only `/harness-settings` and package-owned settings
+shortcuts. It includes no inference runtime, editor adapter, suggestion control,
+or suggestion preference writes. The remaining sections describe the future
+design, not currently available behavior. The deferred implementation and
+review fixes are preserved locally on `feat/prompt-suggestions-deferred-426` at
+`593516e`; they are not an integration-ready feature.
 
 ## Confirmed scope
 
@@ -249,13 +266,12 @@ These are versioned local observations, not stable cross-version guarantees.
 
 ## Delivery boundary
 
-The user approved implementation and shipping after selecting the settings hub
-and standalone-compatible shortcuts. Preserve the explicit user opt-in default
-through delivery; do not change personal settings. The implementation supports
-public provider transport on Pi 0.82.1 and 1.0.0, with safe rejection of stock
-Codex/Bedrock transports and virtual routes that cannot meet v1 bounds. Auxiliary
-usage uses a separate metadata ledger rather than fictional transcript messages.
+The user approved shipping the settings hub and standalone-compatible shortcuts,
+then explicitly deferred inference under #426. Delivery must not load any of the
+future inference/editor modules or expose a suggestion toggle. Do not change
+personal settings. The deferred prototype and review regressions remain on the
+local deferred branch for future work, subject to the integration gate above.
 Startup git-derived prompts, predictive typing, alternative-model routing, and
-remote telemetry remain outside v1.
+remote telemetry remain outside the future v1 design.
 
 [claude-interactive]: https://code.claude.com/docs/en/interactive-mode#prompt-suggestions

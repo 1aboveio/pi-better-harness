@@ -13,7 +13,7 @@ const goalExtension = installed ? join(installed, "extensions/goal/index.ts") : 
 const piCli = process.env.PI_HARNESS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
 const q = text => `'${text.replaceAll("'", "'\\''")}'`;
 
-test("real TUI settings hub routes package settings and suggestions require acceptance", { skip: spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 }, () => {
+test("real TUI hub routes package settings without invoking the model", { skip: spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 }, () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-harness-settings-"));
   const socket = `harness-settings-${process.pid}`;
   const log = join(dir, "calls.jsonl");
@@ -23,23 +23,9 @@ test("real TUI settings hub routes package settings and suggestions require acce
   mkdirSync(agent);
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ tuiMode: "fullscreen", packages: [], quietStartup: true }));
   writeFileSync(fixture, `import { appendFileSync, writeFileSync } from 'node:fs';
-import { createAssistantMessageEventStream } from ${JSON.stringify(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")))};
-function streamSimple(model, context, options){
-  const suggestion = !context.tools?.length && JSON.stringify(context).toLowerCase().includes('suggest');
-  appendFileSync(${JSON.stringify(log)}, JSON.stringify({suggestion,tools:context.tools?.length??0})+'\\n');
-  const stream = createAssistantMessageEventStream();
-  const response = {role:'assistant',content:[{type:'text',text:suggestion ? 'Run the focused tests' : 'The focused change is ready for testing.'}],
-    api:model.api,provider:model.provider,model:model.id,stopReason:'stop',timestamp:Date.now(),
-    usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
-  queueMicrotask(()=>{
-    if(options?.signal?.aborted){const aborted={...response,stopReason:'aborted'};stream.push({type:'error',reason:'aborted',error:aborted});stream.end(aborted);return;}
-    stream.push({type:'start',partial:response});
-    stream.push({type:'text_start',contentIndex:0,partial:response});
-    stream.push({type:'text_delta',contentIndex:0,delta:response.content[0].text,partial:response});
-    stream.push({type:'text_end',contentIndex:0,content:response.content[0].text,partial:response});
-    stream.push({type:'done',reason:'stop',message:response});stream.end(response);
-  });
-  return stream;
+function streamSimple(){
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify({unexpectedModelRequest:true})+'\\n');
+  throw new Error('Settings must not invoke the model');
 }
 export default function(pi){
   pi.registerProvider('harness-test',{api:'harness-test-api',apiKey:'fake',baseUrl:'http://localhost:0',streamSimple,
@@ -67,36 +53,19 @@ export default function(pi){
     tmux("new-session", "-d", "-s", "test", "-x", "100", "-y", "32", command);
     tmux("set-option", "-w", "-t", "test", "remain-on-exit", "on");
     wait(() => existsSync(ready));
-    send("A baseline change"); key("Enter");
-    wait(pane => pane.includes("The focused change is ready for testing."));
     send("/harness-settings"); key("Enter");
     wait(pane => pane.includes("Harness settings") && pane.includes("/goal settings"));
-    assert.equal(calls().length, 1, "default-off made no auxiliary model call");
-    key("Down"); key("Down"); key("Enter");
+    key("Enter");
     wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
     key("Escape");
     wait(pane => pane.includes("Harness settings"));
-    key("Up"); key("Up"); key("Enter");
-    wait(pane => pane.includes("Enable prompt suggestions?"));
-    key("Enter");
-    wait(pane => pane.includes("Harness settings") && /Prompt suggestions\s+on\s*\n/.test(pane) && !pane.includes("Enable prompt suggestions?"));
-    key("Escape");
-    wait(pane => !pane.includes("Harness settings") && !pane.includes("Enable prompt suggestions?"));
-    send("Implement the focused change"); key("Enter");
-    wait(pane => pane.includes("Run the focused tests"));
-    assert.equal(calls().filter(call => call.suggestion).length, 1);
-    assert.equal(calls().find(call => call.suggestion).tools, 0);
-    key("Enter");
-    send("/harness-settings"); key("Enter");
-    wait(pane => pane.includes("Harness settings"));
-    assert.equal(calls().filter(call => !call.suggestion).length, 2, "ghost Enter made no agent request");
     key("Escape");
     wait(pane => !pane.includes("Harness settings"));
-    send("A second focused change"); key("Enter");
-    wait(pane => pane.includes("Run the focused tests") && calls().filter(call => call.suggestion).length === 2);
-    key("Tab"); key("Enter");
-    wait(() => calls().filter(call => !call.suggestion).length === 4);
-    assert.equal(calls().filter(call => !call.suggestion).length, 4);
+    send("/goal settings"); key("Enter");
+    wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
+    key("Escape");
+    wait(pane => !pane.includes("Goal settings"));
+    assert.deepEqual(calls(), [], "opening settings never invokes the model");
   } finally {
     spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
     rmSync(dir, { recursive: true, force: true });
