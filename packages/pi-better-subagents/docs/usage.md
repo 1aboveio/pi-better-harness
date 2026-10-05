@@ -67,7 +67,7 @@ is present; without this extension it uses adaptive guidance.
   `subagent_spawn` starts a detached `pi -p` child and returns immediately,
   leaving the session free for the human. When the child finishes, it sends a
   lightweight trigger; the foreground calls `subagent_result` and presents the
-  result (as a `followUp`, never cutting into work in progress). The foreground
+  result (as a `followUp` by default; optional busy steering is described below). The foreground
   is nudged once, at completion — never on a wait/poll loop.
 - **Subagents are autonomous; communication is one-way (parent → child).** The
   parent front-loads everything the child needs into the spawn; the child runs to
@@ -247,7 +247,7 @@ given.
   its output is durable in a log file.
 - **Completions trigger one batched turn that fetches durable results.** Ordinary
   terminal callbacks stay in the harness queue while the foreground agent is
-  busy. Once Pi is idle, they accumulate for 100 ms and share one
+  busy by default. Once Pi is idle, they accumulate for 100 ms and share one
   `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })` notification
   with background-task completions from the same Pi host. Each row contains only
   source, id, label, terminal status, and the `subagent_result` lookup. Full
@@ -260,6 +260,20 @@ given.
   pending records retryable, and `/reload` recovers records explicitly marked
   pending. `callback:false` sends no model message; read the durable result later
   with `subagent_result`.
+- **Optional busy steering.** Start Pi with
+  `PI_BETTER_CALLBACK_WHILE_BUSY=steer` to receive ordinary completions during
+  foreground work. Completions spanning multiple accumulation windows during
+  one tool call stay together until the final active tool ends, then share one
+  compact `steer` notification without triggering a new run. Parallel and nested
+  tools are tracked together by both extensions. While busy with no active tool,
+  the normal accumulation window applies. Manual compaction and branch
+  summarization hold callbacks until an agent run starts or Pi becomes idle.
+  Idle delivery remains
+  `{ deliverAs: "followUp", triggerTurn: true }`. Unset or invalid values keep
+  the default hold-until-idle behavior. The same byte budget, queued overflow,
+  dedupe, delivery receipts, retry, ownership checks, and `callback:false` rules
+  apply to both modes; a completion handed off by steer is not sent again at
+  idle. Urgent health/failure alerts are unchanged.
 - **The prompt guidelines forbid polling.** The foreground agent is told, in the
   tool guidelines, that spawning is done and it must not loop on `output`/`result`
   or sleep to wait.

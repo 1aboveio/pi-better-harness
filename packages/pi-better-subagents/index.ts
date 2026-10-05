@@ -2354,18 +2354,23 @@ export default function (pi: ExtensionAPI) {
     // ---- live-status lifecycle -----------------------------------------
     pi.on("agent_start", async (_event, ctx) => {
         setCallbackBatchContext(pi, ctx);
+        getCallbackBatcher(pi).setForegroundRunning(true);
         uiCtx = ctx;
         mainAgentStartedAt = Date.now();
         mainAgentTools.clear();
         refreshBackgroundWorkNavigator(ctx);
     });
 
+    pi.on("agent_end", () => { getCallbackBatcher(pi).setForegroundRunning(false); });
+
     pi.on("tool_execution_start", async (event, ctx) => {
+        getCallbackBatcher(pi).toolStarted(event.toolCallId);
         mainAgentTools.set(event.toolCallId, event.toolName);
         refreshBackgroundWorkNavigator(ctx);
     });
 
     pi.on("tool_execution_end", async (event, ctx) => {
+        await getCallbackBatcher(pi).toolEnded(event.toolCallId);
         mainAgentTools.delete(event.toolCallId);
         refreshBackgroundWorkNavigator(ctx);
     });
@@ -2386,6 +2391,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("agent_settled", async (_event, ctx) => {
+        getCallbackBatcher(pi).setForegroundRunning(false);
         setCallbackBatchContext(pi, ctx);
         mainAgentStartedAt = undefined;
         mainAgentTools.clear();

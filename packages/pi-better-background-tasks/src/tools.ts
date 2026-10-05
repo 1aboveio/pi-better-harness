@@ -13,7 +13,7 @@ import {
   type OutputOptions,
 } from "./output.js";
 import { readOutputControls } from "./shared-log-utils.js";
-import { cancelCallbackBatch, setCallbackBatchContext } from "./shared-callback-batcher.js";
+import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
@@ -203,8 +203,17 @@ export function registerTools(pi: ExtensionAPI): void {
     }
     runTaskMaintenance({ activeOrigin: activeSession });
   });
-  pi.on("agent_start", (_event, ctx) => { setCallbackBatchContext(pi, ctx); });
-  pi.on("agent_settled", (_event, ctx) => { setCallbackBatchContext(pi, ctx); });
+  pi.on("agent_start", (_event, ctx) => {
+    setCallbackBatchContext(pi, ctx);
+    getCallbackBatcher(pi).setForegroundRunning(true);
+  });
+  pi.on("agent_end", () => { getCallbackBatcher(pi).setForegroundRunning(false); });
+  pi.on("agent_settled", (_event, ctx) => {
+    getCallbackBatcher(pi).setForegroundRunning(false);
+    setCallbackBatchContext(pi, ctx);
+  });
+  pi.on("tool_execution_start", (event) => { getCallbackBatcher(pi).toolStarted(event.toolCallId); });
+  pi.on("tool_execution_end", async (event) => { await getCallbackBatcher(pi).toolEnded(event.toolCallId); });
   pi.on("session_before_switch", () => {
     activeSession = undefined;
     cancelCallbackBatch(pi);
