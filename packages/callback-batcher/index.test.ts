@@ -7,8 +7,11 @@ import test from "node:test";
 import {
   CALLBACK_BATCH_BUDGET_BYTES,
   CALLBACK_BATCH_MAX_BYTES,
+  CALLBACK_WHILE_BUSY_ENV,
   callbackBatchBudget,
   createCallbackBatcher,
+  getCallbackBatcher,
+  setCallbackBatchContext,
   formatCallbackBatch,
   formatUrgentCallback,
   packCallbackBatch,
@@ -44,6 +47,357 @@ function recordingHost() {
   };
   return { host, messages };
 }
+
+test("#425 only the exact environment opt-in steers busy callbacks; idle delivery is unchanged", async () => {
+  const previous = process.env[CALLBACK_WHILE_BUSY_ENV];
+  try {
+    for (const value of [undefined, "", "invalid", "STEER", " steer ", "steer"]) {
+      if (value === undefined) delete process.env[CALLBACK_WHILE_BUSY_ENV];
+      else process.env[CALLBACK_WHILE_BUSY_ENV] = value;
+      let idle = false;
+      const { host, messages } = recordingHost();
+      const batcher = createCallbackBatcher(host, { windowMs: 10_000, isAvailable: () => idle });
+      batcher.setForegroundRunning(true);
+      try {
+        batcher.toolStarted("foreground");
+        batcher.enqueue(event("busy"));
+        assert.equal(await batcher.flush(), false, `active tool must hold callbacks (${value})`);
+        await batcher.toolEnded("foreground");
+        assert.equal(messages.length, value === "steer" ? 1 : 0, `busy handoff (${value})`);
+        if (value === "steer") {
+          assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+        }
+        idle = true;
+        batcher.setAvailability(() => idle);
+        await batcher.flush();
+        assert.equal(messages.length, 1, "idle must not repeat a busy handoff");
+        batcher.enqueue(event("idle"));
+        // Reset the idle awaitingRun guard after the preceding idle follow-up.
+        if (value !== "steer") {
+          idle = false;
+          batcher.setAvailability(() => idle);
+          idle = true;
+          batcher.setAvailability(() => idle);
+        }
+        await batcher.flush();
+        assert.equal(messages.length, 2);
+        assert.deepEqual(messages[1]!.options, { deliverAs: "followUp", triggerTurn: true });
+      } finally { batcher.cancel(); }
+    }
+  } finally {
+    if (previous === undefined) delete process.env[CALLBACK_WHILE_BUSY_ENV];
+    else process.env[CALLBACK_WHILE_BUSY_ENV] = previous;
+  }
+});
+
+test("#425 time-separated mixed completions form one steer at the last parallel/nested tool end", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let idle = false;
+  const { host, messages } = recordingHost();
+  const delivered: string[] = [];
+  const batcher = createCallbackBatcher(host, { windowMs: 25, retryMs: 50, whileBusy: "steer", isAvailable: () => idle });
+  batcher.setForegroundRunning(true);
+  try {
+    for (const id of ["parent", "parallel", "parent/1"]) {
+      batcher.toolStarted(id);
+      batcher.toolStarted(id);
+    }
+    for (const id of ["sa_first", "bg_second", "sa_third"]) {
+      const item = event(id, {
+        ...(id.startsWith("bg") ? { source: "background-task", detailTool: "bg_task_status" } as const : {}),
+        onDelivered: () => delivered.push(id),
+      });
+      assert.equal(batcher.enqueue(item), true);
+      assert.equal(batcher.enqueue(item), false);
+      t.mock.timers.tick(200);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(messages.length, 0, "debounce/retry windows must not split an active tool batch");
+    }
+    assert.equal(batcher.enqueue(event("quiet", { callback: false })), false);
+    await batcher.toolEnded("unknown");
+    await batcher.toolEnded("parallel");
+    await batcher.toolEnded("parallel");
+    await batcher.toolEnded("parent/1");
+    assert.equal(messages.length, 0, "nested and parallel ends cannot release an active parent");
+    assert.deepEqual(delivered, []);
+    await batcher.toolEnded("parent");
+    await batcher.toolEnded("parent");
+    assert.equal(messages.length, 1);
+    assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+    assert.equal(messages[0]!.message.customType, "background-completion-batch");
+    assert.match(messages[0]!.message.content, /^3 background completions are ready:/);
+    assert.match(messages[0]!.message.content, /bg_task_status id=bg_second/);
+    assert.match(messages[0]!.message.content, /subagent_result id="sa_first"/);
+    assert.doesNotMatch(messages[0]!.message.content, /quiet/);
+    assert.ok(utf8ByteLength(messages[0]!.message.content) <= CALLBACK_BATCH_BUDGET_BYTES);
+    assert.deepEqual(delivered, ["sa_first", "bg_second", "sa_third"]);
+    idle = true;
+    batcher.setAvailability(() => idle);
+    await batcher.flush();
+    assert.equal(messages.length, 1);
+  } finally { batcher.cancel(); }
+});
+
+test("#425 compaction and branch summary unavailability hold callbacks until an agent run or idle", async () => {
+  let idle = false;
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, whileBusy: "steer", isAvailable: () => idle });
+  try {
+    batcher.enqueue(event("during_compaction"));
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 0, "non-idle without an active agent must not request a run");
+    batcher.setForegroundRunning(true);
+    assert.equal(await batcher.flush(), true);
+    assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+    batcher.setForegroundRunning(false);
+    batcher.enqueue(event("during_branch_summary"));
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 1, "agent_end must close the busy steering opportunity");
+    idle = true;
+    assert.equal(await batcher.flush(), true);
+    assert.deepEqual(messages[1]!.options, { deliverAs: "followUp", triggerTurn: true });
+  } finally { batcher.cancel(); }
+});
+
+test("#425 a busy agent with no active tool uses the accumulation window", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 25, whileBusy: "steer", isAvailable: () => false });
+  batcher.setForegroundRunning(true);
+  try {
+    batcher.enqueue(event("between_tools"));
+    t.mock.timers.tick(24);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 0);
+    t.mock.timers.tick(1);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(messages.length, 1);
+    assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+  } finally { batcher.cancel(); }
+});
+
+test("#425 final tool end awaits handoff and receipts even after an in-flight deferred flush", async () => {
+  let finishHandoff!: () => void;
+  let receipted = false;
+  const batcher = createCallbackBatcher({ sendMessage() {
+    return new Promise<void>((resolve) => { finishHandoff = resolve; });
+  } }, { windowMs: 10_000, whileBusy: "steer", isAvailable: () => false });
+  batcher.setForegroundRunning(true);
+  try {
+    batcher.toolStarted("tool");
+    batcher.enqueue(event("awaited", { onDelivered: () => { receipted = true; } }));
+    const deferred = batcher.flush();
+    let ended = false;
+    const boundary = batcher.toolEnded("tool").then(() => { ended = true; });
+    assert.equal(await deferred, false);
+    assert.equal(typeof finishHandoff, "function", "final end must send without waiting for a timer");
+    assert.equal(ended, false);
+    assert.equal(receipted, false);
+    finishHandoff();
+    await boundary;
+    assert.equal(ended, true);
+    assert.equal(receipted, true);
+    assert.equal(batcher.pendingCount(), 0);
+  } finally { batcher.cancel(); }
+});
+
+test("#425 default-mode tool notifications do not wait on an in-flight idle handoff", async () => {
+  let finishHandoff!: () => void;
+  const batcher = createCallbackBatcher({ sendMessage() {
+    return new Promise<void>((resolve) => { finishHandoff = resolve; });
+  } }, { windowMs: 10_000, whileBusy: "hold" });
+  batcher.enqueue(event("idle_handoff"));
+  const flush = batcher.flush();
+  try {
+    batcher.toolStarted("new_run_tool");
+    let ended = false;
+    void batcher.toolEnded("new_run_tool").then(() => { ended = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(ended, true, "default-mode tools cannot wait on the handoff that started their run");
+  } finally {
+    finishHandoff();
+    await flush;
+    batcher.cancel();
+  }
+});
+
+test("#425 busy steering retains send retry, receipt retry, and late suppression", async () => {
+  const { host, messages } = recordingHost();
+  let failSend = true;
+  let failReceipt = true;
+  let suppressed = false;
+  const delivered: string[] = [];
+  const suppressions: string[] = [];
+  const batcher = createCallbackBatcher({ sendMessage(message, options) {
+    if (failSend) throw new Error("handoff unavailable");
+    return host.sendMessage(message, options);
+  } }, { windowMs: 10_000, whileBusy: "steer", isAvailable: () => false });
+  batcher.setForegroundRunning(true);
+  try {
+    batcher.toolStarted("tool");
+    batcher.enqueue(event("retry", { onDelivered: () => {
+      if (failReceipt) throw new Error("receipt unavailable");
+      delivered.push("retry");
+    } }));
+    batcher.enqueue(event("cancelled", {
+      getSuppressionReason: () => suppressed ? "owner changed while busy" : undefined,
+      onSuppressed: (reason) => suppressions.push(reason),
+    }));
+    suppressed = true;
+    assert.equal(await batcher.toolEnded("tool"), false);
+    assert.equal(messages.length, 0);
+    assert.deepEqual(delivered, []);
+    assert.deepEqual(suppressions, ["owner changed while busy"]);
+    assert.equal(batcher.pendingCount(), 1);
+    failSend = false;
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 1);
+    assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+    assert.doesNotMatch(messages[0]!.message.content, /cancelled/);
+    failReceipt = false;
+    assert.equal(await batcher.flush(), true);
+    assert.equal(messages.length, 1, "receipt retry must not send another steer");
+    assert.deepEqual(delivered, ["retry"]);
+  } finally { batcher.cancel(); }
+});
+
+test("#425 opt-in cannot bypass unreadable availability or the idle awaitingRun guard", async () => {
+  let unreadable = true;
+  let idle = true;
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, whileBusy: "steer", isAvailable: () => {
+    if (unreadable) throw new Error("availability unavailable");
+    return idle;
+  } });
+  batcher.setForegroundRunning(true);
+  try {
+    batcher.enqueue(event("first"));
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 0);
+    unreadable = false;
+    assert.equal(await batcher.flush(), true);
+    batcher.enqueue(event("next"));
+    batcher.setAvailability(() => idle);
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 1, "a deferred idle run is not a busy steering opportunity");
+    idle = false;
+    batcher.setAvailability(() => idle);
+    assert.equal(await batcher.flush(), true);
+    assert.equal(messages.length, 2);
+    assert.deepEqual(messages[1]!.options, { deliverAs: "steer", triggerTurn: true });
+  } finally { batcher.cancel(); }
+});
+
+test("#425 bounded busy overflow is unreceipted and waits through the next active tool", async () => {
+  const { host, messages } = recordingHost();
+  const delivered: string[] = [];
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, maxBytes: 700, whileBusy: "steer", isAvailable: () => false });
+  batcher.setForegroundRunning(true);
+  try {
+    batcher.toolStarted("first_tool");
+    for (const id of ["first", "overflow", "last"]) {
+      batcher.enqueue(event(id, { label: "x".repeat(160), onDelivered: () => delivered.push(id) }));
+    }
+    await batcher.toolEnded("first_tool");
+    assert.equal(messages.length, 1);
+    assert.match(messages[0]!.message.content, /not receipted; still queued/);
+    assert.equal(batcher.pendingCount(), 3 - delivered.length);
+    assert.ok(batcher.pendingCount() > 0);
+    batcher.toolStarted("next_tool");
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 1);
+    await batcher.toolEnded("next_tool");
+    while (batcher.pendingCount()) await batcher.flush();
+    assert.deepEqual(delivered, ["first", "overflow", "last"]);
+    for (const { message, options } of messages) {
+      assert.ok(utf8ByteLength(message.content) <= 700);
+      assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
+    }
+  } finally { batcher.cancel(); }
+});
+
+test("#425 both vendored copies share tool IDs across distinct wrappers and host refresh", async () => {
+  const subagents = await import("../pi-better-subagents/shared-callback-batcher.ts");
+  const background = await import("../pi-better-background-tasks/src/shared-callback-batcher.ts");
+  const { host, messages } = recordingHost();
+  const sessionManager = {};
+  const ctx = { isIdle: () => false, sessionManager };
+  const first = getCallbackBatcher(host, { windowMs: 10_000, whileBusy: "steer" });
+  first.setForegroundRunning(true);
+  setCallbackBatchContext(host, ctx);
+  const subagentHost = { ...host, events: {} };
+  const backgroundHost = { ...host, events: {} };
+  subagents.setCallbackBatchContext(subagentHost, ctx);
+  background.setCallbackBatchContext(backgroundHost, ctx);
+  const second = subagents.getCallbackBatcher(subagentHost);
+  const third = background.getCallbackBatcher(backgroundHost);
+  assert.equal(second, first);
+  assert.equal(third, first);
+  try {
+    second.toolStarted("shared_tool");
+    third.toolStarted("shared_tool");
+    first.enqueue(event("shared_completion"));
+    const refreshed = { ...host, events: {} };
+    background.setCallbackBatchContext(refreshed, ctx);
+    assert.equal(await first.flush(), false, "context refresh retains the active Set");
+    await background.getCallbackBatcher(refreshed).toolEnded("shared_tool");
+    await second.toolEnded("shared_tool");
+    assert.equal(messages.length, 1, "duplicate ends from both consumers release one batch");
+    assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+  } finally { first.cancel(); }
+});
+
+test("#425 shutdown cancels busy steering and clears tools but preserves handoff receipts on resume", async () => {
+  const { host, messages } = recordingHost();
+  let writable = false;
+  let receipts = 0;
+  const item = event("delivered", { onDelivered: () => {
+    if (!writable) throw new Error("receipt unavailable");
+    receipts++;
+  } });
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, whileBusy: "steer", isAvailable: () => false });
+  batcher.setForegroundRunning(true);
+  try {
+    batcher.enqueue(item);
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 1);
+    batcher.toolStarted("abandoned_tool");
+    batcher.enqueue(event("abandoned"));
+    batcher.cancel();
+    batcher.enqueue(event("late_old_context"));
+    assert.equal(await batcher.flush(), false);
+    assert.equal(messages.length, 1, "a shutdown cannot turn unavailability into busy steering");
+    batcher.cancel();
+    batcher.setAvailability(() => false);
+    batcher.setForegroundRunning(true);
+    writable = true;
+    batcher.enqueue(item);
+    batcher.enqueue(event("resumed"));
+    assert.equal(await batcher.flush(), true, "abandoned tool IDs cannot strand resumed work");
+    assert.equal(receipts, 1);
+    assert.equal(messages.length, 2);
+    assert.match(messages[1]!.message.content, /id=resumed/);
+    assert.doesNotMatch(messages[1]!.message.content, /id=delivered|abandoned|late_old_context/);
+  } finally { batcher.cancel(); }
+});
+
+test("#425 opt-in leaves urgent health delivery on its immediate follow-up path", async () => {
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, whileBusy: "steer", isAvailable: () => false });
+  batcher.setForegroundRunning(true);
+  try {
+    batcher.toolStarted("tool");
+    batcher.enqueue(event("ordinary"));
+    assert.equal(await batcher.deliverUrgent({ source: "subagent", id: "health", label: "worker",
+      status: "orphaned", customType: "subagent-health", content: "Needs attention" }), true);
+    assert.equal(messages.length, 1);
+    assert.deepEqual(messages[0]!.options, { deliverAs: "followUp", triggerTurn: true });
+    assert.equal(batcher.pendingCount(), 1);
+    await batcher.toolEnded("tool");
+    assert.equal(messages.length, 2);
+    assert.deepEqual(messages[1]!.options, { deliverAs: "steer", triggerTurn: true });
+  } finally { batcher.cancel(); }
+});
 
 test("successful handoffs retry failed receipt hooks without sending again", async () => {
   const { host, messages } = recordingHost();

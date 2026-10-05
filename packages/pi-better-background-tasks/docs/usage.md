@@ -190,6 +190,8 @@ remote shells, PTY or tmux attach UX, `screen` / `systemd-run` / `nohup`
 fallback ladders, guaranteed remote kill in direct mode, a remote IDE mode, or
 a first-class Windows OpenSSH matrix.
 
+## Completion callbacks
+
 Callbacks are terminal-only by default. Ordinary callback-enabled terminal
 transitions accumulate while the foreground agent is busy, then produce one
 compact follow-up after a 100 ms idle window, shared with
@@ -214,6 +216,21 @@ pending, so manual compaction does not strand them. New completions and overflow
 wait for the next available boundary while
 that run is active. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
+
+Start Pi with `PI_BETTER_CALLBACK_WHILE_BUSY=steer` to opt into ordinary
+completion delivery during foreground work. Completions spanning multiple
+accumulation windows during one tool call stay queued until the final active
+tool ends, then share one compact `steer` notification with subagent completions.
+Both extensions track parallel and nested tools together. Busy delivery uses
+`{ deliverAs: "steer", triggerTurn: true }`, which steers the existing busy run;
+while busy with no active tool, the normal accumulation window applies.
+Manual compaction and branch summarization hold callbacks until an agent run
+starts or Pi becomes idle; they are not busy steering opportunities. Idle
+delivery remains `{ deliverAs: "followUp", triggerTurn: true }`. Unset or
+invalid values keep the default hold-until-idle behavior. Byte bounds, queued
+overflow, dedupe, delivery receipts, retries, ownership checks, and
+`callback:false` apply in both modes. A completion handed off by steer is not
+sent again at idle. Urgent failure alerts retain their existing behavior.
 
 Each row's `status` is the lifecycle status, plus an attention count when
 incidents are pending (for example `failed; 2 incidents need attention`); the

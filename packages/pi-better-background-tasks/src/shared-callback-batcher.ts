@@ -70,6 +70,8 @@ export interface CallbackBatcherOptions {
   retryMs?: number;
   /** Ordinary callbacks stay here, not in Pi's follow-up queue, while unavailable. */
   isAvailable?: () => boolean;
+  /** Defaults to PI_BETTER_CALLBACK_WHILE_BUSY; only "steer" opts in. */
+  whileBusy?: "hold" | "steer";
   /** UTF-8 byte cap for one sendMessage payload. Defaults to 2 KiB. */
   maxBytes?: number;
 }
@@ -81,6 +83,12 @@ export interface CallbackBatcher {
   setHost(host: CallbackBatchHost): void;
   /** Update the session predicate and schedule an asynchronous drain when available. */
   setAvailability(isAvailable: () => boolean): void;
+  /** Non-idle context operations are not foreground agent runs. */
+  setForegroundRunning(running: boolean): void;
+  /** Shared IDs make duplicate notifications from both extensions idempotent. */
+  toolStarted(toolCallId: string): void;
+  /** Await the final active tool's handoff before Pi checks its steering queue. */
+  toolEnded(toolCallId: string): Promise<boolean>;
   deliverUrgent(event: UrgentCallbackEvent): boolean | Promise<boolean>;
   cancel(): void;
   pendingCount(): number;
@@ -131,6 +139,13 @@ const RETRIEVAL_FOOTER =
 
 export const CALLBACK_BATCH_WINDOW_ENV = "PI_BETTER_CALLBACK_BATCH_MS";
 export const DEFAULT_CALLBACK_BATCH_WINDOW_MS = DEFAULT_WINDOW_MS;
+export const CALLBACK_WHILE_BUSY_ENV = "PI_BETTER_CALLBACK_WHILE_BUSY";
+
+export function resolveCallbackWhileBusy(
+  value: unknown = process.env[CALLBACK_WHILE_BUSY_ENV],
+): "hold" | "steer" {
+  return value === "steer" ? "steer" : "hold";
+}
 
 export function resolveCallbackBatchWindowMs(
   value: unknown = process.env[CALLBACK_BATCH_WINDOW_ENV],
@@ -436,26 +451,31 @@ export function createCallbackBatcher(
 ): CallbackBatcher {
   const windowMs = options.windowMs ?? resolveCallbackBatchWindowMs();
   const retryMs = Math.max(0, options.retryMs ?? DEFAULT_RETRY_MS);
+  const whileBusy = options.whileBusy ?? resolveCallbackWhileBusy();
   const maxBytes = callbackBatchBudget(options.maxBytes);
   const pending = new Map<string, PendingEvent>();
   const inFlight = new Set<string>();
   const urgentInFlight = new Set<string>();
   const handedOff = new Map<string, number>();
+  const activeTools = new Set<string>();
   let sequence = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let flushPromise: Promise<boolean> | undefined;
   let isAvailable = options.isAvailable ?? (() => true);
   let gated = options.isAvailable !== undefined;
   let awaitingRun = false;
+  let cancelled = false;
+  let foregroundRunning = false;
 
-  const available = (): boolean => {
+  const deliveryMode = (): "followUp" | "steer" | undefined => {
+    if (cancelled) return undefined;
     try {
       if (!isAvailable()) {
         awaitingRun = false;
-        return false;
+        return whileBusy === "steer" && foregroundRunning && activeTools.size === 0 ? "steer" : undefined;
       }
-      return !awaitingRun;
-    } catch { return false; }
+      return !awaitingRun ? "followUp" : undefined;
+    } catch { return undefined; }
   };
 
   const cancelTimer = (): void => {
@@ -466,7 +486,7 @@ export function createCallbackBatcher(
   const schedule = (delayMs: number): void => {
     if (timer || pending.size === 0) return;
     // Some idle transitions (manual compaction) have no agent_settled event.
-    const delay = available() ? delayMs : retryMs;
+    const delay = deliveryMode() ? delayMs : retryMs;
     timer = setTimeout(() => {
       timer = undefined;
       void api.flush();
@@ -485,7 +505,8 @@ export function createCallbackBatcher(
 
   const performFlush = async (): Promise<boolean> => {
     cancelTimer();
-    if (!available()) {
+    const mode = deliveryMode();
+    if (!mode) {
       schedule(retryMs);
       return false;
     }
@@ -539,14 +560,16 @@ export function createCallbackBatcher(
     try {
       // Pi may defer the requested run while settled handlers finish, leaving
       // isIdle() true. Permit no second handoff until a run starts.
-      awaitingRun = gated;
+      awaitingRun = mode === "followUp" && gated;
       await host.sendMessage(
         {
           customType: "background-completion-batch",
           content: packed.text,
           display: true,
         },
-        { deliverAs: "followUp", triggerTurn: true },
+        // Newer Pi requires triggerTurn for steering too; false only appends
+        // a custom message at the turn boundary without continuing the agent.
+        { deliverAs: mode, triggerTurn: true },
       );
     } catch {
       awaitingRun = false;
@@ -632,15 +655,36 @@ export function createCallbackBatcher(
     setAvailability(check) {
       gated = true;
       isAvailable = check;
-      available();
+      cancelled = false;
+      deliveryMode();
       cancelTimer();
       schedule(windowMs);
+    },
+    setForegroundRunning(running) {
+      foregroundRunning = running;
+      cancelTimer();
+      schedule(windowMs);
+    },
+    toolStarted(toolCallId) {
+      activeTools.add(toolCallId);
+    },
+    async toolEnded(toolCallId) {
+      const ended = activeTools.delete(toolCallId);
+      if (activeTools.size > 0 || whileBusy !== "steer" || cancelled) return false;
+      if (!ended) return flushPromise ?? false;
+      // A timer may still be completing a deferred flush. Recheck after it so
+      // the tool boundary cannot lose the pending batch to that older attempt.
+      if (flushPromise) await flushPromise;
+      return pending.size > 0 ? api.flush() : true;
     },
     deliverUrgent,
     cancel() {
       cancelTimer();
       pending.clear();
       awaitingRun = false;
+      activeTools.clear();
+      foregroundRunning = false;
+      cancelled = true;
     },
     pendingCount() {
       return pending.size;
