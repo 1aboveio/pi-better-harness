@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -222,10 +222,12 @@ test("five displayed-but-unused suggestions skip exactly three eligible schedule
   assert.equal(calls, 7);
 });
 
-async function runtimeFixture(t, { auth, holdAuth = false, holdResponse = false, response = {}, fail, api = "test-prompt-api" } = {}) {
+async function runtimeFixture(t, { auth, holdAuth = false, holdResponse = false, response = {}, fail,
+  api = "test-prompt-api", modelsJson } = {}) {
   const root = mkdtempSync(join(tmpdir(), "pi-prompt-provider-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const requests = [];
+  let authCalls = 0;
   const authEntered = Promise.withResolvers();
   const releaseAuth = Promise.withResolvers();
   const requestEntered = Promise.withResolvers();
@@ -233,8 +235,10 @@ async function runtimeFixture(t, { auth, holdAuth = false, holdResponse = false,
   const model = { id: "recording", name: "Recording", api, provider: "test-prompt-provider",
     baseUrl: "https://example.invalid/configured", reasoning: true, input: ["text"],
     contextWindow: 128_000, maxTokens: 1_024, cost, headers: { "X-Model": "model-header" } };
+  if (modelsJson) writeFileSync(join(root, "models.json"), JSON.stringify(modelsJson(root, model)));
   const provider = ai.createProvider({ id: model.provider, models: [model], headers: { "X-Provider": "provider-header" },
     auth: { apiKey: { label: "Synthetic auth", check: async () => ({ source: "test" }), resolve: async () => {
+      authCalls++;
       authEntered.resolve();
       if (holdAuth) await releaseAuth.promise;
       return auth ?? { auth: { apiKey: "synthetic-key", headers: { "X-Auth": "auth-header" } }, env: { TEST_PROVIDER_REGION: "test-region" } };
@@ -258,16 +262,18 @@ async function runtimeFixture(t, { auth, holdAuth = false, holdResponse = false,
   const runtime = await sdk.ModelRuntime.create({ credentials: new ai.InMemoryCredentialStore(), refreshOnCreate: false,
     modelsPath: join(root, "models.json"), modelsStorePath: join(root, "models-store.json") });
   runtime.registerNativeProvider(provider);
+  await runtime.refresh({ allowNetwork: false });
   const registry = new sdk.ModelRegistry(runtime);
   const ctx = { model: runtime.getModel(model.provider, model.id), modelRegistry: registry };
   t.after(() => { releaseAuth.resolve(); for (const request of requests) request.finish(); });
-  return { root, runtime, registry, ctx, requests, authEntered, releaseAuth, requestEntered };
+  return { root, runtime, registry, ctx, requests, authEntered, releaseAuth, requestEntered, get authCalls() { return authCalls; } };
 }
 
 test("installed SDK uses the registered third-party provider with active model/auth/headers/env and strict budgets", async (t) => {
   const fixture = await runtimeFixture(t);
   const controller = new AbortController();
-  const result = await generateSuggestion(fixture.ctx, "Bounded conversation", controller.signal);
+  const usages = [];
+  const result = await generateSuggestion(fixture.ctx, "Bounded conversation", controller.signal, { onUsage: value => usages.push(value) });
   assert.equal(fixture.requests.length, 1);
   const request = fixture.requests[0];
   assert.equal(request.model.id, fixture.ctx.model.id);
@@ -288,6 +294,101 @@ test("installed SDK uses the registered third-party provider with active model/a
   assert.equal(result.text, "Run the focused tests");
   assert.equal(result.usage.input, 20);
   assert.equal(result.usage.output, 5);
+  assert.deepEqual(usages, [result.usage], "successful settlement reports usage only once and retains the standalone return value");
+});
+
+test("models.json command headers in hidden SDK composer layers never execute before rejection", async (t) => {
+  for (const layer of ["provider", "model", "override"]) {
+    const fixture = await runtimeFixture(t, { modelsJson(root, model) {
+      const headers = { "X-Command": `!printf executed > '${join(root, "shell-sentinel")}'; printf header` };
+      const config = layer === "provider" ? { headers }
+        : layer === "model" ? { models: [{ id: model.id, headers }] }
+          : { modelOverrides: { [model.id]: { headers } } };
+      return { providers: { [model.provider]: config } };
+    } });
+    assert.equal(fixture.registry.getError(), undefined);
+    assert.equal(fixture.registry.getRegisteredProviderConfig(fixture.ctx.model.provider), undefined);
+    assert.notEqual(fixture.registry.getProviderAuthStatus(fixture.ctx.model.provider).source, "models_json_command");
+    assert.equal(Object.values(fixture.ctx.model.headers ?? {}).some(value => value.startsWith("!")), false,
+      "the active model does not expose command headers hidden by composition");
+    assert.equal(existsSync(join(fixture.root, "shell-sentinel")), false);
+    await assert.rejects(generateSuggestion(fixture.ctx, "context", new AbortController().signal), /cannot safely inspect composed/);
+    assert.equal(fixture.authCalls, 0, `${layer} header rejected before native auth resolution`);
+    assert.equal(fixture.requests.length, 0);
+    assert.equal(existsSync(join(fixture.root, "shell-sentinel")), false, `${layer} header shell MUST NOT execute`);
+  }
+});
+
+test("opaque custom-path and stale models.json snapshots fail closed even when the current file is safe", async (t) => {
+  const fixture = await runtimeFixture(t, { modelsJson(root, model) {
+    return { providers: { [model.provider]: { headers: {
+      "X-Command": `!printf executed > '${join(root, "shell-sentinel")}'; printf header`,
+    } } } };
+  } });
+  writeFileSync(join(fixture.root, "models.json"), '{}');
+  await assert.rejects(generateSuggestion(fixture.ctx, "context", new AbortController().signal), /cannot safely inspect composed/);
+  assert.equal(fixture.authCalls, 0);
+  assert.equal(fixture.requests.length, 0);
+  assert.equal(existsSync(join(fixture.root, "shell-sentinel")), false);
+});
+
+test("registered config and native header command values are rejected before auth or dispatch", async (t) => {
+  for (const layer of ["key", "provider", "model", "native"]) {
+    const fixture = await runtimeFixture(t);
+    const sentinel = join(fixture.root, "shell-sentinel");
+    const command = `!printf executed > '${sentinel}'; printf credential`;
+    let ctx = fixture.ctx;
+    if (layer === "native") {
+      const native = fixture.registry.getRegisteredNativeProvider(ctx.model.provider);
+      fixture.runtime.registerNativeProvider({ ...native, headers: { "X-Command": command } });
+    } else {
+      const id = "prompt-command-registration";
+      const config = { baseUrl: "https://example.invalid", api: "openai-completions", apiKey: "synthetic-key" };
+      if (layer === "key") config.apiKey = command;
+      if (layer === "provider") config.headers = { "X-Command": command };
+      if (layer === "model") config.models = [{ ...fixture.ctx.model, headers: { "X-Command": command } }];
+      fixture.runtime.registerProvider(id, config);
+      ctx = { model: { ...ctx.model, provider: id }, modelRegistry: fixture.registry };
+    }
+    await fixture.runtime.refresh({ allowNetwork: false });
+    await assert.rejects(generateSuggestion(ctx, "context", new AbortController().signal), /command-based auth/);
+    assert.equal(fixture.authCalls, 0);
+    assert.equal(fixture.requests.length, 0);
+    assert.equal(existsSync(sentinel), false, `${layer} command MUST NOT execute`);
+  }
+});
+
+test("SDK composition-error fallback cannot disguise hidden command model headers as untouched native", async (t) => {
+  const fixture = await runtimeFixture(t, { modelsJson(root, model) {
+    return { providers: { [model.provider]: { models: [{ id: model.id, maxTokens: 0,
+      headers: { "X-Command": `!printf executed > '${join(root, "shell-sentinel")}'; printf header` } }] } } };
+  } });
+  assert.match(fixture.registry.getError(), /invalid maxTokens/);
+  assert.equal(fixture.registry.getProvider(fixture.ctx.model.provider),
+    fixture.registry.getRegisteredNativeProvider(fixture.ctx.model.provider), "SDK fell back to the native provider");
+  await assert.rejects(generateSuggestion(fixture.ctx, "context", new AbortController().signal), /cannot safely inspect composed/);
+  assert.equal(fixture.authCalls, 0);
+  assert.equal(fixture.requests.length, 0);
+  assert.equal(existsSync(join(fixture.root, "shell-sentinel")), false);
+});
+
+test("eligibility lost during asynchronous SDK auth prevents actual provider dispatch", async (t) => {
+  const fixture = await runtimeFixture(t, { holdAuth: true });
+  let eligible = true;
+  const usages = [];
+  const pending = generateSuggestion(fixture.ctx, "context", new AbortController().signal,
+    { eligible: () => eligible, onUsage: usage => usages.push(usage) });
+  const rejected = assert.rejects(pending, /eligible|provider request failed/);
+  await fixture.authEntered.promise;
+  eligible = false;
+  fixture.releaseAuth.resolve();
+  await rejected;
+  await flush();
+  assert.equal(fixture.requests.length, 0);
+  assert.equal(usages.some(usage => usage.input > 0 || usage.output > 0), false);
+  await assert.rejects(generateSuggestion(fixture.ctx, "context", new AbortController().signal,
+    { eligible: () => false }), /no longer eligible/);
+  assert.equal(fixture.requests.length, 0);
 });
 
 test("SDK auth-selected endpoint overrides and deletion headers survive compatibility transport", async (t) => {
@@ -362,6 +463,51 @@ test("an abort-insensitive provider cannot overlap a later request, and settleme
   assert.equal((await next).text, "Run the focused tests");
 });
 
+test("stale, aborted, and timed-out completions report sanitized usage once at settlement", async (t) => {
+  for (const invalidation of ["stale", "abort", "timeout"]) {
+    await t.test(invalidation, async (t) => {
+      const fixture = await runtimeFixture(t, { holdResponse: true,
+        response: { usage: { input: 11, output: 3, cacheRead: 0, cacheWrite: -1, totalTokens: NaN,
+          cost: { total: 0, output: Infinity, secret: "synthetic-secret" }, secret: "synthetic-secret" } } });
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const controller = new AbortController();
+      const usages = [];
+      let eligible = true;
+      const pending = generateSuggestion(fixture.ctx, "context", controller.signal,
+        { eligible: () => eligible, onUsage: usage => usages.push(usage) });
+      const rejected = assert.rejects(pending, /no longer eligible|cancelled|timed out/);
+      const request = await fixture.requestEntered.promise;
+      if (invalidation === "stale") eligible = false;
+      else if (invalidation === "abort") controller.abort();
+      else t.mock.timers.tick(4_000);
+      if (invalidation !== "stale") {
+        await rejected;
+        assert.deepEqual(usages, [], "local cancellation cannot fabricate usage before settlement");
+        await assert.rejects(generateSuggestion(fixture.ctx, "overlap", new AbortController().signal), /still active/);
+      }
+      request.finish();
+      await rejected;
+      await flush();
+      assert.deepEqual(usages, [{ input: 11, output: 3, cacheRead: 0, cost: { total: 0 } }]);
+      request.finish();
+      await flush();
+      assert.equal(usages.length, 1, "repeated terminal events cannot double-count settled usage");
+      assert.equal(fixture.requests.length, 1);
+    });
+  }
+});
+
+test("non-numeric usage remains unknown instead of becoming zero or leaking provider data", async (t) => {
+  const fixture = await runtimeFixture(t, { response: { usage: { input: -1, output: "5", cacheRead: Infinity,
+    totalTokens: NaN, cost: { total: -1, secret: "synthetic-secret" }, secret: "synthetic-secret" } } });
+  const usages = [];
+  const result = await generateSuggestion(fixture.ctx, "context", new AbortController().signal,
+    { onUsage: usage => usages.push(usage) });
+  assert.equal(result.usage, undefined);
+  assert.deepEqual(usages, []);
+  assert.equal(result.text, "Run the focused tests");
+});
+
 test("unbounded bundled APIs and command-based auth fail before inference, while a native bounded custom transport remains usable", async (t) => {
   const fixture = await runtimeFixture(t);
   for (const [provider, api, reason] of [["openai-codex", "openai-codex-responses", /output token cap/],
@@ -387,10 +533,15 @@ test("transport refuses unsupported, incomplete, tool, and failed output without
     { stopReason: "stop", content: [text("Next"), { type: "toolCall", name: "bash", arguments: {} }] },
     { stopReason: "error", errorMessage: "synthetic-secret" }, { stopReason: "aborted" },
   ]) {
-    const fixture = await runtimeFixture(t, { response });
-    await assert.rejects(generateSuggestion(fixture.ctx, "context", new AbortController().signal),
+    const usages = [];
+    const fixture = await runtimeFixture(t, { response: { ...response, usage: { input: 20, output: 5, cacheRead: -1,
+      cacheWrite: Infinity, totalTokens: "25", cost: { total: 0.125, input: NaN, secret: "synthetic-secret" },
+      secret: "synthetic-secret" } } });
+    await assert.rejects(generateSuggestion(fixture.ctx, "context", new AbortController().signal, { onUsage: value => usages.push(value) }),
       (error) => /failed|incomplete|tool response/.test(error.message) && !error.message.includes("synthetic-secret"));
     assert.equal(fixture.requests.length, 1);
+    assert.deepEqual(usages, [{ input: 20, output: 5, cost: { total: 0.125 } }],
+      "invalid result usage is sanitized and reported once, independently of output validation");
   }
   const failed = await runtimeFixture(t, { fail: "Prompt suggestions: synthetic-secret" });
   await assert.rejects(generateSuggestion(failed.ctx, "context", new AbortController().signal),
@@ -401,7 +552,7 @@ test("transport refuses unsupported, incomplete, tool, and failed output without
   await assert.rejects(generateSuggestion(failed.ctx, "x".repeat(8_001), new AbortController().signal), /Invalid.*context/);
 });
 
-test("extension-registered providers retain custom transport, configured auth and resolved provider/model headers", async (t) => {
+test("opaque extension-registered transport/auth/header composition fails closed without falling back", async (t) => {
   const fixture = await runtimeFixture(t);
   const calls = [];
   const originalKey = process.env.PROMPT_TEST_KEY;
@@ -432,16 +583,10 @@ test("extension-registered providers retain custom transport, configured auth an
     },
   });
   const model = fixture.runtime.getModel("prompt-extension-fixture", "custom");
-  const result = await generateSuggestion({ model, modelRegistry: fixture.registry }, "context", new AbortController().signal);
-  assert.equal(result.text, "Check the regression");
+  await assert.rejects(generateSuggestion({ model, modelRegistry: fixture.registry }, "context", new AbortController().signal),
+    /cannot safely inspect composed auth\/header configuration/);
   assert.equal(fixture.requests.length, 0, "never fall back to another registered provider");
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].model.baseUrl, "https://example.invalid/custom");
-  assert.equal(calls[0].options.apiKey, "synthetic-extension-key");
-  assert.equal(calls[0].options.headers.Authorization, "Bearer synthetic-extension-key");
-  assert.equal(calls[0].options.headers["X-Extension"], "resolved-extension-header");
-  assert.equal(calls[0].options.headers["X-Model"], "resolved-extension-header");
-  assert.equal(calls[0].options.maxRetries, 0);
+  assert.equal(calls.length, 0);
 });
 
 test("preferences default off, require a boolean, persist atomically in the user agent dir, and leave other files alone", (t) => {

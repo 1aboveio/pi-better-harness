@@ -5,11 +5,13 @@ import { readPreferences, writeEnabled } from "../prompt-suggestions/preferences
 import { installGhostEditor, type GhostEditor } from "../prompt-suggestions/editor.ts";
 import { chooseHarnessSetting } from "./page.ts";
 import { createSettingsRegistry } from "./registry.ts";
+import { createEligibilityRegistry } from "./eligibility.ts";
 
 const USAGE_ENTRY = "pi-better-harness-suggestion-usage";
 
 export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   const registry = createSettingsRegistry(pi);
+  const eligibility = createEligibilityRegistry(pi);
   let ctx: ExtensionContext;
   let enabled = false;
   let paused = false;
@@ -18,10 +20,16 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   let userTurn = false;
   let revision = 0;
   let turnRevision = 0;
+  let sessionEpoch = 0;
   let reason = "disabled";
   let transportReason: string | undefined;
   let usage: Record<string, number> = {};
 
+  function runtimeEligible(): boolean {
+    return enabled && !paused && ctx.mode === "tui" && ctx.isIdle() && !ctx.hasPendingMessages() &&
+      revision === turnRevision && !eligibility.blocked();
+  }
+  function canGenerate(): boolean { return runtimeEligible() && editor?.available() === true; }
 
   function cancel(state: string): void {
     reason = state;
@@ -35,6 +43,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
       changed() { revision++; cancel("editor changed"); },
       accepted() { engine?.noteAccepted(); reason = "accepted"; revision++; },
       unused() { engine?.noteUnused(); },
+      eligible: runtimeEligible,
     });
   }
   function recordUsage(value: unknown): void {
@@ -53,8 +62,13 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   function startEngine(): void {
     engine?.dispose();
     engine = new SuggestionEngine({
+      isEligible: canGenerate,
       generate: async (context, signal) => {
-        try { return await generateSuggestion(ctx, context, signal); }
+        const epoch = sessionEpoch;
+        try { return await generateSuggestion(ctx, context, signal, {
+          eligible: () => epoch === sessionEpoch && canGenerate(),
+          onUsage(value) { if (epoch === sessionEpoch) recordUsage(value); },
+        }); }
         catch (error) {
           // The transport exposes only its own sanitized errors, never SDK payloads.
           transportReason = error instanceof Error ? error.message : "Provider unavailable";
@@ -62,25 +76,26 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
         }
       },
       onSuggestion(text) {
-        if (enabled && !paused && ctx.isIdle() && !ctx.hasPendingMessages() && editor?.show(text)) reason = "ready";
+        if (canGenerate() && editor?.show(text)) reason = "ready";
         else reason = "editor unavailable";
       },
-      onState(state, reportedUsage) {
+      onState(state) {
         reason = state === "error" ? transportReason ?? "Provider unavailable" : state;
         if (state === "generating") {
           transportReason = undefined;
           usage.requests = (usage.requests ?? 0) + 1;
           pi.appendEntry(USAGE_ENTRY, { requests: 1 });
         }
-        if (reportedUsage) recordUsage(reportedUsage);
         if (state.startsWith("error")) paused = true;
       },
     });
   }
 
   pi.on("session_start", (_event, current) => {
+    sessionEpoch++;
     ctx = current;
     registry.refresh();
+    eligibility.refresh();
     paused = false;
     userTurn = false;
     usage = {};
@@ -104,15 +119,14 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   });
   pi.on("agent_start", () => { turnRevision = revision; cancel("agent running"); });
   pi.on("agent_settled", () => {
-    const eligible = userTurn && enabled && !paused && ctx.mode === "tui" && revision === turnRevision &&
-      ctx.isIdle() && !ctx.hasPendingMessages() && editor?.available();
+    const eligible = userTurn && canGenerate();
     userTurn = false;
     if (!eligible) return;
     const context = buildSuggestionContext(ctx.sessionManager.getBranch());
     if (context) engine?.schedule(context);
     else reason = "no eligible conversation";
   });
-  const boundary = () => { userTurn = false; cancel("session boundary changed"); };
+  const boundary = () => { sessionEpoch++; userTurn = false; cancel("session boundary changed"); };
   pi.on("session_before_switch", boundary);
   pi.on("session_before_fork", boundary);
   pi.on("session_before_tree", boundary);
@@ -120,7 +134,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   pi.on("session_compact", boundary);
   pi.on("session_tree", boundary);
   pi.on("model_select", () => { paused = false; userTurn = false; cancel("model changed"); });
-  pi.on("session_shutdown", () => { engine?.dispose(); editor?.dispose(); registry.dispose(); });
+  pi.on("session_shutdown", () => { engine?.dispose(); editor?.dispose(); registry.dispose(); eligibility.dispose(); });
 
   pi.registerCommand("harness-settings", {
     description: "Configure Harness and open loaded package settings",

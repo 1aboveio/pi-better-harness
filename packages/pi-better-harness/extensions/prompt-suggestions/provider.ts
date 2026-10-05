@@ -11,6 +11,21 @@ class SuggestionTransportError extends Error {}
 const transportState = globalThis as unknown as { [key: symbol]: WeakSet<object> | undefined };
 const outstanding = transportState[Symbol.for("pi-better-harness.prompt-suggestion-outstanding")] ??= new WeakSet<object>();
 
+function sanitizeUsage(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const numbers = (source: Record<string, unknown>, keys: string[]) => Object.fromEntries(
+    keys.flatMap(key => typeof source[key] === "number" && Number.isFinite(source[key]) && source[key] >= 0
+      ? [[key, source[key]]] : []),
+  );
+  const usage: Record<string, unknown> = numbers(source, ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]);
+  if (source.cost && typeof source.cost === "object" && !Array.isArray(source.cost)) {
+    const cost = numbers(source.cost as Record<string, unknown>, ["input", "output", "cacheRead", "cacheWrite", "total"]);
+    if (Object.keys(cost).length) usage.cost = cost;
+  }
+  return Object.keys(usage).length ? usage : undefined;
+}
+
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
     const abort = () => reject(new SuggestionTransportError("Prompt suggestion cancelled or timed out"));
@@ -25,6 +40,7 @@ export async function generateSuggestion(
   ctx: ExtensionContext,
   context: string,
   signal: AbortSignal,
+  hooks: { eligible?: () => boolean; onUsage?: (usage: unknown) => void } = {},
 ): Promise<{ text: string; usage?: unknown }> {
   if (!context.trim() || context.length > 8_000) throw new Error("Invalid prompt suggestion context");
   const model = ctx.model;
@@ -49,11 +65,13 @@ export async function generateSuggestion(
   const check = () => {
     if (Date.now() >= expiresAt) abort();
     if (controller.signal.aborted) throw new SuggestionTransportError("Prompt suggestion cancelled or timed out");
+    if (hooks.eligible && !hooks.eligible()) throw new SuggestionTransportError("Prompt suggestions: request is no longer eligible");
   };
   try {
     check();
     const configured = registry.getRegisteredProviderConfig?.(model.provider);
     const native = registry.getRegisteredNativeProvider?.(model.provider);
+    const provider = registry.getProvider?.(model.provider);
     const customStream = native || (configured?.api === model.api && typeof configured?.streamSimple === "function");
     // These bundled APIs cannot honor all v1 bounds in either inspected SDK.
     if (!customStream && model.api === "openai-codex-responses") {
@@ -65,8 +83,23 @@ export async function generateSuggestion(
     const commandValue = (value: unknown) => typeof value === "string" && value.startsWith("!");
     if (registry.getProviderAuthStatus?.(model.provider).source === "models_json_command" ||
         commandValue(configured?.apiKey) || Object.values(configured?.headers ?? {}).some(commandValue) ||
+        configured?.models?.some(entry => Object.values(entry.headers ?? {}).some(commandValue)) ||
+        Object.values(native?.headers ?? {}).some(commandValue) ||
         Object.values(model.headers ?? {}).some(commandValue)) {
       throw new SuggestionTransportError("Prompt suggestions: command-based auth cannot meet the whole-request deadline");
+    }
+    if (typeof registry.getProvider !== "function") {
+      throw new SuggestionTransportError("Prompt suggestions need a compatible public provider transport");
+    }
+    // Pi 0.82.1 and 1.0.0 expose neither the composed raw headers nor their config
+    // snapshot/path. getAgentDir()/models.json cannot certify custom paths or stale
+    // snapshots. Identity with an untouched native registration proves no composer
+    // layer is present only in an error-free registry (composition errors can
+    // fall back to native). Reject all other transports BEFORE auth resolution.
+    // This includes static extension configs, builtins, and native config overlays.
+    // Native auth callbacks remain trusted provider code, not inspectable config.
+    if (!native || provider !== native || typeof registry.getError !== "function" || registry.getError()) {
+      throw new SuggestionTransportError("Prompt suggestions: cannot safely inspect composed auth/header configuration on this SDK; an untouched native provider is required");
     }
     const request: Context = { messages: [{ role: "user", content: context, timestamp: Date.now() }] };
     const options: SimpleStreamOptions = {
@@ -77,6 +110,7 @@ export async function generateSuggestion(
     };
     let stream: AssistantMessageEventStream;
     if (typeof registry.streamSimple === "function") {
+      check();
       reserve();
       stream = registry.streamSimple(model, request, {
         ...options,
@@ -88,7 +122,6 @@ export async function generateSuggestion(
           typeof registry.getProviderAuth !== "function") {
         throw new SuggestionTransportError("Prompt suggestions need a compatible public provider transport");
       }
-      const provider = registry.getProvider(model.provider);
       if (!provider || typeof provider.streamSimple !== "function") {
         throw new SuggestionTransportError("Prompt suggestions: active provider has no public streamSimple transport");
       }
@@ -115,7 +148,14 @@ export async function generateSuggestion(
     const pending = stream.result();
     trackingResult = true;
     // Local cancellation cannot prove an abort-insensitive provider stream has settled.
-    const tracked = pending.then(result => { outstanding.delete(registry); return result; }, error => {
+    const tracked = pending.then(result => {
+      outstanding.delete(registry);
+      const usage = sanitizeUsage(result?.usage);
+      // Settlement owns accounting, independently of validity/freshness/cancellation.
+      // Do not let an owner's ledger exception prevent release or leak its message.
+      if (usage !== undefined) { try { hooks.onUsage?.(usage); } catch {} }
+      return { ...result, usage };
+    }, error => {
       outstanding.delete(registry);
       throw error;
     });

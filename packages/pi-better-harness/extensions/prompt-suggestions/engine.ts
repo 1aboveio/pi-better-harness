@@ -78,6 +78,7 @@ export interface SuggestionEngineOptions {
   generate: (context: string, signal: AbortSignal) => Promise<{ text: string; usage?: unknown }>;
   onSuggestion: (text: string) => void;
   onState?: (reason: string, usage?: unknown) => void;
+  isEligible?: () => boolean;
   delayMs?: number;
   timeoutMs?: number;
 }
@@ -111,6 +112,7 @@ export class SuggestionEngine {
     this.delay = setTimeout(() => {
       this.delay = undefined;
       if (this.disposed || revision !== this.revision) return;
+      if (this.options.isEligible?.() === false) { this.options.onState?.("ineligible"); return; }
       // An abort-insensitive generator must settle before another request starts.
       if (this.inFlight) {
         this.options.onState?.("busy");

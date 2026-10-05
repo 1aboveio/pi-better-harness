@@ -872,6 +872,25 @@ export default function (pi: ExtensionAPI): void {
   const unsubscribeSettingsRequest = pi.events.on("harness-settings:request", registerSettings);
   registerSettings();
 
+  const suggestionsContribution = {
+    id: "goal",
+    blocked: (): boolean => {
+      const ctx = currentCtx;
+      if (!ctx) return false;
+      const goal = getGoal(ctx);
+      if (!goal || goal.status === "complete") return false;
+      // Pi may be idle while a wake is delayed, auditing activity, or queued.
+      if (idleContinuationTimer !== undefined || continuationQueuedFor === goal.goalId) return true;
+      const permissions = currentPermissionHold(ctx, goal.goalId);
+      if (goal.pauseReason === "permission-blocker" || permissions.blockers.length > 0 || permissions.saturated) return true;
+      return isPokeable(goal) && !WAKE_DISABLED && preferences.autoContinue &&
+        currentContinuationState(ctx, goal.goalId)?.blocked !== true;
+    },
+  };
+  const registerSuggestions = () => pi.events.emit("harness-suggestions:register", suggestionsContribution);
+  const unsubscribeSuggestionsRequest = pi.events.on("harness-suggestions:request", registerSuggestions);
+  registerSuggestions();
+
   pi.registerCommand("goal", {
     description: "Create, inspect, pause, resume, clear, or complete the active goal; configure persistent goal settings",
     getArgumentCompletions: goalArgumentCompletions,
@@ -1439,6 +1458,7 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
+    if (typeof unsubscribeSuggestionsRequest === "function") unsubscribeSuggestionsRequest();
     executionGeneration += 1;
     sessionGeneration += 1;
     escapeAbortSuppression = undefined;

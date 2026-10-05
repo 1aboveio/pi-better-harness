@@ -13,7 +13,7 @@ export interface GhostEditor {
   dispose(): void;
 }
 
-export function installGhostEditor(ctx: any, callbacks: { changed(): void; accepted(): void; unused(): void }): GhostEditor {
+export function installGhostEditor(ctx: any, callbacks: { changed(): void; accepted(): void; unused(): void; eligible?(): boolean }): GhostEditor {
   const previous = ctx.ui.getEditorComponent();
   let inner: any;
   let live: any;
@@ -35,7 +35,7 @@ export function installGhostEditor(ctx: any, callbacks: { changed(): void; accep
     tui?.requestRender();
   }
   function available(): boolean {
-    if (unsupportedReason() || !inner || inner.getText() !== "" || !inner.focused || inner.isShowingAutocomplete?.() || inner[BLOCKED]?.()) return false;
+    if (callbacks.eligible?.() === false || unsupportedReason() || !inner || inner.getText() !== "" || !inner.focused || inner.isShowingAutocomplete?.() || inner[BLOCKED]?.()) return false;
     return true;
   }
   function unsupportedReason(): string | undefined {

@@ -4,12 +4,13 @@ import { EventEmitter } from "node:events";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { createSettingsRegistry } from "../packages/pi-better-harness/extensions/settings/registry.ts";
+import { createEligibilityRegistry } from "../packages/pi-better-harness/extensions/settings/eligibility.ts";
 import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 import { installGhostEditor } from "../packages/pi-better-harness/extensions/prompt-suggestions/editor.ts";
 import { ensureBackgroundWorkNavigator, disposeBackgroundWorkNavigator, registerBackgroundWorkProvider } from "../packages/navigator/index.ts";
 const { KeybindingsManager } = await import(new URL("./core/keybindings.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
 
-function editorFixture(previous, bindings = {}) {
+function editorFixture(previous, bindings = {}, eligible) {
   let factory = previous;
   let editor;
   let changed = 0;
@@ -28,7 +29,7 @@ function editorFixture(previous, bindings = {}) {
     editor.focused = true;
   } } };
   ctx.ui.setEditorComponent(previous);
-  const ghost = installGhostEditor(ctx, { changed() {}, accepted() { accepted++; }, unused() {} });
+  const ghost = installGhostEditor(ctx, { changed() {}, accepted() { accepted++; }, unused() {}, eligible });
   return { ghost, get editor() { return editor; }, ctx, submits, changed: () => changed, accepted: () => accepted };
 }
 
@@ -186,6 +187,46 @@ test("native autocomplete owns empty-buffer selection rather than ghost text", a
   assert.equal(f.editor.getText(), "first");
   assert.deepEqual(f.submits, []);
   f.ghost.dispose();
+});
+
+test("fresh runtime eligibility gates ghost rendering and acceptance", () => {
+  for (const key of ["\t", "\x1b[C"]) {
+    let eligible = true;
+    const f = editorFixture(undefined, {}, () => eligible);
+    assert.equal(f.ghost.show("Stale work"), true);
+    eligible = false;
+    assert.doesNotMatch(f.editor.render(80).join("\n"), /Stale work/);
+    f.editor.handleInput(key);
+    assert.equal(f.editor.getText(), "");
+    assert.equal(f.accepted(), 0);
+    eligible = true;
+    assert.doesNotMatch(f.editor.render(80).join("\n"), /Stale work/);
+    f.ghost.dispose();
+  }
+});
+
+test("eligibility contributors are live, optional and fail closed on conflicts or errors", () => {
+  const events = new EventEmitter();
+  const api = { events: { on(name, fn) { events.on(name, fn); return () => events.off(name, fn); }, emit: (name, value) => events.emit(name, value) } };
+  let held = false;
+  const goal = { id: "goal", blocked: () => held };
+  events.on("harness-suggestions:request", () => events.emit("harness-suggestions:register", goal));
+  const registry = createEligibilityRegistry(api);
+  assert.equal(registry.blocked(), false, "standalone Harness has no required contributor");
+  registry.refresh();
+  held = true;
+  assert.equal(registry.blocked(), true);
+  held = false;
+  assert.equal(registry.blocked(), false);
+  events.emit("harness-suggestions:register", goal);
+  assert.equal(registry.blocked(), false, "same callback is deduplicated");
+  events.emit("harness-suggestions:register", { id: "goal", blocked: () => false });
+  assert.equal(registry.blocked(), true, "conflicting contributors cannot reopen eligibility");
+  registry.refresh();
+  events.emit("harness-suggestions:register", { id: "fault", blocked() { throw new Error("unavailable"); } });
+  assert.equal(registry.blocked(), true);
+  registry.dispose();
+  assert.equal(events.listenerCount("harness-suggestions:register"), 0);
 });
 
 test("settings discovery supports both load orders, deduplicates and removes conflicts", async () => {
