@@ -6,6 +6,45 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.20.0] - 2026-10-05
+
+### Changed
+
+- Fold minimal tool output into one truncated call header per running or completed tool, hiding result bodies, images, boxes, and spacers while preserving full-output expansion. (#422)
+- Bundle Sandbox 0.11.0, Subagents 0.14.1, Goal 0.8.1, and Background Tasks 0.6.6 with the current sandbox settings and permission-blocker fixes.
+- Keep Plan 0.5.4 and SSH 0.1.2 unchanged.
+
+## [pi-better-sandbox@0.11.0] - 2026-10-05
+
+### Changed
+
+- Default fresh Main and Subagents Process access profiles to Read; retain explicit saved restrictions and legacy Off values. (#422)
+- Display explicitly built-in tool groups as `built-in` in `/sandbox` without changing saved package identities or admission rules. (#422)
+
+### Fixed
+
+- Avoid optional Git index locks during confined inventory without broadening permissions; preserve explicit environment overrides and required writes. (#421)
+
+## [pi-better-subagents@0.14.1] - 2026-10-05
+
+### Fixed
+
+- Retain actionable permission blockers and failure history, validating worker-report provenance and failing closed when scope is incomplete. (#420)
+- Avoid optional Git index locks during confined inventory. (#421)
+- Carry built-in tool display provenance without changing package admission identities. (#422)
+
+## [pi-better-goal@0.8.1] - 2026-10-05
+
+### Fixed
+
+- Preserve durable permission holds and require explicit human release for one same-scope retry, preventing automatic repeated attempts against permission blockers. (#420)
+
+## [pi-better-background-tasks@0.6.6] - 2026-10-05
+
+### Fixed
+
+- Carry the strict shared permission-blocker and failure-observation contracts used by trusted worker reports. (#420)
+
 ## [pi-better-harness@0.19.0] - 2026-10-04
 
 ### Changed
