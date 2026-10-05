@@ -16,6 +16,26 @@ For one session without changing Pi settings:
 pi -e npm:pi-better-ssh
 ```
 
+## Sandboxed Subagents
+
+Open `/sandbox` and expand **Subagents · Tools → Trusted → pi-better-ssh**.
+Toggle `ssh_profile`, `remote_bash`, and/or `ssh_mux` with Space, or toggle the
+group to select all three. They are off by default and require Subagents Network
+access On (profile operations can probe mux state too). Ctrl+S saves defaults.
+
+Enabling a tool automatically loads the `pi-better-ssh` extension into new
+sandboxed subagents and admits only the selected tools. No separate
+`toolExtensions` mapping is needed. Default launches include ticked tools; when
+passing an explicit spawn `tools` list, include the tools the task needs, for
+example `read,bash,ssh_profile,remote_bash`. Do not use `clean:true`, which is
+builtins-only. The parent's active SSH profile is not inherited; provide a host
+or select a profile in the child.
+
+These are **trusted**, not guarded, tools: they run outside local task file,
+credential-file, and command restrictions. Remote effects are not confined by
+the local sandbox. Enabling them is an explicit grant of trust, not a restricted
+SSH execution adapter. Main sandbox admission is unchanged.
+
 ## Choose The Right Tool
 
 Use `remote_bash` when the foreground turn should wait for a short remote command's output and exit code. Use `bg_task_spawn` and the `bg_task_*` lifecycle tools with structured `ssh` for long-running or durable remote jobs; those jobs use remote tmux for lifecycle control.

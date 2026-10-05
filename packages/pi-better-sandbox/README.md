@@ -48,7 +48,8 @@ Process access                    -                Read
   package. A ticked one is loaded into the subagent and runs in its Pi process,
   **outside the file rules**. One Space toggles it immediately. It is admitted
   only from the package you ticked. Known network tool names are refused while
-  Network access is Off: `web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`, and any `mcp__*` name. That is a name list, not a network sandbox.
+  Network access is Off: `web_fetch`, `web_search`, `firecrawl_scrape`, `firecrawl_extract`, `mcp`, `mcpScript`, `remote_bash`,
+  `ssh_profile`, `ssh_mux`, and any `mcp__*` name. That is a name list, not a network sandbox.
 
 Trusted tools use two levels: a package/provider group, then its individual tools.
 Non-MCP tools are grouped by exact owning package; `mcp__<provider>__...` tools
@@ -69,6 +70,19 @@ Ctrl+S saves defaults and reports anything loosened. Only individual tool
 entries are saved, never a package/provider wildcard or the open/closed state.
 
 Defaults: `apply_patch`, `web_fetch`, and `web_search` on; everything else off.
+The `pi-better-ssh` trusted group offers `ssh_profile`, `remote_bash`, and
+`ssh_mux`, all off by default. Expand it with Right and toggle individual tools
+with Space, or toggle the group to select all three. Keep Subagents Network
+access On. A ticked tool automatically loads its owning extension into new
+subagents; no separate extension mapping is needed. Default launches include
+ticked tools; an explicit spawn `tools` list must include the SSH tools needed,
+and `clean:true` does not load extensions. Ctrl+S saves these choices for new
+sessions. Running subagents keep their launch policy.
+
+Trusted SSH tools run outside local file, credential-file, and command rules;
+remote effects are not confined either. Only enable them when you trust the
+extension and the subagent's access to your SSH configuration and credentials.
+Other harness packages remain excluded from trusted candidates.
 See [ADR 0009](../../docs/adr/0009-guarded-and-trusted-subagent-tools.md).
 
 Project files and Outside project cycle through four levels:
@@ -249,11 +263,13 @@ configuration, and policy/control files are protected from task writes, even
 under broader file grants. Task access to `~/.pi` does not receive a blanket
 write allowance or lock-file exception.
 
-Local confinement cannot govern a remote host's filesystem. Dedicated SSH,
-MCP, scripting, background, and nested-agent tools currently lack admission
-adapters and fail closed under an enabled actor profile. SSH through confined
-`bash` receives local file, credential, and network restrictions; remote effects
-remain outside the local filesystem policy.
+Local confinement cannot govern a remote host's filesystem. SSH tools are
+available to confined Subagents only when explicitly ticked as trusted under
+Subagents · Tools, with Network access On. They run outside local task rules.
+Main SSH tools, and unadmitted MCP, scripting, background, and nested-agent
+tools, still lack admission adapters and fail closed under an enabled actor
+profile. SSH through confined `bash` receives local file, credential, and network
+restrictions; remote effects remain outside the local filesystem policy.
 
 Overriding `write` and `edit` changes nothing you can see: the parameter
 schemas, prompt guidance, call rendering, write previews, edit diffs, result

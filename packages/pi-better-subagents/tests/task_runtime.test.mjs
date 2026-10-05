@@ -399,11 +399,11 @@ function fakeToolPackage(dir, name, marker) {
     return realpathSync(dir);
 }
 
-function startTrusted(t, f, { load, trustedRoot, network = true, applyPatch = false }) {
+function startTrusted(t, f, { load, trustedRoot, network = true, applyPatch = false, toolName = 'web_fetch', packageName = 'npm:trusted-web' }) {
     const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control,
-        tools: ['read', 'write', 'edit', 'bash', ...(applyPatch ? ['apply_patch'] : []), 'web_fetch'],
+        tools: ['read', 'write', 'edit', 'bash', ...(applyPatch ? ['apply_patch'] : []), toolName],
         permissions: { ...f.policy.permissions, network }, applyPatch,
-        extensionTools: [{ name: 'web_fetch', package: 'npm:trusted-web', root: trustedRoot, network: true }],
+        extensionTools: [{ name: toolName, package: packageName, root: trustedRoot, network: true }],
         extensionPaths: [load],
         piBin: fileURLToPath(new URL('./cli.js', import.meta.resolve('@earendil-works/pi-coding-agent'))) });
     t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
@@ -432,6 +432,21 @@ test('a confined child admits a trusted tool only from its ticked package and on
     const offline = startTrusted(t, f, { load: trusted, trustedRoot: trusted, network: false });
     assert.equal(offline.ready?.trusted, undefined, offline.output);
     assert.match(offline.ready?.refused?.[0]?.reason ?? '', /needs Network access, which is Off/);
+});
+
+test('a ticked SSH tool loads the real SSH extension into a confined child without admitting its other tools', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const root = realpathSync(fileURLToPath(new URL('../../pi-better-ssh', import.meta.url)));
+    const plan = planTaskTools({ requested: ['ssh_profile'], network: true,
+        settings: { applyPatch: false, trusted: [{ name: 'ssh_profile', package: 'npm:pi-better-ssh' }] },
+        builtins: ['read', 'write', 'edit', 'bash'],
+        registered: [{ name: 'ssh_profile', sourceInfo: { path: join(root, 'src', 'index.ts'), source: 'npm:pi-better-ssh', baseDir: root } }],
+        resolvePath: () => undefined });
+    assert.deepEqual(plan.refused, []);
+    const [tool] = plan.trusted;
+    const child = startTrusted(t, f, { load: tool.loadPath, trustedRoot: tool.root, toolName: tool.name, packageName: tool.package });
+    assert.deepEqual(child.ready?.trusted, ['ssh_profile'], child.output);
+    assert.equal(child.ready?.refused, undefined, child.output);
 });
 
 test('trusted-tool admission checks name, canonical package root and network', (t) => {

@@ -11,7 +11,7 @@ export interface PermissionPageHandlers {
     save(settings: PermissionSettings): void | Promise<void>;
     /** What saving `settings` would loosen versus the saved defaults. Reported after the save. */
     loosening?(settings: PermissionSettings): string[];
-    /** Trusted-tool candidates registered in the running Pi (core builtins and harness tools excluded). */
+    /** Trusted-tool candidates registered in Pi (core builtins and non-SSH harness tools excluded). */
     discoverTools?(): readonly Pick<DiscoveredTool, "name" | "package" | "source">[];
 }
 

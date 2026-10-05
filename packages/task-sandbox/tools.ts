@@ -3,7 +3,7 @@
  *
  * - Guarded tools are harness adapters that go through the task's guarded file
  *   operations, so the file rules govern them. Today: apply_patch.
- * - Trusted tools are third-party tools admitted by name AND owning package.
+ * - Trusted tools are extension tools admitted by name AND owning package.
  *   They run in the child Pi process, outside the file rules; a human ticks each
  *   one in /sandbox. Network tools are refused while Network is Off.
  */
@@ -35,15 +35,17 @@ export function defaultSubagentTools(): SubagentToolSettings {
 
 /** Tools that reach the network; refused while the profile's Network access is Off. */
 export function isNetworkTool(name: string): boolean {
-    return ["web_fetch", "web_search", "firecrawl_scrape", "firecrawl_extract", "mcp", "mcpScript", "remote_bash"].includes(name) ||
+    return ["web_fetch", "web_search", "firecrawl_scrape", "firecrawl_extract", "mcp", "mcpScript", ...SSH_TOOL_NAMES].includes(name) ||
         name.startsWith("mcp__");
 }
 
 /** Names never offered as trusted: builtins and the guarded adapters. */
 export const RESERVED_TOOL_NAMES = Object.freeze(["read", "write", "edit", "bash", "grep", "find", "ls", "powershell", "apply_patch", "process_list"]);
 
-/** Packages that are this harness: their tools are never offered as trusted tools. */
+/** Harness tools stay excluded except for the explicitly supported SSH tools. */
 const HARNESS_PACKAGES = /(^|[/:])pi-better-[a-z-]+$/;
+const SSH_PACKAGE = /(^|[/:])pi-better-ssh$/;
+const SSH_TOOL_NAMES = ["remote_bash", "ssh_profile", "ssh_mux"];
 
 /** Strict decoding: a malformed tool list must not silently admit anything. */
 export function parseSubagentTools(value: unknown): SubagentToolSettings {
@@ -94,13 +96,16 @@ export function toolPackage(tool: ToolSource): DiscoveredTool | undefined {
     return { name: tool.name, package: pkg, root: base };
 }
 
-/** Candidate trusted tools in a running Pi, excluding core builtins, guarded names and this harness. */
+/** Candidate trusted tools, excluding core builtins, guarded names and non-SSH harness tools. */
 export function discoverTrustedTools(tools: readonly ToolSource[]): DiscoveredTool[] {
     const found: DiscoveredTool[] = [];
     for (const tool of tools) {
         if (RESERVED_TOOL_NAMES.includes(tool.name)) continue;
         const owner = toolPackage(tool);
-        if (!owner || [owner.package, owner.root].some((id) => HARNESS_PACKAGES.test(id.replace(/\/+$/, "")))) continue;
+        if (!owner) continue;
+        const harnessOwners = [owner.package, owner.root].map((id) => id.replace(/\/+$/, ""))
+            .filter((id) => HARNESS_PACKAGES.test(id));
+        if (harnessOwners.length && !(SSH_TOOL_NAMES.includes(tool.name) && harnessOwners.every((id) => SSH_PACKAGE.test(id)))) continue;
         if (!found.some((t) => t.name === owner.name && t.package === owner.package)) {
             found.push(tool.sourceInfo?.source === "builtin" ? { ...owner, source: "builtin" } : owner);
         }
