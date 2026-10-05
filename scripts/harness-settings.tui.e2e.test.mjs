@@ -61,7 +61,7 @@ export default function(pi){
     wait(pane => pane.includes("Harness settings"));
     key("Escape");
     wait(pane => !pane.includes("Harness settings"));
-    send("/goal settings"); key("Enter");
+    send("/goal settings"); key("Escape"); key("Enter");
     wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
     key("Escape");
     wait(pane => !pane.includes("Goal settings"));
