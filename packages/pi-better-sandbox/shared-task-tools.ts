@@ -72,6 +72,8 @@ export interface ToolSource {
 export interface DiscoveredTool {
     name: string;
     package: string;
+    /** Explicit SDK provenance for display only; never a package or admission identity. */
+    source?: "builtin";
     /**
      * What to load and admit: the package root directory, or, for an extension
      * file with no package manifest, that file itself. Loading a manifest-less
@@ -80,7 +82,7 @@ export interface DiscoveredTool {
     root: string;
 }
 
-/** The owning package of a registered tool, or undefined for builtins and inline registrations. */
+/** The owning package of a registered tool, or undefined for synthetic core/inline sources. */
 export function toolPackage(tool: ToolSource): DiscoveredTool | undefined {
     const info = tool.sourceInfo;
     if (!info?.path || info.path.startsWith("<")) return undefined;
@@ -93,14 +95,16 @@ export function toolPackage(tool: ToolSource): DiscoveredTool | undefined {
     return { name: tool.name, package: pkg, root: base };
 }
 
-/** Candidate trusted tools in a running Pi, excluding builtins, guarded names and this harness. */
+/** Candidate trusted tools in a running Pi, excluding core builtins, guarded names and this harness. */
 export function discoverTrustedTools(tools: readonly ToolSource[]): DiscoveredTool[] {
     const found: DiscoveredTool[] = [];
     for (const tool of tools) {
         if (RESERVED_TOOL_NAMES.includes(tool.name)) continue;
         const owner = toolPackage(tool);
         if (!owner || [owner.package, owner.root].some((id) => HARNESS_PACKAGES.test(id.replace(/\/+$/, "")))) continue;
-        if (!found.some((t) => t.name === owner.name && t.package === owner.package)) found.push(owner);
+        if (!found.some((t) => t.name === owner.name && t.package === owner.package)) {
+            found.push(tool.sourceInfo?.source === "builtin" ? { ...owner, source: "builtin" } : owner);
+        }
     }
     return found.sort((a, b) => a.name.localeCompare(b.name) || a.package.localeCompare(b.package));
 }

@@ -11,11 +11,11 @@ export interface PermissionPageHandlers {
     save(settings: PermissionSettings): void | Promise<void>;
     /** What saving `settings` would loosen versus the saved defaults. Reported after the save. */
     loosening?(settings: PermissionSettings): string[];
-    /** Trusted-tool candidates registered in the running Pi (builtins and harness tools excluded). */
-    discoverTools?(): readonly Pick<DiscoveredTool, "name" | "package">[];
+    /** Trusted-tool candidates registered in the running Pi (core builtins and harness tools excluded). */
+    discoverTools?(): readonly Pick<DiscoveredTool, "name" | "package" | "source">[];
 }
 
-type TrustedItem = { kind: "trusted"; name: string; package: string; loaded: boolean; group: string };
+type TrustedItem = Pick<DiscoveredTool, "name" | "package" | "source"> & { kind: "trusted"; loaded: boolean; group: string };
 type ToolGroup = { kind: "group"; id: string; label: string; tools: TrustedItem[] };
 type ToolItem =
     | { kind: "guarded"; name: "apply_patch" }
@@ -86,7 +86,7 @@ export function createPermissionsPage(
         message = errorText(error);
         isError = true;
     }
-    let discovered: readonly Pick<DiscoveredTool, "name" | "package">[] = [];
+    let discovered: readonly Pick<DiscoveredTool, "name" | "package" | "source">[] = [];
     try {
         discovered = handlers.discoverTools?.() ?? [];
     } catch (error) {
@@ -98,9 +98,9 @@ export function createPermissionsPage(
     const expanded = new Set<string>();
     function toolGroups(): ToolGroup[] {
         const trusted = new Map<string, TrustedItem>();
-        const add = (tool: { name: string; package: string }, loaded: boolean) => {
+        const add = (tool: Pick<DiscoveredTool, "name" | "package" | "source">, loaded: boolean) => {
             const provider = /^mcp__(.+?)__/.exec(tool.name)?.[1];
-            const group = JSON.stringify([tool.package, provider ?? ""]);
+            const group = JSON.stringify([tool.package, provider ?? "", tool.source ?? ""]);
             const key = JSON.stringify([tool.name, tool.package]);
             if (!trusted.has(key)) trusted.set(key, { ...tool, kind: "trusted", loaded, group });
         };
@@ -110,8 +110,9 @@ export function createPermissionsPage(
         for (const tool of trusted.values()) {
             if (!groups.has(tool.group)) {
                 const provider = JSON.parse(tool.group)[1] as string;
+                const label = tool.source === "builtin" ? "built-in" : packageLabel(tool.package);
                 groups.set(tool.group, { kind: "group", id: tool.group,
-                    label: provider ? `${provider} (${packageLabel(tool.package)})` : packageLabel(tool.package), tools: [] });
+                    label: provider ? `${provider} (${label})` : label, tools: [] });
             }
             groups.get(tool.group)!.tools.push(tool);
         }

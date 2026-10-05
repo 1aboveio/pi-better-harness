@@ -1359,8 +1359,11 @@ test("saved permissions reach file tools, command gates, and consumer snapshots"
     forgetSandboxPreference();
 });
 
-test("Process access remains Off even when Main confinement is inactive", async () => {
+test("saved Process access Off remains enforced even when Main confinement is inactive", async () => {
     forgetSandboxPreference();
+    const settings = defaultSandboxPermissions();
+    settings.main.processAccess = "off";
+    writePermissionSettings(settings);
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const started = await startSession(recorded, project("process-off"), "startup", false, false);

@@ -16,7 +16,9 @@ would abandon the task boundary and is not an acceptable fix.
 ## Decision
 
 Add Process access with Off and Read values, persisted as `processAccess`.
-Absent values decode to Off. Existing profiles are not broadened. Subagents
+Fresh Main and Subagents profiles default to Read. Absent values in saved
+profiles decode to Off, and explicit saved values are preserved. Existing
+profiles are not broadened. Subagents
 capture the selected value in their immutable launch policy.
 
 The fixed `process_list` tool returns current-user PIDs and process names only.

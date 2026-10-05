@@ -65,12 +65,13 @@ need interactive confirmation. Full policy: [pi-better-sandbox](https://github.c
 ## Minimal Tool Output
 
 The bundled harness also provides `/tool-output minimal`, `/tool-output normal`,
-and `/tool-output` (toggle). Minimal mode hides tool blocks entirely, including
-running calls, headers, results, images, summary rows, and tool spacers. Built-in,
+and `/tool-output` (toggle). Minimal mode folds each tool call into a single-line
+header, including running calls. Long headers are truncated to the terminal
+width; result bodies, images, boxes, and tool spacers are hidden. Built-in,
 extension, and MCP calls are included. Execution, sandboxing, and agent-facing
 payloads are unchanged. Ctrl+O reveals the original tool blocks; Ctrl+O again
-hides them. `/tool-output normal` restores ordinary rendering. Error results
-are also hidden in minimal mode and remain available when revealed.
+folds them. `/tool-output normal` restores ordinary rendering. Error result
+bodies are also hidden in minimal mode and remain available when expanded.
 
 Normal mode is the default. The preference is saved in the current session,
 including resume/reload. This is a version-sensitive internal TUI adapter,

@@ -72,7 +72,7 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[4]!, /Stored credentials\s+-\s+Write & delete\s*$/);
     assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
     assert.match(lines[6]!, /Network access\s+-\s+On/);
-    assert.match(lines[7]!, /Process access\s+-\s+Off/);
+    assert.match(lines[7]!, /Process access\s+-\s+Read/);
     assert.match(lines[8]!, /Subagents · Tools/);
     assert.match(lines[9]!, /Guarded \(follows the file rules\)/);
     assert.match(lines[10]!, /\[x\] apply_patch\s+harness adapter/);
@@ -180,13 +180,13 @@ test("Process access cycles only Off and Read without changing other permissions
     const h = harness();
     h.press(Key.right, ...Array(6).fill(Key.down), Key.space);
     await settle();
-    assert.equal(h.current.subagents.processAccess, "read");
-    assert.equal(h.current.main.processAccess, "off");
-    assert.match(plain(table(h.page, 100)[7]!), /Process access\s+-\s+Read/);
-    assert.deepEqual({ ...h.current.subagents, processAccess: "off" }, h.initial.subagents);
+    assert.equal(h.current.subagents.processAccess, "off");
+    assert.equal(h.current.main.processAccess, "read");
+    assert.match(plain(table(h.page, 100)[7]!), /Process access\s+-\s+Off/);
+    assert.deepEqual({ ...h.current.subagents, processAccess: "read" }, h.initial.subagents);
     h.press(Key.space);
     await settle();
-    assert.equal(h.current.subagents.processAccess, "off");
+    assert.equal(h.current.subagents.processAccess, "read");
 });
 
 test("a single Space applies both looser and tighter permission changes", async () => {
@@ -354,6 +354,39 @@ test("a ticked tool that is not loaded stays grouped so it can be unticked", asy
     await settle();
     assert.deepEqual(h.current.subagentTools.trusted, []);
     assert.match(h.page.render(120).map(plain).join("\n"), />\s*\[x\] apply_patch/, "removing the last unloaded group clamps focus to the guarded tool");
+});
+
+test("builtin provenance labels groups without relabeling dot packages or changing saved identities", async () => {
+    const initial = structuredClone(DEFAULT_PERMISSION_SETTINGS);
+    initial.subagentTools.trusted = [{ name: "bundled_tool", package: "." }];
+    const discovered = [
+        { name: "bundled_tool", package: ".", source: "builtin" as const },
+        { name: "local_tool", package: "." },
+        { name: "mcp__docs__search", package: ".", source: "builtin" as const },
+    ];
+    const h = harness({ getConfig: () => initial, discoverTools: () => discovered });
+    const rendered = () => h.page.render(160).map(plain).join("\n");
+    assert.match(rendered(), /> \[ \] \. 0\/1/);
+    assert.match(rendered(), /> \[x\] built-in 1\/1/);
+    assert.match(rendered(), /> \[ \] docs \(built-in\) 0\/1/);
+    h.press(...Array(9).fill(Key.down), Key.right);
+    assert.match(rendered(), /\[x\] bundled_tool/);
+    assert.ok(!/\[ \] local_tool/.test(rendered()), "the unmarked dot package is a separate collapsed group");
+    h.press(Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted, []);
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.deepEqual(h.current.subagentTools.trusted, [{ name: "bundled_tool", package: "." }]);
+    h.press("\x13");
+    await settle();
+    assert.deepEqual(h.saved.at(-1)!.subagentTools.trusted, initial.subagentTools.trusted,
+        "neither the display label nor provenance is persisted as an admission identity");
+    const reopened = harness({ getConfig: () => h.saved.at(-1)!, discoverTools: () => discovered });
+    assert.match(reopened.page.render(160).map(plain).join("\n"), /> \[x\] built-in 1\/1/);
+    const unloaded = harness({ getConfig: () => h.saved.at(-1)!, discoverTools: () => [] });
+    assert.match(unloaded.page.render(160).map(plain).join("\n"), /> \[x\] \. 1\/1/,
+        "a saved dot package alone does not establish builtin provenance");
 });
 
 test("MCP providers are separate groups and identical names in other packages stay independent", async () => {

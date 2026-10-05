@@ -7,6 +7,10 @@ test("permission defaults preserve independent Main and Subagents columns", () =
     assert.equal(settings.main.enabled, false);
     assert.equal(settings.subagents.enabled, true);
     assert.deepEqual(settings.subagents, { ...settings.main, enabled: true, outsideProject: "write", storedCredentials: "read-write" });
+    assert.equal(settings.main.processAccess, "read");
+    assert.equal(settings.subagents.processAccess, "read");
+    settings.main.processAccess = "off";
+    assert.equal(settings.subagents.processAccess, "read");
     assert.equal(settings.main.storedCredentials, "read");
     settings.main.storedCredentials = "off";
     assert.equal(settings.subagents.storedCredentials, "read-write");
@@ -42,6 +46,10 @@ test("legacy profiles keep Process access Off and malformed values fail closed",
     assert.equal(decoded.main.processAccess, "off");
     assert.equal(decoded.subagents.processAccess, "off");
     assert.throws(() => parseSandboxPermissions({ ...settings, subagents: { ...settings.subagents, processAccess: "write" } }), /explicit permission values/);
+    settings.main.processAccess = "off";
+    settings.subagents.processAccess = "off";
+    assert.equal(parseSandboxPermissions(settings).main.processAccess, "off");
+    assert.equal(parseSandboxPermissions(settings).subagents.processAccess, "off");
     settings.subagents.processAccess = "read";
     assert.equal(parseSandboxPermissions(settings).subagents.processAccess, "read");
     assert.deepEqual(describeLoosening(decoded, settings), ["Subagents: processAccess off → read"]);
