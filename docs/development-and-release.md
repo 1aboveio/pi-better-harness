@@ -84,8 +84,8 @@ npm run test:cross-session
 
 ### Minimal tool output compatibility
 
-The renderer regression suite covers zero-row tool hiding, expansion, restoration,
-and reload/reinstall behavior. When the workspace SDK includes a bundled CLI,
+The renderer regression suite covers single-line folded call headers, terminal-width
+truncation, expansion, restoration, and reload/reinstall behavior. When the workspace SDK includes a bundled CLI,
 it also exercises that CLI's actual renderer and transcript Container. To test a separately installed
 bundled Pi build:
 
