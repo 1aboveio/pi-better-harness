@@ -117,12 +117,24 @@ approval rules. Do not let generated text silently expand into a command.
 
 ## Settings and observability
 
-Proposed `/prompt-suggestions` command: `on`, `off`, and `status`.
+Confirmed configuration entry point: **`/harness-settings`**, a Harness-owned
+screen using Pi's native `SettingsList`. Leave the built-in `/settings` untouched;
+Pi 1.0.0 has no public extension-setting registration API.
+
+Initial row: `Prompt suggestions`, values `off` / `on`, default `off`. Its
+description discloses additional model usage and recent conversation sharing
+with the active provider. Changing off to on requires explicit user confirmation;
+cancelling leaves the setting off. Changing to off immediately cancels pending
+inference and clears ghost text. Esc closes the screen and restores editor focus
+without changing the draft. Do not add settings for unimplemented features.
+
 Persist explicit preference using user-owned Harness configuration conventions;
 session entries may record local overrides but cannot authorize global opt-in.
 Do not edit the upstream Pi settings schema or enable via project configuration.
-The status view reports on/off, active model, last skip/error reason, and
-auxiliary input/cache/output tokens and provider-reported cost when available.
+A separate status/detail view reports on/off, active model, last skip/error reason,
+and auxiliary input/cache/output tokens and provider-reported cost when available.
+Keep operational details out of the settings list. A dedicated
+`/prompt-suggestions` command is not required for v1.
 Label missing pricing or usage as unknown, not zero. Persist accounting metadata
 without prompt/suggestion text or auth material; no analytics service.
 
