@@ -56,6 +56,18 @@ test('the default plan loads the ticked web tools from their registered package 
     assert.equal(describeTaskTools(plan), 'guarded apply_patch · trusted web_fetch (@juicesharp/rpiv-web-tools), web_search (@juicesharp/rpiv-web-tools)');
 });
 
+test('file-backed builtin display provenance does not change launch roots or admit a display label', (t) => {
+    const { registered, web } = packages(t);
+    const tool = { ...registered[0], sourceInfo: { ...registered[0].sourceInfo, source: 'builtin' } };
+    assert.deepEqual(discoverTrustedTools([tool]), [{ name: 'web_fetch', package: web, root: web, source: 'builtin' }]);
+    const options = { requested: ['web_fetch'], network: true, builtins: BUILTINS, registered: [tool], resolvePath: () => undefined };
+    const plan = planTaskTools({ ...options, settings: { applyPatch: false, trusted: [{ name: 'web_fetch', package: web }] } });
+    assert.deepEqual(plan.trusted, [{ name: 'web_fetch', package: web, root: web, network: true, loadPath: web }]);
+    const mislabeled = planTaskTools({ ...options, settings: { applyPatch: false, trusted: [{ name: 'web_fetch', package: 'built-in' }] } });
+    assert.deepEqual(mislabeled.trusted, []);
+    assert.match(mislabeled.refused[0].reason, /can't be found/);
+});
+
 test('network tools are refused with Network Off; unresolvable or mismatched packages are refused with a reason', (t) => {
     const { registered, other } = packages(t);
     const base = { settings: defaultSubagentTools(), builtins: BUILTINS, registered, resolvePath: () => undefined };

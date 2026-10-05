@@ -53,6 +53,12 @@ Process access                    -                Read
 Trusted tools use two levels: a package/provider group, then its individual tools.
 Non-MCP tools are grouped by exact owning package; `mcp__<provider>__...` tools
 are grouped by provider and owning package together. Groups start collapsed.
+File-backed extensions explicitly marked `builtin` by Pi display as `built-in`,
+not their package path (which can be `.`). This is a display label only: saved
+choices and admission still use the original owning package. An unmarked `.`
+package is not built-in, and an unavailable saved tool keeps its package label
+until Pi reports its provenance again. Core tools with synthetic source paths
+remain excluded from trusted candidates.
 `>` means collapsed and `v` means expanded. Their checkbox shows `[x]` when
 all children are selected, `[-]` when some are selected, and `[ ]` when none
 are; the count is selected/total. Right expands a group. Left collapses a group,
