@@ -1,9 +1,14 @@
+import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 interface ToolComponent {
+  toolName: string;
+  args: unknown;
+  callRendererComponent?: Component;
   expanded: boolean;
   showImages: boolean;
   resultRendererComponent?: unknown;
@@ -36,6 +41,20 @@ export interface MinimalOutputHook {
 
 const HOOK = Symbol.for("pi-better-harness.minimal-output-hook");
 const emptyResult = () => ({ render: () => [] as string[], invalidate() {} });
+
+function compactCall(component: ToolComponent, width: number): string[] {
+  if (width <= 0) return [];
+  // Render the call alone at a wider width so terminal wrapping becomes truncation.
+  const header = component.callRendererComponent?.render(Math.max(4096, width + 1))
+    .map((line) => stripVTControlCharacters(line).trim())
+    .find((line) => line.length > 0);
+  let text = header;
+  if (!text) {
+    const args = JSON.stringify(component.args);
+    text = `${component.toolName}${args && args !== "{}" ? ` ${args}` : ""}`;
+  }
+  return [truncateToWidth(text, width)];
+}
 
 function hostRequire(): NodeRequire {
   let require = createRequire(import.meta.url);
@@ -145,7 +164,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype): MinimalOutpu
         return current.enabled && !this.expanded ? "" : originals.getTextOutput.apply(this, args);
       },
       render(this: ToolComponent, width: number): string[] {
-        return current.enabled && !this.expanded ? [] : originals.render.call(this, width);
+        return current.enabled && !this.expanded ? compactCall(this, width) : originals.render.call(this, width);
       },
     };
     Object.assign(prototype, wrappers);

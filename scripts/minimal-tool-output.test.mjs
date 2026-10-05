@@ -11,7 +11,7 @@ import { installMinimalOutputHook, loadToolPrototype } from "../packages/pi-bett
 const sdk = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 // The SDK may have its own TUI copy; override capabilities on the renderer's instance.
 const sdkRequire = createRequire(pathToFileURL(join(sdk, "index.js")));
-const { Container, Text, getCapabilities, setCapabilities } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
+const { Box, Container, Text, getCapabilities, setCapabilities, visibleWidth } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
 const { AssistantMessageComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/assistant-message.js")).href);
 const { ToolExecutionComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/tool-execution.js")).href);
 const { initTheme } = await import(pathToFileURL(join(sdk, "modes/interactive/theme/theme.js")).href);
@@ -62,7 +62,9 @@ for (const [name, definition] of [
     component.setExpanded(false);
     const normalView = rendered(component);
     hook.setEnabled(true);
-    assert.deepEqual(component.render(100), [], "hidden tools must consume zero transcript rows");
+    assert.equal(component.render(100).length, 1, "collapsed tools retain exactly one header row");
+    assert.match(rendered(component), name === "read" ? /demo/ : name === "subagent_result" ? /SUBAGENT_HEADER/ : name === "mcp__example__query" ? /MCP_HEADER/ : /unknown_external_tool/);
+    assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
     assert.equal(component.result, payload, "the agent-facing result object must remain untouched");
     component.setExpanded(true);
     assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
@@ -84,7 +86,7 @@ test("minimal mode suppresses streaming error bodies and inline images without d
   assert.equal(component.imageComponents.length, 1);
   hook.setEnabled(true);
   component.updateResult(imageResult, true);
-  assert.deepEqual(component.render(100), []);
+  assert.equal(component.render(100).length, 1);
   assert.equal(component.imageComponents.length, 0);
   assert.equal(component.result, imageResult);
   assert.equal(component.result.isError, true);
@@ -94,7 +96,7 @@ test("minimal mode suppresses streaming error bodies and inline images without d
   assert.equal(component.imageComponents.length, 1);
 });
 
-test("new tool rows and streaming updates stay hidden, and custom renderer reuse survives expansion", () => {
+test("new tool headers survive streaming updates, and custom renderer reuse survives expansion", () => {
   const hook = install();
   hook.setEnabled(true);
   const seenComponents = [];
@@ -108,7 +110,8 @@ test("new tool rows and streaming updates stay hidden, and custom renderer reuse
     },
   };
   const component = tool("stateful_extension", definition);
-  assert.deepEqual(component.render(100), []);
+  assert.equal(component.render(100).length, 1);
+  assert.match(rendered(component), /STATEFUL_HEADER/);
   assert.equal(seenComponents.length, 0, "hidden result renderers should not run");
   component.setExpanded(true);
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
@@ -123,18 +126,80 @@ test("new tool rows and streaming updates stay hidden, and custom renderer reuse
   assert.match(rendered(component), /STREAMING_UPDATE_SENTINEL/);
 });
 
-test("minimal mode hides a running tool before any result arrives", () => {
+test("minimal mode retains a running tool header before any result arrives", () => {
   const hook = install();
   hook.setEnabled(true);
   const component = new ToolExecutionComponent("bash", "running-bash", { command: "ls -la" }, {}, undefined, { requestRender() {} }, process.cwd());
-  assert.deepEqual(component.render(100), []);
+  assert.match(rendered(component), /ls -la/);
+  assert.equal(component.render(100).length, 1);
   component.updateResult(payload, true);
-  assert.deepEqual(component.render(100), []);
+  assert.match(rendered(component), /ls -la/);
+  assert.equal(component.render(100).length, 1);
   component.setExpanded(true);
   assert.match(rendered(component), /ls -la/);
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
   component.setExpanded(false);
-  assert.deepEqual(component.render(100), []);
+  assert.match(rendered(component), /ls -la/);
+  assert.equal(component.render(100).length, 1);
+});
+
+test("compact headers truncate long and multiline calls without wrapping or background boxes", () => {
+  const hook = install();
+  hook.setEnabled(true);
+  const command = `ls -la /tmp/${"long-directory/".repeat(20)}\necho second-command`;
+  const component = new ToolExecutionComponent("bash", "long-bash", { command }, {}, undefined, { requestRender() {} }, process.cwd());
+  for (const width of [1, 10, 40, 100]) {
+    const lines = component.render(width);
+    assert.equal(lines.length, 1);
+    assert.ok(visibleWidth(lines[0]) <= width);
+    assert.doesNotMatch(lines[0], /\x1b\[(?:48|4[0-7])[;m]/, "call headers have no box background");
+    if (width >= 10) {
+      assert.match(lines[0], /ls -l/);
+      assert.match(lines[0], /\.\.\.|\u2026/, "long calls show truncation");
+    }
+  }
+  assert.deepEqual(component.render(0), []);
+  component.updateArgs({ command: "git status --short" });
+  assert.match(rendered(component), /git status --short/);
+  assert.doesNotMatch(rendered(component), /long-directory/);
+  const custom = tool("multiline_call", {
+    renderCall: () => new Text("FIRST_HEADER\nSECOND_HEADER", 0, 0),
+    renderResult: () => new Text("BODY", 0, 0),
+  });
+  assert.equal(custom.render(40).length, 1);
+  assert.match(rendered(custom), /FIRST_HEADER/);
+  assert.doesNotMatch(rendered(custom), /SECOND_HEADER|BODY/);
+  const wide = tool("wide_call", {
+    renderCall: () => new Text("\u4e2d\u6587 ".repeat(40), 0, 0),
+  });
+  for (const width of [1, 2, 7, 20]) {
+    const lines = wide.render(width);
+    assert.equal(lines.length, 1);
+    assert.ok(visibleWidth(lines[0]) <= width, "wide characters must fit the supplied terminal columns");
+  }
+});
+
+test("compact custom call headers discard styled box padding and backgrounds", () => {
+  const hook = install();
+  const component = tool("boxed_call", {
+    renderCall: () => {
+      const box = new Box(2, 1, (text) => `\x1b[48;2;100;20;20m${text}\x1b[0m`);
+      box.addChild(new Text("BOXED_HEADER", 0, 0));
+      return box;
+    },
+    renderResult: () => new Text("BOXED_RESULT", 0, 0),
+  });
+  const normal = rendered(component);
+  hook.setEnabled(true);
+  assert.deepEqual(component.render(40), ["BOXED_HEADER"]);
+  assert.doesNotMatch(rendered(component), /BOXED_RESULT|\x1b/);
+  component.setExpanded(true);
+  assert.match(rendered(component), /BOXED_HEADER/);
+  assert.match(rendered(component), /BOXED_RESULT/);
+  assert.match(rendered(component), /\x1b\[48;2;/);
+  component.setExpanded(false);
+  hook.setEnabled(false);
+  assert.equal(rendered(component), normal);
 });
 
 test("duplicate hook owners do not stack wrappers and the last disposal restores ordinary output", () => {
@@ -227,11 +292,11 @@ test("the command toggles existing rows, persists session preference, and restor
   assert.match(rendered(existing), /RESULT_BODY_SENTINEL/);
   assert.equal(entries.at(-1).data.enabled, false);
   assert.match(notices.at(-1), /Normal tool output restored/);
-  assert.match(notices.find((message) => message.startsWith("Minimal tool output on")), /Tool blocks are hidden/);
+  assert.match(notices.find((message) => message.startsWith("Minimal tool output on")), /Compact call headers remain visible/);
 });
 
 const bundledCli = process.env.PI_MINIMAL_OUTPUT_HOST_CLI ?? join(sdk, "bundle/cli.js");
-test("minimal mode patches the running bundled host and removes its bash block entirely", {
+test("minimal mode patches the running bundled host and retains only its bash header", {
   skip: !process.env.PI_MINIMAL_OUTPUT_HOST_CLI && !existsSync(bundledCli)
     ? "This SDK has no bundled CLI; set PI_MINIMAL_OUTPUT_HOST_CLI to test one" : false,
 }, async () => {
@@ -253,10 +318,12 @@ test("minimal mode patches the running bundled host and removes its bash block e
     chat.addChild(component);
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     hook.setEnabled(true);
-    assert.deepEqual(chat.render(100), [], "no header, result, summary, or spacer survives");
+    assert.equal(chat.render(100).length, 1, "only the call header survives");
+    assert.match(rendered(chat), /ls -la/);
+    assert.doesNotMatch(rendered(chat), /RESULT_BODY_SENTINEL/);
     const message = new host.AssistantMessageComponent({ role: "assistant", content: [{ type: "text", text: "BUNDLED_MODEL_TEXT" }], stopReason: "stop" });
     chat.addChild(message);
-    assert.deepEqual(chat.render(100), message.render(100));
+    assert.deepEqual(chat.render(100), [...component.render(100), ...message.render(100)]);
     component.setExpanded(true);
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     component.setExpanded(false);
@@ -268,7 +335,7 @@ test("minimal mode patches the running bundled host and removes its bash block e
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     hook = installMinimalOutputHook(await loadToolPrototype());
     hook.setEnabled(true);
-    assert.deepEqual(chat.render(100), message.render(100), "reinstalling after reload must still hide restored tools");
+    assert.deepEqual(chat.render(100), [...component.render(100), ...message.render(100)], "reinstalling after reload must still fold restored tools");
   } finally {
     hook?.dispose();
     process.argv[1] = argv;
@@ -289,7 +356,7 @@ function placedTool(name, ui, result = payload) {
   return component;
 }
 
-test("minimal mode removes completed and live tool rows without adding summaries or spacers", () => {
+test("minimal mode folds completed and live tool rows without adding boxes or spacers", () => {
   const hook = installMinimalOutputHook(prototype);
   handles.push(hook);
   const ui = { requestRender() {}, children: [] };
@@ -306,7 +373,12 @@ test("minimal mode removes completed and live tool rows without adding summaries
   hook.setEnabled(true);
 
   for (const width of [20, 100]) {
-    assert.deepEqual(chat.render(width), [first, thinking, second].flatMap((component) => component.render(width)), "tool rows must add no transcript height");
+    assert.deepEqual(chat.render(width), [first, thinking, read, edit, second, live].flatMap((component) => component.render(width)));
+    for (const component of [read, edit, live]) {
+      assert.equal(component.render(width).length, 1);
+      assert.ok(visibleWidth(component.render(width)[0]) <= width);
+    }
+    assert.doesNotMatch(chat.render(width).join("\n"), /RESULT_BODY_SENTINEL|EDIT_BODY|LIVE_BODY/);
   }
   assert.equal(read.result, payload);
   assert.equal(edit.result.isError, true);
@@ -315,10 +387,11 @@ test("minimal mode removes completed and live tool rows without adding summaries
   edit.setExpanded(true);
   assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
   assert.match(rendered(chat), /EDIT_BODY/);
-  assert.doesNotMatch(rendered(chat), /LIVE_BODY|live_probe-arg/);
+  assert.doesNotMatch(rendered(chat), /LIVE_BODY/);
+  assert.match(rendered(chat), /live_probe-arg/);
   read.setExpanded(false);
   edit.setExpanded(false);
-  assert.deepEqual(chat.render(100), [first, thinking, second].flatMap((component) => component.render(100)));
+  assert.deepEqual(chat.render(100), [first, thinking, read, edit, second, live].flatMap((component) => component.render(100)));
 
   hook.dispose();
   assert.deepEqual(chat.render(100), normal);

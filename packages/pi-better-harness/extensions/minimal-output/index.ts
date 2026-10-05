@@ -56,11 +56,11 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("tool-output", {
-    description: "[minimal|normal] — Hide tool blocks entirely, or restore normal output. No argument toggles. Display only.",
+    description: "[minimal|normal] — Fold tool output into single-line call headers, or restore normal output. No argument toggles. Display only.",
     getArgumentCompletions: (argumentPrefix) => {
       const prefix = argumentPrefix.trimStart().toLowerCase();
       const matches = [
-        { value: "minimal", label: "minimal", description: "Hide all tool blocks, including running tools" },
+        { value: "minimal", label: "minimal", description: "Show compact call headers without result bodies" },
         { value: "normal", label: "normal", description: "Restore ordinary tool output" },
       ].filter((option) => option.value.startsWith(prefix));
       return matches.length > 0 ? matches : null;
@@ -78,7 +78,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
       pi.appendEntry(ENTRY, { version: 1, enabled });
       status(ctx);
       ctx.ui.notify(enabled
-        ? "Minimal tool output on. Tool blocks are hidden. Ctrl+O reveals them."
+        ? "Minimal tool output on. Compact call headers remain visible. Ctrl+O reveals results."
         : "Normal tool output restored.", "info");
     },
   });
