@@ -37,3 +37,23 @@ test("dot package paths do not establish builtin provenance and synthetic source
         { name: "unknown_tool", package: ".", root: "." },
     ]);
 });
+
+test("only the supported SSH tools are offered from harness packages, including local installs", (t) => {
+    const base = mkdtempSync(join(tmpdir(), "ssh-discovery-"));
+    t.after(() => rmSync(base, { recursive: true, force: true }));
+    const ssh = join(base, "pi-better-ssh");
+    const harness = join(base, "pi-better-harness");
+    for (const dir of [ssh, harness]) {
+        mkdirSync(dir);
+        writeFileSync(join(dir, "package.json"), "{}");
+    }
+    const tool = (name: string, root: string, source: string) => ({ name,
+        sourceInfo: { path: join(root, "index.ts"), baseDir: root, source } });
+    assert.deepEqual(discoverTrustedTools([
+        tool("ssh_profile", ssh, ssh),
+        tool("future_tool", ssh, "npm:pi-better-ssh"),
+        tool("subagent_spawn", harness, "npm:pi-better-harness"),
+        tool("remote_bash", harness, "npm:pi-better-ssh"),
+        tool("ssh_mux", ssh, "npm:pi-better-harness"),
+    ]), [{ name: "ssh_profile", package: ssh, root: ssh }]);
+});

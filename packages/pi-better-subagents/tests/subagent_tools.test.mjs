@@ -17,7 +17,8 @@ function packages(t) {
     const other = join(base, 'node_modules', 'other-web');
     const ask = join(base, 'node_modules', '@juicesharp', 'rpiv-ask-user-question');
     const harness = join(base, 'node_modules', 'pi-better-harness');
-    for (const dir of [web, other, ask, harness]) {
+    const ssh = join(base, 'node_modules', 'pi-better-ssh');
+    for (const dir of [web, other, ask, harness, ssh]) {
         mkdirSync(dir, { recursive: true });
         writeFileSync(join(dir, 'index.ts'), '');
         writeFileSync(join(dir, 'package.json'), '{}');
@@ -31,8 +32,34 @@ function packages(t) {
         { name: 'apply_patch', sourceInfo: { path: '/v/src/index.ts', source: 'npm:@vanillagreen/pi-codex-minimal-tools', baseDir: '/v' } },
         { name: 'ask_user_question', sourceInfo: { path: join(ask, 'index.ts'), source: 'npm:@juicesharp/rpiv-ask-user-question', baseDir: ask } },
     ];
-    return { base, web, other, ask, registered };
+    return { base, web, other, ask, ssh, registered };
 }
+
+test('SSH tools require opt-in and Network On and load only the selected extension', (t) => {
+    const { ssh } = packages(t);
+    const names = ['remote_bash', 'ssh_mux', 'ssh_profile'];
+    const registered = names.map((name) => ({ name,
+        sourceInfo: { path: join(ssh, 'index.ts'), source: 'npm:pi-better-ssh', baseDir: ssh } }));
+    assert.deepEqual(discoverTrustedTools(registered), names.map((name) => ({ name, package: 'npm:pi-better-ssh', root: ssh })));
+    const options = { requested: names, network: true, builtins: BUILTINS, registered, resolvePath: () => undefined };
+    const defaults = planTaskTools({ ...options, settings: defaultSubagentTools() });
+    assert.deepEqual(defaults.trusted, []);
+    assert.deepEqual(defaults.refused.map(({ name }) => name), names);
+    const settings = { applyPatch: false, trusted: names.map((name) => ({ name, package: 'npm:pi-better-ssh' })) };
+    const enabled = planTaskTools({ ...options, settings });
+    assert.deepEqual(enabled.refused, []);
+    assert.deepEqual(enabled.trusted, names.map((name) => ({ name, package: 'npm:pi-better-ssh', root: ssh, network: true, loadPath: ssh })));
+    const offline = planTaskTools({ ...options, settings, network: false });
+    assert.deepEqual(offline.trusted, []);
+    assert.deepEqual(offline.refused, names.map((name) => ({ name, reason: 'needs Network access, which is Off for subagents' })));
+    const individual = planTaskTools({ ...options, settings: { ...settings, trusted: settings.trusted.slice(0, 1) } });
+    assert.deepEqual(individual.trusted.map(({ name, loadPath }) => ({ name, loadPath })), [{ name: 'remote_bash', loadPath: ssh }]);
+    assert.deepEqual(individual.refused.map(({ name }) => name), ['ssh_mux', 'ssh_profile']);
+    const impostor = planTaskTools({ ...options, settings, registered: registered.map((tool) => ({ ...tool,
+        sourceInfo: { ...tool.sourceInfo, source: 'npm:other-ssh' } })) });
+    assert.deepEqual(impostor.trusted, []);
+    assert.deepEqual(impostor.refused.map(({ name }) => name), names);
+});
 
 test('discovery lists only third-party tools with their owning package', (t) => {
     const { registered, web, ask } = packages(t);
