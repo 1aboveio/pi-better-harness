@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Add `/harness-settings` with shortcuts to loaded Sandbox, Subagents, and Goal settings. Each package retains its direct settings command and standalone configuration ownership.
+- Add opt-in, bounded next-prompt suggestions in the empty TUI editor. Tab or Right Arrow accepts without sending; typing and lifecycle changes cancel stale suggestions. Report auxiliary model usage separately from Pi totals.
+
 ## [pi-better-harness@0.20.0] - 2026-10-05
 
 ### Changed

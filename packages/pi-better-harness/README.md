@@ -86,6 +86,45 @@ Load the bundled harness or run it directly from a checkout:
 pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
 ```
 
+## Harness Settings
+
+The bundled harness provides `/harness-settings`, using Pi's native settings
+list. It opens the settings screens of loaded Sandbox, Subagents, and Goal
+packages without duplicating their configuration. `/sandbox`, `/subagents
+settings`, and `/goal settings` remain available in standalone installations.
+Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
+
+Prompt suggestions are off by default. Enable them explicitly in
+`/harness-settings`; confirmation explains the extra model usage. After a
+successful user interaction settles, an empty editor can show one gray suggested
+follow-up. Tab or Right Arrow inserts it for editing; Enter subsequently sends
+it. Enter on ghost text alone does not send it. Typing, pasting, history recall,
+and session/model changes dismiss or cancel suggestions. Navigator input and
+dialogs take priority; incompatible custom editors keep their own behavior.
+
+Suggestions use a bounded recent user/assistant text context and the active
+model, without task tools, new file reads, or raw tool output. Requests time out
+after four seconds, are not retried, and stop when you start editing. They use
+Pi's provider connection, even with task Network access Off. Request limits do
+not guarantee cache hits or a fixed dollar cost. The settings screen's usage
+detail reports auxiliary usage separately from Pi session totals; missing usage
+or prices are labeled unknown. No suggestion analytics are sent.
+
+Providers must expose a compatible public transport that honors the request
+bounds. The inspected stock Codex transport cannot enforce the output-token cap,
+and the stock Bedrock transport cannot disable retries; suggestions pause for
+these transports and virtual-model routes. The usage detail shows the reason.
+There is no silent fallback to another provider or model.
+
+The preference is user-owned and persists across sessions. This feature is TUI
+only, not active in RPC/print/JSON modes or subagent children. The standalone
+package installer does not install Harness-only extensions; load the bundle or
+the settings extension from the checkout to use the hub:
+
+```sh
+pi -e ./packages/pi-better-harness/extensions/settings/index.ts
+```
+
 ## When To Use
 
 Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, synchronous SSH, goal tracking, or plans.

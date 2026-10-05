@@ -13,7 +13,7 @@
 
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
@@ -2283,6 +2283,27 @@ export default function (pi: ExtensionAPI) {
         },
         enrich: createLaunchEnricher(),
     });
+    const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
+        if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.custom === "function") {
+            await ctx.ui.custom<void>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
+                get: () => ({
+                    mode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap(),
+                    modeSource: delegationOverride ? "session" : "config",
+                    capSource: capOverride !== undefined ? "session" : "config",
+                    defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
+                    defaultCap: normalizeConcurrencyCap(loadConfig().maxConcurrent),
+                }),
+                changeMode, changeCap, save: saveSettings, reset: resetSettings,
+            }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done()));
+        } else {
+            ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Use /subagents mode <mode> or /subagents cap <number>; /subagents save persists both.`, "info");
+        }
+    };
+    const contribution = { id: "subagents", label: "Subagents", command: "/subagents settings", open: openSettings };
+    const registerSettings = () => pi.events?.emit("harness-settings:register", contribution);
+    const unsubscribeSettingsRequest = pi.events?.on?.("harness-settings:request", registerSettings);
+    registerSettings();
+
     if (typeof pi.registerCommand === "function") {
         agentOperations.registerCommands(pi);
         pi.registerCommand("subagents", {
@@ -2291,20 +2312,7 @@ export default function (pi: ExtensionAPI) {
             async handler(args, ctx) {
                 const tokens = args.trim().split(/\s+/).filter(Boolean);
                 if (tokens.length === 0 || (tokens.length === 1 && tokens[0] === "settings")) {
-                    if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.custom === "function") {
-                        await ctx.ui.custom<void>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
-                            get: () => ({
-                                mode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap(),
-                                modeSource: delegationOverride ? "session" : "config",
-                                capSource: capOverride !== undefined ? "session" : "config",
-                                defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
-                                defaultCap: normalizeConcurrencyCap(loadConfig().maxConcurrent),
-                            }),
-                            changeMode, changeCap, save: saveSettings, reset: resetSettings,
-                        }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done()));
-                    } else {
-                        ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Use /subagents mode <mode> or /subagents cap <number>; /subagents save persists both.`, "info");
-                    }
+                    await openSettings(ctx);
                     return;
                 }
                 const requested = tokens[1];
@@ -2446,6 +2454,7 @@ export default function (pi: ExtensionAPI) {
 
     // Tear down the timer and clear the widget when the session ends.
     pi.on("session_shutdown", async (_event, ctx) => {
+        if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
         // The foreground Pi session owns this work. Stop current-session
         // running/orphaned children before dropping the session origin, so they
         // cannot become live process groups with no coordinator.

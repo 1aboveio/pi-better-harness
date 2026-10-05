@@ -1,6 +1,6 @@
 # Next-prompt suggestions
 
-Status: research-backed proposal; not implemented or approved for delivery.
+Status: user-approved design; implementation and delivery verification underway.
 
 ## Confirmed scope
 
@@ -247,12 +247,15 @@ These are versioned local observations, not stable cross-version guarantees.
    frequency, and actual auxiliary usage. Acceptance is a usefulness signal,
    not a claim that the suggested action was safe or correct.
 
-## Approval boundary
+## Delivery boundary
 
-Research and design only. No runtime code, version changes, personal settings,
-PR, publication, or release in this task. Before implementation, confirm this
-proposal and resolve the minimum SDK/model-transport and usage-accounting path.
+The user approved implementation and shipping after selecting the settings hub
+and standalone-compatible shortcuts. Preserve the explicit user opt-in default
+through delivery; do not change personal settings. The implementation supports
+public provider transport on Pi 0.82.1 and 1.0.0, with safe rejection of stock
+Codex/Bedrock transports and virtual routes that cannot meet v1 bounds. Auxiliary
+usage uses a separate metadata ledger rather than fictional transcript messages.
 Startup git-derived prompts, predictive typing, alternative-model routing, and
-remote telemetry are explicitly outside v1.
+remote telemetry remain outside v1.
 
 [claude-interactive]: https://code.claude.com/docs/en/interactive-mode#prompt-suggestions

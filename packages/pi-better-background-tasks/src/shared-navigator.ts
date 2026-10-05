@@ -641,6 +641,8 @@ function installNavigatorEditor(ui: any, deps: HostDeps): unknown {
 
 function wrapEditor(inner: any, deps: HostDeps): unknown {
   if (inner && typeof inner.render === "function") state().editorComponent = inner as Component;
+  // Shared editor decorators must yield while navigator keys own the empty editor.
+  inner[Symbol.for("pi-better-harness.editor-input-blocked")] = () => state().mainListFocused === true;
   const proxy: any = new Proxy(inner, {
     get(target, prop) {
       if (prop === "handleInput") {

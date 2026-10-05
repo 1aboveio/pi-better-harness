@@ -1,4 +1,4 @@
-import type { CustomEditor, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CustomEditor, ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { readFileSync } from "node:fs";
@@ -842,6 +842,36 @@ export default function (pi: ExtensionAPI): void {
     if (latestSnapshot) collectIfPossible();
   });
 
+  const changePreference = async (ctx: ExtensionCommandContext, key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
+    const previous = preferences;
+    preferences = writeGoalPreference(key, enabled);
+    if (previous.autoContinue !== preferences.autoContinue) clearIdleContinuation();
+    syncResumeTool(getGoal(ctx));
+    applyStatus(ctx);
+    if (!previous.autoContinue && preferences.autoContinue) {
+      const snapshot = await publishSnapshot(ctx);
+      const goal = getGoal(ctx);
+      if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
+        scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
+      }
+    }
+  };
+  const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
+    currentCtx = ctx;
+    if (ctx.hasUI && ctx.mode !== "rpc" && typeof ctx.ui.custom === "function") {
+      await ctx.ui.custom<void>((tui, theme, _kb, done) => createGoalSettingsPage(theme, {
+        get: () => ({ ...preferences }),
+        change: (key, enabled) => changePreference(ctx, key, enabled),
+      }, () => tui.requestRender(), () => done()));
+    } else {
+      ctx.ui.notify(`${formatPreferences(preferences)}\nPreferences: ${goalPreferencesPath()}`, "info");
+    }
+  };
+  const contribution = { id: "goal", label: "Goal", command: "/goal settings", open: openSettings };
+  const registerSettings = () => pi.events.emit("harness-settings:register", contribution);
+  const unsubscribeSettingsRequest = pi.events.on("harness-settings:request", registerSettings);
+  registerSettings();
+
   pi.registerCommand("goal", {
     description: "Create, inspect, pause, resume, clear, or complete the active goal; configure persistent goal settings",
     getArgumentCompletions: goalArgumentCompletions,
@@ -851,25 +881,8 @@ export default function (pi: ExtensionAPI): void {
       const current = getGoal(ctx);
 
       if (trimmed === "settings" || trimmed.startsWith("settings ")) {
-        const changePreference = async (key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
-          const previous = preferences;
-          preferences = writeGoalPreference(key, enabled);
-          if (previous.autoContinue !== preferences.autoContinue) clearIdleContinuation();
-          syncResumeTool(getGoal(ctx));
-          applyStatus(ctx);
-          if (!previous.autoContinue && preferences.autoContinue) {
-            const snapshot = await publishSnapshot(ctx);
-            const goal = getGoal(ctx);
-            if (snapshot && isPokeable(goal) && !isForegroundBusy(ctx) && !snapshot.backgroundRunning) {
-              scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
-            }
-          }
-        };
-        if (trimmed === "settings" && ctx.hasUI && ctx.mode !== "rpc" && typeof ctx.ui.custom === "function") {
-          await ctx.ui.custom<void>((tui, theme, _kb, done) => createGoalSettingsPage(theme, {
-            get: () => ({ ...preferences }),
-            change: changePreference,
-          }, () => tui.requestRender(), () => done()));
+        if (trimmed === "settings") {
+          await openSettings(ctx);
           return;
         }
         const [, setting, mode, ...extra] = trimmed.split(/\s+/);
@@ -882,7 +895,7 @@ export default function (pi: ExtensionAPI): void {
           try {
             const key = setting === "auto-continue" ? "autoContinue"
               : setting === "conversational-resume" ? "conversationalResume" : "pauseOnEscape";
-            await changePreference(key, mode === "on");
+            await changePreference(ctx, key, mode === "on");
           } catch (error) {
             notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
             return;
@@ -1425,6 +1438,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
     executionGeneration += 1;
     sessionGeneration += 1;
     escapeAbortSuppression = undefined;

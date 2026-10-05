@@ -96,6 +96,29 @@ PI_MINIMAL_OUTPUT_HOST_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js 
 
 The bundled-host case reports a skip when the selected SDK has no bundled CLI.
 
+### Harness settings verification
+
+The focused editor/registry tests and recording-provider TUI journey run in
+`npm test`. The TUI test requires tmux and uses a private socket, agent directory,
+synthetic provider, and preference store; it never enables suggestions in the
+developer's personal installation or sends a real model request.
+
+```sh
+node --import tsx --test scripts/harness-settings.test.mjs scripts/prompt-suggestions-engine.test.mjs
+node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/harness-settings.tui.e2e.test.mjs
+node scripts/smoke-harness-settings-package.mjs
+```
+
+The package smoke packs the bundle, installs it in a disposable npm project with
+the checkout SDK version and its declared dependencies, then runs the same
+terminal journey through installed extension paths. It requires registry access
+for installation. The provider suite can also run against another installed SDK:
+
+```sh
+PI_CODEMODE_TEST_SDK_DIR=/absolute/path/to/pi-coding-agent \
+  node --import tsx --test scripts/prompt-suggestions-engine.test.mjs
+```
+
 ### Navigator golden path
 
 `docs/tests/navigator.smoke.manifest.json` defines the navigator's release-blocking
