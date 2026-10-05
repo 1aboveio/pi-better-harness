@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { createSettingsRegistry } from "../packages/pi-better-harness/extensions/settings/registry.ts";
 import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 import harnessSettings from "../packages/pi-better-harness/extensions/settings/index.ts";
+import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 
 function eventApi(bus = new EventEmitter()) {
   return { bus, events: { on(name, handler) { bus.on(name, handler); return () => bus.off(name, handler); }, emit: (name, data) => bus.emit(name, data) } };
@@ -51,6 +52,27 @@ test("native settings list selects package links without opening or changing the
   page.handleInput("\r");
   assert.equal(await selected, "link:goal");
   assert.equal(opened, false);
+});
+
+test("selection restoration preserves ordering and rebound native navigation", async () => {
+  const original = getKeybindings();
+  const rebound = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.down": "j", "tui.select.up": "k" });
+  setKeybindings(rebound);
+  try {
+    let page;
+    const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
+    const links = ["goal", "sandbox", "subagents"].map(id => ({ id, label: id, command: `/${id} settings`, open() {} }));
+    const chosen = chooseHarnessSetting(ctx, links, "link:subagents");
+    assert.equal(getKeybindings(), rebound, "restore never replaces the user's active bindings");
+    const lines = page.render(80).join("\n");
+    assert.match(lines, /> subagents/);
+    assert.ok(lines.indexOf("goal") < lines.indexOf("sandbox") && lines.indexOf("sandbox") < lines.indexOf("subagents"));
+    page.handleInput("k");
+    assert.match(page.render(80).join("\n"), /> sandbox/);
+    page.handleInput("j");
+    page.handleInput("\r");
+    assert.equal(await chosen, "link:subagents");
+  } finally { setKeybindings(original); }
 });
 
 test("hub opens package-owned settings, returns to selection and reports opener failure", async () => {

@@ -22,7 +22,8 @@ try {
   });
   const installed = join(dir, "node_modules", "pi-better-harness");
   execFileSync(process.execPath, ["--import", "tsx", "--import", "./scripts/isolate-registry.mjs", "--test", "scripts/harness-settings.tui.e2e.test.mjs"], {
-    cwd: root, env: { ...process.env, PI_HARNESS_SETTINGS_PACKAGE_DIR: installed }, stdio: "inherit",
+    cwd: root, env: { ...process.env, PI_HARNESS_SETTINGS_PACKAGE_DIR: installed,
+      PI_HARNESS_SETTINGS_CLI: process.env.PI_HARNESS_SETTINGS_CLI ?? join(dir, "node_modules", ".bin", "pi") }, stdio: "inherit",
   });
 } finally {
   rmSync(dir, { recursive: true, force: true });

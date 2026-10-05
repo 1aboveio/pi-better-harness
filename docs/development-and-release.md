@@ -111,8 +111,8 @@ node scripts/smoke-harness-settings-package.mjs
 
 The package smoke packs the bundle, installs it in a disposable npm project with
 the checkout SDK version and its declared dependencies, then runs the same
-terminal journey through installed extension paths. It requires registry access
-for installation.
+terminal journey through installed extension paths and the disposable install's
+Pi executable. It requires registry access for installation.
 
 Set `PI_HARNESS_SETTINGS_CLI` to another Pi executable to run the terminal
 journey against that CLI. The package smoke also accepts

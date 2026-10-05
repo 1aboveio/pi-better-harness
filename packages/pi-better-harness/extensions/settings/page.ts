@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Container, SettingsList, Text, type SettingItem } from "@earendil-works/pi-tui";
+import { Container, SettingsList, Text, getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS, type SettingItem } from "@earendil-works/pi-tui";
 import type { SettingsLink } from "./registry.ts";
 
 export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], selected?: string): Promise<string | undefined> {
@@ -13,7 +13,16 @@ export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], sele
       description: text => theme.fg("muted", text), cursor: "> ", hint: text => theme.fg("dim", text),
     }, (id) => done(id), () => done(), { enableSearch: false });
 
-    if (selected) for (let i = 0; i < Math.max(0, items.findIndex(item => item.id === selected)); i++) list.handleInput("\x1b[B");
+    const index = selected ? items.findIndex(item => item.id === selected) : 0;
+    if (index > 0) {
+      // SettingsList has no public selection setter. Restore synchronously using
+      // default navigation, then return the untouched user bindings before input.
+      const bindings = getKeybindings();
+      try {
+        setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+        for (let i = 0; i < index; i++) list.handleInput("\x1b[B");
+      } finally { setKeybindings(bindings); }
+    }
     const page = new Container();
     page.addChild(new Text(theme.fg("accent", theme.bold("Harness settings")), 0, 0));
     page.addChild(list);
