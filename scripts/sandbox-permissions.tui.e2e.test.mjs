@@ -10,8 +10,48 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
 function selectedRow(text) {
-    const value = text.match(/^> (.*)$/m)?.[1];
+    const matches = [...text.matchAll(/^> (.*)$/gm)];
+    const value = matches.length === 1 ? matches[0][1] : undefined;
     return value?.trim() ? value : undefined;
+}
+
+function permissionRows(text) {
+    return text.split("\n").filter((line) => /^(?:> |  )(?:Sandbox\s+(?:Off|On)|Project files\s|Outside project\s|Stored credentials\s|Run commands & applications\s|Network access\s|Process access\s|  (?:[>v] )?\[[ x-]\]|      \[[ x]\])/.test(line))
+        .map((line) => line.slice(2).trimEnd());
+}
+
+function selectionDriver(wait, key) {
+    let text = "";
+    const waitSelected = (pattern, state = () => true) => {
+        text = wait((frame) => {
+            const row = selectedRow(frame);
+            return row !== undefined && (typeof pattern === "string" ? row.trimEnd() === pattern : pattern.test(row)) && state(frame);
+        });
+        return text;
+    };
+    return {
+        waitSelected,
+        press(value, pattern, state) {
+            key(value);
+            return waitSelected(pattern, state);
+        },
+        moveTo(pattern, direction = "Down") {
+            if (!text) waitSelected(/\S/);
+            for (let i = 0; i < 60; i++) {
+                const before = selectedRow(text).trimEnd();
+                if (pattern.test(before)) return text;
+                const rows = permissionRows(text);
+                const index = rows.indexOf(before);
+                assert.ok(index >= 0, `Selected row is not navigable:\n${text}`);
+                const next = rows[index + (direction === "Up" ? -1 : 1)];
+                assert.notEqual(next, undefined, `Could not select ${pattern}: reached ${direction} boundary:\n${text}`);
+                key(direction);
+                // A count change or a partially painted row is not an arrow acknowledgement.
+                waitSelected(next, (frame) => permissionRows(frame).join("\n") === rows.join("\n"));
+            }
+            assert.fail(`Could not select ${pattern}:\n${text}`);
+        },
+    };
 }
 
 test("selection synchronization rejects absent and blank redraw rows", () => {
@@ -20,6 +60,68 @@ test("selection synchronization rejects absent and blank redraw rows", () => {
     }
     const value = "  > [ ] atlas (fixture-alpha) 0/2";
     assert.equal(selectedRow(`Other row\n> ${value}\nFooter`), value);
+});
+
+test("selection synchronization rejects duplicate selected rows during redraw", () => {
+    assert.equal(selectedRow(">   > [ ] atlas (fixture-alpha) 0/2\n>   > [ ] atlas (fixture-beta) 0/1"), undefined);
+});
+
+function captureSequence(frames) {
+    const remaining = [...frames];
+    const keys = [];
+    return {
+        keys,
+        driver: selectionDriver((accept) => {
+            while (remaining.length) {
+                const frame = remaining.shift();
+                if (accept(frame)) return frame;
+            }
+            assert.fail("No capture acknowledged the input");
+        }, (key) => keys.push(key)),
+        assertConsumed() { assert.equal(remaining.length, 0, "must wait for the final coherent capture"); },
+    };
+}
+
+test("selection navigation acknowledges exact adjacent rows before sending another arrow", () => {
+    const alpha = "  > [ ] atlas (fixture-alpha) 0/2";
+    const beta = "  > [ ] atlas (fixture-beta) 0/1";
+    const beacon = "  > [ ] beacon (fixture-alpha) 0/1";
+    const frame = (selected) => [alpha, beta, beacon].map((row) => `${row === selected ? "> " : "  "}${row}`).join("\n");
+    const h = captureSequence([
+        frame(alpha),
+        frame(alpha), // Arrow has not been processed yet.
+        frame(alpha).replaceAll("0/2", "2/2"), // An apply redraw is not navigation.
+        frame(beacon), // A different row is still not the expected adjacent row.
+        frame(beta).replace(`  ${alpha}`, `> ${alpha}`), // Two selection markers mid-redraw.
+        frame(beta),
+        frame(beta),
+        frame(beacon).replace("beacon (fixture-alpha) 0/1", "bea"),
+        frame(beacon),
+        frame(beta),
+        frame(alpha),
+    ]);
+    h.driver.waitSelected(/atlas .*fixture-alpha.*0\/2/);
+    h.driver.moveTo(/beacon .*0\/1/);
+    assert.deepEqual(h.keys, ["Down", "Down"]);
+    h.driver.moveTo(/atlas .*fixture-alpha.*0\/2/, "Up");
+    h.assertConsumed();
+    assert.deepEqual(h.keys, ["Down", "Down", "Up", "Up"]);
+});
+
+test("selection toggles wait for focus and applied state in the same capture", () => {
+    const frame = (count, tick, selected = true) => `    v [-] atlas (fixture-alpha) ${count}/2\n${selected ? "> " : "  "}      [${tick}] mcp__atlas__read\n${selected ? "  " : "> "}  > [ ] atlas (fixture-beta) 0/1`;
+    const h = captureSequence([frame(0, " "), frame(1, " "), frame(0, "x"), frame(1, "x", false), frame(1, "x")]);
+    h.driver.waitSelected(/\[ \] mcp__atlas__read$/);
+    h.driver.press("Space", /\[x\] mcp__atlas__read$/, (text) => /atlas \(fixture-alpha\) 1\/2/.test(text));
+    h.assertConsumed();
+    assert.deepEqual(h.keys, ["Space"]);
+});
+
+test("selection navigation fails at a boundary without sending an unacknowledgeable arrow", () => {
+    const h = captureSequence([">   > [ ] beacon (fixture-alpha) 0/1"]);
+    h.driver.waitSelected(/beacon/);
+    assert.throws(() => h.driver.moveTo(/atlas/), /reached Down boundary/);
+    assert.deepEqual(h.keys, []);
 });
 
 test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the real TUI", { skip: !hasTmux }, () => {
@@ -147,52 +249,40 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         }
         assert.fail(`Missing ${pattern}:\n${text}`);
     };
-    const selected = () => selectedRow(screen()) ?? "";
-    const moveTo = (pattern, direction = "Down") => {
-        for (let i = 0; i < 60; i++) {
-            const before = selectedRow(wait((text) => selectedRow(text) !== undefined));
-            if (pattern.test(before)) return;
-            key(direction);
-            wait((text) => {
-                const current = selectedRow(text);
-                return current !== undefined && current !== before;
-            });
-        }
-        assert.fail(`Could not select ${pattern}:\n${screen()}`);
-    };
+    const { waitSelected, press, moveTo } = selectionDriver(wait, key);
+    const alphaAtlas = (fold, tick, count) => new RegExp(`^  ${fold} \\[${tick}\\] atlas \\([^\\n]*fixture-alpha\\) ${count}/2\\s*$`);
+    const alphaPackage = (tick, count) => new RegExp(`^  > \\[${tick}\\] [^\\n]*fixture-alpha ${count}/1\\s*$`);
     try {
         tmux("new-session", "-d", "-s", "permissions", "-x", "130", "-y", "50", command);
         wait(/sandbox/);
         literal("/sandbox"); key("Enter");
-        wait(/Subagents · Tools/);
-        assert.match(screen(), /\[ \].*fixture-alpha.*0\/1/);
-        assert.match(screen(), /\[ \].*fixture-beta.*0\/1/);
-        assert.match(screen(), /> \[ \] atlas \([^\n]*fixture-alpha\) 0\/2/);
-        assert.match(screen(), /atlas \([^\n]*fixture-beta\).*0\/1/);
-        assert.doesNotMatch(screen(), /mcp__atlas__read/, "groups start collapsed");
+        let text = waitSelected(/^Sandbox\s+Off\s+On\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
+        assert.match(text, /\[ \].*fixture-alpha.*0\/1/);
+        assert.match(text, /\[ \].*fixture-beta.*0\/1/);
+        assert.match(text, /> \[ \] atlas \([^\n]*fixture-alpha\) 0\/2/);
+        assert.match(text, /atlas \([^\n]*fixture-beta\).*0\/1/);
+        assert.doesNotMatch(text, /mcp__atlas__read/, "groups start collapsed");
         moveTo(/atlas \([^\n]*fixture-alpha\).*0\/2/);
-        key("Right"); wait(/v \[ \] atlas \([^\n]*fixture-alpha\) 0\/2/);
+        press("Right", alphaAtlas("v", " ", 0), (frame) => /\[ \] mcp__atlas__read/.test(frame));
         moveTo(/mcp__atlas__read/);
-        key("Space");
-        wait(/v \[-\] atlas \([^\n]*fixture-alpha\) 1\/2/);
-        key("Left"); wait(/^(?![\s\S]*mcp__atlas__read)/);
-        assert.match(selected(), /> \[-\] atlas \([^\n]*fixture-alpha\) 1\/2/);
-        key("Space"); wait(/> \[x\] atlas \([^\n]*fixture-alpha\) 2\/2/);
-        assert.match(screen(), /atlas \([^\n]*fixture-beta\).*0\/1/, "same provider in another package is untouched");
-        moveTo(/fixture-alpha.*0\/1/, "Up");
-        key("Space"); wait(/fixture-alpha.*1\/1/);
-        key("Space"); wait(/fixture-alpha.*0\/1/);
+        press("Space", /^      \[x\] mcp__atlas__read\s+needs Network On\s*$/, (frame) => /v \[-\] atlas \([^\n]*fixture-alpha\) 1\/2/.test(frame));
+        text = press("Left", alphaAtlas(">", "-", 1), (frame) => !/mcp__atlas__read/.test(frame));
+        assert.match(selectedRow(text), /> \[-\] atlas \([^\n]*fixture-alpha\) 1\/2/);
+        text = press("Space", alphaAtlas(">", "x", 2));
+        assert.match(text, /atlas \([^\n]*fixture-beta\).*0\/1/, "same provider in another package is untouched");
+        moveTo(alphaPackage(" ", 0), "Up");
+        press("Space", alphaPackage("x", 1));
+        press("Space", alphaPackage(" ", 0));
         moveTo(/atlas \([^\n]*fixture-alpha\).*2\/2/);
-        key("Space"); wait(/atlas \([^\n]*fixture-alpha\).*0\/2/);
-        key("Space"); wait(/atlas \([^\n]*fixture-alpha\).*2\/2/);
-        key("Right"); wait(/mcp__atlas__read/);
-        key("Left"); wait(/^(?![\s\S]*mcp__atlas__read)/);
-        key("Enter"); wait(/mcp__atlas__read/);
-        key("Enter"); wait(/^(?![\s\S]*mcp__atlas__read)/);
+        press("Space", alphaAtlas(">", " ", 0));
+        press("Space", alphaAtlas(">", "x", 2));
+        press("Right", alphaAtlas("v", "x", 2), (frame) => /\[x\] mcp__atlas__read/.test(frame));
+        press("Left", alphaAtlas(">", "x", 2), (frame) => !/mcp__atlas__read/.test(frame));
+        press("Enter", alphaAtlas("v", "x", 2), (frame) => /\[x\] mcp__atlas__read/.test(frame));
+        text = press("Enter", alphaAtlas(">", "x", 2), (frame) => !/mcp__atlas__read/.test(frame));
         assert.equal(existsSync(join(agent, "extensions/pi-better-sandbox-permissions.json")), false);
-        assert.doesNotMatch(screen(), /Save as defaults/);
-        key("C-s"); wait(/Defaults saved/);
-        wait(/Looser:/);
+        assert.doesNotMatch(text, /Save as defaults/);
+        press("C-s", alphaAtlas(">", "x", 2), (frame) => /Defaults saved[\s\S]*Looser:/.test(frame));
         const saved = JSON.parse(readFileSync(join(agent, "extensions/pi-better-sandbox-permissions.json"), "utf8"));
         assert.equal(saved.permissions.subagentTools.applyPatch, true);
         assert.deepEqual(Object.keys(saved.permissions.subagentTools).sort(), ["applyPatch", "trusted"]);
@@ -202,13 +292,16 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         ]);
         key("Escape"); wait(/^(?![\s\S]*Sandbox permissions\s+Main)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
-        literal("/sandbox"); key("Enter"); wait(/Subagents · Tools/);
-        assert.match(screen(), /atlas \([^\n]*fixture-alpha\).*2\/2/);
-        assert.match(screen(), /atlas \([^\n]*fixture-beta\).*0\/1/);
-        assert.doesNotMatch(screen(), /mcp__atlas__read/, "fold state is not persisted");
-        moveTo(/atlas \([^\n]*fixture-alpha\).*2\/2/); key("Right"); wait(/\[x\] mcp__atlas__read/);
-        assert.match(screen(), /\[x\] mcp__atlas__write/);
-        moveTo(/beacon \([^\n]*fixture-alpha\).*0\/1/); key("Right"); wait(/\[ \] mcp__beacon__read/);
+        literal("/sandbox"); key("Enter");
+        text = waitSelected(/^Sandbox\s+Off\s+On\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
+        assert.match(text, /atlas \([^\n]*fixture-alpha\).*2\/2/);
+        assert.match(text, /atlas \([^\n]*fixture-beta\).*0\/1/);
+        assert.doesNotMatch(text, /mcp__atlas__read/, "fold state is not persisted");
+        moveTo(/atlas \([^\n]*fixture-alpha\).*2\/2/);
+        text = press("Right", alphaAtlas("v", "x", 2), (frame) => /\[x\] mcp__atlas__read/.test(frame));
+        assert.match(text, /\[x\] mcp__atlas__write/);
+        moveTo(/beacon \([^\n]*fixture-alpha\).*0\/1/);
+        press("Right", /^  v \[ \] beacon \([^\n]*fixture-alpha\) 0\/1\s*$/, (frame) => /\[ \] mcp__beacon__read/.test(frame));
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
         rmSync(fixture, { recursive: true, force: true });

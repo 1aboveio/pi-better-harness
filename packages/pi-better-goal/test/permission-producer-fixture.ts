@@ -1,13 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
+// @ts-expect-error The shared npm pack parser is a JavaScript build helper.
+import { selectPackedResult } from "../../../scripts/stage-harness-dependencies.mjs";
 import { discoverAndLoadExtensions, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** Exercise the shipped staging script and npm bundle without touching workspace dependencies or running sync hooks. */
 export function installedHarnessFixture() {
-  const root = mkdtempSync(join(tmpdir(), "pi-goal-installed-harness-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-goal-installed-harness-")));
   const repo = fileURLToPath(new URL("../../../", import.meta.url));
   try {
     cpSync(join(repo, "packages"), join(root, "packages"), {
@@ -22,8 +24,9 @@ export function installedHarnessFixture() {
     const output = execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", root], {
       cwd: join(root, "packages/pi-better-harness"), env, encoding: "utf8", stdio: "pipe",
     });
-    const packed = JSON.parse(output) as Array<{ filename: string }>;
-    execFileSync("tar", ["-xzf", join(root, packed[0]!.filename), "-C", root], { stdio: "pipe" });
+    const packed = selectPackedResult(output);
+    if (!packed?.filename) throw new Error("npm pack did not return the harness tarball filename");
+    execFileSync("tar", ["-xzf", join(root, packed.filename), "-C", root], { stdio: "pipe" });
     // The SDK host and external libraries resolve normally; bundled first-party packages stay real extracted files.
     symlinkSync(join(repo, "node_modules"), join(root, "node_modules"), "dir");
     return { root, installed: join(root, "package"), cleanup: () => rmSync(root, { recursive: true, force: true }) };
