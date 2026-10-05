@@ -1,0 +1,31 @@
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { Container, SettingsList, Text, getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS, type SettingItem } from "@earendil-works/pi-tui";
+import type { SettingsLink } from "./registry.ts";
+
+export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], selected?: string): Promise<string | undefined> {
+  return ctx.ui.custom((tui: any, theme: Theme, _kb: unknown, done: (id?: string) => void) => {
+    const items: SettingItem[] = [
+      ...links.map(link => ({ id: `link:${link.id}`, label: link.label, currentValue: link.command, description: "Open package settings", values: [link.command] })),
+    ];
+    const list = new SettingsList(items, 10, {
+      label: (text, active) => theme.fg(active ? "accent" : "text", text),
+      value: (text, active) => active ? theme.inverse(text) : theme.fg("muted", text),
+      description: text => theme.fg("muted", text), cursor: "> ", hint: text => theme.fg("dim", text),
+    }, (id) => done(id), () => done(), { enableSearch: false });
+
+    const index = selected ? items.findIndex(item => item.id === selected) : 0;
+    if (index > 0) {
+      // SettingsList has no public selection setter. Restore synchronously using
+      // default navigation, then return the untouched user bindings before input.
+      const bindings = getKeybindings();
+      try {
+        setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+        for (let i = 0; i < index; i++) list.handleInput("\x1b[B");
+      } finally { setKeybindings(bindings); }
+    }
+    const page = new Container();
+    page.addChild(new Text(theme.fg("accent", theme.bold("Harness settings")), 0, 0));
+    page.addChild(list);
+    return { render: (width: number) => page.render(width), invalidate: () => page.invalidate(), handleInput: (data: string) => list.handleInput(data) };
+  });
+}

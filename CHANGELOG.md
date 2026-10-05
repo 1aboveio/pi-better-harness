@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Add `/harness-settings` with shortcuts to loaded Sandbox, Subagents, and Goal settings. Each package retains its direct settings command and standalone configuration ownership.
+- Record the next-prompt suggestion design, with inference deferred until safe public auth/header resolution is available. (#426)
+
 ## [pi-better-harness@0.20.0] - 2026-10-05
 
 ### Changed

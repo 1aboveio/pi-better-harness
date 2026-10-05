@@ -35,7 +35,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import piBetterSandbox from "../index.ts";
-import { permissionSettingsPath, writePermissionSettings } from "../permission-settings.ts";
+import { permissionSettingsPath, readPermissionSettings, writePermissionSettings } from "../permission-settings.ts";
 import { defaultSandboxPermissions } from "../permissions.ts";
 import { SESSION_PERMISSION_ENTRY } from "../session-permissions.ts";
 import type { Component } from "@earendil-works/pi-tui";
@@ -589,7 +589,8 @@ test("confirmed command off persists its switch and retains permission details a
 
 /** Run the real page through Pi's custom-UI boundary, awaiting render completion. */
 async function permissionsPage(recorded: Recorded, cwd: string,
-    interact: (page: Component, press: (key: string) => Promise<void>) => Promise<void>) {
+    interact: (page: Component, press: (key: string) => Promise<void>) => Promise<void>,
+    open?: (ctx: ExtensionCommandContext) => Promise<void>) {
     const shown = context(cwd, { branch: () => recorded.branch });
     shown.ctx.ui.custom = nodeTest.mock.fn(async (factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) => {
         let rendered: (() => void) | undefined;
@@ -604,8 +605,61 @@ async function permissionsPage(recorded: Recorded, cwd: string,
         page.handleInput?.("\x1b");
         return null;
     }) as ExtensionContext["ui"]["custom"];
-    await recorded.commands.get("sandbox")!.handler("", shown.ctx);
+    if (open) await open(shown.ctx);
+    else await recorded.commands.get("sandbox")!.handler("", shown.ctx);
 }
+
+nodeTest("sandbox contributes its standalone permissions opener at load and on request, and unsubscribes at shutdown", async () => {
+    forgetDenyOverride();
+    forgetSandboxPreference();
+    const recorded = record();
+    type Contribution = { id: string; label: string; command: string; open(ctx: ExtensionCommandContext): Promise<void> };
+    const registrations: Contribution[] = [];
+    recorded.events.on("harness-settings:register", (data) => registrations.push(data as Contribution));
+    piBetterSandbox(recorded.pi);
+    assert.equal(registrations.length, 1, "a hub loaded first receives registration at extension load");
+    const contribution = registrations[0]!;
+    assert.equal(contribution.id, "sandbox");
+    assert.equal(contribution.label, "Sandbox");
+    assert.equal(contribution.command, "/sandbox");
+    const later: Contribution[] = [];
+    recorded.events.on("harness-settings:register", (data) => later.push(data as Contribution));
+    recorded.events.emit("harness-settings:request", undefined);
+    recorded.events.emit("harness-settings:request", undefined);
+    assert.deepEqual(later, [contribution, contribution], "late discovery reuses the same opener");
+
+    const root = project("settings-contribution");
+    const started = await startSession(recorded, root, "startup", false);
+    const before = recorded.published.length;
+    await permissionsPage(recorded, root, async () => {}, contribution.open);
+    assert.equal(recorded.published.length, before, "opening does not change task policy");
+    assert.deepEqual(recorded.branch, []);
+    assert.equal(existsSync(permissionSettingsPath()), false);
+    // Change the default-on Subagents switch, avoiding any kernel dependency.
+    await permissionsPage(recorded, root, async (_page, press) => {
+        await press("\x1b[C");
+        await press(" ");
+    }, contribution.open);
+    assert.equal(recorded.published.at(-1)?.subagentPermissions?.enabled, false);
+    await permissionsPage(recorded, root, async (page, press) => {
+        assert.match(page.render(100).join("\n"), /Sandbox\s+Off\s+Off/);
+        await press("\x13");
+    });
+    assert.equal(readPermissionSettings().subagents.enabled, false);
+
+    await recorded.handlers.get("session_shutdown")!({}, started.ctx);
+    const count = registrations.length;
+    recorded.events.emit("harness-settings:request", undefined);
+    assert.equal(registrations.length, count, "shutdown removes the request listener");
+    // Standalone direct invocation still opens without a registry consumer.
+    const standalone = record();
+    piBetterSandbox(standalone.pi);
+    await startSession(standalone, root, "startup", false, false);
+    await permissionsPage(standalone, root, async (page) => {
+        assert.match(page.render(100).join("\n"), /Sandbox\s+Off\s+Off/);
+    });
+    await standalone.handlers.get("session_shutdown")!({}, started.ctx);
+});
 
 function sessionEntry(data: unknown, id = "policy", parentId: string | null = null): SessionEntry {
     return { type: "custom", customType: SESSION_PERMISSION_ENTRY, data,

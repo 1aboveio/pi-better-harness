@@ -86,6 +86,27 @@ Load the bundled harness or run it directly from a checkout:
 pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
 ```
 
+## Harness Settings
+
+The bundled harness provides `/harness-settings`, using Pi's native settings
+list. It opens the settings screens of loaded Sandbox, Subagents, and Goal
+packages without duplicating their configuration. `/sandbox`, `/subagents
+settings`, and `/goal settings` remain available in standalone installations.
+Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
+
+Next-prompt inference is deferred pending safe public auth/header resolution in
+Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in
+this version, and makes no auxiliary model requests. The integration blocker is
+[issue #426](https://github.com/1aboveio/pi-better-harness/issues/426).
+
+The hub is TUI-only. The standalone-package installer does not install
+Harness-only extensions; load the bundle or the settings extension from the
+checkout to use the hub:
+
+```sh
+pi -e ./packages/pi-better-harness/extensions/settings/index.ts
+```
+
 ## When To Use
 
 Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, synchronous SSH, goal tracking, or plans.

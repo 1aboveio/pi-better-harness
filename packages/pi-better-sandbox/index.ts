@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
     SettingsManager,
     type ExtensionAPI,
+    type ExtensionCommandContext,
     type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
@@ -166,7 +167,31 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     });
     pi.on("session_tree", (_event, ctx) => restorePermissions(ctx));
 
+    const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
+        await openPermissionsPage(ctx, {
+            getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
+            // Trusted-tool candidates: what this Pi has actually registered, by owning package.
+            discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
+            change: (settings) => {
+                appendSessionPermissions(pi, settings);
+                announce(controller.setPermissionSettings(settings));
+            },
+            save: (settings) => writePermissionSettings(settings),
+            // Report every capability loosened by saving these defaults.
+            loosening: (settings) => {
+                let previous: SandboxPermissionSettings;
+                try { previous = readPermissionSettings(); } catch { previous = defaultSandboxPermissions(); }
+                return describeLoosening(previous, settings);
+            },
+        });
+    };
+    const contribution = { id: "sandbox", label: "Sandbox", command: "/sandbox", open: openSettings };
+    const registerSettings = () => pi.events.emit("harness-settings:register", contribution);
+    const unsubscribeSettingsRequest = pi.events.on("harness-settings:request", registerSettings);
+    registerSettings();
+
     pi.on("session_shutdown", () => {
+        if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
         controller.dispose();
     });
 
@@ -191,24 +216,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
                 appendSessionPermissions(pi, settings);
                 return controller.setPermissionSettings(settings);
             },
-            openPermissions: async (ctx) => {
-                await openPermissionsPage(ctx, {
-                    getConfig: () => controller.permissionSettings() ?? defaultSandboxPermissions(),
-                    // Trusted-tool candidates: what this Pi has actually registered, by owning package.
-                    discoverTools: () => discoverTrustedTools(pi.getAllTools?.() ?? []),
-                    change: (settings) => {
-                        appendSessionPermissions(pi, settings);
-                        announce(controller.setPermissionSettings(settings));
-                    },
-                    save: (settings) => writePermissionSettings(settings),
-                    // Report every capability loosened by saving these defaults.
-                    loosening: (settings) => {
-                        let previous: SandboxPermissionSettings;
-                        try { previous = readPermissionSettings(); } catch { previous = defaultSandboxPermissions(); }
-                        return describeLoosening(previous, settings);
-                    },
-                });
-            },
+            openPermissions: openSettings,
         }),
     });
 }
