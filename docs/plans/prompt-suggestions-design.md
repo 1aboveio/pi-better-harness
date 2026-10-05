@@ -121,7 +121,7 @@ Confirmed configuration entry point: **`/harness-settings`**, a Harness-owned
 screen using Pi's native `SettingsList`. Leave the built-in `/settings` untouched;
 Pi 1.0.0 has no public extension-setting registration API.
 
-Initial row: `Prompt suggestions`, values `off` / `on`, default `off`. Its
+Initial local row: `Prompt suggestions`, values `off` / `on`, default `off`. Its
 description discloses additional model usage and recent conversation sharing
 with the active provider. Changing off to on requires explicit user confirmation;
 cancelling leaves the setting off. Changing to off immediately cancels pending
@@ -143,6 +143,63 @@ whether the supported SDK has a public auxiliary-usage accounting API; otherwise
 keep an explicit Harness ledger and label it as separate from host totals.
 Provider failures should pause automatic requests until re-enabled or the model
 changes, avoiding repeated auth errors or rate-limit traffic.
+
+## Package settings shortcuts
+
+Confirmed: `/harness-settings` also provides shortcuts to settings owned by
+loaded `pi-better-*` packages. Their existing commands and screens remain the
+canonical entry points and continue working without Harness installed.
+
+Use two native list groups: Harness-local options and package-settings links.
+Links are actions, not duplicated on/off rows. Show the destination command as
+secondary text so users can find it directly next time. Enter opens the package's
+screen; returning to the hub restores its selected row and the untouched draft.
+Closing the hub restores editor focus. Never automatically execute a toggle or
+state-changing command just by following a settings link.
+
+Verified current destinations:
+
+| Link | Package-owned destination |
+| --- | --- |
+| Sandbox | `/sandbox` permissions UI |
+| Subagents | `/subagents settings` |
+| Goal | `/goal settings` |
+
+Plan currently exposes `/plan` and display commands, not a dedicated settings
+screen. Tool output exposes `/tool-output`, whose no-argument behavior toggles
+state, so it is not a safe open-settings shortcut. SSH and Background Tasks have
+no settings command in the inspected entry points. Do not fabricate destinations
+or invoke model tools to simulate opening settings. Those packages can add their
+own settings screens later and then contribute links. Read Aloud is optional;
+show its link only if it supplies a real settings contribution.
+
+Proposed small runtime contribution contract: stable package/id, label,
+destination command for display, and an `open(ctx)` callback owned by the package.
+Both the direct command and hub action call the same package-local settings
+opener. Package code owns validation, persistence, live effects, and confirmation;
+Harness owns discovery, list ordering, and navigation only.
+
+Use `pi.events` for discovery/registration following existing inter-extension
+patterns: request a snapshot after hub startup and respond to registrations in
+both extension load orders. Clear registrations on reload/shutdown and ignore
+stale callbacks. Namespace and deduplicate ids; detect conflicting registrations
+rather than silently replacing another package's contribution. Registry messages
+carry UI callbacks only inside the trusted runtime, not model-callable tools.
+No package may import or require the Harness bundle. If a small shared helper is
+needed, package it into each standalone consumer, preserving independent installs.
+
+Only advertise available settings providers; never list unloaded packages or
+make installation a prerequisite for using the hub. A standalone package need
+not show a hub or register `/harness-settings` itself. Without Harness, its normal
+command opens precisely the same settings and writes precisely the same store.
+Settings changes through either entry point must immediately agree; no second
+copy of package configuration is kept in Harness.
+
+Before shipping, prove hub-first/package-first load order, reload/unload cleanup,
+partial and standalone installs, correct settings routing, unchanged draft and
+focus on return, and identical persistence/confirmation behavior through both
+entry points. Opening each link must produce zero agent turns and no toggle or
+task effects until the user makes a choice inside the destination screen.
 
 ## Pi integration findings
 
