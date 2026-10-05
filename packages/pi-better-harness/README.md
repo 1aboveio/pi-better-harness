@@ -100,7 +100,9 @@ successful user interaction settles, an empty editor can show one gray suggested
 follow-up. Tab or Right Arrow inserts it for editing; Enter subsequently sends
 it. Enter on ghost text alone does not send it. Typing, pasting, history recall,
 and session/model changes dismiss or cancel suggestions. Navigator input and
-dialogs take priority; incompatible custom editors keep their own behavior.
+dialogs take priority. The stock native editor and transparent navigator wrappers
+are supported; unknown custom-editor factories are not recreated or probed and
+keep their own behavior. Harness status explains when editor integration is paused.
 
 Suggestions use a bounded recent user/assistant text context and the active
 model, without task tools, new file reads, or raw tool output. Requests time out

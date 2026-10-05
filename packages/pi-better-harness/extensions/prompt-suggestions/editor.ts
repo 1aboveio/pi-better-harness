@@ -2,6 +2,7 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const BLOCKED = Symbol.for("pi-better-harness.editor-input-blocked");
+const BASE = Symbol.for("pi-better-harness.editor-base-factory");
 
 
 export interface GhostEditor {
@@ -20,6 +21,14 @@ export function installGhostEditor(ctx: any, callbacks: { changed(): void; accep
   let ghost: string | undefined;
   let disposed = false;
   let changing = false;
+  // Unknown factories may carry modal state; do not recreate them to probe compatibility.
+  let base = previous;
+  const decorators = new Set();
+  while (base) {
+    if (typeof base !== "function" || decorators.has(base) || !Object.hasOwn(base, BASE)) { disposed = true; break; }
+    decorators.add(base);
+    base = base[BASE];
+  }
   function clear(unused = false): void {
     if (ghost && unused) callbacks.unused();
     ghost = undefined;
@@ -36,7 +45,7 @@ export function installGhostEditor(ctx: any, callbacks: { changed(): void; accep
     while (current !== factory) {
       if (typeof current !== "function" || seen.has(current)) return "Editor was replaced by another extension";
       seen.add(current);
-      current = current[Symbol.for("pi-better-harness.editor-base-factory")];
+      current = current[BASE];
     }
     return undefined;
   }
@@ -96,7 +105,7 @@ export function installGhostEditor(ctx: any, callbacks: { changed(): void; accep
     return live;
   };
 
-  ctx.ui.setEditorComponent(factory);
+  if (!disposed) ctx.ui.setEditorComponent(factory);
   return {
     available,
     unsupportedReason,

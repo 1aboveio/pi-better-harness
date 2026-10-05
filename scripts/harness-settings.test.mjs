@@ -27,6 +27,7 @@ function editorFixture(previous, bindings = {}) {
     editor.setText(text);
     editor.focused = true;
   } } };
+  ctx.ui.setEditorComponent(previous);
   const ghost = installGhostEditor(ctx, { changed() {}, accepted() { accepted++; }, unused() {} });
   return { ghost, get editor() { return editor; }, ctx, submits, changed: () => changed, accepted: () => accepted };
 }
@@ -91,13 +92,21 @@ test("ghost preview fits narrow columns with CJK without adding editor rows", ()
 });
 
 test("foreign modal editors are preserved and do not acquire suggestion keys", () => {
-  class ModalEditor extends CustomEditor {}
-  const f = editorFixture((tui, theme, kb) => new ModalEditor(tui, theme, kb));
+  let creations = 0;
+  let original;
+  class ModalEditor extends CustomEditor { constructor(...args) { super(...args); creations++; this.mode = "normal"; } }
+  const previous = (tui, theme, kb) => original = new ModalEditor(tui, theme, kb);
+  const f = editorFixture(previous);
+  assert.equal(creations, 1, "the existing editor must not be recreated to detect its type");
+  assert.equal(f.editor, original);
+  assert.equal(f.editor.mode, "normal");
   assert.equal(f.ghost.show("Do not install"), false);
   assert.match(f.ghost.unsupportedReason(), /Custom editor/);
   f.editor.handleInput("draft");
   assert.equal(f.editor.getText(), "draft");
   f.ghost.dispose();
+  assert.equal(f.editor, original);
+  assert.equal(f.ctx.ui.getEditorComponent(), previous);
 });
 
 test("a later editor replacement disables stale suggestions and retains the new editor on disposal", () => {

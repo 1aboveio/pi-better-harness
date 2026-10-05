@@ -29,7 +29,12 @@ editor implementations retain their existing behavior.
 
 Shared input-ownership and factory-chain markers let the navigator wrap the
 native editor transparently. An incompatible replacement disables the old
-adapter and reports a status reason. The provider single-flight guard survives
+adapter and reports a status reason.
+Unknown factories are not recreated to probe their editor type, preserving
+opaque modal state. Only the stock native editor and declared transparent
+decorators are supported.
+
+The provider single-flight guard survives
 extension reload and remains held until the public response stream settles,
 even when local cancellation rejects before an abort-insensitive provider ends.
 
