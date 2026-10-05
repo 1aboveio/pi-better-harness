@@ -23,15 +23,26 @@ test("real TUI settings hub routes package settings and suggestions require acce
   mkdirSync(agent);
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ tuiMode: "fullscreen", packages: [], quietStartup: true }));
   writeFileSync(fixture, `import { appendFileSync, writeFileSync } from 'node:fs';
-import { createFauxCore, fauxAssistantMessage } from ${JSON.stringify(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")))};
-const core = createFauxCore({api:'harness-test-api',provider:'harness-test',models:[{id:'local'}],tokensPerSecond:2000});
-core.setResponses(Array.from({length:30},()=>context=>{
+import { createAssistantMessageEventStream } from ${JSON.stringify(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")))};
+function streamSimple(model, context, options){
   const suggestion = !context.tools?.length && JSON.stringify(context).toLowerCase().includes('suggest');
   appendFileSync(${JSON.stringify(log)}, JSON.stringify({suggestion,tools:context.tools?.length??0})+'\\n');
-  return fauxAssistantMessage(suggestion ? 'Run the focused tests' : 'The focused change is ready for testing.');
-}));
+  const stream = createAssistantMessageEventStream();
+  const response = {role:'assistant',content:[{type:'text',text:suggestion ? 'Run the focused tests' : 'The focused change is ready for testing.'}],
+    api:model.api,provider:model.provider,model:model.id,stopReason:'stop',timestamp:Date.now(),
+    usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+  queueMicrotask(()=>{
+    if(options?.signal?.aborted){const aborted={...response,stopReason:'aborted'};stream.push({type:'error',reason:'aborted',error:aborted});stream.end(aborted);return;}
+    stream.push({type:'start',partial:response});
+    stream.push({type:'text_start',contentIndex:0,partial:response});
+    stream.push({type:'text_delta',contentIndex:0,delta:response.content[0].text,partial:response});
+    stream.push({type:'text_end',contentIndex:0,content:response.content[0].text,partial:response});
+    stream.push({type:'done',reason:'stop',message:response});stream.end(response);
+  });
+  return stream;
+}
 export default function(pi){
-  pi.registerProvider('harness-test',{api:'harness-test-api',apiKey:'fake',baseUrl:'http://localhost:0',streamSimple:core.streamSimple,
+  pi.registerProvider('harness-test',{api:'harness-test-api',apiKey:'fake',baseUrl:'http://localhost:0',streamSimple,
     models:[{id:'local',name:'Local test',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:4096}]});
   pi.on('session_start',async(_e,ctx)=>{await pi.setModel(ctx.modelRegistry.find('harness-test','local'));writeFileSync(${JSON.stringify(ready)},'ready');});
 }`);

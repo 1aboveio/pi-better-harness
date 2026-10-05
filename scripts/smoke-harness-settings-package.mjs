@@ -13,7 +13,7 @@ try {
   });
   const packed = selectPackedResult(output);
   if (!packed?.filename) throw new Error("Harness pack did not return a tarball");
-  const sdkRoot = resolve(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..");
+  const sdkRoot = process.env.PI_CODEMODE_TEST_SDK_DIR ?? resolve(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "..");
   const sdkVersion = JSON.parse(readFileSync(join(sdkRoot, "package.json"), "utf8")).version;
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "harness-settings-install-smoke", private: true,
     dependencies: { "@earendil-works/pi-coding-agent": sdkVersion } }));

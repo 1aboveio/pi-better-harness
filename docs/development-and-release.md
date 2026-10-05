@@ -119,6 +119,10 @@ PI_CODEMODE_TEST_SDK_DIR=/absolute/path/to/pi-coding-agent \
   node --import tsx --test scripts/prompt-suggestions-engine.test.mjs
 ```
 
+Set `PI_HARNESS_SETTINGS_CLI` to another Pi executable to run the terminal
+journey against that CLI. The package smoke also accepts
+`PI_CODEMODE_TEST_SDK_DIR` to select its disposable installation's SDK version.
+
 ### Navigator golden path
 
 `docs/tests/navigator.smoke.manifest.json` defines the navigator's release-blocking
