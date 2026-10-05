@@ -39,7 +39,7 @@ export function defaultSandboxPermissions(): SandboxPermissionSettings {
         storedCredentials: "read",
         commands: true,
         network: true,
-        processAccess: "off",
+        processAccess: "read",
     });
     return { main: profile(), subagents: { ...profile(), enabled: true, outsideProject: "write", storedCredentials: "read-write" }, subagentTools: defaultSubagentTools() };
 }

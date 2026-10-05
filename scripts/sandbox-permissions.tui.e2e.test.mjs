@@ -71,7 +71,8 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         key("Space");
         wait(/Outside project\s+-\s+Write & delete/);
         for (let i = 0; i < 4; i++) key("Down");
-        wait(/Process access\s+-\s+Off/);
+        wait(/Process access\s+-\s+Read/);
+        key("Space"); wait(/Process access\s+-\s+Off/);
         key("Space"); wait(/Process access\s+-\s+Read/);
         for (let i = 0; i < 4; i++) key("Up");
         // The guarded adapter stays a direct row; trusted tools start folded by package.
@@ -94,7 +95,7 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         assert.equal(saved.permissions.subagents.outsideProject, "read-write");
         assert.equal(saved.permissions.subagents.storedCredentials, "read-write");
         assert.equal(saved.permissions.subagents.processAccess, "read");
-        assert.equal(saved.permissions.main.processAccess, "off");
+        assert.equal(saved.permissions.main.processAccess, "read");
         assert.equal(saved.permissions.subagentTools.applyPatch, true);
         key("Space"); wait(/Project files\s+Off\s+Write & delete/); // Session-only Main on.
         key("Escape");

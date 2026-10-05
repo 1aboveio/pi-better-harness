@@ -72,7 +72,7 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[4]!, /Stored credentials\s+-\s+Write & delete\s*$/);
     assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
     assert.match(lines[6]!, /Network access\s+-\s+On/);
-    assert.match(lines[7]!, /Process access\s+-\s+Off/);
+    assert.match(lines[7]!, /Process access\s+-\s+Read/);
     assert.match(lines[8]!, /Subagents · Tools/);
     assert.match(lines[9]!, /Guarded \(follows the file rules\)/);
     assert.match(lines[10]!, /\[x\] apply_patch\s+harness adapter/);
@@ -180,13 +180,13 @@ test("Process access cycles only Off and Read without changing other permissions
     const h = harness();
     h.press(Key.right, ...Array(6).fill(Key.down), Key.space);
     await settle();
-    assert.equal(h.current.subagents.processAccess, "read");
-    assert.equal(h.current.main.processAccess, "off");
-    assert.match(plain(table(h.page, 100)[7]!), /Process access\s+-\s+Read/);
-    assert.deepEqual({ ...h.current.subagents, processAccess: "off" }, h.initial.subagents);
+    assert.equal(h.current.subagents.processAccess, "off");
+    assert.equal(h.current.main.processAccess, "read");
+    assert.match(plain(table(h.page, 100)[7]!), /Process access\s+-\s+Off/);
+    assert.deepEqual({ ...h.current.subagents, processAccess: "read" }, h.initial.subagents);
     h.press(Key.space);
     await settle();
-    assert.equal(h.current.subagents.processAccess, "off");
+    assert.equal(h.current.subagents.processAccess, "read");
 });
 
 test("a single Space applies both looser and tighter permission changes", async () => {

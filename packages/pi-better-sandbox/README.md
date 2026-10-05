@@ -26,7 +26,7 @@ Outside project                   -                Write
 Stored credentials                -                Write & delete
 Run commands & applications       -                On
 Network access                    -                On
-Process access                    -                Off
+Process access                    -                Read
 
   Subagents · Tools
     Guarded (follows the file rules)
@@ -180,12 +180,13 @@ environment variables, are excluded. Write & delete may be needed by a CLI that
 refreshes a token or updates its credential database. This row applies
 independently of Project files and Outside project.
 
-**Process access** controls the fixed `process_list` tool: **Off** (default) or
-**Read**. Read returns current-user process IDs and names only, with optional
+**Process access** controls the fixed `process_list` tool: **Off** or
+**Read** (default for fresh Main and Subagents profiles). Read returns current-user process IDs and names only, with optional
 literal name filtering and a bounded result limit. It does not expose command
 arguments, environment variables, debugger attachment, signals, termination,
-or emulator/ADB operations. Legacy saved profiles stay Off until a human
-enables Read; subagents snapshot the setting at launch.
+or emulator/ADB operations. Explicit saved values are preserved, and legacy
+saved profiles without this setting stay Off until a human enables Read;
+subagents snapshot the setting at launch.
 
 The inventory helper uses a fixed system `pgrep` command under the existing
 kernel policy, without a shell or model-controlled arguments. It can work with
