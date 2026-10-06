@@ -6,16 +6,28 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-plan@0.6.0] - 2026-10-06
+
 ### Added
 
-- Add Tool output: Normal / Minimal directly to `/harness-settings`, sharing the existing session preference and command shortcuts.
+- Distinguish implemented, review passed, and delivered Rush issue rows. Only delivered units count as complete; code-done units remain in flight until delivery. (#429, #428)
+
+## [pi-better-harness@0.22.0] - 2026-10-06
+
+### Added
+
+- Add Tool output: Normal / Minimal directly to `/harness-settings`, sharing the existing session preference and `/tool-output` command shortcuts. (#434)
 
 ### Changed
 
 - Style compact tool calls as muted activity rows with inline command/path context, distinct from conversation input.
 - Preserve click-to-expand full native tool details in newer Pi fullscreen mode; Ctrl+O remains available in all terminal modes.
+- Bundle Plan 0.6.0 with the implemented, review passed, and delivered row states from #429.
+- Keep all other bundled component versions unchanged.
 
-- Plan: Rush issue rows show `◐ implemented` and `◑ review passed` between code done and delivery, and count a row complete only at `status: succeeded`, when its change has landed by a merged PR or a direct push. The README example keeps a code-done unit `in-flight`. (#428)
+### Fixed
+
+- Restore tool-output session preferences across branch navigation, reload, and saved-session resume, and keep failed saves from applying rejected changes.
 
 ## [pi-better-harness@0.21.0] - 2026-10-06
 
