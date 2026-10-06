@@ -30,7 +30,7 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
             get: readSettings,
             change: mode => changeCallbackSetting(pi, ctx, mode),
             save: () => saveCallbackDefault(readSettings().mode),
-          });
+          }, registry.controls());
         } catch (error) {
           ctx.ui.notify(`Settings unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
           return;

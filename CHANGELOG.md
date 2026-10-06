@@ -6,7 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Add Tool output: Normal / Minimal directly to `/harness-settings`, sharing the existing session preference and command shortcuts.
+
 ### Changed
+
+- Style compact tool calls as muted activity rows with inline command/path context, distinct from conversation input.
+- Preserve click-to-expand full native tool details in newer Pi fullscreen mode; Ctrl+O remains available in all terminal modes.
 
 - Plan: Rush issue rows show `◐ implemented` and `◑ review passed` between code done and delivery, and count a row complete only at `status: succeeded`, when its change has landed by a merged PR or a direct push. The README example keeps a code-done unit `in-flight`. (#428)
 

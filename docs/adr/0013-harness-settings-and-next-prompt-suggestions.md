@@ -22,6 +22,23 @@ IDs, and cleans listeners on shutdown. Opening a package screen and closing it
 returns to the hub with the same selection. Packages without a real settings
 screen do not receive invented shortcuts.
 
+Inline controls may publish `{ id, label, values, get, change }` on the same
+trusted bus. Their owning extension retains runtime state and persistence;
+Harness only renders the native selector and waits for successful changes.
+Tool output contributes Normal/Minimal through this contract. The existing
+`/tool-output` command uses the same change path, with session-only persistence,
+branch restoration, and failed-save rollback. Callback Ctrl+S remains scoped to
+callback defaults and does not save a tool-output default.
+
+The user selected prototype B (inline context) and requested full expansion on
+click on 2026-10-06. The visual studies are captured on the throwaway
+`prototype/tool-output-exploration` branch at `53a0a14`. Production translates
+that direction into quiet theme-colored tool names and inline arguments, not
+browser icons or status badges. Newer fullscreen Pi mouse routing expands the
+folded row into its original native rendering; expanded interaction is delegated
+to Pi. Regular terminals retain native selection/scrollback, with Ctrl+O as the
+keyboard alternative. No result payloads are rewritten.
+
 Harness additionally owns the shared **Completions while busy** control.
 Changes are branch-local session entries and take effect immediately for both
 callback producers. Ctrl+S explicitly saves the current value as the user
