@@ -34,7 +34,14 @@ export default function(pi){
   pi.on('session_start',async(_e,ctx)=>{
     await pi.setModel(ctx.modelRegistry.find('harness-test','local'));
     if (!ctx.sessionManager.getBranch().some(entry=>entry.type==='message' && entry.message.role==='assistant')) {
-      ctx.sessionManager.appendMessage({role:'assistant',content:[{type:'text',text:'Settings journey fixture'}],
+      ctx.sessionManager.appendMessage({role:'assistant',content:[{type:'text',text:'Settings journey fixture'},
+        {type:'toolCall',id:'fixture-first',name:'read',arguments:{path:'fixture-first.txt'}},
+        {type:'toolCall',id:'fixture-second',name:'read',arguments:{path:'fixture-second.txt'}}],
+        api:'harness-test-api',provider:'harness-test',model:'local',stopReason:'toolUse',timestamp:0,
+        usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
+      for (const id of ['fixture-first','fixture-second']) ctx.sessionManager.appendMessage({
+        role:'toolResult',toolCallId:id,toolName:'read',content:[{type:'text',text:'TOOL_DETAIL_SENTINEL '+id}],isError:false,timestamp:0});
+      ctx.sessionManager.appendMessage({role:'assistant',content:[{type:'text',text:'Settings journey answer'}],
         api:'harness-test-api',provider:'harness-test',model:'local',stopReason:'stop',timestamp:0,
         usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
     }
@@ -84,6 +91,13 @@ export default function(pi){
     wait(pane => /Tool output\s+Minimal/.test(pane) && pane.includes("Session setting saved"));
     key("Escape");
     wait(pane => !pane.includes("Harness settings"));
+    const folded = wait(pane => pane.includes("2 tool calls") && pane.includes("Settings journey answer"));
+    assert.equal(folded.includes("TOOL_DETAIL_SENTINEL"), false);
+    assert.match(folded, /^ {3}\u25b8 2 tool calls/m);
+    key("C-o");
+    wait(pane => pane.includes("TOOL_DETAIL_SENTINEL fixture-first") && pane.includes("TOOL_DETAIL_SENTINEL fixture-second"));
+    key("C-o");
+    wait(pane => pane.includes("2 tool calls") && !pane.includes("TOOL_DETAIL_SENTINEL"));
     rmSync(ready);
     send("/reload"); key("Enter");
     wait(pane => existsSync(ready) && pane.includes("Reloaded keybindings"));
@@ -116,6 +130,7 @@ export default function(pi){
     send("/harness-settings"); key("Enter");
     wait(pane => /Tool output\s+Minimal/.test(pane) && pane.includes("Steer active run") && pane.includes("Session setting"));
     key("Escape");
+    wait(pane => pane.includes("2 tool calls") && pane.includes("Settings journey answer") && !pane.includes("TOOL_DETAIL_SENTINEL"));
     assert.deepEqual(calls(), [], "opening settings never invokes the model");
   } finally {
     spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });

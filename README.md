@@ -38,22 +38,29 @@ pi install npm:pi-better-harness
 ## Minimal Tool Output
 
 With the bundled harness (`pi install npm:pi-better-harness`), use
-`/tool-output minimal` to keep the conversation readable. A tool run stays
-visible while it is the latest thing on screen. Once later model text is
-written, that run — every tool call and result between model texts — folds
-into one line such as `▸ 4 tools · read ×2, bash`. The live run at the bottom
-stays open, with result bodies hidden. Extension and MCP calls fold the same
-way. The agent still receives the complete result; execution, sandboxing,
-paging, and execution defaults are unchanged.
+`/tool-output minimal` to keep the conversation readable. Live calls show one
+quiet, indented row with a tool-specific icon and inline arguments; result
+bodies stay hidden. The icon is accent-colored while running, muted when
+completed, and error-colored when failed. Names stay muted and arguments use
+a distinct dim tone. Running and failed calls also retain text labels.
+
+Once the foreground run fully settles, each consecutive block of tools folds
+into one expandable line such as `▸ 4 tool calls · 1 failed`. Assistant text
+stays visible, and only the failure count uses the error color. Extension and
+MCP calls fold the same way. The agent still receives the complete result;
+execution, sandboxing, paging, and execution defaults are unchanged.
 
 `/tool-output normal` restores each tool's ordinary renderer; `/tool-output`
-toggles between the two modes. Ctrl+O unfolds runs and reveals results. On a
-Pi build with clickable rows, click a folded line to open that run, and click
-again to fold it. The preference is saved in the current session and restored
-on resume/reload; new sessions start in normal mode.
+toggles between the two modes. Ctrl+O reveals all original tool details and
+folds them again on the next toggle. In Pi fullscreen mode with clickable rows,
+click a folded block to reveal its call rows, then click a call for its original
+details. Click the disclosure again to refold the block. The preference is saved
+in the current session and restored on resume/reload; new sessions start in
+normal mode.
 
-This is an **internal TUI adapter**, tested with Pi 0.82.1 and 0.99.1, not a
-public renderer API. Future Pi upgrades may require adapter changes. An
+This is an **internal TUI adapter**, tested with Pi 0.82.1, 0.99.1, and the
+bundled Pi 1.0.0 CLI, not a public renderer API. Future Pi upgrades may require
+adapter changes. An
 incompatible display API leaves ordinary output enabled and reports a warning.
 It does not apply to print/RPC mode or exported transcripts.
 
