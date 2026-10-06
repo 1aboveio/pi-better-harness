@@ -82,7 +82,9 @@ into one disclosure row showing the call count and any failures. Only the failur
 count uses the error color; the disclosure and total stay muted. Assistant text
 stays visible, and restored history uses the same folded view. In newer Pi
 fullscreen mode, click a block disclosure to reveal its call rows, then click a
-call to expand its original details. Click the disclosure again to refold the
+call to expand its original details. Hover highlights compact call and disclosure
+rows using the selection background (reverse video for themes without one), and
+tool icons sit centered in a three-column gutter. Click the disclosure again to refold the
 block; native expanded call/result clicks collapse individual details. Regular
 terminals keep mouse input for terminal selection and scrollback; Ctrl+O expands
 all original tool details in both modes and folds them again on the next toggle.

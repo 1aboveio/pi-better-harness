@@ -207,7 +207,7 @@ test("compact custom call headers discard styled box padding and backgrounds", (
   });
   const normal = rendered(component);
   hook.setEnabled(true);
-  assert.deepEqual(component.render(40), ["   \u25c7 Boxed call  BOXED_HEADER"]);
+  assert.deepEqual(component.render(40), ["    \u25c7 Boxed call  BOXED_HEADER"]);
   assert.doesNotMatch(rendered(component), /BOXED_RESULT|\x1b/);
   component.setExpanded(true);
   assert.match(rendered(component), /BOXED_HEADER/);
@@ -254,7 +254,7 @@ test("compact rows use one state-colored tool icon and distinct quiet name and a
       component.updateResult(result, partial);
       const line = component.render(80)[0];
       const plain = stripVTControlCharacters(line);
-      assert.match(plain, /^ {3}\u2318 Shell/);
+      assert.match(plain, /^ {4}\u2318 Shell/);
       if (suffix) assert.ok(plain.endsWith(suffix));
       else assert.doesNotMatch(plain, /\(running\)|\(failed\)/);
       assert.ok(line.includes(themeModule.theme.fg(color, "\u2318")), "the tool icon alone carries the state color");
@@ -284,18 +284,89 @@ test("default tools keep one identity icon across states and expose running and 
   ]) {
     const component = tool(name);
     assert.equal(visibleWidth(icon), 1, "tool icons occupy one terminal column");
-    assert.ok(rendered(component).startsWith(`   ${icon} ${label}`));
+    assert.ok(rendered(component).startsWith(`    ${icon} ${label}`));
     assert.doesNotMatch(rendered(component), /\(running\)|\(failed\)/);
     component.updateResult(payload, true);
-    assert.ok(rendered(component).startsWith(`   ${icon} ${label}`));
+    assert.ok(rendered(component).startsWith(`    ${icon} ${label}`));
     assert.match(rendered(component), /\(running\)$/);
     component.updateResult({ ...payload, isError: true }, false);
-    assert.ok(rendered(component).startsWith(`   ${icon} ${label}`));
+    assert.ok(rendered(component).startsWith(`    ${icon} ${label}`));
     assert.match(rendered(component), /\(failed\)$/);
     for (const width of [1, 8, 20, 80]) {
       assert.ok(visibleWidth(component.render(width)[0]) <= width);
     }
   }
+});
+
+test("fullscreen hover highlights only the pointed row and clears on pointer exit and view changes", {
+  skip: typeof prototype.handleMouse !== "function" ? "This Pi SDK has no fullscreen mouse routing" : false,
+}, () => {
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  const chat = new Container();
+  const viewportInput = data => data;
+  const ui = { children: [chat], requestRender() {}, handleViewportInput: viewportInput };
+  const first = placedTool("first", ui);
+  const second = placedTool("second", ui);
+  chat.addChild(first);
+  chat.addChild(second);
+  hook.setEnabled(true);
+  const move = (y, width = 80) => dispatchMouseEvent(chat, {
+    type: "move", button: "none", x: 4, y, screenX: 4, screenY: y,
+    width, height: chat.render(width).length, shift: false, ctrl: false, alt: false,
+  });
+  for (const name of ["dark", "light", "system"]) {
+    initTheme(name, false);
+    const plain = chat.render(80);
+    assert.equal(move(0).render, true);
+    let lines = chat.render(80);
+    assert.notEqual(lines[0], plain[0]);
+    assert.equal(lines[1], plain[1]);
+    assert.equal(visibleWidth(lines[0]), 80, "hover fills the row without changing its geometry");
+    assert.equal(stripVTControlCharacters(lines[0]).trimEnd(), stripVTControlCharacters(plain[0]));
+    assert.equal(first.expanded, false);
+    assert.equal(move(0).render, false, "moving within a row does not redraw");
+    assert.equal(ui.handleViewportInput("\x1b[<35;15;1M"), "\x1b[<35;15;1M", "input is forwarded unchanged");
+    assert.deepEqual(chat.render(80), lines, "motion within the hovered row keeps its highlight");
+    move(1);
+    lines = chat.render(80);
+    assert.equal(lines[0], plain[0]);
+    assert.notEqual(lines[1], plain[1]);
+    ui.handleViewportInput("\x1b[<35;5;5M");
+    assert.deepEqual(chat.render(80), plain, "moving onto non-tool content clears hover");
+    for (const input of ["\x1b[<64;5;2M", "\x1b[<0;5;2M", "\x1b[<51;5;2M", "\x0f"]) {
+      move(1);
+      ui.handleViewportInput(input);
+      assert.deepEqual(chat.render(80), plain, "scroll, click, modified move and keyboard input clear hover");
+    }
+    move(0);
+    assert.ok(chat.render(20).every(line => visibleWidth(line) <= 20));
+    assert.deepEqual(chat.render(80), plain, "resize clears stale pointer bounds");
+    move(0);
+    first.setExpanded(true);
+    first.setExpanded(false);
+    assert.deepEqual(chat.render(80), plain, "expansion clears hover");
+    move(0);
+    hook.setEnabled(false);
+    hook.setEnabled(true);
+    assert.deepEqual(chat.render(80), plain, "mode switches clear hover");
+  }
+  hook.completeRun();
+  const summary = chat.render(80);
+  move(0);
+  assert.notDeepEqual(chat.render(80), summary, "block summaries have hover feedback too");
+  ui.handleViewportInput("\x1b[<0;5;1M");
+  dispatchMouseEvent(chat, { type: "click", button: "left", x: 4, y: 0, screenX: 4, screenY: 0,
+    width: 80, height: 1, shift: false, ctrl: false, alt: false });
+  assert.equal(chat.render(80).length, 3);
+  move(1);
+  const open = chat.render(80);
+  assert.equal(visibleWidth(open[1]), 80);
+  assert.ok(visibleWidth(open[0]) < 80);
+  assert.ok(visibleWidth(open[2]) < 80);
+  hook.dispose();
+  assert.equal(ui.handleViewportInput, viewportInput, "disposal restores fullscreen input routing");
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
 });
 
 test("fullscreen mouse dispatch expands a folded row to all original detail and collapses it again", {
@@ -602,7 +673,7 @@ test("restored history folds by call id while new runs stay visible and respect 
   assert.match(old.render(80)[0], /^ {6}\u25b8 1 tool call/);
   const next = placedTool("next", ui);
   chat.addChild(next);
-  assert.match(next.render(80)[0], /^ {6}\u25c7 Next/);
+  assert.match(next.render(80)[0], /^ {7}\u25c7 Next/);
   assert.doesNotMatch(next.render(80)[0], /tool call/);
   hook.completeRun();
   assert.match(next.render(80)[0], /^ {6}\u25b8 1 tool call/);
@@ -610,8 +681,8 @@ test("restored history folds by call id while new runs stay visible and respect 
   intro.setOutputPad(0);
   assert.match(old.render(80)[0], /^ {2}\u25b8/);
   hook.restoreCompletedCalls([]);
-  assert.match(old.render(80)[0], /^ {2}\u25c7 Old/);
-  assert.match(next.render(80)[0], /^ {2}\u25c7 Next/);
+  assert.match(old.render(80)[0], /^ {3}\u25c7 Old/);
+  assert.match(next.render(80)[0], /^ {3}\u25c7 Next/);
 });
 
 test("tool-only assistant messages do not split a visual block but visible thinking and errors do", () => {

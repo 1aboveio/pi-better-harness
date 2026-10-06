@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -12,6 +13,7 @@ const settingsExtension = installed ? join(installed, "extensions/settings/index
 const toolOutputExtension = installed ? join(installed, "extensions/minimal-output/index.ts") : join(root, "packages/pi-better-harness/extensions/minimal-output/index.ts");
 const goalExtension = installed ? join(installed, "extensions/goal/index.ts") : join(root, "packages/pi-better-goal/src/index.ts");
 const piCli = process.env.PI_HARNESS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
+const mouseRouting = existsSync(join(dirname(createRequire(realpathSync(piCli)).resolve("@earendil-works/pi-tui")), "tui-alt-screen.js"));
 const q = text => `'${text.replaceAll("'", "'\\''")}'`;
 
 test("real TUI hub autosaves callback mode, saves defaults on ctrl+s, and routes packages without model requests", { skip: spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 }, () => {
@@ -33,6 +35,7 @@ export default function(pi){
     models:[{id:'local',name:'Local test',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:4096}]});
   pi.on('session_start',async(_e,ctx)=>{
     await pi.setModel(ctx.modelRegistry.find('harness-test','local'));
+
     if (!ctx.sessionManager.getBranch().some(entry=>entry.type==='message' && entry.message.role==='assistant')) {
       ctx.sessionManager.appendMessage({role:'assistant',content:[{type:'text',text:'Settings journey fixture'},
         {type:'toolCall',id:'fixture-first',name:'read',arguments:{path:'fixture-first.txt'}},
@@ -50,6 +53,7 @@ export default function(pi){
 }`);
   const tmux = (...args) => execFileSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
   const screen = () => tmux("capture-pane", "-t", "test", "-p");
+  const ansiScreen = () => tmux("capture-pane", "-t", "test", "-p", "-e");
   const send = text => tmux("send-keys", "-t", "test", "-l", text);
   const key = name => tmux("send-keys", "-t", "test", name);
   const wait = predicate => {
@@ -59,7 +63,7 @@ export default function(pi){
       if (predicate(pane)) return pane;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
     }
-    throw new Error(`TUI condition timed out:\n${screen()}\n${existsSync(log) ? readFileSync(log, "utf8") : "no calls"}`);
+    throw new Error(`TUI condition timed out:\n${screen()}\nANSI: ${JSON.stringify(ansiScreen())}\n${existsSync(log) ? readFileSync(log, "utf8") : "no calls"}`);
   };
   const calls = () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
   try {
@@ -94,6 +98,30 @@ export default function(pi){
     const folded = wait(pane => pane.includes("2 tool calls") && pane.includes("Settings journey answer"));
     assert.equal(folded.includes("TOOL_DETAIL_SENTINEL"), false);
     assert.match(folded, /^ {3}\u25b8 2 tool calls/m);
+    if (mouseRouting) {
+      const background = /\x1b\[(?:48;|4[0-7]m|10[0-7]m|7m)/;
+      const summaryY = folded.split("\n").findIndex(line => line.includes("2 tool calls"));
+      const answerY = folded.split("\n").findIndex(line => line.includes("Settings journey answer"));
+      const move = y => send(`\x1b[<35;5;${y + 1}M`);
+      const click = y => { send(`\x1b[<0;5;${y + 1}M`); send(`\x1b[<0;5;${y + 1}m`); };
+      assert.doesNotMatch(ansiScreen().split("\n")[summaryY], background);
+      move(summaryY);
+      wait(() => background.test(ansiScreen().split("\n")[summaryY]));
+      move(answerY);
+      wait(() => !background.test(ansiScreen().split("\n")[summaryY]));
+      click(summaryY);
+      const open = wait(pane => pane.includes("fixture-first.txt") && pane.includes("fixture-second.txt"));
+      assert.match(open, /^ {6}\u25a4 Read/m, "icons are centered in the three-column gutter");
+      const callY = open.split("\n").findIndex(line => line.includes("fixture-first.txt"));
+      move(callY);
+      wait(() => background.test(ansiScreen().split("\n")[callY]));
+      click(callY);
+      wait(pane => pane.includes("TOOL_DETAIL_SENTINEL fixture-first"));
+      key("C-o");
+      wait(pane => pane.includes("TOOL_DETAIL_SENTINEL fixture-second"));
+      key("C-o");
+      wait(pane => pane.includes("2 tool calls") && !pane.includes("TOOL_DETAIL_SENTINEL"));
+    }
     key("C-o");
     wait(pane => pane.includes("TOOL_DETAIL_SENTINEL fixture-first") && pane.includes("TOOL_DETAIL_SENTINEL fixture-second"));
     key("C-o");

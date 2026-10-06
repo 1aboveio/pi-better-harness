@@ -54,7 +54,8 @@ execution, sandboxing, paging, and execution defaults are unchanged.
 toggles between the two modes. Ctrl+O reveals all original tool details and
 folds them again on the next toggle. In Pi fullscreen mode with clickable rows,
 click a folded block to reveal its call rows, then click a call for its original
-details. Click the disclosure again to refold the block. The preference is saved
+details. Hover highlights clickable rows; icons sit centered in a three-column
+gutter. Click the disclosure again to refold the block. The preference is saved
 in the current session and restored on resume/reload; new sessions start in
 normal mode.
 
