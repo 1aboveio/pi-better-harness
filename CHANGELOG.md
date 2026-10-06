@@ -6,10 +6,51 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.21.0] - 2026-10-06
+
 ### Added
 
 - Add `/harness-settings` with shortcuts to loaded Sandbox, Subagents, and Goal settings. Each package retains its direct settings command and standalone configuration ownership.
+- Add Completions while busy with Wait until idle and Steer active run modes. Changes autosave to the current session; Ctrl+S saves the default for future sessions without changing already-open sessions. (#425, #432)
 - Record the next-prompt suggestion design, with inference deferred until safe public auth/header resolution is available. (#426)
+
+### Changed
+
+- Bundle Subagents 0.15.0 and Background Tasks 0.7.0 with shared callback delivery settings and tool-boundary completion batching.
+- Remove `PI_BETTER_CALLBACK_WHILE_BUSY`; configure callback delivery through `/harness-settings` instead.
+- Keep Sandbox 0.11.0, Goal 0.8.1, Plan 0.5.4, and SSH 0.1.2 unchanged.
+
+## [pi-better-subagents@0.15.0] - 2026-10-06
+
+### Added
+
+- Support shared session callback delivery settings and explicit saved defaults for standalone and bundled installations. (#432)
+- Aggregate busy-run completions into one steering message after the last active tool ends when Steer active run is enabled. (#425)
+
+### Changed
+
+- Remove `PI_BETTER_CALLBACK_WHILE_BUSY` support; retain Wait until idle as the default.
+
+### Fixed
+
+- Hold callbacks during compaction and preserve retries, receipts, deduplication, and session ownership across delivery-mode changes.
+- Prevent failed session writes from activating rejected settings and keep saved defaults isolated from already-open sessions.
+
+## [pi-better-background-tasks@0.7.0] - 2026-10-06
+
+### Added
+
+- Support shared session callback delivery settings and explicit saved defaults for standalone and bundled installations. (#432)
+- Batch mixed background-task and subagent completions at the final active-tool boundary when Steer active run is enabled. (#425)
+
+### Changed
+
+- Remove `PI_BETTER_CALLBACK_WHILE_BUSY` support; retain Wait until idle as the default.
+
+### Fixed
+
+- Hold callbacks during compaction and preserve retries, receipts, deduplication, and session ownership across delivery-mode changes.
+- Prevent failed session writes from activating rejected settings and keep saved defaults isolated from already-open sessions.
 
 ## [pi-better-harness@0.20.0] - 2026-10-05
 
