@@ -5,7 +5,9 @@ export interface PlanRenderTheme {
   fg(color: string, value: string): string;
 }
 
-export type DisplayStatus = "completed" | "in_progress" | "pending" | "blocked" | "failed" | "skipped" | "unknown";
+// `implemented` and `reviewed` are in-progress states a workflow row can show between
+// "code done" and "delivered"; native plans never use them.
+export type DisplayStatus = "completed" | "in_progress" | "implemented" | "reviewed" | "pending" | "blocked" | "failed" | "skipped" | "unknown";
 export interface PlanRow {
   label: string;
   title: string;
@@ -24,6 +26,8 @@ export function statusStyle(status: DisplayStatus): { glyph: string; color: stri
   switch (status) {
     case "completed": return { glyph: "✓", color: "success", label: "" };
     case "in_progress": return { glyph: "●", color: "accent", label: "active" };
+    case "implemented": return { glyph: "◐", color: "accent", label: "implemented" };
+    case "reviewed": return { glyph: "◑", color: "success", label: "review passed" };
     case "blocked": return { glyph: "!", color: "warning", label: "blocked" };
     case "failed": return { glyph: "×", color: "error", label: "failed" };
     case "skipped": return { glyph: "—", color: "dim", label: "skipped" };
@@ -45,7 +49,8 @@ export function renderPlanPresentation(
   const count = (status: DisplayStatus) => plan.rows.filter((row) => row.status === status).length;
   const summary = [`${count("completed")}/${plan.rows.length} complete`];
   for (const [status, label] of [
-    ["in_progress", "in progress"], ["blocked", "blocked"], ["failed", "failed"],
+    ["in_progress", "in progress"], ["implemented", "implemented"], ["reviewed", "review passed"],
+    ["blocked", "blocked"], ["failed", "failed"],
     ["skipped", "skipped"], ["unknown", "unknown"],
   ] as const) {
     if (count(status)) summary.push(`${count(status)} ${label}`);
@@ -67,7 +72,7 @@ export function renderPlanPresentation(
       theme.fg(style.color, style.glyph) + " " + theme.fg("dim", label) +
       " ".repeat(Math.max(0, labelWidth - visibleWidth(label)) + 2);
     const titleColor = row.status === "blocked" ? "warning" : row.status === "failed" ? "error" :
-      row.status === "in_progress" ? "text" : "muted";
+      row.status === "in_progress" || row.status === "implemented" || row.status === "reviewed" ? "text" : "muted";
     const badge = planText(row.statusLabel ?? style.label);
     const available = size - visibleWidth(prefix);
     // At narrow widths use an inline status so it survives title truncation.

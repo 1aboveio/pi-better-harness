@@ -128,6 +128,34 @@ test("workflow summaries handle concurrent activity, idle, complete and empty pl
   assert.equal(renderRushPlan(workflow, 100)[0], "plan  0/0 complete");
 });
 
+test("issue rows show implemented, review passed and delivered as distinct states", () => {
+  const workflow = rushFixture();
+  workflow.issues = [
+    { id: "1", title: "Building", stage: "validate", status: "in-flight", dependsOn: [] },
+    { id: "2", title: "Implemented", stage: "done", status: "in-flight", headSha: "aaa", reviewedHead: "old", delivery: "review", dependsOn: [] },
+    { id: "3", title: "Reviewed", stage: "done", status: "in-flight", headSha: "bbb", reviewedHead: "bbb", delivery: "ci", dependsOn: [] },
+    { id: "4", title: "Merged", stage: "done", status: "succeeded", headSha: "ccc", reviewedHead: "ccc", delivery: "merged", dependsOn: [] },
+    { id: "5", title: "Pushed", stage: "done", status: "succeeded", dependsOn: [] },
+  ];
+  const rendered = renderRushPlan(workflow, 100).join("\n");
+  assert.equal(renderRushPlan(workflow, 100)[0], "plan  2/5 complete · 1 in progress · 1 implemented · 1 review passed");
+  assert.match(rendered, /●\s+#1\s+Building\s+active/);
+  assert.match(rendered, /◐\s+#2\s+Implemented\s+implemented/);
+  assert.match(rendered, /◑\s+#3\s+Reviewed\s+review passed/);
+  assert.match(rendered, /✓\s+#4\s+Merged/);
+  assert.match(rendered, /✓\s+#5\s+Pushed/, "a direct push with no PR fields is delivered");
+  assert.match(renderRushPlan(workflow, 100, true).join("\n"), /done · in-flight · ci/);
+});
+
+test("a code-done unit without a HEAD keeps the plain in-progress state", () => {
+  const unit = projectRushPlan({
+    runId: "r", planRevision: 1, fleet: {},
+    units: [{ id: "1", title: "Older plan", stage: "done", status: "in-flight" }],
+  }, "r");
+  assert.match(renderRushPlan(unit, 100).join("\n"), /●\s+#1\s+Older plan\s+active/);
+  assert.equal(renderRushPlan(unit, 100)[0], "plan  0/1 complete · 1 in progress");
+});
+
 test("both full components use the same selection and return keys", () => {
   const native = replacePlan(null, [{ step: "Done", status: "completed" }, { step: "Working", status: "in_progress" }], undefined, 100);
   let closed = 0;

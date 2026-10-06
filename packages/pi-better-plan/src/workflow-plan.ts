@@ -16,6 +16,9 @@ interface RushUnit {
   dependsOn: string[];
   worker?: string | number | undefined;
   note?: string | undefined;
+  headSha?: string | undefined;
+  reviewedHead?: string | undefined;
+  delivery?: string | undefined;
 }
 
 export interface RushPlan {
@@ -78,6 +81,9 @@ export function projectRushPlan(data: unknown, runId: string): RushPlan {
       dependsOn: Array.isArray(unit.dependsOn) ? unit.dependsOn.filter((id): id is string => typeof id === "string") : [],
       worker: typeof unit.worker === "string" || typeof unit.worker === "number" ? unit.worker : undefined,
       note: typeof unit.note === "string" ? unit.note : undefined,
+      headSha: typeof unit.headSha === "string" && unit.headSha ? unit.headSha : undefined,
+      reviewedHead: typeof unit.reviewedHead === "string" && unit.reviewedHead ? unit.reviewedHead : undefined,
+      delivery: typeof unit.delivery === "string" && unit.delivery ? unit.delivery : undefined,
     };
   });
   const fleet: RushPlan["fleet"] = {};
@@ -133,6 +139,15 @@ function workflowStatus(status: string): DisplayStatus {
   }
 }
 
+// A unit is delivered (completed) only at `status: succeeded`, whether its change landed by a
+// merged PR or a direct push. Between code done and delivery, a unit with a HEAD shows
+// whether that HEAD passed review; without one it shows plain in-progress, as before.
+function unitStatus(unit: RushUnit): DisplayStatus {
+  const status = workflowStatus(unit.status);
+  if (status !== "in_progress" || unit.stage !== "done" || !unit.headSha) return status;
+  return unit.reviewedHead === unit.headSha ? "reviewed" : "implemented";
+}
+
 function presentRushPlan(plan: RushPlan, owner: string): PlanPresentation {
   // The warehouse canary only applies to data work; hide it otherwise.
   const stages = ["explore", "implement", "review", "ci", ...(plan.warehouseCanaryRequired ? ["canary"] : [])];
@@ -147,8 +162,8 @@ function presentRushPlan(plan: RushPlan, owner: string): PlanPresentation {
   return {
     metadata,
     rows: plan.issues.map((unit) => {
-      const status = workflowStatus(unit.status);
-      const details = [`${unit.stage} · ${unit.status}${unit.worker !== undefined ? ` · worker ${unit.worker}` : ""}`];
+      const status = unitStatus(unit);
+      const details = [`${unit.stage} · ${unit.status}${unit.delivery ? ` · ${unit.delivery}` : ""}${unit.worker !== undefined ? ` · worker ${unit.worker}` : ""}`];
       if (unit.dependsOn.length) details.push(`after: ${unit.dependsOn.map((id) => `#${id}`).join(", ")}`);
       if (unit.note) details.push(unit.note);
       return {

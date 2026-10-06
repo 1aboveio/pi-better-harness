@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- Plan: Rush issue rows show `◐ implemented` and `◑ review passed` between code done and delivery, and count a row complete only at `status: succeeded`, when its change has landed by a merged PR or a direct push. The README example keeps a code-done unit `in-flight`. (#428)
+
 ## [pi-better-harness@0.21.0] - 2026-10-06
 
 ### Added

@@ -45,12 +45,14 @@ For any workflow using the shared task-plan contract (including `resolve-issues`
   "event": "unit-validated",
   "revision": 12,
   "changes": [
-    { "id": "1201", "set": { "stage": "done", "status": "succeeded", "worker": null, "headSha": "abc123" } },
+    { "id": "1201", "set": { "stage": "done", "status": "in-flight", "worker": null, "headSha": "abc123" } },
     { "id": "C1", "set": { "status": "combining" } }
   ],
   "profiling": { "outcome": "succeeded", "wallMs": 540000 }
 } }
 ```
+
+Each issue row shows where it is between code and delivery: `●` while it is being built, `◐ implemented` once `stage` is `done` with a `headSha`, `◑ review passed` while `reviewedHead` equals `headSha`, and `✓` only at `status: succeeded`, when the change has landed on the target branch by a merged PR or a direct push. Only `✓` rows count as complete.
 
 `changes` addresses units, components, and fleet stages by id (a change without an id sets run-level fields); all changes in one call are one transition. For a scope change, a change with `target` `unit` or `component` and an `add` row appends a new row; existing rows cannot be removed or renamed. The tool checks ids, dependencies (including cycles), worker slots, and status/stage values against the shared issue-resolution contract (a fleet status of `n/a` is saved as `not-applicable`), refuses a stale `revision`, appends an optional `decision`, then saves the plan atomically with `planRevision + 1` and a new `updatedAt`, and appends one profiling event with the same revision to the log the run already uses (`profiling/run.jsonl` or `profiling.jsonl`). A rejected update changes nothing. The event is appended before the plan is renamed into place, so a crash between the two can leave the log one revision ahead; the next update notices, reuses that revision, and marks its event with `logAheadRevision`.
 
