@@ -4,12 +4,15 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 
 interface ToolComponent {
   toolName: string;
   args: unknown;
   callRendererComponent?: Component;
   expanded: boolean;
+  isPartial?: boolean;
+  result?: { isError?: boolean };
   showImages: boolean;
   resultRendererComponent?: unknown;
   ui: { requestRender(): void };
@@ -19,7 +22,10 @@ interface ToolComponent {
 }
 
 type Method = (this: ToolComponent, ...args: unknown[]) => unknown;
+interface ToolMouseEvent { type: string; button: string; y: number; shift?: boolean; alt?: boolean; ctrl?: boolean }
+type MouseHandler = (this: ToolComponent, event: ToolMouseEvent) => unknown;
 interface ToolPrototype {
+  handleMouse?: MouseHandler;
   updateDisplay: Method;
   getResultRenderer: Method;
   getTextOutput: Method;
@@ -42,7 +48,7 @@ export interface MinimalOutputHook {
 const HOOK = Symbol.for("pi-better-harness.minimal-output-hook");
 const emptyResult = () => ({ render: () => [] as string[], invalidate() {} });
 
-function compactCall(component: ToolComponent, width: number): string[] {
+function compactCall(component: ToolComponent, width: number, theme?: Theme): string[] {
   if (width <= 0) return [];
   // Render the call alone at a wider width so terminal wrapping becomes truncation.
   const header = component.callRendererComponent?.render(Math.max(4096, width + 1))
@@ -50,10 +56,24 @@ function compactCall(component: ToolComponent, width: number): string[] {
     .find((line) => line.length > 0);
   let text = header;
   if (!text) {
-    const args = JSON.stringify(component.args);
-    text = `${component.toolName}${args && args !== "{}" ? ` ${args}` : ""}`;
+    const args = component.args as Record<string, unknown> | undefined;
+    const hint = args?.command ?? args?.path ?? args?.pattern;
+    const detail = typeof hint === "string" ? hint.replace(/\r?\n/g, " ") : JSON.stringify(component.args);
+    text = `${component.toolName}${detail && detail !== "{}" ? ` ${detail}` : ""}`;
   }
-  return [truncateToWidth(text, width)];
+  const failed = component.result?.isError === true;
+  const running = !component.result || component.isPartial;
+  const detail = text.startsWith(`${component.toolName} `) ? text.slice(component.toolName.length).trimStart()
+    : text === component.toolName ? "" : text;
+  const label = component.toolName === "bash" ? "Shell"
+    : component.toolName.replace(/_/g, " ").replace(/^./, letter => letter.toUpperCase());
+  const marker = failed ? "!" : running ? "~" : ">";
+  const suffix = failed ? " (failed)" : running ? " (running)" : "";
+  const title = `${marker} ${label}`;
+  const styled = theme
+    ? `${theme.fg(failed ? "error" : "muted", title)}${detail ? `  ${theme.fg("dim", detail)}` : ""}${theme.fg(failed ? "error" : "muted", suffix)}`
+    : `${title}${detail ? `  ${detail}` : ""}${suffix}`;
+  return [truncateToWidth(styled, width)];
 }
 
 function hostRequire(): NodeRequire {
@@ -104,7 +124,7 @@ function sdkEntry(require: ReturnType<typeof createRequire>): string {
 }
 
 /** Internal TUI adapter: no tools are replaced and no result content is changed. */
-export function installMinimalOutputHook(prototype: ToolPrototype): MinimalOutputHook {
+export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: () => Theme): MinimalOutputHook {
   for (const name of ["updateDisplay", "getResultRenderer", "getTextOutput", "setExpanded", "invalidate", "render"] as const) {
     if (typeof prototype[name] !== "function") {
       throw new Error(`Pi's tool display API is incompatible: missing ${name}. Normal output remains enabled.`);
@@ -117,6 +137,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype): MinimalOutpu
       getResultRenderer: prototype.getResultRenderer,
       getTextOutput: prototype.getTextOutput,
       render: prototype.render,
+      ...(typeof prototype.handleMouse === "function" ? { handleMouse: prototype.handleMouse } : {}),
     };
     const seen = new WeakSet<ToolComponent>();
     const components = new Set<WeakRef<ToolComponent>>();
@@ -133,10 +154,11 @@ export function installMinimalOutputHook(prototype: ToolPrototype): MinimalOutpu
         }
       },
       restore() {
-        for (const name of Object.keys(originals) as Array<keyof typeof originals>) {
+        for (const name of ["updateDisplay", "getResultRenderer", "getTextOutput", "render"] as const) {
           // Do not remove another extension's subsequently installed wrapper.
           if (prototype[name] === wrappers[name]) Object.assign(prototype, { [name]: originals[name] });
         }
+        if (originals.handleMouse && prototype.handleMouse === mouseWrapper) prototype.handleMouse = originals.handleMouse;
         delete prototype[HOOK];
         components.clear();
       },
@@ -164,9 +186,19 @@ export function installMinimalOutputHook(prototype: ToolPrototype): MinimalOutpu
         return current.enabled && !this.expanded ? "" : originals.getTextOutput.apply(this, args);
       },
       render(this: ToolComponent, width: number): string[] {
-        return current.enabled && !this.expanded ? compactCall(this, width) : originals.render.call(this, width);
+        return current.enabled && !this.expanded ? compactCall(this, width, getTheme?.()) : originals.render.call(this, width);
       },
     };
+    const mouseWrapper: MouseHandler = function(event) {
+      if (current.enabled && !this.expanded) {
+        if (event.type !== "click" || event.button !== "left" || event.y !== 0 || event.shift || event.alt || event.ctrl) return undefined;
+        this.setExpanded(true);
+        this.ui.requestRender();
+        return { handled: true, render: true };
+      }
+      return originals.handleMouse?.call(this, event);
+    };
+    if (originals.handleMouse) prototype.handleMouse = mouseWrapper;
     Object.assign(prototype, wrappers);
     prototype[HOOK] = state;
   }

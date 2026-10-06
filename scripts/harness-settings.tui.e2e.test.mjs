@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const installed = process.env.PI_HARNESS_SETTINGS_PACKAGE_DIR;
 const settingsExtension = installed ? join(installed, "extensions/settings/index.ts") : join(root, "packages/pi-better-harness/extensions/settings/index.ts");
+const toolOutputExtension = installed ? join(installed, "extensions/minimal-output/index.ts") : join(root, "packages/pi-better-harness/extensions/minimal-output/index.ts");
 const goalExtension = installed ? join(installed, "extensions/goal/index.ts") : join(root, "packages/pi-better-goal/src/index.ts");
 const piCli = process.env.PI_HARNESS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
 const q = text => `'${text.replaceAll("'", "'\\''")}'`;
@@ -30,7 +31,15 @@ function streamSimple(){
 export default function(pi){
   pi.registerProvider('harness-test',{api:'harness-test-api',apiKey:'fake',baseUrl:'http://localhost:0',streamSimple,
     models:[{id:'local',name:'Local test',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:4096}]});
-  pi.on('session_start',async(_e,ctx)=>{await pi.setModel(ctx.modelRegistry.find('harness-test','local'));writeFileSync(${JSON.stringify(ready)},'ready');});
+  pi.on('session_start',async(_e,ctx)=>{
+    await pi.setModel(ctx.modelRegistry.find('harness-test','local'));
+    if (!ctx.sessionManager.getBranch().some(entry=>entry.type==='message' && entry.message.role==='assistant')) {
+      ctx.sessionManager.appendMessage({role:'assistant',content:[{type:'text',text:'Settings journey fixture'}],
+        api:'harness-test-api',provider:'harness-test',model:'local',stopReason:'stop',timestamp:0,
+        usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
+    }
+    writeFileSync(${JSON.stringify(ready)},JSON.stringify({sessionFile:ctx.sessionManager.getSessionFile()}));
+  });
 }`);
   const tmux = (...args) => execFileSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
   const screen = () => tmux("capture-pane", "-t", "test", "-p");
@@ -49,10 +58,12 @@ export default function(pi){
   try {
     const command = ["exec env", `PI_CODING_AGENT_DIR=${q(agent)}`, "PI_OFFLINE=1", q(piCli),
       "--approve --no-skills --no-context-files", "-e", q(goalExtension),
-      "-e", q(settingsExtension), "-e", q(fixture)].join(" ");
+      "-e", q(settingsExtension), "-e", q(toolOutputExtension), "-e", q(fixture)].join(" ");
     tmux("new-session", "-d", "-s", "test", "-x", "100", "-y", "32", command);
     tmux("set-option", "-w", "-t", "test", "remain-on-exit", "on");
     wait(() => existsSync(ready));
+    const originalSessionFile = JSON.parse(readFileSync(ready, "utf8")).sessionFile;
+    assert.equal(typeof originalSessionFile, "string");
     send("/harness-settings"); key("Enter");
     wait(pane => pane.includes("Harness settings") && pane.includes("/goal settings"));
     wait(pane => pane.includes("Completions while busy") && pane.includes("Wait until idle") && pane.includes("Ctrl+S saves the default for future sessions"));
@@ -68,6 +79,19 @@ export default function(pi){
     wait(pane => pane.includes("Callback default saved"));
     assert.equal(existsSync(preferences), true);
     key("Down");
+    wait(pane => pane.includes("Tool output") && pane.includes("Normal"));
+    key("Space");
+    wait(pane => /Tool output\s+Minimal/.test(pane) && pane.includes("Session setting saved"));
+    key("Escape");
+    wait(pane => !pane.includes("Harness settings"));
+    rmSync(ready);
+    send("/reload"); key("Enter");
+    wait(pane => existsSync(ready) && pane.includes("Reloaded keybindings"));
+    send("/harness-settings"); key("Enter");
+    const reloaded = wait(pane => /Tool output\s+Minimal/.test(pane) && pane.includes("Steer active run"));
+    assert.equal((reloaded.match(/Tool output/g) ?? []).length, 1, "reload must not duplicate the tool-output contribution");
+    key("Down");
+    key("Down");
     key("Enter");
     wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
     key("Escape");
@@ -82,9 +106,15 @@ export default function(pi){
     tmux("new-window", "-t", "test", "-n", "fresh-session", command);
     wait(() => existsSync(ready));
     send("/harness-settings"); key("Enter");
-    wait(pane => pane.includes("Harness settings") && pane.includes("Steer active run") && pane.includes("User default"));
+    wait(pane => pane.includes("Harness settings") && pane.includes("Steer active run") && pane.includes("User default") && /Tool output\s+Normal/.test(pane));
     key("Enter");
     wait(pane => pane.includes("Wait until idle") && pane.includes("Session setting saved"));
+    key("Escape");
+    rmSync(ready);
+    tmux("new-window", "-t", "test", "-n", "resumed-session", `${command} --session ${q(originalSessionFile)}`);
+    wait(() => existsSync(ready));
+    send("/harness-settings"); key("Enter");
+    wait(pane => /Tool output\s+Minimal/.test(pane) && pane.includes("Steer active run") && pane.includes("Session setting"));
     key("Escape");
     assert.deepEqual(calls(), [], "opening settings never invokes the model");
   } finally {

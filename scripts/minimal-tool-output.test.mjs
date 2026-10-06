@@ -4,19 +4,33 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
+import { EventEmitter } from "node:events";
+import { stripVTControlCharacters } from "node:util";
+import { createSettingsRegistry } from "../packages/pi-better-harness/extensions/settings/registry.ts";
+import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 
 import minimalOutputExtension from "../packages/pi-better-harness/extensions/minimal-output/index.ts";
 import { installMinimalOutputHook, loadToolPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
 
-const sdk = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+const sdk = process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR
+  ? join(process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR, "dist")
+  : dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 // The SDK may have its own TUI copy; override capabilities on the renderer's instance.
 const sdkRequire = createRequire(pathToFileURL(join(sdk, "index.js")));
 const { Box, Container, Text, getCapabilities, setCapabilities, visibleWidth } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
+const { dispatchMouseEvent } = await import(pathToFileURL(join(dirname(sdkRequire.resolve("@earendil-works/pi-tui")), "tui.js")).href);
+const originalArgv = process.argv[1];
+const { SessionManager } = await import(pathToFileURL(join(sdk, "index.js")).href);
 const { AssistantMessageComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/assistant-message.js")).href);
 const { ToolExecutionComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/tool-execution.js")).href);
-const { initTheme } = await import(pathToFileURL(join(sdk, "modes/interactive/theme/theme.js")).href);
+const themeModule = await import(pathToFileURL(join(sdk, "modes/interactive/theme/theme.js")).href);
+const { initTheme } = themeModule;
+function events() {
+  const bus = new EventEmitter();
+  return { on(name, handler) { bus.on(name, handler); return () => bus.off(name, handler); }, emit: (name, data) => bus.emit(name, data) };
+}
 const prototype = ToolExecutionComponent.prototype;
-const originals = Object.fromEntries(["updateDisplay", "getResultRenderer", "getTextOutput", "render"].map((name) => [name, prototype[name]]));
+const originals = Object.fromEntries(["updateDisplay", "getResultRenderer", "getTextOutput", "render", ...(typeof prototype.handleMouse === "function" ? ["handleMouse"] : [])].map((name) => [name, prototype[name]]));
 const capabilities = getCapabilities();
 const handles = [];
 const shutdowns = [];
@@ -27,10 +41,12 @@ const payload = Object.freeze({
 });
 
 beforeEach(() => {
+  if (process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR) process.argv[1] = join(sdk, "cli.js");
   initTheme("dark", false);
   setCapabilities({ ...capabilities, images: null });
 });
 afterEach(async () => {
+  process.argv[1] = originalArgv;
   for (const stop of shutdowns.splice(0)) await stop();
   for (const handle of handles.splice(0)) handle.dispose();
   setCapabilities(capabilities);
@@ -63,7 +79,7 @@ for (const [name, definition] of [
     const normalView = rendered(component);
     hook.setEnabled(true);
     assert.equal(component.render(100).length, 1, "collapsed tools retain exactly one header row");
-    assert.match(rendered(component), name === "read" ? /demo/ : name === "subagent_result" ? /SUBAGENT_HEADER/ : name === "mcp__example__query" ? /MCP_HEADER/ : /unknown_external_tool/);
+    assert.match(rendered(component), name === "read" ? /demo/ : name === "subagent_result" ? /SUBAGENT_HEADER/ : name === "mcp__example__query" ? /MCP_HEADER/ : /Unknown external tool/);
     assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
     assert.equal(component.result, payload, "the agent-facing result object must remain untouched");
     component.setExpanded(true);
@@ -153,7 +169,7 @@ test("compact headers truncate long and multiline calls without wrapping or back
     assert.equal(lines.length, 1);
     assert.ok(visibleWidth(lines[0]) <= width);
     assert.doesNotMatch(lines[0], /\x1b\[(?:48|4[0-7])[;m]/, "call headers have no box background");
-    if (width >= 10) {
+    if (width >= 20) {
       assert.match(lines[0], /ls -l/);
       assert.match(lines[0], /\.\.\.|\u2026/, "long calls show truncation");
     }
@@ -191,7 +207,7 @@ test("compact custom call headers discard styled box padding and backgrounds", (
   });
   const normal = rendered(component);
   hook.setEnabled(true);
-  assert.deepEqual(component.render(40), ["BOXED_HEADER"]);
+  assert.deepEqual(component.render(40), ["> Boxed call  BOXED_HEADER"]);
   assert.doesNotMatch(rendered(component), /BOXED_RESULT|\x1b/);
   component.setExpanded(true);
   assert.match(rendered(component), /BOXED_HEADER/);
@@ -223,9 +239,132 @@ test("an incompatible Pi display API is refused without installing a partial hoo
   assert.equal(incompatible.updateDisplay, original);
 });
 
+test("compact tool rows use muted identity and inline context across light and dark themes", () => {
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  const component = new ToolExecutionComponent("bash", "styled-call", { command: "git status --short" }, {}, undefined, { requestRender() {} }, process.cwd());
+  for (const name of ["dark", "light"]) {
+    initTheme(name, false);
+    const line = component.render(80)[0];
+    assert.match(stripVTControlCharacters(line), /^~ Shell  .*git status --short/);
+    assert.ok(line.includes(themeModule.theme.fg("muted", "~ Shell")));
+    assert.ok(line.includes(themeModule.theme.fg("dim", "$ git status --short")) || line.includes(themeModule.theme.fg("dim", "git status --short")));
+    assert.doesNotMatch(line, /\x1b\[(?:48|4[0-7])[;m]/);
+  }
+  component.updateResult(payload, true);
+  assert.match(stripVTControlCharacters(rendered(component)), /^~ Shell/);
+  component.updateResult(payload, false);
+  assert.match(stripVTControlCharacters(rendered(component)), /^> Shell/);
+  component.updateResult({ ...payload, isError: true }, false);
+  assert.match(stripVTControlCharacters(rendered(component)), /^! Shell/);
+  assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+  for (const width of [1, 6, 10, 20, 80]) {
+    assert.equal(component.render(width).length, 1);
+    assert.ok(visibleWidth(component.render(width)[0]) <= width);
+  }
+  component.setExpanded(true);
+  assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
+});
+
+test("fullscreen mouse dispatch expands a folded row to all original detail and collapses it again", {
+  skip: typeof prototype.handleMouse !== "function" ? "This Pi SDK has no fullscreen mouse routing" : false,
+}, () => {
+  const hook = install();
+  const result = { content: [{ type: "text", text: Array.from({ length: 20 }, (_, i) => `DETAIL_LINE_${i}`).join("\n") }], isError: false };
+  const component = tool("unknown_external_tool", undefined, result);
+  const chat = new Container();
+  chat.addChild(component);
+  const normal = chat.render(80);
+  hook.setEnabled(true);
+  assert.equal(chat.render(80).length, 1);
+  const event = (y, extra = {}) => ({ type: "click", button: "left", x: 1, y,
+    screenX: 1, screenY: y, width: 80, height: chat.render(80).length,
+    shift: false, ctrl: false, alt: false, ...extra });
+  for (const extra of [{ type: "wheel", button: "none", wheelDelta: 1 }, { type: "drag" }, { ctrl: true }, { button: "right" }]) {
+    assert.equal(dispatchMouseEvent(chat, event(0, extra)), undefined);
+    assert.equal(component.expanded, false);
+  }
+  assert.equal(dispatchMouseEvent(chat, event(0)).handled, true);
+  assert.equal(component.expanded, true);
+  const expanded = chat.render(80);
+  assert.match(expanded.join("\n"), /DETAIL_LINE_0/);
+  assert.match(expanded.join("\n"), /DETAIL_LINE_19/);
+  assert.equal(component.result, result);
+  const headerY = expanded.findIndex(line => stripVTControlCharacters(line).includes("unknown_external_tool"));
+  assert.ok(headerY >= 0);
+  assert.equal(dispatchMouseEvent(chat, event(headerY)).handled, true);
+  assert.equal(component.expanded, false);
+  assert.equal(chat.render(80).length, 1);
+  hook.setEnabled(false);
+  assert.deepEqual(chat.render(80), normal);
+});
+
+test("the contributed hub control changes real tool rows, shares command state, restores branches and rolls back failed saves", async () => {
+  const handlers = new Map();
+  const commands = new Map();
+  const entries = [];
+  const sessionManager = SessionManager.inMemory(process.cwd());
+  let failSave = false;
+  const pi = { events: events(), on: (name, handler) => handlers.set(name, handler),
+    registerCommand: (name, command) => commands.set(name, command),
+    appendEntry(customType, data) {
+      entries.push({ type: "custom", customType, data });
+      sessionManager.appendCustomEntry(customType, data);
+      if (failSave) throw new Error("Disk write failed");
+    } };
+  minimalOutputExtension(pi);
+  const registry = createSettingsRegistry(pi);
+  registry.refresh();
+  const component = tool("unknown_external_tool");
+  let expanded = false;
+  let page;
+  const ctx = { mode: "tui", sessionManager, ui: {
+    theme: themeModule.theme, notify() {}, setStatus() {}, getToolsExpanded: () => expanded,
+    setToolsExpanded(value) { expanded = value; component.setExpanded(value); },
+    custom(build) { return new Promise(resolve => { page = build({ requestRender() {} }, themeModule.theme, {}, resolve); }); },
+  } };
+  shutdowns.push(() => handlers.get("session_shutdown")());
+  await handlers.get("session_start")({}, ctx);
+  const opening = chooseHarnessSetting(ctx, [], undefined, undefined, registry.controls());
+  assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Normal/);
+  page.handleInput(" ");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Minimal/);
+  assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+  assert.equal(entries.at(-1).data.enabled, true);
+  assert.equal(entries.length, 1);
+  const minimalLeaf = sessionManager.getLeafId();
+  failSave = true;
+  page.handleInput("\r");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Minimal/);
+  assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Disk write failed/);
+  await handlers.get("session_tree")({}, ctx);
+  assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+  page.handleInput("\x1b");
+  await opening;
+  failSave = false;
+  await commands.get("tool-output").handler("normal", ctx);
+  assert.equal(registry.controls()[0].get(), "Normal");
+  assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
+  sessionManager.branch(minimalLeaf);
+  await handlers.get("session_tree")({}, ctx);
+  assert.equal(registry.controls()[0].get(), "Minimal");
+  assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+  await handlers.get("session_shutdown")();
+  registry.refresh();
+  assert.deepEqual(registry.controls(), []);
+  await handlers.get("session_start")({}, ctx);
+  registry.refresh();
+  assert.equal(registry.controls().length, 1);
+  registry.dispose();
+});
+
 test("slash-command argument completion offers both modes and filters partial arguments", () => {
   let command;
   minimalOutputExtension({
+    events: events(),
     on() {},
     registerCommand: (_name, definition) => { command = definition; },
   });
@@ -246,6 +385,7 @@ test("print and RPC modes refuse the toggle without changing saved preferences",
     const saved = [];
     const notices = [];
     minimalOutputExtension({
+      events: events(),
       on: (name, handler) => lifecycle.set(name, handler),
       registerCommand: (_name, definition) => { command = definition; },
       appendEntry: (...args) => saved.push(args),
@@ -274,6 +414,7 @@ test("the command toggles existing rows, persists session preference, and restor
     },
   };
   minimalOutputExtension({
+    events: events(),
     on: (name, handler) => handlers.set(name, handler),
     registerCommand: (name, command) => commands.set(name, command),
     appendEntry: (customType, data) => entries.push({ type: "custom", customType, data }),

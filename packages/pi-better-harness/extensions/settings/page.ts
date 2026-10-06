@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Container, SettingsList, Text, getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS, matchesKey, type SettingItem } from "@earendil-works/pi-tui";
-import type { SettingsLink } from "./registry.ts";
+import type { SettingsControl, SettingsLink } from "./registry.ts";
 
 export interface CallbackSettingsControl {
   get(): { mode: "hold" | "steer"; source: "session" | "default" };
@@ -11,7 +11,7 @@ export interface CallbackSettingsControl {
 const CALLBACK_SETTING_ID = "callbacks:while-busy";
 const callbackLabel = (mode: "hold" | "steer") => mode === "steer" ? "Steer active run" : "Wait until idle";
 
-export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], selected?: string, callbacks?: CallbackSettingsControl): Promise<string | undefined> {
+export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], selected?: string, callbacks?: CallbackSettingsControl, controls: SettingsControl[] = []): Promise<string | undefined> {
   return ctx.ui.custom((tui: any, theme: Theme, _kb: unknown, done: (id?: string) => void) => {
     let callbackMode = callbacks?.get().mode ?? "hold";
     const callbackSetting: SettingItem | undefined = callbacks ? {
@@ -23,9 +23,11 @@ export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], sele
     } : undefined;
     const items: SettingItem[] = [
       ...(callbackSetting ? [callbackSetting] : []),
+      ...controls.map(control => ({ id: `setting:${control.id}`, label: control.label, currentValue: control.get(), description: "Session setting", values: control.values })),
       ...links.map(link => ({ id: `link:${link.id}`, label: link.label, currentValue: link.command, description: "Open package settings", values: [link.command] })),
     ];
     const feedback = new Text("", 0, 0);
+    let changing = false;
     const report = (message: string, error = false) => {
       feedback.setText(theme.fg(error ? "error" : "muted", message));
       tui.requestRender?.();
@@ -35,6 +37,20 @@ export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], sele
       value: (text, active) => active ? theme.inverse(text) : theme.fg("muted", text),
       description: text => theme.fg("muted", text), cursor: "> ", hint: text => theme.fg("dim", text),
     }, (id, value) => {
+      const control = controls.find(item => `setting:${item.id}` === id);
+      if (control) {
+        const previous = control.get();
+        changing = true;
+        report("Saving session setting...");
+        Promise.resolve().then(() => control.change(value, ctx)).then(() => {
+          list.updateValue(id, control.get());
+          report("Session setting saved.");
+        }).catch(error => {
+          list.updateValue(id, previous);
+          report(error instanceof Error ? error.message : String(error), true);
+        }).finally(() => { changing = false; tui.requestRender?.(); });
+        return;
+      }
       if (id !== CALLBACK_SETTING_ID || !callbacks || !callbackSetting) { done(id); return; }
       try {
         const nextMode = value === "Steer active run" ? "steer" : "hold";
@@ -67,6 +83,7 @@ export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], sele
       render: (width: number) => page.render(width),
       invalidate: () => page.invalidate(),
       handleInput(data: string) {
+        if (changing) return;
         if (callbacks && matchesKey(data, "ctrl+s")) {
           try { callbacks.save(); report("Callback default saved."); }
           catch (error) { report(error instanceof Error ? error.message : String(error), true); }

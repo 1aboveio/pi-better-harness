@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installMinimalOutputHook, loadToolPrototype, type MinimalOutputHook } from "./hook.ts";
+import type { SettingsControl } from "../settings/registry.ts";
 
 const ENTRY = "pi-better-harness-tool-output";
 
@@ -24,7 +25,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     }
     if (hook) return true;
     try {
-      hook = installMinimalOutputHook(await loadToolPrototype());
+      hook = installMinimalOutputHook(await loadToolPrototype(), () => ctx.ui.theme);
       return true;
     } catch (error) {
       ctx.ui.notify(`Minimal tool output is unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
@@ -32,13 +33,13 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     }
   }
 
-  pi.on("session_start", async (_event, ctx) => {
+  async function restore(ctx: ExtensionContext): Promise<void> {
     if (ctx.mode !== "tui") return;
     enabled = false;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === ENTRY) {
-        const data = entry.data as { enabled?: unknown } | undefined;
-        if (typeof data?.enabled === "boolean") enabled = data.enabled;
+        const data = entry.data as { version?: unknown; enabled?: unknown } | undefined;
+        if (data?.version === 1 && typeof data.enabled === "boolean") enabled = data.enabled;
       }
     }
     // Observe transcript components from startup, so the toggle also redraws existing rows.
@@ -47,9 +48,35 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
       hook!.setEnabled(enabled);
     } else enabled = false;
     status(ctx);
-  });
+  }
+
+  async function change(value: string, ctx: ExtensionContext): Promise<void> {
+    if (value !== "Normal" && value !== "Minimal") throw new Error("Invalid tool output mode.");
+    if (!await ensureHook(ctx)) throw new Error("Tool output settings are unavailable in this Pi runtime.");
+    const data = { version: 1, enabled: value === "Minimal" };
+    try { pi.appendEntry(ENTRY, data); }
+    catch (error) { data.version = 0; data.enabled = enabled; throw error; }
+    enabled = data.enabled;
+    if (enabled) collapseTools(ctx);
+    hook!.setEnabled(enabled);
+    status(ctx);
+  }
+
+  const setting: SettingsControl = {
+    id: "tool-output", label: "Tool output", values: ["Normal", "Minimal"],
+    get: () => enabled ? "Minimal" : "Normal", change,
+  };
+  const register = () => pi.events.emit("harness-settings:register", setting);
+  let stopSettings: (() => void) | undefined;
+  const subscribe = () => { stopSettings ??= pi.events.on("harness-settings:request", register); };
+  subscribe();
+  register();
+  pi.on("session_start", async (_event, ctx) => { subscribe(); await restore(ctx); register(); });
+  pi.on("session_tree", async (_event, ctx) => { await restore(ctx); });
 
   pi.on("session_shutdown", () => {
+    stopSettings?.();
+    stopSettings = undefined;
     hook?.dispose();
     hook = undefined;
     enabled = false;
@@ -71,12 +98,8 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
         ctx.ui.notify("Usage: /tool-output [minimal|normal]", "warning");
         return;
       }
-      if (!await ensureHook(ctx)) return;
-      enabled = mode ? mode === "minimal" : !enabled;
-      if (enabled) collapseTools(ctx);
-      hook!.setEnabled(enabled);
-      pi.appendEntry(ENTRY, { version: 1, enabled });
-      status(ctx);
+      try { await change((mode ? mode === "minimal" : !enabled) ? "Minimal" : "Normal", ctx); }
+      catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning"); return; }
       ctx.ui.notify(enabled
         ? "Minimal tool output on. Compact call headers remain visible. Ctrl+O reveals results."
         : "Normal tool output restored.", "info");

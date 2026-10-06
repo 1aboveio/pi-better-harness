@@ -64,14 +64,20 @@ need interactive confirmation. Full policy: [pi-better-sandbox](https://github.c
 
 ## Minimal Tool Output
 
-The bundled harness also provides `/tool-output minimal`, `/tool-output normal`,
-and `/tool-output` (toggle). Minimal mode folds each tool call into a single-line
-header, including running calls. Long headers are truncated to the terminal
-width; result bodies, images, boxes, and tool spacers are hidden. Built-in,
-extension, and MCP calls are included. Execution, sandboxing, and agent-facing
-payloads are unchanged. Ctrl+O reveals the original tool blocks; Ctrl+O again
-folds them. `/tool-output normal` restores ordinary rendering. Error result
-bodies are also hidden in minimal mode and remain available when expanded.
+The bundled harness provides **Tool output: Normal / Minimal** in
+`/harness-settings`. `/tool-output minimal`, `/tool-output normal`, and
+`/tool-output` (toggle) remain compatibility shortcuts to the same preference.
+Minimal mode folds each tool call into a single-line header, including running
+calls. Muted tool names and quieter inline command/path context distinguish
+activity from conversation text; running and failed calls retain visible state
+markers. Long headers are truncated to the terminal width; result bodies,
+images, boxes, and tool spacers are hidden. Built-in, extension, and MCP calls
+are included. Execution, sandboxing, and agent-facing payloads are unchanged.
+In newer Pi fullscreen mode, click a folded row to expand its original details,
+then click the expanded call/result to collapse it. Regular terminals keep mouse
+input for terminal selection and scrollback; Ctrl+O expands tools in all modes.
+`/tool-output normal` restores ordinary rendering. Error result bodies are also
+hidden in minimal mode and remain available when expanded.
 
 Normal mode is the default. The preference is saved in the current session,
 including resume/reload. This is a version-sensitive internal TUI adapter,
@@ -94,7 +100,9 @@ packages without duplicating their configuration. `/sandbox`, `/subagents
 settings`, and `/goal settings` remain available in standalone installations.
 Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
 
-The hub also owns **Completions while busy**, shared by Subagents and Background
+The hub includes **Tool output** when the bundled renderer extension is loaded.
+Changes apply immediately to the current session and do not save a global
+default. The hub also owns **Completions while busy**, shared by Subagents and Background
 Tasks. Choose **Wait until idle** (the default) or **Steer active run**. Changes
 apply immediately and autosave to the current session branch, including across
 reloads. Press **Ctrl+S** to save the current choice as your default for future
