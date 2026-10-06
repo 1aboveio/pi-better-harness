@@ -7,6 +7,7 @@ const ENTRY = "pi-better-harness-tool-output";
 export default function minimalOutputExtension(pi: ExtensionAPI): void {
   let hook: MinimalOutputHook | undefined;
   let enabled = false;
+  let running = false;
 
   function status(ctx: ExtensionContext): void {
     ctx.ui.setStatus(ENTRY, enabled ? "tools: minimal" : undefined);
@@ -44,6 +45,8 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     }
     // Observe transcript components from startup, so the toggle also redraws existing rows.
     if (await ensureHook(ctx)) {
+      hook!.restoreCompletedCalls(ctx.sessionManager.getBranch().flatMap(entry =>
+        entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : []));
       if (enabled) collapseTools(ctx);
       hook!.setEnabled(enabled);
     } else enabled = false;
@@ -59,6 +62,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     enabled = data.enabled;
     if (enabled) collapseTools(ctx);
     hook!.setEnabled(enabled);
+    if (enabled && !running) hook!.completeRun();
     status(ctx);
   }
 
@@ -73,6 +77,12 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
   register();
   pi.on("session_start", async (_event, ctx) => { subscribe(); await restore(ctx); register(); });
   pi.on("session_tree", async (_event, ctx) => { await restore(ctx); });
+  pi.on("agent_start", () => { running = true; });
+  pi.on("agent_settled", (_event, ctx) => {
+    running = false;
+    if (enabled) ctx.ui.setToolsExpanded(false);
+    hook?.completeRun();
+  });
 
   pi.on("session_shutdown", () => {
     stopSettings?.();
@@ -80,6 +90,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     hook?.dispose();
     hook = undefined;
     enabled = false;
+    running = false;
   });
 
   pi.registerCommand("tool-output", {

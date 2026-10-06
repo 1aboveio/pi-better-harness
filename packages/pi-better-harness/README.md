@@ -68,14 +68,24 @@ The bundled harness provides **Tool output: Normal / Minimal** in
 `/harness-settings`. `/tool-output minimal`, `/tool-output normal`, and
 `/tool-output` (toggle) remain compatibility shortcuts to the same preference.
 Minimal mode folds each tool call into a single-line header, including running
-calls. Muted tool names and quieter inline command/path context distinguish
-activity from conversation text; running and failed calls retain visible state
-markers. Long headers are truncated to the terminal width; result bodies,
+calls. Each row has a single tool-specific icon: accent-colored while running,
+muted when completed, and error-colored when failed. Tool names stay muted;
+inline command/path arguments use the theme's distinct dim tone. Running and
+failed calls retain text labels so state never depends on color alone. Activity
+stays quieter than conversation text. Tool rows are indented two columns past
+the assistant text padding. Long
+headers are truncated to the terminal width; result bodies,
 images, boxes, and tool spacers are hidden. Built-in, extension, and MCP calls
 are included. Execution, sandboxing, and agent-facing payloads are unchanged.
-In newer Pi fullscreen mode, click a folded row to expand its original details,
-then click the expanded call/result to collapse it. Regular terminals keep mouse
-input for terminal selection and scrollback; Ctrl+O expands tools in all modes.
+When a foreground run ends, each consecutive block of tool calls folds further
+into one disclosure row showing the call count and any failures. Only the failure
+count uses the error color; the disclosure and total stay muted. Assistant text
+stays visible, and restored history uses the same folded view. In newer Pi
+fullscreen mode, click a block disclosure to reveal its call rows, then click a
+call to expand its original details. Click the disclosure again to refold the
+block; native expanded call/result clicks collapse individual details. Regular
+terminals keep mouse input for terminal selection and scrollback; Ctrl+O expands
+all original tool details in both modes and folds them again on the next toggle.
 `/tool-output normal` restores ordinary rendering. Error result bodies are also
 hidden in minimal mode and remain available when expanded.
 

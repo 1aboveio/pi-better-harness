@@ -30,7 +30,7 @@ function events() {
   return { on(name, handler) { bus.on(name, handler); return () => bus.off(name, handler); }, emit: (name, data) => bus.emit(name, data) };
 }
 const prototype = ToolExecutionComponent.prototype;
-const originals = Object.fromEntries(["updateDisplay", "getResultRenderer", "getTextOutput", "render", ...(typeof prototype.handleMouse === "function" ? ["handleMouse"] : [])].map((name) => [name, prototype[name]]));
+const originals = Object.fromEntries(["updateDisplay", "getResultRenderer", "getTextOutput", "setExpanded", "render", ...(typeof prototype.handleMouse === "function" ? ["handleMouse"] : [])].map((name) => [name, prototype[name]]));
 const capabilities = getCapabilities();
 const handles = [];
 const shutdowns = [];
@@ -207,7 +207,7 @@ test("compact custom call headers discard styled box padding and backgrounds", (
   });
   const normal = rendered(component);
   hook.setEnabled(true);
-  assert.deepEqual(component.render(40), ["> Boxed call  BOXED_HEADER"]);
+  assert.deepEqual(component.render(40), ["   \u25c7 Boxed call  BOXED_HEADER"]);
   assert.doesNotMatch(rendered(component), /BOXED_RESULT|\x1b/);
   component.setExpanded(true);
   assert.match(rendered(component), /BOXED_HEADER/);
@@ -239,25 +239,31 @@ test("an incompatible Pi display API is refused without installing a partial hoo
   assert.equal(incompatible.updateDisplay, original);
 });
 
-test("compact tool rows use muted identity and inline context across light and dark themes", () => {
+test("compact rows use one state-colored tool icon and distinct quiet name and argument tones", () => {
   const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
   handles.push(hook);
   hook.setEnabled(true);
   const component = new ToolExecutionComponent("bash", "styled-call", { command: "git status --short" }, {}, undefined, { requestRender() {} }, process.cwd());
   for (const name of ["dark", "light"]) {
     initTheme(name, false);
-    const line = component.render(80)[0];
-    assert.match(stripVTControlCharacters(line), /^~ Shell  .*git status --short/);
-    assert.ok(line.includes(themeModule.theme.fg("muted", "~ Shell")));
-    assert.ok(line.includes(themeModule.theme.fg("dim", "$ git status --short")) || line.includes(themeModule.theme.fg("dim", "git status --short")));
-    assert.doesNotMatch(line, /\x1b\[(?:48|4[0-7])[;m]/);
+    for (const [result, partial, suffix, color] of [
+      [payload, true, " (running)", "accent"],
+      [payload, false, "", "muted"],
+      [{ ...payload, isError: true }, false, " (failed)", "error"],
+    ]) {
+      component.updateResult(result, partial);
+      const line = component.render(80)[0];
+      const plain = stripVTControlCharacters(line);
+      assert.match(plain, /^ {3}\u2318 Shell/);
+      if (suffix) assert.ok(plain.endsWith(suffix));
+      else assert.doesNotMatch(plain, /\(running\)|\(failed\)/);
+      assert.ok(line.includes(themeModule.theme.fg(color, "\u2318")), "the tool icon alone carries the state color");
+      assert.ok(line.includes(themeModule.theme.fg("muted", "Shell")), "names remain quiet in every state");
+      assert.ok(line.includes(themeModule.theme.fg("dim", "$ git status --short")) || line.includes(themeModule.theme.fg("dim", "git status --short")));
+      assert.notEqual(themeModule.theme.fg("muted", "tone"), themeModule.theme.fg("dim", "tone"), "names and arguments have distinct grayscale tones on both themes");
+      assert.doesNotMatch(line, /\x1b\[(?:48|4[0-7])[;m]/);
+    }
   }
-  component.updateResult(payload, true);
-  assert.match(stripVTControlCharacters(rendered(component)), /^~ Shell/);
-  component.updateResult(payload, false);
-  assert.match(stripVTControlCharacters(rendered(component)), /^> Shell/);
-  component.updateResult({ ...payload, isError: true }, false);
-  assert.match(stripVTControlCharacters(rendered(component)), /^! Shell/);
   assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
   for (const width of [1, 6, 10, 20, 80]) {
     assert.equal(component.render(width).length, 1);
@@ -265,6 +271,31 @@ test("compact tool rows use muted identity and inline context across light and d
   }
   component.setExpanded(true);
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
+});
+
+test("default tools keep one identity icon across states and expose running and failure without color", () => {
+  const hook = install();
+  hook.setEnabled(true);
+  for (const [name, icon, label] of [
+    ["bash", "\u2318", "Shell"], ["read", "\u25a4", "Read"],
+    ["write", "\u2710", "Write"], ["edit", "\u270e", "Edit"],
+    ["grep", "\u2315", "Grep"], ["find", "\u2316", "Find"],
+    ["ls", "\u2261", "Ls"], ["external_tool", "\u25c7", "External tool"],
+  ]) {
+    const component = tool(name);
+    assert.equal(visibleWidth(icon), 1, "tool icons occupy one terminal column");
+    assert.ok(rendered(component).startsWith(`   ${icon} ${label}`));
+    assert.doesNotMatch(rendered(component), /\(running\)|\(failed\)/);
+    component.updateResult(payload, true);
+    assert.ok(rendered(component).startsWith(`   ${icon} ${label}`));
+    assert.match(rendered(component), /\(running\)$/);
+    component.updateResult({ ...payload, isError: true }, false);
+    assert.ok(rendered(component).startsWith(`   ${icon} ${label}`));
+    assert.match(rendered(component), /\(failed\)$/);
+    for (const width of [1, 8, 20, 80]) {
+      assert.ok(visibleWidth(component.render(width)[0]) <= width);
+    }
+  }
 });
 
 test("fullscreen mouse dispatch expands a folded row to all original detail and collapses it again", {
@@ -496,6 +527,242 @@ function placedTool(name, ui, result = payload) {
   component.setExpanded(false);
   return component;
 }
+
+test("completed runs fold consecutive blocks, preserve prose and failures, and expand through native tool controls", () => {
+  const hook = install();
+  const chat = new Container();
+  const ui = { children: [chat], requestRender() {} };
+  const intro = modelText("PROGRESS_TEXT");
+  const read = placedTool("read", ui);
+  const edit = placedTool("edit", ui, { ...payload, isError: true });
+  const answer = modelText("FINAL_ANSWER");
+  const tail = placedTool("tail", ui);
+  const live = placedTool("live", ui);
+  live.updateResult(payload, true);
+  for (const component of [intro, read, edit, answer, tail, live]) chat.addChild(component);
+  const normal = chat.render(100);
+  hook.setEnabled(true);
+  assert.match(rendered(chat), /read-arg/);
+  assert.match(rendered(chat), /edit-arg/);
+  hook.completeRun();
+  assert.deepEqual(read.render(100), ["   \u25b8 2 tool calls \u00b7 1 failed"]);
+  assert.deepEqual(edit.render(100), []);
+  assert.deepEqual(tail.render(100), ["   \u25b8 1 tool call"]);
+  assert.match(rendered(chat), /PROGRESS_TEXT/);
+  assert.match(rendered(chat), /FINAL_ANSWER/);
+  assert.match(rendered(chat), /live-arg.*running/);
+  assert.doesNotMatch(rendered(chat), /read-arg|edit-arg|tail-arg|RESULT_BODY_SENTINEL/);
+  for (const width of [0, 1, 2, 6, 20, 80]) {
+    for (const component of [read, edit, tail, live]) {
+      for (const line of component.render(width)) assert.ok(visibleWidth(line) <= width);
+    }
+  }
+  for (const component of [read, edit, tail, live]) component.setExpanded(true);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+  assert.match(rendered(chat), /read-arg/);
+  for (const component of [read, edit, tail, live]) component.setExpanded(false);
+  assert.deepEqual(read.render(100), ["   \u25b8 2 tool calls \u00b7 1 failed"]);
+  hook.setEnabled(false);
+  assert.deepEqual(chat.render(100), normal);
+  assert.equal(read.result, payload);
+});
+
+test("folded summaries keep disclosure and counts quiet and color only the failure count", () => {
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  const chat = new Container();
+  const ui = { children: [chat], requestRender() {} };
+  const successful = placedTool("read", ui);
+  const failed = placedTool("edit", ui, { ...payload, isError: true });
+  chat.addChild(successful);
+  chat.addChild(failed);
+  hook.setEnabled(true);
+  hook.completeRun();
+  for (const name of ["dark", "light"]) {
+    initTheme(name, false);
+    const line = chat.render(80)[0];
+    assert.match(stripVTControlCharacters(line), /^ {3}\u25b8 2 tool calls \u00b7 1 failed/);
+    assert.ok(line.includes(themeModule.theme.fg("muted", "\u25b8 2 tool calls")));
+    assert.ok(line.includes(themeModule.theme.fg("error", "1 failed")));
+    assert.doesNotMatch(line, /RESULT_BODY_SENTINEL/);
+  }
+});
+
+test("restored history folds by call id while new runs stay visible and respect assistant padding", () => {
+  const hook = install();
+  const chat = new Container();
+  const ui = { children: [chat], requestRender() {} };
+  const intro = modelText("PADDED_TEXT");
+  intro.setOutputPad(4);
+  const old = placedTool("old", ui);
+  chat.addChild(intro);
+  chat.addChild(old);
+  hook.restoreCompletedCalls([old.toolCallId]);
+  hook.setEnabled(true);
+  assert.match(old.render(80)[0], /^ {6}\u25b8 1 tool call/);
+  const next = placedTool("next", ui);
+  chat.addChild(next);
+  assert.match(next.render(80)[0], /^ {6}\u25c7 Next/);
+  assert.doesNotMatch(next.render(80)[0], /tool call/);
+  hook.completeRun();
+  assert.match(next.render(80)[0], /^ {6}\u25b8 1 tool call/);
+  assert.match(old.render(80)[0], /1 tool call/);
+  intro.setOutputPad(0);
+  assert.match(old.render(80)[0], /^ {2}\u25b8/);
+  hook.restoreCompletedCalls([]);
+  assert.match(old.render(80)[0], /^ {2}\u25c7 Old/);
+  assert.match(next.render(80)[0], /^ {2}\u25c7 Next/);
+});
+
+test("tool-only assistant messages do not split a visual block but visible thinking and errors do", () => {
+  const hook = install();
+  const chat = new Container();
+  const ui = { children: [chat], requestRender() {} };
+  const first = placedTool("first", ui);
+  const second = placedTool("second", ui);
+  const third = placedTool("third", ui);
+  const fourth = placedTool("fourth", ui);
+  const invisible = new AssistantMessageComponent({ role: "assistant", content: [
+    { type: "toolCall", id: "second", name: "second", arguments: {} },
+  ], stopReason: "toolUse" });
+  const thinking = new AssistantMessageComponent({ role: "assistant", content: [
+    { type: "thinking", thinking: "VISIBLE_THINKING" },
+  ], stopReason: "toolUse" });
+  const error = new AssistantMessageComponent({ role: "assistant", content: [], stopReason: "error", errorMessage: "VISIBLE_ERROR" });
+  for (const component of [first, invisible, second, thinking, third, error, fourth]) chat.addChild(component);
+  assert.deepEqual(invisible.render(80), []);
+  hook.setEnabled(true);
+  hook.completeRun();
+  assert.match(first.render(80)[0], /2 tool calls/);
+  assert.deepEqual(second.render(80), []);
+  assert.match(third.render(80)[0], /1 tool call/);
+  assert.match(fourth.render(80)[0], /1 tool call/);
+  assert.match(rendered(chat), /VISIBLE_THINKING/);
+  assert.match(rendered(chat), /VISIBLE_ERROR/);
+});
+
+test("warmed folded-history rendering avoids repeated transcript and group scans", () => {
+  const hook = install();
+  const chat = new Container();
+  let treeReads = 0;
+  let expansionReads = 0;
+  const ui = { get children() { treeReads++; return [chat]; }, requestRender() {} };
+  const size = 200;
+  for (let index = 0; index < size; index++) {
+    const component = placedTool(`probe_${index}`, ui);
+    let expanded = component.expanded;
+    Object.defineProperty(component, "expanded", {
+      get() { expansionReads++; return expanded; },
+      set(value) { expanded = value; }, configurable: true,
+    });
+    chat.addChild(component);
+  }
+  hook.setEnabled(true);
+  hook.completeRun();
+  assert.equal(chat.render(80).length, 1);
+  treeReads = 0;
+  expansionReads = 0;
+  assert.match(rendered(chat), /200 tool calls/);
+  assert.equal(treeReads, 0, "stable transcript layout must reuse its parent lookup");
+  assert.ok(expansionReads <= size * 2, "hidden members must not rescan every sibling's expansion state");
+});
+
+test("the extension folds at settlement, keeps continuations visible, resumes history, and synchronizes Ctrl+O", async () => {
+  const handlers = new Map();
+  const commands = new Map();
+  const sessionManager = SessionManager.inMemory(process.cwd());
+  minimalOutputExtension({
+    events: events(), on: (name, handler) => handlers.set(name, handler),
+    registerCommand: (name, command) => commands.set(name, command),
+    appendEntry: (type, data) => sessionManager.appendCustomEntry(type, data),
+  });
+  shutdowns.push(() => handlers.get("session_shutdown")());
+  const chat = new Container();
+  const ui = { children: [chat], requestRender() {} };
+  let expanded = false;
+  const ctx = { mode: "tui", sessionManager, ui: {
+    theme: themeModule.theme, notify() {}, setStatus() {}, getToolsExpanded: () => expanded,
+    setToolsExpanded(value) { expanded = value; for (const child of chat.children) child.setExpanded?.(value); },
+  } };
+  await handlers.get("session_start")({}, ctx);
+  await handlers.get("agent_start")({}, ctx);
+  const first = placedTool("first", ui);
+  const second = placedTool("second", ui);
+  chat.addChild(first);
+  chat.addChild(second);
+  await commands.get("tool-output").handler("minimal", ctx);
+  ctx.ui.setToolsExpanded(true);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+  for (const component of [first, second]) sessionManager.appendMessage({
+    role: "toolResult", toolCallId: component.toolCallId, toolName: component.toolName,
+    content: payload.content, isError: false, timestamp: 0,
+  });
+  await handlers.get("agent_end")?.({}, ctx);
+  assert.equal(first.expanded, true, "an intermediate agent end must not fold continuation work");
+  assert.doesNotMatch(rendered(chat), /2 tool calls/);
+  await handlers.get("agent_start")({}, ctx);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+  await handlers.get("agent_settled")({}, ctx);
+  assert.equal(first.expanded, false);
+  assert.equal(ctx.ui.getToolsExpanded(), false);
+  ctx.ui.setToolsExpanded(!ctx.ui.getToolsExpanded());
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/, "the next Ctrl+O must reopen automatically folded tools");
+  ctx.ui.setToolsExpanded(!ctx.ui.getToolsExpanded());
+  assert.match(rendered(chat), /2 tool calls/);
+  assert.doesNotMatch(rendered(chat), /first-arg|second-arg|RESULT_BODY_SENTINEL/);
+  await handlers.get("session_shutdown")();
+  await handlers.get("session_start")({}, ctx);
+  assert.match(rendered(chat), /2 tool calls/);
+  await commands.get("tool-output").handler("normal", ctx);
+  first.setExpanded(true);
+  await handlers.get("agent_settled")({}, ctx);
+  assert.equal(first.expanded, true, "completion must not change expansion in normal mode");
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+});
+
+test("completed block mouse disclosure reveals call rows, supports detail and refolds the block", {
+  skip: typeof prototype.handleMouse !== "function" ? "This Pi SDK has no fullscreen mouse routing" : false,
+}, () => {
+  const hook = install();
+  const chat = new Container();
+  const ui = { children: [chat], requestRender() {} };
+  const first = placedTool("first", ui);
+  const second = placedTool("second", ui);
+  chat.addChild(first);
+  chat.addChild(second);
+  hook.setEnabled(true);
+  hook.completeRun();
+  const click = (y, extra = {}) => dispatchMouseEvent(chat, {
+    type: "click", button: "left", x: 4, y, screenX: 4, screenY: y,
+    width: 80, height: chat.render(80).length, shift: false, ctrl: false, alt: false, ...extra,
+  });
+  assert.equal(chat.render(80).length, 1);
+  assert.equal(click(0, { ctrl: true }), undefined);
+  assert.equal(click(0).handled, true);
+  assert.equal(chat.render(80).length, 3);
+  assert.match(rendered(chat), /first-arg/);
+  assert.match(rendered(chat), /second-arg/);
+  assert.doesNotMatch(rendered(chat), /RESULT_BODY_SENTINEL/);
+  assert.equal(click(2).handled, true);
+  assert.equal(second.expanded, true);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+  assert.equal(click(0).handled, true);
+  assert.equal(second.expanded, false);
+  assert.equal(chat.render(80).length, 1);
+  assert.equal(click(0).handled, true);
+  assert.equal(click(1).handled, true);
+  assert.equal(first.expanded, true);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+  const headerY = chat.render(80).findIndex(line => stripVTControlCharacters(line).includes("first"));
+  assert.ok(headerY >= 0);
+  assert.equal(click(headerY).handled, true);
+  assert.equal(first.expanded, false);
+  assert.equal(chat.render(80).length, 3, "individual detail collapse retains block disclosure");
+  for (const member of [first, second]) member.setExpanded(true);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+  for (const member of [first, second]) member.setExpanded(false);
+  assert.equal(chat.render(80).length, 1, "Ctrl+O collapse refolds a previously mouse-opened block");
+});
 
 test("minimal mode folds completed and live tool rows without adding boxes or spacers", () => {
   const hook = installMinimalOutputHook(prototype);
