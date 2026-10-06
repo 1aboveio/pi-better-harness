@@ -6,9 +6,18 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.25.0] - 2026-10-06
+
 ### Changed
 
-- Make `update_plan` the universal planning interface: bind or reload workflow checkpoints with `workflow.path` and `revision`, or save transitions with `event` and `changes`. Binding and the first transition can be combined in one call.
+- Bundle Plan 0.7.0 with the universal `update_plan` API for workflow binding, reloading, and saved transitions. (#440)
+- Keep all other bundled component versions unchanged.
+
+## [pi-better-plan@0.7.0] - 2026-10-06
+
+### Changed
+
+- Make `update_plan` the universal planning interface: bind or reload workflow checkpoints with `workflow.path` and `revision`, or save transitions with `event` and `changes`. Binding and the first transition can be combined in one call. (#440)
 
 ### Removed
 
