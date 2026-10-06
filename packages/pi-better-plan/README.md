@@ -6,7 +6,7 @@
 
 ## What It Does
 
-- Gives models `update_plan` and `get_plan` tools for atomic, explicit progress updates.
+- Gives models one `update_plan` interface for checklist updates, workflow binding, and workflow transitions, plus `get_plan` for inspection.
 - Supports dependency edges (`id` and `dependsOn`) so independent ready steps can run concurrently.
 - Shows the complete checklist of completed, active, pending, and blocked steps above the editor.
 - Persists plan state and display preferences on the active Pi session branch.
@@ -38,7 +38,18 @@ For a DAG, assign stable ids to prerequisite steps and list those ids in depende
 
 When an explicitly invoked skill declares `workflow-role: coordinator` in its metadata, that skill's task plan takes precedence. The generic checklist stays persisted but is hidden, and `update_plan` refuses generic checklist updates until workflow ownership is released. `/plan` never opens a stale generic checklist during workflow ownership.
 
-For any workflow using the shared task-plan contract (including `resolve-issues` and `rush-issues`), call `sync_workflow_plan` once with the absolute `.resolve-issues/rush/<run-id>/task-plan.json` path and its persisted `planRevision`. This binds the run to the session and shows its fleet stages and units in the widget, `/plan`, and `get_plan`; the binding survives Pi session resume, and ownership release restores the prior generic checklist. After that, record every transition with `update_plan` and a `workflow` object instead of editing `task-plan.json` or the profiling log by hand:
+For any workflow using the shared task-plan contract (including `resolve-issues` and `rush-issues`), bind its plan through `update_plan` with the absolute `.resolve-issues/rush/<run-id>/task-plan.json` path and its persisted `planRevision`:
+
+```json
+{ "workflow": {
+  "path": "/absolute/project/.resolve-issues/rush/run-1/task-plan.json",
+  "revision": 12
+} }
+```
+
+This binds the run to the session and shows its fleet stages and units in the widget, `/plan`, and `get_plan`. It does not rewrite the plan, increment its revision, or append a profiling event. The binding survives Pi session resume, and ownership release restores the prior generic checklist. Repeat this form to reload an externally saved checkpoint at its exact revision. `sync_workflow_plan` has been removed; migrate its old `{path, revision}` arguments into `update_plan`'s `workflow` object.
+
+After binding, record every transition with `update_plan` and a `workflow` object instead of editing `task-plan.json` or the profiling log by hand:
 
 ```json
 { "workflow": {
@@ -51,6 +62,8 @@ For any workflow using the shared task-plan contract (including `resolve-issues`
   "profiling": { "outcome": "succeeded", "wallMs": 540000 }
 } }
 ```
+
+You may include `path` and `revision` alongside `event` and `changes` in the first call to bind and save a transition together. A rejected transition does not activate a new binding. Every successful binding or transition requests a TUI refresh; there is no separate synchronization tool to call afterward.
 
 Each issue row shows where it is between code and delivery: `●` while it is being built, `◐ implemented` once `stage` is `done` with a `headSha`, `◑ review passed` while `reviewedHead` equals `headSha`, and `✓` only at `status: succeeded`, when the change has landed on the target branch by a merged PR or a direct push. Only `✓` rows count as complete.
 

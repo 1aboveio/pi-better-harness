@@ -49,10 +49,10 @@ test("plan tool schemas, including update_plan's workflow transition, use only p
     on() {},
     appendEntry() {},
   });
-  assert.deepEqual([...tools.keys()].sort(), ["get_plan", "sync_workflow_plan", "update_plan"]);
+  assert.deepEqual([...tools.keys()].sort(), ["get_plan", "update_plan"]);
   for (const [name, tool] of tools) {
     assert.deepEqual(findProviderRejectedKeywords(plain(tool.parameters)), [], name);
   }
   const workflow = plain(tools.get("update_plan").parameters).properties.workflow;
-  assert.deepEqual(Object.keys(workflow.properties).sort(), ["changes", "decision", "event", "profiling", "revision"]);
+  assert.deepEqual(Object.keys(workflow.properties).sort(), ["changes", "decision", "event", "path", "profiling", "revision"]);
 });

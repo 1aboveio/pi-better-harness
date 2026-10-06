@@ -66,10 +66,10 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     const renderWidget = () => renderWidgetLines().join("\n");
     assert.equal(renderWidget(), "", "an unsynced Rush plan stays hidden");
     await assert.rejects(update.execute("conflict", { plan: [{ step: "Wrong", status: "pending" }] }, undefined, undefined, ctx), /owns the task plan/);
-    const sync = tools.get("sync_workflow_plan")!;
-    await assert.rejects(sync.execute("stale", { path, revision: 2 }, undefined, undefined, ctx), /revision mismatch/);
+    const bind = (id: string, revision: number) => update.execute(id, { workflow: { path, revision } }, undefined, undefined, ctx);
+    await assert.rejects(bind("stale", 2), /revision mismatch/);
     assert.doesNotMatch(renderWidget(), /Extract shared core/);
-    await sync.execute("bind", { path, revision: 1 }, undefined, undefined, ctx);
+    await bind("bind", 1);
     assert.equal(renderWidgetLines()[0], "", "the Rush section is separated from the preceding widget");
     assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>plan<\/warning><dim>  0\/2 complete/);
     assert.ok((renderWidgetLines(true)[2] ?? "").includes(`${owner} · rev 1`));
@@ -87,13 +87,13 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     assert.match(notification, /workflow owns its plan/);
 
     file(2, "succeeded");
-    await sync.execute("advance", { path, revision: 2 }, undefined, undefined, ctx);
+    await bind("advance", 2);
     assert.match(renderWidget(), /rev 2/);
     assert.match(renderWidget(), /✓\s+#214\s+Extract shared core/);
     file(3, "diagnosing");
-    await assert.rejects(sync.execute("wrong-revision", { path, revision: 2 }, undefined, undefined, ctx), /revision mismatch/);
+    await assert.rejects(bind("wrong-revision", 2), /revision mismatch/);
     assert.equal(renderWidget(), "", "a plan rejected at sync stays hidden");
-    await sync.execute("reconciled", { path, revision: 3 }, undefined, undefined, ctx);
+    await bind("reconciled", 3);
     await handlers.get("session_tree")?.({}, ctx);
     assert.match(renderWidget(), /rev 3/, "session restore reopens the bound run");
     entries.push({ type: "custom", customType: "pi-better-workflow-plan", data: {
@@ -106,14 +106,14 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     await assert.rejects(update.execute("mismatched", {
       workflow: { event: "advance", changes: [{ id: "214", set: { note: "wrong owner" } }] },
     }, undefined, undefined, ctx), /No .* plan is bound/);
-    await sync.execute("rebind", { path, revision: 3 }, undefined, undefined, ctx);
+    await bind("rebind", 3);
     entries.push({ type: "custom", customType: "pi-better-workflow", data: {
       version: 1, kind: "set", owner: { name: owner, planOwner: "workflow" },
     } });
     pi.events.emit("pi-better-workflow:changed", { name: owner });
     await handlers.get("session_tree")?.({}, ctx);
     assert.equal(renderWidget(), "", "a new Rush invocation stays hidden and cannot inherit a previous run");
-    await sync.execute("new-run", { path, revision: 3 }, undefined, undefined, ctx);
+    await bind("new-run", 3);
     rmSync(path);
     const missing = await tools.get("get_plan")!.execute("missing", {}, undefined, undefined, ctx);
     assert.equal((missing.details as any).hasPlan, false);

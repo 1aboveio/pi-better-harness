@@ -89,9 +89,59 @@ async function boundHarness(options: Parameters<typeof harness>[0] = {}): Promis
   const h = await harness(options);
   h.own("rush-issues");
   const revision = h.plan().planRevision;
-  await h.tools.get("sync_workflow_plan")!.execute("bind", { path: h.path, revision }, undefined, undefined, h.ctx);
+  await h.update({ workflow: { path: h.path, revision } });
   return h;
 }
+
+test("update_plan binds and reloads workflow checkpoints without rewriting them", async () => {
+  const h = await harness();
+  try {
+    h.own("rush-issues");
+    const before = readFileSync(h.path, "utf8");
+    await assert.rejects(h.update({ workflow: { path: h.path } }), /workflow.revision is required/);
+    await assert.rejects(h.update({ workflow: { path: h.path, revision: 12, changes: [{ id: "1201", set: { note: "ignored" } }] } }), /workflow.event is required/);
+    assert.equal(h.widget(), "");
+    const result = await h.update({ workflow: { path: h.path, revision: 12 } });
+    assert.equal(result.details.revision, 12);
+    assert.match(h.widget(), /rush-issues · rev 12/);
+    assert.equal(readFileSync(h.path, "utf8"), before);
+    assert.equal(existsSync(join(h.runDir, "profiling", "run.jsonl")), false, "binding is not a saved transition");
+    const entryCount = h.entries.length;
+    writeFileSync(h.path, JSON.stringify({ ...h.plan(), planRevision: 13, units: h.plan().units.map((row: any) => ({ ...row, note: "external checkpoint" })) }));
+    await h.update({ workflow: { path: h.path, revision: 13 } });
+    assert.match(h.widget(), /rev 13/);
+    assert.equal(h.entries.length, entryCount, "reloading the same run does not append another binding");
+    assert.equal(existsSync(join(h.runDir, "profiling", "run.jsonl")), false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("update_plan can bind and save a transition in one call, without binding a rejected transition", async () => {
+  const h = await harness();
+  try {
+    h.own("resolve-issues");
+    const entries = h.entries.length;
+    const original = readFileSync(h.path, "utf8");
+    await assert.rejects(h.update({ workflow: {
+      path: h.path, revision: 12, event: "bad-transition", changes: [{ id: "missing", set: { note: "bad" } }],
+    } }), /missing/);
+    assert.equal(h.entries.length, entries);
+    assert.equal(h.widget(), "");
+    assert.equal(readFileSync(h.path, "utf8"), original);
+    const result = await h.update({ workflow: {
+      path: h.path, revision: 12, event: "unit-started", changes: [{ id: "1201", set: { note: "started" } }],
+    } });
+    assert.equal(result.details.revision, 13);
+    assert.match(h.widget(), /resolve-issues · rev 13/);
+    assert.equal(h.plan().units[0].note, "started");
+    await h.update({ workflow: { event: "unit-progress", revision: 13, changes: [{ id: "1201", set: { note: "progress" } }] } });
+    assert.equal(h.plan().planRevision, 14);
+    assert.match(h.widget(), /rev 14/);
+  } finally {
+    h.cleanup();
+  }
+});
 
 function readEvents(path: string): any[] {
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
@@ -392,11 +442,11 @@ test(`${owner} updates require a matching binding and leave generic plans unaffe
     const generic = await h.update({ plan: [{ step: "Generic", status: "in_progress" }] });
     assert.equal((generic.details as any).plan.steps[0].step, "Generic");
 
-    await assert.rejects(h.tools.get("sync_workflow_plan")!.execute("unowned", { path: h.path, revision: 12 }, undefined, undefined, h.ctx), /Only an active workflow/);
+    await assert.rejects(h.update({ workflow: { path: h.path, revision: 12 } }), /No workflow owns/);
     h.own(owner);
-    await assert.rejects(h.update(change), new RegExp(`No ${owner} plan is bound; call sync_workflow_plan`));
-    await h.tools.get("sync_workflow_plan")!.execute("bind", { path: h.path, revision: 12 }, undefined, undefined, h.ctx);
-    await assert.rejects(h.update({ plan: [{ step: "Wrong", status: "pending" }] }), /Send workflow \(bound with sync_workflow_plan\) instead of plan/);
+    await assert.rejects(h.update(change), new RegExp(`No ${owner} plan is bound; send workflow.path`));
+    await h.update({ workflow: { path: h.path, revision: 12 } });
+    await assert.rejects(h.update({ plan: [{ step: "Wrong", status: "pending" }] }), /Send workflow instead of plan/);
     await assert.rejects(h.update({ ...change, plan: [{ step: "Both", status: "pending" }] }), /either plan or workflow, not both/);
     assert.equal(readFileSync(h.path, "utf8"), original);
     await h.update(change);

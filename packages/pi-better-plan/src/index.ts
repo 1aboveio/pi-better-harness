@@ -53,8 +53,9 @@ const WorkflowRowChangeSchema = Type.Object({
 });
 
 const WorkflowUpdateSchema = Type.Object({
-  event: Type.String({ description: "Short name for this transition in the profiling log, e.g. unit-validated or component-pr-opened." }),
-  revision: Type.Optional(Type.Integer({ minimum: 0, description: "The planRevision you last saw. The update is refused if the saved plan has a different revision." })),
+  path: Type.Optional(Type.String({ description: "Absolute path to .resolve-issues/rush/<run-id>/task-plan.json. Send with revision to bind or reload a workflow plan; omit event for a read-only bind." })),
+  event: Type.Optional(Type.String({ description: "Short name for a saved transition, e.g. unit-validated. Required when sending changes, decision, or profiling; omit for a read-only bind." })),
+  revision: Type.Optional(Type.Integer({ minimum: 0, description: "The planRevision you last saw. Required with path. The update is refused if the saved plan has a different revision." })),
   changes: Type.Optional(Type.Array(WorkflowRowChangeSchema, { maxItems: 50, description: "Every row this transition changes. All of them are saved together as one revision." })),
   decision: Type.Optional(Type.Object({
     id: Type.String({ description: "New, unique decision id." }),
@@ -66,13 +67,15 @@ const WorkflowUpdateSchema = Type.Object({
     additionalProperties: true,
     description: "Extra fields for this transition's profiling event, e.g. outcome, wallMs, waitMs, headSha.",
   })),
-}, { description: "Workflow task-plan transition. Use only while a workflow owns the plan and it is bound with sync_workflow_plan; send this instead of plan." });
+}, { description: "Bind, reload, or update a workflow-owned task plan. Send this instead of plan while a workflow owns planning." });
 
 const UpdatePlanSchema = Type.Object({
   explanation: Type.Optional(Type.String({ description: "Why the plan or its status changed." })),
   plan: Type.Optional(Type.Array(PlanStepSchema, { minItems: 1, maxItems: 50, description: "The full generic checklist. Required unless you send workflow." })),
   workflow: Type.Optional(WorkflowUpdateSchema),
 });
+
+type WorkflowPlanInput = Omit<RushPlanUpdate, "event"> & { path?: string; event?: string };
 
 const LEGACY_PLAN_NAV_STATUS_KEY = "pi-better-plan-nav";
 const DELEGATION_MODE_REQUEST = "pi-better-subagents:delegation-mode-request";
@@ -146,6 +149,17 @@ export default function planExtension(pi: ExtensionAPI): void {
     }
     refresh(true);
     return rushPlan;
+  };
+
+  const displayWorkflowPlan = (plan: RushPlan, binding: WorkflowPlanBinding): void => {
+    if (!rushBinding || rushBinding.owner !== binding.owner || rushBinding.path !== binding.path || rushBinding.runId !== binding.runId) {
+      pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "set", ...binding });
+    }
+    displayedWorkflowOwner = binding.owner;
+    rushBinding = binding;
+    rushPlan = plan;
+    rushError = null;
+    refresh(true);
   };
 
   const cancelCompletedPlanClear = (): void => {
@@ -283,40 +297,9 @@ export default function planExtension(pi: ExtensionAPI): void {
 
 
   pi.registerTool({
-    name: "sync_workflow_plan",
-    label: "Sync Workflow Plan",
-    description: "Bind and display an active workflow's compatible persisted task plan at its exact checkpoint revision. Record later transitions with update_plan's workflow field.",
-    parameters: Type.Object({
-      path: Type.String({ description: "Absolute path to .resolve-issues/rush/<run-id>/task-plan.json" }),
-      revision: Type.Integer({ minimum: 0, description: "Persisted planRevision to display" }),
-    }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const owner = workflowPlanOwner(ctx);
-      if (!owner) throw new Error("Only an active workflow can sync its plan.");
-      const plan = readRushPlan(params.path, ctx.cwd);
-      if (plan.planRevision !== params.revision) {
-        rushPlan = null;
-        rushError = `revision mismatch: expected ${params.revision}, found ${plan.planRevision}`;
-        refresh(true);
-        throw new Error(`Rush plan ${rushError}.`);
-      }
-      const binding: WorkflowPlanBinding = { owner, path: params.path, runId: plan.runId };
-      if (!rushBinding || rushBinding.owner !== owner || rushBinding.path !== binding.path || rushBinding.runId !== binding.runId) {
-        pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "set", ...binding });
-      }
-      displayedWorkflowOwner = owner;
-      rushBinding = binding;
-      rushPlan = plan;
-      rushError = null;
-      refresh(true);
-      return { content: [{ type: "text", text: `Showing ${owner} rev ${plan.planRevision}: ${plan.issues.length} units.` }], details: { runId: plan.runId, revision: plan.planRevision } };
-    },
-  });
-
-  pi.registerTool({
     name: "update_plan",
     label: "Update Plan",
-    description: "Create or atomically replace the current structured execution plan and its step statuses. While a workflow owns a bound plan, send workflow instead of plan to save one task-plan transition.",
+    description: "Universal plan interface: create or replace a generic checklist, bind or reload a workflow plan with workflow.path and revision, or save a workflow transition with event and changes. Every successful call refreshes the displayed plan.",
     promptSnippet: "Create and update a persistent structured execution plan",
     promptGuidelines: [
       "Use update_plan for work with three or more meaningful steps unless a skill owns planning; update it immediately when a step completes, becomes blocked, or scope changes.",
@@ -325,26 +308,47 @@ export default function planExtension(pi: ExtensionAPI): void {
       "For generic plans, follow the active delegation mode. Manual forbids proactive delegation even in plan mode; adaptive favors substantial independent work; coordinator delegates nontrivial role-owned tasks after agents_catalog discovery.",
       "Use a generic plan as a milestone ledger only when no workflow owns planning. Otherwise follow the workflow's task plan and foreground role.",
       "For generic plans, use separate steps for distinct deliverables, not one step per worker process. Before completing verification or the plan, inspect and integrate every relevant delegated result or failure.",
-      "While a workflow owns the plan and it is bound with sync_workflow_plan, record every transition with update_plan's workflow field instead of editing task-plan.json or its profiling log; it saves the rows, the next planRevision, and the matching profiling event together.",
+      "While a workflow owns planning, bind its persisted task plan with update_plan({workflow:{path,revision}}). Then record every transition with update_plan's workflow event and changes instead of editing task-plan.json or its profiling log; it saves the rows, the next planRevision, and the matching profiling event together. Path and revision can accompany the first transition to bind and update in one call.",
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const owner = workflowPlanOwner(ctx);
-      const input = params as { explanation?: string; plan?: PlanStepInput[]; workflow?: RushPlanUpdate };
+      const input = params as { explanation?: string; plan?: PlanStepInput[]; workflow?: WorkflowPlanInput };
       if (input.workflow !== undefined) {
         if (!owner) throw new Error("No workflow owns the task plan; send plan instead of workflow.");
         if (input.plan !== undefined) throw new Error("Send either plan or workflow, not both.");
-        if (!rushBinding || rushBinding.owner !== owner) throw new Error(`No ${owner} plan is bound; call sync_workflow_plan with the task-plan.json path first.`);
-        const result = applyRushPlanUpdate(rushBinding.path, ctx.cwd, rushBinding.runId, input.workflow);
-        rushPlan = result.plan;
-        rushError = null;
-        refresh(true);
+        const { path, ...transition } = input.workflow;
+        if (transition.event === undefined && (transition.changes !== undefined || transition.decision !== undefined || transition.profiling !== undefined)) {
+          throw new Error("workflow.event is required when sending changes, decision, or profiling.");
+        }
+        let binding = rushBinding?.owner === owner ? rushBinding : null;
+        if (path !== undefined) {
+          if (transition.revision === undefined) throw new Error("workflow.revision is required with workflow.path.");
+          const plan = readRushPlan(path, ctx.cwd);
+          if (plan.planRevision !== transition.revision) {
+            if (transition.event === undefined) {
+              rushPlan = null;
+              rushError = `revision mismatch: expected ${transition.revision}, found ${plan.planRevision}`;
+              refresh(true);
+            }
+            throw new Error(`Rush plan revision mismatch: expected ${transition.revision}, found ${plan.planRevision}.`);
+          }
+          binding = { owner, path, runId: plan.runId };
+          if (transition.event === undefined) {
+            displayWorkflowPlan(plan, binding);
+            return { content: [{ type: "text", text: `Showing ${owner} rev ${plan.planRevision}: ${plan.issues.length} units.` }], details: { ok: true, runId: plan.runId, revision: plan.planRevision } };
+          }
+        }
+        if (!binding) throw new Error(`No ${owner} plan is bound; send workflow.path and workflow.revision to update_plan first.`);
+        if (transition.event === undefined) throw new Error("workflow.path is required to bind or reload a plan; otherwise send workflow.event and changes.");
+        const result = applyRushPlanUpdate(binding.path, ctx.cwd, binding.runId, { ...transition, event: transition.event });
+        displayWorkflowPlan(result.plan, binding);
         const rows = result.changed.map(({ target, id, added }) =>
           `${added ? "+" : ""}${id === null ? "run" : target === "unit" ? `#${id}` : id}`);
         const logNote = result.logAheadRevision === undefined ? ""
           : ` The profiling log already held rev ${result.logAheadRevision} (an earlier write stopped after logging); this event supersedes it.`;
         return {
-          content: [{ type: "text", text: `Saved ${owner} rev ${result.revision} (${input.workflow.event.trim()})${rows.length ? `: ${rows.join(", ")}` : ""}${input.workflow.decision ? `${rows.length ? ";" : ":"} decision ${input.workflow.decision.id}` : ""}. Profiling: ${result.profilingPath}.${logNote}` }],
+          content: [{ type: "text", text: `Saved ${owner} rev ${result.revision} (${transition.event.trim()})${rows.length ? `: ${rows.join(", ")}` : ""}${input.workflow.decision ? `${rows.length ? ";" : ":"} decision ${input.workflow.decision.id}` : ""}. Profiling: ${result.profilingPath}.${logNote}` }],
           details: {
             ok: true, runId: result.plan.runId, revision: result.revision, changed: result.changed, profilingPath: result.profilingPath,
             ...(result.logAheadRevision === undefined ? {} : { logAheadRevision: result.logAheadRevision }),
@@ -352,7 +356,7 @@ export default function planExtension(pi: ExtensionAPI): void {
         };
       }
       if (owner) {
-        throw new Error(`${owner} owns the task plan. Send workflow (bound with sync_workflow_plan) instead of plan.`);
+        throw new Error(`${owner} owns the task plan. Send workflow instead of plan; include path and revision to bind its persisted task plan.`);
       }
       if (input.plan === undefined) throw new Error("plan is required: send the full list of steps.");
       const plan = replacePlan(currentPlan, input.plan, input.explanation);
@@ -366,7 +370,7 @@ export default function planExtension(pi: ExtensionAPI): void {
     renderCall(args, theme) {
       return new Text(
         theme.fg("toolTitle", theme.bold("update_plan ")) + theme.fg("muted", args.workflow
-          ? `workflow ${args.workflow.event ?? ""}`.trimEnd()
+          ? `workflow ${args.workflow.event ?? "bind"}`
           : `${args.plan?.length ?? 0} steps`),
         0,
         0,
