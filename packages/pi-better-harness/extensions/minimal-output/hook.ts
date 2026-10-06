@@ -1,4 +1,4 @@
-import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -6,6 +6,11 @@ import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
+interface ToolUI {
+  requestRender(): void;
+  children?: TranscriptComponent[];
+  handleViewportInput?(data: string): unknown;
+}
 interface ToolComponent {
   toolName: string;
   toolCallId: string;
@@ -16,7 +21,7 @@ interface ToolComponent {
   result?: { isError?: boolean };
   showImages: boolean;
   resultRendererComponent?: unknown;
-  ui: { requestRender(): void; children?: TranscriptComponent[] };
+  ui: ToolUI;
   invalidate(): void;
   setExpanded(expanded: boolean): void;
   render(width: number): string[];
@@ -30,7 +35,7 @@ interface TranscriptComponent extends Component {
 interface ToolGroup { members: ToolComponent[]; open: boolean; expanded: number }
 
 type Method = (this: ToolComponent, ...args: unknown[]) => unknown;
-interface ToolMouseEvent { type: string; button: string; y: number; shift?: boolean; alt?: boolean; ctrl?: boolean }
+interface ToolMouseEvent { type: string; button: string; x: number; y: number; screenX: number; screenY: number; width: number; shift?: boolean; alt?: boolean; ctrl?: boolean }
 type MouseHandler = (this: ToolComponent, event: ToolMouseEvent) => unknown;
 interface ToolPrototype {
   handleMouse?: MouseHandler;
@@ -49,6 +54,7 @@ interface HookState {
   restore(): void;
   completeRun(): void;
   restoreCompletedCalls(ids: Iterable<string>): void;
+  handleTerminalInput(data: string): void;
 }
 export interface MinimalOutputHook {
   setEnabled(enabled: boolean): void;
@@ -90,9 +96,9 @@ function compactCall(component: ToolComponent, width: number, theme?: Theme, ind
     : component.toolName.replace(/_/g, " ").replace(/^./, letter => letter.toUpperCase());
   const suffix = failed ? " (failed)" : running ? " (running)" : "";
   const icon = TOOL_ICONS[component.toolName] ?? "\u25c7";
-  const title = `${icon} ${label}`;
+  const title = ` ${icon} ${label}`;
   const styled = theme
-    ? `${theme.fg(failed ? "error" : running ? "accent" : "muted", icon)} ${theme.fg("muted", label)}${detail ? `  ${theme.fg("dim", detail)}` : ""}${theme.fg(failed ? "error" : "dim", suffix)}`
+    ? ` ${theme.fg(failed ? "error" : running ? "accent" : "muted", icon)} ${theme.fg("muted", label)}${detail ? `  ${theme.fg("dim", detail)}` : ""}${theme.fg(failed ? "error" : "dim", suffix)}`
     : `${title}${detail ? `  ${detail}` : ""}${suffix}`;
   return [truncateToWidth(`${" ".repeat(Math.min(indent, Math.max(0, width - 1)))}${styled}`, width)];
 }
@@ -184,6 +190,25 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
       ...(typeof prototype.handleMouse === "function" ? { handleMouse: prototype.handleMouse } : {}),
     };
     let mouseHandling = false;
+    const inputWrappers = new Map<ToolUI, { original: NonNullable<ToolUI["handleViewportInput"]>; wrapper: NonNullable<ToolUI["handleViewportInput"]> }>();
+    let hovered: { component: ToolComponent; row: number; left: number; top: number; width: number } | undefined;
+    const clearHover = () => {
+      if (!hovered) return;
+      const component = hovered.component;
+      hovered = undefined;
+      component.ui.requestRender();
+    };
+    const highlight = (component: ToolComponent, lines: string[], width: number): string[] => {
+      if (hovered?.component !== component) return lines;
+      const theme = getTheme?.();
+      if (width !== hovered.width || hovered.row >= lines.length) { clearHover(); return lines; }
+      if (theme) {
+        const row = lines[hovered.row] + " ".repeat(Math.max(0, width - visibleWidth(lines[hovered.row])));
+        const shaded = theme.bg("selectedBg", row);
+        lines[hovered.row] = shaded.startsWith("\x1b[49m") ? theme.inverse(row) : shaded;
+      }
+      return lines;
+    };
     const seen = new WeakSet<ToolComponent>();
     const components = new Set<WeakRef<ToolComponent>>();
     let completed = new Map<string, object>();
@@ -246,6 +271,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         this.redraw();
       },
       redraw(collapse = false) {
+        clearHover();
         for (const reference of components) {
           const component = reference.deref();
           if (!component) { components.delete(reference); continue; }
@@ -255,6 +281,11 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         }
       },
       restore() {
+        clearHover();
+        for (const [ui, { original, wrapper }] of inputWrappers) {
+          if (ui.handleViewportInput === wrapper) ui.handleViewportInput = original;
+        }
+        inputWrappers.clear();
         for (const name of ["updateDisplay", "getResultRenderer", "getTextOutput", "setExpanded", "render"] as const) {
           // Do not remove another extension's subsequently installed wrapper.
           if (prototype[name] === wrappers[name]) Object.assign(prototype, { [name]: originals[name] });
@@ -263,10 +294,30 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         delete prototype[HOOK];
         components.clear();
       },
+      handleTerminalInput(data) {
+        if (!hovered) return;
+        // Pi routes moves only to the new target; observe input to clear a row on exit.
+        const motion = /^\x1b\[<35;(\d+);(\d+)M$/.exec(data);
+        if (motion) {
+          const x = Number(motion[1]) - 1;
+          const y = Number(motion[2]) - 1;
+          if (y === hovered.top && x >= hovered.left && x < hovered.left + hovered.width) return;
+        }
+        clearHover();
+      },
     };
     const current = state;
     const wrappers = {
       updateDisplay(this: ToolComponent, ...args: unknown[]) {
+        if (typeof this.ui.handleViewportInput === "function" && !inputWrappers.has(this.ui)) {
+          const original = this.ui.handleViewportInput;
+          const wrapper = function(this: ToolUI, data: string) {
+            current.handleTerminalInput(data);
+            return original.call(this, data);
+          };
+          inputWrappers.set(this.ui, { original, wrapper });
+          this.ui.handleViewportInput = wrapper;
+        }
         if (!seen.has(this)) { seen.add(this); components.add(new WeakRef(this)); }
         if (!current.enabled || this.expanded) return originals.updateDisplay.apply(this, args);
         const showImages = this.showImages;
@@ -281,6 +332,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         }
       },
       setExpanded(this: ToolComponent, ...args: unknown[]) {
+        clearHover();
         const group = groups.get(this);
         const wasExpanded = this.expanded;
         if (args[0] === false && !mouseHandling && group) group.open = false;
@@ -300,7 +352,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         const padding = layout?.anchor?.outputPad ?? 1;
         const indent = Number.isFinite(padding) ? Math.max(0, Math.floor(padding)) + 2 : 3;
         const group = groupFor(this, layout?.parent);
-        if (!group) return compactCall(this, width, getTheme?.(), indent);
+        if (!group) return highlight(this, compactCall(this, width, getTheme?.(), indent), width);
         const open = group.open || group.expanded > 0;
         const first = group.members[0] === this;
         const lines: string[] = [];
@@ -315,11 +367,19 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
           lines.push(truncateToWidth(`${" ".repeat(Math.min(indent, Math.max(0, width - 1)))}${styled}`, width));
         }
         if (open) lines.push(...compactCall(this, width, getTheme?.(), indent + 2));
-        return lines;
+        return highlight(this, lines, width);
       },
     };
     const mouseWrapper: MouseHandler = function(event) {
       if (current.enabled && !this.expanded) {
+        if (event.type === "move" && event.button === "none") {
+          const lines = this.render(event.width);
+          if (event.y < 0 || event.y >= lines.length) { clearHover(); return undefined; }
+          if (hovered?.component === this && hovered.row === event.y) return { handled: true, render: false };
+          clearHover();
+          hovered = { component: this, row: event.y, left: event.screenX - event.x, top: event.screenY, width: event.width };
+          return { handled: true, render: true };
+        }
         if (event.type !== "click" || event.button !== "left" || event.shift || event.alt || event.ctrl) return undefined;
         const group = groupFor(this, layoutFor(this)?.parent);
         if (group?.members[0] === this && event.y === 0) {
