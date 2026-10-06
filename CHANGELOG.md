@@ -6,6 +6,23 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.23.0] - 2026-10-06
+
+### Added
+
+- Fold each consecutive completed tool block into an expandable summary with call and failure counts, keeping assistant text visible. (#436)
+
+### Changed
+
+- Indent minimal tool rows and use one tool-specific icon whose color indicates state, with quieter tool names and dimmer arguments.
+- Fold tool blocks only when the agent settles, preserving active retries and automatic continuation.
+- Keep all bundled component versions unchanged.
+
+### Fixed
+
+- Synchronize automatic folding with Pi's tool-expansion state so the next Ctrl+O reopens tool details.
+- Preserve tool-block grouping, click disclosure, and native expansion across reload and saved-session resume.
+
 ## [pi-better-plan@0.6.0] - 2026-10-06
 
 ### Added
