@@ -6,6 +6,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.24.0] - 2026-10-06
+
+### Added
+
+- Highlight compact tool calls and completed-block disclosures on hover in fullscreen Pi, using the theme selection background or reverse video when no background is supplied. (#438)
+
+### Changed
+
+- Center tool icons in a fixed three-column gutter while preserving the quiet name, argument, and state styling.
+- Keep all bundled component versions unchanged.
+
+### Fixed
+
+- Clear hover feedback on pointer exit, scrolling, expansion, mode changes, resize, and reload without changing click disclosure or Ctrl+O behavior.
+
 ## [pi-better-harness@0.23.0] - 2026-10-06
 
 ### Added
