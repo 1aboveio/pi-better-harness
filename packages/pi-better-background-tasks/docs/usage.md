@@ -217,8 +217,13 @@ wait for the next available boundary while
 that run is active. Failed sends leave all affected events unmarked and
 retryable; ownership is rechecked at flush so another cwd/session is suppressed.
 
-Start Pi with `PI_BETTER_CALLBACK_WHILE_BUSY=steer` to opt into ordinary
-completion delivery during foreground work. Completions spanning multiple
+In `/harness-settings`, set **Completions while busy** to **Steer active run** to
+opt into ordinary completion delivery during foreground work. Changes autosave
+to the current session branch and apply immediately; **Ctrl+S** saves the
+choice as the user default for future sessions, including standalone callback
+packages. **Wait until idle** is the default. The former
+`PI_BETTER_CALLBACK_WHILE_BUSY` environment variable is no longer supported.
+Completions spanning multiple
 accumulation windows during one tool call stay queued until the final active
 tool ends, then share one compact `steer` notification with subagent completions.
 Both extensions track parallel and nested tools together. Busy delivery uses
@@ -226,8 +231,7 @@ Both extensions track parallel and nested tools together. Busy delivery uses
 while busy with no active tool, the normal accumulation window applies.
 Manual compaction and branch summarization hold callbacks until an agent run
 starts or Pi becomes idle; they are not busy steering opportunities. Idle
-delivery remains `{ deliverAs: "followUp", triggerTurn: true }`. Unset or
-invalid values keep the default hold-until-idle behavior. Byte bounds, queued
+delivery remains `{ deliverAs: "followUp", triggerTurn: true }`. Byte bounds, queued
 overflow, dedupe, delivery receipts, retries, ownership checks, and
 `callback:false` apply in both modes. A completion handed off by steer is not
 sent again at idle. Urgent failure alerts retain their existing behavior.

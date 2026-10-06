@@ -2399,6 +2399,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("session_tree", async (_event, ctx) => {
+        setCallbackBatchContext(pi, ctx);
         agentSessionSettings.restore(ctx);
         try { noteCatalogHost(catalogHostFrom(ctx)); } catch { /* catalog inspection stays undecided */ }
         restoreDelegationMode(ctx);

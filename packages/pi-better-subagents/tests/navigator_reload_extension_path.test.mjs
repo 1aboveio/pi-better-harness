@@ -76,6 +76,7 @@ export function getSupportedThinkingLevels(model) {
     });
     writeStubPackage("@earendil-works/pi-coding-agent", {
         "index.js": `
+export function getAgentDir() { return process.env.PI_CODING_AGENT_DIR || ${JSON.stringify(join(RUNTIME, "agent"))}; }
 export class CustomEditor {
     constructor() { this._text = ""; }
     getText() { return this._text; }

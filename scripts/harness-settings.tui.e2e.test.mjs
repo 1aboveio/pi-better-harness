@@ -13,7 +13,7 @@ const goalExtension = installed ? join(installed, "extensions/goal/index.ts") : 
 const piCli = process.env.PI_HARNESS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
 const q = text => `'${text.replaceAll("'", "'\\''")}'`;
 
-test("real TUI hub routes package settings without invoking the model", { skip: spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 }, () => {
+test("real TUI hub autosaves callback mode, saves defaults on ctrl+s, and routes packages without model requests", { skip: spawnSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0 }, () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-harness-settings-"));
   const socket = `harness-settings-${process.pid}`;
   const log = join(dir, "calls.jsonl");
@@ -55,6 +55,19 @@ export default function(pi){
     wait(() => existsSync(ready));
     send("/harness-settings"); key("Enter");
     wait(pane => pane.includes("Harness settings") && pane.includes("/goal settings"));
+    wait(pane => pane.includes("Completions while busy") && pane.includes("Wait until idle") && pane.includes("Ctrl+S saves the default for future sessions"));
+    key("Enter");
+    wait(pane => pane.includes("Steer active run") && pane.includes("Session setting saved"));
+    const preferences = join(agent, "extensions", "pi-better-callback-preferences.json");
+    assert.equal(existsSync(preferences), false, "changing the session must not save a global default");
+    key("Escape");
+    wait(pane => !pane.includes("Harness settings"));
+    send("/harness-settings"); key("Enter");
+    wait(pane => pane.includes("Harness settings") && pane.includes("Steer active run"));
+    key("C-s");
+    wait(pane => pane.includes("Callback default saved"));
+    assert.equal(existsSync(preferences), true);
+    key("Down");
     key("Enter");
     wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
     key("Escape");
@@ -65,6 +78,14 @@ export default function(pi){
     wait(pane => pane.includes("Goal settings") && pane.includes("Automatic continuation"));
     key("Escape");
     wait(pane => !pane.includes("Goal settings"));
+    rmSync(ready);
+    tmux("new-window", "-t", "test", "-n", "fresh-session", command);
+    wait(() => existsSync(ready));
+    send("/harness-settings"); key("Enter");
+    wait(pane => pane.includes("Harness settings") && pane.includes("Steer active run") && pane.includes("User default"));
+    key("Enter");
+    wait(pane => pane.includes("Wait until idle") && pane.includes("Session setting saved"));
+    key("Escape");
     assert.deepEqual(calls(), [], "opening settings never invokes the model");
   } finally {
     spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });

@@ -78,7 +78,10 @@ export function getSupportedThinkingLevels(model) {
 `,
     });
     writeStubPackage("@earendil-works/pi-coding-agent", {
-        "index.js": "// Type-only stub\nexport class CustomEditor {}\n",
+        "index.js": `
+export function getAgentDir() { return process.env.PI_CODING_AGENT_DIR || ${JSON.stringify(join(RUNTIME, "agent"))}; }
+export class CustomEditor {}
+`,
     });
     writeStubPackage("@earendil-works/pi-tui", {
         "index.js": `

@@ -260,17 +260,20 @@ given.
   pending records retryable, and `/reload` recovers records explicitly marked
   pending. `callback:false` sends no model message; read the durable result later
   with `subagent_result`.
-- **Optional busy steering.** Start Pi with
-  `PI_BETTER_CALLBACK_WHILE_BUSY=steer` to receive ordinary completions during
-  foreground work. Completions spanning multiple accumulation windows during
+- **Optional busy steering.** In `/harness-settings`, set **Completions while
+  busy** to **Steer active run** to receive ordinary completions during
+  foreground work. Changes autosave to the current session branch and apply
+  immediately; **Ctrl+S** saves the choice as the user default for future
+  sessions, including standalone callback packages. **Wait until idle** is the
+  default. The former `PI_BETTER_CALLBACK_WHILE_BUSY` environment variable is
+  no longer supported. Completions spanning multiple accumulation windows during
   one tool call stay together until the final active tool ends, then share one
   compact `steer` notification without triggering a new run. Parallel and nested
   tools are tracked together by both extensions. While busy with no active tool,
   the normal accumulation window applies. Manual compaction and branch
   summarization hold callbacks until an agent run starts or Pi becomes idle.
   Idle delivery remains
-  `{ deliverAs: "followUp", triggerTurn: true }`. Unset or invalid values keep
-  the default hold-until-idle behavior. The same byte budget, queued overflow,
+  `{ deliverAs: "followUp", triggerTurn: true }`. The same byte budget, queued overflow,
   dedupe, delivery receipts, retry, ownership checks, and `callback:false` rules
   apply to both modes; a completion handed off by steer is not sent again at
   idle. Urgent health/failure alerts are unchanged.

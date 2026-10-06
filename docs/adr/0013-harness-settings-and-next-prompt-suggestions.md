@@ -22,6 +22,16 @@ IDs, and cleans listeners on shutdown. Opening a package screen and closing it
 returns to the hub with the same selection. Packages without a real settings
 screen do not receive invented shortcuts.
 
+Harness additionally owns the shared **Completions while busy** control.
+Changes are branch-local session entries and take effect immediately for both
+callback producers. Ctrl+S explicitly saves the current value as the user
+default for future sessions; already-open sessions retain their initial default
+when navigating to an unconfigured branch. The shared callback module owns validation,
+atomic default persistence, session restoration, and runtime mode updates;
+standalone callback packages consume the same defaults without depending on
+Harness. Environment-variable mode selection is removed now that the control
+is available in settings. Package-owned settings shortcuts remain unchanged.
+
 ## Inference Deferral
 
 The proposed opt-in next-prompt experience requires a bounded auxiliary request

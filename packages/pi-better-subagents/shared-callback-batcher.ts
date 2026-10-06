@@ -1,6 +1,126 @@
 // Generated from packages/callback-batcher/index.ts. Do not edit directly.
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+
 export type CallbackSource = "subagent" | "background-task";
 export type CallbackDetailTool = "subagent_result" | "bg_task_status";
+export type CallbackDeliveryMode = "hold" | "steer";
+
+export interface CallbackSettingsContext {
+  sessionManager?: { getBranch?(): readonly unknown[]; getSessionId?(): string };
+  ui?: { notify(message: string, type: "error"): void };
+}
+
+export interface CallbackSettingsSeams {
+  agentDir?: () => string;
+}
+
+export interface CallbackSettings {
+  mode: CallbackDeliveryMode;
+  source: "session" | "default";
+}
+
+export const CALLBACK_SETTINGS_ENTRY = "pi-better-callback-settings";
+const CALLBACK_PREFERENCES_FILE = "pi-better-callback-preferences.json";
+
+function isDeliveryMode(mode: unknown): mode is CallbackDeliveryMode {
+  return mode === "hold" || mode === "steer";
+}
+
+function validCallbackPreferences(value: unknown): value is { version: 1; mode: CallbackDeliveryMode } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const data = value as Record<string, unknown>;
+  return Object.keys(data).length === 2 && Object.hasOwn(data, "version") && Object.hasOwn(data, "mode")
+    && data.version === 1 && isDeliveryMode(data.mode);
+}
+
+function callbackPreferencesPath(seams: CallbackSettingsSeams): string {
+  return join((seams.agentDir ?? getAgentDir)(), "extensions", CALLBACK_PREFERENCES_FILE);
+}
+
+/** Branch history is authoritative; abandoned branches and invalid entries are ignored. */
+export function getCallbackSettings(
+  ctx: CallbackSettingsContext,
+  seams: CallbackSettingsSeams = {},
+): CallbackSettings {
+  const branch = ctx.sessionManager?.getBranch?.() ?? [];
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i] as { type?: unknown; customType?: unknown; data?: unknown } | null;
+    if (entry?.type === "custom" && entry.customType === CALLBACK_SETTINGS_ENTRY && validCallbackPreferences(entry.data)) {
+      return { mode: entry.data.mode, source: "session" };
+    }
+  }
+  return getSessionDefault(ctx, seams);
+}
+
+function getSessionDefault(ctx: CallbackSettingsContext, seams: CallbackSettingsSeams): CallbackSettings {
+  const sessionId = ctx.sessionManager?.getSessionId?.();
+  const defaults = globalState().sessionDefaults ??= new WeakMap<object, { sessionId?: string; mode: CallbackDeliveryMode }>();
+  const initial = ctx.sessionManager ? defaults.get(ctx.sessionManager) : undefined;
+  if (initial && initial.sessionId === sessionId) return { mode: initial.mode, source: "default" };
+  const snapshot = (mode: CallbackDeliveryMode): CallbackSettings => {
+    if (ctx.sessionManager) defaults.set(ctx.sessionManager, { sessionId, mode });
+    return { mode, source: "default" };
+  };
+  const path = callbackPreferencesPath(seams);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return snapshot("hold");
+    throw new Error(`Cannot read callback default at ${path}: ${String(error)}`, { cause: error });
+  }
+  try {
+    const data: unknown = JSON.parse(text);
+    if (!validCallbackPreferences(data)) throw new Error('Expected { version: 1, mode: "hold" | "steer" }');
+    return snapshot(data.mode);
+  } catch (error) {
+    throw new Error(`Invalid callback default at ${path}: ${String(error)}`, { cause: error });
+  }
+}
+
+/** Saves only the future-session default; never changes the active branch or batcher. */
+export function saveCallbackDefault(mode: CallbackDeliveryMode, seams: CallbackSettingsSeams = {}): void {
+  if (!isDeliveryMode(mode)) throw new Error("Invalid callback delivery mode. Nothing saved.");
+  const dir = join((seams.agentDir ?? getAgentDir)(), "extensions");
+  const path = join(dir, CALLBACK_PREFERENCES_FILE);
+  const tmp = join(dir, `.${CALLBACK_PREFERENCES_FILE}.${randomUUID()}.tmp`);
+  let created = false;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const fd = openSync(tmp, "wx", 0o600);
+    created = true;
+    try { writeFileSync(fd, `${JSON.stringify({ version: 1, mode })}\n`); }
+    finally { closeSync(fd); }
+    renameSync(tmp, path);
+  } catch (error) {
+    throw new Error(`Cannot save callback default at ${path}: ${String(error)}`, { cause: error });
+  } finally {
+    if (created) rmSync(tmp, { force: true });
+  }
+}
+
+/** Persist first so a failed append cannot become a transient delivery-mode change. */
+export function changeCallbackSetting(
+  host: CallbackBatchHost & { appendEntry(customType: string, data: unknown): void },
+  ctx: CallbackSettingsContext & { isIdle(): boolean },
+  mode: CallbackDeliveryMode,
+): void {
+  if (!isDeliveryMode(mode)) throw new Error("Invalid callback delivery mode. Nothing changed.");
+  const data = { version: 1, mode };
+  try { host.appendEntry(CALLBACK_SETTINGS_ENTRY, data); }
+  catch (error) {
+    // Pi advances its in-memory branch before disk persistence. Invalidate
+    // our payload so that failed entry cannot become a restored setting.
+    data.version = 0;
+    throw error;
+  }
+  const batcher = bindCallbackBatcher(host, ctx);
+  batcher.setWhileBusy(mode);
+  batcher.setAvailability(() => ctx.isIdle());
+}
 
 export interface CallbackBatchHost {
   /** Older Pi shares this object; newer Pi supplies per-extension wrappers. */
@@ -70,8 +190,8 @@ export interface CallbackBatcherOptions {
   retryMs?: number;
   /** Ordinary callbacks stay here, not in Pi's follow-up queue, while unavailable. */
   isAvailable?: () => boolean;
-  /** Defaults to PI_BETTER_CALLBACK_WHILE_BUSY; only "steer" opts in. */
-  whileBusy?: "hold" | "steer";
+  /** Internal initial mode. Session/default settings are restored with context. */
+  whileBusy?: CallbackDeliveryMode;
   /** UTF-8 byte cap for one sendMessage payload. Defaults to 2 KiB. */
   maxBytes?: number;
 }
@@ -83,6 +203,8 @@ export interface CallbackBatcher {
   setHost(host: CallbackBatchHost): void;
   /** Update the session predicate and schedule an asynchronous drain when available. */
   setAvailability(isAvailable: () => boolean): void;
+  /** Change delivery immediately without clearing pending callbacks or handoff receipts. */
+  setWhileBusy(mode: CallbackDeliveryMode): void;
   /** Non-idle context operations are not foreground agent runs. */
   setForegroundRunning(running: boolean): void;
   /** Shared IDs make duplicate notifications from both extensions idempotent. */
@@ -112,6 +234,7 @@ interface PendingEvent {
 interface SharedCallbackBatcherState {
   byHost: WeakMap<object, CallbackBatcher>;
   bySession?: WeakMap<object, CallbackBatcher>;
+  sessionDefaults?: WeakMap<object, { sessionId?: string; mode: CallbackDeliveryMode }>;
 }
 
 const GLOBAL_STATE_KEY = Symbol.for("@1aboveio/pi-better-harness/callback-batcher");
@@ -139,14 +262,6 @@ const RETRIEVAL_FOOTER =
 
 export const CALLBACK_BATCH_WINDOW_ENV = "PI_BETTER_CALLBACK_BATCH_MS";
 export const DEFAULT_CALLBACK_BATCH_WINDOW_MS = DEFAULT_WINDOW_MS;
-export const CALLBACK_WHILE_BUSY_ENV = "PI_BETTER_CALLBACK_WHILE_BUSY";
-
-export function resolveCallbackWhileBusy(
-  value: unknown = process.env[CALLBACK_WHILE_BUSY_ENV],
-): "hold" | "steer" {
-  return value === "steer" ? "steer" : "hold";
-}
-
 export function resolveCallbackBatchWindowMs(
   value: unknown = process.env[CALLBACK_BATCH_WINDOW_ENV],
 ): number {
@@ -451,7 +566,7 @@ export function createCallbackBatcher(
 ): CallbackBatcher {
   const windowMs = options.windowMs ?? resolveCallbackBatchWindowMs();
   const retryMs = Math.max(0, options.retryMs ?? DEFAULT_RETRY_MS);
-  const whileBusy = options.whileBusy ?? resolveCallbackWhileBusy();
+  let whileBusy = options.whileBusy ?? "hold";
   const maxBytes = callbackBatchBudget(options.maxBytes);
   const pending = new Map<string, PendingEvent>();
   const inFlight = new Set<string>();
@@ -660,6 +775,12 @@ export function createCallbackBatcher(
       cancelTimer();
       schedule(windowMs);
     },
+    setWhileBusy(mode) {
+      if (!isDeliveryMode(mode)) throw new Error("Invalid callback delivery mode. Nothing changed.");
+      whileBusy = mode;
+      cancelTimer();
+      schedule(windowMs);
+    },
     setForegroundRunning(running) {
       foregroundRunning = running;
       cancelTimer();
@@ -715,11 +836,39 @@ export function cancelCallbackBatch(host: CallbackBatchHost): void {
   batcher?.cancel();
 }
 
-/** Called on session_start, agent_start and agent_settled by both extensions. */
+/** Restore current branch/default mode without resetting foreground tools or receipts. */
 export function setCallbackBatchContext(
   host: CallbackBatchHost,
-  ctx: { isIdle(): boolean; sessionManager?: object },
+  ctx: CallbackSettingsContext & { isIdle(): boolean },
+  seams: CallbackSettingsSeams = {},
 ): void {
+  const batcher = bindCallbackBatcher(host, ctx);
+  let mode: CallbackDeliveryMode = "hold";
+  try {
+    const settings = getCallbackSettings(ctx, seams);
+    if (settings.source === "session") {
+      // Capture the initial default even when an override currently hides it,
+      // so navigating to an unconfigured branch cannot inherit a later save.
+      try { getSessionDefault(ctx, seams); }
+      catch {
+        if (ctx.sessionManager) {
+          const defaults = globalState().sessionDefaults ??= new WeakMap();
+          defaults.set(ctx.sessionManager, { sessionId: ctx.sessionManager.getSessionId?.(), mode: "hold" });
+        }
+      }
+    }
+    mode = settings.mode;
+  } catch (error) {
+    try { ctx.ui?.notify(`Callback delivery restored to hold: ${String(error)}`, "error"); }
+    catch { /* A failing UI must not retain the prior session's delivery mode. */ }
+  }
+  batcher.setWhileBusy(mode);
+  // Schedule rather than await delivery inside agent_settled: its handlers are
+  // still settling the previous run, and sendMessage may start a new one.
+  batcher.setAvailability(() => ctx.isIdle());
+}
+
+function bindCallbackBatcher(host: CallbackBatchHost, ctx: CallbackSettingsContext): CallbackBatcher {
   const state = globalState();
   const bySession = state.bySession ??= new WeakMap<object, CallbackBatcher>();
   const shared = ctx.sessionManager ? bySession.get(ctx.sessionManager) : undefined;
@@ -727,9 +876,7 @@ export function setCallbackBatchContext(
   if (ctx.sessionManager) bySession.set(ctx.sessionManager, batcher);
   state.byHost.set(host.events ?? host, batcher);
   batcher.setHost(host);
-  // Schedule rather than await delivery inside agent_settled: its handlers are
-  // still settling the previous run, and sendMessage may start a new one.
-  batcher.setAvailability(() => ctx.isIdle());
+  return batcher;
 }
 
 function globalState(): SharedCallbackBatcherState {
