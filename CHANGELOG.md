@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- Make `update_plan` the universal planning interface: bind or reload workflow checkpoints with `workflow.path` and `revision`, or save transitions with `event` and `changes`. Binding and the first transition can be combined in one call.
+
+### Removed
+
+- Remove the separate `sync_workflow_plan` tool. Move its `{path, revision}` arguments into `update_plan`'s `workflow` object; existing persisted bindings remain compatible.
+
 ## [pi-better-harness@0.24.0] - 2026-10-06
 
 ### Added

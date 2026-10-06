@@ -206,7 +206,7 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner);
   const prompt = await goalHandlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
   assert.match(prompt.systemPrompt, /Coordinate the rush run/, "resumed turns carry the coordinator's instructions");
-  const synced = await planTools.get("sync_workflow_plan")!.execute("bind", { path: planPath, revision: 1 }, undefined, undefined, toolContext(ctx));
+  const synced = await planTools.get("update_plan")!.execute("bind", { workflow: { path: planPath, revision: 1 } }, undefined, undefined, toolContext(ctx));
   assert.equal((synced.details as { runId: string }).runId, "run-1");
 
   await goalCommands.get("workflow")?.handler("clear", ctx);
