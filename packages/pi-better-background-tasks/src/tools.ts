@@ -207,6 +207,7 @@ export function registerTools(pi: ExtensionAPI): void {
     setCallbackBatchContext(pi, ctx);
     getCallbackBatcher(pi).setForegroundRunning(true);
   });
+  pi.on("session_tree", (_event, ctx) => { setCallbackBatchContext(pi, ctx); });
   pi.on("agent_end", () => { getCallbackBatcher(pi).setForegroundRunning(false); });
   pi.on("agent_settled", (_event, ctx) => {
     getCallbackBatcher(pi).setForegroundRunning(false);

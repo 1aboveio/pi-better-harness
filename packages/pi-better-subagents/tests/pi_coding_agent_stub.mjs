@@ -1,4 +1,11 @@
 /** Stub of the public pi-coding-agent surface used by extension-level tests. */
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+export function getAgentDir() {
+    return process.env.PI_CODING_AGENT_DIR || join(tmpdir(), "pi-test-agent");
+}
+
 export class CustomEditor {
     constructor() { this._text = ""; }
     getText() { return this._text; }

@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createSettingsRegistry } from "../packages/pi-better-harness/extensions/settings/registry.ts";
 import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 import harnessSettings from "../packages/pi-better-harness/extensions/settings/index.ts";
 import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 
 function eventApi(bus = new EventEmitter()) {
-  return { bus, events: { on(name, handler) { bus.on(name, handler); return () => bus.off(name, handler); }, emit: (name, data) => bus.emit(name, data) } };
+  const entries = [];
+  return { bus, entries, appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
+    events: { on(name, handler) { bus.on(name, handler); return () => bus.off(name, handler); }, emit: (name, data) => bus.emit(name, data) } };
 }
 const theme = { fg: (_key, text) => text, bold: text => text, inverse: text => text };
 
@@ -85,7 +90,11 @@ test("hub opens package-owned settings, returns to selection and reports opener 
   let pages = 0;
   const notifications = [];
   const ctx = { mode: "tui", ui: { notify: (...args) => notifications.push(args), custom(build) {
-    return new Promise(resolve => { const page = build({}, theme, {}, resolve); page.handleInput(++pages === 1 ? "\r" : "\x1b"); });
+    return new Promise(resolve => {
+      const page = build({}, theme, {}, resolve);
+      if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\r"); }
+      else page.handleInput("\x1b");
+    });
   } } };
   const link = { id: "goal", label: "Goal", command: "/goal settings", open(current) { assert.equal(current, ctx); opened++; throw new Error("Synthetic opener failure"); } };
   pi.bus.on("harness-settings:request", () => pi.bus.emit("harness-settings:register", link));
@@ -99,15 +108,138 @@ test("hub opens package-owned settings, returns to selection and reports opener 
   assert.equal(pi.bus.listenerCount("harness-settings:register"), 0);
 });
 
-test("hub without contributions or outside TUI exits without requesting an agent turn", async () => {
+test("hub offers callback settings without package contributions and rejects non-TUI mode", async () => {
   const pi = eventApi();
   let command;
   pi.on = () => {};
   pi.registerCommand = (_name, options) => { command = options.handler; };
   harnessSettings(pi);
   const notifications = [];
-  const ui = { notify: (...args) => notifications.push(args), custom() { throw new Error("Must not open a selector"); } };
+  let pages = 0;
+  const ui = { notify: (...args) => notifications.push(args), custom(build) {
+    pages++;
+    return new Promise(resolve => {
+      const page = build({}, theme, {}, resolve);
+      assert.match(page.render(80).join("\n"), /Completions while busy/);
+      page.handleInput("\x1b");
+    });
+  } };
   await command("", { mode: "tui", ui });
   await command("", { mode: "rpc", ui });
-  assert.deepEqual(notifications, [["No package settings are available.", "info"], ["Harness settings requires the interactive TUI.", "warning"]]);
+  assert.equal(pages, 1);
+  assert.deepEqual(notifications, [["Harness settings requires the interactive TUI.", "warning"]]);
+});
+
+test("hub autosaves callback changes in the session and saves the future default only on ctrl+s", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-callback-settings-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    const pi = eventApi();
+    let command;
+    pi.on = () => {};
+    pi.registerCommand = (_name, options) => { command = options.handler; };
+    harnessSettings(pi);
+    const path = join(dir, "extensions", "pi-better-callback-preferences.json");
+    let page;
+    const notifications = [];
+    const ctx = { mode: "tui", isIdle: () => true, sessionManager: { getBranch: () => pi.entries },
+      ui: { notify: (...args) => notifications.push(args), custom(build) {
+        return new Promise(resolve => { page = build({}, theme, {}, resolve); });
+      } } };
+    const opening = command("", ctx);
+    assert.match(page.render(80).join("\n"), /Wait until idle/);
+    page.handleInput("\r");
+    assert.match(page.render(80).join("\n"), /Steer active run/);
+    assert.equal(pi.entries.length, 1);
+    assert.equal(existsSync(path), false, "session autosave must not alter future defaults");
+    page.handleInput("\x13");
+    assert.match(page.render(80).join("\n"), /Callback default saved/);
+    assert.equal(existsSync(path), true);
+    page.handleInput("\x1b");
+    await opening;
+    const reopening = command("", ctx);
+    assert.match(page.render(80).join("\n"), /Steer active run/);
+    page.handleInput("\r");
+    assert.match(page.render(80).join("\n"), /Wait until idle/);
+    const savedDefault = readFileSync(path, "utf8");
+    assert.equal(pi.entries.length, 2);
+    page.handleInput("\x1b");
+    await reopening;
+    assert.equal(readFileSync(path, "utf8"), savedDefault, "later session edits leave the saved default alone");
+    const newSession = command("", { ...ctx, sessionManager: { getBranch: () => [] } });
+    assert.match(page.render(80).join("\n"), /Steer active run/);
+    page.handleInput("\x1b");
+    await newSession;
+    assert.deepEqual(notifications, []);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("callback control rolls back a failed session save and reports a failed default save without closing", async () => {
+  let page;
+  let mode = "hold";
+  const ctx = { ui: { custom(build) { return new Promise(resolve => { page = build({}, theme, {}, resolve); }); } } };
+  const opening = chooseHarnessSetting(ctx, [], undefined, {
+    get: () => ({ mode, source: "default" }),
+    change() { throw new Error("Session write unavailable"); },
+    save() { throw new Error("Default write unavailable"); },
+  });
+  page.handleInput("\r");
+  assert.match(page.render(80).join("\n"), /Wait until idle/);
+  assert.doesNotMatch(page.render(80).join("\n"), /Steer active run/);
+  assert.match(page.render(80).join("\n"), /Session write unavailable/);
+  page.handleInput("\x13");
+  assert.match(page.render(80).join("\n"), /Default write unavailable/);
+  assert.equal(mode, "hold");
+  page.handleInput("\x1b");
+  assert.equal(await opening, undefined);
+});
+
+test("an invalid callback default reports once, leaves package settings usable, and can be repaired by ctrl+s", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-invalid-callback-default-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    mkdirSync(join(dir, "extensions"));
+    writeFileSync(join(dir, "extensions", "pi-better-callback-preferences.json"), "malformed");
+    const pi = eventApi();
+    let command;
+    let opened = 0;
+    let pages = 0;
+    pi.on = () => {};
+    pi.registerCommand = (_name, options) => { command = options.handler; };
+    const link = { id: "goal", label: "Goal", command: "/goal settings", open() { opened++; } };
+    pi.bus.on("harness-settings:request", () => pi.bus.emit("harness-settings:register", link));
+    harnessSettings(pi);
+    const notifications = [];
+    const ctx = { mode: "tui", isIdle: () => true, sessionManager: { getBranch: () => pi.entries },
+      ui: { notify: (...args) => notifications.push(args), custom(build) {
+        return new Promise(resolve => {
+          const page = build({}, theme, {}, resolve);
+          assert.match(page.render(80).join("\n"), /Wait until idle/);
+          if (++pages === 1) { page.handleInput("\x1b[B"); page.handleInput("\r"); }
+          else {
+            if (pages === 2) {
+              page.handleInput("\x13");
+              assert.match(page.render(80).join("\n"), /Callback default saved/);
+            }
+            page.handleInput("\x1b");
+          }
+        });
+      } } };
+    await command("", ctx);
+    assert.equal(opened, 1);
+    assert.equal(notifications.length, 1);
+    assert.match(notifications[0][0], /Callback default unavailable/);
+    await command("", ctx);
+    assert.equal(notifications.length, 1, "the repaired default must load without another error");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

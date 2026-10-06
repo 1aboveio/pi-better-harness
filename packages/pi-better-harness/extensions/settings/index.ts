@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chooseHarnessSetting } from "./page.ts";
 import { createSettingsRegistry } from "./registry.ts";
+import { changeCallbackSetting, getCallbackSettings, saveCallbackDefault } from "pi-better-background-tasks/src/shared-callback-batcher.ts";
 
 export default function harnessSettingsExtension(pi: ExtensionAPI): void {
   const registry = createSettingsRegistry(pi);
@@ -13,10 +14,27 @@ export default function harnessSettingsExtension(pi: ExtensionAPI): void {
       if (ctx.mode !== "tui") { ctx.ui.notify("Harness settings requires the interactive TUI.", "warning"); return; }
       registry.refresh();
       let selected: string | undefined;
+      const reported = new Set<string>();
+      const readSettings = (): ReturnType<typeof getCallbackSettings> => {
+        try { return getCallbackSettings(ctx); }
+        catch (error) {
+          const message = `Callback default unavailable; using Wait until idle: ${error instanceof Error ? error.message : String(error)}`;
+          if (!reported.has(message)) { ctx.ui.notify(message, "error"); reported.add(message); }
+          return { mode: "hold", source: "default" };
+        }
+      };
       while (true) {
         const links = registry.list();
-        if (!links.length) { ctx.ui.notify("No package settings are available.", "info"); return; }
-        selected = await chooseHarnessSetting(ctx, links, selected);
+        try {
+          selected = await chooseHarnessSetting(ctx, links, selected, {
+            get: readSettings,
+            change: mode => changeCallbackSetting(pi, ctx, mode),
+            save: () => saveCallbackDefault(readSettings().mode),
+          });
+        } catch (error) {
+          ctx.ui.notify(`Settings unavailable: ${error instanceof Error ? error.message : String(error)}`, "error");
+          return;
+        }
         if (!selected) return;
         const link = links.find(item => `link:${item.id}` === selected);
         if (!link) continue;

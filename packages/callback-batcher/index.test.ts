@@ -2,15 +2,22 @@
 // @level unit
 // @fails-without-fix background-callback.batch
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import {
   CALLBACK_BATCH_BUDGET_BYTES,
   CALLBACK_BATCH_MAX_BYTES,
-  CALLBACK_WHILE_BUSY_ENV,
+  CALLBACK_SETTINGS_ENTRY,
   callbackBatchBudget,
+  changeCallbackSetting,
   createCallbackBatcher,
   getCallbackBatcher,
+  getCallbackSettings,
+  saveCallbackDefault,
   setCallbackBatchContext,
   formatCallbackBatch,
   formatUrgentCallback,
@@ -48,12 +55,438 @@ function recordingHost() {
   return { host, messages };
 }
 
-test("#425 only the exact environment opt-in steers busy callbacks; idle delivery is unchanged", async () => {
-  const previous = process.env[CALLBACK_WHILE_BUSY_ENV];
+function preferencesFixture(t: { after(fn: () => void): void }) {
+  const dir = mkdtempSync(join(tmpdir(), "callback-settings-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const seams = { agentDir: () => dir };
+  const path = join(dir, "extensions", "pi-better-callback-preferences.json");
+  const write = (text: string) => {
+    mkdirSync(join(dir, "extensions"), { recursive: true });
+    writeFileSync(path, text);
+  };
+  const branch: unknown[] = [];
+  const ctx = { isIdle: () => false, sessionManager: { getBranch: () => branch } };
+  const { host: base, messages } = recordingHost();
+  const host = { ...base, appendEntry(customType: string, data: unknown) {
+    branch.push({ type: "custom", customType, data });
+  } };
+  return { seams, path, write, branch, ctx, host, messages };
+}
+
+function settingEntry(mode: string, version = 1) {
+  return { type: "custom", customType: CALLBACK_SETTINGS_ENTRY, data: { version, mode } };
+}
+
+test("latest valid current-branch setting wins without reading even a corrupt user default", (t) => {
+  const f = preferencesFixture(t);
+  f.write("not JSON");
+  const invalid = [null, [], {}, { version: 2, mode: "steer" }, { version: 1, mode: "STEER" },
+    { version: 1, mode: " steer " }, { version: 1, mode: "hold", extra: true }];
+  f.branch.push(settingEntry("hold"), settingEntry("steer"),
+    { type: "message", customType: CALLBACK_SETTINGS_ENTRY, data: { version: 1, mode: "hold" } },
+    { type: "custom", customType: "unrelated", data: { version: 1, mode: "hold" } },
+    ...invalid.map((data) => ({ type: "custom", customType: CALLBACK_SETTINGS_ENTRY, data })));
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "session" });
+  assert.deepEqual(getCallbackSettings(f.ctx, { agentDir() { throw new Error("must not read default"); } }),
+    { mode: "steer", source: "session" });
+  f.branch.splice(1);
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "session" });
+  f.branch.length = 0;
+  assert.throws(() => getCallbackSettings(f.ctx, f.seams), /Invalid callback default/);
+});
+
+test("missing defaults fall back to hold; invalid branch entries fall back to the saved default", (t) => {
+  const f = preferencesFixture(t);
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "default" });
+  saveCallbackDefault("steer", f.seams);
+  f.branch.push(settingEntry("hold", 2), settingEntry("bad"));
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "default" });
+  assert.deepEqual(getCallbackSettings({ sessionManager: { getBranch: () => f.branch } }, f.seams), { mode: "steer", source: "default" });
+  f.branch.push(settingEntry("hold"));
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "session" });
+});
+
+test("saved defaults require exact versioned JSON and surface malformed/read errors", (t) => {
+  const f = preferencesFixture(t);
+  for (const text of ["{", "null", "[]", "{}", '{"mode":"steer"}', '{"version":1}',
+    '{"version":"1","mode":"steer"}', '{"version":2,"mode":"steer"}',
+    '{"version":1,"mode":"invalid"}', '{"version":1,"mode":"steer","extra":true}']) {
+    f.write(text);
+    assert.throws(() => getCallbackSettings(f.ctx, f.seams), (error: Error) => {
+      assert.match(error.message, /Invalid callback default/);
+      assert.ok(error.message.includes(f.path), "error identifies the file to repair");
+      return true;
+    });
+  }
+  rmSync(f.path);
+  mkdirSync(f.path);
+  assert.throws(() => getCallbackSettings(f.ctx, f.seams), /Cannot read callback default/);
+});
+
+test("session changes autosave only the branch; explicit default saves survive a fresh session", async (t) => {
+  const f = preferencesFixture(t);
+  const batcher = getCallbackBatcher(f.host, { windowMs: 10_000 });
+  t.after(() => batcher.cancel());
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  batcher.setForegroundRunning(true);
+  batcher.enqueue(event("session_only"));
+  changeCallbackSetting(f.host, f.ctx, "steer");
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "session" });
+  assert.deepEqual(getCallbackSettings({}, f.seams), { mode: "hold", source: "default" });
+  assert.equal(await batcher.flush(), true);
+  assert.deepEqual(f.messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+
+  saveCallbackDefault("steer", f.seams);
+  changeCallbackSetting(f.host, f.ctx, "hold");
+  batcher.enqueue(event("current_still_hold"));
+  saveCallbackDefault("steer", f.seams);
+  assert.equal(await batcher.flush(), false, "saving a default cannot change current-session delivery");
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "session" });
+  const fresh = recordingHost();
+  const freshCtx = { isIdle: () => false, sessionManager: { getBranch: () => [] } };
+  setCallbackBatchContext(fresh.host, freshCtx, f.seams);
+  const restarted = getCallbackBatcher(fresh.host);
+  t.after(() => restarted.cancel());
+  restarted.setForegroundRunning(true);
+  restarted.enqueue(event("future_session"));
+  assert.deepEqual(getCallbackSettings(freshCtx, f.seams), { mode: "steer", source: "default" });
+  assert.equal(await restarted.flush(), true);
+  assert.deepEqual(fresh.messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+});
+
+test("settings restore from the real SDK branch and survive session file reopen", (t) => {
+  const f = preferencesFixture(t);
+  const dir = f.seams.agentDir();
+  const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
+  const ctx = { ...f.ctx, sessionManager };
+  const host = { ...f.host, appendEntry(customType: string, data: unknown) {
+    sessionManager.appendCustomEntry(customType, data);
+  } };
+  changeCallbackSetting(host, ctx, "hold");
+  const root = sessionManager.getLeafId()!;
+  // Pi flushes its first session file when the first assistant message arrives.
+  sessionManager.appendMessage({ role: "assistant", content: [{ type: "text", text: "ready" }],
+    api: "anthropic-messages", provider: "test", model: "test", stopReason: "stop", timestamp: 0,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+  changeCallbackSetting(host, ctx, "steer");
+  const abandoned = sessionManager.getLeafId()!;
+  sessionManager.branch(root);
+  assert.deepEqual(getCallbackSettings(ctx, f.seams), { mode: "hold", source: "session" });
+  changeCallbackSetting(host, ctx, "hold");
+  const reopened = SessionManager.open(sessionManager.getSessionFile()!);
+  assert.ok(reopened.getEntries().some((entry) => entry.id === abandoned), "abandoned setting remains in history");
+  assert.deepEqual(getCallbackSettings({ sessionManager: reopened }, f.seams), { mode: "hold", source: "session" });
+  reopened.branch(abandoned);
+  assert.deepEqual(getCallbackSettings({ sessionManager: reopened }, f.seams), { mode: "steer", source: "session" });
+  t.after(() => getCallbackBatcher(host).cancel());
+});
+
+test("a real SDK disk failure cannot restore the rejected in-memory setting", async (t) => {
+  const f = preferencesFixture(t);
+  const dir = f.seams.agentDir();
+  const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
+  sessionManager.appendMessage({ role: "assistant", content: [{ type: "text", text: "ready" }],
+    api: "anthropic-messages", provider: "test", model: "test", stopReason: "stop", timestamp: 0,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+  const ctx = { ...f.ctx, sessionManager };
+  const host = { ...f.host, appendEntry(customType: string, data: unknown) {
+    sessionManager.appendCustomEntry(customType, data);
+  } };
+  setCallbackBatchContext(host, ctx, f.seams);
+  const batcher = getCallbackBatcher(host);
+  t.after(() => batcher.cancel());
+  batcher.setForegroundRunning(true);
+  batcher.enqueue(event("must_stay_held"));
+  const previousLeaf = sessionManager.getLeafId();
+  const file = sessionManager.getSessionFile()!;
+  rmSync(file);
+  mkdirSync(file);
+  assert.throws(() => changeCallbackSetting(host, ctx, "steer"), /EISDIR/);
+  assert.notEqual(sessionManager.getLeafId(), previousLeaf, "the SDK really advanced its in-memory branch before the failure");
+  assert.deepEqual(getCallbackSettings(ctx, f.seams), { mode: "hold", source: "default" });
+  setCallbackBatchContext(host, ctx, f.seams);
+  assert.equal(await batcher.flush(), false);
+  assert.equal(f.messages.length, 0, "a failed edit cannot enable steering on a later lifecycle event");
+});
+
+test("a future-session default does not leak into an already-open session without an override", async (t) => {
+  const f = preferencesFixture(t);
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  const batcher = getCallbackBatcher(f.host);
+  t.after(() => batcher.cancel());
+  batcher.setForegroundRunning(true);
+  saveCallbackDefault("steer", f.seams);
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "default" });
+  batcher.enqueue(event("existing_session"));
+  assert.equal(await batcher.flush(), false);
+  assert.equal(f.messages.length, 0);
+  const freshCtx = { isIdle: () => false, sessionManager: { getBranch: () => [] } };
+  const fresh = recordingHost();
+  setCallbackBatchContext(fresh.host, freshCtx, f.seams);
+  const future = getCallbackBatcher(fresh.host);
+  t.after(() => future.cancel());
+  future.setForegroundRunning(true);
+  future.enqueue(event("future_session"));
+  assert.deepEqual(getCallbackSettings(freshCtx, f.seams), { mode: "steer", source: "default" });
+  assert.equal(await future.flush(), true);
+  assert.equal(fresh.messages.length, 1);
+  assert.deepEqual(fresh.messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+});
+
+test("returning from an overridden branch retains the original session default", (t) => {
+  const f = preferencesFixture(t);
+  saveCallbackDefault("steer", f.seams);
+  f.branch.push(settingEntry("hold"));
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  t.after(() => getCallbackBatcher(f.host).cancel());
+  saveCallbackDefault("hold", f.seams);
+  f.branch.length = 0;
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "default" });
+  const fresh = { sessionManager: { getBranch: () => [] } };
+  assert.deepEqual(getCallbackSettings(fresh, f.seams), { mode: "hold", source: "default" });
+});
+
+test("a reused manager captures a new default when its session identity changes", (t) => {
+  const f = preferencesFixture(t);
+  let id = "first";
+  const ctx = { sessionManager: { getBranch: () => [], getSessionId: () => id } };
+  assert.deepEqual(getCallbackSettings(ctx, f.seams), { mode: "hold", source: "default" });
+  saveCallbackDefault("steer", f.seams);
+  assert.deepEqual(getCallbackSettings(ctx, f.seams), { mode: "hold", source: "default" });
+  id = "second";
+  assert.deepEqual(getCallbackSettings(ctx, f.seams), { mode: "steer", source: "default" });
+});
+
+test("Harness package-specifier settings changes update both producers' live shared singleton", async (t) => {
+  const f = preferencesFixture(t);
+  const subagents = await import("../pi-better-subagents/shared-callback-batcher.ts");
+  const harness = await import("pi-better-background-tasks/src/shared-callback-batcher.ts");
+  const background = await import("../pi-better-background-tasks/src/shared-callback-batcher.ts");
+  f.branch.push(settingEntry("hold"));
+  const subagentHost = { ...f.host, events: {} };
+  const backgroundHost = { ...f.host, events: {} };
+  const harnessHost = { ...f.host, events: {} };
+  subagents.setCallbackBatchContext(subagentHost, f.ctx, f.seams);
+  background.setCallbackBatchContext(backgroundHost, f.ctx, f.seams);
+  const batcher = subagents.getCallbackBatcher(subagentHost);
+  t.after(() => batcher.cancel());
+  batcher.setForegroundRunning(true);
+  batcher.toolStarted("tool");
+  batcher.enqueue(event("subagent"));
+  background.getCallbackBatcher(backgroundHost).enqueue(event("background", {
+    source: "background-task", detailTool: "bg_task_status",
+  }));
+  harness.changeCallbackSetting(harnessHost, f.ctx, "steer");
+  assert.equal(harness.getCallbackBatcher(harnessHost), batcher);
+  assert.equal(background.getCallbackBatcher(backgroundHost), batcher);
+  assert.deepEqual(subagents.getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "session" });
+  assert.equal(await batcher.flush(), false, "changing mode cannot clear producer tool IDs");
+  await background.getCallbackBatcher(backgroundHost).toolEnded("tool");
+  assert.equal(f.messages.length, 1);
+  assert.match(f.messages[0]!.message.content, /^2 background completions are ready:/);
+  assert.deepEqual(f.messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+  harness.changeCallbackSetting(harnessHost, f.ctx, "hold");
+  batcher.enqueue(event("held"));
+  assert.equal(await background.getCallbackBatcher(backgroundHost).flush(), false);
+  assert.equal(f.messages.length, 1);
+});
+
+test("failed appends and invalid modes leave the branch, pending timer, and live mode untouched", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = preferencesFixture(t);
+  const batcher = getCallbackBatcher(f.host, { windowMs: 25, isAvailable: () => false });
+  t.after(() => batcher.cancel());
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  batcher.setForegroundRunning(true);
+  changeCallbackSetting(f.host, f.ctx, "steer");
+  batcher.enqueue(event("pending"));
+  const before = [...f.branch];
+  let appends = 0;
+  const failingHost = { ...f.host, appendEntry() { appends++; throw new Error("disk full"); } };
+  assert.throws(() => changeCallbackSetting(failingHost, f.ctx, "hold"), /disk full/);
+  assert.throws(() => changeCallbackSetting(failingHost, f.ctx, "invalid" as never), /Invalid callback delivery mode/);
+  assert.throws(() => batcher.setWhileBusy("invalid" as never), /Invalid callback delivery mode/);
+  assert.equal(appends, 1, "validation happens before append");
+  assert.deepEqual(f.branch, before);
+  t.mock.timers.tick(25);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(f.messages.length, 1);
+  assert.deepEqual(f.messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+});
+
+test("live hold/steer switches replace pending retry/debounce timers and retain dedupe", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let idle = false;
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 25, retryMs: 100, isAvailable: () => idle });
+  t.after(() => batcher.cancel());
+  batcher.setForegroundRunning(true);
+  const item = event("switch");
+  batcher.enqueue(item);
+  t.mock.timers.tick(10);
+  batcher.setWhileBusy("steer");
+  assert.equal(batcher.enqueue(item), false);
+  t.mock.timers.tick(24);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(messages.length, 0);
+  batcher.setWhileBusy("hold");
+  t.mock.timers.tick(100);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(messages.length, 0, "an obsolete steer timer cannot send after switching to hold");
+  assert.equal(batcher.pendingCount(), 1);
+  batcher.setWhileBusy("steer");
+  t.mock.timers.tick(25);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(messages.length, 1, "switching to steer must not wait for the old retry deadline");
+  assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+  batcher.setWhileBusy("hold");
+  batcher.enqueue(item);
+  idle = true;
+  batcher.setAvailability(() => idle);
+  await batcher.flush();
+  assert.equal(messages.length, 1, "changing modes cannot discard handoff dedupe");
+});
+
+test("branch/context restore preserves active tools, foreground state, and failed receipt handoffs", async (t) => {
+  const f = preferencesFixture(t);
+  const batcher = getCallbackBatcher(f.host, { windowMs: 10_000 });
+  t.after(() => batcher.cancel());
+  f.branch.push(settingEntry("steer"));
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  batcher.setForegroundRunning(true);
+  let writable = false;
+  let receipts = 0;
+  batcher.enqueue(event("receipt", { onDelivered() {
+    if (!writable) throw new Error("receipt unavailable");
+    receipts++;
+  } }));
+  assert.equal(await batcher.flush(), false);
+  assert.equal(f.messages.length, 1);
+  batcher.toolStarted("outer");
+  batcher.toolStarted("outer/1");
+  batcher.enqueue(event("pending"));
+  f.branch.splice(0, f.branch.length, settingEntry("hold"));
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  await batcher.toolEnded("outer/1");
+  assert.equal(await batcher.flush(), false);
+  f.branch.splice(0, f.branch.length, settingEntry("steer"));
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  assert.equal(await batcher.flush(), false, "branch navigation must not clear the active outer tool");
+  writable = true;
+  await batcher.toolEnded("outer");
+  assert.equal(f.messages.length, 2, "restored foreground state permits the final tool's steer");
+  assert.equal(receipts, 1);
+  assert.match(f.messages[1]!.message.content, /id=pending/);
+  assert.doesNotMatch(f.messages[1]!.message.content, /id=receipt/);
+});
+
+test("corrupt defaults and unreadable branch restores fail closed instead of leaking prior session steer", async (t) => {
+  const f = preferencesFixture(t);
+  const batcher = getCallbackBatcher(f.host, { windowMs: 10_000 });
+  t.after(() => batcher.cancel());
+  f.branch.push(settingEntry("steer"));
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  batcher.setForegroundRunning(true);
+  batcher.enqueue(event("queued"));
+  f.write("broken JSON");
+  const notices: Array<[string, string]> = [];
+  const ctx = { isIdle: () => false, sessionManager: { getBranch: () => [] },
+    ui: { notify(message: string, type: string) { notices.push([message, type]); } } };
+  assert.throws(() => getCallbackSettings(ctx, f.seams), /Invalid callback default/);
+  setCallbackBatchContext(f.host, ctx, f.seams);
+  assert.equal(await batcher.flush(), false);
+  assert.equal(f.messages.length, 0);
+  assert.equal(batcher.pendingCount(), 1);
+  assert.match(notices[0]![0], /restored to hold.*Invalid callback default/);
+  assert.equal(notices[0]![1], "error");
+
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  saveCallbackDefault("steer", f.seams);
+  const unreadable = { ...ctx, sessionManager: { getBranch(): unknown[] { throw new Error("branch unreadable"); } } };
+  assert.throws(() => getCallbackSettings(unreadable, f.seams), /branch unreadable/);
+  setCallbackBatchContext(f.host, unreadable, f.seams);
+  assert.equal(await batcher.flush(), false, "an unreadable branch cannot enable the saved steer default");
+  assert.match(notices[1]![0], /branch unreadable/);
+  setCallbackBatchContext(f.host, f.ctx, f.seams);
+  f.write("bad again");
+  setCallbackBatchContext(f.host, { ...ctx, ui: { notify() { throw new Error("UI unavailable"); } } }, f.seams);
+  assert.equal(await batcher.flush(), false, "notification failure cannot prevent fail-closed restoration");
+});
+
+test("live mode changes cannot bypass the deferred idle-run guard", async (t) => {
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher(host, { windowMs: 10_000, isAvailable: () => true });
+  t.after(() => batcher.cancel());
+  batcher.setForegroundRunning(true);
+  batcher.enqueue(event("idle"));
+  await batcher.flush();
+  batcher.enqueue(event("awaiting_run"));
+  batcher.setWhileBusy("steer");
+  batcher.setWhileBusy("hold");
+  batcher.setWhileBusy("steer");
+  assert.equal(await batcher.flush(), false);
+  assert.equal(messages.length, 1);
+});
+
+test("switching to hold during an in-flight steer retains receipts and holds later callbacks", async (t) => {
+  let finish!: () => void;
+  const { host, messages } = recordingHost();
+  const batcher = createCallbackBatcher({ sendMessage(message, options) {
+    host.sendMessage(message, options);
+    return new Promise<void>((resolve) => { finish = resolve; });
+  } }, { windowMs: 10_000, whileBusy: "steer", isAvailable: () => false });
+  t.after(() => batcher.cancel());
+  batcher.setForegroundRunning(true);
+  let receipts = 0;
+  const item = event("in_flight", { onDelivered: () => { receipts++; } });
+  batcher.enqueue(item);
+  const flush = batcher.flush();
+  batcher.setWhileBusy("hold");
+  assert.equal(batcher.enqueue(item), false);
+  batcher.enqueue(event("later"));
+  finish();
+  assert.equal(await flush, true);
+  assert.equal(receipts, 1);
+  assert.equal(await batcher.flush(), false);
+  assert.equal(messages.length, 1);
+  assert.equal(batcher.pendingCount(), 1);
+});
+
+test("atomic default saves replace valid preferences and failed rename cleans temp files without changing live settings", async (t) => {
+  const f = preferencesFixture(t);
+  saveCallbackDefault("steer", f.seams);
+  saveCallbackDefault("hold", f.seams);
+  assert.deepEqual(getCallbackSettings({}, f.seams), { mode: "hold", source: "default" });
+  const before = readFileSync(f.path, "utf8");
+  assert.throws(() => saveCallbackDefault("bad" as never, f.seams), /Invalid callback delivery mode/);
+  assert.equal(readFileSync(f.path, "utf8"), before);
+  const batcher = getCallbackBatcher(f.host, { windowMs: 10_000 });
+  t.after(() => batcher.cancel());
+  changeCallbackSetting(f.host, f.ctx, "steer");
+  batcher.setForegroundRunning(true);
+  batcher.enqueue(event("unchanged"));
+  rmSync(f.path);
+  mkdirSync(f.path);
+  const sentinel = join(f.path, "do-not-remove");
+  writeFileSync(sentinel, "existing target");
+  assert.throws(() => saveCallbackDefault("hold", f.seams), /Cannot save callback default/);
+  assert.equal(readFileSync(sentinel, "utf8"), "existing target");
+  assert.deepEqual(readdirSync(join(f.seams.agentDir(), "extensions")), ["pi-better-callback-preferences.json"]);
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "session" });
+  assert.equal(await batcher.flush(), true);
+  assert.deepEqual(f.messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
+});
+
+test("removed busy-mode environment values cannot enable steering; idle delivery is unchanged", async () => {
+  const env = "PI_BETTER_CALLBACK_WHILE_BUSY";
+  const previous = process.env[env];
   try {
     for (const value of [undefined, "", "invalid", "STEER", " steer ", "steer"]) {
-      if (value === undefined) delete process.env[CALLBACK_WHILE_BUSY_ENV];
-      else process.env[CALLBACK_WHILE_BUSY_ENV] = value;
+      if (value === undefined) delete process.env[env];
+      else process.env[env] = value;
       let idle = false;
       const { host, messages } = recordingHost();
       const batcher = createCallbackBatcher(host, { windowMs: 10_000, isAvailable: () => idle });
@@ -63,30 +496,25 @@ test("#425 only the exact environment opt-in steers busy callbacks; idle deliver
         batcher.enqueue(event("busy"));
         assert.equal(await batcher.flush(), false, `active tool must hold callbacks (${value})`);
         await batcher.toolEnded("foreground");
-        assert.equal(messages.length, value === "steer" ? 1 : 0, `busy handoff (${value})`);
-        if (value === "steer") {
-          assert.deepEqual(messages[0]!.options, { deliverAs: "steer", triggerTurn: true });
-        }
+        assert.equal(messages.length, 0, `environment must not enable busy handoff (${value})`);
         idle = true;
         batcher.setAvailability(() => idle);
         await batcher.flush();
         assert.equal(messages.length, 1, "idle must not repeat a busy handoff");
         batcher.enqueue(event("idle"));
         // Reset the idle awaitingRun guard after the preceding idle follow-up.
-        if (value !== "steer") {
-          idle = false;
-          batcher.setAvailability(() => idle);
-          idle = true;
-          batcher.setAvailability(() => idle);
-        }
+        idle = false;
+        batcher.setAvailability(() => idle);
+        idle = true;
+        batcher.setAvailability(() => idle);
         await batcher.flush();
         assert.equal(messages.length, 2);
         assert.deepEqual(messages[1]!.options, { deliverAs: "followUp", triggerTurn: true });
       } finally { batcher.cancel(); }
     }
   } finally {
-    if (previous === undefined) delete process.env[CALLBACK_WHILE_BUSY_ENV];
-    else process.env[CALLBACK_WHILE_BUSY_ENV] = previous;
+    if (previous === undefined) delete process.env[env];
+    else process.env[env] = previous;
   }
 });
 
@@ -320,7 +748,7 @@ test("#425 both vendored copies share tool IDs across distinct wrappers and host
   const subagents = await import("../pi-better-subagents/shared-callback-batcher.ts");
   const background = await import("../pi-better-background-tasks/src/shared-callback-batcher.ts");
   const { host, messages } = recordingHost();
-  const sessionManager = {};
+  const sessionManager = { getBranch: () => [{ type: "custom", customType: CALLBACK_SETTINGS_ENTRY, data: { version: 1, mode: "steer" } }] };
   const ctx = { isIdle: () => false, sessionManager };
   const first = getCallbackBatcher(host, { windowMs: 10_000, whileBusy: "steer" });
   first.setForegroundRunning(true);

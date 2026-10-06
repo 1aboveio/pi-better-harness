@@ -94,6 +94,18 @@ packages without duplicating their configuration. `/sandbox`, `/subagents
 settings`, and `/goal settings` remain available in standalone installations.
 Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
 
+The hub also owns **Completions while busy**, shared by Subagents and Background
+Tasks. Choose **Wait until idle** (the default) or **Steer active run**. Changes
+apply immediately and autosave to the current session branch, including across
+reloads. Press **Ctrl+S** to save the current choice as your default for future
+Pi sessions; changing a session afterward does not change that saved default.
+Saving a default leaves already-open sessions unchanged, including when
+navigating to a branch without a session override.
+The user default is stored in
+`<agent-dir>/extensions/pi-better-callback-preferences.json` and also applies
+when either callback package is loaded standalone. The former
+`PI_BETTER_CALLBACK_WHILE_BUSY` environment variable is no longer supported.
+
 Next-prompt inference is deferred pending safe public auth/header resolution in
 Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in
 this version, and makes no auxiliary model requests. The integration blocker is

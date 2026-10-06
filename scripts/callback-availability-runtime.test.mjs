@@ -10,7 +10,7 @@ import test from "node:test";
 import { Type } from "typebox";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
-import { getCallbackBatcher } from "../packages/pi-better-background-tasks/src/shared-callback-batcher.ts";
+import { changeCallbackSetting, getCallbackBatcher } from "../packages/pi-better-background-tasks/src/shared-callback-batcher.ts";
 import { getCallbackBatcher as getSubagentCallbackBatcher } from "../packages/pi-better-subagents/shared-callback-batcher.ts";
 
 const sdkUrl = process.env.PI_CODEMODE_TEST_SDK_DIR
@@ -22,12 +22,6 @@ const ai = await import(process.env.PI_CODEMODE_TEST_SDK_DIR
   : import.meta.resolve("@earendil-works/pi-ai"));
 
 test("#425 real Pi sees one mixed completion steer after a held tool without settling", { timeout: 10_000 }, async (t) => {
-  const previousMode = process.env.PI_BETTER_CALLBACK_WHILE_BUSY;
-  process.env.PI_BETTER_CALLBACK_WHILE_BUSY = "steer";
-  t.after(() => {
-    if (previousMode === undefined) delete process.env.PI_BETTER_CALLBACK_WHILE_BUSY;
-    else process.env.PI_BETTER_CALLBACK_WHILE_BUSY = previousMode;
-  });
   const keepAlive = setInterval(() => {}, 10_000);
   t.after(() => clearInterval(keepAlive));
   const root = mkdtempSync(join(tmpdir(), "pi-callback-steer-"));
@@ -113,6 +107,7 @@ test("#425 real Pi sees one mixed completion steer after a held tool without set
     model: modelRuntime.getModel("callback-steer-test", "offline"), noTools: "builtin" }));
   const errors = [];
   await session.bindExtensions({ onError: (error) => errors.push(error) });
+  changeCallbackSetting(host, { sessionManager: session.sessionManager, isIdle: () => session.isIdle }, "steer");
   const sent = [];
   const sendCustomMessage = session.sendCustomMessage.bind(session);
   session.sendCustomMessage = (message, options) => {
@@ -203,11 +198,6 @@ test("#425 real Pi sees one mixed completion steer after a held tool without set
 });
 
 test("#409 real Pi runs one aggregate after settlement and holds arrivals during that run", { timeout: 10_000 }, async (t) => {
-  const previousMode = process.env.PI_BETTER_CALLBACK_WHILE_BUSY;
-  delete process.env.PI_BETTER_CALLBACK_WHILE_BUSY;
-  t.after(() => {
-    if (previousMode !== undefined) process.env.PI_BETTER_CALLBACK_WHILE_BUSY = previousMode;
-  });
   // Production wake timers are unref'd; the offline provider's unresolved
   // promises do not keep Node alive while this test waits for a wake.
   const keepAlive = setInterval(() => {}, 10_000);
@@ -283,6 +273,7 @@ test("#409 real Pi runs one aggregate after settlement and holds arrivals during
     model: modelRuntime.getModel("callback-availability-test", "offline"), noTools: "builtin" }));
   const errors = [];
   await session.bindExtensions({ onError: (error) => errors.push(error) });
+  changeCallbackSetting(host, { sessionManager: manager, isIdle: () => session.isIdle }, "hold");
   const sent = [];
   const sendCustomMessage = session.sendCustomMessage.bind(session);
   session.sendCustomMessage = (message, options) => {
