@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.26.1] - 2026-10-07
+
+### Fixed
+
+- Collapse compaction summaries to one quiet row in Minimal mode, retaining the original summary when expanded.
+- Show compact argument hints for tools without a custom call renderer, using the generic icon fallback.
+- Keep all bundled component versions unchanged.
+
 ## [pi-better-harness@0.26.0] - 2026-10-07
 
 ### Added
