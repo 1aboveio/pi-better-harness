@@ -21,6 +21,20 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 - A progress-aware follow-up loop with ten identical no-progress retries and linear backoff (60s through 600s by default), followed by a hold recoverable with `/goal resume`. Delays saturate at Node's timer limit, and observed background drains reset progress before callback turns can cancel the wake. Pi's network retry policy remains independent.
 - An observable-progress stall state for active goals.
 
+## Settings Storage
+
+Goal preferences are saved only in Pi's global `~/.pi/agent/settings.json` under
+`piBetterHarness.goal` (or `$PI_CODING_AGENT_DIR/settings.json` when overridden).
+The payload retains `version: 1` and the boolean `autoContinue`,
+`conversationalResume`, and `pauseOnEscape` fields; omitted controls default to
+`true`. Updates preserve other Pi settings and other `piBetterHarness` keys.
+
+On first read, an existing `extensions/pi-better-goal-preferences.json` in the
+agent directory is validated and migrated when the global Goal key is absent.
+An existing global key is authoritative, and subsequent changes write only
+`settings.json`. Invalid preferences report an error instead of being replaced
+with defaults.
+
 ## Skill-Owned Workflows
 
 Skills that own execution and their own task plan can opt in through `SKILL.md` frontmatter:

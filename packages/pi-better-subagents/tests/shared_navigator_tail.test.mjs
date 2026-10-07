@@ -130,11 +130,11 @@ test("subagent details render a structured Pi-style transcript", async () => {
         assert.match(mainSheet, /coordinator · session/);
         assert.match(mainSheet, /m cycles this session/);
         assert.match(mainSheet, /ctrl\+s saves that mode/);
-        const configPath = join(tempDir, "delegation-config.json");
-        writeFileSync(configPath, JSON.stringify({ defaultTools: "read", delegationMode: "adaptive" }));
+        const configPath = join(tempDir, "settings.json");
+        writeFileSync(configPath, JSON.stringify({ piBetterHarness: { subagents: { defaultTools: "read", delegationMode: "adaptive" } } }));
         setConfigPathForTests(configPath);
         component.handleInput("\x13");
-        const saved = JSON.parse(readFileSync(configPath, "utf8"));
+        const saved = JSON.parse(readFileSync(configPath, "utf8")).piBetterHarness.subagents;
         assert.equal(saved.delegationMode, "coordinator");
         assert.equal(saved.defaultTools, "read");
         component.handleInput("x");

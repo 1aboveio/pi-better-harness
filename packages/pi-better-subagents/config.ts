@@ -8,13 +8,14 @@
  * `defaultTools` absent → the built-in SAFE_DEFAULT_TOOLS.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { SELF_SPEC } from "./extensions.ts";
 import { isDelegationMode, type DelegationMode } from "./delegation.ts";
 import type { TimingSettings } from "./timing.ts";
+import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 
 export interface SubagentConfig extends TimingSettings {
     /** Foreground delegation policy; /subagents mode overrides this for the current session. */
@@ -104,13 +105,27 @@ export function setConfigPathForTests(path: string | undefined, bundledPath?: st
 }
 
 export function configPath(): string {
-    return configPathForTests ?? join(piAgentDir(), "extensions", "pi-better-subagents-config.json");
+    return harnessSettingsPath(configSeams());
+}
+
+function configSeams() {
+    return { agentDir: () => configPathForTests ? dirname(configPathForTests) : piAgentDir() };
 }
 
 function readConfig(path: string): SubagentConfig {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+    return parseConfig(JSON.parse(readFileSync(path, "utf-8")));
+}
+
+function parseConfig(parsed: unknown): SubagentConfig {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Config must be a JSON object.");
     return parsed as SubagentConfig;
+}
+
+function savedConfig(): SubagentConfig {
+    const user = readHarnessSetting("subagents", configSeams(), configPathForTests ? undefined : {
+        path: join(piAgentDir(), "extensions", "pi-better-subagents-config.json"), parse: parseConfig,
+    });
+    return user === undefined ? {} : parseConfig(user);
 }
 
 function bundledConfig(): SubagentConfig {
@@ -127,7 +142,7 @@ function bundledConfig(): SubagentConfig {
 export function loadConfig(): SubagentConfig {
     if (cached) return cached;
     let user: SubagentConfig = {};
-    try { user = readConfig(configPath()); } catch { /* retain package fallback */ }
+    try { user = savedConfig(); } catch { /* retain package fallback */ }
     cached = { ...bundledConfig(), ...user };
     return cached;
 }
@@ -146,21 +161,10 @@ export function writeSubagentSettings(settings: { delegationMode: DelegationMode
 }
 
 function writeConfigSettings(settings: Partial<SubagentConfig>, path: string): void {
-    let current: SubagentConfig = {};
-    try {
-        current = readConfig(path);
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    Object.assign(current, settings);
-    const pending = `${path}.${process.pid}.tmp`;
-    try {
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(pending, `${JSON.stringify(current, null, 2)}\n`);
-        renameSync(pending, path);
-    } finally {
-        rmSync(pending, { force: true });
-    }
+    if (path === configPath()) savedConfig();
+    const current = updateHarnessSetting("subagents", previous => ({
+        ...(previous === undefined ? {} : parseConfig(previous)), ...settings,
+    }), { agentDir: () => dirname(path) });
     if (path === configPath()) cached = { ...bundledConfig(), ...current };
 }
 

@@ -2,7 +2,7 @@
 // @level unit
 // @fails-without-fix background-callback.batch
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -59,10 +59,15 @@ function preferencesFixture(t: { after(fn: () => void): void }) {
   const dir = mkdtempSync(join(tmpdir(), "callback-settings-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const seams = { agentDir: () => dir };
-  const path = join(dir, "extensions", "pi-better-callback-preferences.json");
+  const path = join(dir, "settings.json");
+  const legacyPath = join(dir, "extensions", "pi-better-callback-preferences.json");
   const write = (text: string) => {
-    mkdirSync(join(dir, "extensions"), { recursive: true });
     writeFileSync(path, text);
+  };
+  const writePreferences = (callbacks: unknown) => write(JSON.stringify({ piBetterHarness: { callbacks } }));
+  const writeLegacy = (text: string) => {
+    mkdirSync(join(dir, "extensions"), { recursive: true });
+    writeFileSync(legacyPath, text);
   };
   const branch: unknown[] = [];
   const ctx = { isIdle: () => false, sessionManager: { getBranch: () => branch } };
@@ -70,7 +75,7 @@ function preferencesFixture(t: { after(fn: () => void): void }) {
   const host = { ...base, appendEntry(customType: string, data: unknown) {
     branch.push({ type: "custom", customType, data });
   } };
-  return { seams, path, write, branch, ctx, host, messages };
+  return { seams, path, legacyPath, write, writePreferences, writeLegacy, branch, ctx, host, messages };
 }
 
 function settingEntry(mode: string, version = 1) {
@@ -106,12 +111,13 @@ test("missing defaults fall back to hold; invalid branch entries fall back to th
   assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "session" });
 });
 
-test("saved defaults require exact versioned JSON and surface malformed/read errors", (t) => {
+test("saved defaults require an exact versioned callbacks payload and surface read errors", (t) => {
   const f = preferencesFixture(t);
-  for (const text of ["{", "null", "[]", "{}", '{"mode":"steer"}', '{"version":1}',
-    '{"version":"1","mode":"steer"}', '{"version":2,"mode":"steer"}',
-    '{"version":1,"mode":"invalid"}', '{"version":1,"mode":"steer","extra":true}']) {
-    f.write(text);
+  for (const value of [null, false, 0, "", [], {}, { mode: "steer" }, { version: 1 },
+    { version: "1", mode: "steer" }, { version: 2, mode: "steer" },
+    { version: 1, mode: "invalid" }, { version: 1, mode: "STEER" },
+    { version: 1, mode: " steer " }, { version: 1, mode: "steer", extra: true }]) {
+    f.writePreferences(value);
     assert.throws(() => getCallbackSettings(f.ctx, f.seams), (error: Error) => {
       assert.match(error.message, /Invalid callback default/);
       assert.ok(error.message.includes(f.path), "error identifies the file to repair");
@@ -121,6 +127,93 @@ test("saved defaults require exact versioned JSON and surface malformed/read err
   rmSync(f.path);
   mkdirSync(f.path);
   assert.throws(() => getCallbackSettings(f.ctx, f.seams), /Cannot read callback default/);
+});
+
+test("legacy defaults migrate on first read into global settings while preserving unrelated settings", (t) => {
+  const f = preferencesFixture(t);
+  const legacy = '{"version":1,"mode":"steer"}';
+  f.writeLegacy(legacy);
+  f.write(JSON.stringify({ theme: "light", piBetterHarness: { other: { enabled: true } } }));
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "default" });
+  assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), {
+    theme: "light", piBetterHarness: { other: { enabled: true }, callbacks: { version: 1, mode: "steer" } },
+  });
+  assert.equal(readFileSync(f.legacyPath, "utf8"), legacy, "migration leaves the legacy file untouched");
+  f.writeLegacy('{"version":1,"mode":"hold"}');
+  assert.deepEqual(getCallbackSettings({}, f.seams), { mode: "steer", source: "default" });
+  saveCallbackDefault("hold", f.seams);
+  assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), {
+    theme: "light", piBetterHarness: { other: { enabled: true }, callbacks: { version: 1, mode: "hold" } },
+  });
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "default" },
+    "migration captures the session's initial default");
+});
+
+test("an existing global callbacks key is authoritative even when invalid; saves can repair its payload", (t) => {
+  const f = preferencesFixture(t);
+  f.writeLegacy("malformed legacy JSON");
+  for (const mode of ["hold", "steer"]) {
+    f.writePreferences({ version: 1, mode });
+    assert.deepEqual(getCallbackSettings({}, f.seams), { mode, source: "default" });
+  }
+  f.writeLegacy('{"version":1,"mode":"steer"}');
+  const unrelated = { theme: "light", piBetterHarness: { other: { enabled: true }, callbacks: null } };
+  f.write(JSON.stringify(unrelated));
+  const before = readFileSync(f.path, "utf8");
+  assert.throws(() => getCallbackSettings(f.ctx, f.seams), /Invalid callback default/);
+  assert.equal(readFileSync(f.path, "utf8"), before, "invalid global payload cannot fall back to legacy");
+  saveCallbackDefault("hold", f.seams);
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "default" });
+  assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), {
+    ...unrelated, piBetterHarness: { ...unrelated.piBetterHarness, callbacks: { version: 1, mode: "hold" } },
+  });
+  assert.equal(readFileSync(f.legacyPath, "utf8"), '{"version":1,"mode":"steer"}');
+});
+
+test("invalid legacy defaults are never migrated; a save bypasses and leaves invalid legacy data untouched", (t) => {
+  const f = preferencesFixture(t);
+  for (const text of ["{", "null", "[]", "{}", '{"version":2,"mode":"steer"}',
+    '{"version":1,"mode":"STEER"}', '{"version":1,"mode":"steer","extra":true}']) {
+    f.writeLegacy(text);
+    assert.throws(() => getCallbackSettings(f.ctx, f.seams), /Invalid callback default/);
+    assert.equal(existsSync(f.path), false, "failed validation cannot create a global setting");
+  }
+  const before = readFileSync(f.legacyPath, "utf8");
+  saveCallbackDefault("hold", f.seams);
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "hold", source: "default" });
+  assert.equal(readFileSync(f.legacyPath, "utf8"), before);
+});
+
+test("failed migration and default saves preserve global settings and allow a later first-read retry", (t) => {
+  const f = preferencesFixture(t);
+  f.writeLegacy('{"version":1,"mode":"steer"}');
+  f.write('{"theme":"light","piBetterHarness":{"other":true}}');
+  const before = readFileSync(f.path, "utf8");
+  const lock = `${f.path}.lock`;
+  mkdirSync(lock);
+  assert.throws(() => getCallbackSettings(f.ctx, f.seams), /Cannot read callback default/);
+  assert.throws(() => saveCallbackDefault("hold", f.seams), /Cannot save callback default/);
+  assert.equal(readFileSync(f.path, "utf8"), before);
+  assert.deepEqual(readdirSync(f.seams.agentDir()).sort(), ["extensions", "settings.json", "settings.json.lock"]);
+  rmSync(lock, { recursive: true });
+  assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "default" },
+    "failed migration must not cache a fallback default");
+  assert.deepEqual(JSON.parse(readFileSync(f.path, "utf8")), {
+    theme: "light", piBetterHarness: { other: true, callbacks: { version: 1, mode: "steer" } },
+  });
+});
+
+test("malformed global JSON and non-object roots reject reads and saves without overwriting the file", (t) => {
+  const f = preferencesFixture(t);
+  f.writeLegacy('{"version":1,"mode":"steer"}');
+  for (const text of ["{", "null", "[]", "false", "0", '"settings"']) {
+    f.write(text);
+    assert.throws(() => getCallbackSettings(f.ctx, f.seams), /Invalid callback default/);
+    assert.throws(() => saveCallbackDefault("hold", f.seams), /Cannot save callback default/);
+    assert.equal(readFileSync(f.path, "utf8"), text, "failed save must retain the invalid global root");
+    assert.deepEqual(readdirSync(f.seams.agentDir()).sort(), ["extensions", "settings.json"]);
+  }
+  assert.equal(readFileSync(f.legacyPath, "utf8"), '{"version":1,"mode":"steer"}');
 });
 
 test("session changes autosave only the branch; explicit default saves survive a fresh session", async (t) => {
@@ -391,7 +484,7 @@ test("corrupt defaults and unreadable branch restores fail closed instead of lea
   setCallbackBatchContext(f.host, f.ctx, f.seams);
   batcher.setForegroundRunning(true);
   batcher.enqueue(event("queued"));
-  f.write("broken JSON");
+  f.writePreferences({ version: 2, mode: "steer" });
   const notices: Array<[string, string]> = [];
   const ctx = { isIdle: () => false, sessionManager: { getBranch: () => [] },
     ui: { notify(message: string, type: string) { notices.push([message, type]); } } };
@@ -455,10 +548,11 @@ test("switching to hold during an in-flight steer retains receipts and holds lat
   assert.equal(batcher.pendingCount(), 1);
 });
 
-test("atomic default saves replace valid preferences and failed rename cleans temp files without changing live settings", async (t) => {
+test("default saves use only global settings and failed writes leave the target and live settings untouched", async (t) => {
   const f = preferencesFixture(t);
   saveCallbackDefault("steer", f.seams);
   saveCallbackDefault("hold", f.seams);
+  assert.equal(existsSync(f.legacyPath), false, "saving must not create a legacy preferences file");
   assert.deepEqual(getCallbackSettings({}, f.seams), { mode: "hold", source: "default" });
   const before = readFileSync(f.path, "utf8");
   assert.throws(() => saveCallbackDefault("bad" as never, f.seams), /Invalid callback delivery mode/);
@@ -474,7 +568,7 @@ test("atomic default saves replace valid preferences and failed rename cleans te
   writeFileSync(sentinel, "existing target");
   assert.throws(() => saveCallbackDefault("hold", f.seams), /Cannot save callback default/);
   assert.equal(readFileSync(sentinel, "utf8"), "existing target");
-  assert.deepEqual(readdirSync(join(f.seams.agentDir(), "extensions")), ["pi-better-callback-preferences.json"]);
+  assert.deepEqual(readdirSync(f.seams.agentDir()), ["settings.json"], "failed save leaves no temporary or lock files");
   assert.deepEqual(getCallbackSettings(f.ctx, f.seams), { mode: "steer", source: "session" });
   assert.equal(await batcher.flush(), true);
   assert.deepEqual(f.messages[0]!.options, { deliverAs: "steer", triggerTurn: true });

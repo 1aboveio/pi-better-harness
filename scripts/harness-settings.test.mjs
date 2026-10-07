@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +8,15 @@ import { createSettingsRegistry } from "../packages/pi-better-harness/extensions
 import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 import harnessSettings from "../packages/pi-better-harness/extensions/settings/index.ts";
 import { getKeybindings, setKeybindings, KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const isolatedAgentDir = mkdtempSync(join(tmpdir(), "harness-settings-tests-"));
+process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+after(() => {
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+  rmSync(isolatedAgentDir, { recursive: true, force: true });
+});
 
 function eventApi(bus = new EventEmitter()) {
   const entries = [];
@@ -140,7 +149,7 @@ test("hub autosaves callback changes in the session and saves the future default
     pi.on = () => {};
     pi.registerCommand = (_name, options) => { command = options.handler; };
     harnessSettings(pi);
-    const path = join(dir, "extensions", "pi-better-callback-preferences.json");
+    const path = join(dir, "settings.json");
     let page;
     const notifications = [];
     const ctx = { mode: "tui", isIdle: () => true, sessionManager: { getBranch: () => pi.entries },

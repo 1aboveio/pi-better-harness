@@ -64,7 +64,7 @@ test("session cap validates input and follows reload, branch navigation, and res
 
 test("settings save refuses corrupt config without discarding session choices", async () => {
     const dir = mkdtempSync(join(tmpdir(), "subagent-settings-"));
-    const path = join(dir, "config.json");
+    const path = join(dir, "settings.json");
     setConfigPathForTests(path);
     try {
         const h = harness();
@@ -120,8 +120,8 @@ test("/subagents action completions expose complete mode selections with context
 
 test("/subagents save confirms, preserves other config, and clears the session override", async () => {
     const dir = mkdtempSync(join(tmpdir(), "delegation-save-"));
-    const path = join(dir, "config.json");
-    writeFileSync(path, JSON.stringify({ defaultTools: "read", delegationMode: "adaptive" }));
+    const path = join(dir, "settings.json");
+    writeFileSync(path, JSON.stringify({ piBetterHarness: { subagents: { defaultTools: "read", delegationMode: "adaptive" } } }));
     setConfigPathForTests(path);
     try {
         const h = harness();
@@ -131,11 +131,11 @@ test("/subagents save confirms, preserves other config, and clears the session o
         h.ctx.hasUI = true;
         h.ctx.ui.confirm = async () => false;
         await command.handler("save", h.ctx);
-        assert.equal(JSON.parse(readFileSync(path, "utf8")).delegationMode, "adaptive");
+        assert.equal(JSON.parse(readFileSync(path, "utf8")).piBetterHarness.subagents.delegationMode, "adaptive");
         assert.match(h.notifications.at(-1).message, /unchanged/);
         h.ctx.ui.confirm = async () => true;
         await command.handler("save", h.ctx);
-        const saved = JSON.parse(readFileSync(path, "utf8"));
+        const saved = JSON.parse(readFileSync(path, "utf8")).piBetterHarness.subagents;
         assert.equal(saved.delegationMode, "coordinator");
         assert.equal(saved.maxConcurrent, 7);
         assert.equal(saved.defaultTools, "read");

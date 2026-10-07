@@ -13,7 +13,7 @@ const theme = { fg: (_color, text) => text, bg: (_color, text) => text,
     bold: (text) => text, inverse: (text) => text };
 
 test("subagents contributes the standalone settings opener with shared session and saved state, and removes its listener", async (t) => {
-    const path = join(root, "config.json");
+    const path = join(root, "settings.json");
     setConfigPathForTests(path);
     setConfigForTests({ delegationMode: "manual", maxConcurrent: 3 });
     t.after(() => {

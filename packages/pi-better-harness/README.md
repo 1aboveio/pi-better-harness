@@ -91,8 +91,10 @@ all original tool details in both modes and folds them again on the next toggle.
 `/tool-output normal` restores ordinary rendering. Error result bodies are also
 hidden in minimal mode and remain available when expanded.
 
-Normal mode is the default. The preference is saved in the current session,
-including resume/reload. This is a version-sensitive internal TUI adapter,
+Normal mode is the initial default. Changing tool output saves the choice in
+global `settings.json` under `piBetterHarness.toolOutput`, as well as the current
+session. New sessions inherit it; resumed branches retain their own saved choice.
+This is a version-sensitive internal TUI adapter,
 tested with Pi 0.82.1, 0.99.1, and the bundled Pi 1.0.0 CLI; incompatible APIs
 produce a warning and leave ordinary output enabled. Print/RPC output and
 exported transcripts are unchanged.
@@ -113,8 +115,8 @@ settings`, and `/goal settings` remain available in standalone installations.
 Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
 
 The hub includes **Tool output** when the bundled renderer extension is loaded.
-Changes apply immediately to the current session and do not save a global
-default. The hub also owns **Completions while busy**, shared by Subagents and Background
+Changes apply immediately and also save the default for future sessions.
+The hub also owns **Completions while busy**, shared by Subagents and Background
 Tasks. Choose **Wait until idle** (the default) or **Steer active run**. Changes
 apply immediately and autosave to the current session branch, including across
 reloads. Press **Ctrl+S** to save the current choice as your default for future
@@ -122,9 +124,18 @@ Pi sessions; changing a session afterward does not change that saved default.
 Saving a default leaves already-open sessions unchanged, including when
 navigating to a branch without a session override.
 The user default is stored in
-`<agent-dir>/extensions/pi-better-callback-preferences.json` and also applies
+`<agent-dir>/settings.json` under `piBetterHarness.callbacks` and also applies
 when either callback package is loaded standalone. The former
 `PI_BETTER_CALLBACK_WHILE_BUSY` environment variable is no longer supported.
+
+All Harness-owned defaults use the `piBetterHarness` section of global
+`~/.pi/agent/settings.json` (or `PI_CODING_AGENT_DIR/settings.json`): tool output,
+Subagents configuration, callback delivery, Goal controls, and Sandbox activation,
+permissions, and deny-rule templates. Existing preference files migrate on first
+use after validation; global choices take precedence, and old files remain intact.
+Updates preserve Pi's own settings and other packages' choices. SSH profiles,
+plans, run records, and role/agent definitions remain in their existing stores:
+they are session data or reusable definitions, not global UI defaults.
 
 Next-prompt inference is deferred pending safe public auth/header resolution in
 Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in

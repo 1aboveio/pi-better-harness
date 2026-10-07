@@ -18,9 +18,9 @@
  *
  * **Nothing is written until a rule changes.** Installing the package writes no
  * settings file; the packaged defaults live in source (`policy.ts`). The
- * override file appears on the first `add` or `remove`, and `reset` deletes it
- * again, which is exactly what "restore the defaults from the installed package
- * version" requires — a copy of the defaults on disk would go stale the next
+ * override key appears on the first `add` or `remove`, and `reset` replaces it
+ * with a null migration sentinel to restore defaults from the installed package
+ * version — a copy of the defaults on disk would go stale the next
  * time the package shipped different ones.
  *
  * **Validation reuses enforcement.** Every check below resolves through
@@ -30,10 +30,11 @@
  * to the sandbox.
  */
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, normalize, sep } from "node:path";
+import { existsSync } from "node:fs";
+import { join, normalize, sep } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 
 import {
     PACKAGED_DENY_WRITE_TEMPLATES,
@@ -46,7 +47,7 @@ import {
 } from "./shared-sandbox-core.ts";
 import type { ForegroundSandboxController, ForegroundSandboxStatus } from "./state.ts";
 
-/** The override file, alongside the extension settings pi's own example uses. */
+/** The legacy override filename, retained for migration only. */
 export const DENY_RULES_FILE_NAME = "pi-better-sandbox.json";
 
 /** Bumped only if the stored shape ever has to change incompatibly. */
@@ -120,6 +121,10 @@ export type DenyRuleSeams = PolicySeams & DenyRuleStoreSeams;
 
 /** Where the user override lives. Reading it is the only reason to need this. */
 export function denyRuleOverridePath(seams: DenyRuleStoreSeams = {}): string {
+    return harnessSettingsPath(seams);
+}
+
+function legacyDenyRuleOverridePath(seams: DenyRuleStoreSeams): string {
     return join((seams.agentDir ?? getAgentDir)(), "extensions", DENY_RULES_FILE_NAME);
 }
 
@@ -340,36 +345,31 @@ type DenyRuleOverrideFile = {
 /**
  * Read the user override, or `undefined` when none exists.
  *
- * Throws `DenyRuleError("unreadable-override")` when the file exists but cannot
+ * Throws `DenyRuleError("unreadable-override")` when the stored override cannot
  * be understood. The caller keeps the packaged defaults in force and refuses to
- * overwrite the file until the human resets it, so a typo in a hand-edited
+ * overwrite the override until the human resets it, so a typo in a hand-edited
  * override is never silently converted into a lost rule set.
  */
 export function readDenyRuleOverride(
     seams: DenyRuleStoreSeams = {},
 ): readonly string[] | undefined {
     const path = denyRuleOverridePath(seams);
-    let raw: string;
     try {
-        raw = readFileSync(path, "utf8");
+        const stored = readHarnessSetting<unknown>("sandboxDenyRules", seams, {
+            path: legacyDenyRuleOverridePath(seams),
+            parse: (value) => ({ version: DENY_RULES_FORMAT_VERSION, denyWrite: parseDenyRuleOverride(value, path) }),
+        });
+        return stored === undefined || stored === null ? undefined : parseDenyRuleOverride(stored, path);
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        if (error instanceof DenyRuleError) throw error;
         throw new DenyRuleError(
             "unreadable-override",
             `The write-deny override at ${path} could not be read: ${messageOf(error)}`,
         );
     }
+}
 
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(raw);
-    } catch (error) {
-        throw new DenyRuleError(
-            "unreadable-override",
-            `The write-deny override at ${path} is not valid JSON: ${messageOf(error)}`,
-        );
-    }
-
+function parseDenyRuleOverride(parsed: unknown, path: string): string[] {
     const denyWrite = (parsed as Partial<DenyRuleOverrideFile> | null)?.denyWrite;
     if (!Array.isArray(denyWrite) || denyWrite.some((entry) => typeof entry !== "string")) {
         throw new DenyRuleError(
@@ -390,34 +390,31 @@ export function readDenyRuleOverride(
     }
 }
 
-/** Write the user override. This is the only thing that creates the file. */
+/** Write the user override without changing any other global setting. */
 export function writeDenyRuleOverride(
     templates: readonly string[],
     seams: DenyRuleStoreSeams = {},
 ): string {
     const path = denyRuleOverridePath(seams);
-    mkdirSync(dirname(path), { recursive: true });
-    const contents = `${JSON.stringify(
-        { version: DENY_RULES_FORMAT_VERSION, denyWrite: [...templates].sort() } satisfies DenyRuleOverrideFile,
-        undefined,
-        2,
-    )}\n`;
-    // Written through a temporary file so a reader never observes a half-written
-    // rule set, and a failed write leaves the previous rules intact.
-    const pending = `${path}.${process.pid}.tmp`;
-    writeFileSync(pending, contents, "utf8");
-    renameSync(pending, path);
+    const value = { version: DENY_RULES_FORMAT_VERSION, denyWrite: [...templates].sort() } satisfies DenyRuleOverrideFile;
+    updateHarnessSetting("sandboxDenyRules", () => value, seams);
     return path;
 }
 
-/** Delete the user override. Returns whether there was one to delete. */
+/** Restore packaged rules; null prevents a retained legacy file from migrating again. */
 export function clearDenyRuleOverride(seams: DenyRuleStoreSeams = {}): boolean {
     const path = denyRuleOverridePath(seams);
     try {
-        rmSync(path);
-        return true;
+        const current = readHarnessSetting("sandboxDenyRules", seams);
+        const legacyExists = existsSync(legacyDenyRuleOverridePath(seams));
+        if (current === null || (current === undefined && !legacyExists)) return false;
+        let removed = false;
+        updateHarnessSetting("sandboxDenyRules", (value) => {
+            removed = value !== null && (value !== undefined || legacyExists);
+            return null;
+        }, seams);
+        return removed;
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
         throw new DenyRuleError(
             "unreadable-override",
             `The write-deny override at ${path} could not be removed: ${messageOf(error)}`,

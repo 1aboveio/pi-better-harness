@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -34,6 +35,8 @@ const originals = Object.fromEntries(["updateDisplay", "getResultRenderer", "get
 const capabilities = getCapabilities();
 const handles = [];
 const shutdowns = [];
+let settingsRoot;
+let originalAgentDir;
 const payload = Object.freeze({
   content: Object.freeze([{ type: "text", text: "RESULT_BODY_SENTINEL\nsecond line" }]),
   details: Object.freeze({ preserved: "original details" }),
@@ -41,6 +44,9 @@ const payload = Object.freeze({
 });
 
 beforeEach(() => {
+  originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+  settingsRoot = mkdtempSync(join(tmpdir(), "tool-output-settings-"));
+  process.env.PI_CODING_AGENT_DIR = settingsRoot;
   if (process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR) process.argv[1] = join(sdk, "cli.js");
   initTheme("dark", false);
   setCapabilities({ ...capabilities, images: null });
@@ -51,6 +57,9 @@ afterEach(async () => {
   for (const handle of handles.splice(0)) handle.dispose();
   setCapabilities(capabilities);
   for (const [name, original] of Object.entries(originals)) assert.equal(prototype[name], original);
+  rmSync(settingsRoot, { recursive: true, force: true });
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 });
 function install() {
   const handle = installMinimalOutputHook(prototype);
@@ -450,6 +459,14 @@ test("the contributed hub control changes real tool rows, shares command state, 
   await commands.get("tool-output").handler("normal", ctx);
   assert.equal(registry.controls()[0].get(), "Normal");
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
+  const settingsPath = join(settingsRoot, "settings.json");
+  const savedDefaults = readFileSync(settingsPath, "utf8");
+  writeFileSync(settingsPath, "{broken");
+  await assert.rejects(registry.controls()[0].change("Minimal", ctx), SyntaxError);
+  await handlers.get("session_tree")({}, ctx);
+  assert.equal(registry.controls()[0].get(), "Normal", "a failed global save rolls back the persisted branch choice");
+  assert.equal(readFileSync(settingsPath, "utf8"), "{broken");
+  writeFileSync(settingsPath, savedDefaults);
   sessionManager.branch(minimalLeaf);
   await handlers.get("session_tree")({}, ctx);
   assert.equal(registry.controls()[0].get(), "Minimal");
@@ -527,10 +544,12 @@ test("the command toggles existing rows, persists session preference, and restor
   assert.doesNotMatch(rendered(existing), /RESULT_BODY_SENTINEL/);
   assert.equal(entries.at(-1).data.enabled, true);
   assert.equal(expanded, false);
+  assert.equal(JSON.parse(readFileSync(join(settingsRoot, "settings.json"), "utf8")).piBetterHarness.toolOutput.enabled, true);
   await handlers.get("session_shutdown")();
   assert.match(rendered(existing), /RESULT_BODY_SENTINEL/);
+  entries.length = 0;
   await handlers.get("session_start")({}, ctx);
-  assert.doesNotMatch(rendered(existing), /RESULT_BODY_SENTINEL/);
+  assert.doesNotMatch(rendered(existing), /RESULT_BODY_SENTINEL/, "a fresh session inherits the saved global default");
   await commands.get("tool-output").handler("", ctx);
   assert.match(rendered(existing), /RESULT_BODY_SENTINEL/);
   assert.equal(entries.at(-1).data.enabled, false);

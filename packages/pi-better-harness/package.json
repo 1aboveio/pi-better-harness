@@ -48,7 +48,7 @@
     "extensions/**/*.ts"
   ],
   "scripts": {
-    "prepack": "node ../../scripts/stage-harness-dependencies.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/stage-harness-dependencies.mjs",
     "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --strict --skipLibCheck --types node extensions/minimal-output/index.ts extensions/minimal-output/hook.ts extensions/settings/index.ts",
     "test": "node --test test/*.test.mjs"
   },
@@ -59,6 +59,7 @@
     "pi-better-sandbox": "0.11.0",
     "pi-better-ssh": "0.1.2",
     "pi-better-subagents": "0.15.0",
+    "proper-lockfile": "^4.1.2",
     "smol-toml": "1.9.0",
     "yaml": "^2.9.1"
   },

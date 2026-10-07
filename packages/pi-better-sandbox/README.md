@@ -334,24 +334,32 @@ A command already running keeps the rules it launched with.
 
 ### Where your rules live
 
-Your changes are written to `~/.pi/agent/extensions/pi-better-sandbox.json`
-(under `$PI_CODING_AGENT_DIR` when you set one):
+Your changes are written to `~/.pi/agent/settings.json` (under
+`$PI_CODING_AGENT_DIR` when you set one), in the `piBetterHarness` namespace:
 
 ```json
 {
-  "version": 1,
-  "denyWrite": [".env", ".env.local", ".git/hooks", "build/artifacts"]
+  "piBetterHarness": {
+    "sandboxDenyRules": {
+      "version": 1,
+      "denyWrite": [".env", ".env.local", ".git/hooks", "build/artifacts"]
+    }
+  }
 }
 ```
 
-That file appears the first time you add or remove a rule, never at install
-time. `/sandbox deny reset` deletes it and puts the defaults shipped by the
-installed package version back in force — so an upgrade that changes the
-defaults is picked up by a reset rather than being masked by a stale copy.
+The override key appears the first time you add or remove a rule, or when an
+existing legacy override is migrated; installation alone writes nothing.
+`/sandbox deny reset` sets `sandboxDenyRules` to `null` and puts the defaults
+shipped by the installed package version back in force. The sentinel prevents a
+retained legacy file from being imported again and does not store a stale copy
+of the packaged defaults. Other Pi and harness settings remain unchanged.
 
 If the file cannot be read, the packaged defaults stay in force, the problem is
-reported, and rule changes are refused until you fix the file or reset it —
-a typo is never quietly turned into a lost rule set.
+reported, and rule changes are refused until you fix the override or reset it —
+a typo is never quietly turned into a lost rule set. If the whole `settings.json`
+file is invalid JSON, repair it by hand first; a deny reset cannot discard other
+settings to repair the file.
 
 ### What is refused, and why
 
@@ -371,8 +379,18 @@ in your rule set but is held out in that project, with a message saying so.
 
 ### Upgrading
 
-Nothing is migrated on disk. A saved `pi-better-sandbox-permissions.json` keeps
-its values: a saved `read-write` is now shown as Write & delete, and a saved
+Sandbox defaults now share global `settings.json` under `piBetterHarness`:
+`sandbox` stores version 1 activation preferences, `sandboxPermissions` stores
+version 1 permission profiles, and `sandboxDenyRules` stores the rule override.
+On first read of a missing key, the corresponding validated legacy file in
+`extensions/` is imported: `pi-better-sandbox-preferences.json`,
+`pi-better-sandbox-permissions.json`, or `pi-better-sandbox.json`. Legacy files
+are left untouched. An existing global key always wins, including the deny-rule
+`null` sentinel; invalid global values are reported, not replaced by legacy data.
+Updates use locked atomic replacement and preserve unrelated Pi settings and
+other harness keys.
+
+A saved permission profile keeps its values: a saved `read-write` is now shown as Write & delete, and a saved
 Subagents Outside project = Read stays Read. Only a fresh configuration, or
 **Ctrl+S** after you choose Write, uses the new Subagents default. To
 adopt it, open `/sandbox`, set Subagents → Outside project to Write, and save.
@@ -389,13 +407,15 @@ current session branch, not as global defaults. Resume, fork, reload and session
 tree navigation restore the latest policy on the active branch. A branch with
 no permission entry and a new session inherit saved global settings. Invalid
 persisted session policy fails closed rather than falling back to defaults.
-Ctrl+S writes both
-profiles to `~/.pi/agent/extensions/pi-better-sandbox-permissions.json` (or the
-corresponding `$PI_CODING_AGENT_DIR`). Existing activation preferences in
-`pi-better-sandbox-preferences.json` migrate when no profile file exists.
+Ctrl+S writes both profiles to `piBetterHarness.sandboxPermissions` in global
+`settings.json`. When no saved profile exists, the Main switch inherits the
+activation preference from `piBetterHarness.sandbox`, including migrated legacy
+activation preferences.
 `/sandbox default on|off` remains available and updates Main's saved switch.
 Failed default saves leave the current session's edits intact. Write-deny rules
-retain their separate global persistence through `/sandbox deny` and `/sandbox rules`.
+retain their global persistence in `piBetterHarness.sandboxDenyRules` through
+`/sandbox deny` and `/sandbox rules`. Session entries and runtime control-plane
+protections are unchanged.
 
 Toggles apply to operations launched after the change. A command already running
 keeps the policy it launched with.

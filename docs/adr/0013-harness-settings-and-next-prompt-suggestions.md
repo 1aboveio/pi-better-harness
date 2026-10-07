@@ -2,6 +2,9 @@
 
 ## Status
 
+Persistence amended by [ADR 0014](0014-global-harness-defaults.md): tool-output
+changes now save a global default, and all package defaults share settings.json.
+
 Accepted for the settings hub. Next-prompt inference deferred by the user on
 2026-10-05, pending [issue #426](https://github.com/1aboveio/pi-better-harness/issues/426)
 and independent review before integration.

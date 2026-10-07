@@ -11,9 +11,9 @@ const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
 test("subagent settings edit mode and cap, validate, save, reset, and survive reload in the real TUI", { skip: !hasTmux }, () => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-subagent-settings-"));
-    const config = join(fixture, "config.json");
+    const config = join(fixture, "settings.json");
     const wrapper = join(fixture, "settings-extension.ts");
-    writeFileSync(config, JSON.stringify({ delegationMode: "adaptive", maxConcurrent: 4, defaultTools: "read" }));
+    writeFileSync(config, JSON.stringify({ piBetterHarness: { subagents: { delegationMode: "adaptive", maxConcurrent: 4, defaultTools: "read" } } }));
     writeFileSync(wrapper, `import extension from ${JSON.stringify(join(root, "packages/pi-better-subagents/index.ts"))};
 import { setConfigPathForTests } from ${JSON.stringify(join(root, "packages/pi-better-subagents/config.ts"))};
 export default function (pi) { setConfigPathForTests(${JSON.stringify(config)}); extension(pi); }
@@ -51,11 +51,11 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/positive whole number/);
         key("C-u"); literal("7"); key("Enter");
         wait(/Concurrent subagents\s+7/);
-        assert.deepEqual(JSON.parse(readFileSync(config, "utf8")), {
+        assert.deepEqual(JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents, {
             delegationMode: "adaptive", maxConcurrent: 4, defaultTools: "read",
         }, "editing session values must not save defaults");
         key("C-s"); wait(/Subagent defaults saved/);
-        const saved = JSON.parse(readFileSync(config, "utf8"));
+        const saved = JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents;
         assert.equal(saved.delegationMode, "coordinator");
         assert.equal(saved.maxConcurrent, 7);
         assert.equal(saved.defaultTools, "read");
@@ -70,7 +70,7 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         literal("/subagents"); key("Enter");
         wait(/Delegation mode\s+coordinator/);
         wait(/Concurrent subagents\s+6/);
-        assert.equal(JSON.parse(readFileSync(config, "utf8")).maxConcurrent, 7, "an unsaved cap survives reload without changing defaults");
+        assert.equal(JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents.maxConcurrent, 7, "an unsaved cap survives reload without changing defaults");
         tmux("resize-window", "-t", "settings", "-x", "40", "-y", "24");
         wait(/Concurrent subagents\s+6/);
         key("Escape");

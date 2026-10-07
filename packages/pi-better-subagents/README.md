@@ -51,13 +51,13 @@ uses `agents_catalog` to discover current role descriptions and delegates every
 nontrivial role-owned task, while the foreground coordinates, integrates, and
 verifies. See [usage notes](docs/usage.md#delegation-mode).
 
-Saved defaults live in `~/.pi/agent/extensions/pi-better-subagents-config.json`
-(or under `PI_CODING_AGENT_DIR`) and survive package reinstalls and upgrades.
-This user file overrides the package's `config.json`, which remains a fallback
-for compatibility. Save existing mode and cap choices once with `/subagents save`
-or Ctrl+S to keep them outside the package. Put other custom config keys in the
-user file as well; edits made only inside the installed package can be lost on
-upgrade.
+Saved defaults live in global `~/.pi/agent/settings.json` under
+`piBetterHarness.subagents` (or under `PI_CODING_AGENT_DIR`) and survive package
+reinstalls and upgrades. The old user config migrates on first use. Global values
+override the package's `config.json`, which remains a compatibility fallback.
+Save existing mode and cap choices with `/subagents save` or Ctrl+S. Put other
+custom config keys in `piBetterHarness.subagents` as well; edits made only inside
+the installed package can be lost on upgrade.
 
 `agents_catalog` shows each role's and named agent's default model and effort,
 such as `role developer "Developer" … default openai/gpt-6.1-sol@high`. Roles are

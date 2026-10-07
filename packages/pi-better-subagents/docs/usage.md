@@ -440,8 +440,9 @@ web_fetch`; just `read, bash` in a `clean` child). `exclude_tools` subtracts on
 top.
 
 User configuration lives in
-`~/.pi/agent/extensions/pi-better-subagents-config.json` (under
-`PI_CODING_AGENT_DIR` when set). Its keys override the package's `config.json`,
+`~/.pi/agent/settings.json` under `piBetterHarness.subagents` (under
+`PI_CODING_AGENT_DIR` when set). The old user config migrates on first use.
+Its keys override the package's `config.json`,
 which is still read as a compatibility fallback. Settings saves write only the
 user file, so saved mode and cap survive reinstalls and upgrades without freezing
 other shipped defaults. To retain custom keys from an older package-local config,

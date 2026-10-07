@@ -140,7 +140,7 @@ later idle turns still respect `auto-continue`. Question-result harvesting and
 other extensions' callback delivery are unchanged.
 
 Changes are saved atomically to
-`~/.pi/agent/extensions/pi-better-goal-preferences.json`, or under
+`~/.pi/agent/settings.json` under `piBetterHarness.goal`, or under
 `$PI_CODING_AGENT_DIR/extensions` when set. They apply immediately in this
 session and are loaded on session start/reload in other sessions. They are
 user-wide preferences, not goal state or project settings. A missing file or
