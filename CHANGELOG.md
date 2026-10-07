@@ -6,6 +6,50 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.26.0] - 2026-10-07
+
+### Added
+
+- Add an Agents catalog shortcut to `/harness-settings`. Save catalog model and effort defaults with Ctrl+S. (#442)
+
+### Fixed
+
+- Persist tool-output defaults in global `settings.json`, retaining branch-local choices on resume and rolling back failed saves.
+- Render compact call headers for Harness tools in Minimal mode while preserving native expanded results and custom call renderers.
+
+### Changed
+
+- Bundle Subagents 0.16.0, Background Tasks 0.7.1, Goal 0.8.2, and Sandbox 0.11.1 with durable global Harness defaults. Keep Plan and SSH versions unchanged.
+
+## [pi-better-subagents@0.16.0] - 2026-10-07
+
+### Added
+
+- Contribute the Agents catalog shortcut to the Harness settings hub. (#442)
+
+### Fixed
+
+- Save Subagents and callback defaults under `piBetterHarness` in global `settings.json`, preserving defaults across reinstalls and migrating legacy settings on first use.
+
+## [pi-better-background-tasks@0.7.1] - 2026-10-07
+
+### Fixed
+
+- Persist shared callback defaults in global `settings.json` with legacy migration, compatible locking, and preservation of unrelated Pi settings. (#442)
+
+## [pi-better-goal@0.8.2] - 2026-10-07
+
+### Fixed
+
+- Persist Goal preferences in global `settings.json` so saved defaults survive reinstalls, and migrate validated legacy preferences on first use. (#442)
+
+## [pi-better-sandbox@0.11.1] - 2026-10-07
+
+### Fixed
+
+- Persist activation, permission profiles, and deny-rule defaults in global `settings.json` with legacy migration and atomic updates that preserve unrelated Pi settings and symlinked dotfiles. (#442)
+- Keep deny-rule resets durable without reimporting legacy overrides.
+
 ## [pi-better-harness@0.25.0] - 2026-10-06
 
 ### Changed
