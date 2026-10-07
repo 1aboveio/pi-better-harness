@@ -35,23 +35,27 @@ test("subagents contributes the standalone settings opener with shared session a
         sendMessage() { assert.fail("settings must not send messages"); },
         sendUserMessage() { assert.fail("settings must not send user messages"); },
     });
-    assert.equal(registrations.length, 1);
+    assert.equal(registrations.length, 2);
     const contribution = registrations[0];
     assert.equal(contribution.id, "subagents");
     assert.equal(contribution.label, "Subagents");
     assert.equal(contribution.command, "/subagents settings");
+    const agents = registrations[1];
+    assert.equal(agents.id, "agents");
+    assert.equal(agents.label, "Agents");
+    assert.equal(agents.command, "/agents");
     const later = [];
     events.on("harness-settings:register", (data) => later.push(data));
     events.emit("harness-settings:request");
     events.emit("harness-settings:request");
-    assert.deepEqual(later, [contribution, contribution]);
+    assert.deepEqual(later, [contribution, agents, contribution, agents]);
 
     const pages = [];
     let keys = [];
     let closed = 0;
     const notices = [];
     const ctx = {
-        cwd: root, mode: "tui", hasUI: true,
+        cwd: root, mode: "tui", hasUI: true, isProjectTrusted: () => false,
         sessionManager: { getBranch: () => entries },
         ui: {
             notify(message) { notices.push(message); }, setWidget() {}, setStatus() {},
@@ -85,6 +89,14 @@ test("subagents contributes the standalone settings opener with shared session a
     await commands.get("subagents").handler("mode coordinator", ctx);
     await contribution.open(ctx);
     assert.match(pages.at(-1), /Delegation mode\s+coordinator/);
+
+    const beforeCatalog = entries.length;
+    await agents.open(ctx);
+    const hubCatalog = pages.at(-1);
+    assert.match(hubCatalog, /Agents/);
+    await commands.get("agents").handler("", ctx);
+    assert.equal(pages.at(-1), hubCatalog, "the hub opens the same catalog as /agents");
+    assert.equal(entries.length, beforeCatalog, "opening the catalog does not change saved session settings");
 
     ctx.mode = "rpc";
     const opened = pages.length;

@@ -2300,7 +2300,11 @@ export default function (pi: ExtensionAPI) {
         }
     };
     const contribution = { id: "subagents", label: "Subagents", command: "/subagents settings", open: openSettings };
-    const registerSettings = () => pi.events?.emit("harness-settings:register", contribution);
+    const agentsContribution = { id: "agents", label: "Agents", command: "/agents", open: agentOperations.openCatalog };
+    const registerSettings = () => {
+        pi.events?.emit("harness-settings:register", contribution);
+        pi.events?.emit("harness-settings:register", agentsContribution);
+    };
     const unsubscribeSettingsRequest = pi.events?.on?.("harness-settings:request", registerSettings);
     registerSettings();
 
