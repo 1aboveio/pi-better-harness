@@ -11,7 +11,7 @@ import { createSettingsRegistry } from "../packages/pi-better-harness/extensions
 import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 
 import minimalOutputExtension from "../packages/pi-better-harness/extensions/minimal-output/index.ts";
-import { installMinimalOutputHook, loadToolPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
+import { installMinimalOutputHook, loadToolPrototype, loadCompactionPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import goalExtension from "../packages/pi-better-goal/src/index.ts";
@@ -29,6 +29,7 @@ const originalArgv = process.argv[1];
 const { SessionManager } = await import(pathToFileURL(join(sdk, "index.js")).href);
 const { AssistantMessageComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/assistant-message.js")).href);
 const { ToolExecutionComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/tool-execution.js")).href);
+const { CompactionSummaryMessageComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/compaction-summary-message.js")).href);
 const themeModule = await import(pathToFileURL(join(sdk, "modes/interactive/theme/theme.js")).href);
 const { initTheme } = themeModule;
 function events() {
@@ -77,6 +78,51 @@ function tool(name, definition, result = payload) {
   return component;
 }
 const rendered = (component) => component.render(100).join("\n");
+
+test("fallback tools show arguments even with a definition but no custom call renderer", () => {
+  const hook = install();
+  hook.setEnabled(true);
+  for (const definition of [undefined, { renderResult: () => new Text("RESULT_BODY_SENTINEL", 0, 0) }]) {
+    const component = new ToolExecutionComponent("compaction", "fallback", { reason: "manual", note: "first\nsecond" }, {}, definition, { requestRender() {} }, process.cwd());
+    component.updateResult(payload, false);
+    assert.match(rendered(component), /Compaction.*manual.*first/);
+    assert.equal(component.render(100).length, 1);
+    assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL|\x1b\[(?:48|4[0-7])[;m]/);
+    component.updateArgs({ path: "/tmp/new-target" });
+    assert.match(rendered(component), /new-target/);
+    assert.doesNotMatch(rendered(component), /manual/);
+    component.setExpanded(true);
+    assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
+  }
+});
+
+test("compaction summaries fold to one quiet row, expand original details, and restore on disposal", () => {
+  const prototype = CompactionSummaryMessageComponent.prototype;
+  const original = prototype.render;
+  const hook = installMinimalOutputHook(ToolExecutionComponent.prototype, () => themeModule.theme, prototype);
+  handles.push(hook);
+  const message = { summary: "COMPACTION_SUMMARY_SENTINEL", tokensBefore: 12345 };
+  const component = new CompactionSummaryMessageComponent(message);
+  const normal = rendered(component);
+  hook.setEnabled(true);
+  for (const width of [0, 1, 8, 24, 100]) {
+    const lines = component.render(width);
+    assert.equal(lines.length, width > 0 ? 1 : 0);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    assert.doesNotMatch(lines.join("\n"), /COMPACTION_SUMMARY_SENTINEL|\x1b\[(?:48|4[0-7])[;m]/);
+  }
+  assert.match(stripVTControlCharacters(rendered(component)), /Compaction.*12,345 tokens/);
+  assert.equal(component.message, message);
+  component.setExpanded(true);
+  assert.match(rendered(component), /COMPACTION_SUMMARY_SENTINEL/);
+  hook.setEnabled(true);
+  assert.equal(component.expanded, false);
+  hook.setEnabled(false);
+  assert.equal(rendered(component), normal);
+  hook.dispose();
+  assert.equal(prototype.render, original);
+  assert.equal(rendered(component), normal);
+});
 
 for (const [name, definition] of [
   ["read", undefined],
@@ -643,8 +689,12 @@ test("minimal mode patches the running bundled host and retains only its bash he
     const toolPrototype = await loadToolPrototype();
     assert.equal(toolPrototype, host.ToolExecutionComponent.prototype, "patch the class actually used by the CLI");
     const originalRender = toolPrototype.render;
+    const compactionPrototype = await loadCompactionPrototype();
+    assert.equal(compactionPrototype, host.CompactionSummaryMessageComponent.prototype);
+    const originalCompactionRender = compactionPrototype.render;
+    const summary = new host.CompactionSummaryMessageComponent({ summary: "BUNDLED_COMPACTION_SUMMARY", tokensBefore: 12345 });
     const HostContainer = Object.getPrototypeOf(host.ToolExecutionComponent.prototype).constructor;
-    hook = installMinimalOutputHook(toolPrototype);
+    hook = installMinimalOutputHook(toolPrototype, undefined, compactionPrototype);
     const chat = new HostContainer();
     const ui = { requestRender() {}, children: [chat] };
     const component = new host.ToolExecutionComponent("bash", "bundled-bash", { command: "ls -la" }, {}, host.createBashToolDefinition(process.cwd()), ui, process.cwd());
@@ -652,6 +702,11 @@ test("minimal mode patches the running bundled host and retains only its bash he
     chat.addChild(component);
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     hook.setEnabled(true);
+    assert.equal(summary.render(100).length, 1);
+    assert.match(rendered(summary), /Compaction.*12,345 tokens/);
+    summary.setExpanded(true);
+    assert.match(rendered(summary), /BUNDLED_COMPACTION_SUMMARY/);
+    summary.setExpanded(false);
     assert.equal(chat.render(100).length, 1, "only the call header survives");
     assert.match(rendered(chat), /ls -la/);
     assert.doesNotMatch(rendered(chat), /RESULT_BODY_SENTINEL/);
@@ -666,6 +721,7 @@ test("minimal mode patches the running bundled host and retains only its bash he
     assert.equal(component.result, payload);
     hook.dispose();
     assert.equal(toolPrototype.render, originalRender);
+    assert.equal(compactionPrototype.render, originalCompactionRender);
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     hook = installMinimalOutputHook(await loadToolPrototype());
     hook.setEnabled(true);

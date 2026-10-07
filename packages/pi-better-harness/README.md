@@ -76,7 +76,10 @@ stays quieter than conversation text. Tool rows are indented two columns past
 the assistant text padding. Long
 headers are truncated to the terminal width; result bodies,
 images, boxes, and tool spacers are hidden. Built-in, extension, and MCP calls
-are included. Execution, sandboxing, and agent-facing payloads are unchanged.
+are included. Tools without a custom call renderer use a generic icon and a
+compact argument hint. Compaction summaries also collapse to one quiet row with
+the pre-compaction token count; Ctrl+O reveals their original summary.
+Execution, sandboxing, and agent-facing payloads are unchanged.
 When a foreground run ends, each consecutive block of tool calls folds further
 into one disclosure row showing the call count and any failures. Only the failure
 count uses the error color; the disclosure and total stay muted. Assistant text
