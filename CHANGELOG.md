@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.27.1] - 2026-10-07
+
+### Fixed
+
+- Fold custom transcript messages from any extension into quiet disclosure rows in Minimal mode, including background completion batches and subagent health/timing alerts.
+- Preserve original message payloads and custom renderers when expanded through Ctrl+O or fullscreen clicks, with cleanup across reloads and shared hook owners.
+- Keep all bundled component versions unchanged.
+
 ## [pi-better-harness@0.27.0] - 2026-10-07
 
 ### Added

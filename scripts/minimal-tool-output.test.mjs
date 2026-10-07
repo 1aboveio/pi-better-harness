@@ -11,7 +11,7 @@ import { createSettingsRegistry } from "../packages/pi-better-harness/extensions
 import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/settings/page.ts";
 
 import minimalOutputExtension from "../packages/pi-better-harness/extensions/minimal-output/index.ts";
-import { installMinimalOutputHook, loadToolPrototype, loadCompactionPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
+import { installMinimalOutputHook, loadToolPrototype, loadCompactionPrototype, loadCustomMessagePrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import goalExtension from "../packages/pi-better-goal/src/index.ts";
@@ -30,6 +30,7 @@ const { SessionManager } = await import(pathToFileURL(join(sdk, "index.js")).hre
 const { AssistantMessageComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/assistant-message.js")).href);
 const { ToolExecutionComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/tool-execution.js")).href);
 const { CompactionSummaryMessageComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/compaction-summary-message.js")).href);
+const { CustomMessageComponent } = await import(pathToFileURL(join(sdk, "modes/interactive/components/custom-message.js")).href);
 const themeModule = await import(pathToFileURL(join(sdk, "modes/interactive/theme/theme.js")).href);
 const { initTheme } = themeModule;
 function events() {
@@ -122,6 +123,107 @@ test("compaction summaries fold to one quiet row, expand original details, and r
   hook.dispose();
   assert.equal(prototype.render, original);
   assert.equal(rendered(component), normal);
+});
+
+test("custom messages fold generically, preserve payloads and native renderers, and expand through transcript controls", async () => {
+  const customPrototype = await loadCustomMessagePrototype();
+  assert.equal(customPrototype, CustomMessageComponent.prototype);
+  const original = customPrototype.render;
+  const renderDescriptor = Object.getOwnPropertyDescriptor(customPrototype, "render");
+  const mouseDescriptor = Object.getOwnPropertyDescriptor(customPrototype, "handleMouse");
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme, undefined, customPrototype);
+  handles.push(hook);
+  const cases = [
+    ["background-completion-batch", "\n1 background completion is ready:\nCALLBACK_DETAIL_SENTINEL"],
+    ["subagent-stuck", "Worker stalled\nCALLBACK_DETAIL_SENTINEL"],
+    ["external_extension_message", Object.freeze([
+      Object.freeze({ type: "text", text: "\u72b6\u6001 ready\nCALLBACK_DETAIL_SENTINEL" }),
+      Object.freeze({ type: "image", mimeType: "image/png", data: "preserved" }),
+    ])],
+    ["empty_notice", []],
+  ];
+  const components = cases.map(([customType, content]) => new CustomMessageComponent(
+    Object.freeze({ role: "custom", customType, content, display: true }), undefined, undefined, 2));
+  const custom = new CustomMessageComponent(
+    Object.freeze({ customType: "third_party", content: "Custom renderer preview\nCALLBACK_DETAIL_SENTINEL" }),
+    (_message, { expanded }) => new Text(expanded ? "NATIVE_EXPANDED_SENTINEL" : "NATIVE_COLLAPSED_SENTINEL", 0, 0));
+  components.push(custom);
+  const normal = components.map(rendered);
+  hook.setEnabled(true);
+  for (const component of components) {
+    const message = component.message;
+    for (const width of [0, 1, 8, 24, 100]) {
+      const lines = component.render(width);
+      assert.equal(lines.length, width > 0 ? 1 : 0);
+      assert.ok(lines.every(line => visibleWidth(line) <= width));
+      assert.doesNotMatch(lines.join("\n"), /CALLBACK_DETAIL_SENTINEL|NATIVE_.*SENTINEL|\x1b\[(?:48|4[0-7])[;m]/);
+    }
+    assert.equal(component.message, message);
+    component.setExpanded(true);
+    if (component === custom) assert.match(rendered(component), /NATIVE_EXPANDED_SENTINEL/);
+    else if (message.customType !== "empty_notice") assert.match(rendered(component), /CALLBACK_DETAIL_SENTINEL/);
+    component.setExpanded(false);
+  }
+  assert.match(stripVTControlCharacters(rendered(components[0])), /^ {4}.*Background completion batch.*1 background completion/);
+  assert.match(stripVTControlCharacters(rendered(components[2])), /\u72b6\u6001 ready/);
+  const event = { type: "click", button: "left", x: 4, y: 0, screenX: 4, screenY: 0, width: 100 };
+  assert.equal(components[0].handleMouse({ ...event, ctrl: true }), undefined);
+  assert.equal(components[0].render(100).length, 1);
+  assert.equal(components[0].handleMouse(event).handled, true);
+  assert.match(rendered(components[0]), /CALLBACK_DETAIL_SENTINEL/);
+  hook.setEnabled(true);
+  assert.equal(components[0].render(100).length, 1, "re-enabling folds existing messages");
+  hook.setEnabled(false);
+  assert.deepEqual(components.map(rendered), normal);
+  hook.dispose();
+  assert.equal(customPrototype.render, original);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(customPrototype, "render"), renderDescriptor);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(customPrototype, "handleMouse"), mouseDescriptor);
+  assert.deepEqual(components.map(rendered), normal);
+});
+
+test("fullscreen container dispatch expands a generic custom-message disclosure", {
+  skip: typeof dispatchMouseEvent !== "function" ? "This Pi SDK has no fullscreen mouse routing" : false,
+}, () => {
+  const hook = installMinimalOutputHook(prototype, undefined, undefined, CustomMessageComponent.prototype);
+  handles.push(hook);
+  const chat = new Container();
+  const component = new CustomMessageComponent({ customType: "external_notice", content: "Preview\nMOUSE_CALLBACK_DETAIL" });
+  chat.addChild(component);
+  hook.setEnabled(true);
+  assert.equal(chat.render(80).length, 1);
+  const result = dispatchMouseEvent(chat, {
+    type: "click", button: "left", x: 4, y: 0, screenX: 4, screenY: 0,
+    width: 80, height: 1, shift: false, ctrl: false, alt: false,
+  });
+  assert.equal(result.handled, true);
+  assert.match(rendered(chat), /MOUSE_CALLBACK_DETAIL/);
+});
+
+test("custom-message hook owners share wrappers and disposal preserves a later extension wrapper", () => {
+  const customPrototype = CustomMessageComponent.prototype;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(customPrototype, "render");
+  const original = customPrototype.render;
+  const first = installMinimalOutputHook(prototype, undefined, undefined, customPrototype);
+  const second = installMinimalOutputHook(prototype, undefined, undefined, customPrototype);
+  handles.push(first, second);
+  const wrapped = customPrototype.render;
+  const component = new CustomMessageComponent({ customType: "external_notice", content: "Preview\nOWNER_DETAIL_SENTINEL" });
+  first.setEnabled(true);
+  first.dispose();
+  assert.equal(customPrototype.render, wrapped);
+  assert.equal(component.render(100).length, 1);
+  const later = function(width) { return wrapped.call(this, width); };
+  customPrototype.render = later;
+  try {
+    second.dispose();
+    assert.equal(customPrototype.render, later);
+    assert.match(rendered(component), /OWNER_DETAIL_SENTINEL/, "the retained wrapper falls back to normal output");
+  } finally {
+    if (originalDescriptor) Object.defineProperty(customPrototype, "render", originalDescriptor);
+    else Reflect.deleteProperty(customPrototype, "render");
+  }
+  assert.equal(customPrototype.render, original);
 });
 
 for (const [name, definition] of [
@@ -693,8 +795,12 @@ test("minimal mode patches the running bundled host and retains only its bash he
     assert.equal(compactionPrototype, host.CompactionSummaryMessageComponent.prototype);
     const originalCompactionRender = compactionPrototype.render;
     const summary = new host.CompactionSummaryMessageComponent({ summary: "BUNDLED_COMPACTION_SUMMARY", tokensBefore: 12345 });
+    const customPrototype = await loadCustomMessagePrototype();
+    assert.equal(customPrototype, host.CustomMessageComponent.prototype);
+    const originalCustomRender = customPrototype.render;
+    const callback = new host.CustomMessageComponent({ customType: "background-completion-batch", content: "1 completion ready\nBUNDLED_CALLBACK_DETAIL" });
     const HostContainer = Object.getPrototypeOf(host.ToolExecutionComponent.prototype).constructor;
-    hook = installMinimalOutputHook(toolPrototype, undefined, compactionPrototype);
+    hook = installMinimalOutputHook(toolPrototype, undefined, compactionPrototype, customPrototype);
     const chat = new HostContainer();
     const ui = { requestRender() {}, children: [chat] };
     const component = new host.ToolExecutionComponent("bash", "bundled-bash", { command: "ls -la" }, {}, host.createBashToolDefinition(process.cwd()), ui, process.cwd());
@@ -703,6 +809,11 @@ test("minimal mode patches the running bundled host and retains only its bash he
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     hook.setEnabled(true);
     assert.equal(summary.render(100).length, 1);
+    assert.equal(callback.render(100).length, 1);
+    assert.match(rendered(callback), /Background completion batch.*1 completion ready/);
+    assert.doesNotMatch(rendered(callback), /BUNDLED_CALLBACK_DETAIL/);
+    callback.setExpanded(true);
+    assert.match(rendered(callback), /BUNDLED_CALLBACK_DETAIL/);
     assert.match(rendered(summary), /Compaction.*12,345 tokens/);
     summary.setExpanded(true);
     assert.match(rendered(summary), /BUNDLED_COMPACTION_SUMMARY/);
@@ -722,6 +833,7 @@ test("minimal mode patches the running bundled host and retains only its bash he
     hook.dispose();
     assert.equal(toolPrototype.render, originalRender);
     assert.equal(compactionPrototype.render, originalCompactionRender);
+    assert.equal(customPrototype.render, originalCustomRender);
     assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
     hook = installMinimalOutputHook(await loadToolPrototype());
     hook.setEnabled(true);
@@ -909,8 +1021,12 @@ test("the extension folds at settlement, keeps continuations visible, resumes hi
   chat.addChild(first);
   chat.addChild(second);
   await commands.get("tool-output").handler("minimal", ctx);
+  const callback = new CustomMessageComponent({ customType: "subagent-stuck", content: "Worker stalled\nSESSION_CALLBACK_DETAIL" });
+  chat.addChild(callback);
+  assert.equal(callback.render(100).length, 1, "new notifications inherit minimal mode");
   ctx.ui.setToolsExpanded(true);
   assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
+  assert.match(rendered(chat), /SESSION_CALLBACK_DETAIL/);
   for (const component of [first, second]) sessionManager.appendMessage({
     role: "toolResult", toolCallId: component.toolCallId, toolName: component.toolName,
     content: payload.content, isError: false, timestamp: 0,
@@ -922,16 +1038,20 @@ test("the extension folds at settlement, keeps continuations visible, resumes hi
   assert.match(rendered(chat), /RESULT_BODY_SENTINEL/);
   await handlers.get("agent_settled")({}, ctx);
   assert.equal(first.expanded, false);
+  assert.equal(callback.render(100).length, 1);
   assert.equal(ctx.ui.getToolsExpanded(), false);
   ctx.ui.setToolsExpanded(!ctx.ui.getToolsExpanded());
   assert.match(rendered(chat), /RESULT_BODY_SENTINEL/, "the next Ctrl+O must reopen automatically folded tools");
+  assert.match(rendered(chat), /SESSION_CALLBACK_DETAIL/);
   ctx.ui.setToolsExpanded(!ctx.ui.getToolsExpanded());
   assert.match(rendered(chat), /2 tool calls/);
   assert.doesNotMatch(rendered(chat), /first-arg|second-arg|RESULT_BODY_SENTINEL/);
   await handlers.get("session_shutdown")();
   await handlers.get("session_start")({}, ctx);
   assert.match(rendered(chat), /2 tool calls/);
+  assert.equal(callback.render(100).length, 1, "reload folds restored notifications");
   await commands.get("tool-output").handler("normal", ctx);
+  assert.match(rendered(chat), /SESSION_CALLBACK_DETAIL/);
   first.setExpanded(true);
   await handlers.get("agent_settled")({}, ctx);
   assert.equal(first.expanded, true, "completion must not change expansion in normal mode");

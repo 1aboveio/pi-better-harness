@@ -42,6 +42,18 @@ interface CompactionComponent extends Component {
 interface CompactionPrototype {
   render: CompactionComponent["render"];
 }
+interface CustomMessageComponent extends Component {
+  _expanded: boolean;
+  outputPad?: number;
+  message: { customType: string; content: string | { type: string; text?: string }[] };
+  setExpanded(expanded: boolean): void;
+}
+interface CustomMessagePrototype {
+  render: CustomMessageComponent["render"];
+  setExpanded: CustomMessageComponent["setExpanded"];
+  invalidate(): void;
+  handleMouse?(event: ToolMouseEvent): unknown;
+}
 
 type Method = (this: ToolComponent, ...args: unknown[]) => unknown;
 interface ToolMouseEvent { type: string; button: string; x: number; y: number; screenX: number; screenY: number; width: number; shift?: boolean; alt?: boolean; ctrl?: boolean }
@@ -229,6 +241,17 @@ export async function loadCompactionPrototype(): Promise<CompactionPrototype> {
   return module.CompactionSummaryMessageComponent.prototype;
 }
 
+export async function loadCustomMessagePrototype(): Promise<CustomMessagePrototype> {
+  const entry = sdkEntry(hostRequire());
+  const path = bundledHostEntry(entry) ?? join(dirname(entry), "modes/interactive/components/custom-message.js");
+  const module = await import(pathToFileURL(path).href);
+  const prototype = module.CustomMessageComponent?.prototype;
+  if (!prototype || ["render", "setExpanded", "invalidate"].some(name => typeof prototype[name] !== "function")) {
+    throw new Error("Pi's runtime does not expose its expandable custom-message display class.");
+  }
+  return prototype;
+}
+
 // Pi's ESM-only export cannot be resolved with require.resolve on older SDKs.
 function sdkEntry(require: ReturnType<typeof createRequire>): string {
   for (const directory of require.resolve.paths("@earendil-works/pi-coding-agent") ?? []) {
@@ -243,7 +266,7 @@ function sdkEntry(require: ReturnType<typeof createRequire>): string {
 }
 
 /** Internal TUI adapter: no tools are replaced and no result content is changed. */
-export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: () => Theme, compactionPrototype?: CompactionPrototype): MinimalOutputHook {
+export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: () => Theme, compactionPrototype?: CompactionPrototype, customMessagePrototype?: CustomMessagePrototype): MinimalOutputHook {
   for (const name of ["updateDisplay", "getResultRenderer", "getTextOutput", "setExpanded", "invalidate", "render"] as const) {
     if (typeof prototype[name] !== "function") {
       throw new Error(`Pi's tool display API is incompatible: missing ${name}. Normal output remains enabled.`);
@@ -406,6 +429,60 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
       current.restore = function() {
         if (compactionPrototype.render === render) compactionPrototype.render = originalRender;
         compactions.clear();
+        restore.call(this);
+      };
+    }
+    if (customMessagePrototype) {
+      const originalRender = customMessagePrototype.render;
+      const originalMouse = customMessagePrototype.handleMouse;
+      const renderDescriptor = Object.getOwnPropertyDescriptor(customMessagePrototype, "render");
+      const mouseDescriptor = Object.getOwnPropertyDescriptor(customMessagePrototype, "handleMouse");
+      const messages = new Set<WeakRef<CustomMessageComponent>>();
+      const seenMessages = new WeakSet<CustomMessageComponent>();
+      const render = function(this: CustomMessageComponent, width: number): string[] {
+        if (!seenMessages.has(this)) { seenMessages.add(this); messages.add(new WeakRef(this)); }
+        if (!current.enabled || this._expanded) return originalRender.call(this, width);
+        if (width <= 0) return [];
+        const label = stripVTControlCharacters(this.message.customType).replace(/[-_\s]+/g, " ").trim().replace(/^./, letter => letter.toUpperCase());
+        const content = typeof this.message.content === "string" ? this.message.content
+          : this.message.content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
+        const detail = stripVTControlCharacters(content).split(/\r?\n/).map(line => line.replace(/\s+/g, " ").trim()).find(Boolean) ?? "";
+        const theme = getTheme?.();
+        const text = theme
+          ? ` ${theme.fg("muted", "\u25b8")} ${theme.fg("muted", label)}${detail ? `  ${theme.fg("dim", detail)}` : ""}`
+          : ` \u25b8 ${label}${detail ? `  ${detail}` : ""}`;
+        const padding = this.outputPad ?? 1;
+        const indent = Number.isFinite(padding) ? Math.max(0, Math.floor(padding)) + 2 : 3;
+        return [truncateToWidth(`${" ".repeat(Math.min(indent, width - 1))}${text}`, width)];
+      };
+      const mouse = function(this: CustomMessageComponent, event: ToolMouseEvent): unknown {
+        if (current.enabled && !this._expanded && event.type === "click" && event.button === "left"
+          && event.y === 0 && !event.shift && !event.alt && !event.ctrl) {
+          this.setExpanded(true);
+          return { handled: true, render: true };
+        }
+        return originalMouse?.call(this, event);
+      };
+      customMessagePrototype.render = render;
+      customMessagePrototype.handleMouse = mouse;
+      const redraw = current.redraw;
+      current.redraw = function(collapse) {
+        for (const reference of messages) {
+          const component = reference.deref();
+          if (!component) { messages.delete(reference); continue; }
+          if (collapse) component.setExpanded(false);
+          else component.invalidate();
+        }
+        redraw.call(this, collapse);
+      };
+      const restore = current.restore;
+      current.restore = function() {
+        for (const [name, wrapper, descriptor] of [["render", render, renderDescriptor], ["handleMouse", mouse, mouseDescriptor]] as const) {
+          if (customMessagePrototype[name] !== wrapper) continue;
+          if (descriptor) Object.defineProperty(customMessagePrototype, name, descriptor);
+          else Reflect.deleteProperty(customMessagePrototype, name);
+        }
+        messages.clear();
         restore.call(this);
       };
     }
