@@ -35,7 +35,7 @@ Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or ne
 
 ## Delegation Modes
 
-`config.json` sets `delegationMode` to `manual`, `adaptive` (default), or
+The user config sets `delegationMode` to `manual`, `adaptive` (default), or
 `coordinator`. `/subagents settings` (or `/subagents`) opens a settings page
 for delegation mode and the concurrent-subagent cap (default 4). Edits apply to
 this session and persist across reloads; Ctrl+S saves both as defaults, and
@@ -50,6 +50,14 @@ plan. Adaptive delegates substantial independent work when useful. Coordinator
 uses `agents_catalog` to discover current role descriptions and delegates every
 nontrivial role-owned task, while the foreground coordinates, integrates, and
 verifies. See [usage notes](docs/usage.md#delegation-mode).
+
+Saved defaults live in `~/.pi/agent/extensions/pi-better-subagents-config.json`
+(or under `PI_CODING_AGENT_DIR`) and survive package reinstalls and upgrades.
+This user file overrides the package's `config.json`, which remains a fallback
+for compatibility. Save existing mode and cap choices once with `/subagents save`
+or Ctrl+S to keep them outside the package. Put other custom config keys in the
+user file as well; edits made only inside the installed package can be lost on
+upgrade.
 
 `agents_catalog` shows each role's and named agent's default model and effort,
 such as `role developer "Developer" … default openai/gpt-6.1-sol@high`. Roles are

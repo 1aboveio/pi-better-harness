@@ -1,6 +1,6 @@
 /**
- * Extension config — a single `config.json` next to this file sets defaults for
- * every subagent, each overridable per `subagent_spawn` call.
+ * User config overrides the shipped `config.json` defaults for every subagent,
+ * each overridable per `subagent_spawn` call. Saves never edit installed files.
  *
  *   { "defaultModel": "xai/grok-4.5", "defaultTools": "read, bash, web_fetch" }
  *
@@ -8,7 +8,7 @@
  * `defaultTools` absent → the built-in SAFE_DEFAULT_TOOLS.
  */
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -89,65 +89,79 @@ export const SAFE_CLEAN_TOOLS = "read, bash";
 
 let cached: SubagentConfig | undefined;
 let configPathForTests: string | undefined;
+let bundledConfigPathForTests: string | undefined;
 
 /** Test seam. Pass undefined to reload config.json on the next loadConfig call. */
 export function setConfigForTests(next: SubagentConfig | undefined): void {
     cached = next;
 }
 
-/** Test seam. Save and load use this file instead of the package config.json. */
-export function setConfigPathForTests(path: string | undefined): void {
+/** Test seam. Isolate user config, optionally supplying a package fallback. */
+export function setConfigPathForTests(path: string | undefined, bundledPath?: string): void {
     configPathForTests = path;
+    bundledConfigPathForTests = bundledPath;
     cached = undefined;
 }
 
 export function configPath(): string {
-    return configPathForTests ?? join(dirname(fileURLToPath(import.meta.url)), "config.json");
+    return configPathForTests ?? join(piAgentDir(), "extensions", "pi-better-subagents-config.json");
 }
 
-/** Load config.json from the extension directory. Missing/invalid → {}. */
+function readConfig(path: string): SubagentConfig {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Config must be a JSON object.");
+    return parsed as SubagentConfig;
+}
+
+function bundledConfig(): SubagentConfig {
+    const path = bundledConfigPathForTests ?? (configPathForTests ? undefined : join(selfDir(), "config.json"));
+    if (!path) return {};
+    try {
+        return readConfig(path);
+    } catch {
+        return {};
+    }
+}
+
+/** Saved user choices take precedence; missing/invalid files contribute no keys. */
 export function loadConfig(): SubagentConfig {
     if (cached) return cached;
-    try {
-        cached = JSON.parse(readFileSync(configPath(), "utf-8")) as SubagentConfig;
-    } catch {
-        cached = {};
-    }
+    let user: SubagentConfig = {};
+    try { user = readConfig(configPath()); } catch { /* retain package fallback */ }
+    cached = { ...bundledConfig(), ...user };
     return cached;
 }
 
-/** Write delegationMode into config.json, preserving every other key. */
+/** Save the navigator's mode-only default without replacing the saved cap. */
 export function writeDelegationMode(mode: DelegationMode, path = configPath()): void {
     if (!isDelegationMode(mode)) throw new Error(`Invalid delegation mode: ${String(mode)}`);
-    let current: SubagentConfig = {};
-    try {
-        const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) current = parsed as SubagentConfig;
-    } catch { /* missing file starts as an empty config */ }
-    current.delegationMode = mode;
-    const pending = `${path}.${process.pid}.tmp`;
-    writeFileSync(pending, `${JSON.stringify(current, null, 2)}\n`);
-    renameSync(pending, path);
-    if (path === configPath()) cached = current;
+    writeConfigSettings({ delegationMode: mode }, path);
 }
 
 /** Save human-facing defaults together, preserving unrelated configuration. */
 export function writeSubagentSettings(settings: { delegationMode: DelegationMode; maxConcurrent: number }, path = configPath()): void {
     if (!isDelegationMode(settings.delegationMode)) throw new Error("Invalid delegation mode.");
     if (!isConcurrencyCap(settings.maxConcurrent)) throw new Error("Concurrent subagents must be a positive whole number.");
-    let current: Record<string, unknown> = {};
+    writeConfigSettings(settings, path);
+}
+
+function writeConfigSettings(settings: Partial<SubagentConfig>, path: string): void {
+    let current: SubagentConfig = {};
     try {
-        const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Config must be a JSON object.");
-        current = parsed as Record<string, unknown>;
+        current = readConfig(path);
     } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     Object.assign(current, settings);
     const pending = `${path}.${process.pid}.tmp`;
-    writeFileSync(pending, `${JSON.stringify(current, null, 2)}\n`);
-    renameSync(pending, path);
-    if (path === configPath()) cached = current as SubagentConfig;
+    try {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(pending, `${JSON.stringify(current, null, 2)}\n`);
+        renameSync(pending, path);
+    } finally {
+        rmSync(pending, { force: true });
+    }
+    if (path === configPath()) cached = { ...bundledConfig(), ...current };
 }
 
 /** Normalize a comma/space tool list to pi's bare comma form: "a, b" → "a,b". */
