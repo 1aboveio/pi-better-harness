@@ -19,7 +19,7 @@ test("agents model and effort edits persist for the session and only Ctrl+S save
     writeFileSync(rolePath, original);
     const args = ["-L", `pi-agents-settings-${process.pid}`];
     const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
-    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(agent)} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(join(root, "node_modules/.bin/pi"))} -e ${q(join(root, "packages/pi-better-subagents/index.ts"))} --no-skills --no-context-files --approve --model openai/gpt-4o-mini`;
+    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(agent)} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(join(root, "node_modules/.bin/pi"))} -e ${q(join(root, "packages/pi-better-subagents/index.ts"))} -e ${q(join(root, "packages/pi-better-harness/extensions/settings/index.ts"))} --no-skills --no-context-files --approve --model openai/gpt-4o-mini`;
     const tmux = (...more) => execFileSync("tmux", [...args, ...more], { encoding: "utf8" });
     const key = (value) => tmux("send-keys", "-t", "agents", value);
     const literal = (value) => tmux("send-keys", "-t", "agents", "-l", value);
@@ -45,6 +45,13 @@ test("agents model and effort edits persist for the session and only Ctrl+S save
     try {
         tmux("new-session", "-d", "-s", "agents", "-x", "100", "-y", "40", command);
         wait(/pi-better-subagents/);
+        literal("/harness-settings"); key("Tab"); key("Enter");
+        wait(/Agents\s+\/agents/);
+        key("Down"); key("Enter");
+        wait(/Agents.*definitions/);
+        assert.equal(readFileSync(rolePath, "utf8"), original, "the settings shortcut does not write catalog defaults");
+        key("Escape"); wait(/Harness settings/);
+        key("Escape"); wait(/^(?![\s\S]*Harness settings)/);
         open();
         key("Enter"); wait(/Agents \/ model/);
         literal("openai/gpt-4o"); wait(/openai\/gpt-4o/); key("Enter");
@@ -61,6 +68,13 @@ test("agents model and effort edits persist for the session and only Ctrl+S save
         assert.equal(parse(frontmatter).defaults.model, "openai/gpt-4o");
         tmux("resize-window", "-t", "agents", "-x", "40", "-y", "24");
         wait(/Agents \/ Fixture/);
+        tmux("new-window", "-t", "agents", "-n", "fresh-defaults", command);
+        tmux("resize-window", "-t", "agents", "-x", "100", "-y", "40");
+        wait(/pi-better-subagents/);
+        open();
+        wait(/Model\s+openai\/gpt-4o\s+(?:catalog|inherited)/);
+        const freshSettings = wait(/Effort\s+low\s+(?:catalog|inherited)/);
+        assert.doesNotMatch(freshSettings, /(?:Model|Effort)[^\n]*session/, "fresh settings come from durable catalog defaults");
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
         rmSync(fixture, { recursive: true, force: true });

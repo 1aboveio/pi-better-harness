@@ -32,9 +32,9 @@
     "access": "public"
   },
   "scripts": {
-    "pretypecheck": "node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
-    "pretest": "node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
-    "prepack": "node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
+    "pretypecheck": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-sandbox-core.mjs && node ../../scripts/sync-task-sandbox.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "verify": "npm run typecheck && npm test"
@@ -59,5 +59,8 @@
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
   }
 }

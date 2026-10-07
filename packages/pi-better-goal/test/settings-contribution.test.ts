@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import test from "node:test";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand, Theme } from "@earendil-works/pi-coding-agent";
@@ -11,6 +11,9 @@ const theme = { fg: (_color: string, text: string) => text, bg: (_color: string,
   bold: (text: string) => text, inverse: (text: string) => text } as Theme;
 
 test("goal settings discovery uses the standalone opener and shared preferences, and stops replying after shutdown", async () => {
+  const unrelated = { theme: "light", piBetterHarness: { callbacks: { mode: "immediate" } } };
+  const rawSettings = JSON.stringify(unrelated);
+  writeFileSync(goalPreferencesPath(), rawSettings);
   const events = createEventBus();
   const registrations: Contribution[] = [];
   events.on("harness-settings:register", (data) => registrations.push(data as Contribution));
@@ -64,7 +67,7 @@ test("goal settings discovery uses the standalone opener and shared preferences,
   assert.equal(pages.length, 2);
   assert.equal(pages[0], pages[1]);
   assert.equal(closed, 2);
-  assert.equal(existsSync(goalPreferencesPath()), false, "opening does not persist defaults");
+  assert.equal(readFileSync(goalPreferencesPath(), "utf8"), rawSettings, "opening does not persist defaults or modify other settings");
   assert.deepEqual(entries, []);
   assert.deepEqual(messages, []);
 
@@ -78,6 +81,12 @@ test("goal settings discovery uses the standalone opener and shared preferences,
   await contribution.open(ctx);
   assert.match(pages.at(-1)!, /Automatic continuation\s+on/i);
   assert.equal(readGoalPreferences().autoContinue, true);
+  assert.deepEqual(JSON.parse(readFileSync(goalPreferencesPath(), "utf8")), {
+    ...unrelated,
+    piBetterHarness: { ...unrelated.piBetterHarness, goal: {
+      version: 1, autoContinue: true, conversationalResume: true, pauseOnEscape: true,
+    } },
+  });
   assert.deepEqual(entries, []);
   assert.deepEqual(messages, []);
 

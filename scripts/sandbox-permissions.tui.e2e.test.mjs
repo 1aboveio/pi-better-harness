@@ -179,19 +179,21 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         for (let i = 0; i < 4; i++) key("Up");
         // The guarded adapter stays a direct row; trusted tools start folded by package.
         wait(/Subagents · Tools[\s\S]*\[x\] apply_patch\s+harness adapter[\s\S]*Trusted \(runs outside the file rules\)[\s\S]*\[x\].*@juicesharp\/rpiv-web-tools\s+2\/2/);
-        const defaultsPath = join(fixture, "agent/extensions/pi-better-sandbox-permissions.json");
-        assert.equal(existsSync(defaultsPath), false, "editing must not write global defaults");
+        const defaultsPath = join(fixture, "agent/settings.json");
+        const savedDefaults = () => existsSync(defaultsPath)
+            ? JSON.parse(readFileSync(defaultsPath, "utf8")).piBetterHarness?.sandboxPermissions : undefined;
+        assert.equal(savedDefaults(), undefined, "editing must not write global defaults");
         key("Enter"); // Not a save command.
         key("Escape"); wait(/^(?![\s\S]*Sandbox permissions\s+Main)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
         literal("/sandbox"); key("Enter");
         wait(/Outside project\s+-\s+Write & delete/);
-        assert.equal(existsSync(defaultsPath), false, "reload restores the session without writing defaults");
+        assert.equal(savedDefaults(), undefined, "reload restores the session without writing defaults");
         key("Space"); wait(/Project files\s+Off\s+Write & delete/);
         key("Space"); wait(/Sandbox\s+Off\s+On/);
         key("C-s"); wait(/Defaults saved\.\s+Looser: Subagents: outsideProject write → read-write/);
         wait(/Defaults saved/);
-        const saved = JSON.parse(readFileSync(defaultsPath, "utf8"));
+        const saved = savedDefaults();
         assert.equal(saved.permissions.main.enabled, false);
         assert.equal(saved.permissions.main.projectFiles, "off");
         assert.equal(saved.permissions.subagents.outsideProject, "read-write");
@@ -280,10 +282,10 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         press("Left", alphaAtlas(">", "x", 2), (frame) => !/mcp__atlas__read/.test(frame));
         press("Enter", alphaAtlas("v", "x", 2), (frame) => /\[x\] mcp__atlas__read/.test(frame));
         text = press("Enter", alphaAtlas(">", "x", 2), (frame) => !/mcp__atlas__read/.test(frame));
-        assert.equal(existsSync(join(agent, "extensions/pi-better-sandbox-permissions.json")), false);
+        assert.equal(JSON.parse(readFileSync(join(agent, "settings.json"), "utf8")).piBetterHarness?.sandboxPermissions, undefined);
         assert.doesNotMatch(text, /Save as defaults/);
         press("C-s", alphaAtlas(">", "x", 2), (frame) => /Defaults saved[\s\S]*Looser:/.test(frame));
-        const saved = JSON.parse(readFileSync(join(agent, "extensions/pi-better-sandbox-permissions.json"), "utf8"));
+        const saved = JSON.parse(readFileSync(join(agent, "settings.json"), "utf8")).piBetterHarness.sandboxPermissions;
         assert.equal(saved.permissions.subagentTools.applyPatch, true);
         assert.deepEqual(Object.keys(saved.permissions.subagentTools).sort(), ["applyPatch", "trusted"]);
         assert.deepEqual(saved.permissions.subagentTools.trusted.map((tool) => [tool.name, tool.package]).sort((a, b) => a[0].localeCompare(b[0])), [

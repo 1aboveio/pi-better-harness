@@ -1,7 +1,11 @@
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+  harnessSettingsPath,
+  readHarnessSetting,
+  updateHarnessSetting,
+  type HarnessSettingsSeams,
+} from "./shared-harness-settings.ts";
 
 export type CallbackSource = "subagent" | "background-task";
 export type CallbackDetailTool = "subagent_result" | "bg_task_status";
@@ -12,9 +16,7 @@ export interface CallbackSettingsContext {
   ui?: { notify(message: string, type: "error"): void };
 }
 
-export interface CallbackSettingsSeams {
-  agentDir?: () => string;
-}
+export type CallbackSettingsSeams = HarnessSettingsSeams;
 
 export interface CallbackSettings {
   mode: CallbackDeliveryMode;
@@ -35,7 +37,12 @@ function validCallbackPreferences(value: unknown): value is { version: 1; mode: 
     && data.version === 1 && isDeliveryMode(data.mode);
 }
 
-function callbackPreferencesPath(seams: CallbackSettingsSeams): string {
+function parseCallbackPreferences(value: unknown): { version: 1; mode: CallbackDeliveryMode } {
+  if (!validCallbackPreferences(value)) throw new Error('Expected { version: 1, mode: "hold" | "steer" }');
+  return value;
+}
+
+function legacyCallbackPreferencesPath(seams: CallbackSettingsSeams): string {
   return join((seams.agentDir ?? getAgentDir)(), "extensions", CALLBACK_PREFERENCES_FILE);
 }
 
@@ -63,41 +70,27 @@ function getSessionDefault(ctx: CallbackSettingsContext, seams: CallbackSettings
     if (ctx.sessionManager) defaults.set(ctx.sessionManager, { sessionId, mode });
     return { mode, source: "default" };
   };
-  const path = callbackPreferencesPath(seams);
-  let text: string;
+  const path = harnessSettingsPath(seams);
   try {
-    text = readFileSync(path, "utf8");
+    const data = readHarnessSetting<{ version: 1; mode: CallbackDeliveryMode }>("callbacks", seams, {
+      path: legacyCallbackPreferencesPath(seams),
+      parse: parseCallbackPreferences,
+    });
+    return snapshot(data === undefined ? "hold" : parseCallbackPreferences(data).mode);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return snapshot("hold");
-    throw new Error(`Cannot read callback default at ${path}: ${String(error)}`, { cause: error });
-  }
-  try {
-    const data: unknown = JSON.parse(text);
-    if (!validCallbackPreferences(data)) throw new Error('Expected { version: 1, mode: "hold" | "steer" }');
-    return snapshot(data.mode);
-  } catch (error) {
-    throw new Error(`Invalid callback default at ${path}: ${String(error)}`, { cause: error });
+    const prefix = (error as NodeJS.ErrnoException).code ? "Cannot read" : "Invalid";
+    throw new Error(`${prefix} callback default at ${path}: ${String(error)}`, { cause: error });
   }
 }
 
 /** Saves only the future-session default; never changes the active branch or batcher. */
 export function saveCallbackDefault(mode: CallbackDeliveryMode, seams: CallbackSettingsSeams = {}): void {
   if (!isDeliveryMode(mode)) throw new Error("Invalid callback delivery mode. Nothing saved.");
-  const dir = join((seams.agentDir ?? getAgentDir)(), "extensions");
-  const path = join(dir, CALLBACK_PREFERENCES_FILE);
-  const tmp = join(dir, `.${CALLBACK_PREFERENCES_FILE}.${randomUUID()}.tmp`);
-  let created = false;
+  const path = harnessSettingsPath(seams);
   try {
-    mkdirSync(dir, { recursive: true });
-    const fd = openSync(tmp, "wx", 0o600);
-    created = true;
-    try { writeFileSync(fd, `${JSON.stringify({ version: 1, mode })}\n`); }
-    finally { closeSync(fd); }
-    renameSync(tmp, path);
+    updateHarnessSetting("callbacks", () => ({ version: 1, mode }), seams);
   } catch (error) {
     throw new Error(`Cannot save callback default at ${path}: ${String(error)}`, { cause: error });
-  } finally {
-    if (created) rmSync(tmp, { force: true });
   }
 }
 

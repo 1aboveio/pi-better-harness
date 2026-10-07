@@ -1,9 +1,9 @@
 /** Persisted foreground-sandbox activation preference. */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
 
 export const SANDBOX_PREFERENCES_FILE_NAME = "pi-better-sandbox-preferences.json";
 export const SANDBOX_PREFERENCES_FORMAT_VERSION = 1;
@@ -27,31 +27,27 @@ export class SandboxPreferenceError extends Error {
 }
 
 export function sandboxPreferencesPath(seams: SandboxPreferenceSeams = {}): string {
-    return join((seams.agentDir ?? getAgentDir)(), "extensions", SANDBOX_PREFERENCES_FILE_NAME);
+    return harnessSettingsPath(seams);
 }
 
 /** Read the persisted default. No file means the product default: off. */
 export function readSandboxDefault(seams: SandboxPreferenceSeams = {}): SandboxDefaultMode {
     const path = sandboxPreferencesPath(seams);
-    let raw: string;
     try {
-        raw = readFileSync(path, "utf8");
+        const stored = readHarnessSetting<unknown>("sandbox", seams, {
+            path: join((seams.agentDir ?? getAgentDir)(), "extensions", SANDBOX_PREFERENCES_FILE_NAME),
+            parse: (value) => parseSandboxPreferences(value, path),
+        });
+        return stored === undefined ? "off" : parseSandboxPreferences(stored, path).default;
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "off";
+        if (error instanceof SandboxPreferenceError) throw error;
         throw new SandboxPreferenceError(
             `The sandbox preference at ${path} could not be read: ${messageOf(error)}`,
         );
     }
+}
 
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(raw);
-    } catch (error) {
-        throw new SandboxPreferenceError(
-            `The sandbox preference at ${path} is not valid JSON: ${messageOf(error)}`,
-        );
-    }
-
+function parseSandboxPreferences(parsed: unknown, path: string): SandboxPreferencesFile {
     const value = parsed as Partial<SandboxPreferencesFile> | null;
     if (
         value?.version !== SANDBOX_PREFERENCES_FORMAT_VERSION ||
@@ -61,7 +57,7 @@ export function readSandboxDefault(seams: SandboxPreferenceSeams = {}): SandboxD
             `The sandbox preference at ${path} must contain version ${SANDBOX_PREFERENCES_FORMAT_VERSION} and default "off" or "on".`,
         );
     }
-    return value.default;
+    return { version: SANDBOX_PREFERENCES_FORMAT_VERSION, default: value.default };
 }
 
 /** Atomically persist the default used by future sessions. */
@@ -70,16 +66,9 @@ export function writeSandboxDefault(
     seams: SandboxPreferenceSeams = {},
 ): string {
     const path = sandboxPreferencesPath(seams);
-    mkdirSync(dirname(path), { recursive: true });
-    const contents = `${JSON.stringify(
-        { version: SANDBOX_PREFERENCES_FORMAT_VERSION, default: mode } satisfies SandboxPreferencesFile,
-        undefined,
-        2,
-    )}\n`;
-    const pending = `${path}.${process.pid}.tmp`;
     try {
-        writeFileSync(pending, contents, "utf8");
-        renameSync(pending, path);
+        const value = parseSandboxPreferences({ version: SANDBOX_PREFERENCES_FORMAT_VERSION, default: mode }, path);
+        updateHarnessSetting("sandbox", () => value, seams);
     } catch (error) {
         throw new SandboxPreferenceError(
             `The sandbox preference at ${path} could not be written: ${messageOf(error)}`,

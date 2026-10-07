@@ -18,17 +18,19 @@
 import { agentsCatalogTool, type DiscoveryDeps } from "./agents-catalog-tool.ts";
 import {
     executeAgentsCommand,
+    executeAgentsCommandContext,
     registerAgentCommands,
     type AgentCommandDeps,
     type AgentCommandHost,
     type AgentCommandResult,
 } from "./agent-commands.ts";
 import { resolveRoleAssignment, type RoleAssignment, type RoleAssignmentDecision } from "./role-assignment.ts";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 export interface AgentOperationsDeps extends AgentCommandDeps, DiscoveryDeps {}
 
 export interface AgentOperationsHandle {
+    openCatalog(ctx: ExtensionCommandContext): Promise<void>;
     registerCommands(pi: Pick<ExtensionAPI, "registerCommand">): void;
     createDiscoveryTool(Type: Parameters<typeof agentsCatalogTool>[0]): ReturnType<typeof agentsCatalogTool>;
     executeCommand(args: string, host: AgentCommandHost): Promise<AgentCommandResult>;
@@ -40,6 +42,9 @@ export interface AgentOperationsHandle {
 
 export function createAgentOperations(deps: AgentOperationsDeps = {}): AgentOperationsHandle {
     return {
+        async openCatalog(ctx) {
+            await executeAgentsCommandContext("", ctx, deps);
+        },
         registerCommands(pi) {
             registerAgentCommands(pi, deps);
         },

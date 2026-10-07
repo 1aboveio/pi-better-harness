@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installMinimalOutputHook, loadToolPrototype, type MinimalOutputHook } from "./hook.ts";
 import type { SettingsControl } from "../settings/registry.ts";
+import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
 
 const ENTRY = "pi-better-harness-tool-output";
 
@@ -8,6 +9,16 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
   let hook: MinimalOutputHook | undefined;
   let enabled = false;
   let running = false;
+  let initialDefault: boolean | undefined;
+
+  function defaultEnabled(): boolean {
+    if (initialDefault !== undefined) return initialDefault;
+    const value = readHarnessSetting<{ version?: unknown; enabled?: unknown }>("toolOutput");
+    if (value !== undefined && (value?.version !== 1 || typeof value.enabled !== "boolean")) {
+      throw new Error("Invalid tool-output default in global settings.json.");
+    }
+    return initialDefault = value?.enabled === true;
+  }
 
   function status(ctx: ExtensionContext): void {
     ctx.ui.setStatus(ENTRY, enabled ? "tools: minimal" : undefined);
@@ -36,7 +47,11 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
 
   async function restore(ctx: ExtensionContext): Promise<void> {
     if (ctx.mode !== "tui") return;
-    enabled = false;
+    try { enabled = defaultEnabled(); }
+    catch (error) {
+      enabled = false;
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+    }
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === ENTRY) {
         const data = entry.data as { version?: unknown; enabled?: unknown } | undefined;
@@ -59,6 +74,14 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     const data = { version: 1, enabled: value === "Minimal" };
     try { pi.appendEntry(ENTRY, data); }
     catch (error) { data.version = 0; data.enabled = enabled; throw error; }
+    try { updateHarnessSetting("toolOutput", () => ({ version: 1, enabled: data.enabled })); }
+    catch (error) {
+      data.version = 0;
+      data.enabled = enabled;
+      // The session entry may already be on disk; restore its prior effective value too.
+      pi.appendEntry(ENTRY, { version: 1, enabled });
+      throw error;
+    }
     enabled = data.enabled;
     if (enabled) collapseTools(ctx);
     hook!.setEnabled(enabled);
@@ -75,7 +98,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
   const subscribe = () => { stopSettings ??= pi.events.on("harness-settings:request", register); };
   subscribe();
   register();
-  pi.on("session_start", async (_event, ctx) => { subscribe(); await restore(ctx); register(); });
+  pi.on("session_start", async (_event, ctx) => { initialDefault = undefined; subscribe(); await restore(ctx); register(); });
   pi.on("session_tree", async (_event, ctx) => { await restore(ctx); });
   pi.on("agent_start", () => { running = true; });
   pi.on("agent_settled", (_event, ctx) => {
@@ -91,6 +114,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     hook = undefined;
     enabled = false;
     running = false;
+    initialDefault = undefined;
   });
 
   pi.registerCommand("tool-output", {

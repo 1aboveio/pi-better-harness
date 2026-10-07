@@ -42,6 +42,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { sandboxArgumentCompletions } from "../commands.ts";
 import { denyRuleOverridePath } from "../deny-rules.ts";
 import { sandboxPreferencesPath, writeSandboxDefault } from "../preferences.ts";
+import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
 import { PACKAGED_DENY_WRITE_TEMPLATES } from "../policy.ts";
 import { RULES_PAGE_NO_UI_REJECTION } from "../rules-page.ts";
 import {
@@ -82,12 +83,18 @@ assert.equal(denyRuleOverridePath().startsWith(agentDir), true);
 
 /** Drop any override a previous test left behind, so each starts on defaults. */
 function forgetDenyOverride(): void {
-    rmSync(denyRuleOverridePath(), { force: true });
+    if (existsSync(denyRuleOverridePath())) updateHarnessSetting("sandboxDenyRules", () => undefined);
 }
 
 function forgetSandboxPreference(): void {
-    rmSync(sandboxPreferencesPath(), { force: true });
-    rmSync(permissionSettingsPath(), { force: true });
+    if (existsSync(sandboxPreferencesPath())) {
+        updateHarnessSetting("sandbox", () => undefined);
+        updateHarnessSetting("sandboxPermissions", () => undefined);
+    }
+}
+
+function hasSandboxSetting(key: string): boolean {
+    return readHarnessSetting(key) !== undefined;
 }
 
 function project(name: string): string {
@@ -498,7 +505,7 @@ test("/sandbox default on persists opt-in and applies it to future sessions", as
     await recorded.commands.get("sandbox")?.handler("default on", shown.ctx);
 
     assert.equal(recorded.published.at(-1)?.state, "enabled");
-    assert.equal(JSON.parse(readFileSync(sandboxPreferencesPath(), "utf8")).default, "on");
+    assert.equal(JSON.parse(readFileSync(sandboxPreferencesPath(), "utf8")).piBetterHarness.sandbox.default, "on");
 
     const next = context(root);
     await recorded.handlers.get("session_start")?.(
@@ -516,19 +523,19 @@ test("/sandbox default off requires confirmation, persists opt-out, and applies 
 
     const declining = context(root, { confirm: false });
     await recorded.commands.get("sandbox")?.handler("default off", declining.ctx);
-    assert.equal(existsSync(sandboxPreferencesPath()), false);
+    assert.equal(hasSandboxSetting("sandbox"), false);
     assert.equal(recorded.published.at(-1)?.state, "enabled");
 
     const confirming = context(root, { confirm: true });
     await recorded.commands.get("sandbox")?.handler("default off", confirming.ctx);
-    assert.equal(JSON.parse(readFileSync(sandboxPreferencesPath(), "utf8")).default, "off");
+    assert.equal(JSON.parse(readFileSync(sandboxPreferencesPath(), "utf8")).piBetterHarness.sandbox.default, "off");
     assert.equal(recorded.published.at(-1)?.state, "disabled");
 });
 
 test("a malformed persisted preference blocks the session instead of broadening access", async () => {
     forgetSandboxPreference();
     mkdirSync(dirname(sandboxPreferencesPath()), { recursive: true });
-    writeFileSync(sandboxPreferencesPath(), '{"version":1,"default":"invalid"}\n');
+    writeFileSync(sandboxPreferencesPath(), '{"piBetterHarness":{"sandbox":{"version":1,"default":"invalid"}}}\n');
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("malformed-preference");
@@ -555,8 +562,8 @@ test("command activation persists across resume but not into a new session", asy
     assert.equal(recorded.published.at(-1)?.state, "disabled");
     await recorded.commands.get("sandbox")?.handler("on", context(root).ctx);
     assert.equal(recorded.published.at(-1)?.state, "enabled");
-    assert.equal(existsSync(permissionSettingsPath()), false);
-    assert.equal(existsSync(sandboxPreferencesPath()), false);
+    assert.equal(hasSandboxSetting("sandboxPermissions"), false);
+    assert.equal(hasSandboxSetting("sandbox"), false);
 
     await startSession(recorded, root, "resume", false);
 
@@ -583,8 +590,8 @@ test("confirmed command off persists its switch and retains permission details a
     assert.equal(reloaded.statuses.at(-1), "sandbox · OFF");
     assert.equal(restored.published.at(-1)?.permissions?.network, false);
     assert.equal(restored.published.at(-1)?.subagentPermissions?.outsideProject, "off");
-    assert.equal(existsSync(permissionSettingsPath()), false);
-    assert.equal(existsSync(sandboxPreferencesPath()), false);
+    assert.equal(hasSandboxSetting("sandboxPermissions"), false);
+    assert.equal(hasSandboxSetting("sandbox"), false);
 });
 
 /** Run the real page through Pi's custom-UI boundary, awaiting render completion. */
@@ -634,7 +641,7 @@ nodeTest("sandbox contributes its standalone permissions opener at load and on r
     await permissionsPage(recorded, root, async () => {}, contribution.open);
     assert.equal(recorded.published.length, before, "opening does not change task policy");
     assert.deepEqual(recorded.branch, []);
-    assert.equal(existsSync(permissionSettingsPath()), false);
+    assert.equal(hasSandboxSetting("sandboxPermissions"), false);
     // Change the default-on Subagents switch, avoiding any kernel dependency.
     await permissionsPage(recorded, root, async (_page, press) => {
         await press("\x1b[C");
@@ -730,7 +737,7 @@ test("a session append failure is visible, leaves the UI and enforcement unchang
         assert.match(page.render(120).join("\n"), /Sandbox\s+Off\s+On/);
         assert.deepEqual(recorded.published.at(-1), before);
         assert.deepEqual(recorded.branch, []);
-        assert.equal(existsSync(permissionSettingsPath()), false);
+        assert.equal(hasSandboxSetting("sandboxPermissions"), false);
         append.mock.restore();
         await press(" ");
         assert.match(page.render(120).join("\n"), /Sandbox\s+On\s+On/);
@@ -770,8 +777,8 @@ for (const verb of ["on", "off"] as const) test(`/sandbox ${verb} keeps enforcem
     await startSession(recorded, root, "reload", false, false);
     assert.equal(recorded.published.at(-1)?.permissions?.enabled, !initial.main.enabled);
     assert.equal(blocked(), !initial.main.enabled);
-    assert.equal(existsSync(permissionSettingsPath()), false);
-    assert.equal(existsSync(sandboxPreferencesPath()), false);
+    assert.equal(hasSandboxSetting("sandboxPermissions"), false);
+    assert.equal(hasSandboxSetting("sandbox"), false);
 });
 
 test("session policy survives fresh extension resume, fork and reload; new sessions inherit saved defaults", async () => {
@@ -870,9 +877,10 @@ test("Ctrl+S alone saves global defaults; a failed save retains session edits an
     await permissionsPage(recorded, root, async (page, press) => {
         await press("\x1b[C");
         await press(" "); // Disable Subagents, a loosening.
-        assert.equal(existsSync(permissionSettingsPath()), false);
+        assert.equal(hasSandboxSetting("sandboxPermissions"), false);
         const branch = structuredClone(recorded.branch);
-        mkdirSync(permissionSettingsPath(), { recursive: true }); // Atomic rename cannot replace this directory.
+        rmSync(permissionSettingsPath(), { force: true });
+        mkdirSync(permissionSettingsPath(), { recursive: true }); // Global settings cannot be read from a directory.
         await press("\x13");
         assert.doesNotMatch(page.render(120).join("\n"), /Defaults saved/);
         assert.match(page.render(120).join("\n"), /EISDIR|ENOTEMPTY/);
@@ -891,7 +899,7 @@ test("Ctrl+S alone saves global defaults; a failed save retains session edits an
     piBetterSandbox(next.pi);
     await startSession(next, root, "new", false, false);
     assert.equal(next.published.at(-1)?.subagentPermissions?.enabled, false);
-    assert.equal(existsSync(sandboxPreferencesPath()), false, "Ctrl+S does not overwrite the legacy activation preference");
+    assert.equal(hasSandboxSetting("sandbox"), false, "Ctrl+S does not overwrite the activation preference key");
 });
 
 test("an unknown /sandbox subcommand explains the usage instead of changing state", async () => {
@@ -988,15 +996,17 @@ function editThrough(
     );
 }
 
-test("installing the extension materializes no settings file", async () => {
+test("installing the extension creates no deny override and leaves global settings unchanged", async () => {
     forgetDenyOverride();
+    forgetSandboxPreference();
+    const before = existsSync(sandboxPreferencesPath()) ? readFileSync(sandboxPreferencesPath(), "utf8") : undefined;
     const recorded = record();
     piBetterSandbox(recorded.pi);
-    await startSession(recorded, project("no-settings-file"));
-
+    await startSession(recorded, project("no-settings-file"), "startup", true, false);
+    assert.equal(existsSync(sandboxPreferencesPath()) ? readFileSync(sandboxPreferencesPath(), "utf8") : undefined, before);
 
     assert.equal(
-        existsSync(denyRuleOverridePath()),
+        hasSandboxSetting("sandboxDenyRules"),
         false,
         "a fresh install plus a session start must not write a settings file",
     );
@@ -1019,7 +1029,7 @@ test("/sandbox deny list shows the packaged defaults as canonical absolute paths
     for (const template of PACKAGED_DENY_WRITE_TEMPLATES) {
         assert.ok(listing.includes(join(root, template)), `${template} must be shown absolutely`);
     }
-    assert.equal(existsSync(denyRuleOverridePath()), false, "listing must not create an override");
+    assert.equal(hasSandboxSetting("sandboxDenyRules"), false, "listing must not create an override");
 });
 
 kernelTest("a new deny rule reaches the write and edit tools pi already holds", async () => {
@@ -1115,11 +1125,11 @@ test("deny reset drops the override and restores the packaged defaults", async (
 
     await runSandbox(recorded, "deny add build", confirming.ctx);
     await runSandbox(recorded, "deny remove .env", confirming.ctx);
-    assert.equal(existsSync(denyRuleOverridePath()), true);
+    assert.equal(hasSandboxSetting("sandboxDenyRules"), true);
 
     await runSandbox(recorded, "deny reset", confirming.ctx);
 
-    assert.equal(existsSync(denyRuleOverridePath()), false);
+    assert.equal(readHarnessSetting("sandboxDenyRules"), null);
     assertProtectedPolicy(recorded, root);
 });
 
@@ -1166,7 +1176,7 @@ test("a refused rule change explains itself and leaves the policy alone", async 
     }
 
     assert.deepEqual([...(recorded.published.at(-1)?.denyWrite ?? [])], before);
-    assert.equal(existsSync(denyRuleOverridePath()), false, "a refused change writes nothing");
+    assert.equal(hasSandboxSetting("sandboxDenyRules"), false, "a refused change writes nothing");
 });
 
 test("a relative rule added in one project applies to the same relative path in the next", async () => {
@@ -1233,7 +1243,7 @@ test("/sandbox rules adds, removes, and restores through the same module", async
     );
 
     // Restore defaults: the override exists (a default was never removed, but a
-    // rule was added and removed), so restoring deletes it.
+    // rule was added and removed), so restoring clears it with a migration sentinel.
     let restorePasses = 0;
     const restoring = context(root, {
         confirm: true,
@@ -1242,7 +1252,7 @@ test("/sandbox rules adds, removes, and restores through the same module", async
     });
     await runSandbox(recorded, "rules", restoring.ctx);
 
-    assert.equal(existsSync(denyRuleOverridePath()), false);
+    assert.equal(readHarnessSetting("sandboxDenyRules"), null);
     assertProtectedPolicy(recorded, root);
 });
 
@@ -1306,7 +1316,7 @@ test("rule management is reachable only from the slash command, never from a too
     recorded.events.emit(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, undefined);
 
     assert.deepEqual([...(recorded.published.at(-1)?.denyWrite ?? [])], before);
-    assert.equal(existsSync(denyRuleOverridePath()), false);
+    assert.equal(hasSandboxSetting("sandboxDenyRules"), false);
 });
 
 test("session restore retains activation overrides and re-reads global deny rules", async () => {
@@ -1344,7 +1354,7 @@ test("a stored rule that cannot apply here is shown as such, never as protection
     mkdirSync(dirname(denyRuleOverridePath()), { recursive: true });
     writeFileSync(
         denyRuleOverridePath(),
-        JSON.stringify({ version: 1, denyWrite: [".env", dirname(root)] }),
+        JSON.stringify({ piBetterHarness: { sandboxDenyRules: { version: 1, denyWrite: [".env", dirname(root)] } } }),
     );
 
     const started = await startSession(recorded, root);
@@ -1377,7 +1387,7 @@ test("a stored rule that cannot apply here is shown as such, never as protection
 
     assert.match(page.confirmations.at(-1) ?? "", /Delete this rule from your global rule set/);
     assert.deepEqual(
-        JSON.parse(readFileSync(denyRuleOverridePath(), "utf8")).denyWrite,
+        JSON.parse(readFileSync(denyRuleOverridePath(), "utf8")).piBetterHarness.sandboxDenyRules.denyWrite,
         [".env"],
     );
 });

@@ -10,6 +10,15 @@ const stallDetectorSource = resolve(root, "packages/stall-detector/index.ts");
 const failureObservationsSource = resolve(root, "packages/failure-observations/index.ts");
 const permissionBlockerSource = resolve(root, "packages/failure-observations/permission-blocker.ts");
 const callbackBatcherSource = resolve(root, "packages/callback-batcher/index.ts");
+const harnessSettingsSource = resolve(root, "packages/harness-settings/index.ts");
+const harnessSettingsTargets = [
+  "packages/callback-batcher/shared-harness-settings.ts",
+  "packages/pi-better-subagents/shared-harness-settings.ts",
+  "packages/pi-better-background-tasks/src/shared-harness-settings.ts",
+  "packages/pi-better-goal/src/shared-harness-settings.ts",
+  "packages/pi-better-sandbox/shared-harness-settings.ts",
+  "packages/pi-better-harness/extensions/shared-harness-settings.ts",
+];
 const banner = "// Generated from packages/log-utils/index.ts. Do not edit directly.\n";
 const logUtilsTargets = [
   resolve(root, "packages/pi-better-background-tasks/src/shared-log-utils.ts"),
@@ -49,6 +58,10 @@ const navigatorContent = readFileSync(navigatorSource, "utf8");
 const renderSchedulerContent = `// Generated from packages/render-scheduler/index.ts. Do not edit directly.\n${readFileSync(renderSchedulerSource, "utf8")}`;
 const stallDetectorContent = `// Generated from packages/stall-detector/index.ts. Do not edit directly.\n${readFileSync(stallDetectorSource, "utf8")}`;
 const callbackBatcherContent = `// Generated from packages/callback-batcher/index.ts. Do not edit directly.\n${readFileSync(callbackBatcherSource, "utf8")}`;
+
+for (const target of harnessSettingsTargets) {
+  writeFileAtomically(resolve(root, target), `// Generated from packages/harness-settings/index.ts. Do not edit directly.\n${readFileSync(harnessSettingsSource, "utf8")}`);
+}
 
 for (const target of logUtilsTargets) {
   writeFileAtomically(target, logUtilsContent);

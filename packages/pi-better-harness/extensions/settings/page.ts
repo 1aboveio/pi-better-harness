@@ -23,7 +23,7 @@ export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], sele
     } : undefined;
     const items: SettingItem[] = [
       ...(callbackSetting ? [callbackSetting] : []),
-      ...controls.map(control => ({ id: `setting:${control.id}`, label: control.label, currentValue: control.get(), description: "Session setting", values: control.values })),
+      ...controls.map(control => ({ id: `setting:${control.id}`, label: control.label, currentValue: control.get(), description: "User default", values: control.values })),
       ...links.map(link => ({ id: `link:${link.id}`, label: link.label, currentValue: link.command, description: "Open package settings", values: [link.command] })),
     ];
     const feedback = new Text("", 0, 0);
@@ -41,10 +41,10 @@ export async function chooseHarnessSetting(ctx: any, links: SettingsLink[], sele
       if (control) {
         const previous = control.get();
         changing = true;
-        report("Saving session setting...");
+        report("Saving setting...");
         Promise.resolve().then(() => control.change(value, ctx)).then(() => {
           list.updateValue(id, control.get());
-          report("Session setting saved.");
+          report("Setting saved.");
         }).catch(error => {
           list.updateValue(id, previous);
           report(error instanceof Error ? error.message : String(error), true);

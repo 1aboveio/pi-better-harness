@@ -14,7 +14,8 @@ launch is the result · completion triggers fetch · the foreground never blocks
 
 ## Delegation Mode
 
-Set `delegationMode` in this package's `config.json` to `manual`, `adaptive`, or
+Set `delegationMode` in the user config described under
+[Tool scoping](#tool-scoping-allowlist) to `manual`, `adaptive`, or
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents settings` (or simply
 `/subagents`) opens the terminal settings page with mode and concurrent-subagent
@@ -438,7 +439,17 @@ Precedence, highest first: the per-call `tools` param → `config.json`
 web_fetch`; just `read, bash` in a `clean` child). `exclude_tools` subtracts on
 top.
 
-`config.json` (next to the extension) also sets:
+User configuration lives in
+`~/.pi/agent/settings.json` under `piBetterHarness.subagents` (under
+`PI_CODING_AGENT_DIR` when set). The old user config migrates on first use.
+Its keys override the package's `config.json`,
+which is still read as a compatibility fallback. Settings saves write only the
+user file, so saved mode and cap survive reinstalls and upgrades without freezing
+other shipped defaults. To retain custom keys from an older package-local config,
+copy those keys into the user file before upgrading. Already-overwritten values
+cannot be recovered automatically.
+
+The effective config also sets:
 
 - `defaultModel` — model for spawns that don't specify one (`null` = inherit the
   foreground model).

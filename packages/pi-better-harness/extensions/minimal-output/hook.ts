@@ -16,6 +16,7 @@ interface ToolComponent {
   toolCallId: string;
   args: unknown;
   callRendererComponent?: Component;
+  getCallRenderer?(): unknown;
   expanded: boolean;
   isPartial?: boolean;
   result?: { isError?: boolean };
@@ -73,7 +74,57 @@ const TOOL_ICONS: Record<string, string> = {
   grep: "\u2315",
   find: "\u2316",
   ls: "\u2261",
+  subagent_spawn: "\u25c7",
+  subagent_spawn_batch: "\u25c7",
+  bg_task_spawn: "\u2318",
+  bg_task_watch: "\u2318",
+  bg_task: "\u2318",
+  update_goal: "\u25ce",
+  get_goal: "\u25ce",
+  goal_resume: "\u25ce",
+  update_plan: "\u2261",
+  get_plan: "\u2261",
+  remote_bash: "\u2318",
 };
+
+function harnessCallDetail(name: string, input: unknown): string | undefined {
+  const args = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const text = (value: unknown): string => typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  const joinDetails = (...values: unknown[]) => values.map(text).filter(Boolean).join(" \u00b7 ");
+  const host = () => {
+    const ssh = args.ssh && typeof args.ssh === "object" ? args.ssh as Record<string, unknown> : args;
+    return text(ssh.host) ? `${text(ssh.user) ? `${text(ssh.user)}@` : ""}${text(ssh.host)}` : "";
+  };
+  switch (name) {
+    case "subagent_spawn":
+      return joinDetails(args.agent ?? args.role, args.alias ?? args.name, args.prompt);
+    case "subagent_spawn_batch":
+      return joinDetails(args.batchName, `${Array.isArray(args.jobs) ? args.jobs.length : 0} jobs`);
+    case "subagent_result": case "subagent_output": case "subagent_stop":
+    case "bg_task_status": case "bg_task_log": case "bg_task_stop":
+      return text(args.id);
+    case "subagent_list": case "bg_task_list":
+      return joinDetails(Array.isArray(args.status) ? args.status.map(text).filter(Boolean).join(", ") : args.status,
+        args.all === true ? "all sessions" : "");
+    case "agents_catalog":
+      return joinDetails(args.action, args.id);
+    case "bg_task_spawn": case "bg_task_watch": case "bg_task": case "bg_status":
+      return joinDetails(args.action, args.id, args.name, host(), args.command ??
+        (Array.isArray(args.argv) ? args.argv.map(text).filter(Boolean).join(" ") : undefined));
+    case "update_goal":
+      return text(args.status);
+    case "goal_resume":
+      return text(args.reason);
+    case "get_goal": case "get_background_activity": case "release_workflow": case "get_plan":
+      return "";
+    case "remote_bash":
+      return joinDetails(host(), args.command);
+    case "ssh_profile": case "ssh_mux":
+      return joinDetails(args.action, host(), args.all === true ? "all hosts" : "");
+    default:
+      return undefined;
+  }
+}
 
 function compactCall(component: ToolComponent, width: number, theme?: Theme, indent = 3): string[] {
   if (width <= 0) return [];
@@ -90,8 +141,9 @@ function compactCall(component: ToolComponent, width: number, theme?: Theme, ind
   }
   const failed = component.result?.isError === true;
   const running = !component.result || component.isPartial;
-  const detail = text.startsWith(`${component.toolName} `) ? text.slice(component.toolName.length).trimStart()
-    : text === component.toolName ? "" : text;
+  const detail = (component.getCallRenderer?.() ? undefined : harnessCallDetail(component.toolName, component.args)) ??
+    (text.startsWith(`${component.toolName} `) ? text.slice(component.toolName.length).trimStart()
+      : text === component.toolName ? "" : text);
   const label = component.toolName === "bash" ? "Shell"
     : component.toolName.replace(/_/g, " ").replace(/^./, letter => letter.toUpperCase());
   const suffix = failed ? " (failed)" : running ? " (running)" : "";

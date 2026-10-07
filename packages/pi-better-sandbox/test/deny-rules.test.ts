@@ -36,6 +36,8 @@ import {
     planDenyRuleAddition,
     planDenyRuleRemoval,
     readDenyRuleOverride,
+    clearDenyRuleOverride,
+    writeDenyRuleOverride,
 } from "../deny-rules.ts";
 import { createSandboxedWriteOperations } from "../files.ts";
 import { PACKAGED_DENY_WRITE_TEMPLATES } from "../policy.ts";
@@ -135,8 +137,10 @@ test("the override appears only after a rule changes, and holds the templates as
 
     assert.equal(existsSync(fixture.overridePath), true);
     assert.deepEqual(JSON.parse(readFileSync(fixture.overridePath, "utf8")), {
-        version: DENY_RULES_FORMAT_VERSION,
-        denyWrite: [".env", ".env.local", ".git/hooks", "build/artifacts"],
+        piBetterHarness: { sandboxDenyRules: {
+            version: DENY_RULES_FORMAT_VERSION,
+            denyWrite: [".env", ".env.local", ".git/hooks", "build/artifacts"],
+        } },
     });
 });
 
@@ -343,8 +347,10 @@ test("removing a packaged default creates the override without it", () => {
     fixture.manager.remove(".env");
 
     assert.deepEqual(JSON.parse(readFileSync(fixture.overridePath, "utf8")), {
-        version: DENY_RULES_FORMAT_VERSION,
-        denyWrite: [".env.local", ".git/hooks"],
+        piBetterHarness: { sandboxDenyRules: {
+            version: DENY_RULES_FORMAT_VERSION,
+            denyWrite: [".env.local", ".git/hooks"],
+        } },
     });
 });
 
@@ -361,7 +367,7 @@ test("removing something that is not a rule says so and lists what is", () => {
     );
 });
 
-test("reset deletes the override and restores the defaults the installed package ships", () => {
+test("reset clears the override and restores the defaults the installed package ships", () => {
     const fixture = harness("reset");
     fixture.manager.load();
     fixture.manager.remove(".env");
@@ -370,7 +376,8 @@ test("reset deletes the override and restores the defaults the installed package
 
     const report = fixture.manager.reset();
 
-    assert.equal(existsSync(fixture.overridePath), false);
+    assert.equal(JSON.parse(readFileSync(fixture.overridePath, "utf8")).piBetterHarness.sandboxDenyRules, null);
+    assert.equal(readDenyRuleOverride(fixture.seams), undefined);
     assert.equal(report.origin, "packaged");
     assert.deepEqual([...report.templates], [...PACKAGED_DENY_WRITE_TEMPLATES].sort());
     assert.deepEqual(fixture.controller.status().denyWrite, [
@@ -394,12 +401,13 @@ test("reset with no override changes nothing and still creates no file", () => {
 test("a broken override keeps the packaged defaults in force and is not overwritten", () => {
     const fixture = harness("broken-override");
     mkdirSync(join(fixture.agentDir, "extensions"), { recursive: true });
-    writeFileSync(fixture.overridePath, "{ not json");
+    const broken = JSON.stringify({ piBetterHarness: { sandboxDenyRules: { denyWrite: ["*.pem"] } } });
+    writeFileSync(fixture.overridePath, broken);
 
     const report = fixture.manager.load();
 
     assert.equal(report.origin, "packaged");
-    assert.match(report.overrideProblem ?? "", /is not valid JSON/);
+    assert.match(report.overrideProblem ?? "", /not a usable path/);
     assert.deepEqual([...report.templates], [...PACKAGED_DENY_WRITE_TEMPLATES].sort());
 
     // Changing a rule would have to rewrite the file, so it is refused with the
@@ -411,16 +419,16 @@ test("a broken override keeps the packaged defaults in force and is not overwrit
             error.kind === "unreadable-override" &&
             /\/sandbox deny reset/.test(error.message),
     );
-    assert.equal(readFileSync(fixture.overridePath, "utf8"), "{ not json");
+    assert.equal(readFileSync(fixture.overridePath, "utf8"), broken);
 
     fixture.manager.reset();
-    assert.equal(existsSync(fixture.overridePath), false);
+    assert.equal(readDenyRuleOverride(fixture.seams), undefined);
 });
 
 test("an override whose denyWrite is not a list of strings is reported, not guessed at", () => {
     const fixture = harness("wrong-shape");
     mkdirSync(join(fixture.agentDir, "extensions"), { recursive: true });
-    writeFileSync(fixture.overridePath, JSON.stringify({ version: 1, denyWrite: [".env", 7] }));
+    writeFileSync(fixture.overridePath, JSON.stringify({ piBetterHarness: { sandboxDenyRules: { version: 1, denyWrite: [".env", 7] } } }));
 
     const report = fixture.manager.load();
 
@@ -438,7 +446,7 @@ test("a global rule that would deny this project's root is held out and reported
     // ancestor of the project root.
     writeFileSync(
         fixture.overridePath,
-        JSON.stringify({ version: 1, denyWrite: [".env", home] }),
+        JSON.stringify({ piBetterHarness: { sandboxDenyRules: { version: 1, denyWrite: [".env", home] } } }),
     );
 
     const report = fixture.manager.load();
@@ -452,6 +460,74 @@ test("a global rule that would deny this project's root is held out and reported
     assert.ok(report.templates.includes(home));
     // But not in force here.
     assert.deepEqual(fixture.controller.status().denyWrite, [join(projectRoot, ".env")]);
+});
+
+test("legacy deny rules migrate into the injected global agent directory and reset suppresses re-migration", () => {
+    const fixture = harness("legacy-migration");
+    const legacyPath = join(fixture.agentDir, "extensions", "pi-better-sandbox.json");
+    mkdirSync(join(fixture.agentDir, "extensions"));
+    const legacy = JSON.stringify({ version: 1, denyWrite: ["./secrets/", ".env"] });
+    writeFileSync(legacyPath, legacy);
+    const other = { model: "keep-model", piBetterHarness: { sandbox: { version: 1, default: "on" }, goal: { enabled: true } } };
+    assert.equal(fixture.overridePath, join(fixture.agentDir, "settings.json"));
+    writeFileSync(fixture.overridePath, JSON.stringify(other));
+    const report = fixture.manager.load();
+    assert.equal(report.origin, "override");
+    assert.deepEqual(report.templates, [".env", "secrets"]);
+    assert.deepEqual(fixture.controller.status().denyWrite, [join(fixture.projectRoot, ".env"), join(fixture.projectRoot, "secrets")]);
+    assert.equal(readFileSync(legacyPath, "utf8"), legacy);
+    fixture.manager.add("build");
+    assert.deepEqual(JSON.parse(readFileSync(fixture.overridePath, "utf8")), {
+        ...other, piBetterHarness: { ...other.piBetterHarness, sandboxDenyRules: { version: 1, denyWrite: [".env", "build", "secrets"] } },
+    });
+    fixture.manager.reset();
+    assert.deepEqual(JSON.parse(readFileSync(fixture.overridePath, "utf8")), {
+        ...other, piBetterHarness: { ...other.piBetterHarness, sandboxDenyRules: null },
+    });
+    assert.equal(fixture.manager.load().origin, "packaged", "reset survives a reload with the original legacy file present");
+    assert.equal(readFileSync(legacyPath, "utf8"), legacy);
+    writeFileSync(legacyPath, "{ broken legacy");
+    assert.equal(readDenyRuleOverride(fixture.seams), undefined, "null is authoritative even over invalid legacy JSON");
+    assert.equal(clearDenyRuleOverride(fixture.seams), false);
+    writeDenyRuleOverride(["new-rule"], fixture.seams);
+    assert.deepEqual(readDenyRuleOverride(fixture.seams), ["new-rule"], "an explicit change replaces the sentinel");
+});
+
+test("invalid legacy deny rules stay untouched and can be reset without migrating", () => {
+    const fixture = harness("invalid-legacy");
+    const legacyPath = join(fixture.agentDir, "extensions", "pi-better-sandbox.json");
+    mkdirSync(join(fixture.agentDir, "extensions"));
+    const broken = '{"denyWrite":["*.pem"]}';
+    writeFileSync(legacyPath, broken);
+    assert.equal(fixture.manager.load().origin, "packaged");
+    assert.match(fixture.manager.report().overrideProblem ?? "", /not a usable path/);
+    assert.equal(existsSync(fixture.overridePath), false, "invalid legacy data must not be migrated");
+    assert.throws(() => fixture.manager.add("build"), (error: unknown) => error instanceof DenyRuleError && error.kind === "unreadable-override");
+    fixture.manager.reset();
+    assert.equal(fixture.manager.load().overrideProblem, undefined);
+    assert.equal(readFileSync(legacyPath, "utf8"), broken);
+});
+
+test("global deny override wins over legacy, including when the global payload is invalid", () => {
+    const fixture = harness("global-authority");
+    const legacyPath = join(fixture.agentDir, "extensions", "pi-better-sandbox.json");
+    mkdirSync(join(fixture.agentDir, "extensions"));
+    writeFileSync(legacyPath, '{"denyWrite":["legacy-rule"]}');
+    writeDenyRuleOverride(["global-rule"], fixture.seams);
+    assert.deepEqual(readDenyRuleOverride(fixture.seams), ["global-rule"]);
+    writeFileSync(fixture.overridePath, '{"piBetterHarness":{"sandboxDenyRules":{"denyWrite":7}}}');
+    assert.throws(() => readDenyRuleOverride(fixture.seams), (error: unknown) => error instanceof DenyRuleError && error.kind === "unreadable-override");
+});
+
+test("malformed global JSON retains protection and cannot be discarded by a deny reset", () => {
+    const fixture = harness("malformed-global");
+    writeFileSync(fixture.overridePath, "{ not json");
+    const report = fixture.manager.load();
+    assert.equal(report.origin, "packaged");
+    assert.ok(report.overrideProblem);
+    assert.deepEqual(report.templates, [...PACKAGED_DENY_WRITE_TEMPLATES].sort());
+    assert.throws(() => fixture.manager.reset(), (error: unknown) => error instanceof DenyRuleError && error.kind === "unreadable-override");
+    assert.equal(readFileSync(fixture.overridePath, "utf8"), "{ not json", "unrelated settings must not be lost");
 });
 
 test("every change is applied to the controller and announced exactly once", () => {

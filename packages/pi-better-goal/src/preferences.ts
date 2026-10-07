@@ -1,6 +1,11 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import {
+  harnessSettingsPath,
+  readHarnessSetting,
+  updateHarnessSetting,
+  type HarnessSettingsSeams,
+} from "./shared-harness-settings.js";
 
 export interface GoalPreferences {
   autoContinue: boolean;
@@ -8,30 +13,33 @@ export interface GoalPreferences {
   pauseOnEscape: boolean;
 }
 
-export interface GoalPreferenceSeams {
-  agentDir?: () => string;
-}
+export interface GoalPreferenceSeams extends HarnessSettingsSeams {}
 
 export function goalPreferencesPath(seams: GoalPreferenceSeams = {}): string {
-  return join((seams.agentDir ?? getAgentDir)(), "extensions", "pi-better-goal-preferences.json");
+  return harnessSettingsPath(seams);
 }
 
 export function readGoalPreferences(seams: GoalPreferenceSeams = {}): GoalPreferences {
   const path = goalPreferencesPath(seams);
-  let raw: string;
+  const legacyPath = join((seams.agentDir ?? getAgentDir)(), "extensions", "pi-better-goal-preferences.json");
   try {
-    raw = readFileSync(path, "utf8");
+    const value = readHarnessSetting<unknown>("goal", seams, {
+      path: legacyPath,
+      parse: (value) => ({ version: 1, ...parseGoalPreferences(value, legacyPath) }),
+    });
+    return parseGoalPreferences(value, path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { autoContinue: true, conversationalResume: true, pauseOnEscape: true };
+    if (messageOf(error).startsWith("Goal preferences at ")) throw error;
+    if (error instanceof SyntaxError || /not valid JSON/.test(messageOf(error))) {
+      throw new Error(`Goal preferences at ${path} are not valid JSON: ${messageOf(error)}`);
     }
     throw new Error(`Goal preferences at ${path} could not be read: ${messageOf(error)}`);
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`Goal preferences at ${path} are not valid JSON: ${messageOf(error)}`);
+}
+
+function parseGoalPreferences(parsed: unknown, path: string): GoalPreferences {
+  if (parsed === undefined) {
+    return { autoContinue: true, conversationalResume: true, pauseOnEscape: true };
   }
   const value = parsed as Partial<GoalPreferences> & { version?: unknown } | null;
   if (value?.version !== 1 ||
@@ -53,19 +61,20 @@ export function writeGoalPreference(
   enabled: boolean,
   seams: GoalPreferenceSeams = {},
 ): GoalPreferences {
-  const preferences = { ...readGoalPreferences(seams), [key]: enabled };
+  // Migrate legacy preferences before updating the authoritative value under lock.
+  readGoalPreferences(seams);
   const path = goalPreferencesPath(seams);
-  const pending = `${path}.${process.pid}.tmp`;
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(pending, `${JSON.stringify({ version: 1, ...preferences }, null, 2)}\n`, "utf8");
-    renameSync(pending, path);
+    const { version: _version, ...preferences } = updateHarnessSetting("goal", (current) => ({
+      version: 1,
+      ...parseGoalPreferences(current, path),
+      [key]: enabled,
+    }), seams);
+    return preferences;
   } catch (error) {
+    if (messageOf(error).startsWith("Goal preferences at ")) throw error;
     throw new Error(`Goal preferences at ${path} could not be written: ${messageOf(error)}`);
-  } finally {
-    rmSync(pending, { force: true });
   }
-  return preferences;
 }
 
 function messageOf(error: unknown): string {

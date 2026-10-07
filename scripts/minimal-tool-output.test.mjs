@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -11,6 +12,11 @@ import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/s
 
 import minimalOutputExtension from "../packages/pi-better-harness/extensions/minimal-output/index.ts";
 import { installMinimalOutputHook, loadToolPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
+import subagentsExtension from "../packages/pi-better-subagents/index.ts";
+import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
+import goalExtension from "../packages/pi-better-goal/src/index.ts";
+import planExtension from "../packages/pi-better-plan/src/index.ts";
+import sshExtension from "../packages/pi-better-ssh/src/index.ts";
 
 const sdk = process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR
   ? join(process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR, "dist")
@@ -34,6 +40,8 @@ const originals = Object.fromEntries(["updateDisplay", "getResultRenderer", "get
 const capabilities = getCapabilities();
 const handles = [];
 const shutdowns = [];
+let settingsRoot;
+let originalAgentDir;
 const payload = Object.freeze({
   content: Object.freeze([{ type: "text", text: "RESULT_BODY_SENTINEL\nsecond line" }]),
   details: Object.freeze({ preserved: "original details" }),
@@ -41,6 +49,9 @@ const payload = Object.freeze({
 });
 
 beforeEach(() => {
+  originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+  settingsRoot = mkdtempSync(join(tmpdir(), "tool-output-settings-"));
+  process.env.PI_CODING_AGENT_DIR = settingsRoot;
   if (process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR) process.argv[1] = join(sdk, "cli.js");
   initTheme("dark", false);
   setCapabilities({ ...capabilities, images: null });
@@ -51,6 +62,9 @@ afterEach(async () => {
   for (const handle of handles.splice(0)) handle.dispose();
   setCapabilities(capabilities);
   for (const [name, original] of Object.entries(originals)) assert.equal(prototype[name], original);
+  rmSync(settingsRoot, { recursive: true, force: true });
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
 });
 function install() {
   const handle = installMinimalOutputHook(prototype);
@@ -110,6 +124,73 @@ test("minimal mode suppresses streaming error bodies and inline images without d
   component.setExpanded(true);
   assert.match(rendered(component), /ERROR_BODY_SENTINEL/);
   assert.equal(component.imageComponents.length, 1);
+});
+
+test("actual Harness tools retain useful compact calls, hide results, and expand their native renderers", () => {
+  const definitions = new Map();
+  const pi = {
+    events: events(), registerTool(definition) { definitions.set(definition.name, definition); },
+    registerCommand() {}, registerShortcut() {}, on() {},
+  };
+  for (const extension of [subagentsExtension, backgroundTasksExtension, goalExtension, planExtension, sshExtension]) extension(pi);
+  const hook = install();
+  hook.setEnabled(true);
+  const cases = [
+    ["subagent_spawn", { role: "developer", name: "checkout", prompt: "Investigate checkout failures", model: "provider/model", thinking: "high" }, /developer.*checkout.*Investigate checkout failures/],
+    ["subagent_spawn_batch", { jobs: [{ role: "developer", prompt: "First job" }, { role: "reviewer", prompt: "Second job" }] }, /2 jobs/],
+    ["subagent_result", { id: "sa-checkout" }, /sa-checkout/],
+    ["subagent_output", { id: "sa-checkout" }, /sa-checkout/],
+    ["subagent_stop", { id: "sa-checkout" }, /sa-checkout/],
+    ["subagent_list", { status: ["running"], all: true }, /running.*all/],
+    ["agents_catalog", { action: "inspect", id: "role.developer" }, /inspect.*role.developer/],
+    ["bg_task_spawn", { command: "npm test", name: "unit-tests" }, /unit-tests.*npm test/],
+    ["bg_task_watch", { command: "deploy status", ssh: { user: "ops", host: "builder" } }, /ops@builder.*deploy status/],
+    ["bg_task_status", { id: "bg-tests" }, /bg-tests/],
+    ["bg_task_log", { id: "bg-tests" }, /bg-tests/],
+    ["bg_task_stop", { id: "bg-tests" }, /bg-tests/],
+    ["bg_task_list", {}, /Bg task list/],
+    ["bg_task", { action: "log", id: "bg-tests" }, /log.*bg-tests/],
+    ["bg_status", { action: "status", id: "bg-tests" }, /status.*bg-tests/],
+    ["get_goal", {}, /Get goal/],
+    ["update_goal", { status: "complete" }, /complete/],
+    ["goal_resume", { reason: "Continue verification" }, /Continue verification/],
+    ["get_background_activity", {}, /Get background activity/],
+    ["release_workflow", {}, /Release workflow/],
+    ["update_plan", { plan: [{ step: "Verify checkout", status: "in_progress" }] }, /1 steps/],
+    ["get_plan", {}, /Get plan/],
+    ["remote_bash", { host: "builder", command: "git status" }, /builder.*git status/],
+    ["ssh_profile", { action: "use", host: "builder" }, /use.*builder/],
+    ["ssh_mux", { action: "status", host: "builder" }, /status.*builder/],
+  ];
+  const chat = new Container();
+  const ui = { children: [chat], requestRender() {} };
+  for (const [name, args, expected] of cases) {
+    const definition = definitions.get(name);
+    assert.ok(definition, `${name} is registered by its real extension`);
+    const component = new ToolExecutionComponent(name, `harness-${name}`, args, {}, definition, ui, process.cwd());
+    chat.addChild(component);
+    component.updateResult(payload, true);
+    assert.match(rendered(component), /running/, `${name} retains streaming state without showing its result`);
+    assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+    component.updateResult(payload, false);
+    const compact = stripVTControlCharacters(rendered(component));
+    assert.equal(component.render(100).length, 1, `${name} stays on one line`);
+    assert.match(compact, expected, `${name} keeps its call identity`);
+    assert.doesNotMatch(compact, /RESULT_BODY_SENTINEL/);
+    assert.equal(component.result, payload);
+    for (const width of [1, 24, 60]) assert.ok(component.render(width).every(line => visibleWidth(line) <= width));
+    component.setExpanded(true);
+    assert.match(rendered(component), /RESULT_BODY_SENTINEL/, `${name} expands its original result`);
+    component.setExpanded(false);
+    assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+  }
+  hook.completeRun();
+  assert.equal(chat.render(100).length, 1, "settled Harness calls share one folded block");
+  assert.match(rendered(chat), new RegExp(`${cases.length} tool calls`));
+  chat.children[0].setExpanded(true);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/, "native expansion still works inside a settled Harness block");
+  chat.children[0].setExpanded(false);
+  assert.equal(chat.render(100).length, 1);
 });
 
 test("new tool headers survive streaming updates, and custom renderer reuse survives expansion", () => {
@@ -450,6 +531,14 @@ test("the contributed hub control changes real tool rows, shares command state, 
   await commands.get("tool-output").handler("normal", ctx);
   assert.equal(registry.controls()[0].get(), "Normal");
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
+  const settingsPath = join(settingsRoot, "settings.json");
+  const savedDefaults = readFileSync(settingsPath, "utf8");
+  writeFileSync(settingsPath, "{broken");
+  await assert.rejects(registry.controls()[0].change("Minimal", ctx), SyntaxError);
+  await handlers.get("session_tree")({}, ctx);
+  assert.equal(registry.controls()[0].get(), "Normal", "a failed global save rolls back the persisted branch choice");
+  assert.equal(readFileSync(settingsPath, "utf8"), "{broken");
+  writeFileSync(settingsPath, savedDefaults);
   sessionManager.branch(minimalLeaf);
   await handlers.get("session_tree")({}, ctx);
   assert.equal(registry.controls()[0].get(), "Minimal");
@@ -527,10 +616,12 @@ test("the command toggles existing rows, persists session preference, and restor
   assert.doesNotMatch(rendered(existing), /RESULT_BODY_SENTINEL/);
   assert.equal(entries.at(-1).data.enabled, true);
   assert.equal(expanded, false);
+  assert.equal(JSON.parse(readFileSync(join(settingsRoot, "settings.json"), "utf8")).piBetterHarness.toolOutput.enabled, true);
   await handlers.get("session_shutdown")();
   assert.match(rendered(existing), /RESULT_BODY_SENTINEL/);
+  entries.length = 0;
   await handlers.get("session_start")({}, ctx);
-  assert.doesNotMatch(rendered(existing), /RESULT_BODY_SENTINEL/);
+  assert.doesNotMatch(rendered(existing), /RESULT_BODY_SENTINEL/, "a fresh session inherits the saved global default");
   await commands.get("tool-output").handler("", ctx);
   assert.match(rendered(existing), /RESULT_BODY_SENTINEL/);
   assert.equal(entries.at(-1).data.enabled, false);

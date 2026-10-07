@@ -137,19 +137,21 @@ export function registerAgentCommands(pi: Pick<ExtensionAPI, "registerCommand">,
             return items.length > 0 ? items : null;
         },
         async handler(args: string, ctx: ExtensionCommandContext) {
-            // Every invocation, including help and a dismissed picker. The
-            // context argument is the current session, not the one captured
-            // when the command was registered.
-            deps.propagateCommandContext?.(ctx);
-            return executeAgentsCommand(args, {
-                cwd: ctx.cwd,
-                hasUI: ctx.hasUI,
-                mode: ctx.mode,
-                isProjectTrusted: () => ctx.isProjectTrusted(),
-                ui: ctx.ui,
-            }, deps);
+            return executeAgentsCommandContext(args, ctx, deps);
         },
     });
+}
+
+/** Slash commands and settings shortcuts must resolve against the same live context. */
+export function executeAgentsCommandContext(args: string, ctx: ExtensionCommandContext, deps: AgentCommandDeps = {}): Promise<AgentCommandResult> {
+    deps.propagateCommandContext?.(ctx);
+    return executeAgentsCommand(args, {
+        cwd: ctx.cwd,
+        hasUI: ctx.hasUI,
+        mode: ctx.mode,
+        isProjectTrusted: () => ctx.isProjectTrusted(),
+        ui: ctx.ui,
+    }, deps);
 }
 
 export async function executeAgentsCommand(args: string, host: AgentCommandHost, deps: AgentCommandDeps = {}): Promise<AgentCommandResult> {
