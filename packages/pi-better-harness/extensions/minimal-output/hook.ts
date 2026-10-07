@@ -34,6 +34,14 @@ interface TranscriptComponent extends Component {
   lastMessage?: { content: { type: string; text?: string; thinking?: string }[]; stopReason?: string };
 }
 interface ToolGroup { members: ToolComponent[]; open: boolean; expanded: number }
+interface CompactionComponent extends Component {
+  expanded: boolean;
+  message: { tokensBefore: number };
+  setExpanded(expanded: boolean): void;
+}
+interface CompactionPrototype {
+  render: CompactionComponent["render"];
+}
 
 type Method = (this: ToolComponent, ...args: unknown[]) => unknown;
 interface ToolMouseEvent { type: string; button: string; x: number; y: number; screenX: number; screenY: number; width: number; shift?: boolean; alt?: boolean; ctrl?: boolean }
@@ -129,7 +137,7 @@ function harnessCallDetail(name: string, input: unknown): string | undefined {
 function compactCall(component: ToolComponent, width: number, theme?: Theme, indent = 3): string[] {
   if (width <= 0) return [];
   // Render the call alone at a wider width so terminal wrapping becomes truncation.
-  const header = component.callRendererComponent?.render(Math.max(4096, width + 1))
+  const header = Boolean(component.getCallRenderer?.()) && component.callRendererComponent?.render(Math.max(4096, width + 1))
     .map((line) => stripVTControlCharacters(line).trim())
     .find((line) => line.length > 0);
   let text = header;
@@ -211,6 +219,16 @@ export async function loadToolPrototype(): Promise<ToolPrototype> {
   return module.ToolExecutionComponent.prototype;
 }
 
+export async function loadCompactionPrototype(): Promise<CompactionPrototype> {
+  const entry = sdkEntry(hostRequire());
+  const path = bundledHostEntry(entry) ?? join(dirname(entry), "modes/interactive/components/compaction-summary-message.js");
+  const module = await import(pathToFileURL(path).href);
+  if (!module.CompactionSummaryMessageComponent?.prototype) {
+    throw new Error("Pi's runtime does not expose its compaction display class.");
+  }
+  return module.CompactionSummaryMessageComponent.prototype;
+}
+
 // Pi's ESM-only export cannot be resolved with require.resolve on older SDKs.
 function sdkEntry(require: ReturnType<typeof createRequire>): string {
   for (const directory of require.resolve.paths("@earendil-works/pi-coding-agent") ?? []) {
@@ -225,7 +243,7 @@ function sdkEntry(require: ReturnType<typeof createRequire>): string {
 }
 
 /** Internal TUI adapter: no tools are replaced and no result content is changed. */
-export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: () => Theme): MinimalOutputHook {
+export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: () => Theme, compactionPrototype?: CompactionPrototype): MinimalOutputHook {
   for (const name of ["updateDisplay", "getResultRenderer", "getTextOutput", "setExpanded", "invalidate", "render"] as const) {
     if (typeof prototype[name] !== "function") {
       throw new Error(`Pi's tool display API is incompatible: missing ${name}. Normal output remains enabled.`);
@@ -359,6 +377,38 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
       },
     };
     const current = state;
+    const compactions = new Set<WeakRef<CompactionComponent>>();
+    const seenCompactions = new WeakSet<CompactionComponent>();
+    if (compactionPrototype) {
+      const originalRender = compactionPrototype.render;
+      const render = function(this: CompactionComponent, width: number): string[] {
+        if (!seenCompactions.has(this)) { seenCompactions.add(this); compactions.add(new WeakRef(this)); }
+        if (!current.enabled || this.expanded) return originalRender.call(this, width);
+        const detail = `from ${this.message.tokensBefore.toLocaleString()} tokens`;
+        const theme = getTheme?.();
+        const text = theme
+          ? ` ${theme.fg("muted", "\u25c7")} ${theme.fg("muted", "Compaction")}  ${theme.fg("dim", detail)}`
+          : ` \u25c7 Compaction  ${detail}`;
+        return width > 0 ? [truncateToWidth(`${" ".repeat(Math.min(3, width - 1))}${text}`, width)] : [];
+      };
+      compactionPrototype.render = render;
+      const redraw = current.redraw;
+      current.redraw = function(collapse) {
+        for (const reference of compactions) {
+          const component = reference.deref();
+          if (!component) { compactions.delete(reference); continue; }
+          if (collapse) component.setExpanded(false);
+          else component.invalidate();
+        }
+        redraw.call(this, collapse);
+      };
+      const restore = current.restore;
+      current.restore = function() {
+        if (compactionPrototype.render === render) compactionPrototype.render = originalRender;
+        compactions.clear();
+        restore.call(this);
+      };
+    }
     const wrappers = {
       updateDisplay(this: ToolComponent, ...args: unknown[]) {
         if (typeof this.ui.handleViewportInput === "function" && !inputWrappers.has(this.ui)) {

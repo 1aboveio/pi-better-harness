@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { installMinimalOutputHook, loadToolPrototype, type MinimalOutputHook } from "./hook.ts";
+import { installMinimalOutputHook, loadToolPrototype, loadCompactionPrototype, type MinimalOutputHook } from "./hook.ts";
 import type { SettingsControl } from "../settings/registry.ts";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
 
@@ -37,7 +37,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     }
     if (hook) return true;
     try {
-      hook = installMinimalOutputHook(await loadToolPrototype(), () => ctx.ui.theme);
+      hook = installMinimalOutputHook(await loadToolPrototype(), () => ctx.ui.theme, await loadCompactionPrototype());
       return true;
     } catch (error) {
       ctx.ui.notify(`Minimal tool output is unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
