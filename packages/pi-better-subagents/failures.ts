@@ -4,6 +4,17 @@ import { logPathFor, runDir, taskRuntimeTrust } from "./registry.ts";
 import { activeFailures, actionableFailures, disposeIncidents, failureIdentity, findIncident, formatFailureSummary, formatTerminalFailureFacts, markFailureAttentionDelivered,
     observeFailures, pendingFailureAttention, readFailureState, type FailureState } from "./shared-failure-observations.ts";
 import { evidenceText, foldToolEnd, foldToolStart, newIncidentModel, toolOperation, type IncidentModel, type IncidentSink } from "./incident-model.ts";
+import { SandboxDiagnostics, isDiagnosticReport } from "./shared-sandbox-diagnostics.ts";
+
+
+let diagnosticsWarned = false;
+const workerDiagnostics = new SandboxDiagnostics({ context: "worker",
+    version: "unknown", policy: () => undefined, backend: () => undefined,
+    onError: () => {
+        if (!diagnosticsWarned) process.stderr.write("Sandbox diagnostics collection gap; enforcement unchanged.\n");
+        diagnosticsWarned = true;
+    },
+});
 
 export { formatFailureSummary, pendingFailureAttention, markFailureAttentionDelivered, toolOperation };
 export const failurePath = (id: string) => join(runDir(id), "failures.jsonl");
@@ -230,7 +241,11 @@ export function collectRunFailures(id: string, cwd: string, terminal = false): F
                     if (line.startsWith("{")) {
                         try {
                             const row = JSON.parse(line);
-                            if (["tool_execution_start", "tool_execution_end", "message_end", "auto_retry_start", "auto_retry_end"].includes(row?.type)) {
+                            // Separate sampling from the incident model. Even a trusted worker log
+                            // only supplies agent-reported evidence, never a policy decision.
+                            if (row?.type === "sandbox_diagnostic_report") {
+                                if (taskRuntimeTrust(id) === "trusted" && isDiagnosticReport(row)) workerDiagnostics.observeReport(row, id);
+                            } else if (["tool_execution_start", "tool_execution_end", "message_end", "auto_retry_start", "auto_retry_end"].includes(row?.type)) {
                                 if ((row.type.startsWith("tool_execution_") &&
                                     (typeof row.toolCallId !== "string" || !row.toolCallId || typeof row.toolName !== "string")) ||
                                     (row.type === "tool_execution_end" && typeof row.isError !== "boolean" && typeof row.result?.isError !== "boolean" && typeof row.result?.exitCode !== "number") ||

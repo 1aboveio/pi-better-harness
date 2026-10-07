@@ -6,6 +6,7 @@ import { constants, realpathSync } from "node:fs";
 import { access, lstat, mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { ReadOperations, WriteOperations, EditOperations } from "@earendil-works/pi-coding-agent";
+import type { SandboxDiagnostics, DiagnosticResource } from "./shared-sandbox-diagnostics.ts";
 import {
     canonicalizePath, compileWritePolicy, evaluateDeleteAccess, evaluateReadAccess, evaluateWriteAccess, maybeBuildSandboxCommand,
     type CompiledSandboxWritePolicy, type SandboxSeams, type SandboxWritePolicy, type WriteAccessDecision,
@@ -161,10 +162,29 @@ function mimeType(data: Buffer): string | null {
     return null;
 }
 
-export function createTaskFileOperations(controller: TaskFileController): {
+export function createTaskFileOperations(controller: TaskFileController, diagnostics?: Pick<SandboxDiagnostics, "observe">, toolOverride?: string): {
     read: ReadOperations; write: WriteOperations; edit: EditOperations; remove: TaskRemoveOperations; check: TaskAccessChecks;
 } {
-    async function run(operation: Operation, path: string, content?: string): Promise<Buffer | void> {
+    function resource(path: string, policy: CompiledSandboxWritePolicy): DiagnosticResource {
+        path = canonicalizePath(path);
+        const inside = (root: string) => path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+        if (policy.credentialPaths?.some(inside)) return "credential-files";
+        return inside(policy.writableRoot) ? "project-files" : "outside-project-files";
+    }
+    const observe = (tool: string, operation: Operation | "remove", path: string, policy: CompiledSandboxWritePolicy,
+        basis: "policy-refusal" | "os-permission-error", outcome: "denied" | "succeeded") =>
+        { try { diagnostics?.observe({ tool, operation: { operation, path }, resource: resource(path, policy), basis, outcome }); }
+          catch { /* Diagnostics must never change the operation's outcome. */ } };
+
+    async function run(operation: Operation, path: string, content?: string, tool = "read"): Promise<Buffer | void> {
+        tool = toolOverride ?? tool;
+        const result = await perform(operation, path, content, tool);
+        try { diagnostics?.observe({ tool, operation: { operation, path }, resource: "unknown",
+            basis: "os-permission-error", outcome: "succeeded" }); } catch { /* Observation is nonfatal. */ }
+        return result;
+    }
+
+    async function perform(operation: Operation, path: string, content?: string, tool = "read"): Promise<Buffer | void> {
         const plan = controller.requireLaunchPlan();
         if (!plan.confined) {
             switch (operation) {
@@ -193,7 +213,10 @@ export function createTaskFileOperations(controller: TaskFileController): {
         const policy = compileWritePolicy(plan.policy);
         if (operation === "unlink") {
             const decision = removeDecision(path, policy);
-            if (!decision.allowed) throw refusal("remove", decision);
+            if (!decision.allowed) {
+                observe(tool, operation, path, policy, "policy-refusal", "denied");
+                throw refusal("remove", decision);
+            }
         }
         const writing = operation === "write" || operation === "mkdir" || operation === "access-edit" || operation === "unlink";
         const decision = writing ? evaluateWriteAccess(path, policy) : evaluateReadAccess(path, policy);
@@ -201,14 +224,18 @@ export function createTaskFileOperations(controller: TaskFileController): {
             if (operation === "mkdir" && decision.reason === "permission-denied") {
                 // SDK write prepares the parent even when it already exists.
                 // Confirm that no-op inside confinement; never grant mkdir.
-                try { await run("existing-directory", path); return; } catch { /* Preserve the original refusal. */ }
+                try { await run("existing-directory", path, undefined, tool); return; } catch { /* Preserve the original refusal. */ }
             }
             const detail = "deniedBy" in decision ? ` (protected by ${decision.deniedBy})` : "";
+            observe(tool, operation, path, policy, "policy-refusal", "denied");
             throw new Error(`Task sandbox refused to ${writing ? "write" : "read"} ${decision.path}: ${decision.reason}${detail}.`);
         }
         if (operation === "access-edit") {
             const readable = evaluateReadAccess(path, policy);
-            if (!readable.allowed) throw new Error(`Task sandbox refused to read ${readable.path}: ${readable.reason}.`);
+            if (!readable.allowed) {
+                observe(tool, operation, path, policy, "policy-refusal", "denied");
+                throw new Error(`Task sandbox refused to read ${readable.path}: ${readable.reason}.`);
+            }
         }
         if (content !== undefined && Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES) {
             throw new Error("File exceeds 8 MiB operation limit");
@@ -256,6 +283,9 @@ export function createTaskFileOperations(controller: TaskFileController): {
             child.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-2048); });
             child.stdin.on("error", () => {}); // An early sandbox failure may close stdin.
             child.on("error", (error) => {
+                if (["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+                    observe(tool, operation, path, policy, "os-permission-error", "denied");
+                }
                 if (!finished) { finished = true; clearTimeout(timer); void unlink(profilePath).catch(() => {}); reject(error); }
             });
             child.on("close", (code) => {
@@ -270,6 +300,7 @@ export function createTaskFileOperations(controller: TaskFileController): {
                 if (!result.ok) {
                     const error = new Error(result.error ?? `Task file sandbox failed (${code})`) as NodeJS.ErrnoException;
                     error.code = result.code;
+                    if (["EACCES", "EPERM"].includes(result.code ?? "")) observe(tool, operation, path, policy, "os-permission-error", "denied");
                     return reject(error);
                 }
                 if (code !== 0) return reject(new Error(`Task file sandbox exited ${code}: ${stderr}`));
@@ -284,11 +315,14 @@ export function createTaskFileOperations(controller: TaskFileController): {
         if (!plan.confined) return;
         const policy = compileWritePolicy(plan.policy);
         const decision = verb === "write" ? evaluateWriteAccess(path, policy) : removeDecision(path, policy);
-        if (!decision.allowed) throw refusal(verb, decision);
+        if (!decision.allowed) {
+            observe("apply_patch", verb === "remove" ? "unlink" : "write", path, policy, "policy-refusal", "denied");
+            throw refusal(verb, decision);
+        }
     };
 
     return {
-        remove: { remove: (path) => run("unlink", path) as Promise<void> },
+        remove: { remove: (path) => run("unlink", path, undefined, "apply_patch") as Promise<void> },
         check: { write: check("write"), remove: check("remove") },
         read: {
             readFile: (path) => run("read", path) as Promise<Buffer>,
@@ -296,13 +330,13 @@ export function createTaskFileOperations(controller: TaskFileController): {
             detectImageMimeType: async (path) => mimeType(await run("mime", path) as Buffer),
         },
         write: {
-            mkdir: (path) => run("mkdir", path) as Promise<void>,
-            writeFile: (path, content) => run("write", path, content) as Promise<void>,
+            mkdir: (path) => run("mkdir", path, undefined, "write") as Promise<void>,
+            writeFile: (path, content) => run("write", path, content, "write") as Promise<void>,
         },
         edit: {
-            readFile: (path) => run("read", path) as Promise<Buffer>,
-            access: (path) => run("access-edit", path) as Promise<void>,
-            writeFile: (path, content) => run("write", path, content) as Promise<void>,
+            readFile: (path) => run("read", path, undefined, "edit") as Promise<Buffer>,
+            access: (path) => run("access-edit", path, undefined, "edit") as Promise<void>,
+            writeFile: (path, content) => run("write", path, content, "edit") as Promise<void>,
         },
     };
 }

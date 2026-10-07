@@ -6,6 +6,7 @@ import { parseTaskPolicy, type TaskPolicy } from "./task-policy.ts";
 import { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } from "./permission-policy.ts";
 import { failureDispositionTool, intentBashDefinition } from "./child-incidents.ts";
 import { DISPOSITION_TOOL } from "./incident-model.ts";
+import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
 
 const TRUSTED_INLINE_SOURCE = "<inline:task-sandbox>";
 
@@ -42,7 +43,19 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
     const controller = Object.freeze({ requireLaunchPlan: () => plan });
     let shellPath: string | undefined;
     let currentCwd = process.cwd();
+    let diagnosticsWarned = false;
+    const diagnostics = new SandboxDiagnostics({ context: "worker", agentDir: () => policy.agentDir,
+        relay: (report) => { process.stdout.write(`${JSON.stringify(report)}\n`); },
+        version: diagnosticPackageVersion(new URL("./package.json", import.meta.url)),
+        policy: () => ({ permissions: policy.permissions, denyWrite: policy.denyWrite, root: policy.root }),
+        backend: () => support.backend,
+        onError: () => {
+            if (!diagnosticsWarned) process.stderr.write("Sandbox diagnostics collection gap; enforcement unchanged.\n");
+            diagnosticsWarned = true;
+        },
+    });
     const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
+        diagnostics,
         trustedSources: [TRUSTED_INLINE_SOURCE],
         // Structured command intent (#315): validated before the confined command runs.
         bashDefinition: (cwd, operations) => intentBashDefinition(cwd, operations) as any,

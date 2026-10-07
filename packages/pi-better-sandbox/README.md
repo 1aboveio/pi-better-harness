@@ -276,6 +276,37 @@ schemas, prompt guidance, call rendering, write previews, edit diffs, result
 details, mutation queueing, and cancellation are Pi's own. Only the filesystem
 operations underneath them are replaced.
 
+## Local Permission Diagnostics
+
+Opt in with `/sandbox diagnostics on`. Saved in global `settings.json`, this
+collects redacted local observations from foreground guards, guarded file
+operations, and background launch preflight, plus redacted worker reports.
+Collection is off by default and never changes permissions or uploads data.
+
+- `/sandbox diagnostics status`: show collection state and retained evidence.
+- `/sandbox diagnostics summary`: group denials and observed recoveries.
+- `/sandbox diagnostics export`: write a redacted local JSON export for sharing.
+- `/sandbox diagnostics off`: stop collection without deleting retained evidence.
+
+The bounded journal lives under `<agent-dir>/diagnostics/sandbox`: at most 2,000
+observations, 1 MiB, and 30 days. Records contain resource categories, package
+version, platform/backend, and installation-keyed fingerprints, not raw commands,
+paths, file contents, or output. Export excludes the fingerprint key.
+
+Confirmed policy refusals are separate from `EACCES`/`EPERM` observations, which
+do not prove the sandbox caused the failure. Confined workers relay fixed,
+redacted reports to their parent, which records them as `agent-reported`; workers
+never receive write access to the global journal. Worker retry correlations stay
+within the reporting worker. Arbitrary shell output and nonzero exits are not
+classified. Recovery is an observed success, not authorization for broader
+permissions or remote access. Summaries disclose journal gaps and retention
+losses; collection failures that prevent a write may not persist.
+
+Storage contention is bounded and never overrides a writer's lock by age. If an
+abruptly terminated collector leaves `events.jsonl.lock`, collection warns and
+stops writing. Stop every collector before manually removing that empty lock
+directory. Existing evidence is retained; enforcement is unaffected.
+
 ## Commands
 
 ```text

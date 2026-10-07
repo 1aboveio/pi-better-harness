@@ -204,7 +204,7 @@ export function spawnTask(
   // Resolved before any task directory, log, or metadata exists so a blocked
   // launch leaves nothing behind. Structured SSH must also honor launch restrictions.
   const intent = readTaskIntent(params);
-  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
+  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params);
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const logPath = logPathFor(id);
@@ -495,7 +495,7 @@ export function startWatchTask(
   }
   const blindChecks = readBlindChecks(params.blind_checks);
   const intent = readTaskIntent(params);
-  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh);
+  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params, "bg_task_watch");
   const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
   const now = Date.now();
@@ -514,7 +514,7 @@ export function startWatchTask(
   const sandboxNotices: string[] = [];
   const launchSpec = remoteTask
     ? commandSpec
-    : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id), {}, (line) => sandboxNotices.push(line));
+    : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id), {}, (line) => sandboxNotices.push(line), "bg_task_watch");
   const meta: BackgroundTaskMeta = {
     id,
     name: params.name,

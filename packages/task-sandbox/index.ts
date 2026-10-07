@@ -14,6 +14,7 @@ import { canonicalizePath, compileWritePolicy, isRemovableUnderWrite, maybeBuild
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
 import { APPLY_PATCH_TOOL, createApplyPatchToolDefinition } from "./apply-patch.ts";
 import { createProcessListToolDefinition, PROCESS_LIST_TOOL } from "./process-list.ts";
+import type { SandboxDiagnostics, DiagnosticResource } from "../sandbox-diagnostics/index.ts";
 
 export const TASK_BUILTINS = Object.freeze(["read", "write", "edit", "bash", PROCESS_LIST_TOOL] as const);
 /** Harness adapters that follow the file rules; each is a task builtin only when the profile enables it. */
@@ -102,14 +103,26 @@ export function createTaskScratch(): { path: string; anchor: string } {
 export function createTaskBashOperations(
     controller: TaskFileController,
     shellPath: () => string | undefined = () => undefined,
+    diagnostics?: Pick<SandboxDiagnostics, "observe">,
 ): BashOperations {
     return {
         async exec(command, cwd, options) {
+            const observed = (basis: "policy-refusal" | "os-permission-error", outcome: "denied" | "succeeded") => {
+                try { diagnostics?.observe({ tool: "bash", operation: { command, cwd }, resource: "command-execution", basis, outcome }); }
+                catch { /* Observation is nonfatal. */ }
+            };
             const configuredShell = shellPath();
             const local = createLocalBashOperations(configuredShell ? { shellPath: configuredShell } : {});
             const plan = controller.requireLaunchPlan();
-            if (!plan.confined) return local.exec(command, cwd, options);
-            if (plan.policy.permissions?.commands === false) throw new Error("Sandbox: Run commands & applications is Off.");
+            if (!plan.confined) {
+                const result = await local.exec(command, cwd, options);
+                if (result.exitCode === 0) observed("os-permission-error", "succeeded");
+                return result;
+            }
+            if (plan.policy.permissions?.commands === false) {
+                observed("policy-refusal", "denied");
+                throw new Error("Sandbox: Run commands & applications is Off.");
+            }
             // An explicit path avoids SDK fallback spawning PATH-resolved `which`.
             const shell = getShellConfig(configuredShell ?? "/bin/bash");
             const sdkUtils = join(PiCodingAgent.getPackageDir(), "dist", "utils");
@@ -157,9 +170,18 @@ export function createTaskBashOperations(
                         cleanup();
                         if (options.signal?.aborted) reject(new Error("aborted"));
                         else if (timedOut) reject(new Error(`timeout:${options.timeout}`));
-                        else resolve({ exitCode });
-                    }, (error: unknown) => { cleanup(); reject(error); });
+                        else {
+                            if (exitCode === 0) observed("os-permission-error", "succeeded");
+                            resolve({ exitCode });
+                        }
+                    }, (error: unknown) => {
+                        cleanup();
+                        reject(error);
+                    });
                 });
+            } catch (error) {
+                if (["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException)?.code ?? "")) observed("os-permission-error", "denied");
+                throw error;
             } finally {
                 await unlink(profilePath).catch((error: NodeJS.ErrnoException) => {
                     if (error.code !== "ENOENT") throw error;
@@ -187,13 +209,14 @@ export function installTaskTools(pi: ExtensionAPI, options: {
     processAccess?: () => "off" | "read";
     /** Build the admitted bash definition from the confined operations (default: the SDK bash tool). */
     bashDefinition?: (cwd: string, operations: BashOperations) => ReturnType<typeof createBashToolDefinition>;
+    diagnostics?: Pick<SandboxDiagnostics, "observe">;
 }) {
     const { controller } = options;
     const sourceKey = (path: string) => path.startsWith("<") ? path : canonicalizePath(path);
     const trustedSources = new Set(options.trustedSources.map(sourceKey));
     const trustedSource = (path: string | undefined) => path !== undefined && trustedSources.has(sourceKey(path));
-    const files = createTaskFileOperations(controller);
-    const bash = createTaskBashOperations(controller, options.shellPath);
+    const files = createTaskFileOperations(controller, options.diagnostics);
+    const bash = createTaskBashOperations(controller, options.shellPath, options.diagnostics);
     const schemas = new Map<string, unknown>();
     let currentCwd: string | undefined;
     const register = (cwd: string) => {
@@ -210,36 +233,47 @@ export function installTaskTools(pi: ExtensionAPI, options: {
         pi.registerTool(own(options.bashDefinition ? options.bashDefinition(cwd, bash) : createBashToolDefinition(cwd, { operations: bash })));
         pi.registerTool(own(createProcessListToolDefinition(cwd, controller, options.processAccess ?? (() => "off"))) as any);
         if (options.applyPatch) {
+            const patchFiles = createTaskFileOperations(controller, options.diagnostics, "apply_patch");
             pi.registerTool(own(createApplyPatchToolDefinition(cwd, {
-                readFile: files.read.readFile, writeFile: files.write.writeFile, mkdir: files.write.mkdir,
-                remove: files.remove.remove, checkWrite: files.check.write, checkRemove: files.check.remove,
+                readFile: patchFiles.read.readFile, writeFile: patchFiles.write.writeFile, mkdir: patchFiles.write.mkdir,
+                remove: patchFiles.remove.remove, checkWrite: patchFiles.check.write, checkRemove: patchFiles.check.remove,
             }, PiCodingAgent.withFileMutationQueue)) as any);
         }
     };
     register(options.cwd);
     pi.on("user_bash", () => ({ operations: bash }));
-    pi.on("tool_call", (event) => {
+    pi.on("tool_call", (event, ctx) => {
+        const blocked = (reason: string, resource: DiagnosticResource) => {
+            try { options.diagnostics?.observe({ tool: event.toolName, operation: { input: event.input, cwd: ctx?.cwd ?? currentCwd }, resource,
+                basis: "policy-refusal", outcome: "denied" }); } catch { /* Observation is nonfatal. */ }
+            return { block: true, reason };
+        };
         try {
             const plan = controller.requireLaunchPlan();
             if (!plan.confined) return;
             const tool = pi.getAllTools().find((candidate) => candidate.name === event.toolName);
             if (schemas.has(event.toolName)) {
                 if (!tool || tool.parameters !== schemas.get(event.toolName) || !trustedSource(tool.sourceInfo?.path)) {
-                    return { block: true, reason: `Sandbox: ${event.toolName} was replaced by an unverified implementation.` };
+                    return blocked(`Sandbox: ${event.toolName} was replaced by an unverified implementation.`, "tool-admission");
                 }
                 if (event.toolName === "bash" && plan.policy.permissions?.commands === false) {
-                    return { block: true, reason: "Sandbox: Run commands & applications is Off." };
+                    return blocked("Sandbox: Run commands & applications is Off.", "command-execution");
                 }
                 if (event.toolName === PROCESS_LIST_TOOL && options.processAccess?.() !== "read") {
-                    return { block: true, reason: "Sandbox: Process access is Off. Enable Read in /sandbox." };
+                    return blocked("Sandbox: Process access is Off. Enable Read in /sandbox.", "process-inspection");
                 }
                 return;
             }
             if (options.admitExtensionTool?.(event.toolName, event.input, tool?.sourceInfo?.path)) return;
-            return { block: true, reason: `Sandbox: ${event.toolName} has no verified task execution adapter. Use a guarded file tool or confined bash command.` };
+            return blocked(`Sandbox: ${event.toolName} has no verified task execution adapter. Use a guarded file tool or confined bash command.`, "tool-admission");
         } catch (error) {
-            return { block: true, reason: error instanceof Error ? error.message : String(error) };
+            return blocked(error instanceof Error ? error.message : String(error), "sandbox-backend");
         }
+    });
+    if (options.diagnostics) pi.on("tool_result", (event, ctx) => {
+        if (event.isError) return;
+        try { options.diagnostics?.observe({ tool: event.toolName, operation: { input: event.input, cwd: ctx?.cwd ?? currentCwd }, resource: "unknown",
+            basis: "policy-refusal", outcome: "succeeded" }); } catch { /* Observation is nonfatal. */ }
     });
     return { register, bash, assertInstalled(names: readonly string[]) {
         const inventory = pi.getAllTools();

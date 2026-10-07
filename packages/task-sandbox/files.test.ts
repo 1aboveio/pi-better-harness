@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,8 @@ import { test } from "node:test";
 import { createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, withFileMutationQueue, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createTaskFileOperations, type TaskFileController } from "./files.ts";
 import type { SandboxPermissions, SandboxWritePolicy } from "../sandbox-core/index.ts";
+import { SandboxDiagnostics, readDiagnostics, setDiagnosticsEnabled } from "../sandbox-diagnostics/index.ts";
+import { applyPatch } from "./apply-patch.ts";
 
 const macKernel = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") &&
     spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]).status === 0;
@@ -57,6 +59,87 @@ function tools(f: ReturnType<typeof fixture>) {
         edit: createEditToolDefinition(f.root, { operations: f.ops.edit }),
     };
 }
+
+test("guarded refusals are collected redacted and a successful retry records recovery without changing enforcement", async () => {
+    const f = fixture();
+    try {
+        const seams = { agentDir: () => f.agent };
+        setDiagnosticsEnabled(true, seams);
+        let confined = true;
+        const diagnostics = new SandboxDiagnostics({ ...seams, context: "foreground", version: "0.11.1",
+            policy: () => ({ permissions: f.policy.permissions, confined }), backend: () => "macos-seatbelt" });
+        const ops = createTaskFileOperations({ requireLaunchPlan: () => confined ? f.plan : { confined: false } }, diagnostics);
+        const path = join(f.outside, "sensitive-workflow-canary.txt");
+        await assert.rejects(ops.write.writeFile(path, "secret-content-canary"), /refused to write/);
+        assert.equal(existsSync(path), false);
+        let data = readDiagnostics(seams);
+        assert.equal(data.records.length, 1);
+        assert.equal(data.records[0]?.basis, "policy-refusal");
+        assert.equal(data.records[0]?.resource, "outside-project-files");
+        assert.doesNotMatch(JSON.stringify(data), /sensitive-workflow-canary|secret-content-canary/);
+        confined = false;
+        await ops.write.writeFile(path, "permitted retry");
+        assert.equal(readFileSync(path, "utf8"), "permitted retry");
+        data = readDiagnostics(seams);
+        assert.equal(data.records.length, 2);
+        assert.equal(data.records[1]?.outcome, "succeeded");
+    } finally { f.cleanup(); }
+});
+
+test("trusted file worker errno is a suspected OS error, not a confirmed policy refusal", { skip: !kernel || process.getuid?.() === 0 }, async () => {
+    const f = fixture();
+    const path = join(f.root, "os-denied.txt");
+    try {
+        const seams = { agentDir: () => f.agent };
+        setDiagnosticsEnabled(true, seams);
+        const diagnostics = new SandboxDiagnostics({ ...seams, context: "worker", version: "0.16.0",
+            policy: () => f.policy, backend: () => macKernel ? "macos-seatbelt" : "linux-bubblewrap" });
+        const ops = createTaskFileOperations({ requireLaunchPlan: () => f.plan }, diagnostics);
+        writeFileSync(path, "private-content-canary", { mode: 0o000 });
+        await assert.rejects(ops.read.readFile(path), (error: NodeJS.ErrnoException) => error.code === "EACCES" || error.code === "EPERM");
+        const record = readDiagnostics(seams).records[0];
+        assert.equal(record?.basis, "os-permission-error");
+        assert.equal(record?.context, "worker");
+        assert.equal(record?.resource, "project-files");
+        assert.doesNotMatch(JSON.stringify(readDiagnostics(seams)), /os-denied|private-content-canary/);
+        chmodSync(path, 0o600);
+        assert.equal((await ops.read.readFile(path)).toString(), "private-content-canary");
+        assert.equal(readDiagnostics(seams).records[1]?.outcome, "succeeded");
+    } finally { if (existsSync(path)) chmodSync(path, 0o600); f.cleanup(); }
+});
+
+test("patch preflight denials match the eventual guarded patch write", async () => {
+    const f = fixture();
+    try {
+        const seams = { agentDir: () => f.agent };
+        setDiagnosticsEnabled(true, seams);
+        let confined = true;
+        const diagnostics = new SandboxDiagnostics({ ...seams, context: "worker", version: "0.16.0",
+            policy: () => ({ confined }), backend: () => "unknown" });
+        const files = createTaskFileOperations({ requireLaunchPlan: () => confined ? f.plan : { confined: false } }, diagnostics, "apply_patch");
+        const operations = { readFile: files.read.readFile, writeFile: files.write.writeFile, mkdir: files.write.mkdir,
+            remove: files.remove.remove, checkWrite: files.check.write, checkRemove: files.check.remove };
+        const patch = "*** Begin Patch\n*** Add File: ../outside/new.txt\n+permitted patch\n*** End Patch";
+        await assert.rejects(applyPatch(patch, f.root, operations), /refused to write/);
+        assert.equal(existsSync(join(f.outside, "new.txt")), false);
+        confined = false;
+        await applyPatch(patch, f.root, operations);
+        assert.equal(readFileSync(join(f.outside, "new.txt"), "utf8"), "permitted patch\n");
+        const data = readDiagnostics(seams);
+        assert.equal(data.records.length, 2);
+        assert.equal(data.records[0]?.tool, "apply_patch");
+        assert.equal(data.records[1]?.recoveryOf, data.records[0]?.fingerprint);
+    } finally { f.cleanup(); }
+});
+
+test("collection failure cannot replace a file policy refusal", async () => {
+    const f = fixture();
+    try {
+        const ops = createTaskFileOperations({ requireLaunchPlan: () => f.plan }, { observe() { throw new Error("collector failure"); } });
+        await assert.rejects(ops.write.writeFile(join(f.outside, "new.txt"), "bad"), /refused to write/);
+        assert.equal(existsSync(join(f.outside, "new.txt")), false);
+    } finally { f.cleanup(); }
+});
 
 function deferred() {
     let resolve!: () => void;

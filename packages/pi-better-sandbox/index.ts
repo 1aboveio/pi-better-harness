@@ -14,6 +14,7 @@
  */
 
 import { dirname, isAbsolute, join } from "node:path";
+
 import { fileURLToPath } from "node:url";
 import {
     SettingsManager,
@@ -43,11 +44,18 @@ import { appendSessionPermissions, readSessionPermissions } from "./session-perm
 
 import { footerTone, formatFooterStatus } from "./status.ts";
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
+import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
 
 const FOOTER_KEY = "sandbox";
 
 export default function piBetterSandbox(pi: ExtensionAPI): void {
     const controller = new ForegroundSandboxController();
+    let diagnosticsWarning: ((error: unknown) => void) | undefined;
+    const diagnostics = new SandboxDiagnostics({ context: "foreground",
+        version: diagnosticPackageVersion(new URL("./package.json", import.meta.url)),
+        policy: () => controller.status(), backend: () => controller.status().backend,
+        onError: (error) => diagnosticsWarning?.(error),
+    });
 
     // Pi's shell setting is only readable once a session directory is known, so
     // it is resolved lazily and re-read on every session start.
@@ -55,12 +63,17 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     const ownEntry = fileURLToPath(import.meta.url);
     const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
         processAccess: () => controller.permissionSettings()?.main.processAccess ?? "off",
+        diagnostics,
         trustedSources: [ownEntry,
             join(dirname(ownEntry), "../../extensions/sandbox/index.ts"),
             join(dirname(ownEntry), "../pi-better-harness/extensions/sandbox/index.ts")],
     });
 
-    pi.on("tool_call", (event) => {
+    pi.on("tool_call", (event, ctx) => {
+        const block = (reason: string, resource: "command-execution" | "network-access" | "tool-admission" | "project-files") => {
+            diagnostics.observe({ tool: event.toolName, operation: { input: event.input, cwd: ctx?.cwd ?? controller.status().projectRoot }, resource, basis: "policy-refusal", outcome: "denied" });
+            return { block: true, reason };
+        };
         const status = controller.status();
         if (status.state === "inactive" || status.state === "disabled") return;
         const permissions = status.permissions;
@@ -70,17 +83,17 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         const launch = ["bash", "powershell", "remote_bash", "subagent_spawn", "subagent_spawn_batch", "bg_task_spawn", "bg_task_watch"].includes(name) ||
             (name === "bg_task" && (action === "spawn" || action === "watch"));
         if (!permissions.commands && (launch || name === "grep" || name === "find")) {
-            return { block: true, reason: "Sandbox: Run commands & applications is Off. Change it in /sandbox to launch work." };
+            return block("Sandbox: Run commands & applications is Off. Change it in /sandbox to launch work.", "command-execution");
         }
         if (!permissions.network && (["web_search", "web_fetch", "firecrawl_scrape", "firecrawl_extract", "remote_bash", "mcp", "mcpScript"].includes(name) || name.startsWith("mcp__") ||
             (launch && Boolean((event.input as { ssh?: unknown }).ssh)))) {
-            return { block: true, reason: "Sandbox: Network access is Off." };
+            return block("Sandbox: Network access is Off.", "network-access");
         }
         if (name === "powershell" || name === "remote_bash") {
-            return { block: true, reason: `Sandbox: ${name} is not a confined execution surface; use bash (including ssh through bash).` };
+            return block(`Sandbox: ${name} is not a confined execution surface; use bash (including ssh through bash).`, "tool-admission");
         }
         if (status.readPolicy === "restricted" && ["grep", "find", "ls"].includes(name)) {
-            return { block: true, reason: "Sandbox: use the guarded read tool or a confined bash command for restricted file access." };
+            return block("Sandbox: use the guarded read tool or a confined bash command for restricted file access.", "project-files");
         }
     });
 
@@ -161,6 +174,12 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     };
 
     pi.on("session_start", (_event, ctx) => {
+        let warned = false;
+        diagnosticsWarning = () => {
+            if (warned) return;
+            warned = true;
+            ctx.ui.notify("Sandbox diagnostics could not be recorded; collection has a gap. Enforcement is unchanged.", "warning");
+        };
         shellPath = resolveShellPath(ctx.cwd);
         boundary.register(ctx.cwd);
         restorePermissions(ctx);
@@ -191,6 +210,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     registerSettings();
 
     pi.on("session_shutdown", () => {
+        diagnosticsWarning = undefined;
         if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
         controller.dispose();
     });
