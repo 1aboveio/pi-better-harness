@@ -79,6 +79,11 @@ images, boxes, and tool spacers are hidden. Built-in, extension, and MCP calls
 are included. Tools without a custom call renderer use a generic icon and a
 compact argument hint. Compaction summaries also collapse to one quiet row with
 the pre-compaction token count; Ctrl+O reveals their original summary.
+Custom transcript messages from any extension also fold to a quiet disclosure
+row with the message type and first content line. This includes background
+completion batches and subagent health/timing alerts. Ctrl+O or a fullscreen
+click reveals the original content and any custom renderer. Direct UI notices
+are unchanged.
 Execution, sandboxing, and agent-facing payloads are unchanged.
 When a foreground run ends, each consecutive block of tool calls folds further
 into one disclosure row showing the call count and any failures. Only the failure
@@ -105,7 +110,7 @@ Normal mode is the initial default. Changing tool output saves the choice in
 global `settings.json` under `piBetterHarness.toolOutput`, as well as the current
 session. New sessions inherit it; resumed branches retain their own saved choice.
 This is a version-sensitive internal TUI adapter,
-tested with Pi 0.82.1, 0.99.1, and the bundled Pi 1.0.0 CLI; incompatible APIs
+tested with Pi 0.82.1, 0.99.1, and the bundled Pi 1.0.4 CLI; incompatible APIs
 produce a warning and leave ordinary output enabled. Print/RPC output and
 exported transcripts are unchanged.
 
