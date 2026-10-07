@@ -52,8 +52,8 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   sendKey("Down");
   sendKey("Space");
   waitForScreen((screen) => /Pause on Esc\s+Off/.test(screen));
-  const preferencesFile = join(fixtures, "agent", "extensions", "pi-better-goal-preferences.json");
-  assert.deepEqual(JSON.parse(readFileSync(preferencesFile, "utf8")), {
+  const preferencesFile = join(fixtures, "agent", "settings.json");
+  assert.deepEqual(JSON.parse(readFileSync(preferencesFile, "utf8")).piBetterHarness.goal, {
     version: 1, autoContinue: false, conversationalResume: false, pauseOnEscape: false,
   });
   sendKey("Space");
@@ -139,7 +139,7 @@ test("golden path: escape pauses the goal, a question does not resume it, go doe
   waitForScreen((screen) => !screen.includes("Goal settings") && screen.includes("goal active"));
   sendKey("Escape");
   assertScreenStays((screen) => screen.includes("goal active") && !screen.includes("goal paused"), 1_000);
-  assert.equal(JSON.parse(readFileSync(preferencesFile, "utf8")).pauseOnEscape, false);
+  assert.equal(JSON.parse(readFileSync(preferencesFile, "utf8")).piBetterHarness.goal.pauseOnEscape, false);
 
   sendLiteral("/goal settings");
   sendKey("Tab");
