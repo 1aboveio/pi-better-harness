@@ -6,6 +6,42 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.27.0] - 2026-10-07
+
+### Added
+
+- Bundle disabled-by-default, local-only sandbox permission diagnostics with redacted summaries and explicit local export. (#445)
+
+### Changed
+
+- Bundle Sandbox 0.12.0, Subagents 0.17.0, and Background Tasks 0.8.0. Keep Goal, Plan, and SSH versions unchanged.
+
+## [pi-better-sandbox@0.12.0] - 2026-10-07
+
+### Added
+
+- Add `/sandbox diagnostics` opt-in, status, summary, export, and off commands, retaining history when disabled. (#445)
+- Collect redacted foreground policy refusals and trusted OS permission errors without changing enforcement or tool outcomes.
+- Bound local evidence to 2,000 observations, 1 MiB, and 30 days, with signed records, keyed identities, and explicit journal gaps.
+
+### Changed
+
+- Keep diagnostic storage fail-closed under paused writers and orphaned locks, with no age-based lock eviction.
+
+## [pi-better-subagents@0.17.0] - 2026-10-07
+
+### Added
+
+- Relay fixed, redacted worker observations to the trusted parent as agent-reported evidence, preserving worker runtime metadata and deduplicating retained reports across reloads. (#445)
+- Keep the global diagnostic journal and installation key inaccessible to confined workers; grant no new permissions.
+
+## [pi-better-background-tasks@0.8.0] - 2026-10-07
+
+### Added
+
+- Collect redacted local spawn and watch preflight refusals and trusted launch permission errors when sandbox diagnostics are enabled. (#445)
+- Preserve task outcomes and avoid classifying arbitrary shell output or nonzero exits as sandbox evidence.
+
 ## [pi-better-harness@0.26.1] - 2026-10-07
 
 ### Fixed
