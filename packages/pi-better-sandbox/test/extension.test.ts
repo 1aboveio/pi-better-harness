@@ -42,7 +42,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { sandboxArgumentCompletions } from "../commands.ts";
 import { denyRuleOverridePath } from "../deny-rules.ts";
 import { sandboxPreferencesPath, writeSandboxDefault } from "../preferences.ts";
-import { readHarnessSetting, removeHarnessSetting } from "../shared-harness-settings.ts";
+import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.ts";
 import { PACKAGED_DENY_WRITE_TEMPLATES } from "../policy.ts";
 import { RULES_PAGE_NO_UI_REJECTION } from "../rules-page.ts";
 import {
@@ -83,13 +83,13 @@ assert.equal(denyRuleOverridePath().startsWith(agentDir), true);
 
 /** Drop any override a previous test left behind, so each starts on defaults. */
 function forgetDenyOverride(): void {
-    if (existsSync(denyRuleOverridePath())) removeHarnessSetting("sandboxDenyRules");
+    if (existsSync(denyRuleOverridePath())) updateHarnessSetting("sandboxDenyRules", () => undefined);
 }
 
 function forgetSandboxPreference(): void {
     if (existsSync(sandboxPreferencesPath())) {
-        removeHarnessSetting("sandbox");
-        removeHarnessSetting("sandboxPermissions");
+        updateHarnessSetting("sandbox", () => undefined);
+        updateHarnessSetting("sandboxPermissions", () => undefined);
     }
 }
 
