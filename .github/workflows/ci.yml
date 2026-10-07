@@ -6,6 +6,35 @@ on:
   workflow_dispatch:
 
 jobs:
+  node24-sandbox:
+    name: node24-sandbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PI_SANDBOX_REQUIRE_BACKEND: linux-bubblewrap
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Enable the Linux sandbox backend
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / -- /bin/true
+          node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap
+      - name: Verify Node 24 confinement and fixture cleanup
+        run: |
+          node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test packages/pi-better-subagents/tests/task_runtime.test.mjs
+          node --import tsx --test packages/task-sandbox/apply-patch.test.ts
+
   windows-verify:
     name: windows-verify
     runs-on: windows-latest

@@ -2,7 +2,7 @@
 // @level integration
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +32,8 @@ function fixture(t, permissions = {}, fixtureParent = process.platform === 'win3
     t.after(() => {
         if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = previousAgent;
+        const mask = join(control, '.pi-sandbox-mask', 'directory');
+        if (existsSync(mask)) chmodSync(mask, 0o700);
         rmSync(base, { recursive: true, force: true });
     });
     return { base, project, agent, control, policy };
@@ -312,7 +314,10 @@ test('compatibility temp cannot retarget project ancestors or sibling runtime co
       // Linux bind mounts reject directory removal/rename with EBUSY.
       const directoryDenied = process.platform === 'linux' ? /^(EPERM|EACCES|EROFS|EBUSY)$/ : /^(EPERM|EACCES|EROFS)$/;
       assert.throws(()=>fs.renameSync(${JSON.stringify(f.base)},${JSON.stringify(f.base + '-moved')}), { code: directoryDenied });
-      assert.throws(()=>fs.rmSync(${JSON.stringify(f.agent)},{recursive:true}), { code: directoryDenied });
+      // Node 24's native recursive rm can wrap EROFS as UV_UNKNOWN (-4094).
+      assert.throws(()=>fs.rmSync(${JSON.stringify(f.agent)},{recursive:true}), error =>
+        directoryDenied.test(error.code) || (process.platform === 'linux' && error.code === '' &&
+          error.errno === -4094 && error.syscall === 'rm' && error.path === ${JSON.stringify(f.agent)}));
       fs.writeFileSync(${JSON.stringify(join(f.project, 'ordinary.txt'))},'allowed');
     `;
     const quote = (text) => `'${text.replaceAll("'", `'\\''`)}'`;

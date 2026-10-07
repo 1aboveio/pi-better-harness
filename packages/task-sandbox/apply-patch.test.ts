@@ -2,7 +2,7 @@
 // @level integration
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -184,7 +184,11 @@ function kernelFixture(permissions: Partial<SandboxPermissions>, parent = tmpdir
     const files = createTaskFileOperations({ requireLaunchPlan: () => plan });
     const ops: PatchFileOperations = { readFile: files.read.readFile, writeFile: files.write.writeFile, mkdir: files.write.mkdir,
         remove: files.remove.remove, checkWrite: files.check.write, checkRemove: files.check.remove };
-    return { base, root, home, ops, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+    return { base, root, home, ops, cleanup: () => {
+        const mask = join(base, ".pi-sandbox-mask", "directory");
+        if (existsSync(mask)) chmodSync(mask, 0o700);
+        rmSync(base, { recursive: true, force: true });
+    } };
 }
 
 test("Project files = Write: edits apply, deletes and moves are refused outside worktree folders", { skip: !kernel }, async () => {
