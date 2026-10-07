@@ -29,7 +29,7 @@ import { dirname } from "node:path";
 
 import { commandExecution } from "./process.js";
 import { baseDir } from "./registry.js";
-import { compileWritePolicy, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
+import { compileWritePolicy, describeSandboxSupport, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
 
 type SandboxPermissions = {
   /** `write` = read, create and overwrite in place; `read-write` = Write & delete. */
@@ -40,6 +40,18 @@ type SandboxPermissions = {
   network: boolean;
 };
 import type { CommandSpec } from "./types.js";
+import { SandboxDiagnostics, diagnosticPackageVersion, type DiagnosticResource } from "./shared-sandbox-diagnostics.js";
+
+function backgroundDiagnostics(policy: unknown): SandboxDiagnostics | undefined {
+  try {
+    return new SandboxDiagnostics({ context: "background",
+      version: diagnosticPackageVersion(new URL("../package.json", import.meta.url)),
+      policy: () => policy,
+      backend: () => { const support = describeSandboxSupport(); return support.supported ? support.backend : undefined; },
+      onError: () => { console.error("Sandbox diagnostics collection gap; enforcement unchanged."); },
+    });
+  } catch { return undefined; }
+}
 
 /**
  * What an operator can do about a missing backend here.
@@ -225,16 +237,25 @@ export function currentForegroundSandboxPolicy(pi: unknown): ForegroundSandboxPo
  * Throws for every state that is neither confinable nor intentionally
  * unconfined, which keeps a blocked launch from leaving task state behind.
  */
-export function resolveForegroundSandboxPlan(pi: unknown, remote = false): ForegroundSandboxPlan {
+export function resolveForegroundSandboxPlan(pi: unknown, remote = false, operation?: unknown, tool = "bg_task_spawn"): ForegroundSandboxPlan {
   const policy = currentForegroundSandboxPolicy(pi);
   if (remote && !policy?.permissions) return UNCONFINED; // Preserve legacy SSH behavior.
-  const plan = planFor(policy);
-  if (remote && plan.confined) {
-    throw new ForegroundSandboxBlockedError(policy!, !plan.permissions?.network
-      ? "Main profile disables network. SSH launches are blocked."
-      : "Structured SSH cannot apply local file and credential permissions yet. Use SSH through confined bash, or change Main permissions in /sandbox.");
+  try {
+    const plan = planFor(policy);
+    if (remote && plan.confined) {
+      throw new ForegroundSandboxBlockedError(policy!, !plan.permissions?.network
+        ? "Main profile disables network. SSH launches are blocked."
+        : "Structured SSH cannot apply local file and credential permissions yet. Use SSH through confined bash, or change Main permissions in /sandbox.");
+    }
+    return plan;
+  } catch (error) {
+    if (error instanceof ForegroundSandboxBlockedError) {
+      const resource: DiagnosticResource = policy?.permissions?.enabled && !policy.permissions.commands ? "command-execution"
+        : remote && policy?.permissions?.network === false ? "network-access" : "sandbox-backend";
+      backgroundDiagnostics(policy)?.observe({ tool, operation, resource, basis: "policy-refusal", outcome: "denied" });
+    }
+    throw error;
   }
-  return plan;
 }
 
 /** The plan for one already-read policy. Exposed for tests and reuse. */
@@ -281,6 +302,7 @@ export function confineCommandSpec(
   seams: SandboxSeams = {},
   /** Receives lines to show with the launch (e.g. a placeholder left in the user's files). */
   onNotice: (line: string) => void = () => {},
+  tool = "bg_task_spawn",
 ): CommandSpec {
   if (!plan.confined) return spec;
 
@@ -330,9 +352,13 @@ export function confineCommandSpec(
       seams,
     );
   } catch (error) {
+    backgroundDiagnostics(plan)?.observe({ tool, operation: spec, resource: "sandbox-backend", basis: "policy-refusal", outcome: "denied" });
     throw blocked(plan, error instanceof Error ? error.message : String(error));
   }
-  if (!command) throw blocked(plan, "no sandbox backend was applied");
+  if (!command) {
+    backgroundDiagnostics(plan)?.observe({ tool, operation: spec, resource: "sandbox-backend", basis: "policy-refusal", outcome: "denied" });
+    throw blocked(plan, "no sandbox backend was applied");
+  }
   for (const line of command.notices ?? []) onNotice(line);
 
   return { ...spec, argv: [command.file, ...command.fileArgs], shell: false };

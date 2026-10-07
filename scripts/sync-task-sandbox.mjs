@@ -14,6 +14,7 @@ export function taskSandboxCopies(root = resolve(import.meta.dirname, "..")) {
     const content = `// Generated from packages/task-sandbox/${source}. Do not edit directly.\n` +
       readFileSync(resolve(root, "packages/task-sandbox", source), "utf8")
         .replaceAll('"../sandbox-core/index.ts"', '"./shared-sandbox-core.ts"')
+        .replaceAll('"../sandbox-diagnostics/index.ts"', '"./shared-sandbox-diagnostics.ts"')
         .replaceAll('"./files.ts"', '"./shared-task-files.ts"')
         .replaceAll('"./apply-patch.ts"', '"./shared-task-apply-patch.ts"')
         .replaceAll('"./tools.ts"', '"./shared-task-tools.ts"')

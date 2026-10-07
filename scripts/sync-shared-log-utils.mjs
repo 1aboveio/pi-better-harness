@@ -11,6 +11,12 @@ const failureObservationsSource = resolve(root, "packages/failure-observations/i
 const permissionBlockerSource = resolve(root, "packages/failure-observations/permission-blocker.ts");
 const callbackBatcherSource = resolve(root, "packages/callback-batcher/index.ts");
 const harnessSettingsSource = resolve(root, "packages/harness-settings/index.ts");
+const sandboxDiagnosticsSource = resolve(root, "packages/sandbox-diagnostics/index.ts");
+const sandboxDiagnosticsTargets = [
+  "packages/pi-better-sandbox/shared-sandbox-diagnostics.ts",
+  "packages/pi-better-subagents/shared-sandbox-diagnostics.ts",
+  "packages/pi-better-background-tasks/src/shared-sandbox-diagnostics.ts",
+];
 const harnessSettingsTargets = [
   "packages/callback-batcher/shared-harness-settings.ts",
   "packages/pi-better-subagents/shared-harness-settings.ts",
@@ -61,6 +67,13 @@ const callbackBatcherContent = `// Generated from packages/callback-batcher/inde
 
 for (const target of harnessSettingsTargets) {
   writeFileAtomically(resolve(root, target), `// Generated from packages/harness-settings/index.ts. Do not edit directly.\n${readFileSync(harnessSettingsSource, "utf8")}`);
+}
+
+for (const target of sandboxDiagnosticsTargets) {
+  const content = readFileSync(sandboxDiagnosticsSource, "utf8")
+    .replaceAll('"../harness-settings/index.ts"', '"./shared-harness-settings.ts"')
+    .replaceAll('"../failure-observations/permission-blocker.ts"', '"./shared-permission-blocker.ts"');
+  writeFileAtomically(resolve(root, target), `// Generated from packages/sandbox-diagnostics/index.ts. Do not edit directly.\n${content}`);
 }
 
 for (const target of logUtilsTargets) {

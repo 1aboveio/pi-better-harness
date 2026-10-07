@@ -23,6 +23,7 @@ import {
 import { openSandboxRulesPage } from "./rules-page.ts";
 import { formatSandboxReport } from "./status.ts";
 import type { ForegroundSandboxController, ForegroundSandboxStatus } from "./state.ts";
+import { DIAGNOSTICS_ACTIONS, handleDiagnosticsCommand } from "./diagnostics-command.ts";
 
 export const SANDBOX_COMMAND_NAME = "sandbox";
 
@@ -41,6 +42,7 @@ const USAGE = [
     "  /sandbox deny remove <path>",
     "  /sandbox deny reset",
     "  /sandbox rules",
+    "  /sandbox diagnostics [status|on|off|summary|export]",
 ].join("\n");
 
 const DENY_USAGE = [
@@ -104,6 +106,11 @@ export function createSandboxCommandHandler({
         const [verb = "", ...tail] = trimmed.split(/\s+/);
         const subcommand = verb.toLowerCase();
         const rest = trimmed.slice(verb.length).trim();
+
+        if (subcommand === "diagnostics") {
+            await handleDiagnosticsCommand(rest, ctx);
+            return;
+        }
 
         if (subcommand === "") {
             if (openPermissions && ctx.mode === "tui") {
@@ -273,7 +280,7 @@ function announce(ctx: ExtensionCommandContext, change: () => DenyRuleReport): v
     }
 }
 
-const SUBCOMMANDS = ["on", "off", "default", "deny", "rules"] as const;
+const SUBCOMMANDS = ["on", "off", "default", "deny", "rules", "diagnostics"] as const;
 const DENY_ACTIONS = ["list", "add", "remove", "reset"] as const;
 
 const COMPLETION_DESCRIPTIONS: Readonly<Record<string, string>> = {
@@ -288,6 +295,7 @@ const COMPLETION_DESCRIPTIONS: Readonly<Record<string, string>> = {
     "deny remove": "Remove a write-denied path",
     "deny reset": "Restore packaged write-deny defaults",
     rules: "Open the write-deny rule manager",
+    diagnostics: "Collect and analyze local redacted permission observations",
 };
 
 /** Argument completions for `/sandbox`, including the `deny` actions. */
@@ -297,9 +305,12 @@ export function sandboxArgumentCompletions(argumentPrefix: string): Autocomplete
     const defaultPrefix = /^default(\s|$)/.test(prefix)
         ? prefix.replace(/^default\s*/, "")
         : undefined;
+    const diagnosticsPrefix = /^diagnostics(\s|$)/.test(prefix) ? prefix.replace(/^diagnostics\s*/, "") : undefined;
 
     const values =
-        denyPrefix !== undefined
+        diagnosticsPrefix !== undefined
+            ? DIAGNOSTICS_ACTIONS.filter(value => value.startsWith(diagnosticsPrefix)).map(value => `diagnostics ${value}`)
+            : denyPrefix !== undefined
             ? DENY_ACTIONS.filter((value) => value.startsWith(denyPrefix)).map(
                   (value) => `deny ${value}`,
               )

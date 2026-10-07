@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { createTaskBashOperations } from "./index.ts";
+import { SandboxDiagnostics, readDiagnostics, setDiagnosticsEnabled } from "../sandbox-diagnostics/index.ts";
 
 function fixture(t: test.TestContext) {
     const base = realpathSync(mkdtempSync(join(tmpdir(), "task-bash-")));
@@ -29,6 +30,29 @@ function mockSpawn(t: test.TestContext, implementation: (...args: any[]) => any)
 }
 
 const options = { onData: (_chunk: Buffer) => {} };
+
+test("direct shell refusals recover only after the same command succeeds in the same working directory", async (t) => {
+    const f = fixture(t);
+    const seams = { agentDir: () => f.control };
+    setDiagnosticsEnabled(true, seams);
+    let confined = true;
+    f.plan.policy.permissions.commands = false;
+    const diagnostics = new SandboxDiagnostics({ ...seams, context: "foreground", version: "0.11.1",
+        policy: () => f.plan.policy, backend: () => "unknown" });
+    const ops = createTaskBashOperations({ requireLaunchPlan: () => confined ? f.plan : { confined: false } }, undefined, diagnostics);
+    await assert.rejects(ops.exec("printf denied-command-canary", f.root, options), /commands & applications is Off/);
+    assert.equal(readDiagnostics(seams).records.length, 1);
+    confined = false;
+    const elsewhere = join(f.control, "other-project");
+    mkdirSync(elsewhere);
+    assert.equal((await ops.exec("printf denied-command-canary", elsewhere, options)).exitCode, 0);
+    assert.equal(readDiagnostics(seams).records.length, 1);
+    assert.equal((await ops.exec("printf denied-command-canary", f.root, options)).exitCode, 0);
+    const data = readDiagnostics(seams);
+    assert.equal(data.records.length, 2);
+    assert.equal(data.records[1]?.recoveryOf, data.records[0]?.fingerprint);
+    assert.doesNotMatch(JSON.stringify(data), /denied-command-canary|other-project/);
+});
 const mac = process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec");
 const kernel = mac && childProcess.spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]).status === 0;
 if (process.env.PI_SANDBOX_REQUIRE_BACKEND === "macos-seatbelt" && !kernel) {
@@ -80,6 +104,30 @@ test("shell profiles are retired on synchronous and asynchronous spawn failure",
                 return child;
             });
             await assert.rejects(f.ops.exec("/usr/bin/true", f.root, options), /fixture spawn failure/);
+            assert.deepEqual(readdirSync(f.control), []);
+        });
+    }
+});
+
+test("trusted shell spawn errno is observed once for synchronous and asynchronous failures", { skip: !mac }, async (t) => {
+    for (const failure of ["throw", "error"] as const) {
+        await t.test(failure, async (t) => {
+            const f = fixture(t);
+            const observed: Array<{ basis: string; outcome: string }> = [];
+            const ops = createTaskBashOperations({ requireLaunchPlan: () => f.plan }, undefined, {
+                observe: observation => { observed.push(observation); },
+            });
+            mockSpawn(t, () => {
+                const error = Object.assign(new Error("fixture launch error"), { code: "EACCES" });
+                if (failure === "throw") throw error;
+                const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
+                queueMicrotask(() => child.emit("error", error));
+                return child;
+            });
+            await assert.rejects(ops.exec("/usr/bin/true", f.root, options), (error: NodeJS.ErrnoException) => error.code === "EACCES");
+            assert.equal(observed.length, 1);
+            assert.equal(observed[0]?.basis, "os-permission-error");
+            assert.equal(observed[0]?.outcome, "denied");
             assert.deepEqual(readdirSync(f.control), []);
         });
     }

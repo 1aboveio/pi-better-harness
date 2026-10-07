@@ -1438,7 +1438,7 @@ test("saved Process access Off remains enforced even when Main confinement is in
 test("completions cover activation defaults and deny actions", () => {
     assert.deepEqual(
         sandboxArgumentCompletions("").map((entry) => entry.value),
-        ["on", "off", "default", "deny", "rules"],
+        ["on", "off", "default", "deny", "rules", "diagnostics"],
     );
     assert.deepEqual(
         sandboxArgumentCompletions("de").map((entry) => entry.value),
