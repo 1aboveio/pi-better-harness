@@ -91,6 +91,13 @@ all original tool details in both modes and folds them again on the next toggle.
 `/tool-output normal` restores ordinary rendering. Error result bodies are also
 hidden in minimal mode and remain available when expanded.
 
+Minimal mode also covers Harness tools: Subagents, Background Tasks, Goal, Plan,
+catalog inspection, and SSH. Compact calls retain the run or task ID, launch name
+and task, background command, goal action, or plan summary without showing result
+bodies. Finished calls fold into the same disclosure blocks as built-in tools;
+expanding them restores their original package renderers. Goal and Plan widgets
+and the background-work navigator are independent UI surfaces and remain visible.
+
 Normal mode is the initial default. Changing tool output saves the choice in
 global `settings.json` under `piBetterHarness.toolOutput`, as well as the current
 session. New sessions inherit it; resumed branches retain their own saved choice.

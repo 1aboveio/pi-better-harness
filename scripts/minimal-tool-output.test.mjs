@@ -12,6 +12,11 @@ import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/s
 
 import minimalOutputExtension from "../packages/pi-better-harness/extensions/minimal-output/index.ts";
 import { installMinimalOutputHook, loadToolPrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
+import subagentsExtension from "../packages/pi-better-subagents/index.ts";
+import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
+import goalExtension from "../packages/pi-better-goal/src/index.ts";
+import planExtension from "../packages/pi-better-plan/src/index.ts";
+import sshExtension from "../packages/pi-better-ssh/src/index.ts";
 
 const sdk = process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR
   ? join(process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR, "dist")
@@ -119,6 +124,73 @@ test("minimal mode suppresses streaming error bodies and inline images without d
   component.setExpanded(true);
   assert.match(rendered(component), /ERROR_BODY_SENTINEL/);
   assert.equal(component.imageComponents.length, 1);
+});
+
+test("actual Harness tools retain useful compact calls, hide results, and expand their native renderers", () => {
+  const definitions = new Map();
+  const pi = {
+    events: events(), registerTool(definition) { definitions.set(definition.name, definition); },
+    registerCommand() {}, registerShortcut() {}, on() {},
+  };
+  for (const extension of [subagentsExtension, backgroundTasksExtension, goalExtension, planExtension, sshExtension]) extension(pi);
+  const hook = install();
+  hook.setEnabled(true);
+  const cases = [
+    ["subagent_spawn", { role: "developer", name: "checkout", prompt: "Investigate checkout failures", model: "provider/model", thinking: "high" }, /developer.*checkout.*Investigate checkout failures/],
+    ["subagent_spawn_batch", { jobs: [{ role: "developer", prompt: "First job" }, { role: "reviewer", prompt: "Second job" }] }, /2 jobs/],
+    ["subagent_result", { id: "sa-checkout" }, /sa-checkout/],
+    ["subagent_output", { id: "sa-checkout" }, /sa-checkout/],
+    ["subagent_stop", { id: "sa-checkout" }, /sa-checkout/],
+    ["subagent_list", { status: ["running"], all: true }, /running.*all/],
+    ["agents_catalog", { action: "inspect", id: "role.developer" }, /inspect.*role.developer/],
+    ["bg_task_spawn", { command: "npm test", name: "unit-tests" }, /unit-tests.*npm test/],
+    ["bg_task_watch", { command: "deploy status", ssh: { user: "ops", host: "builder" } }, /ops@builder.*deploy status/],
+    ["bg_task_status", { id: "bg-tests" }, /bg-tests/],
+    ["bg_task_log", { id: "bg-tests" }, /bg-tests/],
+    ["bg_task_stop", { id: "bg-tests" }, /bg-tests/],
+    ["bg_task_list", {}, /Bg task list/],
+    ["bg_task", { action: "log", id: "bg-tests" }, /log.*bg-tests/],
+    ["bg_status", { action: "status", id: "bg-tests" }, /status.*bg-tests/],
+    ["get_goal", {}, /Get goal/],
+    ["update_goal", { status: "complete" }, /complete/],
+    ["goal_resume", { reason: "Continue verification" }, /Continue verification/],
+    ["get_background_activity", {}, /Get background activity/],
+    ["release_workflow", {}, /Release workflow/],
+    ["update_plan", { plan: [{ step: "Verify checkout", status: "in_progress" }] }, /1 steps/],
+    ["get_plan", {}, /Get plan/],
+    ["remote_bash", { host: "builder", command: "git status" }, /builder.*git status/],
+    ["ssh_profile", { action: "use", host: "builder" }, /use.*builder/],
+    ["ssh_mux", { action: "status", host: "builder" }, /status.*builder/],
+  ];
+  const chat = new Container();
+  const ui = { children: [chat], requestRender() {} };
+  for (const [name, args, expected] of cases) {
+    const definition = definitions.get(name);
+    assert.ok(definition, `${name} is registered by its real extension`);
+    const component = new ToolExecutionComponent(name, `harness-${name}`, args, {}, definition, ui, process.cwd());
+    chat.addChild(component);
+    component.updateResult(payload, true);
+    assert.match(rendered(component), /running/, `${name} retains streaming state without showing its result`);
+    assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+    component.updateResult(payload, false);
+    const compact = stripVTControlCharacters(rendered(component));
+    assert.equal(component.render(100).length, 1, `${name} stays on one line`);
+    assert.match(compact, expected, `${name} keeps its call identity`);
+    assert.doesNotMatch(compact, /RESULT_BODY_SENTINEL/);
+    assert.equal(component.result, payload);
+    for (const width of [1, 24, 60]) assert.ok(component.render(width).every(line => visibleWidth(line) <= width));
+    component.setExpanded(true);
+    assert.match(rendered(component), /RESULT_BODY_SENTINEL/, `${name} expands its original result`);
+    component.setExpanded(false);
+    assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
+  }
+  hook.completeRun();
+  assert.equal(chat.render(100).length, 1, "settled Harness calls share one folded block");
+  assert.match(rendered(chat), new RegExp(`${cases.length} tool calls`));
+  chat.children[0].setExpanded(true);
+  assert.match(rendered(chat), /RESULT_BODY_SENTINEL/, "native expansion still works inside a settled Harness block");
+  chat.children[0].setExpanded(false);
+  assert.equal(chat.render(100).length, 1);
 });
 
 test("new tool headers survive streaming updates, and custom renderer reuse survives expansion", () => {
