@@ -10,6 +10,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
   let enabled = false;
   let running = false;
   let initialDefault: boolean | undefined;
+  let motionEnabled = true;
 
   function defaultEnabled(): boolean {
     if (initialDefault !== undefined) return initialDefault;
@@ -52,6 +53,16 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
       enabled = false;
       ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
     }
+    try {
+      const motion = readHarnessSetting<{ version?: unknown; enabled?: unknown }>("toolAnimation");
+      if (motion !== undefined && (motion?.version !== 1 || typeof motion.enabled !== "boolean")) {
+        throw new Error("Invalid tool-animation default in global settings.json.");
+      }
+      motionEnabled = motion?.enabled !== false;
+    } catch (error) {
+      motionEnabled = false;
+      ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+    }
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === ENTRY) {
         const data = entry.data as { version?: unknown; enabled?: unknown } | undefined;
@@ -60,6 +71,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     }
     // Observe transcript components from startup, so the toggle also redraws existing rows.
     if (await ensureHook(ctx)) {
+      hook!.setAnimationEnabled(motionEnabled);
       hook!.restoreCompletedCalls(ctx.sessionManager.getBranch().flatMap(entry =>
         entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : []));
       if (enabled) collapseTools(ctx);
@@ -93,7 +105,21 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     id: "tool-output", label: "Tool output", values: ["Normal", "Minimal"],
     get: () => enabled ? "Minimal" : "Normal", change,
   };
-  const register = () => pi.events.emit("harness-settings:register", setting);
+  const animationSetting: SettingsControl = {
+    id: "tool-animation", label: "Tool animation", values: ["Shimmer", "Off"],
+    get: () => motionEnabled ? "Shimmer" : "Off",
+    async change(value, ctx) {
+      if (value !== "Shimmer" && value !== "Off") throw new Error("Invalid tool animation mode.");
+      if (!await ensureHook(ctx)) throw new Error("Tool animation settings are unavailable in this Pi runtime.");
+      updateHarnessSetting("toolAnimation", () => ({ version: 1, enabled: value === "Shimmer" }));
+      motionEnabled = value === "Shimmer";
+      hook!.setAnimationEnabled(motionEnabled);
+    },
+  };
+  const register = () => {
+    pi.events.emit("harness-settings:register", setting);
+    pi.events.emit("harness-settings:register", animationSetting);
+  };
   let stopSettings: (() => void) | undefined;
   const subscribe = () => { stopSettings ??= pi.events.on("harness-settings:request", register); };
   subscribe();
@@ -115,6 +141,7 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     enabled = false;
     running = false;
     initialDefault = undefined;
+    motionEnabled = true;
   });
 
   pi.registerCommand("tool-output", {

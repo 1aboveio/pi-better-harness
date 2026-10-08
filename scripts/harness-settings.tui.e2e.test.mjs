@@ -90,6 +90,11 @@ export default function(pi){
     wait(pane => pane.includes("Callback default saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.callbacks.mode, "steer");
     key("Down");
+    wait(pane => /Tool animation\s+Shimmer/.test(pane));
+    key("Space");
+    wait(pane => /Tool animation\s+Off/.test(pane));
+    assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.toolAnimation.enabled, false);
+    key("Down");
     wait(pane => pane.includes("Tool output") && pane.includes("Normal"));
     key("Space");
     wait(pane => /Tool output\s+Minimal/.test(pane) && pane.includes("Setting saved"));
@@ -132,6 +137,9 @@ export default function(pi){
     send("/harness-settings"); key("Enter");
     const reloaded = wait(pane => /Tool output\s+Minimal/.test(pane) && pane.includes("Steer active run"));
     assert.equal((reloaded.match(/Tool output/g) ?? []).length, 1, "reload must not duplicate the tool-output contribution");
+    assert.equal((reloaded.match(/Tool animation/g) ?? []).length, 1);
+    assert.match(reloaded, /Tool animation\s+Off/);
+    key("Down");
     key("Down");
     key("Down");
     key("Enter");
@@ -151,7 +159,7 @@ export default function(pi){
     wait(pane => pane.includes("Harness settings") && pane.includes("Steer active run") && pane.includes("User default") && /Tool output\s+Minimal/.test(pane));
     key("Enter");
     wait(pane => pane.includes("Wait until idle") && pane.includes("Session setting saved"));
-    key("Down"); key("Space");
+    key("Down"); key("Down"); key("Space");
     wait(pane => /Tool output\s+Normal/.test(pane) && pane.includes("Setting saved"));
     assert.equal(JSON.parse(readFileSync(preferences, "utf8")).piBetterHarness.toolOutput.enabled, false);
     key("Escape");

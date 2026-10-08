@@ -68,11 +68,12 @@ The bundled harness provides **Tool output: Normal / Minimal** in
 `/harness-settings`. `/tool-output minimal`, `/tool-output normal`, and
 `/tool-output` (toggle) remain compatibility shortcuts to the same preference.
 Minimal mode folds each tool call into a single-line header, including running
-calls. Each row has a single tool-specific icon: accent-colored while running,
-muted when completed, and error-colored when failed. Tool names stay muted;
-inline command/path arguments use the theme's distinct dim tone. Running and
-failed calls retain text labels so state never depends on color alone. Activity
-stays quieter than conversation text. Tool rows are indented two columns past
+calls. The tool-specific icon and tool name share a state color: accent while
+running, muted when completed, and error-colored when failed. In fullscreen Pi, a soft highlight travels through visible running names; inline
+command/path arguments stay dim. Scrollback terminals keep static state colors.
+Choose **Tool animation: Off** in `/harness-settings` for static running headers.
+Running and failed calls retain text labels so state never depends on color or
+motion alone. Tool rows are indented two columns past
 the assistant text padding. Long
 headers are truncated to the terminal width; result bodies,
 images, boxes, and tool spacers are hidden. Built-in, extension, and MCP calls
@@ -130,8 +131,10 @@ to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
 `/goal settings` remain available in standalone installations.
 Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
 
-The hub includes **Tool output** when the bundled renderer extension is loaded.
-Changes apply immediately and also save the default for future sessions.
+The hub includes **Tool output** and **Tool animation** when the bundled renderer
+extension is loaded. Changes apply immediately and save the default for future
+sessions. The animation preference is stored in `piBetterHarness.toolAnimation`;
+normal output and expanded tool details are never animated.
 The hub also owns **Completions while busy**, shared by Subagents and Background
 Tasks. Choose **Wait until idle** (the default) or **Steer active run**. Changes
 apply immediately and autosave to the current session branch, including across
