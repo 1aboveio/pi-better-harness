@@ -87,7 +87,8 @@ export function renderPlanPresentation(
   let previous = -1;
   for (const index of indices) {
     if (index > previous + 1) {
-      lines.push(theme.fg("dim", `  ... ${index - previous - 1} ${previous < 0 ? "earlier " : ""}steps`));
+      const omitted = index - previous - 1;
+      lines.push(theme.fg("dim", `  ... ${omitted} ${previous < 0 ? "earlier " : ""}${omitted === 1 ? "step" : "steps"}`));
     }
     previous = index;
     const row = plan.rows[index]!;
@@ -119,7 +120,10 @@ export function renderPlanPresentation(
       }
     }
   }
-  if (previous < plan.rows.length - 1) lines.push(theme.fg("dim", `  ... ${plan.rows.length - previous - 1} more steps`));
+  if (previous < plan.rows.length - 1) {
+    const omitted = plan.rows.length - previous - 1;
+    lines.push(theme.fg("dim", `  ... ${omitted} more ${omitted === 1 ? "step" : "steps"}`));
+  }
   if (full) lines.push("", theme.fg("dim", "↑↓ navigate · esc / ← back"));
   return lines.map((line) => truncateToWidth(line, size));
 }

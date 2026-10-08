@@ -10,11 +10,18 @@ corner, embedded from `../brand/logo.png` so the SVGs are self-contained.
 - `./pi-better-*.png` and `./pi-better-*.svg` are the primary package images used by `package.json` `pi.image`. All eight extension packages have a deterministic 1200x750 preview, with a package-specific accent and larger text for gallery thumbnails. Harness, subagents, background tasks, goal, sandbox, and plan use actual feature render surfaces with demonstration state. SSH and read-aloud show labeled examples; generation does not connect to a host, call a speech provider, or play audio. These are previews, not live-session captures.
 - `./overview/pi-better-*.png` and `./overview/pi-better-*.svg` are the earlier overview-card images. They are kept as alternate assets for docs, posts, or future package-gallery experiments.
 - `./real-session/pi-better-harness.png`, `.svg`, and `.txt` are captured from a disposable real Pi TUI session with the goal, subagents, and background-task extensions loaded. The capture seeds durable extension state and uses a temporary probe extension only to read the live session id.
+- `./plan-examples/{start,middle,near-end,expanded}.png` and `.svg` demonstrate the plan widget's moving five-row window and expansion using the same eight-step plan. They use actual widget output with demonstration state, not live-session captures, and appear in the plan package README.
 
 Run this from the repository root to regenerate only the primary actual-feature screenshots:
 
 ```sh
 npm run gallery:render
+```
+
+To regenerate only the four plan examples without changing primary package images:
+
+```sh
+npm run gallery:render -- --plan-examples
 ```
 
 The renderer uses macOS `sips` to rasterize SVGs into PNGs. Validate the existing

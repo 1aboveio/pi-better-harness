@@ -82,6 +82,26 @@ The folded widget shows at most five steps. Active steps take priority, with nea
 
 In Pi's fullscreen TUI, a plain left click on the visible plan toggles expansion without taking editor focus. Regular terminal mode keeps mouse events for terminal selection and scrollback; use `/plan expand` or `/plan collapse` there. Expansion and display preferences survive reload and follow the active session branch.
 
+### Examples
+
+The same eight-step plan at the start, in the middle, and near completion, followed by its expanded view. These previews use the actual widget renderer with demonstration state, not live-session captures.
+
+**Just started:** the first five steps are visible.
+
+![Compact plan at the start, showing steps 1 through 5](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/plan-examples/start.png)
+
+**In the middle:** the window follows the active step, with omitted steps counted on both sides.
+
+![Compact plan in the middle, showing steps 2 through 6 with step 4 active](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/plan-examples/middle.png)
+
+**Near the end:** the last five steps are visible; progress still counts the whole plan.
+
+![Compact plan near completion, showing steps 4 through 8 with step 7 active](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/plan-examples/near-end.png)
+
+**Expanded:** clicking the plan in fullscreen Pi, or running `/plan expand`, reveals every step. Click again or use `/plan collapse` to return to five rows.
+
+![Expanded plan showing all eight steps](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/plan-examples/expanded.png)
+
 ## Install
 
 ```sh
@@ -114,6 +134,13 @@ From the repository root, run the real terminal journey with tmux:
 
 ```sh
 node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/plan-navigation.tui.e2e.test.mjs
+```
+
+Regenerate only the example screenshots, then check the gallery assets:
+
+```sh
+npm run gallery:render -- --plan-examples
+npm run gallery:check
 ```
 
 To also exercise fullscreen mouse dispatch on a mouse-capable Pi build:

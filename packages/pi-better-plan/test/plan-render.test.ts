@@ -45,6 +45,16 @@ test("compact plan follows progress from head to tail and expansion reveals omit
   assert.deepEqual(titles(renderCompactPlan(make(12), 100, theme)), ["Task 8", "Task 9", "Task 10", "Task 11", "Task 12"]);
 });
 
+test("omitted single steps use singular labels on either side of the window", () => {
+  const make = (active: number) => replacePlan(null, Array.from({ length: 7 }, (_, index) => ({
+    step: `Task ${index + 1}`, status: index < active ? "completed" as const : index === active ? "in_progress" as const : "pending" as const,
+  })), undefined, 100);
+  const middle = renderCompactPlan(make(3), 80, theme);
+  assert.match(middle.join("\n"), /\.\.\. 1 earlier step\n/);
+  assert.match(middle.at(-1)!, /\.\.\. 1 more step$/);
+  assert.match(renderCompactPlan(make(0), 80, theme).at(-1)!, /\.\.\. 2 more steps$/);
+});
+
 test("compact plan retains scattered active steps and caps concurrent activity at the latest five", () => {
   const make = (active: number[]) => replacePlan(null, Array.from({ length: 12 }, (_, index) => ({
     step: `Task ${index + 1}`, status: active.includes(index) ? "in_progress" as const : "pending" as const,
