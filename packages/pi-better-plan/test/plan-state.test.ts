@@ -189,11 +189,21 @@ test("reconstructs plan and display preference from the active branch", () => {
   assert.deepEqual(reconstructPlanState([
     entry(planSetEntry(plan, 100)),
     entry(planDisplayEntry("on", 101)),
-  ]), { plan, displayMode: "on" });
+  ]), { plan, displayMode: "on", expanded: false });
 
   assert.deepEqual(reconstructPlanState([
     entry(planSetEntry(plan, 100)),
     entry(planDisplayEntry("hidden", 101)),
     entry(planClearEntry(102)),
-  ]), { plan: null, displayMode: "hidden" });
+  ]), { plan: null, displayMode: "hidden", expanded: false });
+});
+
+test("expansion preferences restore from the active branch independently of plan updates", () => {
+  const plan = replacePlan(null, [{ step: "Working", status: "in_progress" }], undefined, 100);
+  const entry = (data: unknown) => ({ type: "custom", customType: EXTENSION_NAME, data });
+  const base = [entry(planSetEntry(plan)), entry({ version: 1, kind: "expansion", expanded: true, at: 100 })];
+  assert.equal(reconstructPlanState(base).expanded, true);
+  assert.equal(reconstructPlanState([...base, entry({ version: 1, kind: "expansion", expanded: false, at: 101 })]).expanded, false);
+  assert.equal(reconstructPlanState([...base, entry({ version: 1, kind: "expansion", expanded: "invalid", at: 101 })]).expanded, true);
+  assert.deepEqual(reconstructPlanState(base).plan, plan);
 });

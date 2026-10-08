@@ -22,6 +22,24 @@ export interface PlanPresentation {
 
 export const plainPlanTheme: PlanRenderTheme = { fg: (_color, value) => value };
 
+export const COMPACT_PLAN_ROWS = 5;
+
+function compactRowIndices(rows: PlanRow[]): number[] {
+  if (rows.length <= COMPACT_PLAN_ROWS) return rows.map((_, index) => index);
+  let active = rows.flatMap((row, index) =>
+    ["in_progress", "implemented", "reviewed"].includes(row.status) ? [index] : []);
+  if (!active.length) active = rows.flatMap((row, index) =>
+    row.status === "blocked" || row.status === "failed" ? [index] : []);
+  const firstPending = rows.findIndex((row) => row.status === "pending");
+  const anchor = active.at(-1) ?? (firstPending < 0 ? rows.length - 1 : firstPending);
+  const start = Math.max(0, Math.min(anchor - 2, rows.length - COMPACT_PLAN_ROWS));
+  const indices = new Set(active.slice(-COMPACT_PLAN_ROWS));
+  for (let index = start; index < start + COMPACT_PLAN_ROWS && indices.size < COMPACT_PLAN_ROWS; index++) {
+    indices.add(index);
+  }
+  return [...indices].sort((a, b) => a - b);
+}
+
 export function statusStyle(status: DisplayStatus): { glyph: string; color: string; label: string } {
   switch (status) {
     case "completed": return { glyph: "✓", color: "success", label: "" };
@@ -43,7 +61,7 @@ export function planText(value: string): string {
 
 export function renderPlanPresentation(
   plan: PlanPresentation, width: number, theme: PlanRenderTheme,
-  full = false, selectedIndex = -1,
+  full = false, selectedIndex = -1, expanded = false,
 ): string[] {
   const size = Math.max(1, Math.floor(width));
   const count = (status: DisplayStatus) => plan.rows.filter((row) => row.status === status).length;
@@ -65,7 +83,15 @@ export function renderPlanPresentation(
   const labelWidth = Math.min(12, Math.max(4, ...plan.rows.map((row) => visibleWidth(planText(row.label)))));
   const statusWidth = Math.min(24, Math.max(0, ...plan.rows.map((row) =>
     visibleWidth(planText(row.statusLabel ?? statusStyle(row.status).label)))));
-  for (const [index, row] of plan.rows.entries()) {
+  const indices = full || expanded ? plan.rows.map((_, index) => index) : compactRowIndices(plan.rows);
+  let previous = -1;
+  for (const index of indices) {
+    if (index > previous + 1) {
+      const omitted = index - previous - 1;
+      lines.push(theme.fg("dim", `  ... ${omitted} ${previous < 0 ? "earlier " : ""}${omitted === 1 ? "step" : "steps"}`));
+    }
+    previous = index;
+    const row = plan.rows[index]!;
     const style = statusStyle(row.status);
     const label = truncateToWidth(planText(row.label), labelWidth);
     const prefix = (index === selectedIndex ? theme.fg("accent", "› ") : "  ") +
@@ -93,6 +119,10 @@ export function renderPlanPresentation(
         }
       }
     }
+  }
+  if (previous < plan.rows.length - 1) {
+    const omitted = plan.rows.length - previous - 1;
+    lines.push(theme.fg("dim", `  ... ${omitted} more ${omitted === 1 ? "step" : "steps"}`));
   }
   if (full) lines.push("", theme.fg("dim", "↑↓ navigate · esc / ← back"));
   return lines.map((line) => truncateToWidth(line, size));

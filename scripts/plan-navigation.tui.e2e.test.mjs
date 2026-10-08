@@ -7,11 +7,12 @@ import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const piBin = join(repoRoot, "node_modules", ".bin", "pi");
+const piBin = process.env.PI_PLAN_TUI_CLI ?? join(repoRoot, "node_modules", ".bin", "pi");
 const extensionPath = join(repoRoot, "packages", "pi-better-plan", "src", "index.ts");
 const fixtures = mkdtempSync(join(tmpdir(), "pi-plan-navigation-"));
 const probePath = join(fixtures, "seed-plan.mjs");
 const readyPath = join(fixtures, "ready");
+const seededPath = join(fixtures, "seeded");
 const session = `pi-plan-navigation-${process.pid}`;
 
 after(() => {
@@ -87,6 +88,46 @@ test("golden path: Rush-owned units appear in the real plan widget", () => {
   waitForScreen((screen) => screen.includes("rush-issues · rev 7") && !/^› /m.test(screen));
 });
 
+// @covers plan.compact-folding
+// @level e2e
+test("long plans fold through commands, survive reload, and accept fullscreen mouse clicks", () => {
+  assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0);
+  rmSync(readyPath, { force: true });
+  writeFileSync(probePath, seedPlanExtension(readyPath));
+  spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
+  startPiSession();
+  waitForFile(readyPath);
+  sendLiteral("/seed-long-plan");
+  sendKey("Enter");
+  waitForFile(seededPath);
+  let screen = waitForScreen((value) => value.includes("... 4 more steps"));
+  assert.doesNotMatch(screen, /Long task 9/);
+  sendLiteral("\x1b[200~/plan expand\x1b[201~");
+  sendKey("Enter");
+  waitForScreen((value) => /○\s+9\s+Long task 9/.test(value));
+  sendLiteral("/reload");
+  sendKey("Enter");
+  waitForScreen((value) => value.includes("Reloaded") && /○\s+9\s+Long task 9/.test(value));
+  sendLiteral("\x1b[200~/plan collapse\x1b[201~");
+  sendKey("Enter");
+  screen = waitForScreen((value) => value.includes("... 4 more steps") && !/○\s+9\s+Long task 9/.test(value));
+  if (process.env.PI_PLAN_TUI_MOUSE === "1") {
+    const clickHeading = (value) => {
+      const rows = value.split("\n");
+      const y = rows.findIndex((line) => /[▸▾] plan\s+0\/9/.test(line));
+      assert.ok(y >= 0, `plan heading missing:\n${value}`);
+      const x = rows[y].indexOf("plan");
+      sendLiteral(`\x1b[<0;${x + 1};${y + 1}M\x1b[<0;${x + 1};${y + 1}m`);
+    };
+    clickHeading(screen);
+    screen = waitForScreen((value) => /○\s+9\s+Long task 9/.test(value));
+    clickHeading(screen);
+    waitForScreen((value) => value.includes("... 4 more steps") && !/○\s+9\s+Long task 9/.test(value));
+    sendLiteral("still editing");
+    waitForScreen((value) => value.includes("still editing"));
+  }
+});
+
 function startPiSession() {
   const command = [
     `cd ${shellQuote(fixtures)}`,
@@ -151,6 +192,19 @@ function seedPlanExtension(path) {
       pi.appendEntry("pi-better-workflow-plan", { version: 1, kind: "set", owner: "rush-issues",
         path: ${JSON.stringify(join(fixtures, ".resolve-issues", "rush", "e2e-run", "task-plan.json"))}, runId: "e2e-run" });
       await ctx.reload();
+    }
+  });
+  pi.registerCommand("seed-long-plan", {
+    description: "Seed a compact plan fixture",
+    handler: async (_args, ctx) => {
+      const fs = await import("node:fs");
+      pi.appendEntry("pi-better-plan", { version: 1, kind: "set", at: Date.now(), plan: {
+        version: 1, planId: "long-plan", revision: 1,
+        steps: Array.from({ length: 9 }, (_, index) => ({ id: "long_" + index, step: "Long task " + (index + 1), status: "pending" })),
+        createdAt: Date.now(), updatedAt: Date.now()
+      } });
+      await ctx.reload();
+      fs.writeFileSync(${JSON.stringify(seededPath)}, "ready");
     }
   });
 }
