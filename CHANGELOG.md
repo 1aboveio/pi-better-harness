@@ -6,6 +6,18 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.28.0] - 2026-10-08
+
+### Added
+
+- Add a traveling highlight to running tool names in fullscreen Pi, with a persisted Tool animation: Shimmer / Off setting. (#452)
+
+### Changed
+
+- Color the tool icon and name together: accent while running, muted on completion, and error color on failure. Keep arguments dim and preserve status labels.
+- Use a lighter, theme-aware highlight without moving text, changing row widths, or disturbing editor focus. Animate only visible fullscreen rows; keep scrollback rendering static.
+- Keep all bundled component versions unchanged.
+
 ## [pi-better-harness@0.27.2] - 2026-10-08
 
 ### Changed
