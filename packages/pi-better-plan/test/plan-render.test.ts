@@ -8,7 +8,7 @@ import { renderRushPlan, createRushPlanComponent, projectRushPlan, type RushPlan
 
 const theme = { fg: (_color: string, value: string) => value };
 
-test("compact plan keeps the complete checklist visible", () => {
+test("compact plan keeps a short checklist visible", () => {
   const plan = replacePlan(null, [
     { step: "One", status: "completed" },
     { step: "Two", status: "completed" },
@@ -27,6 +27,78 @@ test("compact plan keeps the complete checklist visible", () => {
     "○ 5 Five",
   ]);
   assert.notEqual(lines.at(-1), "", "the next widget owns its leading section gap");
+});
+
+test("compact plan follows progress from head to tail and expansion reveals omitted rows", () => {
+  const make = (active: number) => replacePlan(null, Array.from({ length: 12 }, (_, index) => ({
+    step: `Task ${index + 1}`, status: index < active ? "completed" as const : index === active ? "in_progress" as const : "pending" as const,
+  })), undefined, 100);
+  const titles = (lines: string[]) => lines.filter((line) => /Task \d/.test(line)).map((line) => line.match(/Task \d+/)![0]);
+  assert.deepEqual(titles(renderCompactPlan(make(0), 100, theme)), ["Task 1", "Task 2", "Task 3", "Task 4", "Task 5"]);
+  assert.deepEqual(titles(renderCompactPlan(make(6), 100, theme)), ["Task 5", "Task 6", "Task 7", "Task 8", "Task 9"]);
+  const tail = renderCompactPlan(make(11), 100, theme);
+  assert.deepEqual(titles(tail), ["Task 8", "Task 9", "Task 10", "Task 11", "Task 12"]);
+  assert.match(tail.join("\n"), /\.\.\. 7 earlier steps/);
+  assert.match(tail[0]!, /11\/12 complete/);
+  assert.equal(titles(renderCompactPlan(make(6), 100, theme, true)).length, 12);
+  assert.equal(titles(renderFullPlan(make(6), 100, theme)).length, 12);
+  assert.deepEqual(titles(renderCompactPlan(make(12), 100, theme)), ["Task 8", "Task 9", "Task 10", "Task 11", "Task 12"]);
+});
+
+test("omitted single steps use singular labels on either side of the window", () => {
+  const make = (active: number) => replacePlan(null, Array.from({ length: 7 }, (_, index) => ({
+    step: `Task ${index + 1}`, status: index < active ? "completed" as const : index === active ? "in_progress" as const : "pending" as const,
+  })), undefined, 100);
+  const middle = renderCompactPlan(make(3), 80, theme);
+  assert.match(middle.join("\n"), /\.\.\. 1 earlier step\n/);
+  assert.match(middle.at(-1)!, /\.\.\. 1 more step$/);
+  assert.match(renderCompactPlan(make(0), 80, theme).at(-1)!, /\.\.\. 2 more steps$/);
+});
+
+test("compact plan retains scattered active steps and caps concurrent activity at the latest five", () => {
+  const make = (active: number[]) => replacePlan(null, Array.from({ length: 12 }, (_, index) => ({
+    step: `Task ${index + 1}`, status: active.includes(index) ? "in_progress" as const : "pending" as const,
+  })), undefined, 100);
+  const scattered = renderCompactPlan(make([0, 6, 11]), 100, theme);
+  for (const id of [1, 7, 12]) assert.match(scattered.join("\n"), new RegExp(`Task ${id} +active`));
+  assert.equal(scattered.filter((line) => /Task \d/.test(line)).length, 5);
+  const concurrent = renderCompactPlan(make([0, 2, 4, 6, 8, 10]), 100, theme);
+  assert.doesNotMatch(concurrent.join("\n"), /Task 1 +active/);
+  assert.deepEqual(concurrent.filter((line) => /Task \d/.test(line)).map((line) => line.match(/Task \d+/)![0]),
+    ["Task 3", "Task 5", "Task 7", "Task 9", "Task 11"]);
+  assert.match(concurrent[0]!, /6 in progress/);
+  for (const width of [1, 8, 28, 80]) assert.ok(renderCompactPlan(make([0, 6, 11]), width, theme).every((line) => visibleWidth(line) <= width));
+});
+
+test("idle and blocked plans focus the next pending work or latest blocker", () => {
+  for (const [statuses, expected] of [
+    [Array.from({ length: 10 }, () => "pending" as const), [1, 2, 3, 4, 5]],
+    [Array.from({ length: 10 }, (_, index) => index < 8 ? "completed" as const : "pending" as const), [6, 7, 8, 9, 10]],
+    [Array.from({ length: 10 }, (_, index) => index === 8 ? "blocked" as const : "pending" as const), [6, 7, 8, 9, 10]],
+  ] as const) {
+    const plan = replacePlan(null, statuses.map((status, index) => ({ step: `Task ${index + 1}`, status })), undefined, 100);
+    const actual = renderCompactPlan(plan, 100, theme).flatMap((line) => {
+      const match = line.match(/Task (\d+)/);
+      return match ? [Number(match[1])] : [];
+    });
+    assert.deepEqual(actual, expected);
+  }
+});
+
+test("long workflow and read-only handoff views use the same five-row window and expand fully", () => {
+  const workflow = rushFixture();
+  workflow.issues = Array.from({ length: 12 }, (_, index) => ({
+    id: String(index + 1), title: `Unit ${index + 1}`, stage: "done", status: index < 10 ? "succeeded" : "in-flight",
+    dependsOn: [], headSha: "abc", reviewedHead: "abc",
+  }));
+  const folded = renderRushPlan(workflow, 100, false, undefined, "rush-issues", true);
+  assert.equal(folded.filter((line) => /Unit \d/.test(line)).length, 5);
+  assert.match(folded.join("\n"), /Unit 12 +review passed/);
+  assert.match(folded.join("\n"), /read-only handoff/);
+  assert.match(folded[0]!, /10\/12 complete/);
+  const expanded = renderRushPlan(workflow, 100, false, undefined, "rush-issues", true, true);
+  assert.equal(expanded.filter((line) => /Unit \d/.test(line)).length, 12);
+  assert.doesNotMatch(expanded.join("\n"), /\.\.\./);
 });
 
 test("compact and full plan rendering name blocked state and obey width", () => {

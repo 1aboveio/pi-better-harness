@@ -15,8 +15,8 @@ function presentPlan(plan: PlanSnapshot): PlanPresentation {
   };
 }
 
-export function renderCompactPlan(plan: PlanSnapshot, width: number, theme: PlanRenderTheme): string[] {
-  return renderPlanPresentation(presentPlan(plan), width, theme);
+export function renderCompactPlan(plan: PlanSnapshot, width: number, theme: PlanRenderTheme, expanded = false): string[] {
+  return renderPlanPresentation(presentPlan(plan), width, theme, false, -1, expanded);
 }
 
 export function renderFullPlan(plan: PlanSnapshot, width: number, theme: PlanRenderTheme, selectedIndex = -1): string[] {
