@@ -5,8 +5,10 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { supportsToolShimmer, toolIdentity } from "./tool-identity.ts";
+import { toolVisibility, type ViewportUI } from "./tool-visibility.ts";
 
-interface ToolUI {
+interface ToolUI extends ViewportUI {
   requestRender(): void;
   children?: TranscriptComponent[];
   handleViewportInput?(data: string): unknown;
@@ -70,6 +72,8 @@ interface ToolPrototype {
 }
 interface HookState {
   enabled: boolean;
+  animationEnabled: boolean;
+  stopAnimation(): void;
   owners: number;
   redraw(collapse?: boolean): void;
   restore(): void;
@@ -79,6 +83,7 @@ interface HookState {
 }
 export interface MinimalOutputHook {
   setEnabled(enabled: boolean): void;
+  setAnimationEnabled(enabled: boolean): void;
   completeRun(): void;
   restoreCompletedCalls(ids: Iterable<string>): void;
   dispose(): void;
@@ -146,7 +151,7 @@ function harnessCallDetail(name: string, input: unknown): string | undefined {
   }
 }
 
-function compactCall(component: ToolComponent, width: number, theme?: Theme, indent = 3): string[] {
+function compactCall(component: ToolComponent, width: number, theme?: Theme, indent = 3, animationTime?: number): string[] {
   if (width <= 0) return [];
   // Render the call alone at a wider width so terminal wrapping becomes truncation.
   const header = Boolean(component.getCallRenderer?.()) && component.callRendererComponent?.render(Math.max(4096, width + 1))
@@ -170,7 +175,7 @@ function compactCall(component: ToolComponent, width: number, theme?: Theme, ind
   const icon = TOOL_ICONS[component.toolName] ?? "\u25c7";
   const title = ` ${icon} ${label}`;
   const styled = theme
-    ? ` ${theme.fg(failed ? "error" : running ? "accent" : "muted", icon)} ${theme.fg("muted", label)}${detail ? `  ${theme.fg("dim", detail)}` : ""}${theme.fg(failed ? "error" : "dim", suffix)}`
+    ? ` ${toolIdentity(icon, label, failed ? "error" : running ? "accent" : "muted", theme, animationTime)}${detail ? `  ${theme.fg("dim", detail)}` : ""}${theme.fg(failed ? "error" : "dim", suffix)}`
     : `${title}${detail ? `  ${detail}` : ""}${suffix}`;
   return [truncateToWidth(`${" ".repeat(Math.min(indent, Math.max(0, width - 1)))}${styled}`, width)];
 }
@@ -304,6 +309,50 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     };
     const seen = new WeakSet<ToolComponent>();
     const components = new Set<WeakRef<ToolComponent>>();
+    const animationReferences = new WeakMap<ToolComponent, WeakRef<ToolComponent>>();
+    const animated = new Map<WeakRef<ToolComponent>, number>();
+    const settled = new WeakSet<ToolComponent>();
+    let animationTimer: ReturnType<typeof setInterval> | undefined;
+    const stopAnimation = () => {
+      if (animationTimer !== undefined) clearInterval(animationTimer);
+      animationTimer = undefined;
+      animated.clear();
+    };
+    const canAnimate = (component: ToolComponent) => {
+      const theme = getTheme?.();
+      return state!.enabled && state!.animationEnabled && component.ui.mode === "fullscreen"
+        && !!theme && supportsToolShimmer(theme)
+        && !component.expanded && !component.result?.isError && (!component.result || component.isPartial)
+        && !settled.has(component);
+    };
+    const pruneAnimation = () => {
+      for (const [reference, lastRender] of animated) {
+        const component = reference.deref();
+        if (!component || !canAnimate(component) || Date.now() - lastRender > 400
+          || toolVisibility(component.ui, component) !== true) animated.delete(reference);
+      }
+      if (!animated.size) stopAnimation();
+    };
+    const animationTime = (component: ToolComponent, width: number, indent: number) => {
+      if (width <= indent + 3 || !canAnimate(component) || toolVisibility(component.ui, component) === false) return undefined;
+      let reference = animationReferences.get(component);
+      if (!reference) { reference = new WeakRef(component); animationReferences.set(component, reference); }
+      animated.set(reference, Date.now());
+      if (animationTimer === undefined) {
+        animationTimer = setInterval(() => {
+          pruneAnimation();
+          const uis = new Set<ToolUI>();
+          for (const reference of animated.keys()) {
+            const component = reference.deref();
+            if (!component) continue;
+            uis.add(component.ui);
+          }
+          for (const ui of uis) ui.requestRender();
+        }, 80);
+        animationTimer.unref?.();
+      }
+      return toolVisibility(component.ui, component) === true ? Date.now() : undefined;
+    };
     let completed = new Map<string, object>();
     let groups = new WeakMap<ToolComponent, ToolGroup>();
     let layouts = new WeakMap<ToolComponent, { parent: TranscriptComponent; anchor?: TranscriptComponent }>();
@@ -344,11 +393,15 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
     };
     state = {
       enabled: false,
+      animationEnabled: true,
+      stopAnimation,
       owners: 0,
       completeRun() {
+        stopAnimation();
         const run = {};
         for (const reference of components) {
           const component = reference.deref();
+          if (component) settled.add(component);
           if (component?.result && !component.isPartial && !completed.has(component.toolCallId)) {
             completed.set(component.toolCallId, run);
             if (this.enabled) component.setExpanded(false);
@@ -357,6 +410,11 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         this.redraw();
       },
       restoreCompletedCalls(ids) {
+        stopAnimation();
+        for (const reference of components) {
+          const component = reference.deref();
+          if (component) settled.add(component);
+        }
         const history = {};
         completed = new Map(Array.from(ids, id => [id, history]));
         groups = new WeakMap();
@@ -372,8 +430,10 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
           else component.invalidate();
           component.ui.requestRender();
         }
+        pruneAnimation();
       },
       restore() {
+        stopAnimation();
         clearHover();
         for (const [ui, { original, wrapper }] of inputWrappers) {
           if (ui.handleViewportInput === wrapper) ui.handleViewportInput = original;
@@ -498,6 +558,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
           this.ui.handleViewportInput = wrapper;
         }
         if (!seen.has(this)) { seen.add(this); components.add(new WeakRef(this)); }
+        pruneAnimation();
         if (!current.enabled || this.expanded) return originals.updateDisplay.apply(this, args);
         const showImages = this.showImages;
         const lastRenderer = this.resultRendererComponent;
@@ -517,6 +578,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         if (args[0] === false && !mouseHandling && group) group.open = false;
         const result = originals.setExpanded.apply(this, args);
         if (group) group.expanded += Number(this.expanded) - Number(wasExpanded);
+        pruneAnimation();
         return result;
       },
       getResultRenderer(this: ToolComponent, ...args: unknown[]) {
@@ -531,7 +593,7 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
         const padding = layout?.anchor?.outputPad ?? 1;
         const indent = Number.isFinite(padding) ? Math.max(0, Math.floor(padding)) + 2 : 3;
         const group = groupFor(this, layout?.parent);
-        if (!group) return highlight(this, compactCall(this, width, getTheme?.(), indent), width);
+        if (!group) return highlight(this, compactCall(this, width, getTheme?.(), indent, animationTime(this, width, indent)), width);
         const open = group.open || group.expanded > 0;
         const first = group.members[0] === this;
         const lines: string[] = [];
@@ -590,6 +652,12 @@ export function installMinimalOutputHook(prototype: ToolPrototype, getTheme?: ()
       if (disposed) return;
       current.enabled = enabled;
       current.redraw(enabled);
+    },
+    setAnimationEnabled(enabled) {
+      if (disposed) return;
+      current.animationEnabled = enabled;
+      if (!enabled) current.stopAnimation();
+      current.redraw();
     },
     dispose() {
       if (disposed) return;

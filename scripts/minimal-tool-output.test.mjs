@@ -12,6 +12,8 @@ import { chooseHarnessSetting } from "../packages/pi-better-harness/extensions/s
 
 import minimalOutputExtension from "../packages/pi-better-harness/extensions/minimal-output/index.ts";
 import { installMinimalOutputHook, loadToolPrototype, loadCompactionPrototype, loadCustomMessagePrototype } from "../packages/pi-better-harness/extensions/minimal-output/hook.ts";
+import { toolIdentity } from "../packages/pi-better-harness/extensions/minimal-output/tool-identity.ts";
+import { toolVisibility } from "../packages/pi-better-harness/extensions/minimal-output/tool-visibility.ts";
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import goalExtension from "../packages/pi-better-goal/src/index.ts";
@@ -23,7 +25,7 @@ const sdk = process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR
   : dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 // The SDK may have its own TUI copy; override capabilities on the renderer's instance.
 const sdkRequire = createRequire(pathToFileURL(join(sdk, "index.js")));
-const { Box, Container, Text, getCapabilities, setCapabilities, visibleWidth } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
+const { Box, Container, Text, TUI, TuiMainScreen, getCapabilities, setCapabilities, visibleWidth } = await import(pathToFileURL(sdkRequire.resolve("@earendil-works/pi-tui")).href);
 const { dispatchMouseEvent } = await import(pathToFileURL(join(dirname(sdkRequire.resolve("@earendil-works/pi-tui")), "tui.js")).href);
 const originalArgv = process.argv[1];
 const { SessionManager } = await import(pathToFileURL(join(sdk, "index.js")).href);
@@ -77,6 +79,14 @@ function tool(name, definition, result = payload) {
   const component = new ToolExecutionComponent(name, "call-demo", { path: "/tmp/demo", id: "demo" }, {}, definition, { requestRender() {} }, process.cwd());
   component.updateResult(result, false);
   return component;
+}
+function animationUI(components, requestRender) {
+  const rect = { x: 0, y: 0, width: 100, height: 100 };
+  return { mode: "fullscreen", requestRender, get currentLayout() {
+    return { root: { component: {}, rect, clip: rect, children: components().filter(Boolean).map((component, index) => ({
+      component, rect: { ...rect, y: index, height: 1 }, clip: rect, children: [],
+    })) } };
+  } };
 }
 const rendered = (component) => component.render(100).join("\n");
 
@@ -468,10 +478,11 @@ test("an incompatible Pi display API is refused without installing a partial hoo
   assert.equal(incompatible.updateDisplay, original);
 });
 
-test("compact rows use one state-colored tool icon and distinct quiet name and argument tones", () => {
+test("compact rows color the tool icon and name together, while arguments remain dim", () => {
   const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
   handles.push(hook);
   hook.setEnabled(true);
+  hook.setAnimationEnabled(false);
   const component = new ToolExecutionComponent("bash", "styled-call", { command: "git status --short" }, {}, undefined, { requestRender() {} }, process.cwd());
   for (const name of ["dark", "light"]) {
     initTheme(name, false);
@@ -486,8 +497,7 @@ test("compact rows use one state-colored tool icon and distinct quiet name and a
       assert.match(plain, /^ {4}\u2318 Shell/);
       if (suffix) assert.ok(plain.endsWith(suffix));
       else assert.doesNotMatch(plain, /\(running\)|\(failed\)/);
-      assert.ok(line.includes(themeModule.theme.fg(color, "\u2318")), "the tool icon alone carries the state color");
-      assert.ok(line.includes(themeModule.theme.fg("muted", "Shell")), "names remain quiet in every state");
+      assert.ok(line.includes(themeModule.theme.fg(color, "\u2318 Shell")), "the icon and tool name share their state color");
       assert.ok(line.includes(themeModule.theme.fg("dim", "$ git status --short")) || line.includes(themeModule.theme.fg("dim", "git status --short")));
       assert.notEqual(themeModule.theme.fg("muted", "tone"), themeModule.theme.fg("dim", "tone"), "names and arguments have distinct grayscale tones on both themes");
       assert.doesNotMatch(line, /\x1b\[(?:48|4[0-7])[;m]/);
@@ -500,6 +510,280 @@ test("compact rows use one state-colored tool icon and distinct quiet name and a
   }
   component.setExpanded(true);
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
+});
+
+test("running names shimmer through both themes without changing text, width, or argument color", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  const components = [];
+  let redraws = 0;
+  const frames = [];
+  const ui = animationUI(() => components, () => { redraws++; frames.push(components.map(component => component.render(100)[0])); });
+  for (const name of ["read", "external_tool"]) {
+    const component = new ToolExecutionComponent(name, `shimmer-${name}`, { path: "/tmp/demo" }, {}, undefined, ui, process.cwd());
+    components.push(component);
+  }
+  for (const name of ["dark", "light"]) {
+    initTheme(name, false);
+    const first = components.map(component => component.render(100)[0]);
+    frames.length = 0;
+    redraws = 0;
+    for (let frame = 0; frame < 10; frame++) t.mock.timers.tick(80);
+    assert.equal(redraws, 10, "two tools share one render request per 80ms tick");
+    for (let index = 0; index < components.length; index++) {
+      assert.ok(frames.some(frame => frame[index] !== first[index]), "highlight travels through each running name");
+      for (const frame of frames) {
+        assert.equal(stripVTControlCharacters(frame[index]), stripVTControlCharacters(first[index]));
+        assert.equal(visibleWidth(frame[index]), visibleWidth(first[index]));
+        assert.ok(frame[index].includes(themeModule.theme.fg("dim", "/tmp/demo")));
+        assert.doesNotMatch(frame[index], /\x1b\[(?:48|4[0-7])[;m]/);
+      }
+    }
+    for (const width of [0, 1, 4, 8, 12, 30]) {
+      for (const component of components) assert.ok(component.render(width).every(line => visibleWidth(line) <= width));
+    }
+  }
+  for (const component of components) component.updateResult(payload, false);
+  redraws = 0;
+  t.mock.timers.tick(800);
+  assert.equal(redraws, 0, "completed tools stop the shared clock immediately");
+});
+
+test("tool-name shimmer preserves Unicode and degrades to static color for terminal-defined palettes", () => {
+  for (const name of ["dark", "light"]) {
+    initTheme(name, false);
+    const label = "\u67e5\u8be2 \ud83d\udc69\u200d\ud83d\udcbb e\u0301";
+    for (const time of [0, 400, 800, 1600, 2400]) {
+      const line = toolIdentity("\u25c7", label, "accent", themeModule.theme, time);
+      assert.equal(stripVTControlCharacters(line), `\u25c7 ${label}`);
+      assert.ok(line.includes("\ud83d\udc69\u200d\ud83d\udcbb"));
+      assert.ok(line.includes("e\u0301"));
+      assert.equal(visibleWidth(line), visibleWidth(`\u25c7 ${label}`));
+    }
+    for (const tone of ["muted", "error"]) {
+      assert.equal(toolIdentity("\u25c7", label, tone, themeModule.theme, 800), themeModule.theme.fg(tone, `\u25c7 ${label}`));
+    }
+  }
+  const theme = { fg: (_tone, text) => `\x1b[38;5;6m${text}\x1b[39m`, getFgAnsi: () => "\x1b[38;5;6m" };
+  assert.equal(toolIdentity("*", "Read", "accent", theme, 800), theme.fg("accent", "* Read"));
+});
+
+test("animation stops on expansion, disable, settled runs, history restore, and final disposal", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  const first = installMinimalOutputHook(prototype, () => themeModule.theme);
+  const second = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(first, second);
+  first.setEnabled(true);
+  let component;
+  let redraws = 0;
+  const ui = animationUI(() => [component], () => { redraws++; component?.render(80); });
+  const running = () => {
+    component = new ToolExecutionComponent("bash", `lifecycle-${Date.now()}`, { command: "sleep 10" }, {}, undefined, ui, process.cwd());
+    component.render(80);
+    redraws = 0;
+    t.mock.timers.tick(80);
+    assert.equal(redraws, 1);
+  };
+  const stopped = () => { redraws = 0; t.mock.timers.tick(800); assert.equal(redraws, 0); };
+  running();
+  component.setExpanded(true);
+  stopped();
+  component.setExpanded(false);
+  component.render(80);
+  t.mock.timers.tick(80);
+  first.setAnimationEnabled(false);
+  stopped();
+  assert.ok(component.render(80)[0].includes(themeModule.theme.fg("accent", "\u2318 Shell")));
+  first.setAnimationEnabled(true);
+  component.render(80);
+  first.setEnabled(false);
+  stopped();
+  first.setEnabled(true);
+  running();
+  first.completeRun();
+  stopped();
+  component.render(80);
+  stopped();
+  running();
+  first.restoreCompletedCalls([]);
+  stopped();
+  running();
+  first.dispose();
+  redraws = 0;
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1, "disposing one owner does not remove another owner's animation");
+  second.dispose();
+  stopped();
+});
+
+test("animation stops when a running row is no longer rendered and resumes when it returns", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  let redraws = 0;
+  let component;
+  const ui = animationUI(() => [component], () => { redraws++; });
+  component = new ToolExecutionComponent("read", "stale-render", {}, {}, undefined, ui, process.cwd());
+  component.render(80);
+  for (let frame = 0; frame < 10; frame++) t.mock.timers.tick(80);
+  const count = redraws;
+  assert.ok(count > 0);
+  t.mock.timers.tick(800);
+  assert.equal(redraws, count);
+  component.render(80);
+  t.mock.timers.tick(80);
+  assert.equal(redraws, count + 1);
+  component.updateResult({ ...payload, isError: true }, false);
+  const failure = component.render(80)[0];
+  assert.ok(failure.includes(themeModule.theme.fg("error", "\u25a4 Read")));
+  redraws = 0;
+  t.mock.timers.tick(800);
+  assert.equal(redraws, 0);
+  assert.equal(component.render(80)[0], failure);
+});
+
+test("scrollback hosts and unresolved palettes never start a redundant animation clock", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  let theme = themeModule.theme;
+  const hook = installMinimalOutputHook(prototype, () => theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  let redraws = 0;
+  const component = new ToolExecutionComponent("read", "static-host", {}, {}, undefined, { requestRender() { redraws++; } }, process.cwd());
+  const line = component.render(80)[0];
+  t.mock.timers.tick(800);
+  assert.equal(redraws, 0);
+  assert.equal(component.render(80)[0], line);
+  const ui = animationUI(() => [component], () => { redraws++; component.render(80); });
+  component.ui = ui;
+  component.render(80);
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1);
+  theme = Object.create(themeModule.theme);
+  Object.defineProperty(theme, "colors", { value: undefined });
+  theme.getFgAnsi = () => "\x1b[38;5;6m";
+  redraws = 0;
+  t.mock.timers.tick(800);
+  assert.equal(redraws, 0, "switching to an unresolved palette stops an existing clock");
+  component.render(80);
+  t.mock.timers.tick(800);
+  assert.equal(redraws, 0);
+  theme = themeModule.theme;
+  component.render(80);
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1);
+});
+
+test("clipped running rows do not redraw even when the host keeps rendering them, and custom call renderers are not rebuilt", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  let component;
+  let frame;
+  let redraws = 0;
+  let calls = 0;
+  const ui = { mode: "fullscreen", get currentLayout() { return frame; }, requestRender() { redraws++; component.render(80); } };
+  component = new ToolExecutionComponent("read", "clipped-call", {}, {}, {
+    renderCall() { calls++; return new Text("Read /tmp/demo", 0, 0); },
+  }, ui, process.cwd());
+  const clip = { x: 0, y: 0, width: 80, height: 10 };
+  const at = y => ({ root: { component, rect: { ...clip, y, height: 1 }, clip, children: [] } });
+  frame = at(0);
+  component.render(80);
+  const callsBefore = calls;
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1);
+  assert.equal(calls, callsBefore);
+  frame = at(-21);
+  redraws = 0;
+  for (let tick = 0; tick < 20; tick++) { component.render(80); t.mock.timers.tick(80); }
+  assert.equal(redraws, 0);
+  assert.equal(calls, callsBefore, "animation never invalidates/recreates a native custom call renderer");
+  frame = at(0);
+  component.render(80);
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1);
+});
+
+test("real scrollback TUI leaves off-screen running rows unchanged without scrollback clears", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
+  handles.push(hook);
+  hook.setEnabled(true);
+  const writes = [];
+  const ScrollbackTUI = TuiMainScreen ?? TUI;
+  const ui = new ScrollbackTUI({ columns: 80, rows: 10, write: text => writes.push(text), hideCursor() {}, showCursor() {}, stop() {} });
+  const component = new ToolExecutionComponent("read", "offscreen-scroll", { path: "/tmp/demo" }, {}, undefined, ui, process.cwd());
+  ui.addChild(component);
+  ui.addChild(new Text(Array.from({ length: 30 }, (_, index) => `Filler ${index}`).join("\n"), 0, 0));
+  ui.doRender();
+  const count = writes.length;
+  const fullRedraws = ui.fullRedraws;
+  for (let frame = 0; frame < 20; frame++) { t.mock.timers.tick(80); ui.doRender(); }
+  assert.equal(writes.length, count);
+  assert.equal(ui.fullRedraws, fullRedraws);
+  ui.stop();
+});
+
+test("fullscreen visibility follows painted clips and cached legacy row offsets without re-rendering", () => {
+  const tool = {};
+  const filler = {};
+  const container = { mouseLayout: { children: [{ component: tool, height: 1 }, { component: filler, height: 30 }] } };
+  const clip = { x: 0, y: 0, width: 80, height: 10 };
+  const ui = { mode: "fullscreen", currentLayout: { root: { component: container,
+    rect: { ...clip, y: -21, height: 31 }, clip, children: [] } } };
+  assert.equal(toolVisibility(ui, tool), false, "rendered but off-screen rows stay static");
+  ui.currentLayout = { root: { component: container, rect: { ...clip, height: 31 }, clip, children: [] } };
+  assert.equal(toolVisibility(ui, tool), true);
+  ui.hasOverlay = () => true;
+  assert.equal(toolVisibility(ui, tool), false);
+  ui.hasOverlay = () => false;
+  ui.hasActiveSelection = () => true;
+  assert.equal(toolVisibility(ui, tool), false);
+  ui.hasActiveSelection = () => false;
+  ui.currentLayout = { root: { component: {}, rect: clip, clip, children: [] } };
+  assert.equal(toolVisibility(ui, tool), undefined, "newly mounted rows wait for the next painted frame");
+});
+
+test("the highlight approaches the foreground more closely without changing its base or period", () => {
+  const getFgAnsi = tone => tone === "accent" ? "\x1b[38;2;102;144;184m" : "\x1b[38;2;244;244;244m";
+  const theme = { getFgAnsi, getColorMode: () => "truecolor", fg: (tone, text) => `${getFgAnsi(tone)}${text}\x1b[39m` };
+  const baseline = toolIdentity("*", "Read", "accent", theme, 0);
+  const peak = toolIdentity("*", "Read", "accent", theme, 600);
+  assert.ok(baseline.includes("\x1b[38;2;102;144;184mR"));
+  assert.ok(peak.includes("\x1b[38;2;238;240;242mR"), "the peak blends 96% toward the foreground");
+  assert.ok(peak.startsWith(`${getFgAnsi("accent")}* `), "the icon keeps its original state color");
+  assert.equal(peak, toolIdentity("*", "Read", "accent", theme, 3000));
+  assert.equal(stripVTControlCharacters(baseline), stripVTControlCharacters(peak));
+});
+
+test("256-color shimmer uses indexed foreground colors and keeps text stable", () => {
+  const getFgAnsi = tone => tone === "accent" ? "\x1b[38;5;75m" : "\x1b[38;5;255m";
+  const theme = { getFgAnsi, getColorMode: () => "256color", fg: (tone, text) => `${getFgAnsi(tone)}${text}\x1b[39m` };
+  const frames = [0, 400, 800, 1600].map(time => toolIdentity("*", "Header probe", "accent", theme, time));
+  assert.ok(new Set(frames).size > 1);
+  for (const frame of frames) {
+    assert.equal(stripVTControlCharacters(frame), "* Header probe");
+    assert.doesNotMatch(frame, /\x1b\[38;2;/);
+  }
+});
+
+test("modern indexed themes shimmer with native brightness without inventing terminal colors", () => {
+  const getFgAnsi = token => token === "accent" ? "\x1b[38;5;5m" : "\x1b[39m";
+  const theme = { colors: { accent: { kind: "indexed", index: 5 }, text: { kind: "rgb", r: 229, g: 229, b: 231 } },
+    getFgAnsi, getColorMode: () => "truecolor", fg: (tone, text) => `${getFgAnsi(tone)}${text}\x1b[39m` };
+  const frames = [0, 400, 800, 1600].map(time => toolIdentity("*", "Header probe", "accent", theme, time));
+  assert.ok(new Set(frames).size > 1);
+  for (const frame of frames) {
+    assert.equal(stripVTControlCharacters(frame), "* Header probe");
+    assert.doesNotMatch(frame, /\x1b\[38;2;/);
+    assert.ok(frame.startsWith("\x1b[38;5;5m* "));
+    assert.ok(frame.endsWith("\x1b[22m\x1b[39m"), "brightness attributes do not leak into arguments");
+  }
 });
 
 test("default tools keep one identity icon across states and expose running and failure without color", () => {
@@ -657,7 +941,8 @@ test("the contributed hub control changes real tool rows, shares command state, 
   } };
   shutdowns.push(() => handlers.get("session_shutdown")());
   await handlers.get("session_start")({}, ctx);
-  const opening = chooseHarnessSetting(ctx, [], undefined, undefined, registry.controls());
+  const outputControl = () => registry.controls().find(control => control.id === "tool-output");
+  const opening = chooseHarnessSetting(ctx, [], undefined, undefined, [outputControl()]);
   assert.match(stripVTControlCharacters(page.render(80).join("\n")), /Tool output.*Normal/);
   page.handleInput(" ");
   await new Promise(resolve => setImmediate(resolve));
@@ -677,26 +962,88 @@ test("the contributed hub control changes real tool rows, shares command state, 
   await opening;
   failSave = false;
   await commands.get("tool-output").handler("normal", ctx);
-  assert.equal(registry.controls()[0].get(), "Normal");
+  assert.equal(outputControl().get(), "Normal");
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
   const settingsPath = join(settingsRoot, "settings.json");
   const savedDefaults = readFileSync(settingsPath, "utf8");
   writeFileSync(settingsPath, "{broken");
-  await assert.rejects(registry.controls()[0].change("Minimal", ctx), SyntaxError);
+  await assert.rejects(outputControl().change("Minimal", ctx), SyntaxError);
   await handlers.get("session_tree")({}, ctx);
-  assert.equal(registry.controls()[0].get(), "Normal", "a failed global save rolls back the persisted branch choice");
+  assert.equal(outputControl().get(), "Normal", "a failed global save rolls back the persisted branch choice");
   assert.equal(readFileSync(settingsPath, "utf8"), "{broken");
   writeFileSync(settingsPath, savedDefaults);
   sessionManager.branch(minimalLeaf);
   await handlers.get("session_tree")({}, ctx);
-  assert.equal(registry.controls()[0].get(), "Minimal");
+  assert.equal(outputControl().get(), "Minimal");
   assert.doesNotMatch(rendered(component), /RESULT_BODY_SENTINEL/);
   await handlers.get("session_shutdown")();
   registry.refresh();
   assert.deepEqual(registry.controls(), []);
   await handlers.get("session_start")({}, ctx);
   registry.refresh();
-  assert.equal(registry.controls().length, 1);
+  assert.equal(registry.controls().length, 2);
+  registry.dispose();
+});
+
+test("tool animation preference applies immediately, persists through reload, and survives failed saves", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
+  const handlers = new Map();
+  const pi = { events: events(), on: (name, handler) => handlers.set(name, handler), registerCommand() {}, appendEntry() {} };
+  minimalOutputExtension(pi);
+  const registry = createSettingsRegistry(pi);
+  const ctx = { mode: "tui", sessionManager: { getBranch: () => [] }, ui: {
+    get theme() { return themeModule.theme; }, notify() {}, setStatus() {}, getToolsExpanded: () => false, setToolsExpanded() {},
+  } };
+  shutdowns.push(() => handlers.get("session_shutdown")());
+  await handlers.get("session_start")({}, ctx);
+  registry.refresh();
+  const output = registry.controls().find(control => control.id === "tool-output");
+  const motion = registry.controls().find(control => control.id === "tool-animation");
+  assert.equal(motion.get(), "Shimmer");
+  await output.change("Minimal", ctx);
+  let component;
+  let redraws = 0;
+  const ui = animationUI(() => [component], () => { redraws++; component?.render(80); });
+  const running = () => {
+    component = new ToolExecutionComponent("bash", `setting-${Date.now()}`, { command: "sleep 10" }, {}, undefined, ui, process.cwd());
+    return component.render(80)[0];
+  };
+  running();
+  redraws = 0;
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1);
+  await motion.change("Off", ctx);
+  assert.equal(motion.get(), "Off");
+  const staticLine = component.render(80)[0];
+  assert.ok(staticLine.includes(themeModule.theme.fg("accent", "\u2318 Shell")));
+  redraws = 0;
+  t.mock.timers.tick(800);
+  assert.equal(redraws, 0);
+  assert.equal(component.render(80)[0], staticLine);
+  const path = join(settingsRoot, "settings.json");
+  const saved = readFileSync(path, "utf8");
+  const preferences = JSON.parse(saved).piBetterHarness;
+  assert.equal(preferences.toolOutput.enabled, true);
+  assert.equal(preferences.toolAnimation.enabled, false);
+  writeFileSync(path, "{broken");
+  await assert.rejects(motion.change("Shimmer", ctx), SyntaxError);
+  assert.equal(motion.get(), "Off");
+  assert.equal(component.render(80)[0], staticLine);
+  writeFileSync(path, saved);
+  await handlers.get("session_shutdown")();
+  await handlers.get("session_start")({}, ctx);
+  registry.refresh();
+  const restoredMotion = registry.controls().find(control => control.id === "tool-animation");
+  assert.equal(restoredMotion.get(), "Off");
+  running();
+  redraws = 0;
+  t.mock.timers.tick(800);
+  assert.equal(redraws, 0);
+  await restoredMotion.change("Shimmer", ctx);
+  component.render(80);
+  redraws = 0;
+  t.mock.timers.tick(80);
+  assert.equal(redraws, 1);
   registry.dispose();
 });
 
