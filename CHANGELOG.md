@@ -6,6 +6,25 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.27.2] - 2026-10-08
+
+### Changed
+
+- Bundle Plan 0.8.0 with a compact, foldable checklist and read-only workflow handoffs. Keep all other component versions unchanged. (#450)
+
+## [pi-better-plan@0.8.0] - 2026-10-08
+
+### Added
+
+- Show up to five relevant steps, following active work from the beginning through the middle to the end, with counts for omitted steps. (#450)
+- Expand or collapse the plan with a fullscreen mouse click or `/plan expand` and `/plan collapse`, preserving editor input and saving the display preference across reloads and session branches.
+- Include start, middle, near-end, and expanded screenshot examples in a shorter README, with a packaged technical reference.
+
+### Fixed
+
+- Keep released workflow plans visible as read-only handoffs without granting permission to write. Clear or replace them explicitly, and invalidate old bindings when a workflow is newly invoked.
+- Use singular labels when only one step is omitted.
+
 ## [pi-better-harness@0.27.1] - 2026-10-07
 
 ### Fixed
