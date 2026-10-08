@@ -13,6 +13,8 @@ import {
   replacePlan,
 } from "./plan-state.js";
 import { createFullPlanComponent, renderCompactPlan } from "./plan-render.js";
+import { createPlanWidget } from "./plan-widget.js";
+import { COMPACT_PLAN_ROWS } from "./plan-presentation.js";
 import {
   createRushPlanComponent, readRushPlan, renderRushPlan, workflowBinding,
   WORKFLOW_PLAN_ENTRY, type RushPlan, type WorkflowPlanBinding,
@@ -85,6 +87,8 @@ const PLAN_ACTIONS: readonly AutocompleteItem[] = [
   { value: "clear", label: "clear", description: "Remove the current plan" },
   { value: "hide", label: "hide", description: "Hide the plan widget" },
   { value: "show", label: "show", description: "Restore automatic plan display" },
+  { value: "expand", label: "expand", description: "Show all steps in the plan widget" },
+  { value: "collapse", label: "collapse", description: "Show up to five relevant steps" },
   { value: "pin auto", label: "pin auto", description: "Use automatic plan pinning" },
   { value: "pin on", label: "pin on", description: "Keep the plan pinned" },
   { value: "pin off", label: "pin off", description: "Keep the plan unpinned" },
@@ -119,6 +123,7 @@ function workflowPlanOwner(ctx: ExtensionContext): string | null {
 export default function planExtension(pi: ExtensionAPI): void {
   let currentPlan: PlanSnapshot | null = null;
   let displayMode: PlanDisplayMode = "auto";
+  let expanded = false;
   let displayedWorkflowOwner: string | null = null;
   let rushBinding: WorkflowPlanBinding | null = null;
   let rushPlan: RushPlan | null = null;
@@ -128,16 +133,26 @@ export default function planExtension(pi: ExtensionAPI): void {
   const unsubscribeWorkflow = pi.events.on("pi-better-workflow:changed", (owner) => {
     displayedWorkflowOwner = owner && typeof owner === "object" && "name" in owner && typeof owner.name === "string"
       ? owner.name : null;
-    rushBinding = null;
-    rushPlan = null;
-    rushError = null;
+    if (displayedWorkflowOwner) {
+      rushBinding = null;
+      rushPlan = null;
+      rushError = null;
+    }
     refreshWidget?.(true);
   });
 
   const refresh = (force = false): void => refreshWidget?.(force);
 
   const loadRushPlan = (ctx: ExtensionContext): RushPlan | null => {
-    if (!rushBinding || workflowPlanOwner(ctx) !== rushBinding.owner) return null;
+    const owner = workflowPlanOwner(ctx);
+    const binding = workflowBinding(ctx.sessionManager.getBranch());
+    displayedWorkflowOwner = owner;
+    rushBinding = binding && (!owner || binding.owner === owner) ? binding : null;
+    if (!rushBinding) {
+      rushPlan = null;
+      rushError = null;
+      return null;
+    }
     try {
       const plan = readRushPlan(rushBinding.path, ctx.cwd);
       if (plan.runId !== rushBinding.runId) throw new Error("Rush run identity changed.");
@@ -151,15 +166,22 @@ export default function planExtension(pi: ExtensionAPI): void {
     return rushPlan;
   };
 
-  const displayWorkflowPlan = (plan: RushPlan, binding: WorkflowPlanBinding): void => {
+  const displayWorkflowPlan = (plan: RushPlan, binding: WorkflowPlanBinding, readOnly = false): void => {
     if (!rushBinding || rushBinding.owner !== binding.owner || rushBinding.path !== binding.path || rushBinding.runId !== binding.runId) {
       pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "set", ...binding });
     }
-    displayedWorkflowOwner = binding.owner;
+    displayedWorkflowOwner = readOnly ? null : binding.owner;
     rushBinding = binding;
     rushPlan = plan;
     rushError = null;
     refresh(true);
+  };
+
+  const clearWorkflowPlan = (): void => {
+    if (rushBinding) pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "clear" });
+    rushBinding = null;
+    rushPlan = null;
+    rushError = null;
   };
 
   const cancelCompletedPlanClear = (): void => {
@@ -196,17 +218,19 @@ export default function planExtension(pi: ExtensionAPI): void {
     currentPlan = state.plan;
     displayedWorkflowOwner = workflowPlanOwner(ctx);
     const binding = workflowBinding(ctx.sessionManager.getBranch());
-    rushBinding = binding?.owner === displayedWorkflowOwner ? binding : null;
+    rushBinding = binding && (!displayedWorkflowOwner || binding.owner === displayedWorkflowOwner) ? binding : null;
     rushPlan = null;
     rushError = null;
     if (rushBinding) loadRushPlan(ctx);
     displayMode = state.displayMode;
+    expanded = state.expanded;
     if (ctx.hasUI) ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);
     refresh(true);
     scheduleCompletedPlanClear();
   };
 
   const persistPlan = (plan: PlanSnapshot): void => {
+    clearWorkflowPlan();
     currentPlan = plan;
     pi.appendEntry(EXTENSION_NAME, planSetEntry(plan));
     refresh(true);
@@ -219,6 +243,12 @@ export default function planExtension(pi: ExtensionAPI): void {
     refresh(true);
   };
 
+  const setExpanded = (value: boolean): void => {
+    expanded = value;
+    pi.appendEntry(EXTENSION_NAME, { version: 1, kind: "expansion", expanded, at: Math.floor(Date.now() / 1_000) });
+    refresh(true);
+  };
+
   const installWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
     ctx.ui.setWidget(
@@ -226,20 +256,26 @@ export default function planExtension(pi: ExtensionAPI): void {
       (tui, theme) => {
         const localRefresh = (force = false): void => tui.requestRender(force);
         refreshWidget = localRefresh;
-        return {
-          render(width: number): string[] {
+        const widget = createPlanWidget(
+          (width: number): string[] => {
             if (displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
-            if (displayedWorkflowOwner) {
-              if (rushBinding?.owner !== displayedWorkflowOwner) return [];
+            if (displayedWorkflowOwner || rushBinding) {
+              if (!rushBinding || (displayedWorkflowOwner && rushBinding.owner !== displayedWorkflowOwner) ||
+                  !workflowBinding(ctx.sessionManager.getBranch())) return [];
               const fg = typeof theme?.fg === "function"
                 ? (color: string, value: string) => theme.fg(color as never, value)
                 : undefined;
-              return rushPlan ? ["", ...renderRushPlan(rushPlan, width, false, fg, displayedWorkflowOwner)] : [];
+              return rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded) : [];
             }
             if (!currentPlan) return [];
-            return ["", ...renderCompactPlan(currentPlan, width, theme as never)];
+            return renderCompactPlan(currentPlan, width, theme as never, expanded);
           },
-          invalidate() {},
+          () => (rushBinding ? rushPlan?.issues.length ?? 0 : currentPlan?.steps.length ?? 0) > COMPACT_PLAN_ROWS,
+          () => expanded,
+          () => setExpanded(!expanded),
+        );
+        return {
+          ...widget,
           dispose() {
             if (refreshWidget === localRefresh) refreshWidget = undefined;
           },
@@ -251,21 +287,23 @@ export default function planExtension(pi: ExtensionAPI): void {
 
   const showFullPlan = async (ctx: ExtensionContext): Promise<void> => {
     const owner = workflowPlanOwner(ctx);
-    if (owner) {
+    const binding = workflowBinding(ctx.sessionManager.getBranch());
+    if (owner || binding) {
       const plan = loadRushPlan(ctx);
+      const planOwner = owner ?? binding!.owner;
       if (!plan) {
-        ctx.ui.notify(`${owner} plan unavailable: ${rushError ?? "not bound"}`, "warning");
+        ctx.ui.notify(`${planOwner}${owner ? " plan" : " read-only handoff"} unavailable: ${rushError ?? "not bound"}`, "warning");
         return;
       }
       if (ctx.mode !== "tui") {
-        ctx.ui.notify(renderRushPlan(plan, 160, true, undefined, owner).join("\n"), "info");
+        ctx.ui.notify(renderRushPlan(plan, 160, true, undefined, planOwner, !owner).join("\n"), "info");
         return;
       }
       await ctx.ui.custom<void>((tui, theme, _keys, done) => {
         const fg = typeof theme?.fg === "function"
           ? (color: string, value: string) => theme.fg(color as never, value)
           : undefined;
-        const component = createRushPlanComponent(plan, () => done(), fg, owner);
+        const component = createRushPlanComponent(plan, () => done(), fg, planOwner, !owner);
         return { render: (width) => component.render(width), handleInput(data) {
           component.handleInput?.(data);
           tui.requestRender();
@@ -315,16 +353,26 @@ export default function planExtension(pi: ExtensionAPI): void {
       const owner = workflowPlanOwner(ctx);
       const input = params as { explanation?: string; plan?: PlanStepInput[]; workflow?: WorkflowPlanInput };
       if (input.workflow !== undefined) {
-        if (!owner) throw new Error("No workflow owns the task plan; send plan instead of workflow.");
+        const savedBinding = workflowBinding(ctx.sessionManager.getBranch());
+        if (!owner && (input.workflow.event !== undefined || input.workflow.changes !== undefined ||
+            input.workflow.decision !== undefined || input.workflow.profiling !== undefined || !savedBinding)) {
+          throw new Error(savedBinding
+            ? `${savedBinding.owner} plan is a read-only handoff. Reinvoke /skill:${savedBinding.owner} before updating its workflow plan.`
+            : "No workflow owns the task plan; send plan instead of workflow.");
+        }
         if (input.plan !== undefined) throw new Error("Send either plan or workflow, not both.");
         const { path, ...transition } = input.workflow;
         if (transition.event === undefined && (transition.changes !== undefined || transition.decision !== undefined || transition.profiling !== undefined)) {
           throw new Error("workflow.event is required when sending changes, decision, or profiling.");
         }
-        let binding = rushBinding?.owner === owner ? rushBinding : null;
+        let binding = savedBinding && (!owner || savedBinding.owner === owner) ? savedBinding : null;
         if (path !== undefined) {
+          if (!owner && path !== binding?.path) {
+            throw new Error(`${binding!.owner} plan is a read-only handoff; only its bound path can be reloaded. Reinvoke /skill:${binding!.owner} to bind a workflow plan.`);
+          }
           if (transition.revision === undefined) throw new Error("workflow.revision is required with workflow.path.");
           const plan = readRushPlan(path, ctx.cwd);
+          if (!owner && plan.runId !== binding!.runId) throw new Error("Rush run identity changed.");
           if (plan.planRevision !== transition.revision) {
             if (transition.event === undefined) {
               rushPlan = null;
@@ -333,10 +381,10 @@ export default function planExtension(pi: ExtensionAPI): void {
             }
             throw new Error(`Rush plan revision mismatch: expected ${transition.revision}, found ${plan.planRevision}.`);
           }
-          binding = { owner, path, runId: plan.runId };
+          binding = { owner: owner ?? binding!.owner, path, runId: plan.runId };
           if (transition.event === undefined) {
-            displayWorkflowPlan(plan, binding);
-            return { content: [{ type: "text", text: `Showing ${owner} rev ${plan.planRevision}: ${plan.issues.length} units.` }], details: { ok: true, runId: plan.runId, revision: plan.planRevision } };
+            displayWorkflowPlan(plan, binding, !owner);
+            return { content: [{ type: "text", text: `Showing ${binding.owner} rev ${plan.planRevision}: ${plan.issues.length} units.${owner ? "" : " Read-only handoff."}` }], details: { ok: true, runId: plan.runId, revision: plan.planRevision, ...(!owner ? { readOnly: true } : {}) } };
           }
         }
         if (!binding) throw new Error(`No ${owner} plan is bound; send workflow.path and workflow.revision to update_plan first.`);
@@ -390,13 +438,16 @@ export default function planExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const owner = workflowPlanOwner(ctx);
-      if (owner) {
+      const binding = workflowBinding(ctx.sessionManager.getBranch());
+      if (owner || binding) {
         const workflowPlan = loadRushPlan(ctx);
+        const planOwner = owner ?? binding!.owner;
         return {
           content: [{ type: "text", text: workflowPlan
-            ? renderRushPlan(workflowPlan, 160, true, undefined, owner).join("\n")
-            : `${owner} owns the task plan; ${rushError ?? "consult its persisted workflow state"}.` }],
-          details: { hasPlan: !!workflowPlan, plan: workflowPlan, progress: null, workflowOwner: owner },
+            ? renderRushPlan(workflowPlan, 160, true, undefined, planOwner, !owner).join("\n")
+            : owner ? `${owner} owns the task plan; ${rushError ?? "consult its persisted workflow state"}.`
+              : `${planOwner} read-only handoff unavailable: ${rushError ?? "not bound"}.` }],
+          details: { hasPlan: !!workflowPlan, plan: workflowPlan, progress: null, workflowOwner: planOwner, ...(!owner ? { readOnly: true } : {}) },
         };
       }
       if (!currentPlan) {
@@ -424,6 +475,7 @@ export default function planExtension(pi: ExtensionAPI): void {
           ctx.ui.notify("The workflow owns its plan; /plan clear cannot change it.", "warning");
           return;
         }
+        clearWorkflowPlan();
         clearPlan();
         ctx.ui.notify("Plan cleared.", "info");
         return;
@@ -436,13 +488,17 @@ export default function planExtension(pi: ExtensionAPI): void {
         setDisplayMode("auto");
         return;
       }
+      if (input === "expand" || input === "collapse") {
+        setExpanded(input === "expand");
+        return;
+      }
       const pinMode = input.match(/^pin\s+(auto|on|off)$/)?.[1] as PlanDisplayMode | undefined;
       if (pinMode) {
         setDisplayMode(pinMode);
         ctx.ui.notify(`Plan pin mode: ${pinMode}.`, "info");
         return;
       }
-      ctx.ui.notify("Usage: /plan [clear|hide|show|pin auto|pin on|pin off]", "warning");
+      ctx.ui.notify("Usage: /plan [clear|hide|show|expand|collapse|pin auto|pin on|pin off]", "warning");
     },
   });
 
@@ -454,7 +510,7 @@ export default function planExtension(pi: ExtensionAPI): void {
     restore(ctx);
   });
   pi.on("before_agent_start", async (event, ctx) => {
-    if (workflowPlanOwner(ctx)) return;
+    if (workflowPlanOwner(ctx) || workflowBinding(ctx.sessionManager.getBranch())) return;
     if (!currentPlan) return;
     return {
       systemPrompt: `${event.systemPrompt}\n\n${planPrompt(currentPlan, activeDelegationMode(pi))}`,

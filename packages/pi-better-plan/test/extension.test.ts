@@ -24,6 +24,8 @@ test("plan action completions expose valid commands with context", () => {
     { value: "clear", label: "clear", description: "Remove the current plan" },
     { value: "hide", label: "hide", description: "Hide the plan widget" },
     { value: "show", label: "show", description: "Restore automatic plan display" },
+    { value: "expand", label: "expand", description: "Show all steps in the plan widget" },
+    { value: "collapse", label: "collapse", description: "Show up to five relevant steps" },
     { value: "pin auto", label: "pin auto", description: "Use automatic plan pinning" },
     { value: "pin on", label: "pin on", description: "Keep the plan pinned" },
     { value: "pin off", label: "pin off", description: "Keep the plan unpinned" },
@@ -273,6 +275,46 @@ test("skill-owned workflow suppresses the generic plan and its update tool", asy
   entries.push({ type: "custom", customType: "pi-better-workflow", data: { version: 1, kind: "clear" } });
   const restored = await tools.get("get_plan")!.execute("get", {}, undefined, undefined, ctx);
   assert.match((restored.content[0] as { text: string }).text, /Generic/);
+});
+
+test("released handoff suppresses stale generic guidance until a generic replacement is saved", async () => {
+  const generic = replacePlan(null, [{ step: "Stale generic", status: "in_progress" }], undefined, 100);
+  const entries: SessionEntry[] = [
+    { type: "custom", customType: "pi-better-plan", data: planSetEntry(generic) },
+    { type: "custom", customType: "pi-better-workflow", data: {
+      version: 1, kind: "set", owner: { name: "fixture-workflow", planOwner: "workflow" },
+    } },
+    { type: "custom", customType: "pi-better-workflow-plan", data: {
+      version: 1, kind: "set", owner: "fixture-workflow", path: "/missing/task-plan.json", runId: "missing",
+    } },
+    { type: "custom", customType: "pi-better-workflow", data: { version: 1, kind: "clear" } },
+  ];
+  const tools = new Map<string, ToolDefinition>();
+  const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+  const ctx = {
+    cwd: "/missing", mode: "print", hasUI: false,
+    sessionManager: { getBranch: () => entries },
+    ui: { setWidget() {}, setStatus() {} },
+  } as unknown as ExtensionContext;
+  extension({
+    events: new EventEmitter(),
+    appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
+    registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
+    registerCommand() {},
+    on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { handlers.set(event, handler); },
+  } as unknown as ExtensionAPI);
+  await handlers.get("session_start")!({}, ctx);
+  assert.equal(await handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx), undefined,
+    "an unavailable handoff is not permission to resume the stale generic checklist");
+  await tools.get("update_plan")!.execute("replace", {
+    plan: [{ step: "New generic", status: "in_progress" }],
+  }, undefined, undefined, ctx);
+  const prompt = await handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  assert.match(prompt.systemPrompt, /New generic/);
+  assert.doesNotMatch(prompt.systemPrompt, /Stale generic/);
+  await handlers.get("session_tree")!({}, ctx);
+  const restoredPrompt = await handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  assert.match(restoredPrompt.systemPrompt, /New generic/);
 });
 
 test("a completed plan clears durably after 30 seconds and replacement cancels the deadline", async () => {

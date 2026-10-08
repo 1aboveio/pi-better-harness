@@ -113,7 +113,7 @@ export function workflowBinding(entries: Iterable<{ type: string; customType?: s
   for (const entry of entries) {
     if (entry.type === "custom" && entry.customType === "pi-better-workflow") {
       const data = entry.data;
-      if (isRecord(data) && data.version === 1 && (data.kind === "set" || data.kind === "clear")) binding = null;
+      if (isRecord(data) && data.version === 1 && data.kind === "set") binding = null;
     }
     if (entry.type !== "custom" || entry.customType !== WORKFLOW_PLAN_ENTRY) continue;
     const data = entry.data;
@@ -148,7 +148,7 @@ function unitStatus(unit: RushUnit): DisplayStatus {
   return unit.reviewedHead === unit.headSha ? "reviewed" : "implemented";
 }
 
-function presentRushPlan(plan: RushPlan, owner: string): PlanPresentation {
+function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanPresentation {
   // The warehouse canary only applies to data work; hide it otherwise.
   const stages = ["explore", "implement", "review", "ci", ...(plan.warehouseCanaryRequired ? ["canary"] : [])];
   const fleet = stages.map((stage) => {
@@ -158,6 +158,7 @@ function presentRushPlan(plan: RushPlan, owner: string): PlanPresentation {
     return { color: style.color, text: `  ${stage} ${style.glyph}${display === "unknown" ? ` ${planText(status)}` : ""}` };
   });
   const metadata = [[{ color: "dim", text: `${planText(owner)} · rev ${plan.planRevision}  ·` }, ...fleet]];
+  if (readOnly) metadata.push([{ color: "warning", text: "read-only handoff" }]);
   if (plan.spec?.title) metadata.push([{ color: "dim", text: plan.spec.title }]);
   return {
     metadata,
@@ -180,9 +181,11 @@ export function renderRushPlan(
   full = false,
   fg?: (color: string, value: string) => string,
   owner = "rush-issues",
+  readOnly = false,
+  expanded = false,
 ): string[] {
   const theme = fg ? { fg } : plainPlanTheme;
-  return renderPlanPresentation(presentRushPlan(plan, owner), width, theme, full);
+  return renderPlanPresentation(presentRushPlan(plan, owner, readOnly), width, theme, full, -1, expanded);
 }
 
 export function createRushPlanComponent(
@@ -190,7 +193,8 @@ export function createRushPlanComponent(
   onClose: () => void,
   fg?: (color: string, value: string) => string,
   owner = "rush-issues",
+  readOnly = false,
 ): Component {
   const theme = fg ? { fg } : plainPlanTheme;
-  return createPlanPresentationComponent(presentRushPlan(plan, owner), theme, onClose);
+  return createPlanPresentationComponent(presentRushPlan(plan, owner, readOnly), theme, onClose);
 }
