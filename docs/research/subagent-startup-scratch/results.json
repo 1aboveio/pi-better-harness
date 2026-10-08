@@ -1,0 +1,3287 @@
+{
+  "generatedAt": "2026-10-08T17:07:15.051Z",
+  "samplesPerArm": 7,
+  "repeatCommand": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node /Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/benchmark.mjs 7",
+  "environment": {
+    "node": "v24.14.1",
+    "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+    "realExecPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+    "versions": {
+      "node": "24.14.1",
+      "acorn": "8.15.0",
+      "ada": "3.4.2",
+      "amaro": "1.1.7",
+      "ares": "1.34.6",
+      "brotli": "1.2.0",
+      "cldr": "48.0",
+      "icu": "78.3",
+      "llhttp": "9.3.0",
+      "merve": "1.0.0",
+      "modules": "137",
+      "napi": "10",
+      "nbytes": "0.1.1",
+      "ncrypto": "0.0.1",
+      "nghttp2": "1.68.1",
+      "openssl": "3.6.2",
+      "simdjson": "4.6.0",
+      "simdutf": "6.4.0",
+      "sqlite": "3.51.3",
+      "tz": "2026a",
+      "undici": "7.24.4",
+      "unicode": "17.0",
+      "uv": "1.52.1",
+      "uvwasi": "0.0.23",
+      "v8": "13.6.233.17-node.44",
+      "zlib": "1.2.12",
+      "zstd": "1.5.7"
+    },
+    "platform": "darwin",
+    "arch": "arm64",
+    "osRelease": "24.6.0",
+    "cpu": "Apple M3 Max",
+    "cpuCount": 16,
+    "sdkRoot": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+    "sdkVersion": "1.0.4",
+    "cliEntry": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    "globalCliOnPathNotMeasured": {
+      "path": "/Users/exoulster/.bun/bin/pi",
+      "target": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+    },
+    "inheritedEnvironment": "none; exact allowlisted per-child environments recorded below",
+    "launchMode": "same Node binary, unbundled SDK CLI vs SDK index import; global bundled CLI not timed"
+  },
+  "method": {
+    "timer": "performance.now monotonic milliseconds",
+    "cold": "parent immediately before spawn to readiness JSONL receipt",
+    "sdkInternal": "import await; fresh file-backed runtime/settings + resource reload + offline refresh + create + bind",
+    "warm": "imports reused; recorded first creation excluded; fixed cwd/env; reset private agent disk outside timer; all objects recreated",
+    "taskGuard": "existing task-runtime.mjs, private test-style policy, native Jiti bootstrap and get_state; no kernel task execution",
+    "network": "PI_OFFLINE=1; no credentials; Node preload blocks network functions and audits zero attempts",
+    "excluded": [
+      "fixture setup and reset",
+      "post-readiness validation/disposal and process shutdown",
+      "provider prompting and response latency",
+      "tools and kernel task worker startup",
+      "production parent orchestration/workspace provisioning",
+      "user resources/configuration"
+    ],
+    "caveat": "cold processes, not cold filesystem caches; shared host load uncontrolled; not production subagent latency"
+  },
+  "summary": {
+    "cliCold": {
+      "n": 7,
+      "medianMs": 478.3849590000009,
+      "minMs": 466.41266700000006,
+      "maxMs": 499.5986670000002
+    },
+    "sdkCold": {
+      "n": 7,
+      "medianMs": 467.2937920000004,
+      "minMs": 459.90916599999946,
+      "maxMs": 472.9914580000001
+    },
+    "taskGuardCold": {
+      "n": 7,
+      "medianMs": 813.2467079999988,
+      "minMs": 803.503291,
+      "maxMs": 826.1662499999998
+    },
+    "sdkColdImportPlusReady": {
+      "n": 7,
+      "medianMs": 390.13320899999997,
+      "minMs": 381.261708,
+      "maxMs": 395.583
+    },
+    "sdkColdImport": {
+      "n": 7,
+      "medianMs": 364.142167,
+      "minMs": 356.616042,
+      "maxMs": 368.407417
+    },
+    "sdkWarmFreshSession": {
+      "n": 7,
+      "medianMs": 6.661208999999985,
+      "minMs": 5.935667000000024,
+      "maxMs": 7.606625000000008
+    }
+  },
+  "raw": {
+    "cliCold": [
+      {
+        "pid": 66239,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Cp7LJc/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 484.177917,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 490.94516699999997,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-8f29-761f-ae6d-f04980a33403",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 0
+      },
+      {
+        "pid": 66537,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Qw0Yqf/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 466.41266700000006,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 472.10979199999974,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-9b3c-707c-80ff-ad4b97527e35",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 1
+      },
+      {
+        "pid": 66625,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Iyx33m/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 472.7332500000002,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 478.2364170000001,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-a058-709e-9c31-225237a34b3f",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 2
+      },
+      {
+        "pid": 66718,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-pVnkhT/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 484.1867080000002,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 489.384583,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-a412-7053-b032-d9d4d35747c7",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 3
+      },
+      {
+        "pid": 66963,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bsybzl/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 470.5406670000011,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 475.44916700000067,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-b013-7195-9c45-29f86276ab65",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 4
+      },
+      {
+        "pid": 67119,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-wnkRKn/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 499.5986670000002,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 504.4820839999993,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-b547-7027-8895-5685ff1d9796",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 5
+      },
+      {
+        "pid": 67190,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-iWFW8l/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 478.3849590000009,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 483.88674999999967,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-b902-76aa-85bb-95b8b5ec2e8a",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 6
+      }
+    ],
+    "sdkCold": [
+      {
+        "pid": 66286,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "1"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 472.9914580000001,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 480.14079200000003,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "type": "benchmark_sdk_readiness",
+            "sessionId": "01a11c7b-9122-72b1-a318-6303e170d5fe"
+          },
+          {
+            "type": "benchmark_sdk_ready",
+            "pid": 66286,
+            "sdkVersion": "1.0.4",
+            "nodeVersion": "v24.14.1",
+            "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+            "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/project",
+            "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-9HHKxY/agent",
+            "importMs": 368.407417,
+            "samples": [
+              {
+                "index": 0,
+                "pid": 66286,
+                "importMs": 368.407417,
+                "runtimeMs": 17.37820800000003,
+                "resourcesMs": 5.311374999999998,
+                "createAndBindMs": 4.485541999999953,
+                "readyMs": 27.175583000000017,
+                "importPlusReadyMs": 395.583,
+                "sessionId": "01a11c7b-9122-72b1-a318-6303e170d5fe",
+                "state": {
+                  "messageCount": 0,
+                  "model": {
+                    "id": "unknown",
+                    "name": "unknown",
+                    "api": "unknown",
+                    "provider": "unknown",
+                    "baseUrl": "",
+                    "reasoning": false,
+                    "input": [],
+                    "cost": {
+                      "input": 0,
+                      "output": 0,
+                      "cacheRead": 0,
+                      "cacheWrite": 0
+                    },
+                    "contextWindow": 0,
+                    "maxTokens": 0
+                  },
+                  "isStreaming": false,
+                  "sessionFile": null,
+                  "tools": [
+                    "read",
+                    "bash",
+                    "edit",
+                    "write"
+                  ]
+                },
+                "privateAgentFiles": [
+                  "auth.json",
+                  "models-store.json",
+                  "settings.json"
+                ],
+                "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+              }
+            ]
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 0
+      },
+      {
+        "pid": 66382,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "1"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 468.7944580000003,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 476.0320410000004,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "type": "benchmark_sdk_readiness",
+            "sessionId": "01a11c7b-9644-77ac-ab45-f659aa595377"
+          },
+          {
+            "type": "benchmark_sdk_ready",
+            "pid": 66382,
+            "sdkVersion": "1.0.4",
+            "nodeVersion": "v24.14.1",
+            "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+            "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/project",
+            "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Xb5S0U/agent",
+            "importMs": 365.05775,
+            "samples": [
+              {
+                "index": 0,
+                "pid": 66382,
+                "importMs": 365.05775,
+                "runtimeMs": 16.981499999999983,
+                "resourcesMs": 4.613291000000004,
+                "createAndBindMs": 4.185624999999959,
+                "readyMs": 25.780958,
+                "importPlusReadyMs": 390.838708,
+                "sessionId": "01a11c7b-9644-77ac-ab45-f659aa595377",
+                "state": {
+                  "messageCount": 0,
+                  "model": {
+                    "id": "unknown",
+                    "name": "unknown",
+                    "api": "unknown",
+                    "provider": "unknown",
+                    "baseUrl": "",
+                    "reasoning": false,
+                    "input": [],
+                    "cost": {
+                      "input": 0,
+                      "output": 0,
+                      "cacheRead": 0,
+                      "cacheWrite": 0
+                    },
+                    "contextWindow": 0,
+                    "maxTokens": 0
+                  },
+                  "isStreaming": false,
+                  "sessionFile": null,
+                  "tools": [
+                    "read",
+                    "bash",
+                    "edit",
+                    "write"
+                  ]
+                },
+                "privateAgentFiles": [
+                  "auth.json",
+                  "models-store.json",
+                  "settings.json"
+                ],
+                "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+              }
+            ]
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 1
+      },
+      {
+        "pid": 66653,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "1"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 459.90916599999946,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 467.62604099999953,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "type": "benchmark_sdk_readiness",
+            "sessionId": "01a11c7b-a23c-765d-a0c5-3a82acb5e7cf"
+          },
+          {
+            "type": "benchmark_sdk_ready",
+            "pid": 66653,
+            "sdkVersion": "1.0.4",
+            "nodeVersion": "v24.14.1",
+            "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+            "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/project",
+            "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-XmobLf/agent",
+            "importMs": 356.616042,
+            "samples": [
+              {
+                "index": 0,
+                "pid": 66653,
+                "importMs": 356.616042,
+                "runtimeMs": 15.964916000000017,
+                "resourcesMs": 4.160624999999982,
+                "createAndBindMs": 4.5197089999999776,
+                "readyMs": 24.645666000000006,
+                "importPlusReadyMs": 381.261708,
+                "sessionId": "01a11c7b-a23c-765d-a0c5-3a82acb5e7cf",
+                "state": {
+                  "messageCount": 0,
+                  "model": {
+                    "id": "unknown",
+                    "name": "unknown",
+                    "api": "unknown",
+                    "provider": "unknown",
+                    "baseUrl": "",
+                    "reasoning": false,
+                    "input": [],
+                    "cost": {
+                      "input": 0,
+                      "output": 0,
+                      "cacheRead": 0,
+                      "cacheWrite": 0
+                    },
+                    "contextWindow": 0,
+                    "maxTokens": 0
+                  },
+                  "isStreaming": false,
+                  "sessionFile": null,
+                  "tools": [
+                    "read",
+                    "bash",
+                    "edit",
+                    "write"
+                  ]
+                },
+                "privateAgentFiles": [
+                  "auth.json",
+                  "models-store.json",
+                  "settings.json"
+                ],
+                "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+              }
+            ]
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 2
+      },
+      {
+        "pid": 66753,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "1"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 467.6645840000001,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 474.5917500000005,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "type": "benchmark_sdk_readiness",
+            "sessionId": "01a11c7b-a603-757f-9269-85f8492eab63"
+          },
+          {
+            "type": "benchmark_sdk_ready",
+            "pid": 66753,
+            "sdkVersion": "1.0.4",
+            "nodeVersion": "v24.14.1",
+            "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+            "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/project",
+            "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-uvhRT8/agent",
+            "importMs": 365.89324999999997,
+            "samples": [
+              {
+                "index": 0,
+                "pid": 66753,
+                "importMs": 365.89324999999997,
+                "runtimeMs": 17.24679199999997,
+                "resourcesMs": 4.453708000000006,
+                "createAndBindMs": 4.043666999999971,
+                "readyMs": 25.74449999999996,
+                "importPlusReadyMs": 391.6377499999999,
+                "sessionId": "01a11c7b-a603-757f-9269-85f8492eab63",
+                "state": {
+                  "messageCount": 0,
+                  "model": {
+                    "id": "unknown",
+                    "name": "unknown",
+                    "api": "unknown",
+                    "provider": "unknown",
+                    "baseUrl": "",
+                    "reasoning": false,
+                    "input": [],
+                    "cost": {
+                      "input": 0,
+                      "output": 0,
+                      "cacheRead": 0,
+                      "cacheWrite": 0
+                    },
+                    "contextWindow": 0,
+                    "maxTokens": 0
+                  },
+                  "isStreaming": false,
+                  "sessionFile": null,
+                  "tools": [
+                    "read",
+                    "bash",
+                    "edit",
+                    "write"
+                  ]
+                },
+                "privateAgentFiles": [
+                  "auth.json",
+                  "models-store.json",
+                  "settings.json"
+                ],
+                "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+              }
+            ]
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 3
+      },
+      {
+        "pid": 66887,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "1"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 462.8552919999993,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 470.1381249999995,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "type": "benchmark_sdk_readiness",
+            "sessionId": "01a11c7b-ab08-748f-b700-47ee25ffa2be"
+          },
+          {
+            "type": "benchmark_sdk_ready",
+            "pid": 66887,
+            "sdkVersion": "1.0.4",
+            "nodeVersion": "v24.14.1",
+            "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+            "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/project",
+            "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-DLoU1l/agent",
+            "importMs": 361.361958,
+            "samples": [
+              {
+                "index": 0,
+                "pid": 66887,
+                "importMs": 361.361958,
+                "runtimeMs": 16.586833000000013,
+                "resourcesMs": 5.0011670000000095,
+                "createAndBindMs": 4.0370829999999955,
+                "readyMs": 25.625417000000027,
+                "importPlusReadyMs": 386.98737500000004,
+                "sessionId": "01a11c7b-ab08-748f-b700-47ee25ffa2be",
+                "state": {
+                  "messageCount": 0,
+                  "model": {
+                    "id": "unknown",
+                    "name": "unknown",
+                    "api": "unknown",
+                    "provider": "unknown",
+                    "baseUrl": "",
+                    "reasoning": false,
+                    "input": [],
+                    "cost": {
+                      "input": 0,
+                      "output": 0,
+                      "cacheRead": 0,
+                      "cacheWrite": 0
+                    },
+                    "contextWindow": 0,
+                    "maxTokens": 0
+                  },
+                  "isStreaming": false,
+                  "sessionFile": null,
+                  "tools": [
+                    "read",
+                    "bash",
+                    "edit",
+                    "write"
+                  ]
+                },
+                "privateAgentFiles": [
+                  "auth.json",
+                  "models-store.json",
+                  "settings.json"
+                ],
+                "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+              }
+            ]
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 4
+      },
+      {
+        "pid": 67167,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "1"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 466.9289580000004,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 474.24254199999996,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "type": "benchmark_sdk_readiness",
+            "sessionId": "01a11c7b-b731-73f4-9432-df8593191797"
+          },
+          {
+            "type": "benchmark_sdk_ready",
+            "pid": 67167,
+            "sdkVersion": "1.0.4",
+            "nodeVersion": "v24.14.1",
+            "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+            "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/project",
+            "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-vg8SbD/agent",
+            "importMs": 362.871416,
+            "samples": [
+              {
+                "index": 0,
+                "pid": 67167,
+                "importMs": 362.871416,
+                "runtimeMs": 16.252374999999972,
+                "resourcesMs": 5.1087080000000356,
+                "createAndBindMs": 4.6027500000000146,
+                "readyMs": 25.96433300000001,
+                "importPlusReadyMs": 388.835749,
+                "sessionId": "01a11c7b-b731-73f4-9432-df8593191797",
+                "state": {
+                  "messageCount": 0,
+                  "model": {
+                    "id": "unknown",
+                    "name": "unknown",
+                    "api": "unknown",
+                    "provider": "unknown",
+                    "baseUrl": "",
+                    "reasoning": false,
+                    "input": [],
+                    "cost": {
+                      "input": 0,
+                      "output": 0,
+                      "cacheRead": 0,
+                      "cacheWrite": 0
+                    },
+                    "contextWindow": 0,
+                    "maxTokens": 0
+                  },
+                  "isStreaming": false,
+                  "sessionFile": null,
+                  "tools": [
+                    "read",
+                    "bash",
+                    "edit",
+                    "write"
+                  ]
+                },
+                "privateAgentFiles": [
+                  "auth.json",
+                  "models-store.json",
+                  "settings.json"
+                ],
+                "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+              }
+            ]
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 5
+      },
+      {
+        "pid": 67247,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "1"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 467.2937920000004,
+        "guardMarkerWallMs": null,
+        "exitWallMs": 474.4647499999992,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "type": "benchmark_sdk_readiness",
+            "sessionId": "01a11c7b-baf2-70b5-9eb9-3e98f1251d2a"
+          },
+          {
+            "type": "benchmark_sdk_ready",
+            "pid": 67247,
+            "sdkVersion": "1.0.4",
+            "nodeVersion": "v24.14.1",
+            "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+            "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/project",
+            "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-c0CtLT/agent",
+            "importMs": 364.142167,
+            "samples": [
+              {
+                "index": 0,
+                "pid": 67247,
+                "importMs": 364.142167,
+                "runtimeMs": 16.941542000000027,
+                "resourcesMs": 4.684040999999979,
+                "createAndBindMs": 4.365166999999985,
+                "readyMs": 25.991041999999993,
+                "importPlusReadyMs": 390.13320899999997,
+                "sessionId": "01a11c7b-baf2-70b5-9eb9-3e98f1251d2a",
+                "state": {
+                  "messageCount": 0,
+                  "model": {
+                    "id": "unknown",
+                    "name": "unknown",
+                    "api": "unknown",
+                    "provider": "unknown",
+                    "baseUrl": "",
+                    "reasoning": false,
+                    "input": [],
+                    "cost": {
+                      "input": 0,
+                      "output": 0,
+                      "cacheRead": 0,
+                      "cacheWrite": 0
+                    },
+                    "contextWindow": 0,
+                    "maxTokens": 0
+                  },
+                  "isStreaming": false,
+                  "sessionFile": null,
+                  "tools": [
+                    "read",
+                    "bash",
+                    "edit",
+                    "write"
+                  ]
+                },
+                "privateAgentFiles": [
+                  "auth.json",
+                  "models-store.json",
+                  "settings.json"
+                ],
+                "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+              }
+            ]
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "sample": 6
+      }
+    ],
+    "taskGuardCold": [
+      {
+        "pid": 66318,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-runtime.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/control/task-policy.json",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve",
+          "--no-builtin-tools"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 826.1662499999998,
+        "guardMarkerWallMs": 824.9705829999998,
+        "exitWallMs": 834.9525829999998,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-9452-7492-b260-b461b5403a0e",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "task_sandbox_ready",
+            "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/project",
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "bash"
+            ]
+          },
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"task_sandbox_ready\",\"root\":\"/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/project\",\"tools\":[\"read\",\"write\",\"edit\",\"bash\"]}\n{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "guardMarkerChannel": "stderr",
+        "kernelSandboxIncluded": false,
+        "policy": {
+          "version": 1,
+          "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/project",
+          "home": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/home",
+          "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/agent",
+          "profilePath": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/control/task.sb",
+          "scratch": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/task-scratch",
+          "permissions": {
+            "projectFiles": "read-write",
+            "outsideProject": "read",
+            "storedCredentials": "off",
+            "commands": false,
+            "network": false,
+            "processAccess": "off"
+          },
+          "denyWrite": [
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/agent",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/control",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Pre54a/task-scratch/.sandbox-anchor"
+          ],
+          "tools": [
+            "read",
+            "write",
+            "edit",
+            "bash"
+          ]
+        },
+        "sample": 0
+      },
+      {
+        "pid": 66427,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-runtime.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/control/task-policy.json",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve",
+          "--no-builtin-tools"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 810.1341660000003,
+        "guardMarkerWallMs": 808.8996660000003,
+        "exitWallMs": 818.4373330000003,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-9964-758f-ab8a-79dacfc12343",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "task_sandbox_ready",
+            "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/project",
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "bash"
+            ]
+          },
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"task_sandbox_ready\",\"root\":\"/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/project\",\"tools\":[\"read\",\"write\",\"edit\",\"bash\"]}\n{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "guardMarkerChannel": "stderr",
+        "kernelSandboxIncluded": false,
+        "policy": {
+          "version": 1,
+          "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/project",
+          "home": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/home",
+          "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/agent",
+          "profilePath": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/control/task.sb",
+          "scratch": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/task-scratch",
+          "permissions": {
+            "projectFiles": "read-write",
+            "outsideProject": "read",
+            "storedCredentials": "off",
+            "commands": false,
+            "network": false,
+            "processAccess": "off"
+          },
+          "denyWrite": [
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/agent",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/control",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-Oogd8C/task-scratch/.sandbox-anchor"
+          ],
+          "tools": [
+            "read",
+            "write",
+            "edit",
+            "bash"
+          ]
+        },
+        "sample": 1
+      },
+      {
+        "pid": 66564,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-runtime.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/control/task-policy.json",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve",
+          "--no-builtin-tools"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 812.1415830000001,
+        "guardMarkerWallMs": 810.8588329999998,
+        "exitWallMs": 820.1297920000002,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-9e6c-7602-8352-bf38716be3e7",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "task_sandbox_ready",
+            "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/project",
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "bash"
+            ]
+          },
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"task_sandbox_ready\",\"root\":\"/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/project\",\"tools\":[\"read\",\"write\",\"edit\",\"bash\"]}\n{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "guardMarkerChannel": "stderr",
+        "kernelSandboxIncluded": false,
+        "policy": {
+          "version": 1,
+          "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/project",
+          "home": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/home",
+          "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/agent",
+          "profilePath": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/control/task.sb",
+          "scratch": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/task-scratch",
+          "permissions": {
+            "projectFiles": "read-write",
+            "outsideProject": "read",
+            "storedCredentials": "off",
+            "commands": false,
+            "network": false,
+            "processAccess": "off"
+          },
+          "denyWrite": [
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/agent",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/control",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-hg891F/task-scratch/.sandbox-anchor"
+          ],
+          "tools": [
+            "read",
+            "write",
+            "edit",
+            "bash"
+          ]
+        },
+        "sample": 2
+      },
+      {
+        "pid": 66800,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-runtime.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/control/task-policy.json",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve",
+          "--no-builtin-tools"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 803.503291,
+        "guardMarkerWallMs": 802.2285410000004,
+        "exitWallMs": 811.6088330000002,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-a91c-7739-9027-1d82928203e3",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "task_sandbox_ready",
+            "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/project",
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "bash"
+            ]
+          },
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"task_sandbox_ready\",\"root\":\"/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/project\",\"tools\":[\"read\",\"write\",\"edit\",\"bash\"]}\n{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "guardMarkerChannel": "stderr",
+        "kernelSandboxIncluded": false,
+        "policy": {
+          "version": 1,
+          "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/project",
+          "home": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/home",
+          "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/agent",
+          "profilePath": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/control/task.sb",
+          "scratch": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/task-scratch",
+          "permissions": {
+            "projectFiles": "read-write",
+            "outsideProject": "read",
+            "storedCredentials": "off",
+            "commands": false,
+            "network": false,
+            "processAccess": "off"
+          },
+          "denyWrite": [
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/agent",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/control",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-SDv8lx/task-scratch/.sandbox-anchor"
+          ],
+          "tools": [
+            "read",
+            "write",
+            "edit",
+            "bash"
+          ]
+        },
+        "sample": 3
+      },
+      {
+        "pid": 66902,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-runtime.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/control/task-policy.json",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve",
+          "--no-builtin-tools"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 819.8705420000006,
+        "guardMarkerWallMs": 818.5593339999996,
+        "exitWallMs": 828.2277919999997,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-ae2b-714b-93bc-dbe265e29e28",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "task_sandbox_ready",
+            "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/project",
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "bash"
+            ]
+          },
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"task_sandbox_ready\",\"root\":\"/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/project\",\"tools\":[\"read\",\"write\",\"edit\",\"bash\"]}\n{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "guardMarkerChannel": "stderr",
+        "kernelSandboxIncluded": false,
+        "policy": {
+          "version": 1,
+          "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/project",
+          "home": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/home",
+          "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/agent",
+          "profilePath": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/control/task.sb",
+          "scratch": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/task-scratch",
+          "permissions": {
+            "projectFiles": "read-write",
+            "outsideProject": "read",
+            "storedCredentials": "off",
+            "commands": false,
+            "network": false,
+            "processAccess": "off"
+          },
+          "denyWrite": [
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/agent",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/control",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-bBgC3A/task-scratch/.sandbox-anchor"
+          ],
+          "tools": [
+            "read",
+            "write",
+            "edit",
+            "bash"
+          ]
+        },
+        "sample": 4
+      },
+      {
+        "pid": 66995,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-runtime.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/control/task-policy.json",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve",
+          "--no-builtin-tools"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 814.4438750000008,
+        "guardMarkerWallMs": 813.3243330000005,
+        "exitWallMs": 822.7220830000006,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-b33c-7767-928c-1966beb53bbb",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "task_sandbox_ready",
+            "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/project",
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "bash"
+            ]
+          },
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"task_sandbox_ready\",\"root\":\"/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/project\",\"tools\":[\"read\",\"write\",\"edit\",\"bash\"]}\n{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "guardMarkerChannel": "stderr",
+        "kernelSandboxIncluded": false,
+        "policy": {
+          "version": 1,
+          "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/project",
+          "home": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/home",
+          "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/agent",
+          "profilePath": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/control/task.sb",
+          "scratch": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/task-scratch",
+          "permissions": {
+            "projectFiles": "read-write",
+            "outsideProject": "read",
+            "storedCredentials": "off",
+            "commands": false,
+            "network": false,
+            "processAccess": "off"
+          },
+          "denyWrite": [
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/agent",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/control",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-gXqiiz/task-scratch/.sandbox-anchor"
+          ],
+          "tools": [
+            "read",
+            "write",
+            "edit",
+            "bash"
+          ]
+        },
+        "sample": 5
+      },
+      {
+        "pid": 67267,
+        "command": [
+          "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "--require",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+          "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-runtime.mjs",
+          "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+          "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/control/task-policy.json",
+          "--mode",
+          "rpc",
+          "--offline",
+          "--no-session",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+          "--no-context-files",
+          "--no-approve",
+          "--no-builtin-tools"
+        ],
+        "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/project",
+        "environment": {
+          "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+          "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/home",
+          "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/tmp",
+          "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/tmp",
+          "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/tmp",
+          "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/home/.cache",
+          "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/home/.config",
+          "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/home/.local/share",
+          "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/agent",
+          "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+          "PI_OFFLINE": "1",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "PI_TELEMETRY": "0",
+          "LANG": "C",
+          "LC_ALL": "C",
+          "TZ": "UTC",
+          "NO_COLOR": "1",
+          "TERM": "dumb"
+        },
+        "readyWallMs": 813.2467079999988,
+        "guardMarkerWallMs": 811.7926669999997,
+        "exitWallMs": 821.5754579999993,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "stdoutRecords": [
+          {
+            "id": "startup",
+            "type": "response",
+            "command": "get_state",
+            "success": true,
+            "data": {
+              "model": {
+                "id": "unknown",
+                "name": "unknown",
+                "api": "unknown",
+                "provider": "unknown",
+                "baseUrl": "",
+                "reasoning": false,
+                "input": [],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 0,
+                "maxTokens": 0
+              },
+              "thinkingLevel": "off",
+              "isStreaming": false,
+              "isCompacting": false,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionId": "01a11c7b-be16-7774-bdb4-fc3b3ac06557",
+              "autoCompactionEnabled": true,
+              "messageCount": 0,
+              "pendingMessageCount": 0
+            }
+          }
+        ],
+        "stderrRecords": [
+          {
+            "type": "task_sandbox_ready",
+            "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/project",
+            "tools": [
+              "read",
+              "write",
+              "edit",
+              "bash"
+            ]
+          },
+          {
+            "type": "benchmark_network_audit",
+            "attempts": []
+          }
+        ],
+        "stderr": "{\"type\":\"task_sandbox_ready\",\"root\":\"/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/project\",\"tools\":[\"read\",\"write\",\"edit\",\"bash\"]}\n{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+        "authAfter": "{}",
+        "guardMarkerChannel": "stderr",
+        "kernelSandboxIncluded": false,
+        "policy": {
+          "version": 1,
+          "root": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/project",
+          "home": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/home",
+          "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/agent",
+          "profilePath": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/control/task.sb",
+          "scratch": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/task-scratch",
+          "permissions": {
+            "projectFiles": "read-write",
+            "outsideProject": "read",
+            "storedCredentials": "off",
+            "commands": false,
+            "network": false,
+            "processAccess": "off"
+          },
+          "denyWrite": [
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/agent",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/control",
+            "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-1SCogc/task-scratch/.sandbox-anchor"
+          ],
+          "tools": [
+            "read",
+            "write",
+            "edit",
+            "bash"
+          ]
+        },
+        "sample": 6
+      }
+    ],
+    "sdkWarm": {
+      "pid": 67323,
+      "command": [
+        "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+        "--require",
+        "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs",
+        "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs",
+        "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+        "8"
+      ],
+      "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/project",
+      "environment": {
+        "PATH": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin:/usr/bin:/bin",
+        "HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/home",
+        "TMPDIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/tmp",
+        "TMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/tmp",
+        "TEMP": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/tmp",
+        "XDG_CACHE_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/home/.cache",
+        "XDG_CONFIG_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/home/.config",
+        "XDG_DATA_HOME": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/home/.local/share",
+        "PI_CODING_AGENT_DIR": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/agent",
+        "PI_PACKAGE_DIR": "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent",
+        "PI_OFFLINE": "1",
+        "PI_SKIP_VERSION_CHECK": "1",
+        "PI_TELEMETRY": "0",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "NO_COLOR": "1",
+        "TERM": "dumb"
+      },
+      "readyWallMs": 521.1116249999995,
+      "guardMarkerWallMs": null,
+      "exitWallMs": 527.0723330000001,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "stdoutRecords": [
+        {
+          "type": "benchmark_sdk_ready",
+          "pid": 67323,
+          "sdkVersion": "1.0.4",
+          "nodeVersion": "v24.14.1",
+          "execPath": "/opt/homebrew/Cellar/node@24/24.14.1_1/bin/node",
+          "cwd": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/project",
+          "agentDir": "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/.run-L11eUV/sample-a4Kvy5/agent",
+          "importMs": 365.605791,
+          "samples": [
+            {
+              "index": 0,
+              "pid": 67323,
+              "importMs": 365.605791,
+              "runtimeMs": 14.593291999999963,
+              "resourcesMs": 4.728250000000003,
+              "createAndBindMs": 3.9333330000000046,
+              "readyMs": 23.25520899999998,
+              "importPlusReadyMs": 388.861,
+              "sessionId": "01a11c7b-c008-770b-8659-ebf6476f53e5",
+              "state": {
+                "messageCount": 0,
+                "model": {
+                  "id": "unknown",
+                  "name": "unknown",
+                  "api": "unknown",
+                  "provider": "unknown",
+                  "baseUrl": "",
+                  "reasoning": false,
+                  "input": [],
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                  },
+                  "contextWindow": 0,
+                  "maxTokens": 0
+                },
+                "isStreaming": false,
+                "sessionFile": null,
+                "tools": [
+                  "read",
+                  "bash",
+                  "edit",
+                  "write"
+                ]
+              },
+              "privateAgentFiles": [
+                "auth.json",
+                "models-store.json",
+                "settings.json"
+              ],
+              "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+            },
+            {
+              "index": 1,
+              "pid": 67323,
+              "importMs": 0,
+              "runtimeMs": 4.289250000000038,
+              "resourcesMs": 2.33133399999997,
+              "createAndBindMs": 0.3015410000000429,
+              "readyMs": 6.922292000000027,
+              "importPlusReadyMs": 6.922292000000027,
+              "sessionId": "01a11c7b-c014-770b-8659-ebf8567f0592",
+              "state": {
+                "messageCount": 0,
+                "model": {
+                  "id": "unknown",
+                  "name": "unknown",
+                  "api": "unknown",
+                  "provider": "unknown",
+                  "baseUrl": "",
+                  "reasoning": false,
+                  "input": [],
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                  },
+                  "contextWindow": 0,
+                  "maxTokens": 0
+                },
+                "isStreaming": false,
+                "sessionFile": null,
+                "tools": [
+                  "read",
+                  "bash",
+                  "edit",
+                  "write"
+                ]
+              },
+              "privateAgentFiles": [
+                "auth.json",
+                "models-store.json",
+                "settings.json"
+              ],
+              "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+            },
+            {
+              "index": 2,
+              "pid": 67323,
+              "importMs": 0,
+              "runtimeMs": 3.6203749999999673,
+              "resourcesMs": 2.2072500000000446,
+              "createAndBindMs": 0.27799999999996317,
+              "readyMs": 6.1057500000000005,
+              "importPlusReadyMs": 6.1057500000000005,
+              "sessionId": "01a11c7b-c01a-770b-8659-ebfae9be00eb",
+              "state": {
+                "messageCount": 0,
+                "model": {
+                  "id": "unknown",
+                  "name": "unknown",
+                  "api": "unknown",
+                  "provider": "unknown",
+                  "baseUrl": "",
+                  "reasoning": false,
+                  "input": [],
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                  },
+                  "contextWindow": 0,
+                  "maxTokens": 0
+                },
+                "isStreaming": false,
+                "sessionFile": null,
+                "tools": [
+                  "read",
+                  "bash",
+                  "edit",
+                  "write"
+                ]
+              },
+              "privateAgentFiles": [
+                "auth.json",
+                "models-store.json",
+                "settings.json"
+              ],
+              "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+            },
+            {
+              "index": 3,
+              "pid": 67323,
+              "importMs": 0,
+              "runtimeMs": 3.942124999999976,
+              "resourcesMs": 2.434417000000053,
+              "createAndBindMs": 0.2793749999999591,
+              "readyMs": 6.6561249999999745,
+              "importPlusReadyMs": 6.6561249999999745,
+              "sessionId": "01a11c7b-c022-770b-8659-ebfcf7caffb7",
+              "state": {
+                "messageCount": 0,
+                "model": {
+                  "id": "unknown",
+                  "name": "unknown",
+                  "api": "unknown",
+                  "provider": "unknown",
+                  "baseUrl": "",
+                  "reasoning": false,
+                  "input": [],
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                  },
+                  "contextWindow": 0,
+                  "maxTokens": 0
+                },
+                "isStreaming": false,
+                "sessionFile": null,
+                "tools": [
+                  "read",
+                  "bash",
+                  "edit",
+                  "write"
+                ]
+              },
+              "privateAgentFiles": [
+                "auth.json",
+                "models-store.json",
+                "settings.json"
+              ],
+              "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+            },
+            {
+              "index": 4,
+              "pid": 67323,
+              "importMs": 0,
+              "runtimeMs": 4.0006669999999644,
+              "resourcesMs": 2.3926250000000095,
+              "createAndBindMs": 0.26770800000002737,
+              "readyMs": 6.661208999999985,
+              "importPlusReadyMs": 6.661208999999985,
+              "sessionId": "01a11c7b-c029-770b-8659-ebffb365f073",
+              "state": {
+                "messageCount": 0,
+                "model": {
+                  "id": "unknown",
+                  "name": "unknown",
+                  "api": "unknown",
+                  "provider": "unknown",
+                  "baseUrl": "",
+                  "reasoning": false,
+                  "input": [],
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                  },
+                  "contextWindow": 0,
+                  "maxTokens": 0
+                },
+                "isStreaming": false,
+                "sessionFile": null,
+                "tools": [
+                  "read",
+                  "bash",
+                  "edit",
+                  "write"
+                ]
+              },
+              "privateAgentFiles": [
+                "auth.json",
+                "models-store.json",
+                "settings.json"
+              ],
+              "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+            },
+            {
+              "index": 5,
+              "pid": 67323,
+              "importMs": 0,
+              "runtimeMs": 3.353375000000028,
+              "resourcesMs": 2.3214999999999577,
+              "createAndBindMs": 0.2605829999999969,
+              "readyMs": 5.935667000000024,
+              "importPlusReadyMs": 5.935667000000024,
+              "sessionId": "01a11c7b-c02f-770b-8659-ec01983058b3",
+              "state": {
+                "messageCount": 0,
+                "model": {
+                  "id": "unknown",
+                  "name": "unknown",
+                  "api": "unknown",
+                  "provider": "unknown",
+                  "baseUrl": "",
+                  "reasoning": false,
+                  "input": [],
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                  },
+                  "contextWindow": 0,
+                  "maxTokens": 0
+                },
+                "isStreaming": false,
+                "sessionFile": null,
+                "tools": [
+                  "read",
+                  "bash",
+                  "edit",
+                  "write"
+                ]
+              },
+              "privateAgentFiles": [
+                "auth.json",
+                "models-store.json",
+                "settings.json"
+              ],
+              "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+            },
+            {
+              "index": 6,
+              "pid": 67323,
+              "importMs": 0,
+              "runtimeMs": 4.402958000000012,
+              "resourcesMs": 2.904125000000022,
+              "createAndBindMs": 0.2993749999999977,
+              "readyMs": 7.606625000000008,
+              "importPlusReadyMs": 7.606625000000008,
+              "sessionId": "01a11c7b-c038-770b-8659-ec02693d78e4",
+              "state": {
+                "messageCount": 0,
+                "model": {
+                  "id": "unknown",
+                  "name": "unknown",
+                  "api": "unknown",
+                  "provider": "unknown",
+                  "baseUrl": "",
+                  "reasoning": false,
+                  "input": [],
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                  },
+                  "contextWindow": 0,
+                  "maxTokens": 0
+                },
+                "isStreaming": false,
+                "sessionFile": null,
+                "tools": [
+                  "read",
+                  "bash",
+                  "edit",
+                  "write"
+                ]
+              },
+              "privateAgentFiles": [
+                "auth.json",
+                "models-store.json",
+                "settings.json"
+              ],
+              "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+            },
+            {
+              "index": 7,
+              "pid": 67323,
+              "importMs": 0,
+              "runtimeMs": 3.9387499999999704,
+              "resourcesMs": 2.421209000000033,
+              "createAndBindMs": 0.31049999999999045,
+              "readyMs": 6.670542000000012,
+              "importPlusReadyMs": 6.670542000000012,
+              "sessionId": "01a11c7b-c03f-770b-8659-ec04ecc36d98",
+              "state": {
+                "messageCount": 0,
+                "model": {
+                  "id": "unknown",
+                  "name": "unknown",
+                  "api": "unknown",
+                  "provider": "unknown",
+                  "baseUrl": "",
+                  "reasoning": false,
+                  "input": [],
+                  "cost": {
+                    "input": 0,
+                    "output": 0,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                  },
+                  "contextWindow": 0,
+                  "maxTokens": 0
+                },
+                "isStreaming": false,
+                "sessionFile": null,
+                "tools": [
+                  "read",
+                  "bash",
+                  "edit",
+                  "write"
+                ]
+              },
+              "privateAgentFiles": [
+                "auth.json",
+                "models-store.json",
+                "settings.json"
+              ],
+              "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+            }
+          ]
+        }
+      ],
+      "stderrRecords": [
+        {
+          "type": "benchmark_network_audit",
+          "attempts": []
+        }
+      ],
+      "stderr": "{\"type\":\"benchmark_network_audit\",\"attempts\":[]}\n",
+      "authAfter": "{}",
+      "warmup": {
+        "index": 0,
+        "pid": 67323,
+        "importMs": 365.605791,
+        "runtimeMs": 14.593291999999963,
+        "resourcesMs": 4.728250000000003,
+        "createAndBindMs": 3.9333330000000046,
+        "readyMs": 23.25520899999998,
+        "importPlusReadyMs": 388.861,
+        "sessionId": "01a11c7b-c008-770b-8659-ebf6476f53e5",
+        "state": {
+          "messageCount": 0,
+          "model": {
+            "id": "unknown",
+            "name": "unknown",
+            "api": "unknown",
+            "provider": "unknown",
+            "baseUrl": "",
+            "reasoning": false,
+            "input": [],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 0,
+            "maxTokens": 0
+          },
+          "isStreaming": false,
+          "sessionFile": null,
+          "tools": [
+            "read",
+            "bash",
+            "edit",
+            "write"
+          ]
+        },
+        "privateAgentFiles": [
+          "auth.json",
+          "models-store.json",
+          "settings.json"
+        ],
+        "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+      },
+      "measuredSamples": [
+        {
+          "index": 1,
+          "pid": 67323,
+          "importMs": 0,
+          "runtimeMs": 4.289250000000038,
+          "resourcesMs": 2.33133399999997,
+          "createAndBindMs": 0.3015410000000429,
+          "readyMs": 6.922292000000027,
+          "importPlusReadyMs": 6.922292000000027,
+          "sessionId": "01a11c7b-c014-770b-8659-ebf8567f0592",
+          "state": {
+            "messageCount": 0,
+            "model": {
+              "id": "unknown",
+              "name": "unknown",
+              "api": "unknown",
+              "provider": "unknown",
+              "baseUrl": "",
+              "reasoning": false,
+              "input": [],
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              },
+              "contextWindow": 0,
+              "maxTokens": 0
+            },
+            "isStreaming": false,
+            "sessionFile": null,
+            "tools": [
+              "read",
+              "bash",
+              "edit",
+              "write"
+            ]
+          },
+          "privateAgentFiles": [
+            "auth.json",
+            "models-store.json",
+            "settings.json"
+          ],
+          "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+        },
+        {
+          "index": 2,
+          "pid": 67323,
+          "importMs": 0,
+          "runtimeMs": 3.6203749999999673,
+          "resourcesMs": 2.2072500000000446,
+          "createAndBindMs": 0.27799999999996317,
+          "readyMs": 6.1057500000000005,
+          "importPlusReadyMs": 6.1057500000000005,
+          "sessionId": "01a11c7b-c01a-770b-8659-ebfae9be00eb",
+          "state": {
+            "messageCount": 0,
+            "model": {
+              "id": "unknown",
+              "name": "unknown",
+              "api": "unknown",
+              "provider": "unknown",
+              "baseUrl": "",
+              "reasoning": false,
+              "input": [],
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              },
+              "contextWindow": 0,
+              "maxTokens": 0
+            },
+            "isStreaming": false,
+            "sessionFile": null,
+            "tools": [
+              "read",
+              "bash",
+              "edit",
+              "write"
+            ]
+          },
+          "privateAgentFiles": [
+            "auth.json",
+            "models-store.json",
+            "settings.json"
+          ],
+          "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+        },
+        {
+          "index": 3,
+          "pid": 67323,
+          "importMs": 0,
+          "runtimeMs": 3.942124999999976,
+          "resourcesMs": 2.434417000000053,
+          "createAndBindMs": 0.2793749999999591,
+          "readyMs": 6.6561249999999745,
+          "importPlusReadyMs": 6.6561249999999745,
+          "sessionId": "01a11c7b-c022-770b-8659-ebfcf7caffb7",
+          "state": {
+            "messageCount": 0,
+            "model": {
+              "id": "unknown",
+              "name": "unknown",
+              "api": "unknown",
+              "provider": "unknown",
+              "baseUrl": "",
+              "reasoning": false,
+              "input": [],
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              },
+              "contextWindow": 0,
+              "maxTokens": 0
+            },
+            "isStreaming": false,
+            "sessionFile": null,
+            "tools": [
+              "read",
+              "bash",
+              "edit",
+              "write"
+            ]
+          },
+          "privateAgentFiles": [
+            "auth.json",
+            "models-store.json",
+            "settings.json"
+          ],
+          "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+        },
+        {
+          "index": 4,
+          "pid": 67323,
+          "importMs": 0,
+          "runtimeMs": 4.0006669999999644,
+          "resourcesMs": 2.3926250000000095,
+          "createAndBindMs": 0.26770800000002737,
+          "readyMs": 6.661208999999985,
+          "importPlusReadyMs": 6.661208999999985,
+          "sessionId": "01a11c7b-c029-770b-8659-ebffb365f073",
+          "state": {
+            "messageCount": 0,
+            "model": {
+              "id": "unknown",
+              "name": "unknown",
+              "api": "unknown",
+              "provider": "unknown",
+              "baseUrl": "",
+              "reasoning": false,
+              "input": [],
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              },
+              "contextWindow": 0,
+              "maxTokens": 0
+            },
+            "isStreaming": false,
+            "sessionFile": null,
+            "tools": [
+              "read",
+              "bash",
+              "edit",
+              "write"
+            ]
+          },
+          "privateAgentFiles": [
+            "auth.json",
+            "models-store.json",
+            "settings.json"
+          ],
+          "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+        },
+        {
+          "index": 5,
+          "pid": 67323,
+          "importMs": 0,
+          "runtimeMs": 3.353375000000028,
+          "resourcesMs": 2.3214999999999577,
+          "createAndBindMs": 0.2605829999999969,
+          "readyMs": 5.935667000000024,
+          "importPlusReadyMs": 5.935667000000024,
+          "sessionId": "01a11c7b-c02f-770b-8659-ec01983058b3",
+          "state": {
+            "messageCount": 0,
+            "model": {
+              "id": "unknown",
+              "name": "unknown",
+              "api": "unknown",
+              "provider": "unknown",
+              "baseUrl": "",
+              "reasoning": false,
+              "input": [],
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              },
+              "contextWindow": 0,
+              "maxTokens": 0
+            },
+            "isStreaming": false,
+            "sessionFile": null,
+            "tools": [
+              "read",
+              "bash",
+              "edit",
+              "write"
+            ]
+          },
+          "privateAgentFiles": [
+            "auth.json",
+            "models-store.json",
+            "settings.json"
+          ],
+          "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+        },
+        {
+          "index": 6,
+          "pid": 67323,
+          "importMs": 0,
+          "runtimeMs": 4.402958000000012,
+          "resourcesMs": 2.904125000000022,
+          "createAndBindMs": 0.2993749999999977,
+          "readyMs": 7.606625000000008,
+          "importPlusReadyMs": 7.606625000000008,
+          "sessionId": "01a11c7b-c038-770b-8659-ec02693d78e4",
+          "state": {
+            "messageCount": 0,
+            "model": {
+              "id": "unknown",
+              "name": "unknown",
+              "api": "unknown",
+              "provider": "unknown",
+              "baseUrl": "",
+              "reasoning": false,
+              "input": [],
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              },
+              "contextWindow": 0,
+              "maxTokens": 0
+            },
+            "isStreaming": false,
+            "sessionFile": null,
+            "tools": [
+              "read",
+              "bash",
+              "edit",
+              "write"
+            ]
+          },
+          "privateAgentFiles": [
+            "auth.json",
+            "models-store.json",
+            "settings.json"
+          ],
+          "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+        },
+        {
+          "index": 7,
+          "pid": 67323,
+          "importMs": 0,
+          "runtimeMs": 3.9387499999999704,
+          "resourcesMs": 2.421209000000033,
+          "createAndBindMs": 0.31049999999999045,
+          "readyMs": 6.670542000000012,
+          "importPlusReadyMs": 6.670542000000012,
+          "sessionId": "01a11c7b-c03f-770b-8659-ec04ecc36d98",
+          "state": {
+            "messageCount": 0,
+            "model": {
+              "id": "unknown",
+              "name": "unknown",
+              "api": "unknown",
+              "provider": "unknown",
+              "baseUrl": "",
+              "reasoning": false,
+              "input": [],
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0
+              },
+              "contextWindow": 0,
+              "maxTokens": 0
+            },
+            "isStreaming": false,
+            "sessionFile": null,
+            "tools": [
+              "read",
+              "bash",
+              "edit",
+              "write"
+            ]
+          },
+          "privateAgentFiles": [
+            "auth.json",
+            "models-store.json",
+            "settings.json"
+          ],
+          "checks": "fresh objects/IDs, empty history/auth, no model, fixed cwd/env"
+        }
+      ]
+    }
+  },
+  "sourceSha256": {
+    "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/benchmark.mjs": "d58014dd4d75bfcb6815844e4d4322dfe15da5d7f54b9182224e929696426cac",
+    "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/sdk-worker.mjs": "6fd9c1c85985e35c7b4fff1d625b55b5fc81c8dc35e809e589eea133d77dc3ed",
+    "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/offline.cjs": "ddeb4673ee039337c601368fb981e38f9de3ca2225e94c9f1a2b454cd3c8ea53",
+    "/Users/exoulster/projects/pi-better-harness/docs/research/subagent-startup-scratch/benchmark.test.mjs": "db9e7e8a11dc53b3e199e4ad9667ab10bfc5efae3f64fb06a3c28d3687550c40",
+    "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-runtime.mjs": "7d1aa7e2881b087c8a833481aba8cb89ad09b4747e4339d3a7be818c3acf7b0e",
+    "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/task-guard.ts": "a9a7161f9161e3246faa97acbca3534aba04f1155d88e379b42c1717f33cd807",
+    "/Users/exoulster/projects/pi-better-harness/packages/pi-better-subagents/tests/task_runtime.test.mjs": "07498d7edb895ee5175660cf7a82e1f710c14592df40bda645724961da3bfdff",
+    "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/package.json": "248decde30021109984def7ddc8f7bf4caf21ef04910a1303ab19604206c1bd5",
+    "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/cli.js": "8189b66abc4f9f431dbb70941dcba690d76d040de1fbfff212886be35a53639d",
+    "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/core/sdk.js": "c5d5360f061b3b9f70dea1a0a424deb8a9a9417ed32a4c8d88bc9d0bfe7a75f5",
+    "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session-services.js": "20b7aa4b0657b53fb522ea051df26f72901802e03cc06c89e0a8926388bca601",
+    "/Users/exoulster/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.4_@aws-sdk+credential-provider-node@3.972.84_@smith_28d7cad98b67b749f8571d22c620bc56/node_modules/@earendil-works/pi-coding-agent/dist/core/model-runtime.js": "da26f76339a031456f6d239a249159231776f760ab4ac538c6b54c417dea6f67"
+  },
+  "verification": {
+    "childCount": 22,
+    "allChildrenClosed": true,
+    "tempRunRootRemoved": true,
+    "outsideScratchChangedPaths": [],
+    "comparedFileCount": 5876,
+    "outsideScratchDigestBefore": "9480deaf3d3033bdec9e11c1d559aca164822a91cd64d57754b59330fc49531c",
+    "outsideScratchDigestAfter": "9480deaf3d3033bdec9e11c1d559aca164822a91cd64d57754b59330fc49531c",
+    "gitStatusBefore": "?? .npm-cache/\n?? .resolve-issues/\n?? docs/research/codemode-contract.md\n?? packages/pi-better-background-tasks/src/batch-validation.test.ts\n?? packages/pi-better-background-tasks/src/batch.test.ts\n?? packages/pi-better-background-tasks/src/batch.ts\n?? packages/pi-better-subagents/prototype-main-delegation/\n",
+    "gitStatusAfter": "?? .npm-cache/\n?? .resolve-issues/\n?? docs/research/codemode-contract.md\n?? packages/pi-better-background-tasks/src/batch-validation.test.ts\n?? packages/pi-better-background-tasks/src/batch.test.ts\n?? packages/pi-better-background-tasks/src/batch.ts\n?? packages/pi-better-subagents/prototype-main-delegation/\n",
+    "gitHead": "f46e3895bde8cc6439d798fe68a5e728af531a69",
+    "gitIndexHashBefore": "4065155b9fa605505383a3c587c3837d8950789482b16b75a2fa350ab4822cf4",
+    "gitIndexHashAfter": "4065155b9fa605505383a3c587c3837d8950789482b16b75a2fa350ab4822cf4",
+    "scope": "tracked and nonignored untracked file contents/modes plus git HEAD/index/status; ignored files and contents of gitlinks/nested repositories not fingerprinted"
+  }
+}
