@@ -6,6 +6,20 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.28.1] - 2026-10-09
+
+### Changed
+
+- Bundle Goal 0.8.3 with released-workflow pauses and sticky no-progress holds. Keep all other component versions unchanged. (#455)
+
+## [pi-better-goal@0.8.3] - 2026-10-09
+
+### Fixed
+
+- Pause the associated Goal when its workflow is released, preserving its unfinished objective and requiring explicit skill re-entry before resuming. (#455)
+- Keep exhausted no-progress holds closed across conversation, callbacks, settings, reloads, and interrupts. Only `/goal resume` or `alt+g` reopens them.
+- Prevent model-triggered resume from bypassing an exhausted hold after an interrupt.
+
 ## [pi-better-harness@0.28.0] - 2026-10-08
 
 ### Added
