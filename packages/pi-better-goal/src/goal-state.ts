@@ -66,7 +66,7 @@ function isGoalStatus(value: unknown): value is GoalStatus {
 }
 
 function isPauseReason(value: unknown): value is GoalPauseReason {
-  return value === "interrupt" || value === "permission-blocker";
+  return value === "interrupt" || value === "permission-blocker" || value === "handback";
 }
 
 function isGoalLike(value: unknown): value is GoalLike {

@@ -222,28 +222,28 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   assert.equal(currentWorkflowOwner(entries), null);
   assert.equal(currentGoalSnapshot(ctx)?.status, "paused", "handoff stops the associated goal without completing it");
   assert.equal(currentGoalSnapshot(ctx)?.completedAt, null);
+  assert.equal(currentGoalSnapshot(ctx)?.pauseReason, "handback", "a handback pause waits for the user's answer");
   const before = userMessages.length;
   await goalHandlers.get("agent_settled")?.({}, ctx);
   await goalHandlers.get("session_start")?.({ reason: "reload" }, ctx);
   t.mock.timers.tick(720_000);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(userMessages.length, before, "handoff and reload do not dispatch synthetic skill invocations");
-  await goalCommands.get("goal")?.handler("resume", ctx);
-  assert.equal(currentGoalSnapshot(ctx)?.status, "paused", "resume alone cannot run with an unwritable workflow plan");
-  assert.equal(userMessages.length, before);
   await assert.rejects(planTools.get("update_plan")!.execute("held-update", {
     workflow: { path: planPath, revision: 1, event: "held", changes: [{ target: "run", set: { note: "held" } }] },
   }, undefined, undefined, toolContext(ctx)), /read-only handoff/);
   await goalHandlers.get("input")?.({ source: "extension", text: "/skill:resolve-issues #312" }, ctx);
   assert.equal(currentWorkflowOwner(entries), null, "synthetic input does not reacquire ownership");
-  await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
-  await goalCommands.get("goal")?.handler("resume", ctx);
+  const resumed = await goalTools.get("goal_resume")!.execute("go-ahead", { reason: "authorize resolving the issues" }, undefined, undefined, toolContext(ctx));
+  assert.equal((resumed.details as { ok: boolean }).ok, true, "the user's go-ahead resumes a handed-back goal");
   assert.equal(currentGoalSnapshot(ctx)?.goalId, goalId);
   assert.equal(currentGoalSnapshot(ctx)?.status, "active");
+  assert.deepEqual(currentWorkflowOwner(entries), rushOwner, "resuming a handed-back goal rebinds its workflow");
+  assert.equal(userMessages.at(-1)?.startsWith("/skill:resolve-issues #312"), true, "resume continues through the bound skill");
   const updated = await planTools.get("update_plan")!.execute("resumed-update", {
     workflow: { path: planPath, revision: 1, event: "resumed", changes: [{ target: "run", set: { note: "resumed" } }] },
   }, undefined, undefined, toolContext(ctx));
-  assert.equal((updated.details as { revision: number }).revision, 2, "explicit re-entry restores real plan mutation");
+  assert.equal((updated.details as { revision: number }).revision, 2, "the resumed workflow can mutate its plan again");
 
   await goalCommands.get("goal")?.handler("clear", ctx);
   await goalCommands.get("goal")?.handler("an unrelated objective", ctx);

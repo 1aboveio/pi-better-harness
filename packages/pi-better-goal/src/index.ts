@@ -87,7 +87,8 @@ const GOAL_RESUME_RULE =
 
 /** True when the agent may resume this goal with `goal_resume`. */
 export function agentResumable(goal: GoalSnapshot | null, conversationalResume = true): boolean {
-  return conversationalResume && goal?.status === "paused" && goal.pauseReason === "interrupt";
+  return conversationalResume && goal?.status === "paused" &&
+    (goal.pauseReason === "interrupt" || goal.pauseReason === "handback");
 }
 
 /** Footer status for a paused goal, telling the user how to resume it. */
@@ -98,7 +99,9 @@ export function pausedGoalStatus(goal: GoalSnapshot, conversationalResume = true
 
 function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean): string {
   return [
-    `Pi Better Goal is paused because the user pressed escape. Goal: ${goal.objective}`,
+    goal.pauseReason === "handback"
+      ? `Pi Better Goal is paused because its workflow handed back unfinished work for the user's answer. Goal: ${goal.objective}`
+      : `Pi Better Goal is paused because the user pressed escape. Goal: ${goal.objective}`,
     "Treat the user's messages as ordinary conversation: answer them, but do not continue the goal's work until it is resumed.",
     conversationalResume ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
   ].join("\n");
@@ -456,14 +459,20 @@ export default function (pi: ExtensionAPI): void {
       return `Cannot resume: /${goal.command.name} is no longer registered at its original source.`;
     }
     if (goal.command?.source === "skill") {
-      const owner = workflowOwnerFromSkill(goal.command.name.slice("skill:".length), goal.command.path, registeredSkillPath);
-      const activeOwner = getWorkflow(ctx);
-      if (owner && (activeOwner?.name !== owner.name || activeOwner.path !== owner.path)) {
-        return `Reinvoke /${goal.command.name} before resuming its workflow goal.`;
+      try {
+        goalWorkflowOwner(goal);
+      } catch (error) {
+        return `Cannot resume: ${error instanceof Error ? error.message : String(error)} Reinvoke /${goal.command.name}.`;
       }
     }
     return null;
   };
+
+  /** The workflow a skill-bound goal owns, re-resolved from its registered skill; null for other goals. */
+  const goalWorkflowOwner = (goal: GoalSnapshot): ReturnType<typeof currentWorkflowOwner> =>
+    goal.command?.source === "skill"
+      ? workflowOwnerFromSkill(goal.command.name.slice("skill:".length), goal.command.path, registeredSkillPath)
+      : null;
 
   /**
    * The one resume path shared by `/goal resume`, the hotkey, and `goal_resume`:
@@ -498,6 +507,11 @@ export default function (pi: ExtensionAPI): void {
       }
       pi.appendEntry(EXTENSION_NAME, permissionRecord(current.goalId, "permission-release"));
     }
+    // Resuming a skill-bound goal is explicit re-entry into its workflow: rebind the owner the
+    // goal was created with (released by a handback) before the continuation runs.
+    const owner = goalWorkflowOwner(current);
+    const activeOwner = getWorkflow(ctx);
+    if (owner && (activeOwner?.name !== owner.name || activeOwner.path !== owner.path)) recordWorkflow(owner);
     setGoal(goal, ctx, source);
     queueGoalContinuation(goal, ctx);
     return { ok: true, goal };
@@ -1049,8 +1063,8 @@ export default function (pi: ExtensionAPI): void {
     name: GOAL_RESUME_TOOL,
     label: "Resume Goal",
     description:
-      "Resume the goal the user paused with escape, exactly like /goal resume. " + GOAL_RESUME_RULE,
-    promptSnippet: "Resume the escape-paused goal, only on the user's clear go-ahead.",
+      "Resume the goal the user paused with escape, or one its workflow handed back, exactly like /goal resume. " + GOAL_RESUME_RULE,
+    promptSnippet: "Resume the escape-paused or handed-back goal, only on the user's clear go-ahead.",
     parameters: Type.Object({
       reason: Type.Optional(Type.String({ description: "Short quote or summary of the user's go-ahead." })),
     }),
@@ -1115,7 +1129,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "release_workflow",
     label: "Release Workflow",
-    description: "Release the active skill-owned workflow after its final handoff and completion audit. Its bound active Goal pauses; explicitly reinvoke the skill before resuming that Goal.",
+    description: "Release the active skill-owned workflow when it hands back unfinished work (a blocked unit awaiting the human). Its bound active Goal pauses; /goal resume rebinds the workflow. When the workflow is done, call update_goal complete instead, which also releases it.",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const owner = getWorkflow(ctx);
@@ -1125,13 +1139,13 @@ export default function (pi: ExtensionAPI): void {
       if (goal?.status === "active" && goal.command?.source === "skill") {
         const boundOwner = workflowOwnerFromSkill(goal.command.name.slice("skill:".length), goal.command.path, registeredSkillPath);
         if (boundOwner?.name === owner.name && boundOwner.path === owner.path) {
-          setGoal(goalWithStatus(goal, "paused"), ctx, "tool");
+          setGoal(goalWithStatus(goal, "paused", undefined, "handback"), ctx, "tool");
           resumeCommand = goal.command.name;
         }
       }
       recordWorkflow(null);
       return {
-        content: [{ type: "text", text: `Released ${owner.name} workflow ownership.${resumeCommand ? ` Its Goal is paused, not complete. Reinvoke /${resumeCommand} before /goal resume.` : ""}` }],
+        content: [{ type: "text", text: `Released ${owner.name} workflow ownership.${resumeCommand ? ` Its Goal is paused, not complete; the user's go-ahead or /goal resume rebinds /${resumeCommand}.` : ""}` }],
         details: { released: true, owner: owner.name, goalPaused: resumeCommand !== undefined },
       };
     },
@@ -1261,7 +1275,7 @@ export default function (pi: ExtensionAPI): void {
     if (permissionPrompt && goal?.status === "paused") {
       return { systemPrompt: `${event.systemPrompt}\n\n${permissionPrompt}` };
     }
-    const pausedInstruction = permissionPrompt || (goal?.status === "paused" && goal.pauseReason === "interrupt"
+    const pausedInstruction = permissionPrompt || (goal?.status === "paused" && (goal.pauseReason === "interrupt" || goal.pauseReason === "handback")
       ? pausedGoalPrompt(goal, preferences.conversationalResume) : "");
     if (!isPokeable(goal) && !owner) {
       return pausedInstruction ? { systemPrompt: `${event.systemPrompt}\n\n${pausedInstruction}` } : undefined;

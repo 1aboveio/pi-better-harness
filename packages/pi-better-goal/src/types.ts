@@ -75,7 +75,8 @@ export type GoalStatus = "active" | "paused" | "budgetLimited" | "complete";
  * requires those human controls, and releases just one same-scope retry while
  * keeping its separate blocker/release history.
  */
-export type GoalPauseReason = "interrupt" | "permission-blocker";
+/** Why a goal paused: escape, a permission hold, or a workflow handing back unfinished work for the user's answer. */
+export type GoalPauseReason = "interrupt" | "permission-blocker" | "handback";
 
 export interface GoalUsage {
   tokensUsed: number;
