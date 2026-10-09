@@ -88,6 +88,7 @@ test("workflow metadata opts in through Pi's skill command provenance", async (t
   assert.match(resumed.systemPrompt, /Only coordinate work/);
   await tools.get("release_workflow")!.execute("release", {}, undefined, undefined, toolContext(ctx));
   assert.equal(currentWorkflowOwner(entries), null);
+  assert.equal(currentGoalSnapshot(ctx)?.status, "paused");
   await handlers.get("input")?.({ source: "interactive", text: "/skill:fixture new task" }, ctx);
   assert.equal(currentWorkflowOwner(entries)?.name, "fixture");
   registeredSkillPath = join(dir, "replaced-skill.md");
@@ -173,6 +174,7 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   const entries: Array<{ type: string; customType?: string; data?: unknown }> = [];
   const goalHandlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const goalCommands = new Map<string, Command>();
+  const goalTools = new Map<string, ToolDefinition>();
   const planTools = new Map<string, ToolDefinition>();
   const userMessages: string[] = [];
   const notices: string[] = [];
@@ -191,7 +193,7 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   extension({
     ...shared,
     registerCommand(name: string, command: Command) { goalCommands.set(name, command); },
-    registerTool() {},
+    registerTool(tool: ToolDefinition) { goalTools.set(tool.name, tool); },
     on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { goalHandlers.set(event, handler); },
   } as unknown as ExtensionAPI);
   planExtension({
@@ -213,6 +215,41 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   await goalCommands.get("goal")?.handler("/skill:resolve-issues #312", ctx);
   assert.equal(userMessages.at(-1), "/skill:resolve-issues #312");
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner, "a goal bound to the alias binds the coordinator too");
+  await planTools.get("update_plan")!.execute("bind-goal", { workflow: { path: planPath, revision: 1 } }, undefined, undefined, toolContext(ctx));
+
+  const goalId = currentGoalSnapshot(ctx)?.goalId;
+  await goalTools.get("release_workflow")!.execute("release", {}, undefined, undefined, toolContext(ctx));
+  assert.equal(currentWorkflowOwner(entries), null);
+  assert.equal(currentGoalSnapshot(ctx)?.status, "paused", "handoff stops the associated goal without completing it");
+  assert.equal(currentGoalSnapshot(ctx)?.completedAt, null);
+  const before = userMessages.length;
+  await goalHandlers.get("agent_settled")?.({}, ctx);
+  await goalHandlers.get("session_start")?.({ reason: "reload" }, ctx);
+  t.mock.timers.tick(720_000);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(userMessages.length, before, "handoff and reload do not dispatch synthetic skill invocations");
+  await goalCommands.get("goal")?.handler("resume", ctx);
+  assert.equal(currentGoalSnapshot(ctx)?.status, "paused", "resume alone cannot run with an unwritable workflow plan");
+  assert.equal(userMessages.length, before);
+  await assert.rejects(planTools.get("update_plan")!.execute("held-update", {
+    workflow: { path: planPath, revision: 1, event: "held", changes: [{ target: "run", set: { note: "held" } }] },
+  }, undefined, undefined, toolContext(ctx)), /read-only handoff/);
+  await goalHandlers.get("input")?.({ source: "extension", text: "/skill:resolve-issues #312" }, ctx);
+  assert.equal(currentWorkflowOwner(entries), null, "synthetic input does not reacquire ownership");
+  await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
+  await goalCommands.get("goal")?.handler("resume", ctx);
+  assert.equal(currentGoalSnapshot(ctx)?.goalId, goalId);
+  assert.equal(currentGoalSnapshot(ctx)?.status, "active");
+  const updated = await planTools.get("update_plan")!.execute("resumed-update", {
+    workflow: { path: planPath, revision: 1, event: "resumed", changes: [{ target: "run", set: { note: "resumed" } }] },
+  }, undefined, undefined, toolContext(ctx));
+  assert.equal((updated.details as { revision: number }).revision, 2, "explicit re-entry restores real plan mutation");
+
+  await goalCommands.get("goal")?.handler("clear", ctx);
+  await goalCommands.get("goal")?.handler("an unrelated objective", ctx);
+  await goalHandlers.get("input")?.({ source: "interactive", text: "/skill:resolve-issues #312" }, ctx);
+  await goalTools.get("release_workflow")!.execute("unrelated-release", {}, undefined, undefined, toolContext(ctx));
+  assert.equal(currentGoalSnapshot(ctx)?.status, "active", "release does not pause an unrelated ordinary goal");
 
   await goalCommands.get("workflow")?.handler("clear", ctx);
   registered.delete("rush-issues");
