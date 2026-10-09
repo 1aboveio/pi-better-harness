@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- Goal: `release_workflow` pauses its Goal as a `handback`, which the user's go-ahead (conversational resume), `/goal resume`, or `alt+g` resumes. Resuming rebinds the coordinator skill instead of requiring it to be reinvoked first. `release_workflow` is for unfinished handbacks; a finished workflow completes its Goal.
+
 ## [pi-better-harness@0.28.1] - 2026-10-09
 
 ### Changed
