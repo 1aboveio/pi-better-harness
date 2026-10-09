@@ -115,7 +115,7 @@ Use `on` to enable any control again.
   wakes. Turning it off cancels a pending wake and prevents an in-flight wake
   audit from sending a continuation. The goal stays active, its clocks and
   background activity remain observable, and background drains still reset
-  the progress ledger. Turning it on while an active goal is idle schedules a
+  non-held progress ledgers. Turning it on while an active goal is idle schedules a
   continuation after its normal grace/backoff period, unless it is held for
   no progress or background work is running. It does not resume a paused goal.
 - `conversational-resume` controls the model's `goal_resume` after an Escape
@@ -191,6 +191,14 @@ or replaced.
 The widget does not replace Pi's footer, so custom footer extensions such as
 `pi-observability` retain ownership of their layout and lifecycle.
 
+For a Goal bound to a coordinator skill (including an alias), `release_workflow`
+pauses the active Goal and clears coordinator ownership after the final handoff.
+The objective, incomplete status, and read-only workflow plan are retained;
+pending wakes are cancelled. Reinvoke the skill explicitly before `/goal resume`
+to restore ownership and writable planning. Synthetic continuation messages do
+not restore ownership. Releasing an unrelated workflow does not pause an ordinary
+Goal.
+
 Setting or clearing a goal while the agent is streaming avoids chat `notify`
 lines and confirm dialogs (both reflow the main-screen dock and can stack
 `Working...` / bash `Elapsed` frames into scrollback). Mid-stream feedback goes
@@ -224,12 +232,14 @@ active but holds further automatic continuations and reports `waiting: no
 progress` in the status area. It never marks the goal complete.
 
 Any changed result, an interactive user input, `/goal resume`, or a
-background active-to-idle transition resets the retry ledger. `/goal resume`
-also reopens an active goal held for no progress, without replacing its
-objective or changing its active-time accounting. It does not restart a non-held active or completed goal, and
+background active-to-idle transition resets the retry ledger **before the
+retry limit is exhausted**. Once held, conversation, changed callback results,
+background drains, settings changes, and reload preserve the hold. Only
+`/goal resume` or `alt+g` reopens it without replacing the objective.
+`/goal resume` does not restart a non-held active or completed goal, and
 `goal_resume` remains restricted to escape-paused goals.
 
-The background-drain reset is persisted as soon as the transition is observed,
+For non-held goals, the background-drain reset is persisted as soon as the transition is observed,
 even during a foreground turn or while automatic wakes are disabled. Cancelling
 the delayed wake does not undo that progress. Each new active-to-idle cycle can
 reset the ledger, including repeated cycles with the same task identity. Paused
@@ -237,6 +247,10 @@ goals remain paused; background activity cannot resume them. The reset is
 committed before activity listeners run. Cached pre-drain evidence is invalidated;
 only a fresh completed turn establishes the next baseline. Late collections and
 in-flight wake audits cannot act on a replaced goal, turn, or session.
+
+The bound applies to automatic Goal continuations, not other extensions'
+callback delivery: a held Goal may still receive and inspect background results,
+but those turns do not reopen its autonomous loop.
 
 Configure the number of identical retries after the initial outcome with:
 
@@ -316,7 +330,8 @@ permissions.
 
 `get_goal` reports `Observable progress: healthy`, `quiet`, or `stalled` for
 an active goal. Changed foreground evidence, interactive input, and a
-background-drain transition advance its progress anchor. A running foreground
+background-drain transition advance its progress anchor until its no-progress
+hold is exhausted. Held ledgers retain their anchor until explicit resume. A running foreground
 turn or active background work can be quiet but is not reported as stalled.
 
 The shared defaults are quiet after 60 seconds and stalled after 5 minutes.

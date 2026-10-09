@@ -18,7 +18,7 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 - Background work that finishes while an `ask_user_question` is pending is handed to the agent right after the answer.
 - A compact goal widget that does not replace Pi's footer.
 - Background activity tracking for subagents and other registered providers.
-- A progress-aware follow-up loop with ten identical no-progress retries and linear backoff (60s through 600s by default), followed by a hold recoverable with `/goal resume`. Delays saturate at Node's timer limit, and observed background drains reset progress before callback turns can cancel the wake. Pi's network retry policy remains independent.
+- A progress-aware follow-up loop with ten identical no-progress retries and linear backoff (60s through 600s by default), followed by a sticky hold recoverable with `/goal resume` or `alt+g`. Conversation, changed callback results, and background drains do not reopen an exhausted hold. Delays saturate at Node's timer limit, and observed background drains reset non-held progress before callback turns can cancel the wake. Pi's network retry policy remains independent.
 - An observable-progress stall state for active goals.
 
 ## Settings Storage
@@ -44,7 +44,7 @@ metadata:
   workflow-role: coordinator
 ```
 
-Invoke the skill with Pi's `/skill:name` command, or supervise it with `/goal /skill:name task`. The goal extension resolves the command against Pi's registry, persists its source, and expands the skill on kickoff and continuation (including after session resume). A bound command that disappears or changes source pauses the goal. `/goal /template task` also re-expands prompt templates on continuation; `/goal /extension-command task` dispatches the extension command once, then continues with ordinary goal supervision to avoid repeating side effects. Plain-language goals work as before. This command binding requires Pi 0.84.4 or later. Legacy slash-shaped goals without a binding pause on resume rather than running without the skill. `/workflow` shows a coordinator skill owner; call `release_workflow` after the workflow's completion audit (or use `/workflow clear` to release it manually). Completing an active goal also releases ownership.
+Invoke the skill with Pi's `/skill:name` command, or supervise it with `/goal /skill:name task`. The goal extension resolves the command against Pi's registry, persists its source, and expands the skill on kickoff and continuation (including after session resume). A bound command that disappears or changes source pauses the goal. `/goal /template task` also re-expands prompt templates on continuation; `/goal /extension-command task` dispatches the extension command once, then continues with ordinary goal supervision to avoid repeating side effects. Plain-language goals work as before. This command binding requires Pi 0.84.4 or later. Legacy slash-shaped goals without a binding pause on resume rather than running without the skill. `/workflow` shows a coordinator skill owner; call `release_workflow` after the workflow's completion audit, or use `/workflow clear` to release ownership manually. `release_workflow` also pauses an active Goal bound to that coordinator, preserving its objective and incomplete status. Reinvoke the skill explicitly before `/goal resume`; automatic continuation cannot reacquire ownership. Unrelated ordinary Goals are unchanged. Completing an active goal also releases ownership.
 
 A skill that is only an alias of a coordinator declares the target instead of a role:
 

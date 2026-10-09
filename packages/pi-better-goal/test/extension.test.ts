@@ -466,8 +466,9 @@ test("idle goal continuation rechecks background activity before waking", async 
   assert.equal(messages.length, 0, "new background activity during the grace period cancels the wake");
 });
 
-test("identical autonomous outcomes pause continuation until interactive input resets the ledger", async (t) => {
+test("identical autonomous outcomes hold continuation across conversation until explicit resume", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  isolatePreferences(t);
   const { commands, handlers, messages, ctx, entries } = createContinuationHarness();
 
   await handlers.get("session_start")?.({}, ctx);
@@ -514,18 +515,40 @@ test("identical autonomous outcomes pause continuation until interactive input r
   const blocked = latestContinuationState(entries);
   assert.equal(blocked?.blocked, true);
   assert.equal(blocked?.noProgressRetries, 10);
+  const heldMessages = messages.length;
 
-  await handlers.get("input")?.({ source: "interactive" }, ctx);
-  const reset = latestContinuationState(entries);
-  assert.equal(reset?.blocked, false);
-  assert.equal(reset?.noProgressRetries, 0);
-
-  await handlers.get("agent_start")?.({}, ctx);
-  await handlers.get("agent_end")?.(identicalOutcome, ctx);
-  await handlers.get("agent_settled")?.({}, ctx);
-  t.mock.timers.tick(60_000);
+  for (const text of ["what is blocked?", "what is needed from me?", "go"]) {
+    await handlers.get("input")?.({ source: "interactive", text }, ctx);
+    await handlers.get("agent_start")?.({}, ctx);
+    await handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [{ type: "text", text: `Answer to ${text}` }] }] }, ctx);
+    await handlers.get("agent_settled")?.({}, ctx);
+    assert.deepEqual(latestContinuationState(entries), blocked, "conversation must not replace the held evidence");
+    t.mock.timers.tick(720_000);
+    await flushPromises();
+    assert.equal(messages.length, heldMessages, "conversation does not restart autonomous work");
+  }
+  await handlers.get("session_start")?.({ reason: "reload" }, ctx);
+  t.mock.timers.tick(720_000);
   await flushPromises();
-  assert.equal(messages.length, 12, "interactive input reopens the loop at the base delay");
+  assert.equal(messages.length, heldMessages, "reload retains the hold");
+  await commands.get("goal")?.handler("settings auto-continue off", ctx);
+  await commands.get("goal")?.handler("settings auto-continue on", ctx);
+  t.mock.timers.tick(720_000);
+  await flushPromises();
+  assert.deepEqual(latestContinuationState(entries), blocked, "settings changes retain the hold");
+  assert.equal(messages.length, heldMessages);
+  await handlers.get("session_shutdown")?.({}, ctx);
+  const restored = createContinuationHarness();
+  t.after(() => restored.handlers.get("session_shutdown")?.({}, restored.ctx));
+  restored.entries.push(...structuredClone(entries));
+  await restored.handlers.get("session_start")?.({ reason: "reload" }, restored.ctx);
+  t.mock.timers.tick(720_000);
+  await flushPromises();
+  assert.equal(restored.messages.length, 0, "a new extension instance also preserves the hold");
+  assert.deepEqual(latestContinuationState(restored.entries), blocked);
+  await restored.commands.get("goal")?.handler("resume", restored.ctx);
+  assert.equal(latestContinuationState(restored.entries)?.blocked, false);
+  assert.equal(restored.messages.length, 1, "explicit resume reopens the loop");
 });
 
 test("/goal resume reopens an active no-progress hold without replacing the goal", async (t) => {
@@ -553,6 +576,33 @@ test("/goal resume reopens an active no-progress hold without replacing the goal
   await flushPromises();
   assert.equal(h.messages.length, afterResume + 1, "resumed retry uses the base delay");
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
+});
+
+test("interrupting held conversation cannot enable conversational resume, but the hotkey can reopen it", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const h = createContinuationHarness();
+  t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
+  await h.handlers.get("session_start")?.({}, h.ctx);
+  await h.commands.get("goal")?.handler("wait for authorization", h.ctx);
+  await exhaustNoProgressRetries(h, t);
+  const held = latestContinuationState(h.entries);
+  const before = h.messages.length;
+  await h.handlers.get("input")?.({ source: "interactive", text: "why is it blocked?" }, h.ctx);
+  await h.handlers.get("agent_start")?.({}, h.ctx);
+  await h.handlers.get("agent_end")?.({ messages: [{ role: "assistant", content: [], stopReason: "aborted" }] }, h.ctx);
+  await h.handlers.get("agent_settled")?.({}, h.ctx);
+  assert.equal(latestGoal(h.entries)?.status, "paused");
+  assert.equal(h.activeTools().includes("goal_resume"), false);
+  const refused = await h.tools.get("goal_resume")!.execute("resume", { reason: "go" }, undefined, undefined, toolContext(h.ctx));
+  assert.equal((refused.details as { ok: boolean }).ok, false);
+  assert.deepEqual(latestContinuationState(h.entries), held);
+  t.mock.timers.tick(720_000);
+  await flushPromises();
+  assert.equal(h.messages.length, before);
+  await h.shortcuts.get("alt+g")?.handler(h.ctx);
+  assert.equal(latestGoal(h.entries)?.status, "active");
+  assert.equal(latestContinuationState(h.entries)?.blocked, false);
+  assert.equal(h.messages.length, before + 1);
 });
 
 test("issue #415: unchanged permission blockers hold autonomous continuation despite assistant rephrasing", async (t) => {
@@ -1162,7 +1212,7 @@ test("/goal resume does not restart a non-held active or completed goal", async 
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
 });
 
-test("background drain resets a held ledger before a callback can cancel its wake", async (t) => {
+test("background drain and callback results preserve an exhausted no-progress hold", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const h = createContinuationHarness();
   let active = false;
@@ -1173,29 +1223,21 @@ test("background drain resets a held ledger before a callback can cancel its wak
   await h.handlers.get("session_start")?.({}, h.ctx);
   await h.commands.get("goal")?.handler("wait for recovery", h.ctx);
   await exhaustNoProgressRetries(h, t);
-  assert.equal(latestContinuationState(h.entries)?.blocked, true);
+  const held = latestContinuationState(h.entries);
+  assert.equal(held?.blocked, true);
+  const before = h.messages.length;
 
   active = true;
   await h.handlers.get("agent_start")?.({}, h.ctx);
   active = false;
   await h.handlers.get("tool_execution_start")?.({ toolName: "ask_user_question", toolCallId: "question" }, h.ctx);
-  assert.equal(latestContinuationState(h.entries)?.blocked, false, "drain progress persists while foreground is busy");
-  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
-  await h.handlers.get("agent_end")?.(networkFailureOutcome, h.ctx);
+  assert.deepEqual(latestContinuationState(h.entries), held, "a drain is not explicit resume");
+  await h.handlers.get("agent_end")?.({ messages: [{ role: "toolResult", toolName: "subagent_result", content: [{ type: "text", text: "completed" }] }] }, h.ctx);
   await h.handlers.get("agent_settled")?.({}, h.ctx);
-  t.mock.timers.tick(100);
+  t.mock.timers.tick(720_000);
   await flushPromises();
-  await settleNetworkFailure(h);
-
-  assert.equal(latestContinuationState(h.entries)?.blocked, false);
-  assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1, "only the post-drain repetition counts");
-  const before = h.messages.length;
-  t.mock.timers.tick(119_999);
-  await flushPromises();
-  assert.equal(h.messages.length, before);
-  t.mock.timers.tick(1);
-  await flushPromises();
-  assert.equal(h.messages.length, before + 1, "callback cancellation cannot leave the goal held");
+  assert.deepEqual(latestContinuationState(h.entries), held, "a callback may be handled without reopening the loop");
+  assert.equal(h.messages.length, before, "the drain does not schedule autonomous continuation");
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
 });
 
@@ -1435,7 +1477,7 @@ test("obsolete concurrent provider results neither publish nor rearm a drain", a
   await h.handlers.get("session_shutdown")?.({}, h.ctx);
 });
 
-test("wake-disabled observation resets a held ledger without automatic handoffs", async (t) => {
+test("wake-disabled observation preserves an exhausted hold without automatic handoffs", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   isolatePreferences(t);
   const overrides = {
@@ -1460,8 +1502,8 @@ test("wake-disabled observation resets a held ledger without automatic handoffs"
     await h.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, h.ctx);
     active = false;
     await h.handlers.get("agent_settled")?.({}, h.ctx);
-    assert.equal(latestContinuationState(h.entries)?.blocked, false);
-    assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 0);
+    assert.equal(latestContinuationState(h.entries)?.blocked, true);
+    assert.equal(latestContinuationState(h.entries)?.noProgressRetries, 1);
     const before = h.messages.length;
     t.mock.timers.tick(10_000);
     await flushPromises();
