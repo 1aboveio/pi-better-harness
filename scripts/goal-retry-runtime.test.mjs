@@ -29,7 +29,7 @@ const { createGoalSnapshot, goalSetEntry, createContinuationState, continuationS
   await import("../packages/pi-better-goal/src/goal-state.ts");
 const { continuationEvidence } = await import("../packages/pi-better-goal/src/continuation.ts");
 
-test("Pi retries settle before Goal updates, and resume/reload/callbacks preserve recovery", { timeout: 10_000 }, async (t) => {
+test("Pi retries settle before Goal updates, and only explicit resume reopens exhausted holds", { timeout: 10_000 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "pi-goal-retry-runtime-"));
   const agentDir = join(root, "agent");
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -155,6 +155,9 @@ test("Pi retries settle before Goal updates, and resume/reload/callbacks preserv
 
   await session.prompt("repeat the failed request", { source: "extension" });
   assert.equal(currentContinuationState(ctx, goal.goalId).blocked, true);
+  const held = currentContinuationState(ctx, goal.goalId);
+  await session.prompt("what is blocked?", { source: "interactive" });
+  assert.deepEqual(currentContinuationState(ctx, goal.goalId), held, "a real interactive question preserves the exhausted ledger");
   const observeActivity = async (active) => {
     const observed = new Promise((resolve) => {
       const unsubscribe = subscribeActivity((snapshot) => {
@@ -170,13 +173,11 @@ test("Pi retries settle before Goal updates, and resume/reload/callbacks preserv
   };
   await observeActivity(true);
   await observeActivity(false);
-  assert.equal(currentContinuationState(ctx, goal.goalId).blocked, false);
-  assert.equal(currentContinuationState(ctx, goal.goalId).noProgressRetries, 0);
+  assert.deepEqual(currentContinuationState(ctx, goal.goalId), held, "background drains do not reopen an exhausted hold");
   const sentBeforeCallback = sent.length;
   await session.prompt("background completion callback", { source: "extension" });
-  assert.equal(currentContinuationState(ctx, goal.goalId).blocked, false, "callback-origin turn cannot lose drain progress");
-  assert.equal(currentContinuationState(ctx, goal.goalId).noProgressRetries, 0);
-  assert.equal(sent.length, sentBeforeCallback, "the callback supersedes the delayed drain wake");
-  assert.equal(attempts, 16);
+  assert.deepEqual(currentContinuationState(ctx, goal.goalId), held, "callback-origin turns leave the exhausted hold intact");
+  assert.equal(sent.length, sentBeforeCallback, "the held goal sends no drain continuation");
+  assert.equal(attempts, 20);
   assert.deepEqual(errors, []);
 });
