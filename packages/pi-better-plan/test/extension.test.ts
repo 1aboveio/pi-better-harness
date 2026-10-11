@@ -268,7 +268,8 @@ test("skill-owned workflow suppresses the generic plan and its update tool", asy
   entries.push({ type: "custom", customType: "pi-better-workflow", data: {
     version: 1, kind: "set", owner: { name: "fixture", planOwner: "workflow" },
   } });
-  assert.equal(await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx), undefined);
+  const workflowPrompt = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  assert.doesNotMatch(workflowPrompt.systemPrompt, /Current structured execution plan:/);
   await assert.rejects(update.execute("owned", { plan: [{ step: "Wrong plan", status: "in_progress" }] }, undefined, undefined, ctx), /owns the task plan/);
   const owned = await tools.get("get_plan")!.execute("get", {}, undefined, undefined, ctx);
   assert.match((owned.content[0] as { text: string }).text, /fixture owns the task plan/);
@@ -304,7 +305,8 @@ test("released handoff suppresses stale generic guidance until a generic replace
     on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown) { handlers.set(event, handler); },
   } as unknown as ExtensionAPI);
   await handlers.get("session_start")!({}, ctx);
-  assert.equal(await handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx), undefined,
+  const handoffPrompt = await handlers.get("before_agent_start")!({ systemPrompt: "base" }, ctx) as { systemPrompt: string };
+  assert.doesNotMatch(handoffPrompt.systemPrompt, /Stale generic/,
     "an unavailable handoff is not permission to resume the stale generic checklist");
   await tools.get("update_plan")!.execute("replace", {
     plan: [{ step: "New generic", status: "in_progress" }],

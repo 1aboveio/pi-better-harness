@@ -2,6 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { appendExecutionPolicy } from "./shared-execution-policy.js";
 
 import {
   completedPlanClearDelay,
@@ -342,8 +343,8 @@ export default function planExtension(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use update_plan for work with three or more meaningful steps unless a skill owns planning; update it immediately when a step completes, becomes blocked, or scope changes.",
       "For generic plans only, mark distinct milestones in_progress when work is actually underway. Do not mark a delegated step completed until its result or failure has been inspected and integrated.",
-      "For generic plans with prerequisites, give steps stable ids and dependsOn edges. Start only ready steps whose prerequisites are completed; independent ready steps may run in parallel when the active delegation mode permits it.",
-      "For generic plans, follow the active delegation mode. Manual forbids proactive delegation even in plan mode; adaptive favors substantial independent work; coordinator delegates nontrivial role-owned tasks after agents_catalog discovery.",
+      "For generic plans with prerequisites, give steps stable ids and dependsOn edges for actual dependencies, not list order. Start ready independent steps concurrently under the Harness execution policy; subagent delegation mode controls subagents, not background-command concurrency.",
+      "For generic plans, follow the active delegation mode for subagents. Manual forbids proactive subagent delegation even in plan mode; adaptive favors substantial independent work; coordinator delegates nontrivial role-owned tasks after agents_catalog discovery.",
       "Use a generic plan as a milestone ledger only when no workflow owns planning. Otherwise follow the workflow's task plan and foreground role.",
       "For generic plans, use separate steps for distinct deliverables, not one step per worker process. Before completing verification or the plan, inspect and integrate every relevant delegated result or failure.",
       "While a workflow owns planning, bind its persisted task plan with update_plan({workflow:{path,revision}}). Then record every transition with update_plan's workflow event and changes instead of editing task-plan.json or its profiling log; it saves the rows, the next planRevision, and the matching profiling event together. Path and revision can accompany the first transition to bind and update in one call.",
@@ -510,10 +511,12 @@ export default function planExtension(pi: ExtensionAPI): void {
     restore(ctx);
   });
   pi.on("before_agent_start", async (event, ctx) => {
-    if (workflowPlanOwner(ctx) || workflowBinding(ctx.sessionManager.getBranch())) return;
-    if (!currentPlan) return;
+    const systemPrompt = appendExecutionPolicy(event.systemPrompt);
+    if (workflowPlanOwner(ctx) || workflowBinding(ctx.sessionManager.getBranch()) || !currentPlan) {
+      return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
+    }
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${planPrompt(currentPlan, activeDelegationMode(pi))}`,
+      systemPrompt: `${systemPrompt}\n\n${planPrompt(currentPlan, activeDelegationMode(pi))}`,
     };
   });
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -555,7 +558,7 @@ function formatPlan(plan: PlanSnapshot): string {
 
 function planPrompt(plan: PlanSnapshot, mode: DelegationMode): string {
   const delegation = mode === "manual"
-    ? "Manual delegation mode: a plan does not authorize proactive delegation. Work in the foreground unless the user explicitly asks or an active workflow explicitly requires delegation."
+    ? "Manual delegation mode: a plan does not authorize proactive delegation to subagents. Independent foreground and background operations still follow the Harness execution policy. Use subagents only when the user explicitly asks or an active workflow explicitly requires delegation."
     : mode === "coordinator"
       ? "Coordinator delegation mode: consult agents_catalog and delegate nontrivial role-owned milestones according to current role descriptions. Keep orchestration, cross-role decisions, unowned or ambiguous work, integration, and final verification in the foreground."
       : "Adaptive delegation mode: identify substantial independent work before implementation. Delegate a bounded task when useful and available while continuing unblocked foreground work; keep tightly coupled work in the foreground.";
