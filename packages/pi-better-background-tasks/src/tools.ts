@@ -184,6 +184,7 @@ const StatusActionParams = Type.Object({
 });
 
 const BACKGROUND_ORCHESTRATION_GUIDELINES = [
+  "Follow the Harness execution policy when scheduling independent background operations; subagent delegation mode does not require background commands to run serially.",
   "Use background tasks for genuinely long-running processes or repeated checks. Run short commands in the foreground.",
   "When a structured plan is active, keep it as the coordinator ledger: launch relevant background work early, continue unblocked foreground work without polling, and update the plan after inspecting each terminal result or failure.",
   "Do not treat launch as completion of the parent milestone; relevant background work must be terminal, inspected, and integrated before verification or completion.",

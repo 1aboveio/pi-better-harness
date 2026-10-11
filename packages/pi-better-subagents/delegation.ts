@@ -15,7 +15,7 @@ export function normalizeDelegationMode(value: unknown): DelegationMode {
 export function delegationPrompt(mode: DelegationMode): string {
     switch (mode) {
         case "manual":
-            return "Delegation mode: manual. Do not proactively delegate work. Use subagents only when the user explicitly asks for delegation or an active workflow explicitly requires it. A structured plan or plan mode does not override this restriction; perform planned work in the foreground unless explicitly required otherwise.";
+            return "Delegation mode: manual. Do not proactively delegate work to subagents. Use subagents only when the user explicitly asks for delegation or an active workflow explicitly requires it. A structured plan or plan mode does not override this restriction. This restricts subagent delegation, not execution concurrency: independent foreground tools and background tasks still follow the Harness execution policy.";
         case "coordinator":
             return "Delegation mode: coordinator. The foreground coordinates, integrates, and verifies. Call agents_catalog to discover current available roles and inspect their descriptions. Pass a role to subagent_spawn by its short name, as listed (role: \"developer\"). Delegate every nontrivial task covered by an available role according to its current description; do not assume bundled roles are unchanged. Keep orchestration, cross-role decisions, unowned or ambiguous work, integration, and final verification in the foreground. Inspect results and failures before concluding; do not poll for running children.";
         case "adaptive":

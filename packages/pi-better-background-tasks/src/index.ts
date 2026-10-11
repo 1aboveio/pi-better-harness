@@ -5,8 +5,10 @@ import { clearBackgroundTasksNavigatorSession, ensureBackgroundTasksNavigator, e
 import { resumeScheduledWork, suspendScheduledWork } from "./runtime.js";
 import { observeForegroundSandboxPolicy } from "./sandbox.js";
 import { registerTools } from "./tools.js";
+import { appendExecutionPolicy } from "./shared-execution-policy.js";
 
 export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+  pi.on("before_agent_start", (event) => ({ systemPrompt: appendExecutionPolicy(event.systemPrompt) }));
   registerBackgroundTasksGoalProvider(pi);
   ensureBackgroundTasksNavigatorProvider(pi);
   // Subscribed at load so a sandbox extension that publishes later is heard, and

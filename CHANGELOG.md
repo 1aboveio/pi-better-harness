@@ -6,6 +6,35 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.29.0] - 2026-10-11
+
+### Added
+
+- Define one execution-concurrency policy shared by Subagents, Background Tasks, and Plan. Start ready independent work concurrently, record concrete serialization constraints, and ask about unresolved fleet-availability trade-offs.
+
+### Changed
+
+- Bundle Subagents 0.18.0, Background Tasks 0.9.0, and Plan 0.9.0. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.18.0] - 2026-10-11
+
+### Changed
+
+- Apply the shared Harness execution policy independently of subagent delegation mode. Manual mode still forbids proactive subagents but permits concurrent foreground and background operations.
+
+## [pi-better-background-tasks@0.9.0] - 2026-10-11
+
+### Added
+
+- Inject the shared Harness execution policy in standalone sessions so independent long-running operations are launched concurrently instead of waiting for each other without a concrete constraint.
+
+## [pi-better-plan@0.9.0] - 2026-10-11
+
+### Changed
+
+- Apply the shared Harness execution policy to ready independent milestones, including separate per-host migrations, without making concurrency depend on subagent delegation mode.
+- Preserve workflow-owned plans while delivering the shared policy once per prompt, including sessions without a generic plan.
+
 ## [pi-better-harness@0.28.2] - 2026-10-09
 
 ### Changed

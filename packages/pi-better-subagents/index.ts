@@ -54,6 +54,7 @@ import {
 } from "./timing.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, delegationPrompt, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
+import { appendExecutionPolicy } from "./shared-execution-policy.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime } from "./task-policy.ts";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
@@ -203,6 +204,7 @@ const CATALOG_GUIDELINES = [
 ];
 
 const SUBAGENT_ORCHESTRATION_GUIDELINES = [
+    "Follow the Harness execution policy for concurrency; the active delegation mode determines whether to use subagents, not whether independent background commands can overlap.",
     "When a structured plan is active, follow the current delegation mode. Track delegated and foreground deliverables only when delegation is permitted and actually underway; continue unblocked foreground work and integrate results before marking work complete.",
     "Do not treat launching a subagent as completion of the parent milestone; relevant terminal results must be inspected and integrated before verification or completion.",
 ];
@@ -2352,7 +2354,7 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool(discoveryTool as Parameters<ExtensionAPI["registerTool"]>[0]);
 
     pi.on("before_agent_start", (event) => ({
-        systemPrompt: `${event.systemPrompt}\n\n${delegationPrompt(activeDelegationMode())}`,
+        systemPrompt: `${appendExecutionPolicy(event.systemPrompt)}\n\n${delegationPrompt(activeDelegationMode())}`,
     }));
 
     // ---- live-status lifecycle -----------------------------------------

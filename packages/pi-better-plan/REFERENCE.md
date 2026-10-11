@@ -4,22 +4,36 @@ Technical details for workflow authors and contributors. For installation, scree
 
 ## Coordinating Delegated Work
 
-Use the plan as the foreground coordinator's milestone ledger. Delegate independent, sufficiently substantial work early with subagents, and use background tasks for long-running processes or repeated checks. Keep doing unblocked foreground work after launch; do not poll workers.
+Use the plan as the foreground coordinator's milestone ledger. Before the first
+implementation milestone, identify ready, authorized independent units, including
+separate per-host migrations, and start them concurrently within resource
+constraints before waiting. Serialize only for real dependencies, shared writes,
+resource or capacity limits, or explicit rollout or availability requirements;
+record the reason in the plan.
 
-Before the first implementation milestone, check for independent work and follow
-the active subagent delegation mode. Without `pi-better-subagents`, the plan uses
-adaptive guidance. Manual keeps planned work in the foreground unless the user or
-an active workflow explicitly requires delegation. Adaptive delegates substantial
-independent work when useful. Coordinator consults current catalog roles and
-delegates nontrivial role-owned work while retaining integration and final
-verification in the foreground.
+Execution concurrency is separate from subagent delegation. Use foreground tools
+for small, tightly coupled, or interactive work, and background tasks for
+independent long-running commands or waits. Follow the active subagent delegation
+mode; without `pi-better-subagents`, the plan uses adaptive guidance. Manual
+forbids proactive subagents, not parallel foreground or background execution;
+an explicit user request or active workflow requirement may still authorize
+delegation. Adaptive delegates substantial independent work when useful.
+Coordinator consults current catalog roles and delegates nontrivial role-owned
+work while retaining integration and final verification in the foreground.
+Continue unblocked foreground work after launch; do not poll workers.
 
-Independent foreground and delegated milestones may both be `in_progress` only
-when both are actually underway. Use steps for distinct deliverables, not
+Ask once about an unresolved material operational availability tradeoff while
+independent preparation continues. A host-local failure does not block other
+independent hosts unless there is evidence of a shared cause. Safety,
+authorization, and workflow prerequisites remain unchanged. This policy adds no
+auto-launcher, scheduler, or reminder loops.
+
+Distinct ready milestones may be `in_progress` concurrently only when their work
+is actually underway. Use separate steps for per-host deliverables, not
 individual worker processes; worker tools and the background-work navigator own
-run status. Complete verification and the plan only after every relevant
-delegated task is terminal and its result or failure has been inspected and
-integrated.
+run status. Complete verification, the plan, or the active goal only after every
+relevant subagent and background task is terminal and its result or failure has
+been inspected and integrated.
 
 For a DAG, assign stable ids to prerequisite steps and list those ids in dependent steps' `dependsOn`. Dependencies must exist in the same plan; cycles and starting or completing a step before its prerequisites are complete are rejected. `get_plan` reports pending steps whose prerequisites are complete as ready. Plans without edges keep their existing behavior.
 

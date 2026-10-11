@@ -11,6 +11,12 @@ const failureObservationsSource = resolve(root, "packages/failure-observations/i
 const permissionBlockerSource = resolve(root, "packages/failure-observations/permission-blocker.ts");
 const callbackBatcherSource = resolve(root, "packages/callback-batcher/index.ts");
 const harnessSettingsSource = resolve(root, "packages/harness-settings/index.ts");
+const executionPolicySource = resolve(root, "packages/pi-better-harness/extensions/execution-policy.ts");
+const executionPolicyTargets = [
+  "packages/pi-better-subagents/shared-execution-policy.ts",
+  "packages/pi-better-background-tasks/src/shared-execution-policy.ts",
+  "packages/pi-better-plan/src/shared-execution-policy.ts",
+];
 const sandboxDiagnosticsSource = resolve(root, "packages/sandbox-diagnostics/index.ts");
 const sandboxDiagnosticsTargets = [
   "packages/pi-better-sandbox/shared-sandbox-diagnostics.ts",
@@ -64,6 +70,10 @@ const navigatorContent = readFileSync(navigatorSource, "utf8");
 const renderSchedulerContent = `// Generated from packages/render-scheduler/index.ts. Do not edit directly.\n${readFileSync(renderSchedulerSource, "utf8")}`;
 const stallDetectorContent = `// Generated from packages/stall-detector/index.ts. Do not edit directly.\n${readFileSync(stallDetectorSource, "utf8")}`;
 const callbackBatcherContent = `// Generated from packages/callback-batcher/index.ts. Do not edit directly.\n${readFileSync(callbackBatcherSource, "utf8")}`;
+
+for (const target of executionPolicyTargets) {
+  writeFileAtomically(resolve(root, target), `// Generated from packages/pi-better-harness/extensions/execution-policy.ts. Do not edit directly.\n${readFileSync(executionPolicySource, "utf8")}`);
+}
 
 for (const target of harnessSettingsTargets) {
   writeFileAtomically(resolve(root, target), `// Generated from packages/harness-settings/index.ts. Do not edit directly.\n${readFileSync(harnessSettingsSource, "utf8")}`);

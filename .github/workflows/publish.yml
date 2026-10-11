@@ -154,6 +154,7 @@ jobs:
               check_pack_file /tmp/package-pack.json src/shared-sandbox-diagnostics.ts
               check_pack_file /tmp/package-pack.json src/shared-failure-observations.ts
               check_pack_file /tmp/package-pack.json src/shared-callback-batcher.ts
+              check_pack_file /tmp/package-pack.json src/shared-execution-policy.ts
               ;;
             pi-better-sandbox)
               check_pack_file /tmp/package-pack.json index.ts
@@ -180,12 +181,14 @@ jobs:
               check_pack_file /tmp/package-pack.json task-policy.ts
               check_pack_file /tmp/package-pack.json shared-failure-observations.ts
               check_pack_file /tmp/package-pack.json shared-callback-batcher.ts
+              check_pack_file /tmp/package-pack.json shared-execution-policy.ts
               ;;
             pi-better-goal)
               check_pack_file /tmp/package-pack.json src/index.ts
               ;;
             pi-better-plan)
               check_pack_file /tmp/package-pack.json src/index.ts
+              check_pack_file /tmp/package-pack.json src/shared-execution-policy.ts
               ;;
             pi-better-harness)
               for required in \
@@ -197,6 +200,7 @@ jobs:
                 extensions/ssh/index.ts \
                 extensions/goal/index.ts \
                 extensions/plan/index.ts \
+                extensions/execution-policy.ts \
                 node_modules/pi-better-sandbox/index.ts \
                 node_modules/pi-better-sandbox/shared-sandbox-core.ts \
                 node_modules/pi-better-sandbox/shared-sandbox-diagnostics.ts \
@@ -213,15 +217,18 @@ jobs:
                 node_modules/pi-better-subagents/task-policy.ts \
                 node_modules/pi-better-subagents/shared-failure-observations.ts \
                 node_modules/pi-better-subagents/shared-callback-batcher.ts \
+                node_modules/pi-better-subagents/shared-execution-policy.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-diagnostics.ts \
                 node_modules/pi-better-background-tasks/src/shared-failure-observations.ts \
                 node_modules/pi-better-background-tasks/src/shared-callback-batcher.ts \
+                node_modules/pi-better-background-tasks/src/shared-execution-policy.ts \
                 node_modules/pi-better-ssh/src/index.ts \
                 node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
                 node_modules/pi-better-goal/src/index.ts \
-                node_modules/pi-better-plan/src/index.ts
+                node_modules/pi-better-plan/src/index.ts \
+                node_modules/pi-better-plan/src/shared-execution-policy.ts
               do
                 check_pack_file /tmp/package-pack.json "$required"
               done

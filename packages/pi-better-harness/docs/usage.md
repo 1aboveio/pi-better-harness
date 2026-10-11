@@ -60,9 +60,13 @@ The goal extension also provides the `/goal` and `/better-activity` commands.
 
 ## Coordinated Execution
 
-For substantial work, use `pi-better-plan` as the foreground coordinator's milestone ledger. Identify independent work early, launch reasoning-heavy work with `subagent_spawn` or `subagent_spawn_batch`, and launch genuinely long-running commands or repeated checks with `bg_task_spawn` or `bg_task_watch`. Continue unblocked foreground work after launch instead of polling.
+For substantial work, use `pi-better-plan` as the foreground coordinator's milestone ledger. Identify ready, authorized independent units, including separate per-host migrations, and start them concurrently within resource constraints before waiting. Serialize only for real dependencies, shared writes, resource or capacity limits, or explicit rollout or availability requirements; record the reason.
 
-Keep only one coordinator step `in_progress` even when several workers run concurrently. The subagent and background-task registries own individual worker status; the plan owns milestones, dependencies, integration, and verification. Before completing verification, the plan, or the active goal, ensure every relevant delegated task is terminal and inspect and integrate its result or failure.
+Use foreground tools for small, tightly coupled, or interactive work. Use `subagent_spawn` or `subagent_spawn_batch` only as permitted by the active `manual`, `adaptive`, or `coordinator` delegation mode. Manual forbids proactive subagents, not parallel foreground or background execution; an explicit user request or active workflow requirement may still authorize delegation. Use `bg_task_spawn` or `bg_task_watch` for independent long-running commands or waits. Continue unblocked foreground work after launch instead of polling workers.
+
+Ask once about an unresolved material operational availability tradeoff while independent preparation continues. A host-local failure does not block other independent hosts unless there is evidence of a shared cause. Concurrency never bypasses safety, authorization, or workflow prerequisites. This policy adds no auto-launcher, scheduler, or reminder loops.
+
+Mark distinct ready milestones `in_progress` concurrently only when their work is actually underway. Track per-host deliverables as distinct milestones, not individual worker processes. The subagent and background-task registries own run status; the plan owns milestones, dependencies, integration, and verification. Before completing verification, the plan, or the active goal, ensure every relevant subagent and background task is terminal and inspect and integrate its result or failure.
 
 Sandbox control is human-only. `/sandbox`, `/sandbox on`, `/sandbox off`,
 `/sandbox default on|off`, `/sandbox deny ...`, and `/sandbox rules` are slash
