@@ -81,8 +81,10 @@ type HostDeps = {
 
 type NavigatorState = {
   providers: Map<string, BackgroundWorkProvider>;
+  registrationTokens?: Map<string, symbol>;
   unsubscribers: Map<string, () => void>;
   uiCtx?: ExtensionContext;
+  uiOwner?: symbol;
   deps?: HostDeps;
   lastHint?: string | null;
   lastMainListLines?: string[];
@@ -136,6 +138,8 @@ function state(): NavigatorState {
 
 export function registerBackgroundWorkProvider(provider: BackgroundWorkProvider): () => void {
   const s = state();
+  const token = Symbol(provider.id);
+  (s.registrationTokens ??= new Map()).set(provider.id, token);
   const previousUnsub = s.unsubscribers.get(provider.id);
   if (previousUnsub) {
     try { previousUnsub(); } catch { /* ignore */ }
@@ -151,7 +155,10 @@ export function registerBackgroundWorkProvider(provider: BackgroundWorkProvider)
     s.unsubscribers.delete(provider.id);
   }
   refreshBackgroundWorkNavigator();
-  return () => unregisterBackgroundWorkProvider(provider.id);
+  // A stale factory must not unregister its replacement from another cached module.
+  return () => {
+    if (state().registrationTokens?.get(provider.id) === token) unregisterBackgroundWorkProvider(provider.id);
+  };
 }
 
 export function unregisterBackgroundWorkProvider(id: string): void {
@@ -162,6 +169,7 @@ export function unregisterBackgroundWorkProvider(id: string): void {
   }
   s.unsubscribers.delete(id);
   s.providers.delete(id);
+  s.registrationTokens?.delete(id);
   refreshBackgroundWorkNavigator();
 }
 
@@ -189,10 +197,11 @@ export function applyCloseConfirmFooter(ui: { setStatus(key: string, value: stri
   return hint ?? null;
 }
 
-export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostDeps): void {
+export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostDeps, owner?: symbol): void {
   if (!isNavigatorUiAvailable(ctx)) return;
   const s = state();
   s.uiCtx = ctx;
+  s.uiOwner = owner;
   s.deps = {
     ...deps,
     createTranscriptComponent: deps.createTranscriptComponent ?? s.deps?.createTranscriptComponent,
@@ -208,14 +217,18 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
   refreshMainListWidget();
 }
 
-export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
+export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext, owner?: symbol): void {
   const s = state();
+  if (owner !== undefined && s.uiOwner !== owner) return;
+  // Headless children and superseded UI sessions do not own the current navigator.
+  if (ctx && (!isNavigatorUiAvailable(ctx) || (s.uiCtx && ctx.ui !== s.uiCtx.ui))) return;
   try { s.dispose?.(); } catch { /* ignore */ }
   s.dispose = undefined;
   s.overlay = undefined;
   stopMainListWidget();
   const activeCtx = ctx ?? s.uiCtx;
   s.uiCtx = undefined;
+  s.uiOwner = undefined;
   if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
     const ui = activeCtx.ui;
     try { applyNavigatorFooter(ui as any, 0); } catch { /* ignore */ }

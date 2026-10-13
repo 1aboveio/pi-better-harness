@@ -15,13 +15,15 @@ import {
 import { readOutputControls } from "./shared-log-utils.js";
 import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
-import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams } from "./runtime.js";
+import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams, type BackgroundTaskRuntime } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
 import { ForegroundSandboxBlockedError } from "./sandbox.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 
 export { formatLaunch } from "./output.js";
+
+const defaultRuntime = { awaitFirstWatchCheck, resumeRunningTask, spawnTask, startWatchTask, stopTask };
 
 const JsonPathSchema = Type.String({
   pattern: "^\\$",
@@ -190,7 +192,8 @@ const BACKGROUND_ORCHESTRATION_GUIDELINES = [
   "Do not treat launch as completion of the parent milestone; relevant background work must be terminal, inspected, and integrated before verification or completion.",
 ];
 
-export function registerTools(pi: ExtensionAPI): void {
+export function registerTools(pi: ExtensionAPI, runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime> = defaultRuntime, refreshNavigator = refreshBackgroundTasksNavigator): void {
+  const { resumeRunningTask, spawnTask } = runtime;
   let activeSession: BackgroundTaskCallbackOrigin | undefined;
   const getActiveSession = () => activeSession;
 
@@ -234,7 +237,7 @@ export function registerTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
       const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, activeSession, getActiveSession));
-      refreshBackgroundTasksNavigator(ctx);
+      refreshNavigator(ctx);
       return text(launched);
     },
   });
@@ -247,8 +250,8 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: WatchParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const launched = await launchWatch(pi, params, ctx.cwd, activeSession, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal);
-      refreshBackgroundTasksNavigator(ctx);
+      const launched = await launchWatch(pi, params, ctx.cwd, activeSession, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal, runtime);
+      refreshNavigator(ctx);
       return text(launched);
     },
   });
@@ -296,8 +299,8 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, activeSession));
-      refreshBackgroundTasksNavigator(ctx);
+      const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, activeSession), runtime);
+      refreshNavigator(ctx);
       return text(result);
     },
   });
@@ -313,7 +316,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, params, ctx, activeSession, getActiveSession, signal);
+      return actionText(pi, params, ctx, activeSession, getActiveSession, signal, runtime, refreshNavigator);
     },
   });
 
@@ -327,7 +330,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return actionText(pi, params, ctx, activeSession, getActiveSession);
+      return actionText(pi, params, ctx, activeSession, getActiveSession, undefined, runtime, refreshNavigator);
     },
   });
 }
@@ -383,12 +386,14 @@ async function actionText(
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime>,
+  refreshNavigator: typeof refreshBackgroundTasksNavigator,
 ) {
   if (params.action === "log" && params.id) {
     return logText(String(params.id), logOptions(params, callbackOrigin));
   }
-  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal));
+  return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal, runtime, refreshNavigator));
 }
 
 async function runAction(
@@ -397,14 +402,18 @@ async function runAction(
   ctx: ExtensionContext,
   callbackOrigin: BackgroundTaskCallbackOrigin,
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime>,
+  refreshNavigator: typeof refreshBackgroundTasksNavigator,
 ): Promise<string> {
+  const { spawnTask } = runtime;
+  const withNavigatorRefresh = (ctx: ExtensionContext, result: string) => { refreshNavigator(ctx); return result; };
   switch (params.action) {
     case "spawn":
       return withNavigatorRefresh(ctx, reportLaunch(() => spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
     case "watch":
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
-      return withNavigatorRefresh(ctx, await launchWatch(pi, params as unknown as WatchTaskParams, ctx.cwd, callbackOrigin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal));
+      return withNavigatorRefresh(ctx, await launchWatch(pi, params as unknown as WatchTaskParams, ctx.cwd, callbackOrigin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal, runtime));
     case "list":
       return formatList(listOptions(params, callbackOrigin));
     case "status":
@@ -415,7 +424,7 @@ async function runAction(
       return formatLog(String(params.id), logOptions(params, callbackOrigin));
     case "stop":
       if (!params.id) return "Invalid parameters: stop requires id.";
-      return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession, statusOptions(params, callbackOrigin)));
+      return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession, statusOptions(params, callbackOrigin), runtime));
     case "clear":
       return withNavigatorRefresh(ctx, formatClear(params, statusOptions(params, callbackOrigin)));
     default:
@@ -450,7 +459,9 @@ export async function launchWatch(
   getActiveSession: () => BackgroundTaskCallbackOrigin | undefined,
   waitMs = FIRST_WATCH_CHECK_WAIT_MS,
   signal?: AbortSignal,
+  runtime: Pick<BackgroundTaskRuntime, keyof typeof defaultRuntime> = defaultRuntime,
 ): Promise<string> {
+  const { startWatchTask, awaitFirstWatchCheck } = runtime;
   let meta: BackgroundTaskMeta;
   try {
     meta = startWatchTask(pi, params, cwd, callbackOrigin, getActiveSession);
@@ -463,11 +474,6 @@ export async function launchWatch(
   const latest = readMeta(meta.id) ?? meta;
   if (outcome && !("pending" in outcome && isTerminalStatus(latest.status))) return formatLaunch(latest, outcome);
   return formatLaunch(latest);
-}
-
-function withNavigatorRefresh(ctx: ExtensionContext, result: string): string {
-  refreshBackgroundTasksNavigator(ctx);
-  return result;
 }
 
 /** Origins whose session identity could not be read (the host threw). */
@@ -601,7 +607,9 @@ async function formatStop(
   _ctx: ExtensionContext,
   getActiveSession?: () => BackgroundTaskCallbackOrigin | undefined,
   options: OutputOptions = {},
+  runtime: Pick<BackgroundTaskRuntime, "stopTask"> = defaultRuntime,
 ): Promise<string> {
+  const { stopTask } = runtime;
   const existing = inspectMeta(id);
   if (!existing.meta && !existing.found) return formatStopResult(existing, options);
   if (!existing.meta) return formatMissingTask(existing, options);
