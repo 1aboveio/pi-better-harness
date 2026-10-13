@@ -103,18 +103,19 @@ export function recoverDeclaredOperation(meta: BackgroundTaskMeta, at = Date.now
   }
 }
 
+export function createFailureAttention() {
 const attentionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let attentionSuspended = false;
 /** Session shutdown: stop this instance's attention timers; the next session_start reschedules (#324). */
-export function suspendFailureAttention(): void {
+function suspendFailureAttention(): void {
   attentionSuspended = true;
   for (const timer of attentionTimers.values()) clearTimeout(timer);
   attentionTimers.clear();
 }
-export function resumeFailureAttention(): void {
+function resumeFailureAttention(): void {
   attentionSuspended = false;
 }
-export function stopFailureAttention(id: string): void {
+function stopFailureAttention(id: string): void {
   const timer = attentionTimers.get(id);
   if (timer) clearTimeout(timer);
   attentionTimers.delete(id);
@@ -125,7 +126,7 @@ export function stopFailureAttention(id: string): void {
  * identity is per incident set; the inspect target is the real task id.
  * Only the pending incidents are rows; earlier deliveries are counted, never repeated (#315).
  */
-export function failureAttentionFields(meta: BackgroundTaskMeta, state: FailureState, pending: { key: string; incidents: string[] }) {
+function failureAttentionFields(meta: BackgroundTaskMeta, state: FailureState, pending: { key: string; incidents: string[] }) {
   const rows = pendingAttentionRows(state, pending.incidents);
   const note = pendingAttentionNote(state, pending.incidents);
   const due = pending.incidents.length;
@@ -144,7 +145,7 @@ export function failureAttentionFields(meta: BackgroundTaskMeta, state: FailureS
 }
 
 /** Running incidents get one grace wake. Terminal incidents ride the completion callback. */
-export function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): void {
+function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): void {
   stopFailureAttention(id);
   if (attentionSuspended) return;
   const meta = readMeta(id);
@@ -167,6 +168,7 @@ export function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActive
         return current.status !== "running" || failureAttentionHandled(now, pending.incidents);
       },
       getSuppressionReason: () => {
+        if (attentionSuspended) throw new Error("Failure attention instance is suspended; defer notification");
         const current = readMeta(id);
         if (!current) throw new Error("Task metadata is unavailable; defer failure notification");
         if (current.status !== "running" || current.callback === false || current.stopRequestedAt) return "task is no longer running";
@@ -179,7 +181,7 @@ export function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActive
       onDelivered: (at) => { markFailureAttentionDelivered(failurePath(id), pending, at); },
     });
     void Promise.resolve(delivery).then((sent) => {
-      if (!sent && (!readMeta(id) || readMeta(id)?.status === "running")) {
+      if (!sent && !attentionSuspended && (!readMeta(id) || readMeta(id)?.status === "running")) {
         const timer = setTimeout(() => scheduleFailureAttention(pi, id, getActiveSession), 1_000);
         timer.unref();
         attentionTimers.set(id, timer);
@@ -196,6 +198,11 @@ export function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActive
     attentionTimers.set(id, timer);
   }
 }
+
+return { suspendFailureAttention, resumeFailureAttention, stopFailureAttention, scheduleFailureAttention, failureAttentionFields };
+}
+const defaultAttention = createFailureAttention();
+export const { suspendFailureAttention, resumeFailureAttention, stopFailureAttention, scheduleFailureAttention, failureAttentionFields } = defaultAttention;
 
 export function terminalFailureAttention(id: string) {
   return pendingFailureAttention(readFailureState(failurePath(id)), Date.now(), { terminal: true });
