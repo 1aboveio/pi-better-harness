@@ -40,6 +40,7 @@ import {
 import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
+import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
 import {
   EVENT_ACTIVITY,
   EVENT_READY,
@@ -312,6 +313,8 @@ export default function (pi: ExtensionAPI): void {
   let snapshotSequence = 0;
   let lastAppliedSnapshotSequence = 0;
   let foregroundRunning = false;
+  /** True between agent_start and agent_end: the agent loop will call the model again without a new prompt. */
+  let agentLoopActive = false;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let collecting = false;
   let collectionPending = false;
@@ -1186,6 +1189,7 @@ export default function (pi: ExtensionAPI): void {
     collectionPending = false;
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
+    agentLoopActive = false;
     try {
       preferences = readGoalPreferences();
     } catch (error) {
@@ -1334,6 +1338,7 @@ export default function (pi: ExtensionAPI): void {
     agentGeneration = executionGeneration;
     currentCtx = ctx;
     foregroundRunning = true;
+    agentLoopActive = true;
     clearIdleContinuation();
     continuationQueuedFor = null;
     lastAgentEvidence = null;
@@ -1355,6 +1360,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", async (event, ctx) => {
+    agentLoopActive = false;
     lastAgentEvidence = agentGeneration === executionGeneration ? continuationEvidence(event.messages) : null;
     // Only an observed editor Escape with pause disabled exempts this abort.
     // Unknown interrupt sources retain the safety fallback on every host.
@@ -1481,6 +1487,29 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
+  });
+
+  // A compaction summary keeps run state but drops the coordinator skill's rules. Re-inject them
+  // (or the skill's own rehydrate script output) so the model sees them before its next step.
+  pi.on("session_compact", async (event, ctx) => {
+    const owner = getWorkflow(ctx);
+    if (!owner) return;
+    const content = await workflowRehydrateMessage(owner, ctx.cwd);
+    if (!content) return;
+    // Inside a running agent loop (mid-run compaction or an overflow retry) steer it into the next
+    // model call. Otherwise append it without triggering a turn: the next turn, whatever starts it,
+    // sees it. Steering after the loop ended would start an unprompted continuation.
+    const options = agentLoopActive || event.willRetry ? { deliverAs: "steer" as const } : { triggerTurn: false };
+    try {
+      pi.sendMessage({
+        customType: WORKFLOW_REHYDRATE_MESSAGE_TYPE,
+        content,
+        display: true,
+        details: { workflow: owner.name, path: owner.path, reason: event.reason },
+      }, options);
+    } catch {
+      // Best effort: never fail or block the session over a rehydrate notice.
+    }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
