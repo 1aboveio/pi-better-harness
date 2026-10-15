@@ -69,8 +69,8 @@ The bundled harness provides **Tool output: Normal / Minimal** in
 `/tool-output` (toggle) remain compatibility shortcuts to the same preference.
 Minimal mode folds each tool call into a single-line header, including running
 calls. The tool-specific icon and tool name share a state color: accent while
-running, muted when completed, and error-colored when failed. In fullscreen Pi, a soft highlight travels through visible running names; inline
-command/path arguments stay dim. Scrollback terminals keep static state colors.
+running, muted when completed, and error-colored when failed. In fullscreen Pi, a soft highlight travels through the entire visible running tool name and its
+inline command/path details; details stay dim between highlight passes. Scrollback terminals keep static state colors.
 Choose **Tool animation: Off** in `/harness-settings` for static running headers.
 Running and failed calls retain text labels so state never depends on color or
 motion alone. Tool rows are indented two columns past

@@ -205,6 +205,34 @@ function workflowText(result: Awaited<ReturnType<ReturnType<typeof workflowHarne
   return (result.content[0] as { text: string }).text;
 }
 
+test("a persisted cancellation updates completion counts across workflow views", async (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "plan-counts-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const path = writeLifecyclePlan(cwd, "counts");
+  const harness = workflowHarness(cwd);
+  await harness.start();
+  harness.owner("fixture-workflow");
+  await harness.update({ workflow: {
+    path, revision: 1, event: "scope-added",
+    changes: [{ target: "unit", add: { id: "U2", title: "Optional work", stage: "pending", status: "pending" } }],
+  } });
+  assert.match(harness.widget(), /\b1\/2 complete\b/);
+  await harness.update({ workflow: {
+    revision: 2, event: "scope-cancelled",
+    changes: [{ id: "U2", set: { status: "cancelled" } }],
+  } });
+  assert.match(harness.widget(), /\b1\/1 complete\b/);
+  assert.match(workflowText(await harness.get()), /\b1\/1 complete\b/);
+  await harness.command("");
+  assert.match(harness.fullView(), /\b1\/1 complete\b/);
+  assert.match(harness.fullView(), /Optional work\s+cancelled/);
+  harness.owner(null);
+  const restored = workflowHarness(cwd, [...harness.entries()]);
+  await restored.start();
+  assert.match(restored.widget(), /\b1\/1 complete\b/);
+  assert.match(workflowText(await restored.get()), /read-only handoff/);
+});
+
 test("released workflow stays inspectable but cannot write; replacement and clear persist on their branches", async (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "released-plan-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));

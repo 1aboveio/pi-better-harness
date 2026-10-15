@@ -134,7 +134,7 @@ function workflowStatus(status: string): DisplayStatus {
     case "pending": return "pending";
     case "blocked": return "blocked";
     case "failed": return "failed";
-    case "skipped": case "not-applicable": case "cancelled": return "skipped";
+    case "skipped": case "not-applicable": case "cancelled": case "canceled": return "skipped";
     default: return "unknown";
   }
 }
@@ -164,12 +164,13 @@ function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanP
     metadata,
     rows: plan.issues.map((unit) => {
       const status = unitStatus(unit);
+      const cancelled = unit.status === "cancelled" || unit.status === "canceled";
       const details = [`${unit.stage} · ${unit.status}${unit.delivery ? ` · ${unit.delivery}` : ""}${unit.worker !== undefined ? ` · worker ${unit.worker}` : ""}`];
       if (unit.dependsOn.length) details.push(`after: ${unit.dependsOn.map((id) => `#${id}`).join(", ")}`);
       if (unit.note) details.push(unit.note);
       return {
-        label: `#${unit.id}`, title: unit.title, status, details,
-        ...(status === "unknown" || unit.status === "cancelled" ? { statusLabel: unit.status } : {}),
+        label: `#${unit.id}`, title: unit.title, status, cancelled, details,
+        ...(status === "unknown" || cancelled ? { statusLabel: unit.status } : {}),
       };
     }),
   };
