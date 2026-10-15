@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Goal: after a context compaction, re-inject the bound workflow coordinator skill as a `workflow-rehydrate` message. A skill's `scripts/rehydrate.mjs` (or `rehydrate.mjs`) output decides the text, and empty output injects nothing; without a script, or when it fails, the model is told to re-read its `SKILL.md` in full.
+
 ## [pi-better-harness@0.29.0] - 2026-10-11
 
 ### Added
