@@ -87,6 +87,7 @@ export interface SshMuxControllerOptions extends ResolvedSshCommand {
   runner: RemoteRunner;
   sessionScope: string;
   controlPathRoot?: string;
+  platform?: NodeJS.Platform;
 }
 
 export interface SshMuxStatus {
@@ -98,7 +99,6 @@ export interface SshMuxStatus {
 }
 
 export interface SshMuxEnsureResult extends SshMuxStatus {
-  state: "up";
   reused: boolean;
 }
 
@@ -319,6 +319,30 @@ export function defaultSshControlPathRoot(): string {
  */
 export function createSshMuxController(options: SshMuxControllerOptions): SshMuxController {
   const sessionScope = requireValue(options.sessionScope, "ssh mux sessionScope is required").trim();
+  // Native Windows OpenSSH cannot provide a working ControlMaster socket.
+  if ((options.platform ?? process.platform) === "win32") {
+    const commandResult: CommandResult = {
+      exitCode: null, signal: null, stdout: "", stderr: "", startedAt: 0, endedAt: 0,
+    };
+    const disabled: SshMuxStatus = {
+      state: "down",
+      target: options.identity.target,
+      controlPath: "",
+      detail: "SSH multiplexing is disabled on Windows; commands use independent connections.",
+      commandResult,
+    };
+    return {
+      controlPath: "",
+      status: async () => disabled,
+      ensure: async () => ({ ...disabled, reused: false }),
+      cleanup: async () => ({ ...disabled, state: "not_running" }),
+      withMux: (commandSpec) => muxCommandSpec(commandSpec, options.identity.target, [
+        "-o", "ControlMaster=no",
+        "-o", "ControlPersist=no",
+        "-o", "ControlPath=none",
+      ], true),
+    };
+  }
   const controlPathRoot = resolve(options.controlPathRoot ?? defaultSshControlPathRoot());
   const controlPath = join(controlPathRoot, `cm-${muxIdentityHash(options.identity, sessionScope)}`);
   if (Buffer.byteLength(controlPath) > MAX_SSH_CONTROL_PATH_BYTES) {

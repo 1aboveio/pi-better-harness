@@ -2,11 +2,20 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failedResult, FakeRemoteRunner, successfulResult } from "../../ssh-core/test-support/index.js";
 import sshExtension, { registerRemoteBashTool, registerSshExtension } from "./index.js";
+
+vi.mock("./shared-ssh-core/index.js", async (importOriginal) => {
+  const core = await importOriginal<typeof import("./shared-ssh-core/index.js")>();
+  return {
+    ...core,
+    createSshMuxController: (options: Parameters<typeof core.createSshMuxController>[0]) =>
+      core.createSshMuxController({ ...options, platform: "linux" }),
+  };
+});
 
 type JsonSchema = {
   description?: string;
@@ -303,7 +312,7 @@ describe("pi-better-ssh extension", () => {
     const packageRoot = fileURLToPath(new URL("../", import.meta.url));
     const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
     try {
-      const packOutput = JSON.parse(execFileSync("npm", [
+      const packOutput = JSON.parse(execFileSync(process.execPath, [process.env.npm_execpath!,
         "pack", "--ignore-scripts", "--json", "--pack-destination", directory,
         "--cache", join(directory, "npm-cache"),
       ], { cwd: packageRoot, encoding: "utf8" }));
@@ -311,16 +320,16 @@ describe("pi-better-ssh extension", () => {
         : packOutput.filename ? packOutput
         : Object.values(packOutput).find((value: any) => value?.filename);
       expect(packed?.filename).toBeTypeOf("string");
-      execFileSync("tar", ["-xzf", join(directory, packed.filename), "-C", directory]);
+      execFileSync("tar", ["-xzf", packed.filename], { cwd: directory });
       const manifest = JSON.parse(readFileSync(join(directory, "package/package.json"), "utf8"));
       const rootManifest = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
       expect(manifest.pi.extensions).toHaveLength(1);
       expect(rootManifest.pi.extensions.map((entry: string) => resolve(repoRoot, entry)))
         .toContain(resolve(packageRoot, manifest.pi.extensions[0]));
-      symlinkSync(join(repoRoot, "node_modules"), join(directory, "node_modules"), "dir");
+      symlinkSync(join(repoRoot, "node_modules"), join(directory, "node_modules"), process.platform === "win32" ? "junction" : "dir");
       const output = execFileSync(process.execPath, [
         "--import", "tsx", "--input-type=module", "-e",
-        `import extension from ${JSON.stringify(join(directory, "package", manifest.pi.extensions[0]))};
+        `import extension from ${JSON.stringify(pathToFileURL(join(directory, "package", manifest.pi.extensions[0])).href)};
          const tools = [];
          extension({ registerTool(tool) { tools.push(tool.name); }, on() {} });
          console.log(JSON.stringify(tools));`,
