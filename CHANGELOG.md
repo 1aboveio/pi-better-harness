@@ -6,9 +6,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.29.1] - 2026-10-15
+
+### Changed
+
+- Bundle Goal 0.9.0 with the workflow re-read after compaction. Keep all other component versions unchanged. (#462)
+
+## [pi-better-goal@0.9.0] - 2026-10-15
+
 ### Added
 
-- Goal: after a context compaction, re-inject the bound workflow coordinator skill as a `workflow-rehydrate` message. A skill's `scripts/rehydrate.mjs` (or `rehydrate.mjs`) output decides the text, and empty output injects nothing; without a script, or when it fails, the model is told to re-read its `SKILL.md` in full.
+- After a context compaction, re-inject the bound workflow coordinator skill as a `workflow-rehydrate` message. A skill's `scripts/rehydrate.mjs` (or `rehydrate.mjs`) output decides the text, and empty output injects nothing; without a script, or when it fails, the model is told to re-read its `SKILL.md` in full. (#462)
 
 ## [pi-better-harness@0.29.0] - 2026-10-11
 
