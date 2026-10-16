@@ -19,3 +19,6 @@ coverage/
 .broad-fixture-*
 pi-task-runtime-*
 pi-compat-golden-*
+
+# pi-better-server Pi-version compatibility runs (scripts/test-on-pi.sh)
+.pi-compat/

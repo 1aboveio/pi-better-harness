@@ -186,7 +186,12 @@ on its own.
 
 `scripts/bootstrap-host.sh [PREFIX]` installs a pinned Node, a pinned Pi and this
 package's `src/` under `PREFIX` (default `~/.pi-better-server`) with no root, and
-writes `PREFIX/bin/pi-server`.
+writes `PREFIX/bin/pi-server`. `PI_VERSION=1.0.0` picks the Pi version (default 0.82.1);
+the daemon works on Pi 0.82 and 1.x, and `hello` reports the installed one. On Pi 1.x the
+`prompt`, `steer` and `follow_up` responses carry Pi's `data.disposition`
+(`started`, `handled` or `queued`); on 0.82 they carry no data.
+`scripts/test-on-pi.sh <pi-version>` runs the package tests against any Pi version in an
+isolated install, leaving the repo's lockfile alone.
 
 ## Detach and return (`/detach`, `pi-remote return`)
 
