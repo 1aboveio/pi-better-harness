@@ -7,12 +7,14 @@ import {
 } from "./plan-presentation.js";
 
 export const WORKFLOW_PLAN_ENTRY = "pi-better-workflow-plan";
+export const CANCELLED_ROW_RETENTION_MS = 30_000;
 
 interface RushUnit {
   id: string;
   title: string;
   stage: string;
   status: string;
+  cancelledAt?: number;
   dependsOn: string[];
   worker?: string | number | undefined;
   note?: string | undefined;
@@ -162,7 +164,7 @@ function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanP
   if (plan.spec?.title) metadata.push([{ color: "dim", text: plan.spec.title }]);
   return {
     metadata,
-    rows: plan.issues.map((unit) => {
+    rows: visibleRushUnits(plan).map((unit) => {
       const status = unitStatus(unit);
       const cancelled = unit.status === "cancelled" || unit.status === "canceled";
       const details = [`${unit.stage} · ${unit.status}${unit.delivery ? ` · ${unit.delivery}` : ""}${unit.worker !== undefined ? ` · worker ${unit.worker}` : ""}`];
@@ -174,6 +176,11 @@ function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanP
       };
     }),
   };
+}
+
+export function visibleRushUnits(plan: RushPlan, now = Date.now()): RushPlan["issues"] {
+  return plan.issues.filter(unit => (unit.status !== "cancelled" && unit.status !== "canceled") ||
+    unit.cancelledAt === undefined || now < unit.cancelledAt + CANCELLED_ROW_RETENTION_MS);
 }
 
 export function renderRushPlan(
@@ -190,12 +197,12 @@ export function renderRushPlan(
 }
 
 export function createRushPlanComponent(
-  plan: RushPlan,
+  source: RushPlan | (() => RushPlan),
   onClose: () => void,
   fg?: (color: string, value: string) => string,
   owner = "rush-issues",
   readOnly = false,
 ): Component {
   const theme = fg ? { fg } : plainPlanTheme;
-  return createPlanPresentationComponent(presentRushPlan(plan, owner, readOnly), theme, onClose);
+  return createPlanPresentationComponent(() => presentRushPlan(typeof source === "function" ? source() : source, owner, readOnly), theme, onClose);
 }

@@ -18,8 +18,9 @@ import { createPlanWidget } from "./plan-widget.js";
 import { COMPACT_PLAN_ROWS } from "./plan-presentation.js";
 import {
   createRushPlanComponent, readRushPlan, renderRushPlan, workflowBinding,
-  WORKFLOW_PLAN_ENTRY, type RushPlan, type WorkflowPlanBinding,
+  WORKFLOW_PLAN_ENTRY, visibleRushUnits, type RushPlan, type WorkflowPlanBinding,
 } from "./workflow-plan.js";
+import { cancelledRowsClearDelay, observeCancelledRows } from "./cancelled-rows.js";
 import { applyRushPlanUpdate, type RushPlanUpdate } from "./workflow-plan-update.js";
 import {
   EXTENSION_NAME,
@@ -131,18 +132,45 @@ export default function planExtension(pi: ExtensionAPI): void {
   let rushError: string | null = null;
   let refreshWidget: ((force?: boolean) => void) | undefined;
   let completedPlanClearTimer: ReturnType<typeof setTimeout> | undefined;
+  let cancelledRowsTimer: ReturnType<typeof setTimeout> | undefined;
+  let refreshFullPlan: (() => void) | undefined;
+  const cancelCancelledRowsTimer = (): void => {
+    if (cancelledRowsTimer !== undefined) clearTimeout(cancelledRowsTimer);
+    cancelledRowsTimer = undefined;
+  };
+  const scheduleCancelledRowsClear = (): void => {
+    cancelCancelledRowsTimer();
+    if (!rushPlan) return;
+    const delay = cancelledRowsClearDelay(rushPlan);
+    if (delay === null) return;
+    const timer = setTimeout(() => {
+      if (cancelledRowsTimer !== timer) return;
+      cancelledRowsTimer = undefined;
+      refresh(true);
+      scheduleCancelledRowsClear();
+    }, delay);
+    cancelledRowsTimer = timer;
+    timer.unref?.();
+  };
+  const observeCancellations = (plan: RushPlan, binding: WorkflowPlanBinding, ctx: ExtensionContext): void => {
+    observeCancelledRows(plan, binding, ctx.sessionManager.getBranch(), (type, data) => pi.appendEntry(type, data));
+  };
   const unsubscribeWorkflow = pi.events.on("pi-better-workflow:changed", (owner) => {
     displayedWorkflowOwner = owner && typeof owner === "object" && "name" in owner && typeof owner.name === "string"
       ? owner.name : null;
     if (displayedWorkflowOwner) {
+      cancelCancelledRowsTimer();
       rushBinding = null;
       rushPlan = null;
       rushError = null;
     }
-    refreshWidget?.(true);
+    refresh(true);
   });
 
-  const refresh = (force = false): void => refreshWidget?.(force);
+  const refresh = (force = false): void => {
+    refreshWidget?.(force);
+    refreshFullPlan?.();
+  };
 
   const loadRushPlan = (ctx: ExtensionContext): RushPlan | null => {
     const owner = workflowPlanOwner(ctx);
@@ -152,33 +180,39 @@ export default function planExtension(pi: ExtensionAPI): void {
     if (!rushBinding) {
       rushPlan = null;
       rushError = null;
+      cancelCancelledRowsTimer();
       return null;
     }
     try {
       const plan = readRushPlan(rushBinding.path, ctx.cwd);
       if (plan.runId !== rushBinding.runId) throw new Error("Rush run identity changed.");
+      observeCancellations(plan, rushBinding, ctx);
       rushPlan = plan;
       rushError = null;
     } catch (error) {
       rushPlan = null;
       rushError = error instanceof Error ? error.message : String(error);
     }
+    scheduleCancelledRowsClear();
     refresh(true);
     return rushPlan;
   };
 
-  const displayWorkflowPlan = (plan: RushPlan, binding: WorkflowPlanBinding, readOnly = false): void => {
+  const displayWorkflowPlan = (plan: RushPlan, binding: WorkflowPlanBinding, ctx: ExtensionContext, readOnly = false): void => {
     if (!rushBinding || rushBinding.owner !== binding.owner || rushBinding.path !== binding.path || rushBinding.runId !== binding.runId) {
       pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "set", ...binding });
     }
     displayedWorkflowOwner = readOnly ? null : binding.owner;
     rushBinding = binding;
+    observeCancellations(plan, binding, ctx);
     rushPlan = plan;
     rushError = null;
+    scheduleCancelledRowsClear();
     refresh(true);
   };
 
   const clearWorkflowPlan = (): void => {
+    cancelCancelledRowsTimer();
     if (rushBinding) pi.appendEntry(WORKFLOW_PLAN_ENTRY, { version: 1, kind: "clear" });
     rushBinding = null;
     rushPlan = null;
@@ -215,6 +249,7 @@ export default function planExtension(pi: ExtensionAPI): void {
 
   const restore = (ctx: ExtensionContext): void => {
     cancelCompletedPlanClear();
+    cancelCancelledRowsTimer();
     const state = reconstructPlanState(ctx.sessionManager.getBranch());
     currentPlan = state.plan;
     displayedWorkflowOwner = workflowPlanOwner(ctx);
@@ -271,7 +306,7 @@ export default function planExtension(pi: ExtensionAPI): void {
             if (!currentPlan) return [];
             return renderCompactPlan(currentPlan, width, theme as never, expanded);
           },
-          () => (rushBinding ? rushPlan?.issues.length ?? 0 : currentPlan?.steps.length ?? 0) > COMPACT_PLAN_ROWS,
+          () => (rushBinding && rushPlan ? visibleRushUnits(rushPlan).length : currentPlan?.steps.length ?? 0) > COMPACT_PLAN_ROWS,
           () => expanded,
           () => setExpanded(!expanded),
         );
@@ -300,16 +335,21 @@ export default function planExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(renderRushPlan(plan, 160, true, undefined, planOwner, !owner).join("\n"), "info");
         return;
       }
-      await ctx.ui.custom<void>((tui, theme, _keys, done) => {
-        const fg = typeof theme?.fg === "function"
-          ? (color: string, value: string) => theme.fg(color as never, value)
-          : undefined;
-        const component = createRushPlanComponent(plan, () => done(), fg, planOwner, !owner);
-        return { render: (width) => component.render(width), handleInput(data) {
-          component.handleInput?.(data);
-          tui.requestRender();
-        }, invalidate: () => component.invalidate() };
-      });
+      try {
+        await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+          refreshFullPlan = () => tui.requestRender();
+          const fg = typeof theme?.fg === "function"
+            ? (color: string, value: string) => theme.fg(color as never, value)
+            : undefined;
+          const component = createRushPlanComponent(() => rushPlan ?? { ...plan, issues: [] }, () => done(), fg, planOwner, !owner);
+          return { render: (width) => component.render(width), handleInput(data) {
+            component.handleInput?.(data);
+            tui.requestRender();
+          }, invalidate: () => component.invalidate() };
+        });
+      } finally {
+        refreshFullPlan = undefined;
+      }
       return;
     }
     if (!currentPlan) {
@@ -384,14 +424,14 @@ export default function planExtension(pi: ExtensionAPI): void {
           }
           binding = { owner: owner ?? binding!.owner, path, runId: plan.runId };
           if (transition.event === undefined) {
-            displayWorkflowPlan(plan, binding, !owner);
+            displayWorkflowPlan(plan, binding, ctx, !owner);
             return { content: [{ type: "text", text: `Showing ${binding.owner} rev ${plan.planRevision}: ${plan.issues.length} units.${owner ? "" : " Read-only handoff."}` }], details: { ok: true, runId: plan.runId, revision: plan.planRevision, ...(!owner ? { readOnly: true } : {}) } };
           }
         }
         if (!binding) throw new Error(`No ${owner} plan is bound; send workflow.path and workflow.revision to update_plan first.`);
         if (transition.event === undefined) throw new Error("workflow.path is required to bind or reload a plan; otherwise send workflow.event and changes.");
         const result = applyRushPlanUpdate(binding.path, ctx.cwd, binding.runId, { ...transition, event: transition.event });
-        displayWorkflowPlan(result.plan, binding);
+        displayWorkflowPlan(result.plan, binding, ctx);
         const rows = result.changed.map(({ target, id, added }) =>
           `${added ? "+" : ""}${id === null ? "run" : target === "unit" ? `#${id}` : id}`);
         const logNote = result.logAheadRevision === undefined ? ""
@@ -521,6 +561,8 @@ export default function planExtension(pi: ExtensionAPI): void {
   });
   pi.on("session_shutdown", async (_event, ctx) => {
     cancelCompletedPlanClear();
+    cancelCancelledRowsTimer();
+    refreshFullPlan = undefined;
     if (typeof unsubscribeWorkflow === "function") unsubscribeWorkflow();
     refreshWidget = undefined;
     try {
