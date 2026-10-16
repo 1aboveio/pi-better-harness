@@ -21,12 +21,33 @@ export interface SessionSummary {
   status: SessionStatus;
   name?: string;
   model?: string;
+  /** Git branch checked out in `cwd`, when it is a git work tree. */
+  branch?: string;
   /** True while a turn is in flight in the live session. */
   isStreaming: boolean;
   /** True when the session is hosted in memory right now. */
   live: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Bumped on any wire change an older client cannot ignore. A `hello` with a different version is rejected. */
+export const PROTOCOL_VERSION = 1;
+
+export interface HelloCommand {
+  id?: string;
+  type: "hello";
+  protocolVersion: number;
+  /** Pi version the client runs; compared by major.minor when present. */
+  piVersion?: string;
+  /** Extension and harness versions the client runs, by package name. Reported, not enforced. */
+  extensionVersions?: Record<string, string>;
+}
+
+export interface HelloData {
+  protocolVersion: number;
+  piVersion: string;
+  extensionVersions: Record<string, string>;
 }
 
 export type DaemonCommand =
@@ -42,9 +63,10 @@ export type DaemonCommand =
   | { id?: string; type: "open_session"; sessionId: string }
   | { id?: string; type: "close_session"; sessionId: string };
 
-export type ClientCommand = DaemonCommand | SessionCommand;
+export type ClientCommand = HelloCommand | DaemonCommand | SessionCommand;
 
 export type DaemonResponse =
+  | { id?: string; type: "response"; command: "hello"; success: true; data: HelloData }
   | { id?: string; type: "response"; command: "list_sessions"; success: true; data: { sessions: SessionSummary[] } }
   | { id?: string; type: "response"; command: "create_session"; success: true; sessionId: string; data: SessionSummary }
   | { id?: string; type: "response"; command: "open_session"; success: true; sessionId: string; data: SessionSummary }

@@ -255,6 +255,32 @@ describe("ssh-core package contract", () => {
 
   // @covers ssh-core.control-master
   // @level integration
+  it("forwards and cancels a Unix socket through the master and rejects unusable paths", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-mux-fwd-");
+    try {
+      const runner = new FakeRemoteRunner([successfulResult(""), failedResult(255, "forward refused")]);
+      const mux = createSshMuxController({
+        ...resolveSshCommand({ command: "true", ssh: { host: "fwd.example" } }),
+        runner,
+        sessionScope: "session-fwd",
+        controlPathRoot: join(fixtureRoot, "control"),
+      });
+      const local = join(fixtureRoot, "local.sock");
+      writeFileSync(local, "stale");
+      await mux.forwardUnixSocket(local, "/srv/pi-server.sock");
+      assert.deepEqual(runner.runCalls[0]?.argv?.slice(-10), [
+        "-o", "ControlMaster=no", "-o", `ControlPath=${mux.controlPath}`, "-O", "forward", "-L", `${local}:/srv/pi-server.sock`, "--", "fwd.example",
+      ]);
+      assert.equal(existsSync(local), false, "a stale local socket file is cleared before forwarding");
+      await assert.rejects(() => mux.cancelUnixSocketForward(local, "/srv/pi-server.sock"), /cancel.*forward refused/);
+      await assert.rejects(() => mux.forwardUnixSocket("/a b.sock", "/r.sock"), /localPath/);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  // @covers ssh-core.control-master
+  // @level integration
   it("reopens a stale master exactly once and surfaces a failed post-open check", async () => {
     const fixtureRoot = mkdtempSync("/tmp/ssh-core-mux-stale-");
     try {

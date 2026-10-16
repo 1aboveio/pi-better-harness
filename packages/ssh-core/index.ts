@@ -110,18 +110,33 @@ export interface SshMuxCleanupResult {
   commandResult: CommandResult;
 }
 
+export interface SshMuxForwardResult {
+  target: string;
+  localPath: string;
+  remotePath: string;
+  detail: string;
+  commandResult: CommandResult;
+}
+
 export interface SshMuxController {
   readonly controlPath: string;
   ensure(): Promise<SshMuxEnsureResult>;
+  /** Forward a local Unix socket to a remote Unix socket through the running ControlMaster (`ssh -O forward -L local:remote`). */
+  forwardUnixSocket(localPath: string, remotePath: string): Promise<SshMuxForwardResult>;
+  /** Cancel a forward made by `forwardUnixSocket` (`ssh -O cancel -L local:remote`) and remove the local socket file. */
+  cancelUnixSocketForward(localPath: string, remotePath: string): Promise<SshMuxForwardResult>;
   status(): Promise<SshMuxStatus>;
   cleanup(): Promise<SshMuxCleanupResult>;
   withMux(commandSpec: CommandSpec): CommandSpec;
 }
 
 export class SshMuxError extends Error {
-  constructor(message: string, readonly commandResult: CommandResult) {
+  // Declared, not a parameter property: Node's native type stripping (pi-better-server) cannot run those.
+  readonly commandResult: CommandResult;
+  constructor(message: string, commandResult: CommandResult) {
     super(message);
     this.name = "SshMuxError";
+    this.commandResult = commandResult;
   }
 }
 
@@ -327,6 +342,26 @@ export function createSshMuxController(options: SshMuxControllerOptions): SshMux
   const target = options.identity.target;
 
   const prepareRoot = (): void => ensureControlPathRoot(controlPathRoot);
+  const forwardOperation = async (operation: "forward" | "cancel", localPath: string, remotePath: string): Promise<SshMuxForwardResult> => {
+    for (const [name, value] of [["localPath", localPath], ["remotePath", remotePath]] as const) {
+      if (!value || /[\s:]/.test(value)) throw new Error(`ssh forward ${name} must be non-empty and contain no whitespace or colon`);
+    }
+    prepareRoot();
+    const commandResult = await options.runner.runOnce(muxCommandSpec(options.commandSpec, target, [
+      "-o", "ControlMaster=no",
+      "-o", `ControlPath=${controlPath}`,
+      "-O", operation,
+      "-L", `${localPath}:${remotePath}`,
+    ], false));
+    if (operation === "cancel") rmSync(localPath, { force: true });
+    if (!commandSucceeded(commandResult)) {
+      throw new SshMuxError(
+        `SSH ${operation} of ${localPath} -> ${target}:${remotePath} failed${resultDetail(commandResult) ? `: ${resultDetail(commandResult)}` : "."}`,
+        commandResult,
+      );
+    }
+    return { target, localPath, remotePath, detail: resultDetail(commandResult), commandResult };
+  };
   const buildControlCommand = (operation: "check" | "exit"): CommandSpec => {
     prepareRoot();
     return muxCommandSpec(options.commandSpec, target, [
@@ -349,6 +384,11 @@ export function createSshMuxController(options: SshMuxControllerOptions): SshMux
   return {
     controlPath,
     status,
+    forwardUnixSocket: async (localPath, remotePath) => {
+      rmSync(localPath, { force: true }); // ssh will not bind over a stale socket file
+      return await forwardOperation("forward", localPath, remotePath);
+    },
+    cancelUnixSocketForward: (localPath, remotePath) => forwardOperation("cancel", localPath, remotePath),
     withMux: (commandSpec) => {
       prepareRoot();
       return muxCommandSpec(commandSpec, target, [
