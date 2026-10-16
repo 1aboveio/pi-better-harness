@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { startDaemon, type Daemon } from "../src/index.ts";
@@ -224,6 +225,106 @@ describe("prompt disposition", () => {
     assert.equal(disposition(followed), reportsDisposition ? "queued" : undefined);
     gate(env, "d1").release();
     await waitFor("turn done", async () => (await isIdle(c, id)) && (await assistantTexts(c, id)).includes("echo:then this"));
+  });
+
+  it("handled: an extension input handler that consumes the prompt reports 'handled' and starts no turn", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    const handled = await c.request({ type: "prompt", sessionId: id, message: "swallow this" });
+    assert.equal(handled.success, true, JSON.stringify(handled));
+    assert.equal(handled.data?.disposition, reportsDisposition ? "handled" : undefined);
+    assert.equal(llmCalls(env).length, 0);
+    // Nothing is left marked as a running turn: a plain prompt starts normally.
+    const next = await c.request({ type: "prompt", sessionId: id, message: "after" });
+    assert.equal(next.success, true, JSON.stringify(next));
+    await waitFor("turn ran", async () => (await assistantTexts(c, id)).includes("echo:after"));
+  });
+
+  it("an idle steer starts a turn through the prompt path and reports 'started'", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    const steered = await c.request({ type: "steer", sessionId: id, message: "wake" });
+    assert.equal(steered.success, true, JSON.stringify(steered));
+    assert.equal(steered.data?.disposition, reportsDisposition ? "started" : undefined);
+    await waitFor("turn ran", async () => (await assistantTexts(c, id)).includes("echo:wake"));
+  });
+
+  it("prompt, steer and follow_up all reach extension input handlers with source 'rpc'", { skip: !reportsDisposition }, async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    await c.request({ type: "prompt", sessionId: id, message: "tool src1" });
+    await waitFor("tool running", () => gate(env, "src1").started());
+    await c.request({ type: "steer", sessionId: id, message: "the steer" });
+    await c.request({ type: "follow_up", sessionId: id, message: "the follow" });
+    gate(env, "src1").release();
+    await waitFor("turn done", async () => (await isIdle(c, id)) && (await assistantTexts(c, id)).includes("echo:the follow"));
+    const seen = readFileSync(`${env.logFile}.inputs`, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { text: string; source: string });
+    for (const text of ["tool src1", "the steer", "the follow"]) {
+      assert.equal(seen.find((e) => e.text === text)?.source, "rpc", `${text}: ${JSON.stringify(seen)}`);
+    }
+  });
+
+  it("a prompt Pi defers while it is settling still gets its response and keeps the turn marked as running", { skip: !reportsDisposition }, async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    writeFileSync(join(env.gateDir, "settle.hold"), "1");
+    // An extension starts this turn, so no daemon prompt is in flight while it settles.
+    await c.request({ type: "prompt", sessionId: id, message: "/kick one" });
+    await waitFor("settling", () => existsSync(join(env.gateDir, "settle.started")));
+
+    // Pi defers this prompt until agent_settled finishes; its response must wait for the real outcome.
+    const deferred = c.request({ type: "prompt", sessionId: id, message: "tool defer1" });
+    await new Promise((r) => setTimeout(r, 150));
+    // The deferred prompt counts as a starting turn, so a plain prompt is refused instead of racing it.
+    const refused = await c.request({ type: "prompt", sessionId: id, message: "too early" });
+    assert.equal(refused.success, false, JSON.stringify(refused));
+    assert.match(refused.error, /already processing/i);
+
+    writeFileSync(join(env.gateDir, "settle.release"), "1");
+    const response = await deferred;
+    assert.equal(response.success, true, JSON.stringify(response));
+    assert.equal(response.data?.disposition, "started");
+    await waitFor("tool running", () => gate(env, "defer1").started());
+    gate(env, "defer1").release();
+    await waitFor("turn done", async () => (await isIdle(c, id)) && (await assistantTexts(c, id)).includes("tool-done:gate:defer1"));
+    // Once the deferred turn ended nothing stays marked: a plain prompt works again.
+    const after = await c.request({ type: "prompt", sessionId: id, message: "again" });
+    assert.equal(after.success, true, JSON.stringify(after));
+  });
+
+  it("a prompt Pi defers and then fails still gets a failure response and frees the session", { skip: !reportsDisposition }, async () => {
+    const env = makeEnv();
+    const { daemon, client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    writeFileSync(join(env.gateDir, "settle.hold"), "1");
+    await c.request({ type: "prompt", sessionId: id, message: "/kick one" });
+    await waitFor("settling", () => existsSync(join(env.gateDir, "settle.started")));
+
+    const deferred = c.request({ type: "prompt", sessionId: id, message: "tool doomed" });
+    await new Promise((r) => setTimeout(r, 150));
+    // A compaction starts during the settle window, so Pi throws when it runs the deferred prompt.
+    const pi = (daemon.registry.get(id) as unknown as { session: { _compactionAbortController?: AbortController; _clearManualCompactionState(): void } }).session;
+    pi._compactionAbortController = new AbortController();
+    writeFileSync(join(env.gateDir, "settle.release"), "1");
+    await new Promise((r) => setTimeout(r, 300));
+    // The compaction ends; Pi is idle again.
+    pi._compactionAbortController = undefined;
+    pi._clearManualCompactionState();
+
+    const response = await Promise.race([deferred, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("no response to the failed deferred prompt")), 5000))]);
+    assert.equal(response.success, false, JSON.stringify(response));
+    await waitFor("idle", () => isIdle(c, id));
+    const after = await c.request({ type: "prompt", sessionId: id, message: "again" });
+    assert.equal(after.success, true, JSON.stringify(after));
   });
 });
 
