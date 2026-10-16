@@ -19,6 +19,11 @@ export interface TargetOptions {
 export interface Target {
   /** Unix socket on this machine that reaches the daemon. */
   socketPath: string;
+  /**
+   * Reach another unix socket on the same machine as the daemon (e.g. the Codex app-server's
+   * control socket) through a second SSH forward. For the local daemon it is the same path.
+   */
+  forwardSocket(remoteSocketPath: string): Promise<{ socketPath: string; close(): Promise<void> }>;
   /** Stop forwarding. The ControlMaster is left to expire so the next command reconnects instantly. */
   close(): Promise<void>;
 }
@@ -28,7 +33,11 @@ const REMOTE_SERVER_DIR_SCRIPT = 'printf %s "${PI_SERVER_DIR:-${PI_CODING_AGENT_
 
 export async function resolveTarget(options: TargetOptions): Promise<Target> {
   if (!options.host) {
-    return { socketPath: options.socket ?? socketPathFor(defaultServerDir()), close: async () => undefined };
+    return {
+      socketPath: options.socket ?? socketPathFor(defaultServerDir()),
+      forwardSocket: async (remoteSocketPath) => ({ socketPath: remoteSocketPath, close: async () => undefined }),
+      close: async () => undefined,
+    };
   }
   if (options.socket) throw new Error("--socket and --host cannot be combined; use --remote-dir to point at a remote daemon");
 
@@ -65,6 +74,23 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
   }
   return {
     socketPath: localSocket,
+    async forwardSocket(remoteSocketPath) {
+      const dir = mkdtempSync(join(process.env.PI_REMOTE_TMP ?? (existsSync("/tmp") ? "/tmp" : tmpdir()), "pi-remote-"));
+      const local = join(dir, "f.sock");
+      try {
+        await mux.forwardUnixSocket(local, remoteSocketPath);
+      } catch (error) {
+        rmSync(dir, { recursive: true, force: true });
+        throw error;
+      }
+      return {
+        socketPath: local,
+        async close() {
+          await mux.cancelUnixSocketForward(local, remoteSocketPath).catch(() => undefined);
+          rmSync(dir, { recursive: true, force: true });
+        },
+      };
+    },
     async close() {
       await mux.cancelUnixSocketForward(localSocket, remoteSocket).catch(() => undefined);
       rmSync(localDir, { recursive: true, force: true });

@@ -132,6 +132,30 @@ Never bundled: any file whose name starts with `.env` (`.env`, `.env.local`, `.e
 `.ssh/.aws/.gnupg/.kube/.docker` content, `node_modules`, build output and caches, anything git ignores, and no
 Pi/`gh`/provider auth files (only the transcript and an index row are read from the agent dir).
 
+## Codex threads (`pi-better-server --agent codex`)
+
+The same `move` core carries a Codex thread. Run one daemon per Codex host (`pi-better-server --agent codex`, or
+`PI_SERVER_AGENT=codex`); it speaks the daemon socket protocol for `list_sessions`, the move commands and
+`codex_endpoint`, and keeps Codex's own app-server running through `codex app-server daemon start`. Settings:
+`PI_CODEX_BIN` (the `codex` executable), `CODEX_HOME` (default `~/.codex`), `PI_CODEX_VERSION` (refuse to run unless
+`codex --version` is exactly this).
+
+- **What travels:** the thread's rollout file (`sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`) plus the workspace bundle.
+  The app-server rebuilds its state db and paginated history from the rollout, so nothing else is needed. The import
+  rewrites only the `cwd`, `runtime_workspace_roots` and `workspace_roots` fields of `session_meta` and `turn_context`
+  records to the rebuilt workspace; conversation text is untouched. The source thread is archived (the tombstone).
+- **Never travels:** `auth.json` or any Codex credential. The target host signs in on its own (`codex login`).
+- **Version pin:** the bundle records `codex --version`; the target refuses unless its own is identical. `pi-remote
+  attach` refuses the same way. `PI_CODEX_VERSION` pins a host to one version outright.
+- **Socket only:** the app-server is reached through its unix control socket, locally or ssh-forwarded; there is no
+  TCP listener. `pi-remote attach [--host h] <thread> [-- <codex options>]` forwards that socket and runs
+  `codex resume <thread> --remote unix://<forwarded socket>`.
+- **Not carried:** thread goals, queued messages and read receipts live in separate Codex databases and stay behind.
+  The fence archives the thread on the source app-server, which unloads it for every client (pi-remote attach,
+  `codex resume --remote`, anything else), so none can start or continue a turn until the move is aborted
+  (the thread is unarchived) or retired. A turn already running is waited for before fencing; one that starts in the
+  instant between the last busy check and the archive is not interrupted by the fence itself.
+
 ## Crash recovery
 
 A session stays `running` until `close_session`. On start the daemon reopens

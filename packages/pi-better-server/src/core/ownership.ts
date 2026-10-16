@@ -63,6 +63,11 @@ export class OwnershipStore {
     return this.records.get(sessionId) ?? { sessionId, state: "owned", epoch: 0, updatedAt: new Date(0).toISOString() };
   }
 
+  /** Every session this daemon has a record for (owned, fenced or moved). */
+  list(): OwnershipRecord[] {
+    return [...this.records.values()];
+  }
+
   /** Why the session cannot take commands here, or undefined when this daemon owns it. */
   blockedReason(sessionId: string): string | undefined {
     const record = this.get(sessionId);

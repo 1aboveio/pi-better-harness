@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { CompanionInfo } from "../companion.ts";
 import type { Subcommand } from "./context.ts";
+import { attachCodex } from "./attach-codex.ts";
 import { resolveSession } from "./sessions.ts";
 
 /** The local command that shows the companion's terminal: tmux itself, or ssh -t into the host's tmux. */
@@ -13,13 +14,15 @@ function shellWord(word: string): string {
 }
 
 export const command: Subcommand = {
-  usage: "attach [--host <ssh-alias>] [--no-attach] <session>",
-  options: { "no-attach": { type: "boolean" } },
+  usage: "attach [--host <ssh-alias>] [--no-attach] <session> [-- <codex options>]",
+  options: { "no-attach": { type: "boolean" }, "codex-bin": { type: "string" } },
   async run({ values, positionals }, context) {
     const ref = positionals[0];
     if (!ref) throw new Error("attach needs a session: pi-remote attach <session>");
     const client = await context.connect();
     const session = await resolveSession(client, ref);
+    // A Codex host (pi-better-server --agent codex) announces codex-cli in its hello; its threads attach through Codex's own TUI.
+    if (client.server?.extensionVersions["codex-cli"]) return attachCodex(client, session, positionals.slice(1), values, context);
     const started = await client.call({ type: "start_companion", sessionId: session.sessionId });
     const info = started.data as CompanionInfo;
     const argv = attachCommand(context.host, info.attach);
