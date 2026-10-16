@@ -12,6 +12,8 @@ export interface PlanRow {
   label: string;
   title: string;
   status: DisplayStatus;
+  // Workflow cancellations keep skipped styling but are excluded from the completion total.
+  cancelled?: boolean;
   statusLabel?: string;
   details?: string[];
 }
@@ -65,7 +67,8 @@ export function renderPlanPresentation(
 ): string[] {
   const size = Math.max(1, Math.floor(width));
   const count = (status: DisplayStatus) => plan.rows.filter((row) => row.status === status).length;
-  const summary = [`${count("completed")}/${plan.rows.length} complete`];
+  const total = plan.rows.filter((row) => !row.cancelled).length;
+  const summary = [`${count("completed")}/${total} complete`];
   for (const [status, label] of [
     ["in_progress", "in progress"], ["implemented", "implemented"], ["reviewed", "review passed"],
     ["blocked", "blocked"], ["failed", "failed"],

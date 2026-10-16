@@ -6,7 +6,7 @@ const concreteColors = (theme: Theme) => (theme as Theme & { colors?: Record<str
 const PERIOD = 2400;
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-function themeRgb(theme: Theme, token: "accent" | "text"): RGB | undefined {
+function themeRgb(theme: Theme, token: "accent" | "text" | "dim"): RGB | undefined {
   const color = concreteColors(theme)?.[token];
   if (color?.kind === "rgb" && color.r !== undefined && color.g !== undefined && color.b !== undefined) {
     return [color.r, color.g, color.b];
@@ -43,23 +43,27 @@ function foreground(color: RGB, mode: "truecolor" | "256color"): string {
   return `\x1b[38;5;${index}m`;
 }
 
-export function toolIdentity(icon: string, label: string, tone: "accent" | "muted" | "error", theme: Theme, time?: number): string {
-  if (tone !== "accent" || time === undefined) return theme.fg(tone, `${icon} ${label}`);
+export function toolIdentity(icon: string, label: string, tone: "accent" | "muted" | "error", theme: Theme, time?: number, detail = ""): string {
+  const staticHeader = () => theme.fg(tone, `${icon} ${label}`) + (detail ? `  ${theme.fg("dim", detail)}` : "");
+  if (tone !== "accent" || time === undefined || !supportsToolShimmer(theme)) return staticHeader();
   const base = themeRgb(theme, "accent");
   const light = themeRgb(theme, "text");
-  if (!supportsToolShimmer(theme)) return theme.fg(tone, `${icon} ${label}`);
-  const letters = Array.from(graphemes.segment(label), part => part.segment);
+  const letters = Array.from(graphemes.segment(label + (detail ? `  ${detail}` : "")), part => part.segment);
+  const nameLength = Array.from(graphemes.segment(label)).length;
   const radius = Math.max(2, Math.min(4, letters.length / 3));
   const position = (time % PERIOD) / PERIOD * (letters.length + radius * 2) - radius;
   const mode = theme.getColorMode();
+  const detailBase = detail ? themeRgb(theme, "dim") : undefined;
   const name = letters.map((letter, index) => {
+    const token = index < nameLength ? "accent" : "dim";
+    const letterBase = token === "accent" ? base : detailBase;
     const distance = Math.abs(index - position) / radius;
     const shine = distance < 1 ? (1 + Math.cos(distance * Math.PI)) * 0.48 : 0;
-    if (!base || !light) {
+    if (!base || !light || !letterBase) {
       const intensity = shine > 0.72 ? "\x1b[1m" : shine > 0.18 ? "" : "\x1b[2m";
-      return `\x1b[22m${intensity}${letter}`;
+      return `${theme.getFgAnsi(token)}\x1b[22m${intensity}${letter}`;
     }
-    const color = base.map((value, channel) => Math.round(value + (light[channel] - value) * shine)) as RGB;
+    const color = letterBase.map((value, channel) => Math.round(value + (light[channel] - value) * shine)) as RGB;
     return `${foreground(color, mode)}${letter}`;
   }).join("");
   return theme.fg(tone, `${icon} \x1b[22m${name}\x1b[22m`);
