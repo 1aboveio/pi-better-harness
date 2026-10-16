@@ -30,6 +30,8 @@ export interface SessionSummary {
   branch?: string;
   /** True while a turn is in flight in the live session. */
   isStreaming: boolean;
+  /** Present when this daemon does not currently own the session: fenced for a move, or moved away. */
+  ownership?: "fenced" | "moved";
   /** True when the session is hosted in memory right now. */
   live: boolean;
   /** Seq of the newest event the session has published (0 before the first). */
@@ -72,7 +74,23 @@ export type DaemonCommand =
       thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
     }
   | { id?: string; type: "open_session"; sessionId: string }
-  | { id?: string; type: "close_session"; sessionId: string };
+  | { id?: string; type: "close_session"; sessionId: string }
+  | MoveCommand;
+
+/**
+ * Daemon-to-daemon session move. The CLI drives both ends: fence + export on the
+ * source, begin/write/commit on the target, then retire (or unfence) on the source.
+ */
+export type MoveCommand =
+  | { id?: string; type: "move_fence"; sessionId: string; moveId: string; waitMs?: number }
+  | { id?: string; type: "move_export"; sessionId: string; moveId: string }
+  | { id?: string; type: "move_read"; moveId: string; offset: number; length: number }
+  | { id?: string; type: "move_retire"; sessionId: string; moveId: string; movedTo: string }
+  | { id?: string; type: "move_unfence"; sessionId: string; moveId?: string }
+  | { id?: string; type: "move_begin"; moveId: string; sessionId: string; size: number; sha256: string; cwd?: string }
+  | { id?: string; type: "move_write"; moveId: string; offset: number; data: string }
+  | { id?: string; type: "move_commit"; moveId: string }
+  | { id?: string; type: "move_abort"; moveId: string; sessionId: string };
 
 /**
  * Event delivery and control, all addressed to one session:
@@ -103,7 +121,19 @@ export type ServerMessage =
   | SessionResponse
   | { type: "event"; sessionId: string; seq: number; event: unknown };
 
-export const DAEMON_COMMANDS: ReadonlySet<string> = new Set(["list_sessions", "create_session", "open_session", "close_session"]);
+export const MOVE_COMMANDS: ReadonlySet<string> = new Set([
+  "move_fence",
+  "move_export",
+  "move_read",
+  "move_retire",
+  "move_unfence",
+  "move_begin",
+  "move_write",
+  "move_commit",
+  "move_abort",
+]);
+
+export const DAEMON_COMMANDS: ReadonlySet<string> = new Set(["list_sessions", "create_session", "open_session", "close_session", ...MOVE_COMMANDS]);
 
 export const CONTROL_COMMANDS: ReadonlySet<string> = new Set(["subscribe", "acquire_control", "release_control", "extension_ui_response"]);
 

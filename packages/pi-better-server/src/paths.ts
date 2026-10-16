@@ -36,3 +36,17 @@ export function ensureServerDir(serverDir: string): void {
   }
   if ((info.mode & 0o777) !== 0o700) chmodSync(serverDir, 0o700);
 }
+
+export function ownershipPathFor(serverDir: string): string {
+  return join(serverDir, "ownership.json");
+}
+
+/** Scratch space for in-flight moves: exported and received bundles. */
+export function movesDirFor(serverDir: string): string {
+  return join(serverDir, "moves");
+}
+
+/** Where transcripts of sessions imported from another daemon live. */
+export function importedDirFor(serverDir: string): string {
+  return join(serverDir, "imported");
+}

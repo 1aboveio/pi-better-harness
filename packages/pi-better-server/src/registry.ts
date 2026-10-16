@@ -5,10 +5,11 @@ import { readGitBranch } from "./git.ts";
 import { join } from "node:path";
 import { EventLog, type EventLogOptions } from "./event-log.ts";
 import { HostedSession } from "./hosted-session.ts";
-import { indexPathFor } from "./paths.ts";
+import { OwnershipStore } from "./core/ownership.ts";
+import { indexPathFor, ownershipPathFor } from "./paths.ts";
 import type { DaemonCommand, SessionStatus, SessionSummary } from "./protocol.ts";
 
-interface IndexEntry {
+export interface IndexEntry {
   sessionId: string;
   cwd: string;
   sessionFile: string;
@@ -50,16 +51,19 @@ export class SessionRegistry {
   private readonly resumeErrors = new Map<string, string>();
   private readonly log: (message: string) => void;
   private readonly options: SessionRegistryOptions;
+  /** Which sessions this daemon may write to; fenced and moved-away sessions are not resumed or opened. */
+  readonly ownership: OwnershipStore;
 
   constructor(options: SessionRegistryOptions) {
     this.options = options;
     this.log = options.log ?? (() => undefined);
+    this.ownership = new OwnershipStore(ownershipPathFor(options.serverDir));
     this.load();
   }
 
   /** Resume every session the index marks running, at its last persisted entry. */
   async resumeAll(): Promise<void> {
-    const running = [...this.entries.values()].filter((entry) => entry.status === "running");
+    const running = [...this.entries.values()].filter((entry) => entry.status === "running" && !this.ownership.blockedReason(entry.sessionId));
     await Promise.all(
       running.map(async (entry) => {
         try {
@@ -115,6 +119,8 @@ export class SessionRegistry {
   async open(sessionId: string): Promise<SessionSummary> {
     const entry = this.entries.get(sessionId);
     if (!entry) throw new Error(`Unknown session: ${sessionId}`);
+    const blocked = this.ownership.blockedReason(sessionId);
+    if (blocked) throw new Error(blocked);
     if (!this.live.has(sessionId)) {
       entry.status = "running";
       await this.host(entry);
@@ -135,6 +141,51 @@ export class SessionRegistry {
     entry.status = "closed";
     entry.updatedAt = new Date().toISOString();
     this.resumeErrors.delete(sessionId);
+    this.persist();
+  }
+
+  /** The index row for a session, or undefined. */
+  entry(sessionId: string): Readonly<IndexEntry> | undefined {
+    return this.entries.get(sessionId);
+  }
+
+  /** Release one live session without changing what the index says; the opposite of `open`. Used to fence it. */
+  async release(sessionId: string): Promise<void> {
+    const hosted = this.live.get(sessionId);
+    this.live.delete(sessionId);
+    this.pending.delete(sessionId);
+    if (hosted) await hosted.dispose({ abort: false });
+  }
+
+  /** Mark a session whose ownership went to another daemon as closed here. */
+  async retire(sessionId: string): Promise<void> {
+    await this.release(sessionId);
+    const entry = this.entries.get(sessionId);
+    if (entry) {
+      entry.status = "closed";
+      entry.updatedAt = new Date().toISOString();
+      this.persist();
+    }
+  }
+
+  /** Add (or replace a closed) session that arrived from another daemon, then host it. */
+  async adopt(entry: IndexEntry): Promise<SessionSummary> {
+    if (this.live.has(entry.sessionId)) throw new Error(`Session ${entry.sessionId} is already live here`);
+    this.entries.set(entry.sessionId, { ...entry, status: "running" });
+    try {
+      return await this.open(entry.sessionId);
+    } catch (error) {
+      this.entries.delete(entry.sessionId);
+      this.persist();
+      throw error;
+    }
+  }
+
+  /** Drop a session adopted by a move that is being rolled back. */
+  async forget(sessionId: string, previous: IndexEntry | undefined): Promise<void> {
+    await this.release(sessionId);
+    if (previous) this.entries.set(sessionId, previous);
+    else this.entries.delete(sessionId);
     this.persist();
   }
 
@@ -209,6 +260,7 @@ export class SessionRegistry {
     const model = hosted?.session.model;
     const name = hosted?.session.sessionName ?? entry.name;
     const branch = readGitBranch(entry.cwd);
+    const owned = this.ownership.get(entry.sessionId).state;
     return {
       sessionId: entry.sessionId,
       cwd: entry.cwd,
@@ -217,6 +269,7 @@ export class SessionRegistry {
       ...(name ? { name } : {}),
       ...(model ? { model: `${model.provider}/${model.id}` } : {}),
       ...(branch ? { branch } : {}),
+      ...(owned !== "owned" ? { ownership: owned } : {}),
       isStreaming: hosted?.isStreaming ?? false,
       lastSeq: hosted?.lastSeq ?? 0,
       hasController: hosted?.hasController ?? false,

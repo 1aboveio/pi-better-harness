@@ -4,7 +4,8 @@ import type { RpcCommand } from "@earendil-works/pi-coding-agent";
 import { ConnectionControl } from "./control.ts";
 import { checkHello } from "./handshake.ts";
 import { defaultServerDir, ensureServerDir, socketPathFor } from "./paths.ts";
-import { CONTROL_COMMANDS, DAEMON_COMMANDS, encodeLine, failure, LineDecoder, type ServerMessage } from "./protocol.ts";
+import { MoveService } from "./move/service.ts";
+import { CONTROL_COMMANDS, DAEMON_COMMANDS, encodeLine, failure, LineDecoder, MOVE_COMMANDS, type MoveCommand, type ServerMessage } from "./protocol.ts";
 import { SessionRegistry, type SessionRegistryOptions } from "./registry.ts";
 
 export interface DaemonOptions {
@@ -48,6 +49,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
   const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log });
   await registry.resumeAll();
+  const moves = new MoveService(registry, serverDir);
 
   const sockets = new Set<Socket>();
   const server: Server = createServer((socket) => {
@@ -82,6 +84,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           socket.end(); // an incompatible client gets the reason, then the door
           return;
         }
+        if (MOVE_COMMANDS.has(type)) return reply(await moves.handle(command as MoveCommand));
         if (DAEMON_COMMANDS.has(type)) {
           const sessionId = typeof command.sessionId === "string" ? command.sessionId : "";
           if (type === "list_sessions") return reply({ data: { sessions: registry.list() } });
@@ -107,6 +110,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
         const sessionId = typeof command.sessionId === "string" ? command.sessionId : "";
         if (!sessionId) {
           send(failure(id, type, "sessionId is required"));
+          return;
+        }
+        const blocked = registry.ownership.blockedReason(sessionId);
+        if (blocked) {
+          send(failure(id, type, blocked, sessionId));
           return;
         }
         const hosted = registry.get(sessionId);

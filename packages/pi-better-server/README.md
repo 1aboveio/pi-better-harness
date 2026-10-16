@@ -66,6 +66,7 @@ node src/remote-cli.ts new --host <h> --cwd <dir> "<prompt>"
 node src/remote-cli.ts steer <session> "<message>"
 node src/remote-cli.ts tail <session>
 node src/remote-cli.ts answer <session> [--request <id>] (--value <text> | --confirm | --deny | --cancel)
+node src/remote-cli.ts move <session> --to <ssh-alias> [--to-remote-dir <dir>] [--to-cwd <dir>]
 ```
 
 A session is named by id, unique id prefix, or name. `ls` shows status (running,
@@ -83,6 +84,53 @@ own module under `src/remote/`, registered in `src/remote-cli.ts`.
 
 Tests against a real host: `PI_REMOTE_TEST_HOST=<alias> PI_REMOTE_TEST_HOST_ROOT=<dir>
 npm test`, where the dir holds a Node and Pi as installed by `scripts/bootstrap-host.sh`.
+
+## Moving a session (`pi-remote move`)
+
+`pi-remote move <session> --to <ssh-alias>` moves a session and its git workspace to
+another daemon (`--host` picks the source daemon, default local; `--to-socket <path>`
+targets a daemon on this machine). Steps: wait for a safe boundary (no turn running;
+`--wait <s>`, default 30) -> fence the source -> bundle -> chunked transfer over the
+daemons' own sockets (the SSH forward carries it) -> target verifies the archive sha256
+and every manifest checksum, rebuilds the workspace, checks the rebuilt tree against the
+manifest's per-file digest, opens the session (the acknowledgement) -> source retires.
+The workspace lands under the target's `<server dir>/workspaces/<session id>/` unless
+`--to-cwd` is given.
+
+Ownership: each daemon keeps `ownership.json` (`owned` -> `fenced` -> `moved`, with an
+`epoch`). A fenced or moved session refuses every command and is not resumed on boot, so
+there is never a second live writer. Any failure before the acknowledgement aborts the
+target and unfences the source. If the target cannot be reached to learn whether it
+took the session, the source stays fenced and says so; `pi-remote move --abort <session>`
+unfences it once the target is known not to hold it. If the target owns the session and only
+retiring the source failed, the message prints `pi-remote move --retire <session> --move-id <id>
+[--moved-to <daemon-id>]`; never `--abort` in that state. A workspace holding an untracked nested
+git repository or a submodule is refused (commit/push it separately or move it out), never moved
+with it silently missing. Staged vs unstaged state is not
+preserved (dirty changes arrive unstaged); a committed `.env` stays in history.
+
+The agent-agnostic core lives in `src/core/` (no Pi imports): `bundle.ts`
+(createBundle / verifyBundle / materializeWorkspace / digestWorktree), `ownership.ts`,
+`transfer.ts`, `exclusions.ts`. `src/move/` is the Pi glue.
+
+Bundle format (`formatVersion: 1`), a tar of regular files:
+
+| member | content |
+| --- | --- |
+| `manifest.json` | below |
+| `git.bundle` | `git bundle` of the branch (or `HEAD`) plus the base ref |
+| `tracked.patch` | `git diff --binary HEAD` of dirty tracked files (optional) |
+| `untracked/<path>` | untracked, non-ignored files that pass the exclusion rules |
+| `session/<name>`, `state/<name>` | session transcript files and session-scoped harness state |
+
+Manifest: `{formatVersion, createdAt, agent:{kind,version,extensions}, session:{id,name?,model?,createdAt?,metadata?},
+ownership:{epoch,from,moveId}, repo:{remote?,branch?,head,baseRef?,baseSha?}, files:[{path,role,sha256,size}],
+symlinks:[{path,target}], excluded:[{path,reason:"credential"|"generated"}], worktree:[{path,sha256,mode}],
+totals:{files,bytes,worktreeFiles,worktreeBytes}}`. `files` checksums every archive member;
+`worktree` is the sha256 (and `644`/`755`/`symlink` mode) of every file the restored tree must hold.
+Never bundled: any file whose name starts with `.env` (`.env`, `.env.local`, `.envrc`, `.env-prod`, ...), `.npmrc`/`.netrc`/`.git-credentials`, `auth|credentials|secrets.*`, `id_*`, `*.pem|key|p12|pfx|jks`,
+`.ssh/.aws/.gnupg/.kube/.docker` content, `node_modules`, build output and caches, anything git ignores, and no
+Pi/`gh`/provider auth files (only the transcript and an index row are read from the agent dir).
 
 ## Crash recovery
 
