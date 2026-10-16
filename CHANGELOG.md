@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.29.2] - 2026-10-16
+
+### Fixed
+
+- Extend the active-tool shimmer through the entire visible tool name and detail text, preserving dim details between highlight passes and stable terminal layout.
+
+### Changed
+
+- Bundle Plan 0.9.1 with eligible completion counts and delayed hiding of canceled rows. Keep all other component versions unchanged.
+
+## [pi-better-plan@0.9.1] - 2026-10-16
+
+### Fixed
+
+- Exclude canceled workflow items from the completion-count denominator, recognizing both `canceled` and `cancelled` spellings.
+- Hide canceled rows 30 seconds after first observing cancellation without deleting workflow records. Preserve deadlines across session reloads and show reactivated items immediately.
+- Keep an open full-plan view synchronized with cancellation, expiry, and reactivation.
+
 ## [pi-better-harness@0.29.1] - 2026-10-15
 
 ### Changed
