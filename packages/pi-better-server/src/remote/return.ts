@@ -1,5 +1,6 @@
 import { isCodexHost, returnCodexThread } from "../codex/return.ts";
 import { returnSession } from "../detach/detach.ts";
+import { connectChecked } from "../move/preflight.ts";
 import type { Subcommand } from "./context.ts";
 
 export const command: Subcommand = {
@@ -21,7 +22,7 @@ export const command: Subcommand = {
       onProgress: (message: string) => context.stderr(`${message}\n`),
     };
     // A Codex host returns its thread through the Codex adapter; a Pi host through the Pi detach path.
-    const host = await context.connect();
+    const host = await connectChecked(() => context.connect(), context.host, isCodexHost);
     if (isCodexHost(host)) {
       const rebindProvider = typeof values["codex-provider"] === "string" ? values["codex-provider"] : undefined;
       const result = await returnCodexThread({ ...common, host, ...(rebindProvider ? { rebindProvider } : {}) });

@@ -136,8 +136,8 @@ export function assertChecks(checks: CheckResult[]): void {
   if (checks.some((check) => !check.ok)) throw new PreflightError(checks);
 }
 
-/** Connect to a daemon and refuse, with an install hint, when it is unreachable or runs other versions. */
-export async function connectChecked(connect: () => Promise<DaemonClient>, host?: string): Promise<DaemonClient> {
+/** Connect to a daemon and refuse, with an install hint, when it is unreachable or runs other versions. `skipVersionCheck` exempts a daemon that is not a Pi one (a Codex host). */
+export async function connectChecked(connect: () => Promise<DaemonClient>, host?: string, skipVersionCheck?: (client: DaemonClient) => boolean): Promise<DaemonClient> {
   let client: DaemonClient;
   try {
     client = await connect();
@@ -146,6 +146,7 @@ export async function connectChecked(connect: () => Promise<DaemonClient>, host?
     if (error instanceof HandshakeError) throw new PreflightError([{ name: "versions", ok: false, detail: message }], installHint(host));
     throw new PreflightError([{ name: "daemon", ok: false, detail: `no daemon answered${host ? ` on ${host}` : ""}: ${message}` }], installHint(host));
   }
+  if (skipVersionCheck?.(client)) return client;
   const remoteVersions = client.server?.extensionVersions ?? {};
   const wanted = SERVER_EXTENSION_VERSIONS["pi-better-server"];
   if (remoteVersions["pi-better-server"] !== wanted) {
