@@ -47,6 +47,14 @@ function harness(extensions) {
   };
   return {
     tools, commands, entries, ctx,
+    async context() {
+      let messages = [];
+      for (const handler of handlers.get("context") ?? []) {
+        const result = await handler({ type: "context", messages }, ctx);
+        if (result?.messages) messages = result.messages;
+      }
+      return messages.map(message => message.content).join("\n");
+    },
     async prompt(base = "Existing user and safety instructions.") {
       let systemPrompt = base;
       for (const handler of handlers.get("before_agent_start") ?? []) {
@@ -99,12 +107,13 @@ test("manual mode keeps the same execution policy while four host milestones rem
     const result = await h.tools.get("get_plan").execute("get", {}, undefined, undefined, h.ctx);
     assert.deepEqual(result.details.progress.readyIndices, [1, 2, 3, 4]);
     const manual = await h.prompt();
+    const manualContext = await h.context();
     await h.commands.get("subagents").handler("mode coordinator", h.ctx);
     const coordinator = await h.prompt();
-    const policyBlock = (prompt) => prompt.slice(prompt.indexOf(heading), prompt.indexOf("\n\nDelegation mode:"));
-    assert.equal(policyBlock(manual), policyBlock(coordinator), "delegation changes must not change execution concurrency");
-    assert.match(manual, /Delegation mode: manual/);
-    assert.match(coordinator, /Delegation mode: coordinator/);
+    const policyBlock = prompt => prompt.split("\n\nCurrent structured execution plan:")[0];
+    assert.equal(policyBlock(manual), policyBlock(coordinator), "settings changes must not rewrite the static execution policy");
+    assert.match(manualContext, /Delegation mode: manual/);
+    assert.match(await h.context(), /Delegation mode: coordinator/);
     await h.tools.get("update_plan").execute("start", {
       plan: steps.map((step) => hosts.includes(step.id) ? { ...step, status: "in_progress" } : step),
     }, undefined, undefined, h.ctx);

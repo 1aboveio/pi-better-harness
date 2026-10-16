@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.30.0] - 2026-10-16
+
+### Changed
+
+- Bundle Subagents 0.19.0 with model-visible live settings, read-only capacity inspection, and launch-time enforcement of cap changes. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.19.0] - 2026-10-16
+
+### Added
+
+- Add the read-only `subagent_settings` tool with effective delegation mode, concurrency limit, setting sources, a stable revision, and running/reserved/available slots.
+- Refresh one temporary settings context block before every model request, including continuations after mid-run settings changes, without accumulating snapshots in session history.
+
+### Fixed
+
+- Refresh cached configuration when saved settings change, preserving session overrides.
+- Recheck live capacity immediately before child creation so a lowered cap applies to launches still awaiting preparation, without stopping existing children.
+
 ## [pi-better-harness@0.29.2] - 2026-10-16
 
 ### Fixed
