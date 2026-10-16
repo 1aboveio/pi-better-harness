@@ -31,7 +31,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve, sep } from "node:path";
 import { exclusionReason } from "./exclusions.ts";
 
 export const BUNDLE_FORMAT_VERSION = 1;
@@ -368,10 +368,133 @@ export function verifyBundle(archive: string, workDir: string): ExtractedBundle 
       const reason = exclusionReason(entry.path);
       if (reason) throw new BundleError(`Bundle worktree lists ${reason} path ${entry.path}`);
     }
+    assertSafeWorkspaceEntries(manifest);
     return { manifest, dir };
   } catch (error) {
     rmSync(dir, { recursive: true, force: true });
     throw error;
+  }
+}
+
+/** Bundle paths and link targets use POSIX semantics, as the restoring filesystem does: '/' is the only separator. */
+function pathSegments(path: string): string[] {
+  return path.split("/").filter((segment) => segment !== "" && segment !== ".");
+}
+
+function hasGitSegment(path: string): boolean {
+  return pathSegments(path).some((segment) => segment.toLowerCase() === ".git");
+}
+
+/**
+ * Refuse, before anything is written, a bundle that could plant or redirect writes into `.git`
+ * (a hook, `core.fsmonitor`, ...) or outside the workspace: any `.git` path segment (case-insensitive)
+ * in files, worktree entries or symlinks; a backslash in any path or symlink target (a filename character on
+ * POSIX that other tools read as a separator); symlinks that are absolute, climb out of the workspace, or
+ * point into `.git`; and members whose path runs through another bundled symlink.
+ */
+export function assertSafeWorkspaceEntries(manifest: BundleManifest): void {
+  const workspacePath = (path: string, what: string): void => {
+    if (path.includes("\\")) throw new BundleError(`${what} contains a backslash: ${path}`);
+    if (isAbsolute(path) || path.startsWith("/") || /^[A-Za-z]:/.test(path) || pathSegments(path).includes("..")) {
+      throw new BundleError(`${what} escapes the workspace: ${path}`);
+    }
+    if (hasGitSegment(path)) throw new BundleError(`${what} writes into .git: ${path}`);
+  };
+  for (const file of manifest.files) {
+    if (file.role === "untracked") workspacePath(file.path.slice("untracked/".length), "Untracked path");
+  }
+  for (const entry of manifest.worktree) workspacePath(entry.path, "Worktree path");
+  const linkPaths = new Set<string>();
+  for (const link of manifest.symlinks) {
+    workspacePath(link.path, "Symlink path");
+    if (typeof link.target !== "string" || link.target === "") throw new BundleError(`Symlink ${link.path} has no target`);
+    if (link.target.includes("\\")) throw new BundleError(`Symlink ${link.path} target contains a backslash: ${link.target}`);
+    if (isAbsolute(link.target) || link.target.startsWith("/") || /^[A-Za-z]:/.test(link.target)) {
+      throw new BundleError(`Symlink ${link.path} has an absolute target: ${link.target}`);
+    }
+    const resolved = posix.normalize(posix.join(posix.dirname(pathSegments(link.path).join("/")), link.target));
+    if (resolved === ".." || resolved.startsWith("../")) throw new BundleError(`Symlink ${link.path} points outside the workspace: ${link.target}`);
+    if (hasGitSegment(resolved) || hasGitSegment(link.target)) throw new BundleError(`Symlink ${link.path} points into .git: ${link.target}`);
+    linkPaths.add(pathSegments(link.path).join("/"));
+  }
+  const members = [
+    ...manifest.files.filter((f) => f.role === "untracked").map((f) => f.path.slice("untracked/".length)),
+    ...manifest.symlinks.map((l) => l.path),
+  ];
+  for (const member of members) {
+    const parts = pathSegments(member);
+    for (let i = 1; i < parts.length; i++) {
+      if (linkPaths.has(parts.slice(0, i).join("/"))) throw new BundleError(`Bundle path ${member} runs through symlink ${parts.slice(0, i).join("/")}`);
+    }
+  }
+}
+
+/**
+ * Resolve `relative` (a path under `root`) segment by segment with lstat/readlink, following links the way the
+ * kernel does ('..' applies to the already-resolved prefix). Returns the segments of the final location relative
+ * to `root`, or null when it leaves `root` or a link target holds a backslash. A missing segment ends the walk:
+ * the rest is taken literally.
+ */
+function resolveInside(root: string, relative: string): string[] | null {
+  const resolved: string[] = [];
+  const pending = pathSegments(relative).reverse();
+  for (let hops = 0; pending.length > 0; ) {
+    const part = pending.pop()!;
+    if (part === ".") continue;
+    if (part === "..") {
+      if (resolved.length === 0) return null;
+      resolved.pop();
+      continue;
+    }
+    let target: string | undefined;
+    try {
+      const full = join(root, ...resolved, part);
+      if (lstatSync(full).isSymbolicLink()) target = readlinkSync(full);
+    } catch {
+      // missing: nothing further to follow
+    }
+    if (target === undefined) {
+      resolved.push(part);
+      continue;
+    }
+    if (++hops > 40) return null;
+    if (target.includes("\\") || isAbsolute(target) || target.startsWith("/") || /^[A-Za-z]:/.test(target)) return null;
+    pending.push(...pathSegments(target).reverse());
+  }
+  return resolved;
+}
+
+/**
+ * After the whole restore (checkout, patch, untracked files, symlinks) every symlink in the work tree must
+ * resolve, through any other links, to a place inside the workspace and outside `.git`.
+ */
+function assertSymlinksContained(dest: string, prefix = ""): void {
+  for (const entry of readdirSync(join(dest, prefix), { withFileTypes: true })) {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if (!prefix && entry.name.toLowerCase() === ".git") continue;
+      assertSymlinksContained(dest, relative);
+    } else if (entry.isSymbolicLink()) {
+      const final = resolveInside(dest, relative);
+      if (!final) throw new BundleError(`Symlink ${relative} points outside the workspace`);
+      if (final[0]?.toLowerCase() === ".git") throw new BundleError(`Symlink ${relative} points into .git`);
+    }
+  }
+}
+
+/** Refuse to write `relative` under `dest` when a parent directory already is a symlink (e.g. a tracked link into .git). */
+function assertNoSymlinkParent(dest: string, relative: string): void {
+  const parts = pathSegments(relative);
+  let current = dest;
+  for (const part of parts) {
+    current = join(current, part);
+    let info;
+    try {
+      info = lstatSync(current);
+    } catch {
+      return;
+    }
+    if (info.isSymbolicLink()) throw new BundleError(`Bundle path ${relative} runs through symlink ${part}`);
   }
 }
 
@@ -399,6 +522,7 @@ export interface MaterializeResult {
 export function materializeWorkspace(extracted: ExtractedBundle, destDir: string): MaterializeResult {
   const { manifest, dir } = extracted;
   const dest = resolve(destDir);
+  assertSafeWorkspaceEntries(manifest);
   if (existsSync(dest) && readdirSync(dest).length > 0) throw new BundleError(`Destination ${dest} already exists and is not empty`);
   const created = !existsSync(dest);
   mkdirSync(dest, { recursive: true });
@@ -420,6 +544,7 @@ export function materializeWorkspace(extracted: ExtractedBundle, destDir: string
       const relative = file.path.slice("untracked/".length);
       const target = join(dest, relative);
       if (!resolve(target).startsWith(dest + sep)) throw new BundleError(`Untracked path escapes the workspace: ${relative}`);
+      assertNoSymlinkParent(dest, relative);
       mkdirSync(dirname(target), { recursive: true });
       copyFileSync(join(dir, file.path), target);
       chmodSync(target, statSync(join(dir, file.path)).mode & 0o777);
@@ -427,10 +552,12 @@ export function materializeWorkspace(extracted: ExtractedBundle, destDir: string
     for (const link of manifest.symlinks) {
       const target = join(dest, link.path);
       if (!resolve(target).startsWith(dest + sep)) throw new BundleError(`Symlink path escapes the workspace: ${link.path}`);
+      assertNoSymlinkParent(dest, link.path);
       mkdirSync(dirname(target), { recursive: true });
       symlinkSync(link.target, target);
     }
 
+    assertSymlinksContained(dest);
     const restored = digestWorktree(dest);
     const mismatches = diffDigests(manifest.worktree, restored);
     if (mismatches.length > 0) {

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../src/client.ts";
-import { createBundle, digestWorktree, materializeWorkspace, verifyBundle } from "../src/core/bundle.ts";
+import { createBundle, digestWorktree, materializeWorkspace, sha256File, verifyBundle } from "../src/core/bundle.ts";
 import { MoveError, moveSession } from "../src/move/orchestrate.ts";
 import { gate, llmCalls, makeEnv, spawnDaemon, waitFor, type Env } from "./helpers.ts";
 import { remoteBackend } from "./remote-host.ts";
@@ -394,6 +395,251 @@ describe("session bundle", { concurrency: false }, () => {
     const dest = join(env.root, "dest");
     assert.throws(() => materializeWorkspace(extracted, dest), /differs from the bundle/);
     assert.equal(existsSync(dest), false, "a failed restore leaves no half-built workspace");
+  });
+
+  describe("refuses bundles that write into .git or outside the workspace", () => {
+    type Edit = (manifest: ReturnType<typeof bundleOf>, stage: string) => void;
+    /** Re-pack a valid bundle after `edit` changed its manifest or members; checksums are refreshed so only the path policy can refuse it. */
+    function forge(env: Env, edit: Edit): string {
+      const repo = makeRepo(env.root);
+      const archive = join(env.root, "bundle.tar");
+      bundleOf(repo, archive);
+      const stage = join(env.root, "forge");
+      mkdirSync(stage);
+      execFileSync("tar", ["-xf", archive, "-C", stage]);
+      const manifest = JSON.parse(readFileSync(join(stage, "manifest.json"), "utf8"));
+      edit(manifest, stage);
+      manifest.totals.files = manifest.files.length;
+      manifest.totals.bytes = manifest.files.reduce((sum: number, f: { size: number }) => sum + f.size, 0);
+      writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest));
+      const forged = join(env.root, "forged.tar");
+      execFileSync("tar", ["-cf", forged, "-C", stage, ...readdirSync(stage)]);
+      return forged;
+    }
+    function addUntracked(manifest: any, stage: string, path: string, content: string): void {
+      const full = join(stage, "untracked", path);
+      mkdirSync(dirname(full), { recursive: true });
+      writeFileSync(full, content);
+      manifest.files.push({ path: `untracked/${path}`, role: "untracked", sha256: sha256File(full), size: Buffer.byteLength(content) });
+      manifest.worktree.push({ path, sha256: sha256File(full), mode: "644" });
+    }
+    function expectRefused(env: Env, edit: Edit, pattern: RegExp, marker?: string): void {
+      const forged = forge(env, edit);
+      const dest = join(env.root, "dest");
+      assert.throws(() => {
+        const extracted = verifyBundle(forged, join(env.root, "w"));
+        materializeWorkspace(extracted, dest);
+      }, pattern);
+      assert.equal(existsSync(dest), false, "nothing is materialized");
+      if (marker) assert.equal(existsSync(marker), false, "the planted command never ran");
+    }
+    const fsmonitor = (marker: string) => `[core]\n\tfsmonitor = touch ${marker}\n`;
+
+    it("refuses untracked/.git/config carrying core.fsmonitor, in any case", () => {
+      for (const dir of [".git", ".GIT", ".Git"]) {
+        const env = makeEnv();
+        const marker = join(env.root, "pwned");
+        expectRefused(env, (m, stage) => addUntracked(m, stage, `${dir}/config`, fsmonitor(marker)), /writes into \.git/, marker);
+      }
+    });
+
+    it("refuses a .git segment nested deeper, and a .git entry only listed in the worktree", () => {
+      expectRefused(makeEnv(), (m, stage) => addUntracked(m, stage, "sub/.git/hooks/post-checkout", "#!/bin/sh\n"), /writes into \.git/);
+      expectRefused(makeEnv(), (m) => m.worktree.push({ path: ".git/config", sha256: "0".repeat(64), mode: "644" }), /writes into \.git/);
+    });
+
+    it("refuses a symlink whose path is under .git, so the fsmonitor config never lands", () => {
+      const env = makeEnv();
+      const marker = join(env.root, "pwned");
+      writeFileSync(join(env.root, "evil-config"), fsmonitor(marker));
+      expectRefused(env, (m) => m.symlinks.push({ path: ".git/config", target: join(env.root, "evil-config") }), /writes into \.git/, marker);
+      expectRefused(makeEnv(), (m) => m.symlinks.push({ path: ".GIT/hooks", target: "x" }), /writes into \.git/);
+    });
+
+    it("refuses symlinks that point into .git, outside the workspace, or at an absolute path", () => {
+      expectRefused(makeEnv(), (m) => m.symlinks.push({ path: "gl", target: ".git" }), /into \.git/);
+      expectRefused(makeEnv(), (m) => m.symlinks.push({ path: "d/gl", target: "../.GIT/hooks" }), /into \.git/);
+      expectRefused(makeEnv(), (m) => m.symlinks.push({ path: "esc", target: "../../outside" }), /outside the workspace/);
+      expectRefused(makeEnv(), (m) => m.symlinks.push({ path: "abs", target: "/etc" }), /absolute target/);
+    });
+
+    it("refuses a member written through another bundled symlink", () => {
+      expectRefused(
+        makeEnv(),
+        (m, stage) => {
+          m.symlinks.push({ path: "sneaky", target: "src" });
+          addUntracked(m, stage, "sneaky/x.txt", "x");
+        },
+        /runs through symlink/,
+      );
+    });
+
+    it("refuses an untracked file that would be written through a tracked symlink into .git", () => {
+      const env = makeEnv();
+      const repo = makeRepo(env.root);
+      symlinkSync(".git", join(repo, "gitlink"));
+      git(repo, "add", "gitlink");
+      git(repo, "commit", "-q", "-m", "link");
+      const archive = join(env.root, "bundle.tar");
+      bundleOf(repo, archive);
+      const stage = join(env.root, "forge");
+      mkdirSync(stage);
+      execFileSync("tar", ["-xf", archive, "-C", stage]);
+      const manifest = JSON.parse(readFileSync(join(stage, "manifest.json"), "utf8"));
+      const marker = join(env.root, "pwned");
+      addUntracked(manifest, stage, "gitlink/config", fsmonitor(marker));
+      manifest.totals.files = manifest.files.length;
+      manifest.totals.bytes = manifest.files.reduce((sum: number, f: { size: number }) => sum + f.size, 0);
+      writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest));
+      const forged = join(env.root, "forged.tar");
+      execFileSync("tar", ["-cf", forged, "-C", stage, ...readdirSync(stage)]);
+      const dest = join(env.root, "dest");
+      assert.throws(() => materializeWorkspace(verifyBundle(forged, join(env.root, "w")), dest), /runs through symlink gitlink/);
+      assert.equal(existsSync(dest), false);
+      assert.equal(existsSync(marker), false);
+    });
+
+    it("refuses an untracked file that replaces a tracked symlink pointing into .git/config", () => {
+      const env = makeEnv();
+      const repo = makeRepo(env.root);
+      symlinkSync(".git/config", join(repo, "cfg"));
+      git(repo, "add", "cfg");
+      git(repo, "commit", "-q", "-m", "cfg link");
+      const archive = join(env.root, "bundle.tar");
+      bundleOf(repo, archive);
+      const stage = join(env.root, "forge");
+      mkdirSync(stage);
+      execFileSync("tar", ["-xf", archive, "-C", stage]);
+      const manifest = JSON.parse(readFileSync(join(stage, "manifest.json"), "utf8"));
+      const marker = join(env.root, "pwned");
+      addUntracked(manifest, stage, "cfg", fsmonitor(marker));
+      manifest.totals.files = manifest.files.length;
+      manifest.totals.bytes = manifest.files.reduce((sum: number, f: { size: number }) => sum + f.size, 0);
+      writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest));
+      const forged = join(env.root, "forged.tar");
+      execFileSync("tar", ["-cf", forged, "-C", stage, ...readdirSync(stage)]);
+      const dest = join(env.root, "dest");
+      assert.throws(() => materializeWorkspace(verifyBundle(forged, join(env.root, "w")), dest), /runs through symlink cfg/);
+      assert.equal(existsSync(dest), false);
+      assert.equal(existsSync(marker), false);
+    });
+
+    it("refuses symlinks that only escape once other links are followed (b -> '.', a -> 'b/..')", () => {
+      expectRefused(
+        makeEnv(),
+        (m) => {
+          m.symlinks.push({ path: "b", target: "." }, { path: "a", target: "b/.." });
+        },
+        /points outside the workspace/,
+      );
+    });
+
+    /** Commit `links` (name -> target) into the bundled history, then forge the bundle with `edit`. */
+    function expectRefusedWithTracked(links: Record<string, string>, edit: Edit, pattern: RegExp, marker?: string): void {
+      const env = makeEnv();
+      const repo = makeRepo(env.root);
+      for (const [name, target] of Object.entries(links)) {
+        symlinkSync(target, join(repo, name));
+        git(repo, "add", name);
+      }
+      git(repo, "commit", "-q", "-m", "links");
+      const archive = join(env.root, "bundle.tar");
+      bundleOf(repo, archive);
+      const stage = join(env.root, "forge");
+      mkdirSync(stage);
+      execFileSync("tar", ["-xf", archive, "-C", stage]);
+      const manifest = JSON.parse(readFileSync(join(stage, "manifest.json"), "utf8"));
+      edit(manifest, stage);
+      manifest.totals.files = manifest.files.length;
+      manifest.totals.bytes = manifest.files.reduce((sum: number, f: { size: number }) => sum + f.size, 0);
+      writeFileSync(join(stage, "manifest.json"), JSON.stringify(manifest));
+      const forged = join(env.root, "forged.tar");
+      execFileSync("tar", ["-cf", forged, "-C", stage, ...readdirSync(stage)]);
+      const dest = join(env.root, "dest");
+      assert.throws(() => materializeWorkspace(verifyBundle(forged, join(env.root, "w")), dest), pattern);
+      assert.equal(existsSync(dest), false, "nothing is materialized");
+      if (marker) assert.equal(existsSync(marker), false);
+    }
+
+    it("refuses a manifest symlink that reaches .git through a tracked symlink (t -> .git, u -> t/hooks)", () => {
+      expectRefusedWithTracked({ t: ".git" }, (m) => m.symlinks.push({ path: "u", target: "t/hooks" }), /points into \.git/);
+    });
+
+    it("refuses tracked symlinks into .git or out of the workspace, and one added by tracked.patch", () => {
+      expectRefusedWithTracked({ t: ".git" }, () => {}, /points into \.git/);
+      expectRefusedWithTracked({ up: "../.." }, () => {}, /points outside the workspace/);
+      expectRefusedWithTracked(
+        {},
+        (m, stage) => {
+          const patchPath = join(stage, "tracked.patch");
+          const patch = `${readFileSync(patchPath, "utf8")}diff --git a/hk b/hk\nnew file mode 120000\n--- /dev/null\n+++ b/hk\n@@ -0,0 +1 @@\n+.git/hooks\n\\ No newline at end of file\n`;
+          writeFileSync(patchPath, patch);
+          const entry = m.files.find((f: { path: string }) => f.path === "tracked.patch")!;
+          entry.sha256 = sha256File(patchPath);
+          entry.size = Buffer.byteLength(patch);
+        },
+        /points into \.git/,
+      );
+    });
+
+    const linkDigest = (target: string) => createHash("sha256").update(target).digest("hex");
+    /** A manifest symlink plus its worktree entry, so the restored digest matches and only the path policy can refuse it. */
+    function addLink(manifest: any, path: string, target: string): void {
+      manifest.symlinks.push({ path, target });
+      manifest.worktree.push({ path, sha256: linkDigest(target), mode: "symlink" });
+    }
+    // On POSIX '\' is an ordinary filename character: `a\b/../..` names a directory `a\b`, so two '..' climb out.
+    it("refuses a backslash in an untracked path even when it makes a real directory a link climbs out of", () => {
+      expectRefused(
+        makeEnv(),
+        (m, stage) => {
+          addUntracked(m, stage, "a\\b/f", "x");
+          addLink(m, "x", "a\\b/../..");
+        },
+        /backslash/,
+      );
+    });
+
+    it("refuses a backslash in a worktree entry", () => {
+      expectRefused(makeEnv(), (m) => m.worktree.push({ path: "a\\b", sha256: "0".repeat(64), mode: "644" }), /backslash/);
+    });
+
+    it("refuses a backslash in a symlink path", () => {
+      expectRefused(makeEnv(), (m) => addLink(m, "a\\b", "src"), /backslash/);
+    });
+
+    it("refuses a backslash in a symlink target", () => {
+      expectRefused(makeEnv(), (m) => addLink(m, "x", "a\\b/../.."), /backslash/);
+    });
+
+    it("refuses a tracked symlink whose target holds a backslash", () => {
+      expectRefusedWithTracked({ x: "a\\b/../.." }, () => {}, /points outside the workspace/);
+    });
+
+    it("refuses a patch-created symlink whose target holds a backslash", () => {
+      expectRefusedWithTracked(
+        {},
+        (m, stage) => {
+          const patchPath = join(stage, "tracked.patch");
+          const patch = `${readFileSync(patchPath, "utf8")}diff --git a/hk b/hk\nnew file mode 120000\n--- /dev/null\n+++ b/hk\n@@ -0,0 +1 @@\n+a\\b/../..\n\\ No newline at end of file\n`;
+          writeFileSync(patchPath, patch);
+          const entry = m.files.find((f: { path: string }) => f.path === "tracked.patch")!;
+          entry.sha256 = sha256File(patchPath);
+          entry.size = Buffer.byteLength(patch);
+          m.worktree.push({ path: "hk", sha256: linkDigest("a\\b/../.."), mode: "symlink" });
+        },
+        /points outside the workspace/,
+      );
+    });
+
+    it("still restores an ordinary bundle, including a relative symlink", () => {
+      const env = makeEnv();
+      const repo = makeRepo(env.root);
+      const archive = join(env.root, "bundle.tar");
+      bundleOf(repo, archive);
+      const result = materializeWorkspace(verifyBundle(archive, join(env.root, "w")), join(env.root, "dest"));
+      assert.ok(result.files > 0);
+    });
   });
 });
 
