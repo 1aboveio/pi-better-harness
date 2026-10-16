@@ -72,7 +72,8 @@ async function failureOfTurn(client: CodexAppServerClient, threadId: string, tur
 
 /**
  * Deliver `text`. Mid-turn it steers the running turn; idle it starts a turn. A turn
- * that ends (or starts) between the status read and the call is retried once the other way.
+ * that ends (or starts) between the status read and the call is delivered the other way: the running
+ * turn is looked up right before `turn/start`, and a steer that finds its turn gone is retried as a start.
  */
 export async function deliverToThread(adapter: CodexMoveAdapter, runtime: CodexRuntime, threadId: string, text: string): Promise<DeliveryResult> {
   assertDrivable(adapter, runtime, threadId);
@@ -80,7 +81,8 @@ export async function deliverToThread(adapter: CodexMoveAdapter, runtime: CodexR
   const status = await threadStatus(runtime, threadId);
   if (status === "notLoaded") await client.call("thread/resume", { threadId, excludeTurns: true });
   for (let attempt = 0; attempt < 3; attempt++) {
-    const turnId = status === "active" || attempt > 0 ? await activeTurnId(runtime, threadId) : undefined;
+    // Look for a running turn even when the status read said idle: another client may have started one since.
+    const turnId = await activeTurnId(runtime, threadId);
     if (turnId) {
       try {
         await client.call("turn/steer", { threadId, expectedTurnId: turnId, input: userInput(text) });
