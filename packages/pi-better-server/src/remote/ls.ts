@@ -10,10 +10,18 @@ export function relativeTime(iso: string, now = Date.now()): string {
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
+/** A failed turn shows its error where the status is, so a thread that cannot run is not mistaken for an idle one. */
+function statusCell(session: SessionSummary): string {
+  const status = displayStatus(session);
+  if (status !== "error" || !session.lastError) return status;
+  const oneLine = session.lastError.replace(/\s+/g, " ").trim();
+  return `error: ${oneLine.length > 90 ? `${oneLine.slice(0, 89)}…` : oneLine}`;
+}
+
 export function formatTable(sessions: SessionSummary[], now = Date.now()): string {
   const rows = [
     ["ID", "STATUS", "LAST ACTIVITY", "BRANCH", "CWD", "NAME"],
-    ...sessions.map((s) => [s.sessionId.slice(0, 8), displayStatus(s), relativeTime(s.updatedAt, now), s.branch ?? "-", s.cwd, s.name ?? ""]),
+    ...sessions.map((s) => [s.sessionId.slice(0, 8), statusCell(s), relativeTime(s.updatedAt, now), s.branch ?? "-", s.cwd, s.name ?? ""]),
   ];
   const widths = rows[0]!.map((_, column) => Math.max(...rows.map((row) => row[column]!.length)));
   return rows.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join("  ").trimEnd()).join("\n") + "\n";

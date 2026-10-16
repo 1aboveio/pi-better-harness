@@ -78,12 +78,18 @@ export function readRolloutMeta(file: string): RolloutMeta {
   };
 }
 
-const REWRITTEN_TYPES = new Set(["session_meta", "turn_context"]);
+/** The object holding the workspace fields in a record, if it is one that does. */
+function workspaceHolder(record: { type?: string; payload?: Record<string, any> }): Record<string, unknown> | undefined {
+  if (record.type === "session_meta" || record.type === "turn_context") return record.payload;
+  // The app-server resumes a thread with the last settings it recorded, and those name the workspace too.
+  if (record.type === "event_msg" && record.payload?.type === "thread_settings_applied") return record.payload.thread_settings;
+  return undefined;
+}
 
 /**
  * Point a rollout at the workspace's new location. Only the structured working
  * directory fields (`cwd`, `runtime_workspace_roots`, `workspace_roots`) of the
- * session_meta and turn_context records change; conversation content stays byte for
+ * session_meta, turn_context and thread_settings_applied records change; conversation content stays byte for
  * byte what was said, even where it mentions the old path.
  */
 export function rewriteRolloutCwd(text: string, from: string, to: string): { text: string; changed: number } {
@@ -92,19 +98,45 @@ export function rewriteRolloutCwd(text: string, from: string, to: string): { tex
   const swap = (value: unknown): unknown => (value === from ? ((changed += 1), to) : value);
   const lines = text.split("\n").map((line) => {
     if (!line || !line.includes(from)) return line;
-    let record: { type?: string; payload?: Record<string, unknown> };
+    let record: { type?: string; payload?: Record<string, any> };
     try {
       record = JSON.parse(line);
     } catch {
       return line;
     }
-    if (!record.type || !REWRITTEN_TYPES.has(record.type) || !record.payload) return line;
-    const payload = record.payload;
-    payload.cwd = swap(payload.cwd);
+    const holder = workspaceHolder(record);
+    if (!holder) return line;
+    holder.cwd = swap(holder.cwd);
     for (const key of ["runtime_workspace_roots", "workspace_roots"]) {
-      const roots = payload[key];
-      if (Array.isArray(roots)) payload[key] = roots.map(swap);
+      const roots = holder[key];
+      if (Array.isArray(roots)) holder[key] = roots.map(swap);
     }
+    return JSON.stringify(record);
+  });
+  return { text: lines.join("\n"), changed };
+}
+
+/**
+ * Bind a rollout to another model provider. Two records carry it: `model_provider` of session_meta, and
+ * `model_provider_id` of every `thread_settings_applied` event (the app-server resumes a thread with the last
+ * settings it recorded, so leaving them behind would keep the old provider). Everything else, including the
+ * turns already recorded under the old provider, stays byte for byte.
+ */
+export function rewriteRolloutProvider(text: string, provider: string): { text: string; changed: number } {
+  let changed = 0;
+  const lines = text.split("\n").map((line) => {
+    if (!line.includes("model_provider")) return line;
+    let record: { type?: string; payload?: Record<string, any> };
+    try {
+      record = JSON.parse(line);
+    } catch {
+      return line;
+    }
+    const holder = record.type === "session_meta" ? record.payload : record.type === "event_msg" && record.payload?.type === "thread_settings_applied" ? record.payload.thread_settings : undefined;
+    const key = record.type === "session_meta" ? "model_provider" : "model_provider_id";
+    if (!holder || typeof holder[key] !== "string" || holder[key] === provider) return line;
+    holder[key] = provider;
+    changed += 1;
     return JSON.stringify(record);
   });
   return { text: lines.join("\n"), changed };

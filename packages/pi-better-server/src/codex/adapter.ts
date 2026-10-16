@@ -9,12 +9,13 @@
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import type { AgentMoveAdapter, ImportRequest, MovePreflightContext, SessionBundleSpec } from "../core/adapter.ts";
+import type { AgentMoveAdapter, ImportRequest, MovePreflightContext, ReadinessReport, ReadinessRequest, SessionBundleSpec } from "../core/adapter.ts";
 import type { BundleManifest } from "../core/bundle.ts";
 import { OwnershipStore } from "../core/ownership.ts";
 import { ownershipPathFor } from "../paths.ts";
 import { SERVER_EXTENSION_VERSIONS } from "../handshake.ts";
-import { readRolloutMeta, readThreadName, rewriteRolloutCwd } from "./rollout.ts";
+import { checkHostProvider } from "./provider.ts";
+import { readRolloutMeta, readThreadName, rewriteRolloutCwd, rewriteRolloutProvider } from "./rollout.ts";
 import type { CodexRuntime } from "./runtime.ts";
 
 export const CODEX_AGENT_KIND = "codex";
@@ -24,6 +25,8 @@ interface ThreadState {
   /** Rollout path relative to the sessions directory, so the target files it in the same place. */
   rolloutRelPath: string;
   originalCwd: string;
+  /** `session_meta.model_provider` on the source: the provider the thread's turns ran under. */
+  modelProvider?: string;
   threadName?: string;
 }
 
@@ -46,6 +49,28 @@ export class CodexMoveAdapter implements AgentMoveAdapter {
     this.runtime = runtime;
     this.serverDir = serverDir;
     this.ownership = new OwnershipStore(ownershipPathFor(serverDir));
+  }
+
+  /**
+   * Receiver checks before anything is fenced: can this host's Codex run the thread under its provider (or the
+   * one the move rebinds it to)? With a `sessionId`, also describes that thread, so the sender can ask the
+   * source which provider the thread has before asking the target.
+   */
+  async readiness(request: ReadinessRequest): Promise<ReadinessReport> {
+    this.runtime.assertPinned();
+    const checks: ReadinessReport["checks"] = [];
+    const wanted = request.rebindProvider ?? request.modelProvider;
+    if (wanted) {
+      const verdict = await checkHostProvider(await this.runtime.client(), wanted);
+      checks.push({ name: "provider-auth", ok: verdict.ok, detail: verdict.detail });
+    }
+    if (!request.sessionId) return { checks };
+    const blocked = this.ownership.blockedReason(request.sessionId);
+    if (blocked) throw new Error(blocked);
+    const file = this.runtime.rolloutPath(request.sessionId) ?? this.runtime.archivedRolloutPath(request.sessionId);
+    if (!file) throw new Error(`Unknown Codex thread: ${request.sessionId}`);
+    const meta = readRolloutMeta(file);
+    return { checks, session: { cwd: meta.cwd, cwdName: basename(meta.cwd), ...(meta.modelProvider ? { modelProvider: meta.modelProvider } : {}) } };
   }
 
   // ---- source side ----
@@ -135,7 +160,7 @@ export class CodexMoveAdapter implements AgentMoveAdapter {
     if (!file) throw new Error(`Unknown Codex thread: ${sessionId}`);
     const meta = readRolloutMeta(file);
     const name = readThreadName(this.runtime.home, sessionId);
-    const state: ThreadState = { rolloutRelPath: this.sessionsRelPath(file), originalCwd: meta.cwd, ...(name ? { threadName: name } : {}) };
+    const state: ThreadState = { rolloutRelPath: this.sessionsRelPath(file), originalCwd: meta.cwd, ...(meta.modelProvider ? { modelProvider: meta.modelProvider } : {}), ...(name ? { threadName: name } : {}) };
     return {
       cwd: meta.cwd,
       agent: { kind: this.kind, version: this.runtime.version(), extensions: { ...SERVER_EXTENSION_VERSIONS } },
@@ -205,6 +230,13 @@ export class CodexMoveAdapter implements AgentMoveAdapter {
     if (relative(sessionsDir, target).startsWith("..")) throw new Error(`Bundle rollout path escapes the sessions directory: ${state.rolloutRelPath}`);
 
     const client = await this.runtime.client();
+    // The provider the thread will run under here. Checked before the rollout is written: a host that cannot use it
+    // would accept the move and then fail every turn with an authentication error.
+    const provider = request.rebindProvider ?? state.modelProvider;
+    if (provider) {
+      const verdict = await checkHostProvider(client, provider);
+      if (!verdict.ok) throw new Error(verdict.detail);
+    }
     // A copy from an earlier visit (the tombstone of a move away) is dropped first, with the app-server's index row for it:
     // the row keeps the old cwd, and it is only rebuilt from a rollout the app-server has not seen. snapshot() kept a copy
     // of the file, so a failed move puts it back.
@@ -216,16 +248,18 @@ export class CodexMoveAdapter implements AgentMoveAdapter {
     const destination = target;
 
     const original = readFileSync(join(request.extractedDir, rolloutFile.path), "utf8");
-    const rewritten = rewriteRolloutCwd(original, state.originalCwd, request.cwd).text;
+    const moved = rewriteRolloutCwd(original, state.originalCwd, request.cwd).text;
+    const rewritten = request.rebindProvider ? rewriteRolloutProvider(moved, request.rebindProvider).text : moved;
     mkdirSync(dirname(destination), { recursive: true });
     const temp = `${destination}.${process.pid}.tmp`;
     writeFileSync(temp, rewritten, { mode: 0o600 });
     renameSync(temp, destination);
 
     // The app-server indexes the rollout when it first reads it. Read, then load the thread.
-    const { thread } = await client.call<{ thread: { id: string; cwd: string } }>("thread/read", { threadId: sessionId, includeTurns: false });
+    const { thread } = await client.call<{ thread: { id: string; cwd: string; modelProvider?: string } }>("thread/read", { threadId: sessionId, includeTurns: false });
     if (thread.id !== sessionId) throw new Error(`Imported rollout reads back as thread ${thread.id}, not ${sessionId}`);
     if (thread.cwd !== request.cwd) throw new Error(`Imported thread points at ${thread.cwd}, expected ${request.cwd}`);
+    if (request.rebindProvider && thread.modelProvider !== request.rebindProvider) throw new Error(`Imported thread runs under provider "${thread.modelProvider}", expected "${request.rebindProvider}"`);
     const turns = await client.call<{ data: unknown[] }>("thread/turns/list", { threadId: sessionId, limit: 1 });
     if (!Array.isArray(turns.data)) throw new Error("Imported thread has no readable history");
     await client.call("thread/resume", { threadId: sessionId, excludeTurns: true });

@@ -30,6 +30,8 @@ export interface ImportRequest {
   extractedDir: string;
   /** The rebuilt workspace. */
   cwd: string;
+  /** Agent-specific: bind the imported session to this model provider instead of the one it had (`move_begin`'s `rebindProvider`). */
+  rebindProvider?: string;
 }
 
 /** A `move_preflight` request and what the adapter answers; the core adds the daemon id. Nothing is changed. */
