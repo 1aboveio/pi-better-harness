@@ -147,13 +147,28 @@ export class HostedSession {
     if (options.abort) await this.session.abort().catch(() => undefined);
     this.unsubscribe();
     this.listeners.clear();
+    this.log.flush();
     this.session.dispose();
+  }
+
+  private async queueForStartingTurn(id: string | undefined, command: string, message: string, options: { images?: RpcCommandImages; streamingBehavior?: "steer" | "followUp" }): Promise<RpcResponse> {
+    try {
+      const outcome = await steerOrFollowUp(this.session, options.streamingBehavior === "followUp" ? "followUp" : "steer", message, options.images);
+      return ok(id, command, dispositionData(outcome));
+    } catch (error) {
+      return fail(id, command, error instanceof Error ? error.message : String(error));
+    }
   }
 
   /** Start a turn and answer once preflight accepted it, as Pi's RPC mode does. */
   private startPrompt(id: string | undefined, command: string, message: string, options: { images?: RpcCommandImages; streamingBehavior?: "steer" | "followUp" }): Promise<RpcResponse> {
     if (this.turnActive && !options.streamingBehavior) {
       return Promise.resolve(fail(id, command, "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message."));
+    }
+    if (this.turnActive && options.streamingBehavior && !this.session.isStreaming) {
+      // The turn is still in Pi's preflight, where `session.prompt` would see `isStreaming` false and start a second run.
+      // Queue the message for the starting turn instead, as a steer/follow_up command would.
+      return this.queueForStartingTurn(id, command, message, options);
     }
     this.promptsInFlight++;
     return new Promise<RpcResponse>((resolve) => {
@@ -166,6 +181,7 @@ export class HostedSession {
         this.releaseOnAgentEnd.delete(release);
         this.promptsInFlight--;
         this.onActivity();
+        this.runStrandedQueue();
       };
       this.session
         .prompt(message, {
@@ -215,6 +231,49 @@ export class HostedSession {
           },
         );
     });
+  }
+
+  /**
+   * A message queued for a starting turn is delivered by that turn or refused. When the starting prompt
+   * ended without a run (extension command, handled input, error before the turn, settle window) and
+   * messages are still queued, nothing would run them: start a turn for them now, or report them refused.
+   */
+  private runStrandedQueue(): void {
+    const session = this.session;
+    if (this.promptsInFlight > 0 || session.isStreaming || session.pendingMessageCount === 0) return;
+    this.promptsInFlight++;
+    const refuse = (error: unknown, messages: string[]) => {
+      const text = error instanceof Error ? error.message : String(error);
+      this.publish({ type: "prompt_error", command: "queued", error: `queued message did not run: ${text}`, messages } as unknown as AgentSessionEvent);
+    };
+    const run = async () => {
+      // The first queued message starts the turn through session.prompt (not agent.continue), so it runs in Pi's
+      // run lifecycle: isStreaming while it runs, post-run retry/compaction, and agent_settled after it.
+      const { steering, followUp } = session.clearQueue();
+      const [first, ...rest] = [...steering, ...followUp];
+      if (first === undefined) return;
+      try {
+        await session.prompt(first, {
+          source: "rpc",
+          preflightResult: (outcome: unknown) => {
+            if (outcome === false) return;
+            for (const text of rest) steerOrFollowUp(session, "followUp", text, undefined).catch((error: unknown) => refuse(error, [text]));
+          },
+        });
+      } catch (error) {
+        refuse(error, [first, ...rest]);
+      }
+    };
+    run()
+      .catch((error: unknown) => {
+        const left = session.clearQueue();
+        refuse(error, [...left.steering, ...left.followUp]);
+      })
+      .finally(() => {
+        this.promptsInFlight--;
+        this.onActivity();
+        this.runStrandedQueue();
+      });
   }
 
   async handle(command: RpcCommand): Promise<RpcResponse> {

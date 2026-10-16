@@ -384,4 +384,88 @@ describe("steer", () => {
     assert.ok(messages.some((m: any) => m.role === "user" && JSON.stringify(m.content).includes("change course")), "steer is in the session history");
     assert.equal((await c.request({ type: "get_state", sessionId: id })).data.pendingMessageCount, 0);
   });
+
+  for (const streamingBehavior of ["steer", "followUp"] as const) {
+    it(`a prompt with streamingBehavior ${streamingBehavior} sent during preflight is queued for the starting turn, not run as a second turn`, async () => {
+      const env = makeEnv();
+      const { client } = await inProcess(env);
+      const c = await client();
+      const id = await createSession(c, env);
+      const text = `queued ${streamingBehavior}`;
+      c.sendRaw(`${JSON.stringify({ id: "p1", type: "prompt", sessionId: id, message: "tool g3" })}\n${JSON.stringify({ id: "p2", type: "prompt", sessionId: id, message: text, streamingBehavior })}\n`);
+      const responses = await Promise.all(["p1", "p2"].map((rid) => c.responseFor(rid)));
+      for (const r of responses) assert.equal(r.success, true, JSON.stringify(r));
+      // A steer lands before the first LLM call, so the tool may never run; release it if it does.
+      await waitFor("turn done", async () => {
+        if (gate(env, "g3").started()) gate(env, "g3").release();
+        return c.events.some((e) => e.event?.type === "agent_end") && (await isIdle(c, id));
+      });
+      assert.ok(llmCalls(env).some((call) => call.messages.some((m) => m.role === "user" && m.text === text)), "an LLM call saw the queued prompt");
+      assert.ok(!c.events.some((e) => e.event?.type === "prompt_error"), "no second run failed");
+      assert.equal(c.events.filter((e) => e.event?.type === "agent_start").length, 1, "one turn, not two");
+      const messages = (await c.request({ type: "get_messages", sessionId: id })).data.messages;
+      assert.equal(messages.filter((m: any) => m.role === "user" && JSON.stringify(m.content).includes(text)).length, 1, "delivered exactly once");
+    });
+  }
+
+  // The starting prompt ends without a turn (extension command, handled input): a queued message must still run.
+  for (const [label, starter, gateName, queued] of [
+    ["an extension command", "/slow g5", "g5", { type: "prompt", streamingBehavior: "steer" }],
+    ["an extension command (followUp)", "/slow g6", "g6", { type: "prompt", streamingBehavior: "followUp" }],
+    ["an extension command (steer command)", "/slow g7", "g7", { type: "steer" }],
+    ["a handled input", "hold g8", "g8", { type: "prompt", streamingBehavior: "steer" }],
+  ] as const) {
+    it(`a message queued behind a starting prompt that ends as ${label} runs instead of being stranded`, async () => {
+      const env = makeEnv();
+      const { client } = await inProcess(env);
+      const c = await client();
+      const id = await createSession(c, env);
+      c.sendRaw(`${JSON.stringify({ id: "p1", type: "prompt", sessionId: id, message: starter })}\n${JSON.stringify({ id: "p2", sessionId: id, message: "stranded?", ...queued })}\n`);
+      const queuedResponse = await c.responseFor("p2");
+      assert.equal(queuedResponse.success, true, JSON.stringify(queuedResponse));
+      await waitFor("starter held", () => gate(env, gateName).started());
+      gate(env, gateName).release();
+      await waitFor("queued message ran", async () => (await assistantTexts(c, id)).includes("echo:stranded?") && (await isIdle(c, id)));
+      assert.equal(llmCalls(env).length, 1);
+      assert.equal((await c.request({ type: "get_state", sessionId: id })).data.pendingMessageCount, 0);
+    });
+  }
+
+  it("a stranded queued message in a session with history runs in Pi's run lifecycle (streaming, then agent_settled)", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    assert.equal((await c.request({ type: "prompt", sessionId: id, message: "first" })).success, true);
+    await waitFor("history", async () => (await assistantTexts(c, id)).includes("echo:first") && (await isIdle(c, id)));
+    c.sendRaw(`${JSON.stringify({ id: "p1", type: "prompt", sessionId: id, message: "/slow g9" })}\n${JSON.stringify({ id: "p2", type: "prompt", sessionId: id, message: "tool g10", streamingBehavior: "steer" })}\n`);
+    assert.equal((await c.responseFor("p2")).success, true);
+    await waitFor("starter held", () => gate(env, "g9").started());
+    gate(env, "g9").release();
+    await waitFor("queued turn held", () => gate(env, "g10").started());
+    assert.equal((await c.request({ type: "get_state", sessionId: id })).data.isStreaming, true, "the queued turn reports streaming");
+    gate(env, "g10").release();
+    await waitFor("queued turn done", async () => (await assistantTexts(c, id)).includes("tool-done:gate:g10") && (await isIdle(c, id)));
+    await waitFor("agent_settled after each turn", () => c.events.filter((e) => e.event?.type === "agent_settled").length === 2);
+    const types = c.events.map((e) => e.event?.type);
+    assert.equal(types.lastIndexOf("agent_settled") > types.lastIndexOf("agent_end"), true, "agent_settled follows the queued turn");
+  });
+
+  it("a second client steering while the first client's turn is still starting is queued for that turn", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const a = await client();
+    const b = await client();
+    const id = await createSession(a, env);
+    a.sendRaw(`${JSON.stringify({ id: "p1", type: "prompt", sessionId: id, message: "tool g4" })}\n`);
+    b.sendRaw(`${JSON.stringify({ id: "s1", type: "steer", sessionId: id, message: "from b" })}\n`);
+    const [prompted, steered] = await Promise.all([a.responseFor("p1"), b.responseFor("s1")]);
+    assert.equal(prompted.success, true, JSON.stringify(prompted));
+    assert.equal(steered.success, true, JSON.stringify(steered));
+    await waitFor("tool to start", () => gate(env, "g4").started());
+    gate(env, "g4").release();
+    await waitFor("turn done", async () => (await isIdle(a, id)) && llmCalls(env).length >= 2);
+    assert.ok(llmCalls(env).some((call) => call.messages.some((m) => m.role === "user" && m.text === "from b")), "b's steer reached an LLM call");
+    assert.equal(a.events.filter((e) => e.event?.type === "agent_start").length, 1);
+  });
 });

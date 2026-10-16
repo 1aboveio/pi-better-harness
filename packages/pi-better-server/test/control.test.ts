@@ -91,7 +91,8 @@ describe("event delivery", () => {
     await waitFor("tool to start", () => gate(env, "g2").started());
     gate(env, "g2").release();
     await waitFor("both saw the end", () => ended(a, id) && ended(b, id));
-    await new Promise((r) => setTimeout(r, 100));
+    // Both have seen the end; wait until neither has anything still in flight, then compare.
+    await waitFor("streams to settle", () => a.events.length === b.events.length && a.events.at(-1)?.seq === b.events.at(-1)?.seq);
     assert.ok(a.events.length > 5);
     assert.deepEqual(b.events, a.events);
   });
