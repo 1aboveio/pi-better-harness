@@ -54,7 +54,7 @@ export class HostedSession {
   }
 
   /** A turn is starting or running: queue steers for it instead of starting another one. */
-  private get turnActive(): boolean {
+  get turnActive(): boolean {
     return this.promptsInFlight > 0 || this.session.isStreaming;
   }
 

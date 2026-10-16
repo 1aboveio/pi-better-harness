@@ -24,3 +24,6 @@ export {
 } from "./protocol.ts";
 export { checkHello, SERVER_EXTENSION_VERSIONS, serverHello } from "./handshake.ts";
 export { DaemonClient, HandshakeError, type ConnectOptions } from "./client.ts";
+export { BUNDLE_FORMAT_VERSION, BundleError, createBundle, digestWorktree, materializeWorkspace, verifyBundle, type BundleManifest } from "./core/bundle.ts";
+export { OwnershipStore, type OwnershipRecord, type OwnershipState } from "./core/ownership.ts";
+export { moveSession, MoveError, type MoveOptions, type MoveResult } from "./move/orchestrate.ts";

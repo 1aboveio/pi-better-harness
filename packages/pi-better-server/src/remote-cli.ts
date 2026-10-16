@@ -6,6 +6,7 @@ import { GLOBAL_OPTIONS, createContext, type Subcommand } from "./remote/context
 const SUBCOMMANDS: Record<string, () => Promise<{ command: Subcommand }>> = {
   answer: () => import("./remote/answer.ts"),
   ls: () => import("./remote/ls.ts"),
+  move: () => import("./remote/move.ts"),
   new: () => import("./remote/new.ts"),
   steer: () => import("./remote/steer.ts"),
   tail: () => import("./remote/tail.ts"),
