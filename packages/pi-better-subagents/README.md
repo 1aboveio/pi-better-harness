@@ -42,8 +42,21 @@ this session and persist across reloads; Ctrl+S saves both as defaults, and
 Reset to defaults clears
 session overrides. `/subagents mode manual|adaptive|coordinator` and
 `/subagents cap <number>` are command equivalents; `/subagents save` persists
-both. Lowering the cap blocks new single and batch launches without stopping
-running work. The navigator's `main` row retains its mode-only controls:
+both. Lowering the cap blocks new single and batch launches, including launches
+still preparing, without stopping running work. Saved configuration changes are
+picked up on subsequent reads; explicit session overrides still take precedence.
+Before every model request, including continuations after tool calls,
+the foreground receives one temporary settings block with the current mode, cap,
+setting sources, revision, and running/reserved/available slots. The latest block
+replaces older snapshots and delegation guidance; it is not saved as conversation
+history. Changes reach the model at its next request, not during an in-flight
+response, and are not broadcast to running children. The cap is a ceiling, not a
+target number of agents. `subagent_settings` inspects the same effective state
+without changing it. Its revision is a stable fingerprint of mode, cap, and
+sources; occupancy changes do not change the revision. Admission rechecks capacity
+when spawning because the snapshot can become stale.
+
+The navigator's `main` row retains its mode-only controls:
 `m` cycles the session mode, `ctrl+s` saves that default, and `x`
 does not stop it. Manual delegates only on explicit user or workflow request, even with a
 plan. Adaptive delegates substantial independent work when useful. Coordinator

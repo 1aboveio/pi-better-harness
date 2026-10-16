@@ -37,6 +37,7 @@ import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
 import { createSubagentSettingsPage } from "./settings-page.ts";
+import { effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
     decideTiming,
@@ -53,7 +54,7 @@ import {
     type TimingStopReason,
 } from "./timing.ts";
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
-import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, delegationPrompt, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
+import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { appendExecutionPolicy } from "./shared-execution-policy.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime } from "./task-policy.ts";
@@ -186,6 +187,7 @@ const SUBAGENT_TOOLS = [
     "subagent_spawn",
     "subagent_spawn_batch",
     "subagent_list",
+    "subagent_settings",
     "subagent_output",
     "subagent_stop",
     "subagent_result",
@@ -1522,6 +1524,13 @@ export default function (pi: ExtensionAPI) {
         pi.appendEntry("pi-better-subagents-delegation", { version: 1, mode: null });
     };
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
+    const countRunning = () =>
+        listActiveMetasForParent(process.pid).filter((meta) => effectiveStatus(meta) === "running").length;
+    const effectiveSettings = () => effectiveSubagentSettings({
+        delegationMode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap(),
+        sources: { delegationMode: delegationOverride ? "session" : "config",
+            maxConcurrent: capOverride !== undefined ? "session" : "config" },
+    }, countRunning(), getSharedCapacityGate(countRunning).pending);
     const saveSettings = (): { ok: boolean; message: string } => {
         try {
             writeSubagentSettings({ delegationMode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap() });
@@ -1846,6 +1855,13 @@ export default function (pi: ExtensionAPI) {
 
         let spawned: ReturnType<typeof spawnDetached>;
         try {
+            // Reservations prevent competing admissions, but do not grandfather
+            // unstarted work after a cap reduction. No await separates this live
+            // occupancy check, child creation, and the running metadata below.
+            const maxConcurrent = activeConcurrencyCap();
+            if (countRunning() >= maxConcurrent) {
+                throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
+            }
             spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
                 env: { [STEER_FILE_ENV]: steerPathFor(id) } });
         } catch (error) {
@@ -1956,8 +1972,6 @@ export default function (pi: ExtensionAPI) {
             if (blankSelector) throw new Error(blankSelector);
 
             const maxConcurrent = activeConcurrencyCap();
-            const countRunning = () =>
-                listActiveMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
             // Shared with batch-spawn: reserve before any async work so an interleaved
             // batch cannot oversubscribe after this check and before writeMeta.
             const gate = getSharedCapacityGate(countRunning);
@@ -2093,8 +2107,6 @@ export default function (pi: ExtensionAPI) {
             };
 
             const cfg = loadConfig();
-            const countRunning = () =>
-                listActiveMetasForParent(process.pid).filter((m) => effectiveStatus(m) === "running").length;
             const launchAvailable = p.onCapacity === "launch-available";
             // Shared with single-spawn. Reservations count against maxConcurrent so a
             // concurrent single spawn cannot take a slot the batch already admitted.
@@ -2248,6 +2260,7 @@ export default function (pi: ExtensionAPI) {
         getActiveOrigin: (ctx?: unknown) => activeCallbackOrigin ?? verifiedOriginFromContext(ctx as ExtensionContext | undefined),
     };
     pi.registerTool(subagentListTool(Type, toolSession));
+    pi.registerTool(subagentSettingsTool(Type, effectiveSettings));
     pi.registerTool(subagentOutputTool(Type, toolSession));
     const acceptanceResultTool = subagentResultTool(Type, toolSession);
     pi.registerTool(acceptanceResultTool);
@@ -2288,13 +2301,16 @@ export default function (pi: ExtensionAPI) {
     const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
         if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.custom === "function") {
             await ctx.ui.custom<void>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
-                get: () => ({
-                    mode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap(),
-                    modeSource: delegationOverride ? "session" : "config",
-                    capSource: capOverride !== undefined ? "session" : "config",
-                    defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
-                    defaultCap: normalizeConcurrencyCap(loadConfig().maxConcurrent),
-                }),
+                get: () => {
+                    const settings = effectiveSettings();
+                    return {
+                        mode: settings.delegationMode, maxConcurrent: settings.maxConcurrent,
+                        modeSource: settings.sources.delegationMode,
+                        capSource: settings.sources.maxConcurrent,
+                        defaultMode: normalizeDelegationMode(loadConfig().delegationMode),
+                        defaultCap: normalizeConcurrencyCap(loadConfig().maxConcurrent),
+                    };
+                },
                 changeMode, changeCap, save: saveSettings, reset: resetSettings,
             }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done()));
         } else {
@@ -2354,8 +2370,17 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool(discoveryTool as Parameters<ExtensionAPI["registerTool"]>[0]);
 
     pi.on("before_agent_start", (event) => ({
-        systemPrompt: `${appendExecutionPolicy(event.systemPrompt)}\n\n${delegationPrompt(activeDelegationMode())}`,
+        systemPrompt: `${appendExecutionPolicy(event.systemPrompt)}\n\nUse the latest Subagent settings context block as the authoritative delegation mode and capacity snapshot. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Inspect subagent_settings when needed; never treat the concurrency limit as a target number of agents.`,
     }));
+
+    pi.on("context", (event) => {
+        const settings = effectiveSettings();
+        return { messages: [
+            ...event.messages.filter(message => message.role !== "custom" || message.customType !== SUBAGENT_SETTINGS_CONTEXT),
+            { role: "custom" as const, customType: SUBAGENT_SETTINGS_CONTEXT,
+                content: formatSubagentSettings(settings), display: false, details: settings, timestamp: Date.now() },
+        ] };
+    });
 
     // ---- live-status lifecycle -----------------------------------------
     pi.on("agent_start", async (_event, ctx) => {
