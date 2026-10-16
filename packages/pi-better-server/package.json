@@ -6,10 +6,12 @@
   "type": "module",
   "main": "src/index.ts",
   "bin": {
-    "pi-better-server": "src/cli.ts"
+    "pi-better-server": "src/cli.ts",
+    "pi-remote": "src/remote-cli.ts"
   },
   "files": [
     "src",
+    "!src/shared-ssh-core/test-support/**",
     "scripts",
     "README.md"
   ],
@@ -31,6 +33,8 @@
     "access": "public"
   },
   "scripts": {
+    "pretest": "node ../../scripts/sync-shared-ssh-core.mjs",
+    "prepack": "node ../../scripts/sync-shared-ssh-core.mjs",
     "test": "node --import tsx --import ../../scripts/isolate-registry.mjs --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm test"

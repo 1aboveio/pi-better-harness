@@ -15,6 +15,7 @@ test("syncSharedSshCore replaces the generated consumer tree from canonical sour
   const targetRoots = [
     join(fixtureRoot, "packages", "pi-better-background-tasks", "src", "shared-ssh-core"),
     join(fixtureRoot, "packages", "pi-better-ssh", "src", "shared-ssh-core"),
+    join(fixtureRoot, "packages", "pi-better-server", "src", "shared-ssh-core"),
   ];
   mkdirSync(join(sourceRoot, "test-support"), { recursive: true });
   for (const targetRoot of targetRoots) {

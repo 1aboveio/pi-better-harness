@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createAgentSession, SessionManager, type AgentSession, type CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
+import { readGitBranch } from "./git.ts";
 import { HostedSession } from "./hosted-session.ts";
 import { indexPathFor } from "./paths.ts";
 import type { DaemonCommand, SessionStatus, SessionSummary } from "./protocol.ts";
@@ -201,6 +202,7 @@ export class SessionRegistry {
     const hosted = this.live.get(entry.sessionId);
     const model = hosted?.session.model;
     const name = hosted?.session.sessionName ?? entry.name;
+    const branch = readGitBranch(entry.cwd);
     return {
       sessionId: entry.sessionId,
       cwd: entry.cwd,
@@ -208,6 +210,7 @@ export class SessionRegistry {
       status: entry.status,
       ...(name ? { name } : {}),
       ...(model ? { model: `${model.provider}/${model.id}` } : {}),
+      ...(branch ? { branch } : {}),
       isStreaming: hosted?.isStreaming ?? false,
       live: hosted !== undefined,
       createdAt: entry.createdAt,

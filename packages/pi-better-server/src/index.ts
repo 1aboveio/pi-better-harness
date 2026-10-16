@@ -5,6 +5,9 @@ export { defaultServerDir, ensureServerDir, indexPathFor, socketPathFor } from "
 export {
   encodeLine,
   LineDecoder,
+  PROTOCOL_VERSION,
+  type HelloCommand,
+  type HelloData,
   type ClientCommand,
   type DaemonCommand,
   type DaemonResponse,
@@ -14,3 +17,5 @@ export {
   type SessionStatus,
   type SessionSummary,
 } from "./protocol.ts";
+export { checkHello, SERVER_EXTENSION_VERSIONS, serverHello } from "./handshake.ts";
+export { DaemonClient, HandshakeError, type ConnectOptions } from "./client.ts";

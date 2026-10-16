@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import type { RpcCommand } from "@earendil-works/pi-coding-agent";
+import { checkHello } from "./handshake.ts";
 import { HostedSession } from "./hosted-session.ts";
 import { defaultServerDir, ensureServerDir, socketPathFor } from "./paths.ts";
 import { DAEMON_COMMANDS, encodeLine, failure, LineDecoder, type ServerMessage } from "./protocol.ts";
@@ -79,6 +80,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       try {
         if (!type) {
           send(failure(id, "unknown", "Missing command type"));
+          return;
+        }
+        if (type === "hello") {
+          const verdict = checkHello(command);
+          if (verdict.ok) return reply({ data: verdict.data });
+          send(failure(id, type, verdict.error));
+          socket.end(); // an incompatible client gets the reason, then the door
           return;
         }
         if (DAEMON_COMMANDS.has(type)) {
