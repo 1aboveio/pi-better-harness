@@ -5,6 +5,8 @@ import { GLOBAL_OPTIONS, createContext, type Subcommand } from "./remote/context
 /** One module per subcommand; add a line here to register another (move, return, attach). */
 const SUBCOMMANDS: Record<string, () => Promise<{ command: Subcommand }>> = {
   answer: () => import("./remote/answer.ts"),
+  attach: () => import("./remote/attach.ts"),
+  console: () => import("./remote/console.ts"),
   ls: () => import("./remote/ls.ts"),
   move: () => import("./remote/move.ts"),
   new: () => import("./remote/new.ts"),

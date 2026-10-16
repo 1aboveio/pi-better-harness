@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import type { RpcCommand } from "@earendil-works/pi-coding-agent";
+import { CompanionManager, type CompanionManagerOptions } from "./companion.ts";
 import { ConnectionControl } from "./control.ts";
 import { checkHello } from "./handshake.ts";
 import { defaultServerDir, ensureServerDir, socketPathFor } from "./paths.ts";
@@ -15,6 +16,8 @@ export interface DaemonOptions {
   log?: (message: string) => void;
   /** Bounds for each session's replay ring and on-disk event log. */
   eventLog?: SessionRegistryOptions["eventLog"];
+  /** Where `start_companion` runs the attach terminal; defaults to `$PI_SERVER_TMUX_SOCKET` or the user's own tmux server. */
+  companion?: Pick<CompanionManagerOptions, "tmuxSocket" | "command" | "readyTimeoutMs">;
 }
 
 export interface Daemon {
@@ -50,6 +53,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
   const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log });
   await registry.resumeAll();
   const moves = new MoveService(registry, serverDir);
+  const companions = new CompanionManager({
+    socketPath,
+    ...options.companion,
+    tmuxSocket: options.companion?.tmuxSocket ?? process.env.PI_SERVER_TMUX_SOCKET,
+    isReady: (id) => registry.get(id)?.hasController ?? false,
+  });
 
   const sockets = new Set<Socket>();
   const server: Server = createServer((socket) => {
@@ -103,7 +112,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             const summary = await registry.open(sessionId);
             return reply({ sessionId, data: summary });
           }
+          if (type === "start_companion") {
+            const summary = await registry.open(sessionId);
+            const info = await companions.start(sessionId, summary.cwd);
+            return reply({ sessionId, data: info });
+          }
+          if (type === "stop_companion") return reply({ sessionId, data: { stopped: await companions.stop(sessionId) } });
           control.unsubscribe(sessionId);
+          await companions.stop(sessionId);
           await registry.close(sessionId);
           return reply({ sessionId });
         }

@@ -1,5 +1,19 @@
+import type { DaemonClient } from "../client.ts";
 import type { Subcommand } from "./context.ts";
 import { resolveSession } from "./sessions.ts";
+
+/**
+ * Deliver text to a session the way a person typing would: queued as steering
+ * mid-turn, otherwise as the prompt that starts a turn. Returns which one it was.
+ */
+export async function deliverMessage(client: DaemonClient, sessionId: string, message: string): Promise<"steer" | "prompt"> {
+  const state = await client.call({ type: "get_state", sessionId });
+  const running = (state.data as { isStreaming: boolean }).isStreaming;
+  // Mid-turn the message is queued for the next model call; an idle session starts a new turn with it.
+  // `streamingBehavior` covers a turn that starts between the state check and the prompt.
+  await client.call(running ? { type: "steer", sessionId, message } : { type: "prompt", sessionId, message, streamingBehavior: "steer" });
+  return running ? "steer" : "prompt";
+}
 
 export const command: Subcommand = {
   usage: 'steer [--host <ssh-alias>] <session> "<message>"',
@@ -10,16 +24,8 @@ export const command: Subcommand = {
     if (!ref || !message) throw new Error('steer needs a session and a message: pi-remote steer <session> "<message>"');
     const client = await context.connect();
     const session = await resolveSession(client, ref);
-    const state = await client.call({ type: "get_state", sessionId: session.sessionId });
-    const running = (state.data as { isStreaming: boolean }).isStreaming;
-    // Mid-turn the message is queued for the next model call; an idle session starts a new turn with it.
-    // `streamingBehavior` covers a turn that starts between the state check and the prompt.
-    await client.call(
-      running
-        ? { type: "steer", sessionId: session.sessionId, message }
-        : { type: "prompt", sessionId: session.sessionId, message, streamingBehavior: "steer" },
-    );
-    context.stdout(context.json ? `${JSON.stringify({ sessionId: session.sessionId, delivered: running ? "steer" : "prompt" })}\n` : `${running ? "steered" : "started turn on"} ${session.sessionId.slice(0, 8)}\n`);
+    const delivered = await deliverMessage(client, session.sessionId, message);
+    context.stdout(context.json ? `${JSON.stringify({ sessionId: session.sessionId, delivered })}\n` : `${delivered === "steer" ? "steered" : "started turn on"} ${session.sessionId.slice(0, 8)}\n`);
     return 0;
   },
 };
