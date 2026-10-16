@@ -3,11 +3,16 @@
  *
  * Every client line is a Pi RPC command (the payloads come straight from Pi's
  * own `RpcCommand` type) plus a `sessionId` that addresses one hosted session,
- * or one of the four daemon-level commands below. Responses reuse Pi's
+ * or one of the daemon-level and control commands below. Responses reuse Pi's
  * `{ type: "response", command, success, ... }` shape and echo `id` and
- * `sessionId`. Session events are pushed as `{ type: "event", sessionId, event }`.
+ * `sessionId`. Session events are pushed as `{ type: "event", sessionId, seq, event }`
+ * only to connections that `subscribe`d (and to the creator of a session from
+ * `create_session`); `open_session` does not stream.
  */
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
+import type { DialogAnswer, PendingDialog } from "./ui-bridge.ts";
+
+export type { DialogAnswer, PendingDialog };
 
 /** A Pi RPC command addressed to one hosted session. */
 export type SessionCommand = RpcCommand extends infer C ? (C extends RpcCommand ? C & { sessionId: string } : never) : never;
@@ -27,6 +32,12 @@ export interface SessionSummary {
   isStreaming: boolean;
   /** True when the session is hosted in memory right now. */
   live: boolean;
+  /** Seq of the newest event the session has published (0 before the first). */
+  lastSeq: number;
+  /** True while some connection holds the controller lease. */
+  hasController: boolean;
+  /** Dialogs an extension is blocked on. Non-empty means the turn waits for a person. */
+  needsInput: PendingDialog[];
   createdAt: string;
   updatedAt: string;
 }
@@ -63,7 +74,20 @@ export type DaemonCommand =
   | { id?: string; type: "open_session"; sessionId: string }
   | { id?: string; type: "close_session"; sessionId: string };
 
-export type ClientCommand = HelloCommand | DaemonCommand | SessionCommand;
+/**
+ * Event delivery and control, all addressed to one session:
+ * - `subscribe` replays retained events after `sinceSeq` (omit it for live only), then streams live.
+ *   Re-subscribing on the same connection replaces the earlier subscription.
+ * - `acquire_control` / `release_control` take and give back the single controller lease; it also ends on disconnect.
+ * - `extension_ui_response` answers a pending dialog (`requestId`); only the lease holder may.
+ */
+export type ControlCommand =
+  | { id?: string; type: "subscribe"; sessionId: string; sinceSeq?: number }
+  | { id?: string; type: "acquire_control"; sessionId: string }
+  | { id?: string; type: "release_control"; sessionId: string }
+  | ({ id?: string; type: "extension_ui_response"; sessionId: string; requestId: string } & DialogAnswer);
+
+export type ClientCommand = HelloCommand | DaemonCommand | ControlCommand | SessionCommand;
 
 export type DaemonResponse =
   | { id?: string; type: "response"; command: "hello"; success: true; data: HelloData }
@@ -77,9 +101,11 @@ export type SessionResponse = RpcResponse & { sessionId?: string };
 export type ServerMessage =
   | DaemonResponse
   | SessionResponse
-  | { type: "event"; sessionId: string; event: unknown };
+  | { type: "event"; sessionId: string; seq: number; event: unknown };
 
 export const DAEMON_COMMANDS: ReadonlySet<string> = new Set(["list_sessions", "create_session", "open_session", "close_session"]);
+
+export const CONTROL_COMMANDS: ReadonlySet<string> = new Set(["subscribe", "acquire_control", "release_control", "extension_ui_response"]);
 
 /** Pi RPC commands that rebind the whole session; the daemon pins one session file per session id. */
 export const UNSUPPORTED_SESSION_COMMANDS: ReadonlySet<string> = new Set(["new_session", "switch_session", "fork", "clone"]);

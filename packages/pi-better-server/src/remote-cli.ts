@@ -2,8 +2,9 @@
 import { parseArgs } from "node:util";
 import { GLOBAL_OPTIONS, createContext, type Subcommand } from "./remote/context.ts";
 
-/** One module per subcommand; add a line here to register another (answer, move, return, attach). */
+/** One module per subcommand; add a line here to register another (move, return, attach). */
 const SUBCOMMANDS: Record<string, () => Promise<{ command: Subcommand }>> = {
+  answer: () => import("./remote/answer.ts"),
   ls: () => import("./remote/ls.ts"),
   new: () => import("./remote/new.ts"),
   steer: () => import("./remote/steer.ts"),

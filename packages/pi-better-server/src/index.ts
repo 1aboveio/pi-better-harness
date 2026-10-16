@@ -1,5 +1,7 @@
 export { startDaemon, type Daemon, type DaemonOptions } from "./server.ts";
 export { SessionRegistry, type CreateSessionRequest, type SessionRegistryOptions } from "./registry.ts";
+export { answerPending, type AnswerOptions, type AnswerResult } from "./remote/answer.ts";
+export { EventLog, type EventLogOptions } from "./event-log.ts";
 export { HostedSession } from "./hosted-session.ts";
 export { defaultServerDir, ensureServerDir, indexPathFor, socketPathFor } from "./paths.ts";
 export {
@@ -9,6 +11,9 @@ export {
   type HelloCommand,
   type HelloData,
   type ClientCommand,
+  type ControlCommand,
+  type DialogAnswer,
+  type PendingDialog,
   type DaemonCommand,
   type DaemonResponse,
   type ServerMessage,

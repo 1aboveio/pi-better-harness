@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createAgentSession, SessionManager, type AgentSession, type CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
 import { readGitBranch } from "./git.ts";
+import { join } from "node:path";
+import { EventLog, type EventLogOptions } from "./event-log.ts";
 import { HostedSession } from "./hosted-session.ts";
 import { indexPathFor } from "./paths.ts";
 import type { DaemonCommand, SessionStatus, SessionSummary } from "./protocol.ts";
@@ -30,6 +32,8 @@ export interface SessionRegistryOptions {
   /** Extra `createAgentSession` options for every hosted session (resource loader, tools, ...). */
   sessionOptions?: Omit<CreateAgentSessionOptions, "cwd" | "sessionManager">;
   log?: (message: string) => void;
+  /** Bounds for each session's replay ring and on-disk event log. */
+  eventLog?: EventLogOptions;
 }
 
 /**
@@ -162,7 +166,9 @@ export class SessionRegistry {
     const sessionManager = manager ?? this.reopen(entry);
     const { session } = await createAgentSession({ ...this.options.sessionOptions, cwd: entry.cwd, sessionManager });
     if (!manager) await this.restoreSavedModel(session, sessionManager, entry.model);
-    const hosted = new HostedSession(session, () => this.touch(entry.sessionId));
+    const events = new EventLog(join(this.options.serverDir, "events", `${entry.sessionId}.jsonl`), this.options.eventLog);
+    const hosted = new HostedSession(session, events, () => this.touch(entry.sessionId));
+    await hosted.bindUi();
     this.live.set(entry.sessionId, hosted);
     entry.sessionFile = session.sessionFile ?? entry.sessionFile;
     this.persist();
@@ -212,6 +218,9 @@ export class SessionRegistry {
       ...(model ? { model: `${model.provider}/${model.id}` } : {}),
       ...(branch ? { branch } : {}),
       isStreaming: hosted?.isStreaming ?? false,
+      lastSeq: hosted?.lastSeq ?? 0,
+      hasController: hosted?.hasController ?? false,
+      needsInput: hosted?.needsInput ?? [],
       live: hosted !== undefined,
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,

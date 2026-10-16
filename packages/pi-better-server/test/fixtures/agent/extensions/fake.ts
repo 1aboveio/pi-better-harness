@@ -40,6 +40,9 @@ export default function (pi: ExtensionAPI) {
       if (last?.role === "user" && text.startsWith("tool ")) {
         content = [{ type: "toolCall", id: `call-${Date.now()}`, name: "gate", arguments: { name: text.slice(5).trim() } }];
         stopReason = "toolUse";
+      } else if (last?.role === "user" && text.startsWith("ask ")) {
+        content = [{ type: "toolCall", id: `call-${Date.now()}`, name: "ask", arguments: { question: text.slice(4).trim() } }];
+        stopReason = "toolUse";
       } else if (last?.role === "toolResult") {
         content = [{ type: "text", text: `tool-done:${text}` }];
       } else {
@@ -75,6 +78,17 @@ export default function (pi: ExtensionAPI) {
       while (!existsSync(release) && !signal?.aborted && Date.now() < deadline) await new Promise((r) => setTimeout(r, 15));
       writeFileSync(join(gateDir(), `${params.name}.finished`), String(Date.now()));
       return { content: [{ type: "text", text: `gate:${params.name}` }], details: {} };
+    },
+  });
+
+  pi.registerTool({
+    name: "ask",
+    label: "Ask",
+    description: "Ask the person a question through the extension UI and return the answer",
+    parameters: Type.Object({ question: Type.String() }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const answer = await ctx.ui.input(params.question, "answer");
+      return { content: [{ type: "text", text: `answer:${answer ?? "none"}` }], details: {} };
     },
   });
 }
