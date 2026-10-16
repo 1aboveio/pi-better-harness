@@ -174,8 +174,9 @@ export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boole
   }
 }
 
-export function navigatorFooterHint(count: number): string | null {
-  return count > 0 ? `← work · ${count}` : null;
+export function navigatorFooterHint(_count: number): string | null {
+  // Retain the compatibility helper so refresh/reload clears any old badge.
+  return null;
 }
 
 export function applyNavigatorFooter(ui: { setStatus(key: string, value: string | undefined): void }, count: number): string | null {

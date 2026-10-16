@@ -703,11 +703,8 @@ export default function (pi: ExtensionAPI): void {
       }
     }
     if (waitingOnAnswer > 0) return `${waitingOnAnswer} background done; waiting on your answer`;
-    const background = snapshot?.backgroundRunning
-      ? `bg ${snapshot.activeBackgroundCount}${snapshot.unhealthyBackgroundCount ? `, ${snapshot.unhealthyBackgroundCount} unhealthy` : ""}`
-      : undefined;
-    if (goal?.status === "paused") return background ? `${pausedGoalStatus(goal, preferences.conversationalResume)} · ${background}` : pausedGoalStatus(goal, preferences.conversationalResume);
-    if (background) return background;
+    if (goal?.status === "paused") return pausedGoalStatus(goal, preferences.conversationalResume);
+    if (snapshot?.backgroundRunning) return undefined;
     const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
     if (continuation?.blocked) return "waiting: no progress";
     const goalStall = observeGoalStall(goal, continuation, {
