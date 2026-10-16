@@ -1,0 +1,20 @@
+{
+  "name": "pi-remote",
+  "version": "0.1.0",
+  "description": "Detach a Codex thread and its workspace to another machine, list and steer remote threads, and bring them back, through the pi-remote CLI.",
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Pi Remote",
+    "shortDescription": "Detach, list, steer and return Codex threads on other machines",
+    "developerName": "1above",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "List the Codex threads on my remote host",
+      "Detach this thread to my remote host",
+      "Steer the remote thread with a new instruction"
+    ]
+  }
+}

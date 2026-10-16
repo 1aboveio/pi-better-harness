@@ -156,6 +156,19 @@ The same `move` core carries a Codex thread. Run one daemon per Codex host (`pi-
   (the thread is unarchived) or retired. A turn already running is waited for before fencing; one that starts in the
   instant between the last busy check and the archive is not interrupted by the fence itself.
 
+### Steer, list, return
+
+- `pi-remote ls [--host h]` lists threads (status `running` or `idle`). Threads that moved away are archived and still listed, as `closed` (moved).
+- `pi-remote steer [--host h] <thread> "<message>"` goes through the app-server: `turn/steer` while a turn runs (the text joins the
+  turn at its next model call), `turn/start` when idle. The reply says which one happened. A fenced or moved thread refuses.
+- `pi-remote return --host h <thread> [--to-cwd <empty dir>] [--wait s]` is the move in the other direction: the host's thread is the
+  source and this machine's Codex daemon the target (the running one in `PI_SERVER_DIR`, else one started for the command). The host
+  keeps the thread fenced until this machine acknowledges it, so a failed return leaves it live on the host; afterwards the host's copy is archived.
+  The workspace goes back to where the thread lived before it moved when that directory is free, otherwise pass `--to-cwd`.
+  Resume with `codex resume <thread>`.
+- Codex plugin: `codex plugin marketplace add <this package>/codex-plugin`, then `codex plugin add pi-remote@pi-remote`. It adds a skill and four
+  tools (`remote_detach`, `remote_ls`, `remote_steer`, `remote_return`) that run `pi-remote` (`PI_REMOTE_BIN` names the executable).
+
 ## Crash recovery
 
 A session stays `running` until `close_session`. On start the daemon reopens

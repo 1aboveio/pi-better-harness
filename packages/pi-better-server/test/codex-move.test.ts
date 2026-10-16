@@ -78,6 +78,8 @@ async function startHost(label: string, options: { pin?: string; version?: strin
     client.close();
     await daemon.stop();
     spawnSync(CODEX_BIN, ["app-server", "daemon", "stop"], { env: { ...process.env, CODEX_HOME: home }, timeout: 30_000 });
+    // `daemon stop` leaves the managed copy's pid-update-loop running; it would outlive the test for good.
+    spawnSync("pkill", ["-f", `${home}/packages/app-server-daemon`]);
   });
   return { home, daemon, client };
 }
