@@ -10,6 +10,8 @@ const SUBCOMMANDS: Record<string, () => Promise<{ command: Subcommand }>> = {
   ls: () => import("./remote/ls.ts"),
   move: () => import("./remote/move.ts"),
   new: () => import("./remote/new.ts"),
+  recover: () => import("./remote/recover.ts"),
+  return: () => import("./remote/return.ts"),
   steer: () => import("./remote/steer.ts"),
   tail: () => import("./remote/tail.ts"),
 };

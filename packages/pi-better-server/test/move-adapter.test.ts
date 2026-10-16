@@ -71,9 +71,9 @@ class FakeAdapter implements AgentMoveAdapter {
     if (snapshot) this.sessions.set(id, snapshot as FakeSession);
     else this.sessions.delete(id);
   }
-  async preflight(context: MovePreflightContext) {
+  preflight: (context: MovePreflightContext) => void | Promise<void> = async (context) => {
     this.preflights.push(context);
-  }
+  };
 }
 
 function endpoint(host: MoveHost): DaemonClient {
@@ -146,5 +146,30 @@ describe("move core with a second agent adapter", () => {
     assert.equal(source.ownership.get(sessionId).state, "owned");
     assert.equal(target.sessions.has(sessionId), false);
     assert.equal(existsSync(join(targetDir, "workspaces", sessionId)), false);
+  });
+
+  it("a duplicate move_begin or an abort that lands while the target preflight is awaited cannot register a second transfer", async () => {
+    const root = mkdtempSync(join(tmpdir(), "move-adapter-"));
+    roots.push(root);
+    const targetDir = join(root, "target");
+    mkdirSync(targetDir);
+    const target = new FakeAdapter(targetDir);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolveGate) => (release = resolveGate));
+    target.preflight = async () => gate;
+    const host = new MoveHost(target, targetDir, join(targetDir, "moves"));
+    const begin = (moveId: string) => host.handle({ type: "move_begin", moveId, sessionId: "session-fake-3", size: 0, sha256: "0".repeat(64) } as MoveCommand);
+
+    const first = begin("move-race-1");
+    const second = begin("move-race-1");
+    const aborted = begin("move-race-2");
+    await host.handle({ type: "move_abort", moveId: "move-race-2", sessionId: "session-fake-3" });
+    release();
+    const results = await Promise.allSettled([first, second, aborted]);
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, "only one begin wins");
+    assert.equal(results[0]!.status, "fulfilled");
+    assert.match(String((results[1] as PromiseRejectedResult).reason), /already started/);
+    assert.match(String((results[2] as PromiseRejectedResult).reason), /was aborted/);
+    await assert.rejects(host.handle({ type: "move_write", moveId: "move-race-2", offset: 0, data: "" } as MoveCommand), /not started or was aborted/);
   });
 });

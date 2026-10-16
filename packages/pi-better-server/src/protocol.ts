@@ -93,7 +93,9 @@ export type MoveCommand =
   | { id?: string; type: "move_begin"; moveId: string; sessionId: string; size: number; sha256: string; cwd?: string }
   | { id?: string; type: "move_write"; moveId: string; offset: number; data: string }
   | { id?: string; type: "move_commit"; moveId: string }
-  | { id?: string; type: "move_abort"; moveId: string; sessionId: string };
+  | { id?: string; type: "move_abort"; moveId: string; sessionId: string }
+  /** Checks to run on the receiving daemon before anything is fenced; with `sessionId`, also describes that session for a pull. */
+  | { id?: string; type: "move_preflight"; sessionId?: string; model?: string; repoRemote?: string; requireGh?: boolean; bytes?: number; dir?: string };
 
 /**
  * Event delivery and control, all addressed to one session:
@@ -136,6 +138,7 @@ export const MOVE_COMMANDS: ReadonlySet<string> = new Set([
   "move_write",
   "move_commit",
   "move_abort",
+  "move_preflight",
 ]);
 
 export const DAEMON_COMMANDS: ReadonlySet<string> = new Set(["list_sessions", "create_session", "open_session", "close_session", "start_companion", "stop_companion", ...MOVE_COMMANDS]);
