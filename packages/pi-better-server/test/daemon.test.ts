@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { afterEach, describe, it } from "node:test";
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { startDaemon, type Daemon } from "../src/index.ts";
 import { Client, gate, llmCalls, makeEnv, spawnDaemon, waitFor, type Env } from "./helpers.ts";
 
@@ -196,6 +197,33 @@ describe("crash recovery", () => {
     // The never-prompted session came back too and works.
     await c2.request({ type: "prompt", sessionId: b, message: "hello" });
     await waitFor("beta reply", async () => (await assistantTexts(c2, b)).includes("echo:hello"));
+  });
+});
+
+describe("prompt disposition", () => {
+  // Pi 1.x reports started / handled / queued; Pi 0.82 reports nothing, so the response carries no data.
+  const reportsDisposition = Number(PI_VERSION.split(".")[0]) >= 1;
+
+  it("prompt, steer and follow_up carry Pi's disposition when the installed Pi reports one", async () => {
+    const env = makeEnv();
+    const { client } = await inProcess(env);
+    const c = await client();
+    const id = await createSession(c, env);
+    const disposition = (r: any) => r.data?.disposition;
+
+    const prompted = await c.request({ type: "prompt", sessionId: id, message: "tool d1" });
+    assert.equal(prompted.success, true, JSON.stringify(prompted));
+    assert.equal(disposition(prompted), reportsDisposition ? "started" : undefined);
+    await waitFor("tool running", () => gate(env, "d1").started());
+
+    const steered = await c.request({ type: "steer", sessionId: id, message: "steer it" });
+    assert.equal(steered.success, true, JSON.stringify(steered));
+    assert.equal(disposition(steered), reportsDisposition ? "queued" : undefined);
+    const followed = await c.request({ type: "follow_up", sessionId: id, message: "then this" });
+    assert.equal(followed.success, true, JSON.stringify(followed));
+    assert.equal(disposition(followed), reportsDisposition ? "queued" : undefined);
+    gate(env, "d1").release();
+    await waitFor("turn done", async () => (await isIdle(c, id)) && (await assistantTexts(c, id)).includes("echo:then this"));
   });
 });
 

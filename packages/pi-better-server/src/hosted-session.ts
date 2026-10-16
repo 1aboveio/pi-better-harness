@@ -9,6 +9,11 @@ function ok(id: string | undefined, command: string, data?: unknown): RpcRespons
   return { ...(id !== undefined ? { id } : {}), type: "response", command, success: true, ...(data !== undefined ? { data } : {}) } as RpcResponse;
 }
 
+/** Pi 1.x reports `started` / `handled` / `queued`; Pi 0.82 reports nothing, so the response carries no data. */
+function dispositionData(outcome: unknown): { disposition: string } | undefined {
+  return typeof outcome === "string" ? { disposition: outcome } : undefined;
+}
+
 function fail(id: string | undefined, command: string, error: string): RpcResponse {
   return { ...(id !== undefined ? { id } : {}), type: "response", command, success: false, error };
 }
@@ -135,10 +140,11 @@ export class HostedSession {
           images: options.images,
           streamingBehavior: options.streamingBehavior,
           source: "rpc",
-          preflightResult: (didSucceed: boolean) => {
-            if (didSucceed) {
+          // Pi 0.82 passes a boolean (false: rejected); Pi 1.x passes the disposition string and only calls this on success.
+          preflightResult: (outcome: unknown) => {
+            if (outcome !== false) {
               accepted = true;
-              resolve(ok(id, command));
+              resolve(ok(id, command, dispositionData(outcome)));
             }
           },
         })
@@ -172,14 +178,12 @@ export class HostedSession {
         case "steer":
           // Starting or running turn: queue, delivered after the current tool calls and before the next LLM call.
           if (this.turnActive) {
-            await session.steer(command.message, command.images);
-            return ok(id, "steer");
+            return ok(id, "steer", dispositionData(await session.steer(command.message, command.images)));
           }
           // Idle (no turn running or starting): Pi would only queue it for a turn that never starts. Start that turn now.
           return await this.startPrompt(id, "steer", command.message, { images: command.images });
         case "follow_up":
-          await session.followUp(command.message, command.images);
-          return ok(id, "follow_up");
+          return ok(id, "follow_up", dispositionData(await session.followUp(command.message, command.images)));
         case "abort":
           await session.abort();
           return ok(id, "abort");
