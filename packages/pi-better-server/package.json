@@ -1,0 +1,51 @@
+{
+  "name": "pi-better-server",
+  "version": "0.1.0",
+  "description": "Daemon that hosts Pi agent sessions behind a local Unix socket with session-addressed Pi RPC.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "pi-better-server": "src/cli.ts"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "README.md"
+  ],
+  "keywords": [
+    "pi",
+    "daemon",
+    "rpc"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-server"
+  },
+  "bugs": {
+    "url": "https://github.com/1aboveio/pi-better-harness/issues"
+  },
+  "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-server#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --import tsx --import ../../scripts/isolate-registry.mjs --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.82.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.82.0",
+    "@earendil-works/pi-coding-agent": "^0.82.0",
+    "@types/node": "^25.0.0",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
