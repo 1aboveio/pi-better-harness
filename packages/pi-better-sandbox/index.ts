@@ -42,11 +42,8 @@ import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSet
 import { openPermissionsPage } from "./permissions-page.ts";
 import { appendSessionPermissions, readSessionPermissions } from "./session-permissions.ts";
 
-import { footerTone, formatFooterStatus } from "./status.ts";
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
 import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
-
-const FOOTER_KEY = "sandbox";
 
 export default function piBetterSandbox(pi: ExtensionAPI): void {
     const controller = new ForegroundSandboxController();
@@ -97,11 +94,8 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         }
     });
 
-    let paintFooter: ((status: ForegroundSandboxStatus) => void) | undefined;
-
     const announce = (status: ForegroundSandboxStatus): void => {
         publishForegroundSandboxPolicy(pi.events, status);
-        paintFooter?.(status);
     };
 
     // A consumer that loaded after the last publication can ask for the current
@@ -115,13 +109,6 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     const denyRules = new DenyRuleManager({ controller, onStateChange: announce });
 
     const restorePermissions = (ctx: ExtensionContext): void => {
-        paintFooter = (status) => {
-            ctx.ui.setStatus(
-                FOOTER_KEY,
-                formatFooterStatus(status, (tone, text) => ctx.ui.theme.fg(tone, text)),
-            );
-        };
-
         // Session policy takes precedence over global defaults. Never skip an
         // invalid latest entry to recover an older, potentially broader policy.
         let settings = defaultSandboxPermissions();
@@ -151,8 +138,8 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
 
         // Then the rules are re-read and re-resolved, because the same global
         // template set means different absolute paths in a different project.
-        // Loading is what announces the session's first policy, so consumers and
-        // the footer never see the pre-rule state.
+        // Loading announces the session's first policy, so consumers never see
+        // the pre-rule state.
         const report = denyRules.load();
         const status = report.status;
 

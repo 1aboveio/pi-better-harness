@@ -322,12 +322,11 @@ directory. Existing evidence is retained; enforcement is unaffected.
 /sandbox rules               open the write-denied paths editor
 ```
 
-The footer shows `sandbox · available` when a backend is available but inactive,
-`sandbox · inactive` when inactive without a backend, and
-`sandbox · on · <project>` while protection is active. Explicitly enabled
-sessions report `UNAVAILABLE` or `FAILED` when protection cannot be applied.
-Both surfaces report what the runtime actually resolved — which backend, which
-executable — never what was merely configured.
+Sandbox status is not displayed in the footer. Use `/sandbox` to inspect the
+permission table, or the text status report outside the TUI. Explicitly enabled
+sessions still warn when protection cannot be applied. Status reports describe
+what the runtime actually resolved, including the backend and executable, never
+what was merely configured.
 
 `/sandbox off` and `/sandbox default off` need interactive confirmation and are
 refused outright when there is no interactive UI. There is no tool for changing

@@ -958,6 +958,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
   const handlers = new Map();
   const commands = new Map();
   const entries = [];
+  const statuses = [];
   const sessionManager = SessionManager.inMemory(process.cwd());
   let failSave = false;
   const pi = { events: events(), on: (name, handler) => handlers.set(name, handler),
@@ -974,7 +975,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
   let expanded = false;
   let page;
   const ctx = { mode: "tui", sessionManager, ui: {
-    theme: themeModule.theme, notify() {}, setStatus() {}, getToolsExpanded: () => expanded,
+    theme: themeModule.theme, notify() {}, setStatus: (...args) => statuses.push(args), getToolsExpanded: () => expanded,
     setToolsExpanded(value) { expanded = value; component.setExpanded(value); },
     custom(build) { return new Promise(resolve => { page = build({ requestRender() {} }, themeModule.theme, {}, resolve); }); },
   } };
@@ -1021,6 +1022,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
   await handlers.get("session_start")({}, ctx);
   registry.refresh();
   assert.equal(registry.controls().length, 2);
+  assert.deepEqual(statuses, [], "hub changes, commands, branch restoration, and reload must not publish a footer");
   registry.dispose();
 });
 
@@ -1122,18 +1124,19 @@ test("print and RPC modes refuse the toggle without changing saved preferences",
   }
 });
 
-test("the command toggles existing rows, persists session preference, and restores the hook on reload", async () => {
+test("the command toggles existing rows, persists session preference, and restores the hook on reload without a footer", async () => {
   const commands = new Map();
   const handlers = new Map();
   const entries = [];
   const notices = [];
+  const statuses = [];
   let expanded = false;
   const existing = tool("unknown_external_tool");
   const ctx = {
     mode: "tui", cwd: process.cwd(),
     sessionManager: { getBranch: () => entries },
     ui: {
-      notify: (message) => notices.push(message), setStatus() {},
+      notify: (message) => notices.push(message), setStatus: (...args) => statuses.push(args),
       getToolsExpanded: () => expanded,
       setToolsExpanded(value) { if (expanded === value) return; expanded = value; existing.setExpanded(value); },
     },
@@ -1161,6 +1164,7 @@ test("the command toggles existing rows, persists session preference, and restor
   assert.equal(entries.at(-1).data.enabled, false);
   assert.match(notices.at(-1), /Normal tool output restored/);
   assert.match(notices.find((message) => message.startsWith("Minimal tool output on")), /Compact call headers remain visible/);
+  assert.deepEqual(statuses, [], "startup, mode changes, and reload must not publish a footer");
 });
 
 const bundledCli = process.env.PI_MINIMAL_OUTPUT_HOST_CLI ?? join(sdk, "bundle/cli.js");
