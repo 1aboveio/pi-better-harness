@@ -6,15 +6,16 @@ import { resolveSession } from "./sessions.ts";
  * Deliver text to a session the way a person typing would: queued as steering
  * mid-turn, otherwise as the prompt that starts a turn. Returns which one it was.
  */
-export async function deliverMessage(client: DaemonClient, sessionId: string, message: string): Promise<"steer" | "prompt"> {
+export async function deliverMessage(client: DaemonClient, sessionId: string, message: string): Promise<{ delivered: "steer" | "prompt"; failure?: string }> {
   const state = await client.call({ type: "get_state", sessionId });
   const running = (state.data as { isStreaming: boolean }).isStreaming;
   // Mid-turn the message is queued for the next model call; an idle session starts a new turn with it.
   // `streamingBehavior` covers a turn that starts between the state check and the prompt.
   const reply = await client.call(running ? { type: "steer", sessionId, message } : { type: "prompt", sessionId, message, streamingBehavior: "steer" });
   // A Codex host says how it delivered (a turn can start or end between the check and the call).
-  const said = (reply.data as { delivered?: string } | undefined)?.delivered;
-  return said === "steer" || said === "prompt" ? said : running ? "steer" : "prompt";
+  const said = reply.data as { delivered?: string; failure?: string } | undefined;
+  const delivered = said?.delivered === "steer" || said?.delivered === "prompt" ? said.delivered : running ? "steer" : "prompt";
+  return { delivered, ...(said?.failure ? { failure: said.failure } : {}) };
 }
 
 export const command: Subcommand = {
@@ -26,7 +27,13 @@ export const command: Subcommand = {
     if (!ref || !message) throw new Error('steer needs a session and a message: pi-remote steer <session> "<message>"');
     const client = await context.connect();
     const session = await resolveSession(client, ref);
-    const delivered = await deliverMessage(client, session.sessionId, message);
+    const { delivered, failure } = await deliverMessage(client, session.sessionId, message);
+    if (failure) {
+      // The turn started and then failed on the host: say so instead of "started turn", and exit non-zero.
+      context.stdout(context.json ? `${JSON.stringify({ sessionId: session.sessionId, delivered, failure })}\n` : "");
+      context.stderr(`turn on ${session.sessionId.slice(0, 8)} failed: ${failure}\n`);
+      return 1;
+    }
     context.stdout(context.json ? `${JSON.stringify({ sessionId: session.sessionId, delivered })}\n` : `${delivered === "steer" ? "steered" : "started turn on"} ${session.sessionId.slice(0, 8)}\n`);
     return 0;
   },

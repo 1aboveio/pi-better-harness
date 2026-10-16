@@ -32,6 +32,7 @@ export interface CommitAck {
 interface Inbound {
   sessionId: string;
   cwd?: string;
+  rebindProvider?: string;
   transfer: InboundTransfer;
   ack?: CommitAck;
 }
@@ -155,7 +156,7 @@ export class MoveHost {
     if (this.aborted.has(moveId)) throw new Error(`Move ${moveId} was aborted`);
     if (this.inbound.has(moveId)) throw new Error(`Move ${moveId} already started`);
     const transfer = new InboundTransfer(join(this.movesDir, moveId, "bundle.tar"), command.size, command.sha256);
-    this.inbound.set(moveId, { sessionId, ...(command.cwd ? { cwd: command.cwd } : {}), transfer });
+    this.inbound.set(moveId, { sessionId, ...(command.cwd ? { cwd: command.cwd } : {}), ...(command.rebindProvider ? { rebindProvider: command.rebindProvider } : {}), transfer });
   }
 
   private write(moveId: string, offset: number, data: string): number {
@@ -189,7 +190,7 @@ export class MoveHost {
 
       const record = adapter.ownership.acquire(sessionId, manifest.ownership.epoch + 1, moveId);
       acquired = true;
-      await adapter.importSession({ sessionId, moveId, manifest, extractedDir: extracted.dir, cwd: built.cwd });
+      await adapter.importSession({ sessionId, moveId, manifest, extractedDir: extracted.dir, cwd: built.cwd, ...(inbound.rebindProvider ? { rebindProvider: inbound.rebindProvider } : {}) });
       inbound.ack = { sessionId, daemonId: adapter.ownership.daemonId, cwd: built.cwd, epoch: record.epoch, worktreeFiles: built.files, worktreeBytes: built.bytes, verified: true };
       return inbound.ack;
     } catch (error) {

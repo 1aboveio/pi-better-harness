@@ -1,4 +1,6 @@
 import { DaemonClient } from "../client.ts";
+import { isCodexHost } from "../codex/return.ts";
+import { preflightCodexProvider } from "../codex/preflight.ts";
 import { moveSession } from "../move/orchestrate.ts";
 import type { Subcommand } from "./context.ts";
 import { resolveSession } from "./sessions.ts";
@@ -6,12 +8,13 @@ import { resolveTarget, type Target } from "./target.ts";
 
 export const command: Subcommand = {
   usage:
-    "move [--host <source-ssh-alias>] <session> --to <ssh-alias> [--to-remote-dir <dir>] [--to-cwd <dir>] [--wait <seconds>]\n  pi-remote move [--host <ssh-alias>] --abort <session>\n  pi-remote move [--host <ssh-alias>] --retire <session> --move-id <id> [--moved-to <daemon-id>]",
+    "move [--host <source-ssh-alias>] <session> --to <ssh-alias> [--to-remote-dir <dir>] [--to-cwd <dir>] [--codex-provider <id>] [--wait <seconds>]\n  pi-remote move [--host <ssh-alias>] --abort <session>\n  pi-remote move [--host <ssh-alias>] --retire <session> --move-id <id> [--moved-to <daemon-id>]",
   options: {
     to: { type: "string" },
     "to-remote-dir": { type: "string" },
     "to-socket": { type: "string" },
     "to-cwd": { type: "string" },
+    "codex-provider": { type: "string" },
     wait: { type: "string" },
     abort: { type: "boolean" },
     retire: { type: "boolean" },
@@ -58,8 +61,12 @@ export const command: Subcommand = {
         destination = await resolveTarget({ host: to as string, ...(typeof values["to-remote-dir"] === "string" ? { remoteDir: values["to-remote-dir"] } : {}) });
         client = await DaemonClient.connect(destination.socketPath);
       }
+      const rebindProvider = typeof values["codex-provider"] === "string" ? values["codex-provider"] : undefined;
+      if (isCodexHost(source)) await preflightCodexProvider(source, client, session.sessionId, rebindProvider);
+      else if (rebindProvider) throw new Error("--codex-provider only applies to Codex threads");
       const result = await moveSession(source, client, {
         sessionId: session.sessionId,
+        ...(rebindProvider ? { rebindProvider } : {}),
         ...(toCwd ? { toCwd } : {}),
         ...(waitSeconds !== undefined ? { waitMs: waitSeconds * 1000 } : {}),
         onProgress: (message) => context.stderr(`${message}\n`),

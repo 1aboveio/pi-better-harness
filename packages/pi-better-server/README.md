@@ -145,6 +145,13 @@ The same `move` core carries a Codex thread. Run one daemon per Codex host (`pi-
   rewrites only the `cwd`, `runtime_workspace_roots` and `workspace_roots` fields of `session_meta` and `turn_context`
   records to the rebuilt workspace; conversation text is untouched. The source thread is archived (the tombstone).
 - **Never travels:** `auth.json` or any Codex credential. The target host signs in on its own (`codex login`).
+- **Model provider:** a thread keeps the provider it was recorded under (`session_meta.model_provider`), and a host's sign-in belongs
+  to the providers that host configured, so before anything is fenced `pi-remote move` asks the source for the thread's provider and
+  the target whether its Codex can use it (configured in `config.toml`, or built in and signed in; an API-key login belongs to the
+  host's default provider, not to the built-in `openai`). If not, the move is refused naming the provider and nothing is changed; the
+  target checks again at import. `--codex-provider <id>` (on `move` and `return`) rebinds the thread to a provider the destination
+  has: the import rewrites only `session_meta.model_provider` and the `model_provider_id` of `thread_settings_applied` events. The
+  thread's model is not changed, so pick a provider that serves it.
 - **Version pin:** the bundle records `codex --version`; the target refuses unless its own is identical. `pi-remote
   attach` refuses the same way. `PI_CODEX_VERSION` pins a host to one version outright.
 - **Socket only:** the app-server is reached through its unix control socket, locally or ssh-forwarded; there is no
@@ -158,10 +165,10 @@ The same `move` core carries a Codex thread. Run one daemon per Codex host (`pi-
 
 ### Steer, list, return
 
-- `pi-remote ls [--host h]` lists threads (status `running` or `idle`). Threads that moved away are archived and still listed, as `closed` (moved).
+- `pi-remote ls [--host h]` lists threads (status `running`, `idle`, or `error: <message>` when the thread's last turn failed, e.g. a 401 from the provider). Threads that moved away are archived and still listed, as `closed` (moved).
 - `pi-remote steer [--host h] <thread> "<message>"` goes through the app-server: `turn/steer` while a turn runs (the text joins the
-  turn at its next model call), `turn/start` when idle. The reply says which one happened. A fenced or moved thread refuses.
-- `pi-remote return --host h <thread> [--to-cwd <empty dir>] [--wait s]` is the move in the other direction: the host's thread is the
+  turn at its next model call), `turn/start` when idle. The reply says which one happened. A turn that fails right after it starts (a rejected key, say) is reported instead: `steer` prints the error and exits 1 (the watch lasts `PI_CODEX_TURN_WATCH_MS`, default 3000). A fenced or moved thread refuses.
+- `pi-remote return --host h <thread> [--to-cwd <empty dir>] [--codex-provider <id>] [--wait s]` is the move in the other direction: the host's thread is the
   source and this machine's Codex daemon the target (the running one in `PI_SERVER_DIR`, else one started for the command). The host
   keeps the thread fenced until this machine acknowledges it, so a failed return leaves it live on the host; afterwards the host's copy is archived.
   The workspace goes back to where the thread lived before it moved when that directory is free, otherwise pass `--to-cwd`.

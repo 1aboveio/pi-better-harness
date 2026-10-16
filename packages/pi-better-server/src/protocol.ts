@@ -31,6 +31,8 @@ export interface SessionSummary {
   branch?: string;
   /** True while a turn is in flight in the live session. */
   isStreaming: boolean;
+  /** Codex hosts: the error the thread's last turn ended with, while it has not run a good turn since. */
+  lastError?: string;
   /** Present when this daemon does not currently own the session: fenced for a move, or moved away. */
   ownership?: "fenced" | "moved";
   /** True when the session is hosted in memory right now. */
@@ -90,12 +92,12 @@ export type MoveCommand =
   | { id?: string; type: "move_read"; moveId: string; offset: number; length: number }
   | { id?: string; type: "move_retire"; sessionId: string; moveId: string; movedTo: string }
   | { id?: string; type: "move_unfence"; sessionId: string; moveId?: string }
-  | { id?: string; type: "move_begin"; moveId: string; sessionId: string; size: number; sha256: string; cwd?: string }
+  | { id?: string; type: "move_begin"; moveId: string; sessionId: string; size: number; sha256: string; cwd?: string; rebindProvider?: string }
   | { id?: string; type: "move_write"; moveId: string; offset: number; data: string }
   | { id?: string; type: "move_commit"; moveId: string }
   | { id?: string; type: "move_abort"; moveId: string; sessionId: string }
   /** Checks to run on the receiving daemon before anything is fenced; with `sessionId`, also describes that session for a pull. */
-  | { id?: string; type: "move_preflight"; sessionId?: string; model?: string; repoRemote?: string; requireGh?: boolean; bytes?: number; dir?: string };
+  | { id?: string; type: "move_preflight"; sessionId?: string; model?: string; modelProvider?: string; rebindProvider?: string; repoRemote?: string; requireGh?: boolean; bytes?: number; dir?: string };
 
 /**
  * Event delivery and control, all addressed to one session:

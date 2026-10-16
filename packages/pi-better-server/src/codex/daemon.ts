@@ -48,12 +48,28 @@ function socketIsLive(path: string): Promise<boolean> {
   });
 }
 
+/** What the thread's most recent turn failed with, if it did. */
+async function lastTurnError(runtime: CodexRuntime, threadId: string): Promise<string | undefined> {
+  try {
+    const client = await runtime.client();
+    const page = await client.call<{ data: Array<{ status: string; error?: { message?: string; additionalDetails?: string | null } | null }> }>("thread/turns/list", { threadId, limit: 1 });
+    const turn = page.data[0];
+    if (turn?.status !== "failed" || !turn.error?.message) return undefined;
+    return turn.error.additionalDetails && !turn.error.message.includes(turn.error.additionalDetails) ? `${turn.error.message} (${turn.error.additionalDetails})` : turn.error.message;
+  } catch {
+    return undefined;
+  }
+}
+
 async function listThreads(runtime: CodexRuntime, adapter: CodexMoveAdapter): Promise<SessionSummary[]> {
   const client = await runtime.client();
   const sessions: SessionSummary[] = [];
+  // thread/list shows only the host's default provider unless told otherwise; a thread rebound to another configured provider must stay listed.
+  const { config } = await client.call<{ config: { model_provider?: string | null; model_providers?: Record<string, unknown> | null } }>("config/read", {});
+  const modelProviders = [...new Set([config.model_provider ?? "openai", "openai", ...Object.keys(config.model_providers ?? {})])];
   let cursor: string | null = null;
   do {
-    const page: { data: any[]; nextCursor: string | null } = await client.call("thread/list", { limit: 100, cursor, sourceKinds: ["cli", "vscode", "exec", "appServer"] });
+    const page: { data: any[]; nextCursor: string | null } = await client.call("thread/list", { limit: 100, cursor, modelProviders, sourceKinds: ["cli", "vscode", "exec", "appServer"] });
     for (const thread of page.data) {
       const ownership = adapter.ownership.get(thread.id).state;
       const iso = (seconds: unknown): string => new Date(Number(seconds) * 1000).toISOString();
@@ -65,6 +81,7 @@ async function listThreads(runtime: CodexRuntime, adapter: CodexMoveAdapter): Pr
         ...(thread.name ? { name: thread.name } : thread.preview ? { name: String(thread.preview).slice(0, 80) } : {}),
         ...(thread.model ? { model: thread.model } : {}),
         isStreaming: thread.status?.type === "active",
+        ...(thread.status?.type === "systemError" ? { lastError: (await lastTurnError(runtime, thread.id)) ?? "the last turn failed" } : {}),
         ...(ownership !== "owned" ? { ownership } : {}),
         live: thread.status?.type !== "notLoaded",
         lastSeq: 0,
@@ -158,7 +175,7 @@ export async function startCodexDaemon(options: CodexDaemonOptions = {}): Promis
           if (type === "get_state") return reply({ sessionId, data: { sessionId, isStreaming: await isThreadRunning(adapter, runtime, sessionId) } });
           const message = typeof command.message === "string" ? command.message.trim() : "";
           if (!message) throw new Error(`${type} needs a message`);
-          return reply({ sessionId, data: { delivered: await deliverToThread(adapter, runtime, sessionId, message) } });
+          return reply({ sessionId, data: await deliverToThread(adapter, runtime, sessionId, message) });
         }
         if (type === "codex_endpoint") {
           const status = await runtime.daemonStatus();

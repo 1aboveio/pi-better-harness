@@ -11,6 +11,7 @@ import { DaemonClient } from "../client.ts";
 import { moveSession, type MoveResult } from "../move/orchestrate.ts";
 import { defaultServerDir, socketPathFor } from "../paths.ts";
 import { resolveSession } from "../remote/sessions.ts";
+import { preflightCodexProvider } from "./preflight.ts";
 import { readRolloutMeta } from "./rollout.ts";
 import { startCodexDaemon, type CodexDaemon } from "./daemon.ts";
 import { CodexRuntime, type CodexRuntimeOptions } from "./runtime.ts";
@@ -25,6 +26,8 @@ export interface ReturnCodexOptions {
   codex?: CodexRuntimeOptions;
   /** Where to rebuild the workspace. Default: where the thread lived before it moved away. */
   toCwd?: string;
+  /** Bind the returned thread to this model provider on this machine (the host's provider may not exist here). */
+  rebindProvider?: string;
   waitMs?: number;
   onProgress?: (message: string) => void;
 }
@@ -78,9 +81,11 @@ export async function returnCodexThread(options: ReturnCodexOptions): Promise<Re
     if (dest && existsSync(dest) && readdirSync(dest).length > 0) {
       throw new Error(`${dest} already exists and is not empty; pass --to-cwd <empty dir>`);
     }
+    await preflightCodexProvider(options.host, local.client, summary.sessionId, options.rebindProvider);
     options.onProgress?.("preflight passed");
     const result = await moveSession(options.host, local.client, {
       sessionId: summary.sessionId,
+      ...(options.rebindProvider ? { rebindProvider: options.rebindProvider } : {}),
       ...(dest ? { toCwd: dest } : {}),
       ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}),
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),
