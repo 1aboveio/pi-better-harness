@@ -4,8 +4,9 @@
  */
 import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
+import { estimateBundleBytes, repoRemoteOf, runChecks } from "./preflight.ts";
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
-import type { AgentMoveAdapter, ImportRequest, SessionBundleSpec } from "../core/adapter.ts";
+import type { AgentMoveAdapter, ImportRequest, ReadinessReport, ReadinessRequest, SessionBundleSpec } from "../core/adapter.ts";
 import type { BundleManifest } from "../core/bundle.ts";
 import type { OwnershipStore } from "../core/ownership.ts";
 import { SERVER_EXTENSION_VERSIONS } from "../handshake.ts";
@@ -34,6 +35,30 @@ export class PiMoveAdapter implements AgentMoveAdapter {
 
   get ownership(): OwnershipStore {
     return this.registry.ownership;
+  }
+
+  /** Receiver checks for a move (credentials, disk, repo remote, versions), plus a description of the session for a pull. */
+  async readiness(request: ReadinessRequest): Promise<ReadinessReport> {
+    const checks = await runChecks(request, { serverDir: this.serverDir, providerAuth: (provider) => this.registry.checkProviderAuth(provider) });
+    if (!request.sessionId) return { checks };
+    const entry = this.registry.entry(request.sessionId);
+    if (!entry) throw new Error(`Unknown session: ${request.sessionId}`);
+    const blocked = this.registry.ownership.blockedReason(request.sessionId);
+    if (blocked) throw new Error(blocked);
+    const remote = repoRemoteOf(entry.cwd);
+    return {
+      checks,
+      session: {
+        cwd: entry.cwd,
+        cwdName: basename(entry.cwd),
+        ...(entry.model ? { model: `${entry.model.provider}/${entry.model.modelId}` } : {}),
+        ...(remote ? { repoRemote: remote } : {}),
+        bytes: estimateBundleBytes(entry.cwd),
+        ...(entry.name ? { name: entry.name } : {}),
+        createdAt: entry.createdAt,
+        epoch: this.registry.ownership.get(request.sessionId).epoch,
+      },
+    };
   }
 
   hasSession(sessionId: string): boolean {

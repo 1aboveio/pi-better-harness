@@ -11,9 +11,25 @@
  * a stuck fence is recoverable (`pi-remote move --abort`), two live writers are not.
  */
 import { randomUUID } from "node:crypto";
-import type { DaemonClient } from "../client.ts";
 import { DEFAULT_CHUNK_BYTES } from "../core/transfer.ts";
 import type { CommitAck } from "./service.ts";
+
+/** What the orchestration needs from either end: a daemon connection, or a local stand-in that speaks the same move commands. */
+export interface MoveEndpoint {
+  call(command: Record<string, unknown>): Promise<{ data?: unknown }>;
+  /** The commands that unstick this end when it is left fenced. A daemon uses the `pi-remote move` forms; a local session names its own. */
+  recovery?: MoveRecovery;
+}
+
+export interface MoveRecovery {
+  abort(sessionId: string): string;
+  retire(sessionId: string, moveId: string, movedTo?: string): string;
+}
+
+const DAEMON_RECOVERY: MoveRecovery = {
+  abort: (sessionId) => `pi-remote move --abort ${sessionId}`,
+  retire: (sessionId, moveId, movedTo) => `pi-remote move [--host <source>] --retire ${sessionId} --move-id ${moveId}${movedTo ? ` --moved-to ${movedTo}` : ""}`,
+};
 
 export interface MoveFaults {
   /** Throw while transferring chunk n (0-based). */
@@ -57,11 +73,12 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export async function moveSession(source: DaemonClient, target: DaemonClient, options: MoveOptions): Promise<MoveResult> {
+export async function moveSession(source: MoveEndpoint, target: MoveEndpoint, options: MoveOptions): Promise<MoveResult> {
   const { sessionId } = options;
   const moveId = options.moveId ?? randomUUID();
   const chunkBytes = options.chunkBytes ?? DEFAULT_CHUNK_BYTES;
   const progress = options.onProgress ?? (() => undefined);
+  const recovery = source.recovery ?? DAEMON_RECOVERY;
 
   const fenced = await source.call({ type: "move_fence", sessionId, moveId, ...(options.waitMs !== undefined ? { waitMs: options.waitMs } : {}) });
   const from = (fenced.data as { daemonId: string }).daemonId;
@@ -101,16 +118,16 @@ export async function moveSession(source: DaemonClient, target: DaemonClient, op
     }
     if (committed === true) {
       ack = (await target.call({ type: "move_commit", moveId }).catch(() => undefined))?.data as CommitAck | undefined;
-      if (!ack) throw new MoveError(`${reason}. The target holds the session but its reply was lost; the source stays fenced. Check the target with \`pi-remote ls\`; once it lists the session, run \`pi-remote move [--host <source>] --retire ${sessionId} --move-id ${moveId}\` to retire the source (do not use --abort: the target owns the session).`, false);
+      if (!ack) throw new MoveError(`${reason}. The target holds the session but its reply was lost; the source stays fenced. Check the target with \`pi-remote ls\`; once it lists the session, run \`${recovery.retire(sessionId, moveId)}\` to retire the source (do not use --abort: the target owns the session).`, false);
     } else if (committed === false) {
       try {
         await source.call({ type: "move_unfence", sessionId, moveId });
       } catch (unfenceError) {
-        throw new MoveError(`${reason}. The source could not be unfenced (${describe(unfenceError)}); run \`pi-remote move --abort ${sessionId}\`.`, false);
+        throw new MoveError(`${reason}. The source could not be unfenced (${describe(unfenceError)}); run \`${recovery.abort(sessionId)}\`.`, false);
       }
       throw new MoveError(`move failed, source session is unchanged and running: ${reason}`, true);
     } else {
-      throw new MoveError(`${reason}. The target could not be reached to learn whether it took the session, so the source stays fenced (no second writer). Once the target is reachable, run \`pi-remote move --abort ${sessionId}\` on the source if it does not hold the session.`, false);
+      throw new MoveError(`${reason}. The target could not be reached to learn whether it took the session, so the source stays fenced (no second writer). Once the target is reachable, run \`${recovery.abort(sessionId)}\` on the source if it does not hold the session.`, false);
     }
   }
 
@@ -118,7 +135,7 @@ export async function moveSession(source: DaemonClient, target: DaemonClient, op
   try {
     await source.call({ type: "move_retire", sessionId, moveId, movedTo: ack.daemonId });
   } catch (error) {
-    throw new MoveError(`target now owns the session, but retiring the source failed: ${describe(error)}. The source stays fenced. Once it is reachable, run \`pi-remote move [--host <source>] --retire ${sessionId} --move-id ${moveId} --moved-to ${ack.daemonId}\` (do not use --abort: the target owns the session).`, false);
+    throw new MoveError(`target now owns the session, but retiring the source failed: ${describe(error)}. The source stays fenced. Once it is reachable, run \`${recovery.retire(sessionId, moveId, ack.daemonId)}\` (do not use --abort: the target owns the session).`, false);
   }
   return { ...ack, moveId, from, archiveBytes, chunks, excluded };
 }

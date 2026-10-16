@@ -8,6 +8,7 @@
  * No agent imports here. The Pi adapter is src/move/pi-adapter.ts.
  */
 import type { BundleManifest, CreateBundleOptions } from "./bundle.ts";
+import type { MoveCommand } from "../protocol.ts";
 import type { OwnershipStore } from "./ownership.ts";
 
 /** What the adapter hands the core to bundle a session. The core adds `outFile` and `ownership`. */
@@ -29,6 +30,14 @@ export interface ImportRequest {
   extractedDir: string;
   /** The rebuilt workspace. */
   cwd: string;
+}
+
+/** A `move_preflight` request and what the adapter answers; the core adds the daemon id. Nothing is changed. */
+export type ReadinessRequest = Extract<MoveCommand, { type: "move_preflight" }>;
+export interface ReadinessReport {
+  checks: Array<{ name: string; ok: boolean; detail: string }>;
+  /** When the request names a session: a description of it for a pull. */
+  session?: Record<string, unknown>;
 }
 
 export interface AgentMoveAdapter {
@@ -61,6 +70,9 @@ export interface AgentMoveAdapter {
   importSession(request: ImportRequest): Promise<void>;
   /** Undo a failed `importSession`. */
   restore(sessionId: string, snapshot: unknown): Promise<void>;
+
+  /** Answer a `move_preflight` command (receiver checks, plus a session description for `pi-remote return`). */
+  readiness?(request: ReadinessRequest): Promise<ReadinessReport>;
 
   /** Optional checks run before the source fences and before the target accepts a bundle. #477 supplies the Pi checks. */
   preflight?(context: MovePreflightContext): void | Promise<void>;

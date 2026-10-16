@@ -5,6 +5,7 @@ import { readGitBranch } from "./git.ts";
 import { join } from "node:path";
 import { EventLog, type EventLogOptions } from "./event-log.ts";
 import { HostedSession } from "./hosted-session.ts";
+import { checkProviderAuth } from "./move/auth.ts";
 import { OwnershipStore } from "./core/ownership.ts";
 import { indexPathFor, ownershipPathFor } from "./paths.ts";
 import type { DaemonCommand, SessionStatus, SessionSummary } from "./protocol.ts";
@@ -166,6 +167,11 @@ export class SessionRegistry {
       entry.updatedAt = new Date().toISOString();
       this.persist();
     }
+  }
+
+  /** Dry-run the provider's credentials as a session on this daemon would resolve them. */
+  checkProviderAuth(provider: string): Promise<void> {
+    return checkProviderAuth(provider, this.options.serverDir, this.options.sessionOptions);
   }
 
   /** Add (or replace a closed) session that arrived from another daemon, then host it. */

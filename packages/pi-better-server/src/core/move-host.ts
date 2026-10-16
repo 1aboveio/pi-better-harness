@@ -77,6 +77,10 @@ export class MoveHost {
         return { data: await this.commit(checkId("moveId", command.moveId)) };
       case "move_abort":
         return { data: this.abort(checkId("moveId", command.moveId), command.sessionId) };
+      case "move_preflight": {
+        const report = (await this.adapter.readiness?.(command)) ?? { checks: [] };
+        return { data: { daemonId: this.adapter.ownership.daemonId, ...report } };
+      }
     }
   }
 
@@ -147,6 +151,9 @@ export class MoveHost {
     this.adapter.assertCanImport(sessionId);
     if (command.cwd !== undefined && !command.cwd.startsWith("/")) throw new Error("move_begin cwd must be an absolute path");
     await this.adapter.preflight?.({ side: "target", sessionId, moveId, ...(command.cwd ? { cwd: command.cwd } : {}) });
+    // Preflight is async: a duplicate or an abort may have landed while it ran.
+    if (this.aborted.has(moveId)) throw new Error(`Move ${moveId} was aborted`);
+    if (this.inbound.has(moveId)) throw new Error(`Move ${moveId} already started`);
     const transfer = new InboundTransfer(join(this.movesDir, moveId, "bundle.tar"), command.size, command.sha256);
     this.inbound.set(moveId, { sessionId, ...(command.cwd ? { cwd: command.cwd } : {}), transfer });
   }

@@ -32,6 +32,11 @@
   "publishConfig": {
     "access": "public"
   },
+  "pi": {
+    "extensions": [
+      "./src/detach/extension.ts"
+    ]
+  },
   "scripts": {
     "pretest": "node ../../scripts/sync-shared-ssh-core.mjs",
     "prepack": "node ../../scripts/sync-shared-ssh-core.mjs",

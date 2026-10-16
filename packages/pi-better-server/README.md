@@ -143,3 +143,20 @@ on its own.
 `scripts/bootstrap-host.sh [PREFIX]` installs a pinned Node, a pinned Pi and this
 package's `src/` under `PREFIX` (default `~/.pi-better-server`) with no root, and
 writes `PREFIX/bin/pi-server`.
+
+## Detach and return (`/detach`, `pi-remote return`)
+
+`/detach <ssh-alias> [--remote-dir <dir>] [--to-cwd <dir>]` is a Pi command (registered by `src/detach/extension.ts`, listed under `pi.extensions`). It moves the current plain local session and its workspace into the daemon on that host with the same move protocol as `pi-remote move`; this machine stands in as the source (`LocalSource`). Afterwards the local session is read-only (input is refused with a pointer to `return`); follow the remote one with `pi-remote tail <session> --host <alias>` and `steer` until the attach TUI is available.
+
+`pi-remote return --host <alias> <session> [--to-cwd <empty dir>]` pulls it back: the workspace is rebuilt (default: where it lived before the detach if that directory is gone or empty; /detach leaves the original in place, so normally a new `<name>-returned` directory beside it, which the command prints; the original is never touched), the transcript is placed in Pi's session directory, and the daemon's copy is retired (`moved`; its workspace directory is left on the host). A returned session can be detached again.
+
+Preflight runs before anything is fenced, and a refusal leaves the source untouched:
+
+- the daemon answers and speaks this protocol; Pi (same major.minor) and pi-better-server are the pinned versions. Otherwise the refusal names `scripts/bootstrap-host.sh` (user-local install) as the fix.
+- provider credentials resolve on the receiving side (a dry run, no model call); `gh auth status` passes when the repo remote is on GitHub (`PI_REMOTE_GH` overrides the binary).
+- free disk at the workspace location is at least 3x the bundle plus a reserve (`PI_REMOTE_MIN_FREE_BYTES`, default 256 MiB).
+- the repo remote answers `git ls-remote` from the receiving side.
+
+The daemon exposes these as `move_preflight`. Not covered: installing for the user automatically (the refusal prints the command instead).
+
+If `/detach` leaves this machine's copy fenced (the target was unreachable, or its reply was lost), the error prints the recovery command. It acts on this machine's record and first asks the daemon whether it holds the session: `pi-remote recover <session> --abort --host <alias>` reopens the local session when the daemon does not hold it; `pi-remote recover <session> --retire --move-id <id> --host <alias>` records it as moved when the daemon does. A Pi process that detached a session never runs it again, even after a `return`; resume it with `pi --session` in a new process.
