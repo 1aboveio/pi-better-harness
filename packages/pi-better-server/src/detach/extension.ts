@@ -28,7 +28,14 @@ export function parseDetachArgs(args: string): { host: string; remoteDir?: strin
   return { host, ...(remoteDir ? { remoteDir } : {}), ...(toCwd ? { toCwd } : {}) };
 }
 
-export default function (pi: ExtensionAPI): void {
+/** The Pi session methods the transcript gate wraps. The gate cannot work without them, so /detach refuses when Pi no longer has them. */
+const GATED_METHODS = ["_persist", "_rewriteFile"] as const;
+
+export interface DetachDeps {
+  resolveTarget: typeof resolveTarget;
+}
+
+export function registerDetach(pi: ExtensionAPI, deps: DetachDeps = { resolveTarget }): void {
   /** Sessions this process has seen leave. A later `return` rewrites the record to "owned", but this process must never write them again. */
   const departed = new Set<string>();
   pi.registerCommand("detach", {
@@ -40,6 +47,14 @@ export default function (pi: ExtensionAPI): void {
         parsed = parseDetachArgs(args);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        return;
+      }
+      const missing = GATED_METHODS.filter((method) => typeof (ctx.sessionManager as unknown as Record<string, unknown>)[method] !== "function");
+      if (missing.length > 0) {
+        ctx.ui.notify(
+          `Refusing to detach: this Pi no longer has the session methods (${missing.join(", ")}) that keep a moved session from being written here, so the move could not be made safe. This session is unchanged.`,
+          "error",
+        );
         return;
       }
       const sessionId = ctx.sessionManager.getSessionId();
@@ -59,7 +74,7 @@ export default function (pi: ExtensionAPI): void {
           },
           host: parsed.host,
           connect: async () => {
-            target = await resolveTarget({ host: parsed.host, ...(parsed.remoteDir ? { remoteDir: parsed.remoteDir } : {}) });
+            target = await deps.resolveTarget({ host: parsed.host, ...(parsed.remoteDir ? { remoteDir: parsed.remoteDir } : {}) });
             return DaemonClient.connect(target.socketPath);
           },
           isBusy: () => !ctx.isIdle(),
@@ -98,14 +113,25 @@ export default function (pi: ExtensionAPI): void {
     return departed.has(sessionId) ? `This session moved away from this Pi process; resume it in a new process with \`pi --session\` after \`pi-remote return ${sessionId}\`.` : undefined;
   };
   const guard = (ctx: { sessionManager: { getSessionId(): string } }): void => {
-    const manager = ctx.sessionManager as unknown as { _persist?: (entry: unknown) => void; _rewriteFile?: () => void };
+    const manager = ctx.sessionManager as unknown as { flushed?: boolean; _persist?: (entry: unknown) => void; _rewriteFile?: () => void };
     if (guarded.has(manager)) return;
     guarded.add(manager);
-    for (const method of ["_persist", "_rewriteFile"] as const) {
+    const rewrite = typeof manager._rewriteFile === "function" ? manager._rewriteFile : undefined;
+    // Writes dropped while blocked leave entries only in memory. If the session is unblocked again (a failed
+    // move unfences it), the next append would name those entries as parentId, so the file is rewritten whole first.
+    let dropped = false;
+    for (const method of GATED_METHODS) {
       const original = manager[method];
       if (typeof original !== "function") continue;
       (manager as Record<string, unknown>)[method] = function (this: unknown, ...args: unknown[]) {
-        if (blockedFor(ctx)) return undefined;
+        if (blockedFor(ctx)) {
+          dropped = true;
+          return undefined;
+        }
+        if (dropped) {
+          dropped = false;
+          if (rewrite && manager.flushed !== false) return rewrite.call(this);
+        }
         return (original as (...a: unknown[]) => unknown).apply(this, args);
       };
     }
@@ -133,4 +159,8 @@ export default function (pi: ExtensionAPI): void {
     const reason = blockedFor(ctx);
     return reason ? { block: true, reason } : undefined;
   });
+}
+
+export default function (pi: ExtensionAPI): void {
+  registerDetach(pi);
 }
