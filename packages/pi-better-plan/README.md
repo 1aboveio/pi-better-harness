@@ -16,7 +16,7 @@ By default, you see up to five steps around the current work. The view starts at
 
 Click the plan to expand or collapse it in Pi's fullscreen mode. In regular terminal mode, use `/plan expand` or `/plan collapse`. For the full plan with details, run `/plan`.
 
-Rows show `✓` for done, `●` for active, `○` for pending, and `!` for blocked. Pi marks steps complete explicitly; the count is not an estimate of effort. The completion count is completed items / total eligible items: canceled workflow items (`cancelled` or `canceled`) are excluded from the total, while skipped and not-applicable items remain in it. Canceled items stay visible; an all-canceled plan shows `0/0` complete.
+Rows show `✓` for done, `●` for active, `○` for pending, and `!` for blocked. Pi marks steps complete explicitly; the count is not an estimate of effort. The completion count is completed items / total eligible items: canceled workflow items (`cancelled` or `canceled`) are excluded from the total, while skipped and not-applicable items remain in it. Canceled items remain visible for 30 seconds after the cancellation is first observed, then disappear from the widget and plan lists without deleting their workflow records. This delay survives session reloads; reactivating an item makes it visible again. An all-canceled plan shows `0/0` complete.
 
 Your plan and display settings survive reload and follow the session branch. A completed checklist clears after 30 seconds. A released workflow plan stays visible for reference, but cannot be edited until the workflow resumes.
 
