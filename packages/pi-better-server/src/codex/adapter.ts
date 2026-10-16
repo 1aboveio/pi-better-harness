@@ -205,10 +205,15 @@ export class CodexMoveAdapter implements AgentMoveAdapter {
     if (relative(sessionsDir, target).startsWith("..")) throw new Error(`Bundle rollout path escapes the sessions directory: ${state.rolloutRelPath}`);
 
     const client = await this.runtime.client();
-    // A tombstone from an earlier move away from this host comes back first, then is overwritten.
-    const archived = this.runtime.archivedRolloutPath(sessionId);
-    if (archived && !this.runtime.rolloutPath(sessionId)) await client.call("thread/unarchive", { threadId: sessionId }).catch(() => undefined);
-    const destination = this.runtime.rolloutPath(sessionId) ?? target;
+    // A copy from an earlier visit (the tombstone of a move away) is dropped first, with the app-server's index row for it:
+    // the row keeps the old cwd, and it is only rebuilt from a rollout the app-server has not seen. snapshot() kept a copy
+    // of the file, so a failed move puts it back.
+    const stale = this.runtime.rolloutPath(sessionId) ?? this.runtime.archivedRolloutPath(sessionId);
+    if (stale) {
+      await client.call("thread/delete", { threadId: sessionId }).catch(() => undefined);
+      rmSync(stale, { force: true });
+    }
+    const destination = target;
 
     const original = readFileSync(join(request.extractedDir, rolloutFile.path), "utf8");
     const rewritten = rewriteRolloutCwd(original, state.originalCwd, request.cwd).text;

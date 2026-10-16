@@ -13,6 +13,7 @@
     "src",
     "!src/shared-ssh-core/test-support/**",
     "scripts",
+    "codex-plugin",
     "README.md"
   ],
   "keywords": [

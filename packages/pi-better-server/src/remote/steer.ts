@@ -11,8 +11,10 @@ export async function deliverMessage(client: DaemonClient, sessionId: string, me
   const running = (state.data as { isStreaming: boolean }).isStreaming;
   // Mid-turn the message is queued for the next model call; an idle session starts a new turn with it.
   // `streamingBehavior` covers a turn that starts between the state check and the prompt.
-  await client.call(running ? { type: "steer", sessionId, message } : { type: "prompt", sessionId, message, streamingBehavior: "steer" });
-  return running ? "steer" : "prompt";
+  const reply = await client.call(running ? { type: "steer", sessionId, message } : { type: "prompt", sessionId, message, streamingBehavior: "steer" });
+  // A Codex host says how it delivered (a turn can start or end between the check and the call).
+  const said = (reply.data as { delivered?: string } | undefined)?.delivered;
+  return said === "steer" || said === "prompt" ? said : running ? "steer" : "prompt";
 }
 
 export const command: Subcommand = {

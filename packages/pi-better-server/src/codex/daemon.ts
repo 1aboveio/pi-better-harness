@@ -1,7 +1,8 @@
 /**
  * Daemon for Codex hosts: the same unix-socket protocol as the Pi daemon, limited to
- * what a Codex host needs: hello, list_sessions (Codex threads), the move commands,
- * and `codex_endpoint` (where the Codex app-server's control socket is, for attach).
+ * what a Codex host needs: hello, list_sessions (Codex threads), get_state / steer / prompt
+ * (so `pi-remote steer` works on a thread), the move commands, and `codex_endpoint`
+ * (where the Codex app-server's control socket is, for attach).
  * The daemon never listens on TCP, and the app-server it fronts is reached only
  * through its own unix socket.
  */
@@ -12,6 +13,7 @@ import { MoveHost } from "../core/move-host.ts";
 import { defaultServerDir, ensureServerDir, movesDirFor, socketPathFor } from "../paths.ts";
 import { encodeLine, failure, LineDecoder, MOVE_COMMANDS, type MoveCommand, type ServerMessage, type SessionSummary } from "../protocol.ts";
 import { CodexMoveAdapter } from "./adapter.ts";
+import { deliverToThread, isThreadRunning } from "./deliver.ts";
 import { readRolloutMeta, readThreadName } from "./rollout.ts";
 import { CodexRuntime, type CodexRuntimeOptions } from "./runtime.ts";
 
@@ -150,6 +152,14 @@ export async function startCodexDaemon(options: CodexDaemonOptions = {}): Promis
         }
         if (MOVE_COMMANDS.has(type)) return reply(await moves.handle(command as MoveCommand));
         if (type === "list_sessions") return reply({ data: { sessions: await listThreads(runtime, adapter) } });
+        if (type === "get_state" || type === "steer" || type === "prompt") {
+          const sessionId = typeof command.sessionId === "string" ? command.sessionId : "";
+          if (!sessionId) throw new Error(`${type} needs a sessionId`);
+          if (type === "get_state") return reply({ sessionId, data: { sessionId, isStreaming: await isThreadRunning(adapter, runtime, sessionId) } });
+          const message = typeof command.message === "string" ? command.message.trim() : "";
+          if (!message) throw new Error(`${type} needs a message`);
+          return reply({ sessionId, data: { delivered: await deliverToThread(adapter, runtime, sessionId, message) } });
+        }
         if (type === "codex_endpoint") {
           const status = await runtime.daemonStatus();
           const endpoint: CodexEndpoint = { socketPath: status.socketPath, codexVersion: runtime.version(), ...(status.appServerVersion ? { appServerVersion: status.appServerVersion } : {}) };
