@@ -1,0 +1,130 @@
+/**
+ * The Pi side of the move core: session registry, transcript file and
+ * session-index.json state. Everything agent-agnostic lives in core/move-host.ts.
+ */
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { basename, join } from "node:path";
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import type { AgentMoveAdapter, ImportRequest, SessionBundleSpec } from "../core/adapter.ts";
+import type { BundleManifest } from "../core/bundle.ts";
+import type { OwnershipStore } from "../core/ownership.ts";
+import { SERVER_EXTENSION_VERSIONS } from "../handshake.ts";
+import { importedDirFor } from "../paths.ts";
+import type { IndexEntry, SessionRegistry } from "../registry.ts";
+
+function majorMinor(version: string): string {
+  const match = /^v?(\d+)\.(\d+)/.exec(version);
+  return match ? `${match[1]}.${match[2]}` : version;
+}
+
+function splitModel(value: string): { provider: string; modelId: string } | undefined {
+  const slash = value.indexOf("/");
+  return slash < 1 ? undefined : { provider: value.slice(0, slash), modelId: value.slice(slash + 1) };
+}
+
+export class PiMoveAdapter implements AgentMoveAdapter {
+  readonly kind = "pi";
+  private readonly registry: SessionRegistry;
+  private readonly serverDir: string;
+
+  constructor(registry: SessionRegistry, serverDir: string) {
+    this.registry = registry;
+    this.serverDir = serverDir;
+  }
+
+  get ownership(): OwnershipStore {
+    return this.registry.ownership;
+  }
+
+  hasSession(sessionId: string): boolean {
+    return this.registry.entry(sessionId) !== undefined;
+  }
+
+  isBusy(sessionId: string): boolean {
+    return Boolean(this.registry.get(sessionId)?.turnActive);
+  }
+
+  async stop(sessionId: string): Promise<void> {
+    await this.registry.release(sessionId);
+  }
+
+  bundleSession(sessionId: string): SessionBundleSpec {
+    const entry = this.registry.entry(sessionId);
+    if (!entry) throw new Error(`Unknown session: ${sessionId}`);
+    const hasTranscript = entry.sessionFile !== "" && existsSync(entry.sessionFile);
+    return {
+      cwd: entry.cwd,
+      agent: { kind: this.kind, version: PI_VERSION, extensions: { ...SERVER_EXTENSION_VERSIONS } },
+      session: {
+        id: sessionId,
+        ...(entry.name ? { name: entry.name } : {}),
+        ...(entry.model ? { model: `${entry.model.provider}/${entry.model.modelId}` } : {}),
+        createdAt: entry.createdAt,
+        metadata: { cwdName: basename(entry.cwd) },
+      },
+      sessionFiles: hasTranscript ? [{ name: basename(entry.sessionFile), path: entry.sessionFile }] : [],
+      stateFiles: [{ name: "session-index.json", content: JSON.stringify({ name: entry.name, model: entry.model, createdAt: entry.createdAt }) }],
+    };
+  }
+
+  async retire(sessionId: string): Promise<void> {
+    await this.registry.retire(sessionId);
+  }
+
+  async resume(sessionId: string): Promise<void> {
+    if (this.registry.entry(sessionId)?.status === "running") await this.registry.open(sessionId);
+  }
+
+  assertCanImport(sessionId: string): void {
+    const existing = this.registry.entry(sessionId);
+    if (existing && existing.status === "running" && !this.registry.ownership.blockedReason(sessionId)) {
+      throw new Error(`Session ${sessionId} already exists on this daemon`);
+    }
+  }
+
+  checkBundle(manifest: BundleManifest): void {
+    if (manifest.agent.kind !== this.kind) throw new Error(`Bundle was made by ${manifest.agent.kind}; this daemon hosts Pi sessions`);
+    if (majorMinor(manifest.agent.version) !== majorMinor(PI_VERSION)) {
+      throw new Error(`Pi version mismatch: bundle from pi ${manifest.agent.version}, this daemon runs pi ${PI_VERSION}. Both must be on the same major.minor.`);
+    }
+  }
+
+  snapshot(sessionId: string): IndexEntry | undefined {
+    return this.registry.entry(sessionId) as IndexEntry | undefined;
+  }
+
+  async importSession(request: ImportRequest): Promise<void> {
+    const { sessionId, manifest } = request;
+    const importedDir = join(importedDirFor(this.serverDir), sessionId);
+    rmSync(importedDir, { recursive: true, force: true });
+    try {
+      const transcript = manifest.files.find((file) => file.role === "session");
+      let sessionFile = "";
+      if (transcript) {
+        mkdirSync(importedDir, { recursive: true, mode: 0o700 });
+        sessionFile = join(importedDir, basename(transcript.path));
+        copyFileSync(join(request.extractedDir, transcript.path), sessionFile);
+      }
+      const model = manifest.session.model ? splitModel(manifest.session.model) : undefined;
+      const now = new Date().toISOString();
+      await this.registry.adopt({
+        sessionId,
+        cwd: request.cwd,
+        sessionFile,
+        status: "running",
+        ...(manifest.session.name ? { name: manifest.session.name } : {}),
+        ...(model ? { model } : {}),
+        createdAt: manifest.session.createdAt ?? now,
+        updatedAt: now,
+      });
+    } catch (error) {
+      rmSync(importedDir, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  async restore(sessionId: string, snapshot: unknown): Promise<void> {
+    await this.registry.forget(sessionId, snapshot as IndexEntry | undefined);
+    rmSync(join(importedDirFor(this.serverDir), sessionId), { recursive: true, force: true });
+  }
+}
