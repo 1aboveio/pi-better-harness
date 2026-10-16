@@ -55,7 +55,7 @@ function renderWidget(value: unknown, width: number, theme: unknown = { fg: (_co
 }
 
 describe("shared background work navigator", () => {
-  it("uses one footer/editor host for multiple providers and dispatches close by provider", () => {
+  it("keeps the persistent footer clear while sharing one editor host and dispatching close by provider", () => {
     const closed: string[] = [];
     const unregisterSubagents = registerBackgroundWorkProvider(provider("subagents", "Subagents", 10, 200, (id) => closed.push(`subagents:${id}`)));
     const unregisterTasks = registerBackgroundWorkProvider(provider("background-tasks", "Background Tasks", 20, 100, (id) => closed.push(`tasks:${id}`)));
@@ -85,8 +85,7 @@ describe("shared background work navigator", () => {
         truncate: (value, width) => value.slice(0, width),
       });
 
-      assert.equal(statuses.at(-1)?.[0], NAVIGATOR_STATUS_KEY);
-      assert.equal(statuses.at(-1)?.[1], "← work · 2");
+      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, undefined]);
 
       let list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
       assert.doesNotMatch(list, /background work/);
@@ -121,6 +120,7 @@ describe("shared background work navigator", () => {
       assert.deepEqual(closed, ["subagents:subagents-1"]);
       component.handleInput("x");
       assert.deepEqual(closed, ["subagents:subagents-1", "tasks:background-tasks-1"]);
+      assert.ok(statuses.filter(([key]) => key === NAVIGATOR_STATUS_KEY).every(([, value]) => value === undefined));
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
@@ -133,14 +133,15 @@ describe("shared background work navigator", () => {
     const unregister = registerBackgroundWorkProvider({
       ...provider("background-tasks", "Background Tasks", 20, 100, () => undefined),
       visibleCount: () => count,
-      listRows: () => [],
+      listRows: (now) => count > 0 ? provider("background-tasks", "Background Tasks", 20, 100, () => undefined).listRows(now) : [],
     });
 
     const statuses: Array<[string, string | undefined]> = [];
+    const widgets: unknown[] = [];
     const ui = {
       factory: undefined as any,
       setStatus(key: string, value: string | undefined) { statuses.push([key, value]); },
-      setWidget() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
       getEditorComponent() { return this.factory; },
       setEditorComponent(factory: any) { this.factory = factory; },
     };
@@ -156,10 +157,14 @@ describe("shared background work navigator", () => {
       });
       assert.equal(statuses.at(-1)?.[1], undefined);
 
-      count = 1;
-      refreshBackgroundWorkNavigator(toolCtx);
-
-      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, "← work · 1"]);
+      for (const nextCount of [1, 3, 0]) {
+        count = nextCount;
+        refreshBackgroundWorkNavigator(toolCtx);
+        assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, undefined]);
+        const list = renderWidget(widgets.at(-1), 120).join("\n");
+        if (count > 0) assert.match(list, /Background Tasks row/);
+        else assert.doesNotMatch(list, /Background Tasks row/);
+      }
     } finally {
       disposeBackgroundWorkNavigator(tuiCtx);
       unregister();

@@ -419,6 +419,59 @@ test("external active background providers suppress idle goal continuation", asy
   assert.equal(messages.length, 0, "active background tasks must not trigger idle continuation");
 });
 
+for (const unhealthy of [false, true]) {
+  test(`background activity stays observable without a persistent Goal count footer (unhealthy=${unhealthy})`, async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+    const h = createContinuationHarness(undefined, { hasUI: true });
+    let active = true;
+    h.events.emit("pi-better-goal:register-provider", {
+      id: "fixture",
+      getActivity: () => ({
+        providerId: "fixture",
+        items: [{ id: "work", status: active ? (unhealthy ? "orphaned" : "running") : "succeeded", active, unhealthy }],
+      }),
+    });
+    const activity = async () => {
+      const result = await h.tools.get("get_background_activity")!.execute("inspect", {}, undefined, undefined, toolContext(h.ctx));
+      return result.details as { activeBackgroundCount: number; unhealthyBackgroundCount: number };
+    };
+
+    try {
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      const snapshot = await activity();
+      assert.equal(snapshot.activeBackgroundCount, 1, "activity inspection retains running work");
+      assert.equal(snapshot.unhealthyBackgroundCount, unhealthy ? 1 : 0);
+      assert.ok(h.statuses.length > 0);
+      assert.ok(h.statuses.every((value) => value === undefined), "no-goal activity must not publish a count footer");
+
+      await h.commands.get("goal")?.handler("keep watching", h.ctx);
+      h.statuses.length = 0;
+      h.messages.length = 0;
+      await h.handlers.get("agent_settled")?.({}, h.ctx);
+      t.mock.timers.tick(60_000);
+      await flushPromises();
+      assert.ok(h.statuses.every((value) => value === undefined), "active goal activity must not publish a count footer");
+      assert.equal(h.messages.length, 0, "background work still suppresses autonomous continuation");
+
+      await h.commands.get("goal")?.handler("pause", h.ctx);
+      await activity();
+      assert.equal(h.statuses.at(-1), "goal paused · /goal resume", "pause guidance remains without a bg suffix");
+      await h.handlers.get("session_start")?.({}, h.ctx);
+      assert.equal(h.statuses.at(-1), "goal paused · /goal resume", "reload must not restore the count badge");
+
+      active = false;
+      assert.equal((await activity()).activeBackgroundCount, 0);
+      assert.equal(h.statuses.at(-1), "goal paused · /goal resume");
+      await h.commands.get("goal")?.handler("clear", h.ctx);
+      await activity();
+      assert.equal(h.statuses.at(-1), undefined);
+    } finally {
+      await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    }
+    assert.equal(h.statuses.at(-1), undefined, "shutdown clears footer state");
+  });
+}
+
 test("idle goal continuation waits for the inactivity grace period", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const { commands, handlers, messages, ctx } = createContinuationHarness();
@@ -2129,7 +2182,7 @@ test("non-conversational commands leave an active goal and its continuation unto
 
 test("background work that finishes during a pending question is harvested right after the answer", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
-  const { commands, handlers, messages, sendOptions, ctx, events } = createContinuationHarness();
+  const { commands, handlers, messages, sendOptions, ctx, events, tools, statuses } = createContinuationHarness(undefined, { hasUI: true });
   let workerStatus = "running";
   events.emit("pi-better-goal:register-provider", {
     id: "fixture",
@@ -2150,7 +2203,10 @@ test("background work that finishes during a pending question is harvested right
 
   await handlers.get("tool_execution_start")?.({ toolCallId: "q1", toolName: "ask_user_question", args: {} }, ctx);
   workerStatus = "completed";
+  await tools.get("get_background_activity")!.execute("inspect", {}, undefined, undefined, toolContext(ctx));
+  assert.equal(statuses.at(-1), "1 background done; waiting on your answer", "question feedback remains visible while other work runs");
   await handlers.get("tool_execution_end")?.({ toolCallId: "q1", toolName: "ask_user_question", result: {}, isError: false }, ctx);
+  assert.equal(statuses.at(-1), undefined, "answer clears the feedback without restoring the persistent bg count");
 
   assert.equal(messages.length, 1, "one harvest message follows the answer");
   const harvest = messages[0] as { content: string; details: { kind: string; finished: Array<{ id: string }> } };

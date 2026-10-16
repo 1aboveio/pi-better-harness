@@ -21,10 +21,6 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     return initialDefault = value?.enabled === true;
   }
 
-  function status(ctx: ExtensionContext): void {
-    ctx.ui.setStatus(ENTRY, enabled ? "tools: minimal" : undefined);
-  }
-
   function collapseTools(ctx: ExtensionContext): void {
     // setToolsExpanded is a no-op when already false; force a redraw of restored transcript rows.
     if (!ctx.ui.getToolsExpanded()) ctx.ui.setToolsExpanded(true);
@@ -77,7 +73,6 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
       if (enabled) collapseTools(ctx);
       hook!.setEnabled(enabled);
     } else enabled = false;
-    status(ctx);
   }
 
   async function change(value: string, ctx: ExtensionContext): Promise<void> {
@@ -98,7 +93,6 @@ export default function minimalOutputExtension(pi: ExtensionAPI): void {
     if (enabled) collapseTools(ctx);
     hook!.setEnabled(enabled);
     if (enabled && !running) hook!.completeRun();
-    status(ctx);
   }
 
   const setting: SettingsControl = {
