@@ -23,6 +23,8 @@ export interface RemoteContext {
   /** Aborted on SIGINT/SIGTERM; long-running commands (tail) stop when it fires. */
   readonly signal: AbortSignal;
   connect(): Promise<DaemonClient>;
+  /** Forward another unix socket that lives next to the daemon (see Target.forwardSocket). */
+  forwardSocket(remoteSocketPath: string): Promise<{ socketPath: string; close(): Promise<void> }>;
   stdout(text: string): void;
   stderr(text: string): void;
   close(): Promise<void>;
@@ -53,6 +55,10 @@ export function createContext(options: ContextOptions): RemoteContext {
       target ??= resolveTarget(options);
       client ??= target.then((t) => DaemonClient.connect(t.socketPath));
       return client;
+    },
+    async forwardSocket(remoteSocketPath) {
+      target ??= resolveTarget(options);
+      return (await target).forwardSocket(remoteSocketPath);
     },
     stdout: options.stdout ?? ((text) => void process.stdout.write(text)),
     stderr: options.stderr ?? ((text) => void process.stderr.write(text)),
