@@ -142,8 +142,8 @@ The same `move` core carries a Codex thread. Run one daemon per Codex host (`pi-
 
 - **What travels:** the thread's rollout file (`sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`) plus the workspace bundle.
   The app-server rebuilds its state db and paginated history from the rollout, so nothing else is needed. The import
-  rewrites only the `cwd`, `runtime_workspace_roots` and `workspace_roots` fields of `session_meta` and `turn_context`
-  records to the rebuilt workspace; conversation text is untouched. The source thread is archived (the tombstone).
+  rewrites only the `cwd`, `runtime_workspace_roots` and `workspace_roots` fields of `session_meta`, `turn_context` and
+  `thread_settings_applied` records to the rebuilt workspace; conversation text is untouched. The source thread is archived (the tombstone).
 - **Never travels:** `auth.json` or any Codex credential. The target host signs in on its own (`codex login`).
 - **Model provider:** a thread keeps the provider it was recorded under (`session_meta.model_provider`), and a host's sign-in belongs
   to the providers that host configured, so before anything is fenced `pi-remote move` asks the source for the thread's provider and
