@@ -16,7 +16,7 @@ export interface CompanionManagerOptions {
   tmuxSocket?: string;
   /** Replace the companion's command line (tests); default runs `pi-remote console` with this Node. */
   command?: (sessionId: string, socketPath: string) => string[];
-  /** True once the companion is connected and holds the session's controller lease. */
+  /** True once the companion itself (not some other client) holds the session's controller lease. */
   isReady: (sessionId: string) => boolean;
   readyTimeoutMs?: number;
 }
@@ -72,7 +72,7 @@ export class CompanionManager {
     const attach = ["tmux", ...this.tmux("attach", "-t", `=${name}`)];
     if (await this.exists(name)) return { tmuxSession: name, attach, created: false };
 
-    const command = this.options.command?.(sessionId, this.options.socketPath) ?? [process.execPath, REMOTE_CLI, "console", sessionId, "--socket", this.options.socketPath];
+    const command = this.options.command?.(sessionId, this.options.socketPath) ?? [process.execPath, REMOTE_CLI, "console", sessionId, "--companion", "--socket", this.options.socketPath];
     const made = await run("tmux", this.tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", cwd, "--", ...command));
     if (made.code !== 0) {
       throw new Error(made.code === 127 ? "tmux is not installed on this host; attach needs it" : `tmux could not start the companion: ${made.stderr.trim() || `exit ${made.code}`}`);

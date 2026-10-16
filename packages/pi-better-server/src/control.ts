@@ -10,6 +10,8 @@ import { failure, type DialogAnswer, type ServerMessage } from "./protocol.ts";
 export class ConnectionControl {
   private readonly subscriptions = new Map<string, () => void>();
   private readonly leases = new Set<HostedSession>();
+  /** True once this connection took a lease as the attach companion. */
+  companion = false;
   private readonly send: (message: ServerMessage) => void;
 
   constructor(send: (message: ServerMessage) => void) {
@@ -49,6 +51,7 @@ export class ConnectionControl {
     if (type === "acquire_control") {
       if (!hosted.acquireControl(this)) return refuse("Another connection holds the controller lease for this session");
       this.leases.add(hosted);
+      if (command.companion === true) this.companion = true;
       return reply({ needsInput: hosted.needsInput });
     }
     if (type === "release_control") {
