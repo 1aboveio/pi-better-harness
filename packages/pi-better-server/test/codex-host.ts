@@ -58,11 +58,19 @@ export interface Host {
   env: Record<string, string>;
 }
 
-export async function startHost(label: string): Promise<Host> {
+/**
+ * `provider`: the id of the one provider this host configures (default `mock`).
+ * `apiKeyLogin`: the provider requires a Codex sign-in, and the host is signed in with a made-up API key (Codex only stores it; no request is made).
+ */
+export async function startHost(label: string, provider?: string, options: { apiKeyLogin?: boolean } = {}): Promise<Host> {
   const root = shortDir(`cx-${label}-`);
   const home = join(root, "home");
   const model = await startMockModel();
-  writeMockConfig(home, model.port);
+  writeMockConfig(home, model.port, provider, options.apiKeyLogin === true);
+  if (options.apiKeyLogin) {
+    const login = spawnSync(CODEX_BIN, ["login", "--with-api-key"], { env: { ...process.env, CODEX_HOME: home }, input: "sk-test-not-a-real-key\n", encoding: "utf8" });
+    assert.equal(login.status, 0, login.stderr);
+  }
   const serverDir = join(root, "srv");
   const daemon = await startCodexDaemon({ serverDir, codex: { bin: CODEX_BIN, home } });
   const client = await DaemonClient.connect(daemon.socketPath);

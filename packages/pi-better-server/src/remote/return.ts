@@ -3,9 +3,10 @@ import { returnSession } from "../detach/detach.ts";
 import type { Subcommand } from "./context.ts";
 
 export const command: Subcommand = {
-  usage: "return --host <ssh-alias> <session> [--to-cwd <empty dir>] [--wait <seconds>]",
+  usage: "return --host <ssh-alias> <session> [--to-cwd <empty dir>] [--codex-provider <id>] [--wait <seconds>]",
   options: {
     "to-cwd": { type: "string" },
+    "codex-provider": { type: "string" },
     wait: { type: "string" },
   },
   async run({ values, positionals }, context) {
@@ -22,7 +23,8 @@ export const command: Subcommand = {
     // A Codex host returns its thread through the Codex adapter; a Pi host through the Pi detach path.
     const host = await context.connect();
     if (isCodexHost(host)) {
-      const result = await returnCodexThread({ ...common, host });
+      const rebindProvider = typeof values["codex-provider"] === "string" ? values["codex-provider"] : undefined;
+      const result = await returnCodexThread({ ...common, host, ...(rebindProvider ? { rebindProvider } : {}) });
       context.stdout(
         context.json
           ? `${JSON.stringify(result)}\n`
@@ -30,6 +32,7 @@ export const command: Subcommand = {
       );
       return 0;
     }
+    if (values["codex-provider"] !== undefined) throw new Error("--codex-provider only applies to Codex threads");
     const result = await returnSession({
       ...common,
       ...(context.host ? { host: context.host } : {}),

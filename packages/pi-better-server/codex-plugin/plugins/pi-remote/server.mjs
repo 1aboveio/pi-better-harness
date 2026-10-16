@@ -34,10 +34,11 @@ const TOOLS = {
       session: string("thread id, unique id prefix, or name on this machine"),
       to: string("ssh alias of the destination host"),
       to_cwd: string("absolute directory on the destination for the workspace (optional)"),
+      codex_provider: string("model provider id configured on the destination to bind the thread to; needed when the destination cannot use the thread's provider (optional)"),
       wait_seconds: { type: "number", description: "how long to wait for a running turn to finish first (optional)" },
     },
     required: ["session", "to"],
-    argv: (a) => ["move", "--json", need(a, "session"), "--to", need(a, "to"), ...opt("--to-cwd", a.to_cwd), ...opt("--wait", a.wait_seconds)],
+    argv: (a) => ["move", "--json", need(a, "session"), "--to", need(a, "to"), ...opt("--to-cwd", a.to_cwd), ...opt("--codex-provider", a.codex_provider), ...opt("--wait", a.wait_seconds)],
   },
   remote_return: {
     description: "Bring a Codex thread and its workspace back from a host to this machine, then resume it here.",
@@ -45,10 +46,11 @@ const TOOLS = {
       session: string("thread id, unique id prefix, or name on the host"),
       host: string("ssh alias of the machine that has the thread"),
       to_cwd: string("empty directory on this machine for the workspace (optional)"),
+      codex_provider: string("model provider id configured on this machine to bind the thread to; needed when this machine cannot use the thread's provider (optional)"),
       wait_seconds: { type: "number", description: "how long to wait for a running turn to finish first (optional)" },
     },
     required: ["session", "host"],
-    argv: (a) => ["return", "--host", need(a, "host"), "--json", need(a, "session"), ...opt("--to-cwd", a.to_cwd), ...opt("--wait", a.wait_seconds)],
+    argv: (a) => ["return", "--host", need(a, "host"), "--json", need(a, "session"), ...opt("--to-cwd", a.to_cwd), ...opt("--codex-provider", a.codex_provider), ...opt("--wait", a.wait_seconds)],
   },
 };
 

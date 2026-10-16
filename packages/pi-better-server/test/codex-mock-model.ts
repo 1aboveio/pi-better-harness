@@ -14,6 +14,8 @@ export interface MockModel {
   readonly requests: Array<{ input: any[]; tools?: any[] }>;
   /** Answer the next request with a tool call instead of a message. */
   queueToolCall(name: string, args: Record<string, unknown>, namespace?: string): void;
+  /** Answer the next request with an HTTP error (a rejected key, say) instead of a message. */
+  failNext(status: number, message: string): void;
   /** Hold the next response open until `release()`; resolves when the request arrived. */
   holdNext(): { arrived: Promise<void>; release(): void };
   close(): Promise<void>;
@@ -30,6 +32,7 @@ function message(id: string, text: string): Record<string, unknown> {
 export async function startMockModel(): Promise<MockModel> {
   const requests: MockModel["requests"] = [];
   const toolCalls: Array<{ name: string; args: Record<string, unknown>; namespace?: string }> = [];
+  const failures: Array<{ status: number; message: string }> = [];
   const holds: Array<{ arrived: () => void; released: Promise<void> }> = [];
   let count = 0;
   const server: Server = createServer((req, res) => {
@@ -47,6 +50,11 @@ export async function startMockModel(): Promise<MockModel> {
         /* keep the empty body */
       }
       requests.push(parsed);
+      const failure = failures.shift();
+      if (failure) {
+        res.writeHead(failure.status, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: failure.message } }));
+        return;
+      }
       const n = ++count;
       const id = `resp_${n}`;
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
@@ -78,6 +86,9 @@ export async function startMockModel(): Promise<MockModel> {
     queueToolCall(name, args, namespace) {
       toolCalls.push({ name, args, ...(namespace ? { namespace } : {}) });
     },
+    failNext(status, message) {
+      failures.push({ status, message });
+    },
     holdNext() {
       let arrived!: () => void;
       let release!: () => void;
@@ -95,22 +106,22 @@ export async function startMockModel(): Promise<MockModel> {
 }
 
 /** Point a CODEX_HOME at the mock model with no sign-in needed. */
-export function writeMockConfig(home: string, port: number): void {
+export function writeMockConfig(home: string, port: number, provider = "mock", requiresOpenaiAuth = false): void {
   mkdirSync(home, { recursive: true });
   writeFileSync(
     join(home, "config.toml"),
     [
       'model = "mock-model"',
-      'model_provider = "mock"',
+      `model_provider = "${provider}"`,
       'approval_policy = "never"',
       'sandbox_mode = "read-only"',
       "check_for_update_on_startup = false",
       "",
-      "[model_providers.mock]",
-      'name = "mock"',
+      `[model_providers.${provider}]`,
+      `name = "${provider}"`,
       `base_url = "http://127.0.0.1:${port}/v1"`,
       'wire_api = "responses"',
-      "requires_openai_auth = false",
+      `requires_openai_auth = ${requiresOpenaiAuth}`,
       "request_max_retries = 0",
       "stream_max_retries = 0",
       "",

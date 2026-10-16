@@ -43,6 +43,8 @@ export interface MoveOptions {
   moveId?: string;
   /** Absolute directory on the target for the workspace. Default: under the target daemon's server dir. */
   toCwd?: string;
+  /** Agent-specific: have the target bind the session to this model provider (Codex `--codex-provider`). */
+  rebindProvider?: string;
   /** How long to wait for the session to reach a safe boundary (idle). */
   waitMs?: number;
   chunkBytes?: number;
@@ -93,7 +95,7 @@ export async function moveSession(source: MoveEndpoint, target: MoveEndpoint, op
     archiveBytes = exported.size;
     excluded = exported.excluded;
     progress(`bundled ${exported.size} bytes`);
-    await target.call({ type: "move_begin", moveId, sessionId, size: exported.size, sha256: exported.sha256, ...(options.toCwd ? { cwd: options.toCwd } : {}) });
+    await target.call({ type: "move_begin", moveId, sessionId, size: exported.size, sha256: exported.sha256, ...(options.toCwd ? { cwd: options.toCwd } : {}), ...(options.rebindProvider ? { rebindProvider: options.rebindProvider } : {}) });
 
     for (let offset = 0; offset < exported.size; chunks++) {
       if (options.faults?.failAtChunk === chunks) throw new Error(`injected transfer failure at chunk ${chunks}`);
