@@ -85,7 +85,7 @@ export class DaemonClient {
     return response;
   }
 
-  /** Every pushed `{type:"event"}` line, for sessions this connection created or opened. */
+  /** Every pushed `{type:"event"}` line, for sessions this connection created or `subscribe`d to (each carries `seq`). */
   onEvent(listener: (message: Message) => void): () => void {
     this.eventListeners.add(listener);
     return () => this.eventListeners.delete(listener);

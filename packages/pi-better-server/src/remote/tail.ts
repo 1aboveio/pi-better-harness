@@ -4,15 +4,15 @@ import { cursorKey, readCursor, writeCursor } from "./cursors.ts";
 import { resolveSession } from "./sessions.ts";
 
 /**
- * How `tail` starts receiving a session's events. Today the daemon pushes live
- * events to the connection that opens the session, so there is nothing to catch
- * up on. The daemon's seq/subscribe protocol (#474) replaces this with a
- * `subscribe { sinceSeq }` that replays what was missed; only this function changes.
+ * How `tail` starts receiving a session's events. The default asks the daemon to
+ * replay what was missed after the saved `seq`, then stream live; a test can swap in another source.
  */
-export type TailSource = (client: DaemonClient, sessionId: string, sinceSeq: number | undefined) => Promise<void>;
+export type TailSource = (client: DaemonClient, sessionId: string, sinceSeq: number | undefined, notice: (text: string) => void) => Promise<void>;
 
-export const liveAttach: TailSource = async (client, sessionId) => {
-  await client.call({ type: "open_session", sessionId });
+export const subscribeSince: TailSource = async (client, sessionId, sinceSeq, notice) => {
+  await client.call({ type: "open_session", sessionId }); // loads a closed or not-yet-resumed session; no-op when live
+  const subscribed = await client.call({ type: "subscribe", sessionId, ...(sinceSeq !== undefined ? { sinceSeq } : {}) });
+  if ((subscribed.data as { truncated?: boolean } | undefined)?.truncated) notice("some events since the last tail were no longer retained and are skipped\n");
 };
 
 /**
@@ -74,7 +74,7 @@ export function createTailCommand(source: TailSource): Subcommand {
         context.stdout(context.json ? `${JSON.stringify(message)}\n` : render(message.event));
       });
       try {
-        await source(client, session.sessionId, since);
+        await source(client, session.sessionId, since, context.stderr);
         await Promise.race([closed, aborted]);
       } finally {
         if (lastSeq !== undefined) writeCursor(key, lastSeq);
@@ -88,4 +88,4 @@ export function createTailCommand(source: TailSource): Subcommand {
   };
 }
 
-export const command: Subcommand = createTailCommand(liveAttach);
+export const command: Subcommand = createTailCommand(subscribeSince);

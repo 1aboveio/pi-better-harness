@@ -23,9 +23,26 @@ Each session's conversation is an ordinary Pi session JSONL in the usual
 Strict LF-delimited JSON lines. A session command is a Pi RPC command (the
 `RpcCommand` payloads from `@earendil-works/pi-coding-agent`) plus `sessionId`.
 Daemon commands: `list_sessions`, `create_session`, `open_session`,
-`close_session`. Responses use Pi's `{ type: "response", command, success }`
-shape and echo `id` and `sessionId`. The connection that creates or opens a
-session also receives `{ type: "event", sessionId, event }` lines.
+`close_session`. Control commands, each addressed to one `sessionId`:
+`subscribe`, `acquire_control`, `release_control`, `extension_ui_response`.
+Responses use Pi's `{ type: "response", command, success }` shape and echo `id`
+and `sessionId`.
+
+Events reach a connection only after `subscribe` (or, for the connection that
+issued `create_session`, from the start). `open_session` loads a session but
+does not stream. Each event is `{ type: "event", sessionId, seq, event }`, where
+`seq` counts up per session. `subscribe { sessionId, sinceSeq? }` first replays
+the retained events after `sinceSeq` (omit it for live only), then streams live;
+its response reports `truncated: true` when some of those events are no longer
+retained. Subscribing again on the same connection replaces the earlier
+subscription.
+
+An extension dialog (select, confirm, input, editor) is held until someone
+answers it; it shows as `needsInput` in `list_sessions` and `get_state`.
+`acquire_control` takes the single controller lease (it also ends when the
+connection drops) and returns the pending dialogs; `release_control` gives it
+back. Only the lease holder may send `extension_ui_response { sessionId,
+requestId, value | confirmed | cancelled }`.
 
 `steer` while a turn runs is delivered after the current tool calls and before
 the next LLM call. `steer` on an idle session starts the next turn.
@@ -48,12 +65,13 @@ node src/remote-cli.ts ls [--host <ssh-alias>]
 node src/remote-cli.ts new --host <h> --cwd <dir> "<prompt>"
 node src/remote-cli.ts steer <session> "<message>"
 node src/remote-cli.ts tail <session>
+node src/remote-cli.ts answer <session> [--request <id>] (--value <text> | --confirm | --deny | --cancel)
 ```
 
 A session is named by id, unique id prefix, or name. `ls` shows status (running,
 idle, needs-input), last activity, cwd and git branch. `steer` queues into a
 running turn and starts a turn on an idle session. `tail` follows live events
-until Ctrl-C and remembers the last event `seq` it saw per session.
+until Ctrl-C and remembers the last event `seq` it saw per session; the next `tail` asks the daemon to replay what it missed (`subscribe` with `sinceSeq`). `answer` takes the controller lease, answers a dialog an extension is waiting on, and gives the lease back; without an answer flag it lists the pending dialogs.
 
 `--host` reaches a daemon on another machine: `pi-remote` opens an SSH
 ControlMaster to the alias (through `packages/ssh-core`), forwards the daemon's

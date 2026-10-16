@@ -1,7 +1,9 @@
 import type { AgentSession, AgentSessionEvent, RpcCommand, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
+import type { EventLog, LoggedEvent, Replay } from "./event-log.ts";
 import { UNSUPPORTED_SESSION_COMMANDS } from "./protocol.ts";
+import { UiBridge, type PendingDialog } from "./ui-bridge.ts";
 
-type Listener = (event: AgentSessionEvent) => void;
+type Listener = (logged: LoggedEvent) => void;
 
 function ok(id: string | undefined, command: string, data?: unknown): RpcResponse {
   return { ...(id !== undefined ? { id } : {}), type: "response", command, success: true, ...(data !== undefined ? { data } : {}) } as RpcResponse;
@@ -27,14 +29,24 @@ export class HostedSession {
    * preflight awaits, so this covers the starting window that `isStreaming` misses.
    */
   private promptsInFlight = 0;
+  private readonly log: EventLog;
+  private readonly ui: UiBridge;
+  private controller: unknown;
 
-  constructor(session: AgentSession, onActivity: () => void) {
+  constructor(session: AgentSession, log: EventLog, onActivity: () => void) {
     this.session = session;
+    this.log = log;
     this.onActivity = onActivity;
-    this.unsubscribe = session.subscribe((event) => {
-      for (const listener of this.listeners) listener(event);
+    this.ui = new UiBridge((event) => this.publish(event));
+    this.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+      this.publish(event);
       if (event.type === "agent_end" || event.type === "turn_end") this.onActivity();
     });
+  }
+
+  /** Give extensions a UI whose dialogs the daemon routes to the controller (or holds as needs-input). */
+  async bindUi(): Promise<void> {
+    await this.session.bindExtensions({ uiContext: this.ui.context(), mode: "rpc" });
   }
 
   get isStreaming(): boolean {
@@ -46,14 +58,64 @@ export class HostedSession {
     return this.promptsInFlight > 0 || this.session.isStreaming;
   }
 
+  get lastSeq(): number {
+    return this.log.last;
+  }
+
+  /** Dialogs an extension is blocked on right now. */
+  get needsInput(): PendingDialog[] {
+    return this.ui.pending();
+  }
+
+  get hasController(): boolean {
+    return this.controller !== undefined;
+  }
+
+  private publish(event: unknown): void {
+    const logged = this.log.append(event);
+    for (const listener of this.listeners) listener(logged);
+  }
+
+  /**
+   * Replay retained events after `sinceSeq` (none when omitted), then stream live.
+   * The replay and the live registration happen in one synchronous step, so no event is lost or repeated.
+   */
+  subscribe(sinceSeq: number | undefined, listener: Listener): { replay: Replay; unsubscribe: () => void } {
+    const replay = sinceSeq === undefined ? { events: [], firstSeq: 0, truncated: false } : this.log.since(sinceSeq);
+    return { replay, unsubscribe: this.addListener(listener) };
+  }
+
   /** Receive every session event. Returns an unsubscribe function. */
   addListener(listener: Listener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
+  /** Take the single controller lease. False when another owner holds it. */
+  acquireControl(owner: unknown): boolean {
+    if (this.controller !== undefined && this.controller !== owner) return false;
+    this.controller = owner;
+    return true;
+  }
+
+  releaseControl(owner: unknown): boolean {
+    if (this.controller !== owner) return false;
+    this.controller = undefined;
+    return true;
+  }
+
+  isController(owner: unknown): boolean {
+    return this.controller === owner;
+  }
+
+  /** Resolve a pending dialog; the blocked extension (and so the turn) continues. */
+  answerDialog(requestId: string, answer: Parameters<UiBridge["answer"]>[1]): boolean {
+    return this.ui.answer(requestId, answer);
+  }
+
   /** Stop the running turn (if any) and release the session. The session file stays on disk. */
   async dispose(options: { abort: boolean }): Promise<void> {
+    this.ui.cancelAll();
     if (options.abort) await this.session.abort().catch(() => undefined);
     this.unsubscribe();
     this.listeners.clear();
@@ -88,7 +150,7 @@ export class HostedSession {
           }
           // The response already said success; tell every listener the accepted message did not run.
           const event = { type: "prompt_error", command, ...(id !== undefined ? { id } : {}), error: text } as unknown as AgentSessionEvent;
-          for (const listener of this.listeners) listener(event);
+          this.publish(event);
         })
         .finally(() => {
           this.promptsInFlight--;
@@ -136,7 +198,7 @@ export class HostedSession {
             messageCount: session.messages.length,
             pendingMessageCount: session.pendingMessageCount,
           };
-          return ok(id, "get_state", state);
+          return ok(id, "get_state", { ...state, lastSeq: this.lastSeq, hasController: this.hasController, needsInput: this.needsInput });
         }
         case "set_model": {
           const models = await session.modelRuntime.getAvailable();

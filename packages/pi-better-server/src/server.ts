@@ -1,10 +1,10 @@
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import type { RpcCommand } from "@earendil-works/pi-coding-agent";
+import { ConnectionControl } from "./control.ts";
 import { checkHello } from "./handshake.ts";
-import { HostedSession } from "./hosted-session.ts";
 import { defaultServerDir, ensureServerDir, socketPathFor } from "./paths.ts";
-import { DAEMON_COMMANDS, encodeLine, failure, LineDecoder, type ServerMessage } from "./protocol.ts";
+import { CONTROL_COMMANDS, DAEMON_COMMANDS, encodeLine, failure, LineDecoder, type ServerMessage } from "./protocol.ts";
 import { SessionRegistry, type SessionRegistryOptions } from "./registry.ts";
 
 export interface DaemonOptions {
@@ -12,6 +12,8 @@ export interface DaemonOptions {
   serverDir?: string;
   sessionOptions?: SessionRegistryOptions["sessionOptions"];
   log?: (message: string) => void;
+  /** Bounds for each session's replay ring and on-disk event log. */
+  eventLog?: SessionRegistryOptions["eventLog"];
 }
 
 export interface Daemon {
@@ -44,25 +46,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     unlinkSync(socketPath); // left behind by a daemon that died without cleaning up
   }
 
-  const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, log });
+  const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log });
   await registry.resumeAll();
 
   const sockets = new Set<Socket>();
   const server: Server = createServer((socket) => {
     sockets.add(socket);
-    // Sessions the client created or opened on this connection push their events back to it.
-    const attached = new Map<string, () => void>();
     const send = (message: ServerMessage): void => {
       if (!socket.destroyed) socket.write(encodeLine(message));
     };
-    const attach = (sessionId: string, hosted: HostedSession | undefined): void => {
-      if (!hosted || attached.has(sessionId)) return;
-      attached.set(sessionId, hosted.addListener((event) => send({ type: "event", sessionId, event })));
-    };
-    const detach = (sessionId: string): void => {
-      attached.get(sessionId)?.();
-      attached.delete(sessionId);
-    };
+    const control = new ConnectionControl(send);
 
     const dispatch = async (line: string): Promise<void> => {
       let command: Record<string, unknown>;
@@ -94,7 +87,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           if (type === "list_sessions") return reply({ data: { sessions: registry.list() } });
           if (type === "create_session") {
             const summary = await registry.create(command as never);
-            attach(summary.sessionId, registry.get(summary.sessionId));
+            // A brand-new session has no history to catch up on: stream it live to its creator.
+            const created = registry.get(summary.sessionId);
+            if (created) control.subscribe(summary.sessionId, created, undefined);
             return reply({ sessionId: summary.sessionId, data: summary });
           }
           if (!sessionId) {
@@ -103,10 +98,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           }
           if (type === "open_session") {
             const summary = await registry.open(sessionId);
-            attach(sessionId, registry.get(sessionId));
             return reply({ sessionId, data: summary });
           }
-          detach(sessionId);
+          control.unsubscribe(sessionId);
           await registry.close(sessionId);
           return reply({ sessionId });
         }
@@ -116,6 +110,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           return;
         }
         const hosted = registry.get(sessionId);
+        if (hosted && CONTROL_COMMANDS.has(type)) return control.handle(command, hosted);
         if (!hosted) {
           const reason = registry.resumeError(sessionId);
           send(failure(id, type, reason ? `Session ${sessionId} failed to resume: ${reason}` : `Session not open: ${sessionId}`, sessionId));
@@ -141,8 +136,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     socket.on("error", () => undefined);
     socket.on("close", () => {
       sockets.delete(socket);
-      for (const unsubscribe of attached.values()) unsubscribe();
-      attached.clear();
+      control.dispose();
     });
   });
 
