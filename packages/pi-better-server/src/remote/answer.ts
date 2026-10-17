@@ -90,6 +90,6 @@ export const command: Subcommand = {
       if (result.answered) context.stdout(`answered ${result.answered.method} "${result.answered.title}" (${result.answered.id}) on ${result.sessionId}\n`);
       for (const dialog of result.pending) context.stdout(`pending ${dialog.id} ${dialog.method} "${dialog.title}"\n`);
     }
-    return result.answered || result.pending.length === 0 ? 0 : 1;
+    return 0;
   },
 };

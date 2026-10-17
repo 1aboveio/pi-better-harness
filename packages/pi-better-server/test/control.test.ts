@@ -204,8 +204,8 @@ describe("controller lease and needs-input", () => {
 
     const cli = join(import.meta.dirname, "..", "src", "remote-cli.ts");
     const base = [cli, "answer", id.slice(0, 8), "--socket", socketPathFor(env.serverDir)];
-    // No answer flag: lists what is waiting and exits non-zero.
-    await assert.rejects(run(process.execPath, base), (error: any) => error.code === 1 && /pending .* input "which colour\?"/.test(error.stdout));
+    // No answer flag: lists what is waiting and exits 0.
+    assert.match((await run(process.execPath, base)).stdout, /pending .* input "which colour\?"/);
     const done = await run(process.execPath, [...base, "--value", "green"]);
     assert.match(done.stdout, /answered input "which colour\?"/);
 

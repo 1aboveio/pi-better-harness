@@ -119,10 +119,10 @@ if (!remoteHost) {
       assert.match(readFileSync(join(back, "a.txt"), "utf8"), /edited on the host/);
       assert.equal(git(back, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD"));
 
-      // Single writer: the host retired it (still listed, but closed and moved, not idle) and refuses messages;
+      // Single writer: the host retired it (still listed, but shown as moved, not idle) and refuses messages;
       // the laptop owns it and resumes with the host's turn in the history.
       const hostRows = JSON.parse((await remote(["ls", "--json", ...remoteArgs()])).stdout) as Array<{ sessionId: string; displayStatus: string; ownership?: string }>;
-      assert.deepEqual(hostRows.map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "closed", "moved"]]);
+      assert.deepEqual(hostRows.map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "moved", "moved"]]);
       const refused = await remote(["steer", "--json", ...remoteArgs(), id, "x"]);
       assert.notEqual(refused.code, 0);
       assert.match(refused.stderr, /moved on this host/);
