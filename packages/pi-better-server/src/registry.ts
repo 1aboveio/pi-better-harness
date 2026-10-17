@@ -49,6 +49,9 @@ export class SessionRegistry {
   private readonly entries = new Map<string, IndexEntry>();
   private readonly live = new Map<string, HostedSession>();
   private readonly pending = new Map<string, Promise<HostedSession>>();
+  /** Sessions being released: a new host for the same id waits, so two EventLogs never share a file. */
+  private readonly releasing = new Map<string, Promise<void>>();
+  private readonly operations = new Map<string, Promise<unknown>>();
   private readonly resumeErrors = new Map<string, string>();
   private readonly log: (message: string) => void;
   private readonly options: SessionRegistryOptions;
@@ -117,11 +120,33 @@ export class SessionRegistry {
   }
 
   /** Attach to a hosted session, or bring a closed / not-yet-resumed one back to life. */
-  async open(sessionId: string): Promise<SessionSummary> {
+  open(sessionId: string): Promise<SessionSummary> {
+    return this.serialize(sessionId, () => this.openNow(sessionId));
+  }
+
+  /**
+   * Run open / close / retire / release / forget for one session one after another,
+   * so each sees the settled result of the one before and the last call wins:
+   * `closed` and a live session can never coexist once the calls have settled.
+   */
+  private serialize<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+    const prior = this.operations.get(sessionId) ?? Promise.resolve();
+    const result = prior.then(run, run);
+    const tail = result.catch(() => undefined);
+    this.operations.set(sessionId, tail);
+    void tail.then(() => {
+      if (this.operations.get(sessionId) === tail) this.operations.delete(sessionId);
+    });
+    return result;
+  }
+
+  private async openNow(sessionId: string): Promise<SessionSummary> {
     const entry = this.entries.get(sessionId);
     if (!entry) throw new Error(`Unknown session: ${sessionId}`);
     const blocked = this.ownership.blockedReason(sessionId);
     if (blocked) throw new Error(blocked);
+    const releasing = this.releasing.get(sessionId);
+    if (releasing) await releasing;
     if (!this.live.has(sessionId)) {
       entry.status = "running";
       await this.host(entry);
@@ -132,17 +157,17 @@ export class SessionRegistry {
   }
 
   /** Stop the session for good: abort any turn, release it, and do not resume it on boot. */
-  async close(sessionId: string): Promise<void> {
-    const entry = this.entries.get(sessionId);
-    if (!entry) throw new Error(`Unknown session: ${sessionId}`);
-    const hosted = this.live.get(sessionId);
-    this.live.delete(sessionId);
-    this.pending.delete(sessionId);
-    if (hosted) await hosted.dispose({ abort: true });
-    entry.status = "closed";
-    entry.updatedAt = new Date().toISOString();
-    this.resumeErrors.delete(sessionId);
-    this.persist();
+  close(sessionId: string): Promise<void> {
+    if (!this.entries.has(sessionId)) return Promise.reject(new Error(`Unknown session: ${sessionId}`));
+    return this.serialize(sessionId, async () => {
+      const entry = this.entries.get(sessionId);
+      if (!entry) throw new Error(`Unknown session: ${sessionId}`);
+      await this.releaseLive(sessionId, true);
+      entry.status = "closed";
+      entry.updatedAt = new Date().toISOString();
+      this.resumeErrors.delete(sessionId);
+      this.persist();
+    });
   }
 
   /** The index row for a session, or undefined. */
@@ -151,22 +176,42 @@ export class SessionRegistry {
   }
 
   /** Release one live session without changing what the index says; the opposite of `open`. Used to fence it. */
-  async release(sessionId: string): Promise<void> {
-    const hosted = this.live.get(sessionId);
-    this.live.delete(sessionId);
-    this.pending.delete(sessionId);
-    if (hosted) await hosted.dispose({ abort: false });
+  release(sessionId: string): Promise<void> {
+    return this.serialize(sessionId, () => this.releaseLive(sessionId, false));
+  }
+
+  /**
+   * Take a session out of `live` and dispose it. A start still in flight is awaited
+   * first, so it cannot register itself after the release; `releasing` holds new hosts
+   * back until the old session's events have stopped.
+   */
+  private releaseLive(sessionId: string, abort: boolean): Promise<void> {
+    const prior = this.releasing.get(sessionId);
+    const run = (async () => {
+      await prior;
+      await this.pending.get(sessionId)?.catch(() => undefined);
+      const hosted = this.live.get(sessionId);
+      this.live.delete(sessionId);
+      if (hosted) await hosted.dispose({ abort });
+    })();
+    const tracked = run.finally(() => {
+      if (this.releasing.get(sessionId) === tracked) this.releasing.delete(sessionId);
+    });
+    this.releasing.set(sessionId, tracked);
+    return tracked;
   }
 
   /** Mark a session whose ownership went to another daemon as closed here. */
-  async retire(sessionId: string): Promise<void> {
-    await this.release(sessionId);
-    const entry = this.entries.get(sessionId);
-    if (entry) {
-      entry.status = "closed";
-      entry.updatedAt = new Date().toISOString();
-      this.persist();
-    }
+  retire(sessionId: string): Promise<void> {
+    return this.serialize(sessionId, async () => {
+      await this.releaseLive(sessionId, false);
+      const entry = this.entries.get(sessionId);
+      if (entry) {
+        entry.status = "closed";
+        entry.updatedAt = new Date().toISOString();
+        this.persist();
+      }
+    });
   }
 
   /** Dry-run the provider's credentials as a session on this daemon would resolve them. */
@@ -188,11 +233,13 @@ export class SessionRegistry {
   }
 
   /** Drop a session adopted by a move that is being rolled back. */
-  async forget(sessionId: string, previous: IndexEntry | undefined): Promise<void> {
-    await this.release(sessionId);
-    if (previous) this.entries.set(sessionId, previous);
-    else this.entries.delete(sessionId);
-    this.persist();
+  forget(sessionId: string, previous: IndexEntry | undefined): Promise<void> {
+    return this.serialize(sessionId, async () => {
+      await this.releaseLive(sessionId, false);
+      if (previous) this.entries.set(sessionId, previous);
+      else this.entries.delete(sessionId);
+      this.persist();
+    });
   }
 
   /** Release every live session without changing what the index says should be running. */
@@ -210,6 +257,8 @@ export class SessionRegistry {
   }
 
   private host(entry: IndexEntry, manager?: SessionManager): Promise<HostedSession> {
+    const releasing = this.releasing.get(entry.sessionId);
+    if (releasing) return releasing.then(() => this.host(entry, manager));
     const existing = this.live.get(entry.sessionId);
     if (existing) return Promise.resolve(existing);
     const inFlight = this.pending.get(entry.sessionId);
