@@ -110,6 +110,22 @@ async function reap({ id, pid }) {
     rmSync(runDir(id), { recursive: true, force: true });
 }
 
+/** Health-tick until the deadline steer is requested (the 60 ms deadline passes on its own). */
+async function untilSteerRequested(id) {
+    while (!(readMeta(id).timing.steerRequestedAt > 0)) {
+        await tick();
+        await sleep(20);
+    }
+}
+
+/** Move a persisted limit instead of waiting for it, so the outcome never depends on how slow the host is. */
+function rewindTiming(id, change) {
+    const meta = readMeta(id);
+    writeMeta({ ...meta, timing: { ...meta.timing, ...change(meta.timing) } });
+}
+
+const MINUTE = 60_000;
+
 async function withFakeClock(fn) {
     mock.timers.enable({ apis: ["setInterval"] });
     try { await fn(); } finally { mock.timers.reset(); }
@@ -201,9 +217,9 @@ describe("harness timing: soft deadline", () => {
         await withFakeClock(async () => {
             const h = makeHarness();
             try {
-                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 0.005, max_minutes: 0, stuck_minutes: 0 });
-                await sleep(80);
-                await tick();
+                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
+                await untilSteerRequested(run.id);
+                await waitFor(() => existsSync(steerPath(run.id)));
                 const steer = JSON.parse(readFileSync(steerPath(run.id), "utf8"));
                 assert.match(steer.text, /soft deadline/);
                 assert.match(steer.text, /Do not start new work/);
@@ -222,7 +238,7 @@ describe("harness timing: soft deadline", () => {
                 const running = (await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(running, /Timing: deadline — past its/);
 
-                await sleep(320);
+                rewindTiming(run.id, (timing) => ({ steerRequestedAt: timing.steerRequestedAt - 11 * MINUTE }));
                 await tick();
                 const meta = readMeta(run.id);
                 assert.equal(meta.status, "killed");
@@ -320,12 +336,11 @@ describe("harness timing: a steer queued behind a long tool call", () => {
             writeFakePi(WAIT_SCRIPT);
             const h = makeHarness();
             try {
-                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 0.005, max_minutes: 0, stuck_minutes: 0 });
+                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
                 appendEvents(run.id, longCallStart("long"));
-                await sleep(80);
-                await tick();
+                await untilSteerRequested(run.id);
                 assert.ok(readMeta(run.id).timing.steerRequestedAt > 0, "steer requested at the deadline");
-                await sleep(400);
+                rewindTiming(run.id, (timing) => ({ steerRequestedAt: timing.steerRequestedAt - 11 * MINUTE }));
                 await tick();
                 assert.equal(readMeta(run.id).status, "running", "past request + grace, but the steer waits behind the open tool call");
                 assert.match((await h.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text,
@@ -337,7 +352,6 @@ describe("harness timing: a steer queued behind a long tool call", () => {
                 await tick();
                 const deliveredAt = readMeta(run.id).timing.steerDeliveredAt;
                 assert.ok(deliveredAt > 0, "delivery time recorded durably");
-                await sleep(100);
                 await tick();
                 assert.equal(readMeta(run.id).status, "running", "grace runs from delivery");
                 writeFileSync(join(runDir(run.id), "done"), "");
@@ -359,15 +373,15 @@ describe("harness timing: a steer queued behind a long tool call", () => {
         await withFakeClock(async () => {
             const h = makeHarness();
             try {
-                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 0.001, max_minutes: 0.008, stuck_minutes: 0 });
+                const run = await spawnRun(h, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 10, stuck_minutes: 0 });
                 appendEvents(run.id, longCallStart("hang"));
-                await sleep(80);
-                await tick();
-                await sleep(150);
+                await untilSteerRequested(run.id);
+                rewindTiming(run.id, (timing) => ({ steerRequestedAt: timing.steerRequestedAt - 11 * MINUTE }));
                 await tick();
                 assert.equal(readMeta(run.id).status, "running", "held: the steer is still waiting");
-                await sleep(300);
+                rewindTiming(run.id, () => ({ ceilingAt: Date.now() - 1 }));
                 await tick();
+                await waitFor(() => readMeta(run.id).status === "killed");
                 const meta = readMeta(run.id);
                 assert.equal(meta.status, "killed");
                 assert.equal(meta.timing.stopReason, "ceiling");
