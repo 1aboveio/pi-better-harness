@@ -14,6 +14,15 @@ function dispositionData(outcome: unknown): { disposition: string } | undefined 
   return typeof outcome === "string" ? { disposition: outcome } : undefined;
 }
 
+/**
+ * Pi's RPC mode passes `{ source: "rpc" }` to steer/followUp on 1.x so extension `input` handlers see the right source.
+ * Pi 0.82 declares no third parameter and ignores the extra argument.
+ */
+function steerOrFollowUp(session: AgentSession, kind: "steer" | "followUp", message: string, images: RpcCommandImages | undefined): Promise<unknown> {
+  const call = session[kind] as (text: string, images?: RpcCommandImages, options?: { source: "rpc" }) => Promise<unknown>;
+  return call.call(session, message, images, { source: "rpc" });
+}
+
 function fail(id: string | undefined, command: string, error: string): RpcResponse {
   return { ...(id !== undefined ? { id } : {}), type: "response", command, success: false, error };
 }
@@ -34,6 +43,13 @@ export class HostedSession {
    * preflight awaits, so this covers the starting window that `isStreaming` misses.
    */
   private promptsInFlight = 0;
+  /** Releases for deferred prompts whose turn is running; they fire when that turn's `agent_end` arrives. */
+  private readonly releaseOnAgentEnd = new Set<() => void>();
+  /**
+   * Pi's idle signal for the current run, taken while the run is active. Pi resolves it only after agent_settled and the
+   * prompts it deferred have run (or failed); asking later would return at once, since Pi counts the settle window as idle.
+   */
+  private runIdle: Promise<void> | undefined;
   private readonly log: EventLog;
   private readonly ui: UiBridge;
   private controller: unknown;
@@ -45,6 +61,8 @@ export class HostedSession {
     this.ui = new UiBridge((event) => this.publish(event));
     this.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       this.publish(event);
+      if (event.type === "agent_start") this.runIdle = session.waitForIdle().catch(() => undefined);
+      if (event.type === "agent_end") for (const release of [...this.releaseOnAgentEnd]) release();
       if (event.type === "agent_end" || event.type === "turn_end") this.onActivity();
     });
   }
@@ -140,6 +158,15 @@ export class HostedSession {
     this.promptsInFlight++;
     return new Promise<RpcResponse>((resolve) => {
       let accepted = false;
+      let returned = false;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        this.releaseOnAgentEnd.delete(release);
+        this.promptsInFlight--;
+        this.onActivity();
+      };
       this.session
         .prompt(message, {
           images: options.images,
@@ -147,26 +174,46 @@ export class HostedSession {
           source: "rpc",
           // Pi 0.82 passes a boolean (false: rejected); Pi 1.x passes the disposition string and only calls this on success.
           preflightResult: (outcome: unknown) => {
-            if (outcome !== false) {
-              accepted = true;
-              resolve(ok(id, command, dispositionData(outcome)));
+            if (outcome === false) return;
+            accepted = true;
+            resolve(ok(id, command, dispositionData(outcome)));
+            // Pi 1.x deferred this prompt (it arrived while Pi was emitting agent_settled) and prompt() already returned.
+            // Nothing awaits the deferred run, so a started turn is released when it ends; any other outcome is already over.
+            if (returned) {
+              if (outcome === "started") this.releaseOnAgentEnd.add(release);
+              else release();
             }
           },
         })
-        .catch((error: unknown) => {
-          const text = error instanceof Error ? error.message : String(error);
-          if (!accepted) {
-            resolve(fail(id, command, text));
-            return;
-          }
-          // The response already said success; tell every listener the accepted message did not run.
-          const event = { type: "prompt_error", command, ...(id !== undefined ? { id } : {}), error: text } as unknown as AgentSessionEvent;
-          this.publish(event);
-        })
-        .finally(() => {
-          this.promptsInFlight--;
-          this.onActivity();
-        });
+        .then(
+          () => {
+            returned = true;
+            // Returned before preflight reported: Pi 1.x deferred the prompt. Keep the turn marked until it has run.
+            if (accepted) {
+              release();
+              return;
+            }
+            // Pi settles the run's idle signal after it ran (or failed) the deferred actions, so a prompt that never reached
+            // preflight by then threw inside Pi and nothing else will answer or release it.
+            void this.runIdle?.then(() => {
+              if (accepted || released) return;
+              resolve(fail(id, command, "Pi did not accept the prompt: it failed after being deferred while the agent was settling"));
+              release();
+            });
+          },
+          (error: unknown) => {
+            returned = true;
+            const text = error instanceof Error ? error.message : String(error);
+            if (!accepted) {
+              resolve(fail(id, command, text));
+            } else {
+              // The response already said success; tell every listener the accepted message did not run.
+              const event = { type: "prompt_error", command, ...(id !== undefined ? { id } : {}), error: text } as unknown as AgentSessionEvent;
+              this.publish(event);
+            }
+            release();
+          },
+        );
     });
   }
 
@@ -183,12 +230,12 @@ export class HostedSession {
         case "steer":
           // Starting or running turn: queue, delivered after the current tool calls and before the next LLM call.
           if (this.turnActive) {
-            return ok(id, "steer", dispositionData(await session.steer(command.message, command.images)));
+            return ok(id, "steer", dispositionData(await steerOrFollowUp(session, "steer", command.message, command.images)));
           }
           // Idle (no turn running or starting): Pi would only queue it for a turn that never starts. Start that turn now.
           return await this.startPrompt(id, "steer", command.message, { images: command.images });
         case "follow_up":
-          return ok(id, "follow_up", dispositionData(await session.followUp(command.message, command.images)));
+          return ok(id, "follow_up", dispositionData(await steerOrFollowUp(session, "followUp", command.message, command.images)));
         case "abort":
           await session.abort();
           return ok(id, "abort");

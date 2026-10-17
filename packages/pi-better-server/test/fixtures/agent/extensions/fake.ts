@@ -22,6 +22,23 @@ function textOf(message: { content?: unknown }): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Record every input event's source; swallow any input starting with "swallow" so the extension "handles" it.
+  pi.on("input", (event) => {
+    if (logFile()) appendFileSync(`${logFile()}.inputs`, `${JSON.stringify({ text: event.text, source: event.source })}\n`);
+    return event.text.startsWith("swallow") ? { action: "handled" as const } : { action: "continue" as const };
+  });
+
+  // `/kick <text>` starts a turn from inside the extension, so no daemon prompt is waiting on it.
+  pi.registerCommand("kick", { description: "Start a turn with the given text", handler: async (args) => void pi.sendUserMessage(args) });
+
+  // Pi 1.x only: while `settle.hold` exists in the gate dir, agent_settled blocks until `settle.release` appears.
+  (pi as unknown as { on(event: string, handler: () => Promise<void>): void }).on("agent_settled", async () => {
+    if (!existsSync(join(gateDir(), "settle.hold"))) return;
+    writeFileSync(join(gateDir(), "settle.started"), String(Date.now()));
+    const deadline = Date.now() + 20_000;
+    while (!existsSync(join(gateDir(), "settle.release")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 15));
+  });
+
   pi.registerProvider("fake", {
     baseUrl: "http://127.0.0.1:1",
     apiKey: "fake-key",
