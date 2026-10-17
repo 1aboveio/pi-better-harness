@@ -21,15 +21,35 @@ function textOf(message: { content?: unknown }): string {
   return content.map((part: { type?: string; text?: string }) => (part.type === "text" ? part.text ?? "" : "")).join("");
 }
 
+/** Block until the test releases the named gate (a gate tool call does the same inside a turn). */
+async function holdGate(name: string): Promise<void> {
+  writeFileSync(join(gateDir(), `${name}.started`), String(Date.now()));
+  const release = join(gateDir(), `${name}.release`);
+  const deadline = Date.now() + 20_000;
+  while (!existsSync(release) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 15));
+  writeFileSync(join(gateDir(), `${name}.finished`), String(Date.now()));
+}
+
 export default function (pi: ExtensionAPI) {
   // Record every input event's source; swallow any input starting with "swallow" so the extension "handles" it.
-  pi.on("input", (event) => {
+  // `hold <gate>` holds the starting prompt open on that gate, then handles the input so no turn runs.
+  pi.on("input", async (event) => {
     if (logFile()) appendFileSync(`${logFile()}.inputs`, `${JSON.stringify({ text: event.text, source: event.source })}\n`);
+    if (event.text.startsWith("hold ")) {
+      await holdGate(event.text.slice(5).trim());
+      return { action: "handled" as const };
+    }
     return event.text.startsWith("swallow") ? { action: "handled" as const } : { action: "continue" as const };
   });
 
   // `/kick <text>` starts a turn from inside the extension, so no daemon prompt is waiting on it.
   pi.registerCommand("kick", { description: "Start a turn with the given text", handler: async (args) => void pi.sendUserMessage(args) });
+
+  // `/slow <gate>` holds the starting prompt open on that gate, then finishes without a turn.
+  pi.registerCommand("slow", {
+    description: "Hold the starting prompt open on the named gate, then finish without a turn",
+    handler: async (args) => holdGate(args.trim()),
+  });
 
   // Pi 1.x only: while `settle.hold` exists in the gate dir, agent_settled blocks until `settle.release` appears.
   (pi as unknown as { on(event: string, handler: () => Promise<void>): void }).on("agent_settled", async () => {
