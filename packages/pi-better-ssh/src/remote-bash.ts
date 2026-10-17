@@ -52,7 +52,7 @@ export interface RemoteBashResult {
   target: string;
   workdir?: string;
   mux: {
-    state: "up";
+    state: "up" | "down";
     reused: boolean;
   };
   truncation?: TruncationResult;
@@ -113,7 +113,7 @@ export async function executeRemoteBash(
     truncated: truncation.truncated,
     target: resolved.identity.target,
     ...(effectiveParams.workdir !== undefined ? { workdir: effectiveParams.workdir } : {}),
-    mux: { state: "up", reused: muxState.reused },
+    mux: { state: muxState.state, reused: muxState.reused },
     ...(truncation.truncated ? { truncation } : {}),
     ...(fullOutputPath ? { fullOutputPath } : {}),
   };
