@@ -6,6 +6,54 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [pi-better-harness@0.30.1] - 2026-10-17
+
+### Changed
+
+- Remove the routine minimal tool-output footer badge while preserving tool-output settings and rendering.
+- Bundle Sandbox 0.12.1, SSH 0.1.3, Background Tasks 0.9.1, Subagents 0.19.1, and Goal 0.9.1. Keep Plan at 0.9.1.
+
+## [pi-better-sandbox@0.12.1] - 2026-10-17
+
+### Changed
+
+- Remove the routine sandbox availability footer badge while retaining sandbox enforcement and actionable warnings.
+
+## [pi-better-ssh@0.1.3] - 2026-10-17
+
+### Fixed
+
+- Update the vendored shared SSH runtime with Unix-socket forwarding over multiplexed connections and compatibility with Node.js native TypeScript type stripping.
+- Fall back to a short per-user control socket directory when the default SSH control path would exceed the Unix-socket path limit, and require the control socket directory to be owned by the current user.
+
+## [pi-better-background-tasks@0.9.1] - 2026-10-17
+
+### Changed
+
+- Remove the shared work-count footer badge while preserving the keyboard work navigator.
+
+### Fixed
+
+- Update the vendored shared SSH runtime with Unix-socket forwarding over multiplexed connections and compatibility with Node.js native TypeScript type stripping.
+- Fall back to a short per-user control socket directory when the default SSH control path would exceed the Unix-socket path limit, and require the control socket directory to be owned by the current user.
+- Run the Windows raw-argv trampoline with non-login `bash -c` to avoid loading shell profiles on every spawn. Shell-string commands retain their login-shell behavior. (#533)
+
+## [pi-better-subagents@0.19.1] - 2026-10-17
+
+### Changed
+
+- Remove the shared work-count footer badge while preserving the keyboard work navigator.
+
+### Fixed
+
+- Guard asynchronous child finalizers and recovery-snapshot callbacks against stale session contexts, and clear the captured UI context on session shutdown. (#528)
+
+## [pi-better-goal@0.9.1] - 2026-10-17
+
+### Changed
+
+- Remove the routine background-count footer badge while preserving paused, stalled, and question feedback.
+
 ## [pi-better-harness@0.30.0] - 2026-10-16
 
 ### Changed
