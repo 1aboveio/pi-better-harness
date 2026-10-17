@@ -6,6 +6,7 @@ import type { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bashSingleQuote,
+  commandExecution,
   resolveDefaultShell,
   spawnCommand,
   stopProcessGroup,
@@ -112,6 +113,8 @@ describe("withWindowsLogRedirect", () => {
       "C:\\Temp\\log.log",
     );
     expect(result.shell).toBe(true);
+    expect(result.loginShell).toBe(false);
+    expect(commandExecution(result).execArgs[0]).toBe("-c");
     expect(result.cwd).toBe("C:\\work");
     expect(result.env).toEqual({ A: "1" });
     expect(result.command).toBe(

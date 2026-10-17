@@ -22,6 +22,8 @@ export interface CommandSpec {
   command?: string;
   argv?: string[];
   shell?: boolean;
+  /** Run the shell as a login shell (`bash -lc`, the default). False runs `bash -c`, skipping profile sourcing. */
+  loginShell?: boolean;
   cwd?: string;
   env?: Record<string, string>;
 }
