@@ -36,7 +36,8 @@ export async function checkHostProvider(client: CodexAppServerClient, provider: 
   const login = account.account?.type;
   const not = (why: string): ProviderCheck => ({ ok: false, detail: `model provider "${provider}" cannot be used there: ${why}. This host's default provider is "${fallback}" (configured: ${known}); pass --codex-provider <id> to rebind the thread to one of them` });
 
-  const own = configured[provider];
+  // Own keys only: `constructor`, `toString` and `__proto__` are not configured providers.
+  const own = Object.hasOwn(configured, provider) ? configured[provider] : undefined;
   if (own) {
     if (own.env_key) return env[own.env_key] ? { ok: true, detail: `provider "${provider}" is configured there (key from $${own.env_key})` } : not(`it needs $${own.env_key}, which is not set there`);
     if (own.experimental_bearer_token || own.auth || own.aws) return { ok: true, detail: `provider "${provider}" is configured there` };
