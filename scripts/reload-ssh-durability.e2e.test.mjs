@@ -22,8 +22,8 @@
  * PI_LIVE_SSH_HOST (and optionally PI_LIVE_SSH_USER) to repeat the SSH scenario
  * against a real host with the system ssh; `npm run test:live-ssh` requires it.
  *
- * The only thing replaced in the session is `sendCustomMessage`: a callback would
- * otherwise start a model turn. The test records what the extensions hand to it.
+ * An offline provider answers callback-triggered turns; sendCustomMessage is
+ * recorded and forwarded so Pi's real agent lifecycle gates later batches.
  *
  * // @covers subagent.completion-callback
  * // @covers subagent.result
@@ -79,7 +79,7 @@ after(() => {
 
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
   await import("@earendil-works/pi-coding-agent");
-const { InMemoryCredentialStore } = await import("@earendil-works/pi-ai");
+const { createAssistantMessageEventStream, InMemoryCredentialStore } = await import("@earendil-works/pi-ai");
 // The test's own view of the persisted state: separate module instances from the
 // ones the session loads, sharing only the disk.
 const subagentRegistry = await import("../packages/pi-better-subagents/registry.ts");
@@ -109,28 +109,57 @@ async function waitFor(what, fn, timeoutMs = 15_000) {
 
 /** A real Pi session over the two extensions; `reload()` is what `/reload` runs. */
 async function openSession(project) {
-  const settingsManager = SettingsManager.inMemory();
+  const settingsManager = SettingsManager.inMemory({
+    retry: { enabled: false }, compaction: { enabled: false }, cacheWarming: { enabled: false },
+  });
+  const requests = [];
+  const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const provider = {
+    baseUrl: "https://example.invalid", apiKey: "offline-fixture", api: "openai-completions",
+    models: [{ id: "offline", name: "Offline fixture", input: ["text"], reasoning: false,
+      contextWindow: 128_000, maxTokens: 1024, cost }],
+    streamSimple(model, context) {
+      requests.push(JSON.stringify(context.messages));
+      const stream = createAssistantMessageEventStream();
+      const response = { role: "assistant", content: [{ type: "text", text: "Completion received." }],
+        api: model.api, provider: model.provider, model: model.id, stopReason: "stop", timestamp: Date.now(),
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { ...cost, total: 0 } } };
+      stream.push({ type: "done", reason: "stop", message: response });
+      stream.end(response);
+      return stream;
+    },
+  };
   const resourceLoader = new DefaultResourceLoader({
     cwd: project, agentDir, settingsManager, additionalExtensionPaths: EXTENSIONS,
     noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+    extensionFactories: [{ name: "reload-test-provider", factory(pi) {
+      pi.registerProvider("reload-test", provider);
+    } }],
   });
   await resourceLoader.reload();
   assert.deepEqual(resourceLoader.getExtensions().errors, []);
   const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
+    credentials: new InMemoryCredentialStore(), refreshOnCreate: false,
     modelsPath: join(agentDir, "models.json"),
     modelsStorePath: join(agentDir, "models-store.json"),
   });
+  modelRuntime.registerProvider("reload-test", provider);
   const { session } = await createAgentSession({
     cwd: project, agentDir, resourceLoader, modelRuntime, settingsManager,
+    model: modelRuntime.getModel("reload-test", "offline"),
     sessionManager: SessionManager.inMemory(project), noTools: "builtin",
   });
   const sent = [];
   const errors = [];
-  session.sendCustomMessage = async (message, options) => { sent.push({ ...message, options }); };
+  const sendCustomMessage = session.sendCustomMessage.bind(session);
+  session.sendCustomMessage = (message, options) => {
+    sent.push({ ...message, options });
+    return sendCustomMessage(message, options);
+  };
   return {
     session,
     sent,
+    requests,
     errors,
     sessionId: session.sessionManager.getSessionId(),
     start: () => session.bindExtensions({ onError: (error) => errors.push(error) }),
@@ -233,29 +262,39 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
   process.env.PATH = `${fakeBin}:${originalPath}`;
   process.env.PI_BETTER_CALLBACK_BATCH_MS = "50";
   const host = await openSession(dir("exit-after-reload-project"));
+  const localDone = join(fixtures, "local-exit-release");
+  const directDone = join(fixtures, "direct-exit-release");
+  const command = (marker, output) => `while [ ! -f '${marker}' ]; do sleep 0.05; done; echo ${output}`;
   try {
     await host.start();
-    // The child belongs to the pre-reload instance: its close listener fires after the reload.
-    const localId = taskId(await host.call("bg_task_spawn", { name: "local-exit", command: "sleep 1.5; echo local-done" }));
+    // Keep both children alive through reload, then finish them in separate batches.
+    const localId = taskId(await host.call("bg_task_spawn", { name: "local-exit", command: command(localDone, "local-done") }));
     const directId = taskId(await host.call("bg_task_spawn", {
-      name: "direct-exit", command: "sleep 1.5; echo direct-done", ssh: { host: "fake-remote.test" }, remote: { session: "direct" },
+      name: "direct-exit", command: command(directDone, "direct-done"), ssh: { host: "fake-remote.test" }, remote: { session: "direct" },
     }));
     assert.ok(localId && directId);
-    await delay(200);
     await host.session.reload();
-    for (const id of [localId, directId]) {
+    for (const [id, marker] of [[localId, localDone], [directId, directDone]]) {
+      writeFileSync(marker, "");
       await waitFor(`${id} to finish`, () => bgRegistry.readMeta(id)?.status === "succeeded");
       await waitFor(`${id} completion callback`, () => host.completions(id).length > 0);
       const meta = bgRegistry.readMeta(id);
       assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
       assert.ok(meta.callbackSentAt > 0);
+      await host.session.waitForIdle();
     }
+    assert.equal(host.sent.length, 2, "separated exits must each deliver a batch");
+    assert.equal(host.requests.length, 2, "each callback must reach a real agent turn");
+    assert.ok(host.requests[0].includes(localId));
+    assert.ok(host.requests[1].includes(directId));
     await host.session.reload();
     await delay(600);
     assert.equal(host.completions(localId).length, 1);
     assert.equal(host.completions(directId).length, 1);
     assert.deepEqual(host.errors, []);
   } finally {
+    writeFileSync(localDone, "");
+    writeFileSync(directDone, "");
     host.session.dispose();
     process.env.PATH = originalPath;
   }
