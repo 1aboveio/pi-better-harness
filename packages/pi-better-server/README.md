@@ -128,9 +128,14 @@ ownership:{epoch,from,moveId}, repo:{remote?,branch?,head,baseRef?,baseSha?}, fi
 symlinks:[{path,target}], excluded:[{path,reason:"credential"|"generated"}], worktree:[{path,sha256,mode}],
 totals:{files,bytes,worktreeFiles,worktreeBytes}}`. `files` checksums every archive member;
 `worktree` is the sha256 (and `644`/`755`/`symlink` mode) of every file the restored tree must hold.
-Never bundled: any file whose name starts with `.env` (`.env`, `.env.local`, `.envrc`, `.env-prod`, ...), `.npmrc`/`.netrc`/`.git-credentials`, `auth|credentials|secrets.*`, `id_*`, `*.pem|key|p12|pfx|jks`,
-`.ssh/.aws/.gnupg/.kube/.docker` content, `node_modules`, build output and caches, anything git ignores, and no
+Never bundled: any file whose name starts with `.env` (`.env`, `.env.local`, `.envrc`, `.env-prod`, ...) or ends in `.env` (`prod.env`),
+`.pgpass`, `credential(s)` with no extension, `*.tfvars`/`*.tfvars.json`, `service-account*.json`/`service_account*.json`,
+`.npmrc`/`.netrc`/`.pypirc`/`.git-credentials`/`.dockercfg`, `auth|credentials|secrets.*` (json, yaml, toml, ini),
+`id_rsa|dsa|ecdsa|ed25519` (with optional `_sk` and `.pub`), `*.pem|key|p12|pfx|keystore|jks`,
+`.ssh/.aws/.gnupg/.kube/.docker/.gcloud/.azure` content, `node_modules`, build output and caches, anything git ignores, and no
 Pi/`gh`/provider auth files (only the transcript and an index row are read from the agent dir).
+The one exception: a name ending in `.example`, `.sample` or `.template` (`.env.example`, `.env.production.template`)
+travels, because it is meant to hold placeholders. Never keep real values in such a file.
 
 ## Codex threads (`pi-better-server --agent codex`)
 
