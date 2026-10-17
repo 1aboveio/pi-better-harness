@@ -10,7 +10,7 @@ import { digestWorktree } from "../src/core/bundle.ts";
 import { detachSession, returnSession } from "../src/detach/detach.ts";
 import { recoverLocal } from "../src/detach/recover.ts";
 import { MoveError } from "../src/move/orchestrate.ts";
-import detachExtension, { parseDetachArgs, registerDetach } from "../src/detach/extension.ts";
+import detachExtension, { detachedMessage, parseDetachArgs, registerDetach } from "../src/detach/extension.ts";
 import type { LocalSessionInfo } from "../src/detach/local-source.ts";
 import { localBlockedReason, readLocalRecord, writeLocalRecord } from "../src/detach/local-state.ts";
 import { PreflightError } from "../src/move/preflight.ts";
@@ -237,6 +237,11 @@ describe("/detach and return between a local session and a daemon", { concurrenc
   it("/detach is a registered Pi command; a moved session blocks local input", async () => {
     assert.deepEqual(parseDetachArgs("r9 --remote-dir /x"), { host: "r9", remoteDir: "/x" });
     assert.throws(() => parseDetachArgs(""), /Usage/);
+    const moved = { cwd: "/w", worktreeFiles: 3 };
+    assert.doesNotMatch(detachedMessage("s1", "r9", moved), /--remote-dir/);
+    const lines = detachedMessage("s1", "r9", moved, "/srv/pi dir").split("\n").filter((l) => l.includes("pi-remote"));
+    assert.equal(lines.length, 3);
+    for (const line of lines) assert.match(line, /--host r9 --remote-dir '\/srv\/pi dir'/);
     const commands: string[] = [];
     let onInput: ((event: unknown, ctx: any) => any) | undefined;
     detachExtension({ registerCommand: (name: string) => commands.push(name), on: (event: string, handler: any) => void (event === "input" && (onInput = handler)) } as never);

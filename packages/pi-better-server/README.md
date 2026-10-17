@@ -172,7 +172,7 @@ The same `move` core carries a Codex thread. Run one daemon per Codex host (`pi-
   source and this machine's Codex daemon the target (the running one in `PI_SERVER_DIR`, else one started for the command). The host
   keeps the thread fenced until this machine acknowledges it, so a failed return leaves it live on the host; afterwards the host's copy is archived.
   The workspace goes back to where the thread lived before it moved when that directory is free, otherwise pass `--to-cwd`.
-  Resume with `codex resume <thread>`.
+  While this machine's daemon is running it holds the thread, so a standalone `codex resume` / `codex exec resume` is refused ("already has an active writer"): continue with `pi-remote attach <thread>` or `pi-remote steer <thread> "<message>"`.
 - Codex plugin: `codex plugin marketplace add <this package>/codex-plugin`, then `codex plugin add pi-remote@pi-remote`. It adds a skill and four
   tools (`remote_detach`, `remote_ls`, `remote_steer`, `remote_return`) that run `pi-remote` (`PI_REMOTE_BIN` names the executable).
 

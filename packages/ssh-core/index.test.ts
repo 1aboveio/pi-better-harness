@@ -37,6 +37,23 @@ describe("ssh-core package contract", () => {
     }
   });
 
+  // @covers ssh-core.control-master
+  // @level unit
+  it("falls back to a short per-user root when the agent directory is too long for a ControlPath", () => {
+    const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
+    try {
+      process.env.PI_CODING_AGENT_DIR = `/tmp/${"long-agent-dir-".repeat(8)}`;
+      const root = defaultSshControlPathRoot();
+      assert.match(root, /^\/tmp\/pi-ssh-/);
+      const resolved = resolveSshCommand({ command: "true", ssh: { host: "long.example" } });
+      const mux = createSshMuxController({ ...resolved, runner: new FakeRemoteRunner(), sessionScope: "long-agent-dir" });
+      assert.ok(Buffer.byteLength(mux.controlPath) <= 100, mux.controlPath);
+    } finally {
+      if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
+    }
+  });
+
   // @covers ssh-core.identity-argv
   // @level unit
   it("normalizes identity and enforces noninteractive SSH argv", () => {
