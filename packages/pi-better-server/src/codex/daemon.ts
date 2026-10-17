@@ -8,6 +8,7 @@
  */
 import { chmodSync, existsSync, statSync, unlinkSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
+import { readGitBranch } from "../git.ts";
 import { checkHello } from "../handshake.ts";
 import { MoveHost } from "../core/move-host.ts";
 import { defaultServerDir, ensureServerDir, movesDirFor, socketPathFor } from "../paths.ts";
@@ -72,6 +73,7 @@ async function listThreads(runtime: CodexRuntime, adapter: CodexMoveAdapter): Pr
     const page: { data: any[]; nextCursor: string | null } = await client.call("thread/list", { limit: 100, cursor, modelProviders, sourceKinds: ["cli", "vscode", "exec", "appServer"] });
     for (const thread of page.data) {
       const ownership = adapter.ownership.get(thread.id).state;
+      const branch = typeof thread.cwd === "string" ? readGitBranch(thread.cwd) : undefined;
       const iso = (seconds: unknown): string => new Date(Number(seconds) * 1000).toISOString();
       sessions.push({
         sessionId: thread.id,
@@ -80,6 +82,7 @@ async function listThreads(runtime: CodexRuntime, adapter: CodexMoveAdapter): Pr
         status: "running",
         ...(thread.name ? { name: thread.name } : thread.preview ? { name: String(thread.preview).slice(0, 80) } : {}),
         ...(thread.model ? { model: thread.model } : {}),
+        ...(branch ? { branch } : {}),
         isStreaming: thread.status?.type === "active",
         ...(thread.status?.type === "systemError" ? { lastError: (await lastTurnError(runtime, thread.id)) ?? "the last turn failed" } : {}),
         ...(ownership !== "owned" ? { ownership } : {}),

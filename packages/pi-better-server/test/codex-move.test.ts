@@ -118,8 +118,9 @@ describe("Codex thread move between two Codex hosts (real codex-cli, real app-se
 
     // Codex indexes a rollout when it first reads it; a real laptop thread was indexed when it was recorded.
     await threadView(source);
-    const listed = (((await source.client.call({ type: "list_sessions" })).data as { sessions: Array<{ sessionId: string }> }).sessions).map((s) => s.sessionId);
-    assert.deepEqual(listed, [THREAD_ID]);
+    const rows = ((await source.client.call({ type: "list_sessions" })).data as { sessions: Array<{ sessionId: string; branch?: string }> }).sessions;
+    assert.deepEqual(rows.map((s) => s.sessionId), [THREAD_ID]);
+    assert.equal(rows[0]!.branch, "feature-x");
 
     const result = await moveSession(source.client, target.client, { sessionId: THREAD_ID, chunkBytes: 4096 });
     assert.equal(result.verified, true);

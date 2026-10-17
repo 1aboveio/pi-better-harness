@@ -74,8 +74,8 @@ describe("Codex steer and ls (real codex app-server, mock model)", { concurrency
     await moveSession(host.client, other.client, { sessionId: id });
     const result = await remote(["steer", "--socket", host.daemon.socketPath, id, "still there?"]);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /moved on this host/); // the retired thread is archived and still listed, as closed
-    assert.deepEqual((await ls(host)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "closed", "moved"]]);
+    assert.match(result.stderr, /moved on this host/); // the retired thread is archived and still listed, as moved
+    assert.deepEqual((await ls(host)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "moved", "moved"]]);
     const requestsBefore = host.model.requests.length;
     await assert.rejects(host.client.call({ type: "steer", sessionId: id, message: "x" }), /moved on this host/);
     assert.equal(host.model.requests.length, requestsBefore);
@@ -119,7 +119,7 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
     assert.deepEqual([local.sessionId, local.displayStatus, local.ownership, local.cwd], [id, "idle", undefined, returned.cwd]);
 
     // Single writer: the host's copy is retired (listed as moved) and refuses messages.
-    assert.deepEqual((await ls(server)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "closed", "moved"]]);
+    assert.deepEqual((await ls(server)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "moved", "moved"]]);
     await assert.rejects(server.client.call({ type: "prompt", sessionId: id, message: "x" }), /moved on this host/);
 
     // Resume locally: a new message runs on the laptop's own app-server with the full history.
@@ -145,7 +145,7 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
     assert.equal(result.code, 0, result.stderr);
     assert.equal(existsSync(join(back, "ws", "src", "untracked.ts")), true);
     assert.equal(laptop.daemon.runtime.rolloutPath(id) !== undefined, true);
-    assert.deepEqual((await ls(server)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "closed", "moved"]]);
+    assert.deepEqual((await ls(server)).map((t) => [t.sessionId, t.displayStatus, t.ownership]), [[id, "moved", "moved"]]);
   });
 
   it("leaves the host's thread live and untouched when return cannot go ahead", async () => {
