@@ -10,7 +10,7 @@ import { PiMoveAdapter } from "./pi-adapter.ts";
 export type { CommitAck } from "../core/move-host.ts";
 
 export class MoveService extends MoveHost {
-  constructor(registry: SessionRegistry, serverDir: string) {
-    super(new PiMoveAdapter(registry, serverDir), serverDir, movesDirFor(serverDir));
+  constructor(registry: SessionRegistry, serverDir: string, beforeStop?: (sessionId: string) => Promise<unknown>) {
+    super(new PiMoveAdapter(registry, serverDir, beforeStop), serverDir, movesDirFor(serverDir));
   }
 }

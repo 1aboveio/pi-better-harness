@@ -28,9 +28,13 @@ export class PiMoveAdapter implements AgentMoveAdapter {
   private readonly registry: SessionRegistry;
   private readonly serverDir: string;
 
-  constructor(registry: SessionRegistry, serverDir: string) {
+  private readonly beforeStop?: (sessionId: string) => Promise<unknown>;
+
+  /** `beforeStop` runs at the fence, once the session is fenced and before it is released (e.g. to end the attach companion that holds its lease). */
+  constructor(registry: SessionRegistry, serverDir: string, beforeStop?: (sessionId: string) => Promise<unknown>) {
     this.registry = registry;
     this.serverDir = serverDir;
+    if (beforeStop) this.beforeStop = beforeStop;
   }
 
   get ownership(): OwnershipStore {
@@ -70,6 +74,7 @@ export class PiMoveAdapter implements AgentMoveAdapter {
   }
 
   async stop(sessionId: string): Promise<void> {
+    await this.beforeStop?.(sessionId);
     await this.registry.release(sessionId);
   }
 

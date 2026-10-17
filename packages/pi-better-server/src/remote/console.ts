@@ -44,8 +44,8 @@ function describeDialog(dialog: PendingDialog): string {
  */
 export const command: Subcommand = {
   usage: "console [--host <ssh-alias>] <session>   (the terminal `attach` shows; rarely run by hand)",
-  options: {},
-  async run({ positionals }, context) {
+  options: { companion: { type: "boolean" } },
+  async run({ values, positionals }, context) {
     const ref = positionals[0];
     if (!ref) throw new Error("console needs a session: pi-remote console <session>");
     const client = await context.connect();
@@ -77,7 +77,7 @@ export const command: Subcommand = {
     const state = await client.call({ type: "get_state", sessionId });
     const lastSeq = (state.data as { lastSeq: number }).lastSeq;
     await client.call({ type: "subscribe", sessionId, sinceSeq: Math.max(0, lastSeq - REPLAY_TAIL) });
-    const acquired = await client.request({ type: "acquire_control", sessionId });
+    const acquired = await client.request({ type: "acquire_control", sessionId, ...(values.companion ? { companion: true } : {}) });
     if (!acquired.success) throw new Error(`${acquired.error ?? "could not take control"}; this session already has a controller`);
     for (const dialog of acquired.data.needsInput as PendingDialog[]) {
       if (!dialogs.has(dialog.id)) context.stdout(describeDialog(dialog));

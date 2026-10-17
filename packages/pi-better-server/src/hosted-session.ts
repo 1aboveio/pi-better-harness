@@ -103,6 +103,11 @@ export class HostedSession {
     return true;
   }
 
+  /** True when the current lease holder satisfies `matches`. */
+  controllerIs(matches: (owner: unknown) => boolean): boolean {
+    return this.controller !== undefined && matches(this.controller);
+  }
+
   releaseControl(owner: unknown): boolean {
     if (this.controller !== owner) return false;
     this.controller = undefined;

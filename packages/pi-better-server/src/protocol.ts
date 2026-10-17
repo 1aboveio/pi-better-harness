@@ -108,7 +108,7 @@ export type MoveCommand =
  */
 export type ControlCommand =
   | { id?: string; type: "subscribe"; sessionId: string; sinceSeq?: number }
-  | { id?: string; type: "acquire_control"; sessionId: string }
+  | { id?: string; type: "acquire_control"; sessionId: string; /** Set by the attach companion so the daemon can tell its lease from a person's. */ companion?: boolean }
   | { id?: string; type: "release_control"; sessionId: string }
   | ({ id?: string; type: "extension_ui_response"; sessionId: string; requestId: string } & DialogAnswer);
 

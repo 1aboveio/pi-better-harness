@@ -52,13 +52,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
   const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log });
   await registry.resumeAll();
-  const moves = new MoveService(registry, serverDir);
   const companions = new CompanionManager({
     socketPath,
     ...options.companion,
     tmuxSocket: options.companion?.tmuxSocket ?? process.env.PI_SERVER_TMUX_SOCKET,
-    isReady: (id) => registry.get(id)?.hasController ?? false,
+    isReady: (id) => registry.get(id)?.controllerIs((owner) => owner instanceof ConnectionControl && owner.companion) ?? false,
   });
+
+  // A running attach companion holds the controller lease: the move ends it at the fence, after any wait for a turn, so one started during that wait is stopped too.
+  const moves = new MoveService(registry, serverDir, (sessionId) => companions.stop(sessionId));
 
   const sockets = new Set<Socket>();
   const server: Server = createServer((socket) => {
@@ -93,7 +95,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           socket.end(); // an incompatible client gets the reason, then the door
           return;
         }
-        if (MOVE_COMMANDS.has(type)) return reply(await moves.handle(command as MoveCommand));
+        if (MOVE_COMMANDS.has(type)) {
+          return reply(await moves.handle(command as MoveCommand));
+        }
         if (DAEMON_COMMANDS.has(type)) {
           const sessionId = typeof command.sessionId === "string" ? command.sessionId : "";
           if (type === "list_sessions") return reply({ data: { sessions: registry.list() } });
