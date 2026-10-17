@@ -572,7 +572,15 @@ function syncWidgetNavSelection(running: RunMeta[]): void {
  */
 function renderWidget(): void {
     const ctx = uiCtx;
-    if (!ctx || !ctx.hasUI) return;
+    if (!ctx) return;
+    // A run can exit after Pi replaced the session that captured this ctx; Pi then throws on any
+    // property read. That session's UI is gone, so drop the ctx instead of failing the finalizer.
+    try {
+        if (!ctx.hasUI) return;
+    } catch {
+        if (uiCtx === ctx) uiCtx = undefined;
+        return;
+    }
     updateNavigatorFooter(ctx);
     try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
     spendCache.clear();
@@ -1847,7 +1855,9 @@ export default function (pi: ExtensionAPI) {
         const snapshot = taskRuntime ? takeRecoverySnapshot(taskRuntime.policy.permissions) : undefined;
         if (snapshot?.started) {
             void snapshot.done.then((outcome) => {
-                if (!outcome.ok) ctx.ui?.notify?.(`Subagent ${id}: recovery snapshot failed (run continues): ${outcome.detail}`, "warning");
+                if (outcome.ok) return;
+                // The snapshot can finish after the session was replaced and ctx went stale.
+                try { ctx.ui?.notify?.(`Subagent ${id}: recovery snapshot failed (run continues): ${outcome.detail}`, "warning"); } catch { /* ignore */ }
             });
         }
         const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: piBin, fileArgs: args };
@@ -2497,6 +2507,9 @@ export default function (pi: ExtensionAPI) {
         // running/orphaned children before dropping the session origin, so they
         // cannot become live process groups with no coordinator.
         stopCurrentSessionSubagents(ctx);
+        // The stopped children exit after this handler returns; their finalizers
+        // must not reach for a ctx that Pi invalidates once the session is replaced.
+        uiCtx = undefined;
         agentSessionSettings.clear();
         catalogModelRegistry = undefined;
         activeCallbackOrigin = undefined;

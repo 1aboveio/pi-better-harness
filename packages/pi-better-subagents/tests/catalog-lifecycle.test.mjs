@@ -524,16 +524,9 @@ fi
         assert.equal(meta.catalog.roleId, "role.developer");
         assert.equal(meta.catalog.modelSelection.source, "invocation");
         assert.equal(meta.catalog.capabilities.grantedByCatalog, false);
-        let argv = "";
-        for (let attempt = 0; attempt < 40; attempt++) {
-            try {
-                argv = readFileSync(join(run, "argv.txt"), "utf8");
-                if (argv.includes("--model\nopenai/gpt-6-astra") && argv.includes("--thinking\nhigh")) break;
-            } catch {
-                // The child may not have created its argument capture yet.
-            }
-            await new Promise((resolve) => setTimeout(resolve, 25));
-        }
+        // The fake child writes argv.txt before it exits; the exit is the signal it is there.
+        await settledMeta(id);
+        const argv = readFileSync(join(run, "argv.txt"), "utf8");
         assert.match(argv, /--model\nopenai\/gpt-6-astra/);
         assert.match(argv, /--thinking\nhigh/);
         assert.match(readFileSync(join(run, "prompt.md"), "utf8"), /Look at payments\./);
@@ -650,7 +643,7 @@ fi
             shared: { tools: "read,bash", sandbox: false },
         }, null, null, ctx());
         const text = textOf(result);
-        const ids = [...text.matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
+        const ids = [...text.matchAll(/\bsa_[a-z0-9_]+/g)].map((match) => match[0]);
         assert.equal(ids.length, 2);
         // Both jobs name their own defaults explicitly, so neither launch line carries a note.
         assert.match(text, /• Payments Developer → sa_[a-z0-9_]+$/m);
@@ -736,8 +729,9 @@ fi
         assert.equal(typeof tools.agents_catalog.execute, "function");
     });
 
+    // \b: a batch id such as batch_xxxsa_5 must not match as a run id.
     function runIdFrom(result) {
-        const match = textOf(result).match(/sa_[a-z0-9_]+/);
+        const match = textOf(result).match(/\bsa_[a-z0-9_]+/);
         assert.ok(match, textOf(result));
         return match[0];
     }
@@ -746,13 +740,17 @@ fi
         return JSON.parse(readFileSync(join(baseDir(), "runs", id, "meta.json"), "utf8"));
     }
 
+    // Wait for the child's exit to be recorded; a slow host is bounded by the test runner, not a poll count.
     async function settledMeta(id) {
-        for (let attempt = 0; attempt < 40; attempt++) {
-            const meta = metaOf(id);
-            if (meta.status !== "running") return meta;
+        for (;;) {
+            try {
+                const meta = metaOf(id);
+                if (meta.status !== "running") return meta;
+            } catch (error) {
+                if (error?.code !== "ENOENT") throw error;
+            }
             await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        return metaOf(id);
     }
 
     it("spawns direct-role numeric and alias labels through the registered tool", async () => {
@@ -850,7 +848,7 @@ fi
         }, null, null, ctx());
         const text = textOf(result);
         assert.doesNotMatch(text, /job-1|job-2|job-3/);
-        const ids = [...text.matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
+        const ids = [...text.matchAll(/\bsa_[a-z0-9_]+/g)].map((match) => match[0]);
         assert.equal(ids.length, 3);
         const metas = ids.map(metaOf);
         assert.equal(metas[0].catalog.snapshotDigest, metas[1].catalog.snapshotDigest);
@@ -1022,7 +1020,7 @@ fi
                 ],
                 shared: { role: "reviewer", tools: "read,bash", sandbox: false },
             }, null, null, ctx());
-            const ids = [...textOf(result).matchAll(/sa_[a-z0-9_]+/g)].map((match) => match[0]);
+            const ids = [...textOf(result).matchAll(/\bsa_[a-z0-9_]+/g)].map((match) => match[0]);
             assert.equal(ids.length, 2, textOf(result));
             const metas = await Promise.all(ids.map(settledMeta));
             assert.deepEqual(metas.map((meta) => meta.catalog.roleId), ["role.reviewer", "role.developer"]);
@@ -1159,7 +1157,7 @@ fi
 
     async function waitForNoRunning() {
         const dir = join(baseDir(), "runs");
-        for (let attempt = 0; attempt < 40; attempt++) {
+        for (;;) {
             const ids = existsSync(dir) ? readdirSync(dir) : [];
             const running = ids.some((id) => {
                 try {
