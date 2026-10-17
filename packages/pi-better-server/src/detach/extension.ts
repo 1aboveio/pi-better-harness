@@ -28,6 +28,20 @@ export function parseDetachArgs(args: string): { host: string; remoteDir?: strin
   return { host, ...(remoteDir ? { remoteDir } : {}), ...(toCwd ? { toCwd } : {}) };
 }
 
+const shellWord = (word: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`);
+
+/** The follow-up commands carry `--remote-dir` when the daemon is not in its default dir, so they work as printed. */
+export function detachedMessage(sessionId: string, host: string, result: { cwd: string; worktreeFiles: number }, remoteDir?: string): string {
+  const where = `--host ${shellWord(host)}${remoteDir ? ` --remote-dir ${shellWord(remoteDir)}` : ""}`;
+  return (
+    `Moved to ${host}: ${result.cwd} (${result.worktreeFiles} files verified). The agent keeps running there.\n` +
+    `Follow it:  pi-remote tail ${sessionId} ${where}\n` +
+    `Steer it:   pi-remote steer ${sessionId} "<message>" ${where}\n` +
+    `Bring it back:  pi-remote return ${sessionId} ${where}  (rebuilds beside the original workspace, which stays as it is)\n` +
+    "This Pi process will not run the session again; exit with /quit."
+  );
+}
+
 /** The Pi session methods the transcript gate wraps. The gate cannot work without them, so /detach refuses when Pi no longer has them. */
 const GATED_METHODS = ["_persist", "_rewriteFile"] as const;
 
@@ -82,14 +96,7 @@ export function registerDetach(pi: ExtensionAPI, deps: DetachDeps = { resolveTar
           onProgress: (message) => ctx.ui.notify(message, "info"),
         });
         departed.add(sessionId);
-        ctx.ui.notify(
-          `Moved to ${parsed.host}: ${result.cwd} (${result.worktreeFiles} files verified). The agent keeps running there.\n` +
-            `Follow it:  pi-remote tail ${sessionId} --host ${parsed.host}\n` +
-            `Steer it:   pi-remote steer ${sessionId} "<message>" --host ${parsed.host}\n` +
-            `Bring it back:  pi-remote return ${sessionId} --host ${parsed.host}  (rebuilds beside the original workspace, which stays as it is)\n` +
-            "This Pi process will not run the session again; exit with /quit.",
-          "info",
-        );
+        ctx.ui.notify(detachedMessage(sessionId, parsed.host, result, parsed.remoteDir), "info");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const untouched = error instanceof PreflightError || (error instanceof MoveError && error.sourceUnfenced);

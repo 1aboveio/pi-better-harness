@@ -57,6 +57,8 @@ export interface ResolvedSshIdentity {
 export const DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS = 10;
 export const DEFAULT_SSH_CONTROL_PERSIST_SECONDS = 600;
 export const MAX_SSH_CONTROL_PATH_BYTES = 100;
+/** The longest socket name under a ControlPath root: `cm-` plus a 32-char hash. */
+const MUX_CONTROL_PATH_NAME_TEMPLATE = `cm-${"0".repeat(32)}`;
 export const DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS = 120_000;
 
 export interface RemoteRunner {
@@ -325,7 +327,10 @@ export function wrapRemoteBashCommand(input: RemoteBashCommandInput): string {
 
 export function defaultSshControlPathRoot(): string {
   const agentDirectory = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-  return join(agentDirectory, "ssh-control");
+  const root = join(agentDirectory, "ssh-control");
+  // A long agent directory would push the socket past the unix path limit; fall back to a short per-user root.
+  if (Buffer.byteLength(join(root, MUX_CONTROL_PATH_NAME_TEMPLATE)) <= MAX_SSH_CONTROL_PATH_BYTES) return root;
+  return join("/tmp", `pi-ssh-${process.getuid?.() ?? "user"}`);
 }
 
 /**
@@ -490,6 +495,9 @@ function ensureControlPathRoot(controlPathRoot: string): void {
   const stats = lstatSync(controlPathRoot);
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw new Error(`ssh mux ControlPath root must be a real directory: ${controlPathRoot}`);
+  }
+  if (process.getuid && stats.uid !== process.getuid()) {
+    throw new Error(`ssh mux ControlPath root must be owned by the current user: ${controlPathRoot}`);
   }
   chmodSync(controlPathRoot, 0o700);
 }

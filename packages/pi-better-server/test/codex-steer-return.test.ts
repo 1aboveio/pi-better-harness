@@ -7,6 +7,8 @@ import { digestWorktree } from "../src/core/bundle.ts";
 import { moveSession } from "../src/move/orchestrate.ts";
 import { createThread, git, makeRepo, remote, runCleanups, shortDir, startHost, type Host } from "./codex-host.ts";
 import { waitFor } from "./helpers.ts";
+import { resumeHint } from "../src/codex/return.ts";
+import { defaultServerDir } from "../src/paths.ts";
 
 after(runCleanups);
 
@@ -103,7 +105,9 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
     const returned = JSON.parse(result.stdout) as { cwd: string; resumeCommand: string; verified: boolean; worktreeFiles: number };
     assert.equal(returned.cwd, join(back, "ws"));
     assert.equal(returned.verified, true);
-    assert.match(returned.resumeCommand, new RegExp(`codex resume ${id}`));
+    // The laptop daemon holds the thread, so a standalone `codex resume` would be refused; the hint goes through it.
+    assert.match(returned.resumeCommand, new RegExp(`pi-remote attach ${id}`));
+    assert.doesNotMatch(returned.resumeCommand, /codex (exec )?resume/);
 
     // Workspace: the host's edits, byte for byte, same commit.
     assert.equal(returned.worktreeFiles, digestWorktree(detached.cwd).length);
@@ -172,5 +176,13 @@ describe("pi-remote return for a Codex thread", { concurrency: false }, () => {
     // Never half-moved: the laptop never took it, and the host still takes messages.
     assert.equal(laptop.daemon.runtime.rolloutPath(id), undefined);
     assert.equal(JSON.parse((await remote(["steer", ...sock, "--json", id, "still yours"])).stdout).delivered, "prompt");
+  });
+});
+
+describe("codex return hint", () => {
+  it("goes through the running daemon, naming a non-default server dir, and uses plain codex resume only when nothing holds the thread", () => {
+    assert.equal(resumeHint("/w", "t1", false, defaultServerDir()), "cd /w && codex resume t1");
+    assert.match(resumeHint("/w", "t1", true, defaultServerDir()), /^pi-remote attach t1 /);
+    assert.match(resumeHint("/w", "t1", true, "/x/srv"), /^PI_SERVER_DIR=\/x\/srv pi-remote attach t1 .*PI_SERVER_DIR=\/x\/srv pi-remote steer t1/);
   });
 });
