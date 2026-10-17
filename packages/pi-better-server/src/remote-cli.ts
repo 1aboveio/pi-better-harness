@@ -21,8 +21,15 @@ async function usage(): Promise<string> {
   return `Usage:\n${lines.join("\n")}\n\nOptions for every command:\n  --host <ssh-alias>   reach the daemon on another machine through an SSH-forwarded socket\n  --remote-dir <dir>   daemon server dir on that machine (default: ask its shell)\n  --socket <path>      daemon socket on this machine\n  --json               machine-readable output\n`;
 }
 
+/** The subcommand is the first positional once global options (and their values, like `--host r9`) are skipped. */
+export function findCommandName(argv: string[]): string | undefined {
+  const { tokens } = parseArgs({ args: argv, options: GLOBAL_OPTIONS, allowPositionals: true, strict: false, tokens: true });
+  const first = tokens.find((token) => token.kind === "positional");
+  return first?.kind === "positional" ? first.value : undefined;
+}
+
 export async function main(argv: string[]): Promise<number> {
-  const name = argv.find((arg) => !arg.startsWith("-"));
+  const name = findCommandName(argv);
   if (!name || argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(await usage());
     return name || argv.includes("--help") || argv.includes("-h") ? 0 : 2;
@@ -34,7 +41,7 @@ export async function main(argv: string[]): Promise<number> {
   }
   const { command } = await load();
   const { values, positionals } = parseArgs({ args: argv, options: { ...GLOBAL_OPTIONS, ...command.options }, allowPositionals: true });
-  positionals.shift(); // the subcommand name
+  positionals.splice(positionals.indexOf(name), 1); // the subcommand name; a global option's value is never a positional
   const abort = new AbortController();
   const stop = (): void => abort.abort();
   process.on("SIGINT", stop);

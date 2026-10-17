@@ -23,7 +23,14 @@ export const command: Subcommand = {
     });
     const sessionId = created.sessionId as string;
     // The daemon answers once the turn is accepted; it keeps running after we disconnect.
-    await client.call({ type: "prompt", sessionId, message: prompt });
+    try {
+      await client.call({ type: "prompt", sessionId, message: prompt });
+    } catch (error) {
+      // The session already exists; name it so the user can retry or inspect it instead of hunting through `ls`.
+      context.stdout(context.json ? `${JSON.stringify(created.data)}\n` : `${sessionId}\n`);
+      context.stderr(`session ${sessionId} was created but its prompt was refused\n`);
+      throw error;
+    }
     context.stdout(context.json ? `${JSON.stringify(created.data)}\n` : `${sessionId}\n`);
     return 0;
   },
