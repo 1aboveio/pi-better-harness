@@ -57,6 +57,7 @@ The package workspaces are:
 | `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |
 | `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
 | `packages/pi-better-plan` | `pi-better-plan` | yes | yes |
+| `packages/pi-better-server` | `pi-better-server` (`publishConfig.access` is `public`) | no, not in the publish workflow | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
