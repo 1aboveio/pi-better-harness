@@ -10,9 +10,9 @@ import { digestWorktree } from "../src/core/bundle.ts";
 import { detachSession, returnSession } from "../src/detach/detach.ts";
 import { recoverLocal } from "../src/detach/recover.ts";
 import { MoveError } from "../src/move/orchestrate.ts";
-import detachExtension, { parseDetachArgs } from "../src/detach/extension.ts";
+import detachExtension, { parseDetachArgs, registerDetach } from "../src/detach/extension.ts";
 import type { LocalSessionInfo } from "../src/detach/local-source.ts";
-import { localBlockedReason, readLocalRecord } from "../src/detach/local-state.ts";
+import { localBlockedReason, readLocalRecord, writeLocalRecord } from "../src/detach/local-state.ts";
 import { PreflightError } from "../src/move/preflight.ts";
 import { resolveTarget } from "../src/remote/target.ts";
 import { gate, llmCalls, makeEnv, spawnDaemon, waitFor, type Env } from "./helpers.ts";
@@ -299,6 +299,118 @@ describe("/detach and return between a local session and a daemon", { concurrenc
         assert.equal(readFileSync(local.sessionFile, "utf8"), afterDetach, "returned: stale process transcript untouched");
         assert.equal(llmCalls(local.env).length, llmBefore, "returned: no model call");
       });
+    } finally {
+      delete process.env.PI_REMOTE_STATE_DIR;
+    }
+  });
+
+  /** Register the extension against a stub Pi and hand back the /detach handler and the lifecycle hooks. */
+  function loadExtension(deps?: Parameters<typeof registerDetach>[1]) {
+    let handler: ((args: string, ctx: any) => Promise<void>) | undefined;
+    const hooks: Record<string, (event: unknown, ctx: any) => any> = {};
+    registerDetach({ registerCommand: (_n: string, c: any) => void (handler = c.handler), on: (e: string, h: any) => void (hooks[e] = h) } as never, deps);
+    return { handler: handler!, hooks };
+  }
+
+  it("the /detach handler moves an idle session, tells the user how to follow it, refuses a busy one, and closes the target either way", async () => {
+    const local = makeLocal();
+    const host = await startHost();
+    process.env.PI_REMOTE_STATE_DIR = join(local.env.root, "pistate");
+    try {
+      let closed = 0;
+      const resolved: unknown[] = [];
+      const { handler } = loadExtension({
+        resolveTarget: async (options) => {
+          resolved.push(options);
+          return { socketPath: host.socketPath, forwardSocket: async (socketPath) => ({ socketPath, close: async () => undefined }), close: async () => void closed++ };
+        },
+      });
+      const manager = SessionManager.open(local.sessionFile);
+      let idle = false;
+      const notes: Array<{ message: string; level: string }> = [];
+      const ctx = {
+        cwd: local.repo,
+        sessionManager: manager,
+        model: { provider: "fake", id: "fake-1" },
+        isIdle: () => idle,
+        ui: { notify: (message: string, level: string) => notes.push({ message, level }) },
+      };
+      const before = readFileSync(local.sessionFile, "utf8");
+
+      await handler("", ctx);
+      assert.match(notes.at(-1)!.message, /Usage/);
+      assert.equal(resolved.length, 0);
+
+      await handler("testhost --remote-dir /srv/x", ctx);
+      assert.deepEqual(resolved, [{ host: "testhost", remoteDir: "/srv/x" }]);
+      assert.equal(notes.at(-1)!.level, "error", "a busy agent is refused");
+      assert.equal(closed, 1, "the target is closed after a refusal");
+      assert.equal(readLocalRecord(join(process.env.PI_REMOTE_STATE_DIR, "local-sessions"), local.info.sessionId), undefined);
+      assert.equal(readFileSync(local.sessionFile, "utf8"), before);
+      assert.equal((await sessionsOf(host.socketPath)).length, 0);
+
+      idle = true;
+      await handler("testhost", ctx);
+      const done = notes.at(-1)!;
+      assert.equal(done.level, "info");
+      assert.match(done.message, /Moved to testhost/);
+      assert.ok(done.message.includes(`pi-remote tail ${local.info.sessionId} --host testhost`), done.message);
+      assert.equal(closed, 2, "the target is closed after a move");
+      assert.equal(readLocalRecord(join(process.env.PI_REMOTE_STATE_DIR, "local-sessions"), local.info.sessionId)?.state, "moved");
+      assert.equal((await sessionsOf(host.socketPath)).length, 1);
+    } finally {
+      delete process.env.PI_REMOTE_STATE_DIR;
+    }
+  });
+
+  it("/detach refuses, with the session unchanged, when Pi lacks the session methods the transcript gate wraps", async () => {
+    const local = makeLocal();
+    const host = await startHost();
+    process.env.PI_REMOTE_STATE_DIR = join(local.env.root, "pistate");
+    try {
+      let resolved = 0;
+      const { handler } = loadExtension({ resolveTarget: async () => void resolved++ as never });
+      const manager = SessionManager.open(local.sessionFile) as unknown as Record<string, unknown>;
+      Object.defineProperty(manager, "_persist", { value: undefined }); // a Pi that renamed it
+      const notes: Array<{ message: string; level: string }> = [];
+      const before = readFileSync(local.sessionFile, "utf8");
+      await handler("testhost", { cwd: local.repo, sessionManager: manager, isIdle: () => true, ui: { notify: (message: string, level: string) => notes.push({ message, level }) } });
+      assert.equal(notes.length, 1);
+      assert.equal(notes[0]!.level, "error");
+      assert.match(notes[0]!.message, /Refusing to detach.*_persist/);
+      assert.equal(resolved, 0, "no connection was attempted");
+      assert.equal(readFileSync(local.sessionFile, "utf8"), before);
+      assert.equal(readLocalRecord(join(process.env.PI_REMOTE_STATE_DIR, "local-sessions"), local.info.sessionId), undefined);
+      assert.equal((await sessionsOf(host.socketPath)).length, 0);
+    } finally {
+      delete process.env.PI_REMOTE_STATE_DIR;
+    }
+  });
+
+  it("entries a turn appends while the session is fenced reach the file once a failed move unfences it", async () => {
+    const local = makeLocal();
+    process.env.PI_REMOTE_STATE_DIR = join(local.env.root, "pistate");
+    try {
+      const stateDir = join(process.env.PI_REMOTE_STATE_DIR, "local-sessions");
+      const { hooks } = loadExtension();
+      const manager = SessionManager.open(local.sessionFile);
+      hooks.session_start!({}, { sessionManager: manager });
+      const message = (text: string) => ({ role: "user" as const, content: text, timestamp: Date.now() });
+
+      const first = manager.appendMessage(message("before the fence"));
+      writeLocalRecord(stateDir, { sessionId: local.info.sessionId, state: "fenced", epoch: 0, moveId: "m-test", cwd: local.repo, host: "testhost" });
+      const fenced = manager.appendMessage(message("while fenced"));
+      assert.ok(!readFileSync(local.sessionFile, "utf8").includes("while fenced"), "the fence keeps the file untouched");
+
+      rmSync(join(stateDir, `${local.info.sessionId}.json`)); // the move failed and the session unfenced
+      const last = manager.appendMessage(message("after unfence"));
+
+      const ids = readFileSync(local.sessionFile, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((entry) => entry.type !== "session");
+      const byId = new Map(ids.map((entry) => [entry.id, entry]));
+      for (const id of [first, fenced, last]) assert.ok(byId.has(id), `entry ${id} is on disk`);
+      for (const entry of ids) assert.ok(entry.parentId === null || byId.has(entry.parentId), `entry ${entry.id} has its parent ${entry.parentId} on disk`);
+      assert.equal(readFileSync(local.sessionFile, "utf8").split("while fenced").length - 1, 1, "written once");
+      assert.equal(SessionManager.open(local.sessionFile).getLeafId(), last);
     } finally {
       delete process.env.PI_REMOTE_STATE_DIR;
     }
