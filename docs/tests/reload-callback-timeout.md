@@ -67,3 +67,46 @@ changing sandbox tests. Log: `/tmp/pi-reload-callback-baseline-verify.log`.
 Live network SSH was not run; the always-on SSH scenarios use the existing local
 fake SSH transport. The failure would have been prevented by retaining the real
 session lifecycle and controlling child exits independently of wall-clock timing.
+
+## PR #534 Cleanup Follow-Up
+
+P2 review fix based on parent HEAD `e9a184b` (including `5f4e218` and the
+latest main merge). Disposable clone: `/tmp/pi-reload-cleanup-534`. The parent
+checkout and its untracked work were not changed. No product code or callback
+assertions changed.
+
+Previously, failure cleanup wrote both release markers and immediately disposed
+the session. The suite could then remove the markers before the detached children
+observed them. Cleanup now runs in an awaited test hook, retains the child IDs,
+and recovers any missing ID from metadata scoped to the same cwd/session. It
+keeps the markers and session alive while checking actual process-group exit,
+not just terminal task status. Each exit wait is bounded to one second: release,
+then the real `bg_task_stop` API, then the product process-group helper with
+SIGKILL if needed. Every owned group gets a termination attempt. The session is
+disposed only after cleanup returns or reports failure; a cleanup-hook failure
+does not replace the original test failure. If termination cannot be verified,
+fixtures and markers are retained outside the preload's exit-swept directory.
+
+Permanent real-session cases invoke that same cleanup while children are still
+waiting and neither marker exists. They cover release after reload, a rejected
+second spawn with the first child's ID absent from the cleanup inputs, normal
+stop for local and fake direct-SSH children that ignore the markers, and an
+interrupted real reload before `session_start` with no active tools and children
+that also ignore SIGTERM. Each asserts cleanup finishes in under five seconds,
+every captured owned process group is absent (`kill(-pgid, 0)` gives `ESRCH`),
+and both markers still exist. The stop case also checks durable `cancelled`
+status from `bg_task_stop`. No first-party process runner or session method is
+mocked; only the existing SSH network hop and offline provider remain synthetic.
+
+Verification on Node `v24.14.1`, using the same import flags as above:
+
+- Cleanup cases alone: 4 passed. Log: `/tmp/pi-reload-cleanup-534-cleanup.log`.
+- Cleanup red proof: a temporary early return after writing markers made all four cases fail on the owned-group absence assertion. Their normal cleanup hooks then removed the children. Log: `/tmp/pi-reload-cleanup-534-cleanup-red.log`.
+- Callback red proof: temporarily disabling `sendCustomMessage` forwarding still failed on the second task's completion timeout in approximately 17 seconds. Log: `/tmp/pi-reload-cleanup-534-callback-red.log`.
+- With both probes removed, the full focused file passed: 7 passed, 1 opt-in live-SSH skip, 0 failed. Log: `/tmp/pi-reload-cleanup-534-full.log`.
+- Final full-file rerun: 7 passed, 1 opt-in live-SSH skip, 0 failed. Log: `/tmp/pi-reload-cleanup-534-final.log`.
+- Diff-scoped test-quality lint against `e9a184b`: no findings. `node --check scripts/reload-ssh-durability.e2e.test.mjs` and `git diff --check` passed.
+
+All temporary mutations and diagnostic probes were removed. Live network SSH and
+the repository-wide verification suite were not rerun for this test-only cleanup
+follow-up. Nothing was pushed, published, merged, or opened as a new PR.

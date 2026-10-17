@@ -32,7 +32,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -44,7 +44,9 @@ if (process.env.PI_LIVE_SSH_REQUIRED === "1" && !liveHost) {
 }
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const fixtures = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "pi-reload-ssh-")));
+// Stay outside the preload's exit-swept directory so failed cleanup can retain markers.
+const fixtureRoot = process.env.PI_SCRIPTS_TEST_MACHINE_TMPDIR ?? realpathSync(tmpdir());
+const fixtures = realpathSync(mkdtempSync(join(fixtureRoot, "pi-reload-ssh-")));
 const dir = (name) => { const path = join(fixtures, name); mkdirSync(path, { recursive: true }); return path; };
 const tmp = dir("tmp");
 const agentDir = dir("agent");
@@ -70,11 +72,12 @@ chmodSync(join(fakeBin, "ssh"), 0o755);
 
 const originalPath = process.env.PATH ?? "";
 const originalWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
+let retainFixtures = false;
 after(() => {
   process.env.PATH = originalPath;
   if (originalWindow === undefined) delete process.env.PI_BETTER_CALLBACK_BATCH_MS;
   else process.env.PI_BETTER_CALLBACK_BATCH_MS = originalWindow;
-  rmSync(fixtures, { recursive: true, force: true });
+  if (!retainFixtures) rmSync(fixtures, { recursive: true, force: true });
 });
 
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
@@ -86,6 +89,7 @@ const subagentRegistry = await import("../packages/pi-better-subagents/registry.
 const subagentFailures = await import("../packages/pi-better-subagents/failures.ts");
 const observations = await import("../packages/pi-better-subagents/shared-failure-observations.ts");
 const bgRegistry = await import("../packages/pi-better-background-tasks/src/registry.ts");
+const { stopProcessGroup } = await import("../packages/pi-better-background-tasks/src/process.ts");
 const bgFailures = await import("../packages/pi-better-background-tasks/src/failures.ts");
 const bgObservations = await import("../packages/pi-better-background-tasks/src/shared-failure-observations.ts");
 const { MULTI_PAGE_ANSWER } = await import("./issue-312-payload-baseline/fixtures.mjs");
@@ -258,47 +262,151 @@ test("a real /reload keeps pending callback receipts, the incident journal, and 
   host.session.dispose();
 });
 
-test("local and direct-SSH processes that exit after /reload deliver their completion once", async () => {
+function processGroupAlive(meta) {
+  if (!meta.pid) return false;
+  try {
+    process.kill(meta.pgid ? -meta.pgid : meta.pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    if (error.code === "EPERM") return true;
+    throw error;
+  }
+}
+
+async function cleanupExitChildren(host, project, children) {
+  try {
+    // A spawn can persist its task before the tool returns (or throws). Recover
+    // only this session's tasks, including one whose response did not yield an id.
+    const ids = new Set(children.map((child) => child.id).filter(Boolean));
+    for (const meta of bgRegistry.listMetasForOrigin({ cwd: project, sessionId: host.sessionId })) ids.add(meta.id);
+    const metas = [...ids].map((id) => bgRegistry.readMeta(id)).filter((meta) => meta?.pid);
+    for (const { marker } of children) {
+      try { writeFileSync(marker, ""); } catch { /* Stop still works if release fails. */ }
+    }
+    const gone = () => metas.every((meta) => !processGroupAlive(meta));
+    // Keep markers and supervision alive until the OS, not just terminal metadata,
+    // confirms exit. Stop owns normal group teardown; SIGKILL also works if a
+    // failed reload left no callable tools or a child ignored SIGTERM.
+    if (!await waitFor("released children to exit", gone, 1_000).catch(() => false)) {
+      for (const meta of metas.filter(processGroupAlive)) {
+        try { await host.call("bg_task_stop", { id: meta.id }); } catch { /* Reload may have failed. */ }
+      }
+      if (!await waitFor("stopped children to exit", gone, 1_000).catch(() => false)) {
+        for (const meta of metas.filter(processGroupAlive)) {
+          try { stopProcessGroup(meta.pid, meta.pgid, "SIGKILL"); } catch { /* Attempt both groups; verify exit below. */ }
+        }
+        await waitFor("killed children to exit", gone, 1_000);
+      }
+    }
+  } catch (error) {
+    // Do not remove release markers if even the termination fallback failed.
+    retainFixtures = true;
+    throw error;
+  }
+}
+
+test("local and direct-SSH processes that exit after /reload deliver their completion once", async (t) => {
   process.env.PATH = `${fakeBin}:${originalPath}`;
   process.env.PI_BETTER_CALLBACK_BATCH_MS = "50";
-  const host = await openSession(dir("exit-after-reload-project"));
+  const project = dir("exit-after-reload-project");
+  const host = await openSession(project);
   const localDone = join(fixtures, "local-exit-release");
   const directDone = join(fixtures, "direct-exit-release");
-  const command = (marker, output) => `while [ ! -f '${marker}' ]; do sleep 0.05; done; echo ${output}`;
-  try {
-    await host.start();
-    // Keep both children alive through reload, then finish them in separate batches.
-    const localId = taskId(await host.call("bg_task_spawn", { name: "local-exit", command: command(localDone, "local-done") }));
-    const directId = taskId(await host.call("bg_task_spawn", {
-      name: "direct-exit", command: command(directDone, "direct-done"), ssh: { host: "fake-remote.test" }, remote: { session: "direct" },
-    }));
-    assert.ok(localId && directId);
-    await host.session.reload();
-    for (const [id, marker] of [[localId, localDone], [directId, directDone]]) {
-      writeFileSync(marker, "");
-      await waitFor(`${id} to finish`, () => bgRegistry.readMeta(id)?.status === "succeeded");
-      await waitFor(`${id} completion callback`, () => host.completions(id).length > 0);
-      const meta = bgRegistry.readMeta(id);
-      assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
-      assert.ok(meta.callbackSentAt > 0);
-      await host.session.waitForIdle();
+  const children = [{ marker: localDone }, { marker: directDone }];
+  // Test hooks preserve the original test failure if cleanup also fails.
+  t.after(async () => {
+    try { await cleanupExitChildren(host, project, children); }
+    finally {
+      host.session.dispose();
+      process.env.PATH = originalPath;
     }
-    assert.equal(host.sent.length, 2, "separated exits must each deliver a batch");
-    assert.equal(host.requests.length, 2, "each callback must reach a real agent turn");
-    assert.ok(host.requests[0].includes(localId));
-    assert.ok(host.requests[1].includes(directId));
-    await host.session.reload();
-    await delay(600);
-    assert.equal(host.completions(localId).length, 1);
-    assert.equal(host.completions(directId).length, 1);
-    assert.deepEqual(host.errors, []);
-  } finally {
-    writeFileSync(localDone, "");
-    writeFileSync(directDone, "");
-    host.session.dispose();
-    process.env.PATH = originalPath;
+  });
+  const command = (marker, output) => `while [ ! -f '${marker}' ]; do sleep 0.05; done; echo ${output}`;
+  await host.start();
+  // Keep both children alive through reload, then finish them in separate batches.
+  const localId = children[0].id = taskId(await host.call("bg_task_spawn", { name: "local-exit", command: command(localDone, "local-done") }));
+  const directId = children[1].id = taskId(await host.call("bg_task_spawn", {
+    name: "direct-exit", command: command(directDone, "direct-done"), ssh: { host: "fake-remote.test" }, remote: { session: "direct" },
+  }));
+  assert.ok(localId && directId);
+  await host.session.reload();
+  for (const [id, marker] of [[localId, localDone], [directId, directDone]]) {
+    writeFileSync(marker, "");
+    await waitFor(`${id} to finish`, () => bgRegistry.readMeta(id)?.status === "succeeded");
+    await waitFor(`${id} completion callback`, () => host.completions(id).length > 0);
+    const meta = bgRegistry.readMeta(id);
+    assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
+    assert.ok(meta.callbackSentAt > 0);
+    await host.session.waitForIdle();
   }
+  assert.equal(host.sent.length, 2, "separated exits must each deliver a batch");
+  assert.equal(host.requests.length, 2, "each callback must reach a real agent turn");
+  assert.ok(host.requests[0].includes(localId));
+  assert.ok(host.requests[1].includes(directId));
+  await host.session.reload();
+  await delay(600);
+  assert.equal(host.completions(localId).length, 1);
+  assert.equal(host.completions(directId).length, 1);
+  assert.deepEqual(host.errors, []);
 });
+
+for (const mode of ["release", "partial-spawn", "stop", "failed-reload"]) {
+  test(`exit-child cleanup is bounded with ${mode}`, { timeout: 15_000 }, async (t) => {
+    process.env.PATH = `${fakeBin}:${originalPath}`;
+    const project = dir(`cleanup-${mode}`);
+    const host = await openSession(project);
+    const children = ["local", "direct"].map((name) => ({ marker: join(project, `${name}-release`) }));
+    t.after(async () => {
+      try { await cleanupExitChildren(host, project, children); }
+      finally {
+        host.session.dispose();
+        process.env.PATH = originalPath;
+      }
+    });
+    await host.start();
+    const count = mode === "partial-spawn" ? 1 : 2;
+    for (let i = 0; i < count; i++) {
+      const loop = mode === "release" || mode === "partial-spawn"
+        ? `while [ ! -f '${children[i].marker}' ]; do sleep 0.05; done`
+        : "while :; do sleep 0.05; done";
+      const content = await host.call("bg_task_spawn", {
+        name: `cleanup-${i}`,
+        command: `${mode === "failed-reload" ? "trap '' TERM; " : ""}echo cleanup-ready; ${loop}`,
+        callback: false,
+        ...(i === 1 ? { ssh: { host: "fake-remote.test" }, remote: { session: "direct" } } : {}),
+      });
+      const id = taskId(content);
+      assert.ok(id);
+      // Exercise registry recovery when a spawn response did not supply an id.
+      if (mode !== "partial-spawn") children[i].id = id;
+      await waitFor("the child to enter its wait loop", () => readFileSync(bgRegistry.logPathFor(id), "utf8").includes("cleanup-ready"));
+    }
+    if (mode === "partial-spawn") {
+      await assert.rejects(host.call("bg_task_spawn", { shell: false, argv: [] }), /argv with at least one element/);
+    } else if (mode === "failed-reload") {
+      const failure = new Error("reload interrupted before session_start");
+      await assert.rejects(host.session.reload({ beforeSessionStart() {
+        host.session.setActiveToolsByName([]);
+        throw failure;
+      } }), (error) => error === failure);
+    } else {
+      await host.session.reload();
+    }
+    const owned = bgRegistry.listMetasForOrigin({ cwd: project, sessionId: host.sessionId });
+    assert.equal(owned.length, count);
+    for (const meta of owned) assert.ok(processGroupAlive(meta), `${meta.id} must still be waiting`);
+    for (const child of children) assert.equal(existsSync(child.marker), false);
+    const started = Date.now();
+    await cleanupExitChildren(host, project, children);
+    assert.ok(Date.now() - started < 5_000, "cleanup must finish within its bounded grace periods");
+    for (const meta of owned) {
+      assert.throws(() => process.kill(-meta.pgid, 0), { code: "ESRCH" }, `${meta.id}'s owned process group must be gone`);
+      if (mode === "stop") assert.equal(bgRegistry.readMeta(meta.id).status, "cancelled", "normal fallback uses bg_task_stop");
+    }
+    for (const child of children) assert.equal(existsSync(child.marker), true, "release markers survive cleanup until suite teardown");
+  });
+}
 
 /**
  * SSH transports for the background-task scenario. `fake` always runs; `live`
