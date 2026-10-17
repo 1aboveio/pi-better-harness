@@ -260,8 +260,12 @@ export function createBundle(options: CreateBundleOptions): BundleManifest {
       }
       const full = join(cwd, path);
       const info = lstatSync(full);
-      if (info.isSymbolicLink()) symlinks.push({ path, target: readlinkSync(full) });
-      else if (info.isFile()) {
+      if (info.isSymbolicLink()) {
+        // Restore refuses absolute, escaping and .git-bound links, so fail here rather than ship a bundle that cannot restore.
+        const link = { path, target: readlinkSync(full) };
+        assertSafeSymlinkTarget(link);
+        symlinks.push(link);
+      } else if (info.isFile()) {
         stageFile(scratch, `untracked/${path}`, full, files, "untracked");
         if (info.mode & 0o111) chmodSync(join(scratch, "untracked", path), info.mode & 0o777);
       }
@@ -382,7 +386,25 @@ function pathSegments(path: string): string[] {
 }
 
 function hasGitSegment(path: string): boolean {
-  return pathSegments(path).some((segment) => segment.toLowerCase() === ".git");
+  return pathSegments(path).some(isDotGitName);
+}
+
+/** A segment that names `.git` on some filesystem: case variants, plus the NTFS aliases git's is_ntfs_dotgit refuses ('.git.', '.git ', 'git~1', a ':stream' suffix). */
+function isDotGitName(segment: string): boolean {
+  const name = segment.toLowerCase().split(":")[0]!.replace(/[. ]+$/, "");
+  return name === ".git" || name === "git~1";
+}
+
+/** The rule restore applies to a symlink's target: present, no backslash, not absolute, not climbing out of the workspace, not into `.git`. */
+function assertSafeSymlinkTarget(link: { path: string; target: string }): void {
+  if (typeof link.target !== "string" || link.target === "") throw new BundleError(`Symlink ${link.path} has no target`);
+  if (link.target.includes("\\")) throw new BundleError(`Symlink ${link.path} target contains a backslash: ${link.target}`);
+  if (isAbsolute(link.target) || link.target.startsWith("/") || /^[A-Za-z]:/.test(link.target)) {
+    throw new BundleError(`Symlink ${link.path} has an absolute target: ${link.target}`);
+  }
+  const resolved = posix.normalize(posix.join(posix.dirname(pathSegments(link.path).join("/")), link.target));
+  if (resolved === ".." || resolved.startsWith("../")) throw new BundleError(`Symlink ${link.path} points outside the workspace: ${link.target}`);
+  if (hasGitSegment(resolved) || hasGitSegment(link.target)) throw new BundleError(`Symlink ${link.path} points into .git: ${link.target}`);
 }
 
 /**
@@ -407,14 +429,7 @@ export function assertSafeWorkspaceEntries(manifest: BundleManifest): void {
   const linkPaths = new Set<string>();
   for (const link of manifest.symlinks) {
     workspacePath(link.path, "Symlink path");
-    if (typeof link.target !== "string" || link.target === "") throw new BundleError(`Symlink ${link.path} has no target`);
-    if (link.target.includes("\\")) throw new BundleError(`Symlink ${link.path} target contains a backslash: ${link.target}`);
-    if (isAbsolute(link.target) || link.target.startsWith("/") || /^[A-Za-z]:/.test(link.target)) {
-      throw new BundleError(`Symlink ${link.path} has an absolute target: ${link.target}`);
-    }
-    const resolved = posix.normalize(posix.join(posix.dirname(pathSegments(link.path).join("/")), link.target));
-    if (resolved === ".." || resolved.startsWith("../")) throw new BundleError(`Symlink ${link.path} points outside the workspace: ${link.target}`);
-    if (hasGitSegment(resolved) || hasGitSegment(link.target)) throw new BundleError(`Symlink ${link.path} points into .git: ${link.target}`);
+    assertSafeSymlinkTarget(link);
     linkPaths.add(pathSegments(link.path).join("/"));
   }
   const members = [
