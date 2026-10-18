@@ -4,7 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [pi-better-harness@0.31.0] - 2026-10-18
+
+### Changed
+
+- Bundle Goal 0.10.0. Keep Sandbox 0.12.1, SSH 0.1.3, Background Tasks 0.9.1, Subagents 0.19.1, and Plan 0.9.1.
+
+## [pi-better-goal@0.10.0] - 2026-10-18
 
 ### Added
 
