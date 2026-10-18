@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.31.1] - 2026-10-18
+
+### Changed
+
+- Bundle Goal 0.10.1. Keep all other component versions unchanged.
+
+## [pi-better-goal@0.10.1] - 2026-10-18
+
+### Fixed
+
+- Allow completion and handback after a fresh live scheduler sync confirms the workflow has settled, using read-only copies without changing the bound run files. (#553, #552)
+
 ## [pi-better-harness@0.31.0] - 2026-10-18
 
 ### Changed
