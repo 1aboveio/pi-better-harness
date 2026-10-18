@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Goal: scheduler-backed workflow gates. `update_goal` complete and `release_workflow` consult the bound resolve-issues scheduler and refuse while the run has work it can do itself (failing open with a warning when the scheduler cannot run); invoking `/skill:rush-issues` or `/skill:resolve-issues` with no active goal binds one; a scheduler `wait` schedules the next continuation at its stated time without counting as no progress.
+
 ## [pi-better-harness@0.30.1] - 2026-10-17
 
 ### Changed

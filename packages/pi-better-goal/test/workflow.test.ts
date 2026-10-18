@@ -212,6 +212,9 @@ test("an alias declaring workflow-alias-of binds its coordinator, so the coordin
   assert.equal((synced.details as { runId: string }).runId, "run-1");
 
   await goalCommands.get("workflow")?.handler("clear", ctx);
+  // Invoking the alias already bound a goal; clear it so /goal creates the goal under test.
+  assert.equal(currentGoalSnapshot(ctx)?.command?.name, "skill:resolve-issues");
+  await goalCommands.get("goal")?.handler("clear", ctx);
   await goalCommands.get("goal")?.handler("/skill:resolve-issues #312", ctx);
   assert.equal(userMessages.at(-1), "/skill:resolve-issues #312");
   assert.deepEqual(currentWorkflowOwner(entries), rushOwner, "a goal bound to the alias binds the coordinator too");
