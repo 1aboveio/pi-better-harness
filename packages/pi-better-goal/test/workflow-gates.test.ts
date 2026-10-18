@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -10,7 +11,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import extension, { toolContext } from "./extension-fixture.js";
 import { currentContinuationState, currentGoalSnapshot } from "../src/goal-state.js";
 import { currentWorkflowOwner } from "../src/workflow.js";
-import { waitUntil } from "../src/workflow-gates.js";
+import { runScheduler, schedulerWaitUntil, waitUntil } from "../src/workflow-gates.js";
 
 /** Stands in for resolve-issues' next-actions.mjs: prints the run's stub.json stdout and exits with its status. */
 const STUB_SCHEDULER = `#!/usr/bin/env node
@@ -80,10 +81,164 @@ function setup(t: TestContext, skill = "rush-issues") {
     await commands.get("goal")?.handler(`/skill:${skill} #1`, ctx);
     bindPlan();
   };
-  return { ctx, entries, handlers, commands, userMessages, notices, scheduler, plan, startGoal, run, text, runDir };
+  return { ctx, entries, handlers, commands, userMessages, notices, scheduler, plan, startGoal, run, text, runDir, skillDir };
+}
+
+function setupRealScheduler(t: TestContext) {
+  const h = setup(t);
+  cpSync(new URL("./fixtures/resolve-issues/scripts/", import.meta.url), join(h.skillDir, "scripts"), { recursive: true });
+  cpSync(new URL("./fixtures/engineering-runtime/", import.meta.url), join(h.skillDir, "..", "engineering-runtime"), { recursive: true });
+  const bin = join(h.ctx.cwd, "bin");
+  mkdirSync(bin);
+  const responsePath = join(bin, "response.json");
+  const callsPath = join(bin, "calls.jsonl");
+  writeFileSync(join(bin, "gh"), `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(process.argv.slice(2)) + "\\n");
+const response = JSON.parse(readFileSync(${JSON.stringify(responsePath)}, "utf8"));
+process.stdout.write(JSON.stringify(response.followupError && process.argv.includes("after=next")
+  ? { errors: [{ message: "follow-up unavailable" }] } : response));
+`);
+  chmodSync(join(bin, "gh"), 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}${process.platform === "win32" ? ";" : ":"}${previousPath ?? ""}`;
+  t.after(() => { process.env.PATH = previousPath; });
+  const rawIssue = (number: number, state: string, children: object[] = []) => ({
+    number, state, title: `Issue ${number}`, repository: { nameWithOwner: "fixture/repo" },
+    labels: { totalCount: 0, nodes: [] }, blockedBy: { totalCount: 0, nodes: [] },
+    subIssues: { totalCount: children.length, nodes: children, pageInfo: { hasNextPage: false } },
+  });
+  const tree = (open = false, extra = false) => writeFileSync(responsePath, JSON.stringify({ data: {
+    repository: { issue: rawIssue(1, open || extra ? "OPEN" : "CLOSED", [
+      rawIssue(2, open ? "OPEN" : "CLOSED"), ...(extra ? [rawIssue(3, "OPEN")] : []),
+    ]) },
+  } }));
+  const plan = (units: Unit[]) => writeFileSync(join(h.runDir, "task-plan.json"), JSON.stringify({
+    skill: "rush-issues", spec: "fixture/repo#1", units,
+  }));
+  const script = join(h.skillDir, "scripts", "next-actions.mjs");
+  const cli = (...args: string[]) => JSON.parse(execFileSync("node", [script, "--run", h.runDir, "--slots", "1", "--peek", "--json", ...args], { encoding: "utf8" }));
+  const calls = () => existsSync(callsPath) ? readFileSync(callsPath, "utf8").trim().split("\n").length : 0;
+  const failFetch = () => writeFileSync(responsePath, JSON.stringify({ errors: [{ message: "API rate limit exceeded" }] }));
+  const partialFetch = () => {
+    const response = { data: { repository: { issue: rawIssue(1, "CLOSED") } }, followupError: true };
+    const root = response.data.repository.issue;
+    Object.assign(root.subIssues.pageInfo, { hasNextPage: true, endCursor: "next" });
+    // The real tree fetcher's follow-up fails, yielding a partial tree with errors.
+    writeFileSync(responsePath, JSON.stringify(response));
+  };
+  return { ...h, plan, tree, cli, calls, failFetch, partialFetch, script };
+}
+
+function runFiles(runDir: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  const walk = (dir: string, prefix = "") => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const key = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) walk(join(dir, entry.name), `${key}/`);
+      else files[key] = readFileSync(join(dir, entry.name), "utf8");
+    }
+  };
+  walk(runDir);
+  return files;
 }
 
 const FINISH: Due = { action: "finish", unit: null, detail: "every unit is delivered: write the handoff" };
+
+for (const tool of ["update_goal", "release_workflow"]) {
+  test(`real scheduler: ${tool} closes a settled GitHub run after live finish without writing run inputs`, async (t) => {
+    const h = setupRealScheduler(t);
+    await h.startGoal();
+    h.plan([{ id: "2", status: "succeeded" }]);
+    h.tree();
+    assert.deepEqual(h.cli("--sync").due.map((a: Due) => a.action), ["finish"]);
+    assert.deepEqual(h.cli().due.map((a: Due) => a.action), ["sync"], "a prior live finish is not live evidence in a later call");
+    const before = runFiles(h.runDir);
+    const result = await h.run(tool, tool === "update_goal" ? { status: "complete" } : {});
+    assert.equal(currentGoalSnapshot(h.ctx)?.status, tool === "update_goal" ? "complete" : "paused", h.text(result));
+    assert.equal(currentWorkflowOwner(h.entries), null);
+    assert.doesNotMatch(h.text(result), /Warning:/, "success comes from finish, not the fail-open fallback");
+    assert.equal(h.calls(), 2, "one initial CLI fetch and one gate fetch");
+    assert.deepEqual(runFiles(h.runDir), before, "live gate leaves task plan, tree, and scheduler bookkeeping unchanged");
+  });
+}
+
+
+for (const tool of ["update_goal", "release_workflow"]) {
+  for (const scenario of ["cached fallback", "partial live tree", "new issue", "missing tree"] as const) {
+    test(`real scheduler: ${tool} refuses ${scenario} without a fail-open warning`, async (t) => {
+      const h = setupRealScheduler(t);
+      await h.startGoal();
+      h.plan([{ id: "2", status: "succeeded" }]);
+      h.tree();
+      if (scenario !== "missing tree") h.cli("--sync");
+      if (scenario === "new issue") h.tree(false, true);
+      else if (scenario === "partial live tree") h.partialFetch();
+      else h.failFetch();
+      const before = runFiles(h.runDir);
+      const result = await h.run(tool, tool === "update_goal" ? { status: "complete" } : {});
+      assert.equal(currentGoalSnapshot(h.ctx)?.status, "active", h.text(result));
+      assert.equal(currentWorkflowOwner(h.entries)?.name, "rush-issues");
+      assert.match(h.text(result), scenario === "new issue" ? /add-unit.*3/s : /sync.*issue tree/s);
+      assert.doesNotMatch(h.text(result), /Warning:/);
+      assert.equal(h.calls(), scenario === "missing tree" ? 1 : scenario === "partial live tree" ? 3 : 2);
+      assert.deepEqual(runFiles(h.runDir), before);
+    });
+  }
+}
+
+test("real scheduler: cached due work and heartbeat probes never fetch GitHub", async (t) => {
+  const h = setupRealScheduler(t);
+  await h.startGoal();
+  h.plan([{ id: "2", status: "pending" }]);
+  h.tree(true);
+  h.cli("--sync");
+  const result = await h.run("update_goal", { status: "complete" });
+  assert.match(h.text(result), /fill-slot/);
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "active");
+  assert.match(h.text(await h.run("release_workflow")), /fill-slot/);
+  h.plan([{ id: "2", status: "succeeded" }]);
+  const owner = currentWorkflowOwner(h.entries)!;
+  for (let probe = 0; probe < 3; probe++) {
+    assert.equal(await schedulerWaitUntil(h.entries, owner), undefined);
+    const cached = await runScheduler(h.script, h.runDir);
+    assert.ok(cached.ok);
+    assert.deepEqual(cached.due.map((a) => a.action), ["sync"]);
+  }
+  assert.equal(h.calls(), 1, "only the explicit setup sync used GitHub");
+});
+
+test("real scheduler: running workers still block completion and a genuine human hold can hand back", async (t) => {
+  const h = setupRealScheduler(t);
+  await h.startGoal();
+  h.plan([{ id: "2", status: "in-flight", worker: "impl-2", workerKind: "implement" }]);
+  h.tree(true);
+  h.cli("--sync");
+  assert.match(h.text(await h.run("update_goal", { status: "complete" })), /workers are still running/);
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "active");
+  assert.equal(h.calls(), 1);
+  h.plan([{ id: "2", status: "blocked", blockedReason: "human-decision", humanItem: 3, humanNeed: "Credentials unavailable" }]);
+  const result = await h.run("release_workflow");
+  assert.equal((result.details as { released: boolean }).released, true, h.text(result));
+  assert.equal(currentGoalSnapshot(h.ctx)?.status, "paused");
+  assert.doesNotMatch(h.text(result), /Warning:/);
+  assert.equal(h.calls(), 2);
+});
+
+test("real scheduler: retryable blocked work remains due after a live settlement check", async (t) => {
+  const h = setupRealScheduler(t);
+  await h.startGoal();
+  h.plan([{ id: "2", status: "blocked", blockedReason: "retry-ci" }]);
+  h.tree(true);
+  h.cli("--sync");
+  for (const tool of ["update_goal", "release_workflow"]) {
+    const result = await h.run(tool, tool === "update_goal" ? { status: "complete" } : {});
+    assert.match(h.text(result), /retry-blocked/);
+    assert.equal(currentGoalSnapshot(h.ctx)?.status, "active");
+    assert.doesNotMatch(h.text(result), /Warning:/);
+  }
+  assert.equal(h.calls(), 3);
+});
 
 test("update_goal complete is refused while the scheduler has work due, and the goal stays active", async (t) => {
   const h = setup(t);

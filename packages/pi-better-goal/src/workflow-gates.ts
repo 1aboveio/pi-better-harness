@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { WorkflowOwner } from "./workflow.js";
@@ -8,6 +9,8 @@ import type { WorkflowOwner } from "./workflow.js";
 const WORKFLOW_PLAN_ENTRY = "pi-better-workflow-plan";
 const WORKFLOW_ENTRY = "pi-better-workflow";
 export const SCHEDULER_TIMEOUT_MS = 20_000;
+// Live tree queries allow three 60-second attempts plus follow-ups; cached probes stay cheap.
+const SCHEDULER_SYNC_TIMEOUT_MS = 240_000;
 const DETAIL_LIMIT = 200;
 
 /** Scheduler locations relative to the owner's skill directory, in precedence order. */
@@ -100,9 +103,13 @@ function parseSchedulerOutput(stdout: string): SchedulerRun {
  * are due and 2 on a usage or plan error, so only the latter, a timeout, or bad output is a failure.
  */
 export function runScheduler(script: string, runDir: string, timeoutMs = SCHEDULER_TIMEOUT_MS): Promise<SchedulerRun> {
+  return executeScheduler(script, runDir, timeoutMs);
+}
+
+function executeScheduler(script: string, runDir: string, timeoutMs: number, live = false, cwd = runDir): Promise<SchedulerRun> {
   return new Promise((resolve) => {
-    execFile("node", [script, "--run", runDir, "--slots", "1", "--peek", "--json"],
-      { cwd: runDir, timeout: timeoutMs, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+    execFile("node", [script, "--run", runDir, "--slots", "1", "--peek", "--json", ...(live ? ["--sync"] : [])],
+      { cwd, timeout: timeoutMs, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
           // An exit status of 1 means "actions due"; any other failure (exit 2, timeout, spawn error) is real.
@@ -115,6 +122,27 @@ export function runScheduler(script: string, runDir: string, timeoutMs = SCHEDUL
         resolve(parseSchedulerOutput(stdout));
       });
   });
+}
+
+async function settlementScheduler(script: string, runDir: string, timeoutMs?: number): Promise<SchedulerRun> {
+  const cached = await runScheduler(script, runDir, timeoutMs);
+  if (!cached.ok || cached.due.length !== 1 || cached.due[0]!.action !== "sync") return cached;
+
+  // --peek suppresses seen bookkeeping, not syncRun's issue-tree write. Give the live
+  // probe private inputs; keep cwd so relative workspace paths retain their meaning.
+  let snapshot: string | undefined;
+  try {
+    snapshot = mkdtempSync(join(tmpdir(), "pi-goal-scheduler-"));
+    for (const name of ["task-plan.json", "issue-tree.json", "next-actions-seen.json", "reviews", "results"]) {
+      const source = join(runDir, name);
+      if (existsSync(source)) cpSync(source, join(snapshot, name), { recursive: true, dereference: true });
+    }
+    return await executeScheduler(script, snapshot, timeoutMs ?? SCHEDULER_SYNC_TIMEOUT_MS, true, runDir);
+  } catch (error) {
+    return { ok: false, reason: `could not prepare the live scheduler check (${String(error).slice(0, DETAIL_LIMIT)})` };
+  } finally {
+    if (snapshot) rmSync(snapshot, { recursive: true, force: true });
+  }
 }
 
 interface PlannedRun {
@@ -147,7 +175,7 @@ export async function completionGate(
 ): Promise<GateVerdict> {
   const located = locateRun(entries, owner);
   if ("warning" in located) return unchecked(located.warning);
-  const run = await runScheduler(located.script, located.runDir, options.timeoutMs);
+  const run = await settlementScheduler(located.script, located.runDir, options.timeoutMs);
   if (!run.ok) return unchecked(`could not check the ${owner.name} run (${run.reason})`);
   const open = run.due.filter((action) => action.action !== "finish");
   if (open.length === 0 && run.due.length > 0) return { allow: true };
@@ -190,7 +218,7 @@ export async function pauseGate(
   if ("warning" in located) return unchecked(located.warning);
   const units = readUnits(located.runDir);
   if (!units) return unchecked(`could not read the ${owner.name} task plan`);
-  const run = await runScheduler(located.script, located.runDir, options.timeoutMs);
+  const run = await settlementScheduler(located.script, located.runDir, options.timeoutMs);
   if (!run.ok) return unchecked(`could not check the ${owner.name} run (${run.reason})`);
 
   const refusals: string[] = [];
