@@ -4,10 +4,16 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Run only the Windows compatibility checks
+        type: boolean
+        default: false
 
 jobs:
   node24-sandbox:
     name: node24-sandbox
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -38,6 +44,9 @@ jobs:
   windows-verify:
     name: windows-verify
     runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -51,18 +60,37 @@ jobs:
 
       # Scoped on purpose: the root suite still assumes POSIX shells in places
       # (e.g. /bin/sh shebangs), so this lane proves what Windows must prove —
-      # strict types plus the Windows shell-resolution and log-redirect units —
+      # strict types, SSH contracts, shell resolution, and log redirection —
       # instead of failing on pre-existing POSIX-only expectations.
       - name: Typecheck the background-task package
         run: npm run typecheck -w pi-better-background-tasks
 
+      - name: Typecheck SSH core and extension
+        run: npm run typecheck -w ssh-core -w pi-better-ssh
+
+      # Existing SSH fixtures use /tmp; native Windows resolves it on this drive.
+      - name: Prepare SSH fixtures and report native OpenSSH
+        run: |
+          New-Item -ItemType Directory -Force -Path /tmp | Out-Null
+          & "$env:WINDIR\System32\OpenSSH\ssh.exe" -V
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: SSH core Windows contracts
+        run: npm test -w ssh-core
+
+      - name: SSH extension Windows integration and packaging
+        if: ${{ !cancelled() }}
+        run: npm test -w pi-better-ssh
+
       - name: Windows process unit and integration checks
+        if: ${{ !cancelled() }}
         run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
         working-directory: packages/pi-better-background-tasks
 
   # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
   pi-1x-compat:
     name: pi-1x-compat
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -81,6 +109,7 @@ jobs:
 
   ci:
     name: ci
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,6 +216,7 @@ jobs:
 
   macos-sandbox:
     name: macos-sandbox
+    if: ${{ !inputs.windows_only }}
     runs-on: macos-latest
     env:
       # Turns "no backend, so skip" into a hard failure on the lane whose whole
@@ -245,6 +275,7 @@ jobs:
 
   linux-sandbox:
     name: linux-sandbox
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     env:
       # Same contract as the macOS lane: a runner that has lost bubblewrap must
