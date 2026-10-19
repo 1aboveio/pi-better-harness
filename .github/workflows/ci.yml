@@ -90,12 +90,20 @@ jobs:
         run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
         working-directory: packages/pi-better-background-tasks
 
-  # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
+  # Exercise affected extensions against the minimum and current Pi 1.x SDKs.
   pi-1x-compat:
-    name: pi-1x-compat
+    name: pi-1x-compat (${{ matrix.pi-version }})
     if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        pi-version: ["1.0.0", "1.3.0"]
+    env:
+      PI_SDK_VERSION: ${{ matrix.pi-version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -107,8 +115,36 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: pi-better-server suite on Pi 1.x
-        run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.0.0 "$RUNNER_TEMP/pi-compat"
+      - name: Install selected Pi SDK without changing the lockfile
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ \
+            "@earendil-works/pi-coding-agent@$PI_SDK_VERSION" \
+            "@earendil-works/pi-ai@$PI_SDK_VERSION" \
+            "@earendil-works/pi-tui@$PI_SDK_VERSION"
+
+      - name: Verify each extension resolves the selected SDK
+        run: |
+          node --experimental-import-meta-resolve --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          import { resolve } from "node:path";
+          import { pathToFileURL } from "node:url";
+          for (const name of ["pi-better-background-tasks", "navigator", "pi-better-ssh"]) {
+            const parent = pathToFileURL(resolve("packages", name, "package.json"));
+            const entry = import.meta.resolve("@earendil-works/pi-coding-agent", parent.href);
+            const { version } = JSON.parse(readFileSync(new URL("../package.json", entry), "utf8"));
+            assert.equal(version, process.env.PI_SDK_VERSION, `${name} resolved the wrong Pi SDK`);
+            console.log(`${name}: Pi ${version} at ${entry}`);
+          }
+          NODE
+
+      - name: Typecheck affected extensions and shared modules
+        run: npm run typecheck -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
+
+      - name: Test background lifecycle, navigator, and SSH compatibility
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-sdk-compat-agent
+        run: npm test -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
 
   ci:
     name: ci
