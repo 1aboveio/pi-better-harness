@@ -138,7 +138,7 @@ test("dense rendering bounds ANSI/wide text, keeps the shortcut legend, and scro
       const output = plain(lines);
       assert.match(output, /39 中文/);
       assert.match(output, /ID: id-39/);
-      for (const shortcut of ["Enter attach", "x close", "n rename", "c Create session", "r refresh", "Esc back"]) {
+      for (const shortcut of [width < 40 ? "Enter open" : "Enter attach", "x close", "n rename", "c new", "r refresh", "Esc back"]) {
         assert.ok(output.replace(/\n/g, " ").includes(shortcut), shortcut);
       }
       assert.ok(lines.length <= 24, `height at ${width}`);
@@ -153,8 +153,44 @@ test("dense rendering bounds ANSI/wide text, keeps the shortcut legend, and scro
   state.select("id-1");
   assert.match(plain(statusView.render(100)), /\[busy\]/);
   state.select("id-2");
-  assert.match(plain(statusView.render(100)), /\[needsInput\]/);
+  assert.match(plain(statusView.render(100)), /\[needs input\]/);
   assert.match(plain(statusView.render(100)), /\[idle\]/);
+});
+
+test("wide rows give long names room and keep context-specific shortcut pairs intact", () => {
+  const state = new RemoteSessionBrowserState();
+  const name = "Native client smoke with a descriptive session name";
+  state.replaceSessions([summary("12345678-1234-4234-8234-123456789abc", { name, status: "closed", cwd: "/work/中文-project" })]);
+  state.changeTab();
+  const { screen } = component(state, 30, { cwd: "/home/test/workspaces" });
+  const lines = screen.render(110).map(line => plain([line]));
+  const row = lines.find(line => line.startsWith("> "))!;
+  assert.ok(row.includes(name), row);
+  assert.match(row, /中文-project\s+\[closed\]$/);
+  assert.ok(lines.some(line => line.includes("Folder: /home/test/workspaces")));
+  for (const command of ["Enter reopen", "n rename", "c new", "r refresh", "Esc back"]) {
+    assert.ok(lines.some(line => line.includes(command)), `shortcut pair split: ${command}`);
+  }
+  assert.ok(!lines.some(line => line.includes("x close")));
+  assert.ok(!plain(screen.render(110)).includes("ID: 12345678-1234"));
+});
+
+test("a resized TTY overrides a stale UI height and keeps the action footer visible", t => {
+  const original = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+  Object.defineProperty(process.stdout, "rows", { value: 12, configurable: true });
+  t.after(() => {
+    if (original) Object.defineProperty(process.stdout, "rows", original);
+    else Reflect.deleteProperty(process.stdout, "rows");
+  });
+  const state = new RemoteSessionBrowserState();
+  state.replaceSessions([summary("one", { status: "closed" }), summary("two", { status: "closed" })]);
+  state.changeTab();
+  const { screen } = component(state, 30, { cwd: "/home/test/workspaces" });
+  const lines = screen.render(32);
+  assert.ok(lines.length <= 9, "reserve three lines for Pi's path, model and SSH footer");
+  for (const command of ["Enter open", "n rename", "c new", "r refresh", "Esc back"]) {
+    assert.ok(lines.some(line => plain([line]).includes(command)), command);
+  }
 });
 
 test("short viewports reserve Pi footer space, retain tabs and actions, and scroll multiple rows after resizing", () => {
@@ -169,10 +205,10 @@ test("short viewports reserve Pi footer space, retain tabs and actions, and scro
       assert.ok(lines.length <= height - 2, `${width}x${height}: ${lines.length} component lines leave no Pi footer`);
       assert.ok(lines.every(line => visibleWidth(line) <= width), `${width}x${height}: horizontal overflow`);
       const output = plain(lines).replace(/\n/g, " ");
-      for (const label of ["Active", "Closed", "Tab", "Enter attach", "x close", "n rename", "c create", "r refresh", "Esc back"]) {
+      for (const label of ["Active", "Closed", "Tab", width < 40 ? "Enter open" : "Enter attach", "x close", "n rename", "c new", "r refresh", "Esc back"]) {
         assert.ok(output.toLowerCase().includes(label.toLowerCase()), `${width}x${height}: missing ${label}`);
       }
-      if (!withError) assert.ok(lines.filter(line => /Row\d+/.test(plain([line]))).length >= 2, `${width}x${height}: list collapsed to one row`);
+      if (!withError) assert.ok(lines.filter(line => /Row\d+/.test(plain([line]))).length >= (width === 20 && height === 10 ? 1 : 2), `${width}x${height}: insufficient navigable rows`);
       assert.match(output, new RegExp(`Row${selectedIndex}(?: |$)`));
       assert.ok(output.includes(`(${selectedIndex + 1}/12)`), `${width}x${height}: missing scroll position`);
     };
@@ -207,7 +243,9 @@ test("empty, loading, and single-session layouts fit short viewports without hid
       const output = plain(lines).replace(/\n/g, " ");
       assert.ok(lines.length <= height - 2, `${variant} at ${width}x${height}: vertical overflow`);
       assert.ok(lines.every(line => visibleWidth(line) <= width), `${variant} at ${width}x${height}: horizontal overflow`);
-      for (const label of ["Active", "Closed", "Tab", "Enter attach", "x close", "n rename", "c create", "r refresh", "Esc back"]) {
+      const labels = variant === "loading" ? ["Active", "Closed", "Esc cancel"] : ["Active", "Closed", "Tab", "c new", "r refresh", "Esc back",
+        ...(variant === "active" || variant === "closed" ? [width < 40 ? "Enter open" : variant === "closed" ? "Enter reopen" : "Enter attach", "n rename"] : [])];
+      for (const label of labels) {
         assert.ok(output.toLowerCase().includes(label.toLowerCase()), `${variant} at ${width}x${height}: missing ${label}`);
       }
       assert.match(output, variant === "empty" ? /No active sessions/ : variant === "loading" ? /Loading sessions/ : /Solo/);
@@ -371,7 +409,7 @@ test("refresh failures can be retried and an empty server can return create with
   }, screen => {
     const output = plain(screen.render(100));
     assert.doesNotMatch(output, /Refresh failed/);
-    assert.match(output, /cwd: \/workspace/);
+    assert.match(output, /Folder: \/workspace/);
     screen.handleInput?.("c");
   }]);
   assert.deepEqual(await browseRemoteSessions(ui.ui, client, "host", { cwd: "/workspace" }), { action: "create" });
@@ -433,10 +471,10 @@ test("real daemon: close and rename the selected duplicate-name session, then re
   const other = target.sessionId === first.sessionId ? second.sessionId : first.sessionId;
   const ui = scriptedUI([send(keys.down, "x"), screen => {
     screen.handleInput?.(keys.tab);
-    assert.match(plain(screen.render(100)), /\[closed\] Duplicate/);
+    assert.match(plain(screen.render(100)), /Duplicate .*\[closed\]/);
     screen.handleInput?.("n");
   }, screen => {
-    assert.match(plain(screen.render(100)), /\[closed\] Renamed closed/);
+    assert.match(plain(screen.render(100)), /Renamed closed .*\[closed\]/);
     screen.handleInput?.(keys.enter);
   }], {
     confirm: async () => { assert.fail("idle close must not prompt"); },

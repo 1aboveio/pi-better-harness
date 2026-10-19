@@ -1,5 +1,5 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, SelectList, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import type { DaemonClient } from "../client.ts";
 import type { SessionSummary } from "../protocol.ts";
 
@@ -50,13 +50,12 @@ function sessionActivity(session: SessionSummary): string {
   if (session.ownership === "moved") return "moved - cannot attach";
   if (session.ownership === "fenced") return "fenced";
   if (session.status === "closed") return "closed";
-  if (session.needsInput.length) return "needsInput";
+  if (session.needsInput.length) return "needs input";
   return session.isStreaming ? "busy" : "idle";
 }
 
 /** One native interaction only. Dialogs and daemon calls belong to the outer loop. */
 export class RemoteSessionBrowser implements Component {
-  private list: SelectList | undefined;
   private finished = false;
 
   readonly state: RemoteSessionBrowserState;
@@ -71,75 +70,73 @@ export class RemoteSessionBrowser implements Component {
     this.options = options;
   }
 
-  private makeList(height: number): SelectList {
-    const theme = this.ui.theme;
-    const rows = this.state.rows();
-    const list = new SelectList(rows.map(session => ({
-      value: session.sessionId,
-      label: `[${sessionActivity(session)}] ${singleLine(session.name || "Untitled session")}`,
-      description: singleLine(session.cwd),
-    })), height, {
-      selectedPrefix: text => theme.fg("accent", text),
-      selectedText: text => theme.fg("accent", text),
-      description: text => theme.fg("muted", text),
-      scrollInfo: text => theme.fg("dim", text),
-      noMatch: text => theme.fg("muted", text),
-    });
-    const selectedId = this.state.selected?.sessionId;
-    list.setSelectedIndex(Math.max(0, rows.findIndex(session => session.sessionId === selectedId)));
-    list.onSelectionChange = item => this.state.select(item.value);
-    this.list = list;
-    return list;
-  }
-
   render(width: number): string[] {
     width = Math.max(0, Math.floor(width));
-    if (width === 0) return [];
+    const terminalRows = Math.min(this.ui.rows(), process.stdout.rows ?? Number.POSITIVE_INFINITY);
+    const budget = Math.max(0, Math.floor(terminalRows) - 3);
+    if (!width || !budget) return [];
     const theme = this.ui.theme;
-    const fit = (text: string) => truncateToWidth(text, width, "");
-    // Leave two terminal lines for Pi's footer, independently of our own fixed content.
-    const budget = Math.max(0, Math.floor(this.ui.rows()) - 2);
-    if (budget === 0) return [];
+    const fit = (text: string, size = width) => truncateToWidth(text, Math.max(0, size), "...");
     const rows = this.state.rows();
-    const minimumBody = this.options.loading ? 1 : Math.min(3, Math.max(1, rows.length));
-    const renderTabs = (compact: boolean): string[] => {
-      const labels = (["active", "closed"] as const).map(tab => `${tab === "active" ? "Active" : "Closed"}${compact ? "" : " sessions"} (${this.state.rows(tab).length})`);
-      if (compact && visibleWidth(labels.join("  ")) + 2 > width) {
-        labels[0] = "Active";
-        labels[1] = "Closed";
-      }
-      const tabs = labels.map((label, index) => this.state.tab === (index === 0 ? "active" : "closed")
-        ? theme.fg("accent", theme.bold(`[${label}]`)) : theme.fg("muted", label));
-      return (visibleWidth(tabs.join("  ")) <= width ? [tabs.join("  ")] : tabs).map(fit);
-    };
-    let tabLines = renderTabs(false);
-    let host = [theme.bold(fit(`Remote: ${singleLine(this.host)}`))];
-    let legend = wrapTextWithAnsi("Up/Down select  Tab/ShiftTab/Left/Right tabs  Enter attach  x close  n rename  c Create session  r refresh  Esc back", width);
     const selected = this.state.selected;
-    let details = selected ? [
-      ...wrapTextWithAnsi(`ID: ${singleLine(selected.sessionId)}`, width),
-      fit(`cwd: ${singleLine(selected.cwd)}`),
-    ] : this.options.cwd ? [fit(`cwd: ${singleLine(this.options.cwd)}`)] : [];
-    let errors = this.state.error ? wrapTextWithAnsi(singleLine(this.state.error), width).slice(0, 2) : [];
-    const fixedHeight = () => host.length + tabLines.length + errors.length + details.length + legend.length;
-    if (fixedHeight() + minimumBody > budget) {
-      tabLines = renderTabs(true);
-      legend = wrapTextWithAnsi("Up/Down Tab tabs Enter attach x close n rename c create r refresh Esc back", width);
-      details = selected ? [fit(`ID: ${singleLine(selected.sessionId)}`)] : details;
-      errors = errors.slice(0, 1);
+    const selectedIndex = Math.max(0, rows.findIndex(session => session.sessionId === selected?.sessionId));
+    const tabs = (["active", "closed"] as const).map(tab => {
+      const label = `${tab === "active" ? "Active" : "Closed"} ${this.state.rows(tab).length}`;
+      return this.state.tab === tab ? theme.fg("accent", theme.bold(`[${label}]`)) : theme.fg("muted", label);
+    });
+    const tabLines = (visibleWidth(tabs.join(" ")) <= width ? [tabs.join(width < 40 ? " " : "  ")] : tabs).map(line => fit(line));
+    const commands = this.options.loading ? ["Esc cancel"] : [
+      "Tab tabs",
+      ...(selected ? [width < 40 ? "Enter open" : this.state.tab === "closed" ? "Enter reopen" : "Enter attach",
+        ...(this.state.tab === "active" ? ["x close"] : []), "n rename"] : []),
+      "c new", "r refresh", "Esc back",
+    ];
+    const legend: string[] = [];
+    for (const command of commands) {
+      const previous = legend.at(-1);
+      if (previous && visibleWidth(`${previous}  ${command}`) <= width) legend[legend.length - 1] = `${previous}  ${command}`;
+      else legend.push(fit(command));
     }
-    if (fixedHeight() + minimumBody > budget) host = [];
-    if (fixedHeight() + minimumBody > budget) details = [];
-    // At physically tiny sizes, bound the controls too instead of overflowing fixed content.
-    tabLines = tabLines.slice(0, Math.max(0, budget - 1));
-    legend = legend.slice(0, Math.max(0, budget - tabLines.length - errors.length - 1));
-    const bodyBudget = Math.max(0, budget - fixedHeight());
-    const listHeight = Math.max(1, bodyBudget - (rows.length > bodyBudget ? 1 : 0));
-    const body = bodyBudget === 0 ? [] : this.options.loading ? [theme.fg("muted", fit(this.options.loading))]
-      : rows.length ? this.makeList(listHeight).render(Math.max(4, width)).slice(0, bodyBudget).map(fit)
-      : [theme.fg("muted", fit(this.state.tab === "active" ? "No active sessions" : "No closed sessions"))];
-    return [...host, ...tabLines, ...errors.map(line => theme.fg("error", line)), ...body,
-      ...details.map(line => theme.fg("muted", line)), ...legend.map(line => theme.fg("dim", line))].map(fit);
+    let header = [theme.bold(fit(`Remote: ${singleLine(this.host)}`)),
+      ...(this.options.cwd ? [theme.fg("muted", fit(`Folder: ${singleLine(this.options.cwd)}`))] : [])];
+    let details = selected ? [
+      ...wrapTextWithAnsi(singleLine(selected.name || "Untitled session"), width).slice(0, 2).map(line => theme.fg("accent", line)),
+      ...wrapTextWithAnsi(`cwd: ${singleLine(selected.cwd)}`, width).slice(0, 2).map(line => theme.fg("muted", line)),
+      theme.fg("dim", fit(`ID: ${singleLine(selected.sessionId).slice(0, 8)}`)),
+    ] : [];
+    const errors = this.state.error ? wrapTextWithAnsi(singleLine(this.state.error), width).slice(0, budget < 14 ? 1 : 2).map(line => theme.fg("error", line)) : [];
+    let spacious = width >= 48 && budget >= 16;
+    const gaps = () => spacious ? 3 + (details.length ? 1 : 0) : 0;
+    const minimumBody = Math.min(3, Math.max(1, rows.length));
+    const fixed = () => header.length + tabLines.length + errors.length + details.length + legend.length + gaps();
+    const scrollRoom = rows.length > minimumBody ? 1 : 0;
+    if (fixed() + minimumBody + scrollRoom > budget) details = [];
+    if (fixed() + minimumBody + scrollRoom > budget) spacious = false;
+    while (header.length && fixed() + minimumBody + scrollRoom > budget) header.pop();
+    const available = Math.max(0, budget - fixed());
+    const bodyHeight = Math.min(10, Math.max(0, available - (rows.length > available && available > 1 ? 1 : 0)));
+    const start = Math.min(Math.max(0, selectedIndex - Math.floor(bodyHeight / 2)), Math.max(0, rows.length - bodyHeight));
+    const body: string[] = [];
+    if (this.options.loading) body.push(theme.fg("muted", fit(this.options.loading)));
+    else if (!rows.length) body.push(theme.fg("muted", fit(this.state.tab === "active" ? "No active sessions" : "No closed sessions")));
+    else for (const session of rows.slice(start, start + bodyHeight)) {
+      const chosen = session.sessionId === selected?.sessionId;
+      const badge = available === 1 && rows.length > 1 ? `(${selectedIndex + 1}/${rows.length})` : `[${sessionActivity(session)}]`;
+      const statusWidth = Math.min(visibleWidth(badge), Math.max(0, width - 5));
+      const folder = singleLine(session.cwd).replace(/\/$/, "").split("/").at(-1) || "/";
+      const folderWidth = width >= 64 ? Math.min(26, Math.floor(width / 4)) : 0;
+      const nameWidth = Math.max(0, width - 2 - statusWidth - 2 - (folderWidth ? folderWidth + 2 : 0));
+      const name = fit(singleLine(session.name || "Untitled session"), nameWidth);
+      const paddedName = name + " ".repeat(Math.max(0, nameWidth - visibleWidth(name)));
+      const shortFolder = fit(folder, folderWidth);
+      const folderText = folderWidth ? shortFolder + " ".repeat(Math.max(0, folderWidth - visibleWidth(shortFolder))) + "  " : "";
+      const statusColor = session.ownership || session.needsInput.length ? "warning" : session.isStreaming ? "accent" : "muted";
+      body.push(fit(`${chosen ? theme.fg("accent", "> ") : "  "}${chosen ? theme.fg("accent", paddedName) : paddedName}  ${theme.fg("muted", folderText)}${theme.fg(statusColor, fit(badge, statusWidth))}`));
+    }
+    const scrolling = rows.length > bodyHeight && bodyHeight > 0 && available > 1 ? [theme.fg("dim", fit(`(${selectedIndex + 1}/${rows.length})`))] : [];
+    const gap = spacious ? [""] : [];
+    return [...header, ...gap, ...tabLines, ...gap, ...errors, ...body, ...scrolling,
+      ...(details.length ? [...gap, ...details] : []), ...gap, ...legend.map(line => theme.fg("dim", line))].slice(0, budget).map(line => fit(line));
   }
 
   handleInput(data: string): void {
@@ -148,11 +145,13 @@ export class RemoteSessionBrowser implements Component {
     if (this.options.loading) return;
     if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
       this.state.changeTab();
-      this.list = undefined;
     } else if (matchesKey(data, "c")) { this.finish({ action: "create" }); return; }
     else if (matchesKey(data, "r")) { this.finish({ action: "refresh" }); return; }
     else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
-      (this.list ?? this.makeList(1)).handleInput(data);
+      const rows = this.state.rows();
+      const index = Math.max(0, rows.findIndex(session => session.sessionId === this.state.selected?.sessionId));
+      const next = rows[(index + (matchesKey(data, Key.up) ? -1 : 1) + rows.length) % rows.length];
+      if (next) this.state.select(next.sessionId);
     } else {
       const session = this.state.selected;
       if (!session) return;
@@ -176,7 +175,7 @@ export class RemoteSessionBrowser implements Component {
     this.ui.done(intent);
   }
 
-  invalidate(): void { this.list?.invalidate(); }
+  invalidate(): void {}
   dispose(): void { this.finished = true; }
 }
 

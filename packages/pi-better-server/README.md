@@ -160,7 +160,7 @@ keyboard shortcuts:
 | Enter | Attach to the selected session; reopen it if closed |
 | `x` | Close the selected active session; confirm if busy or waiting for input |
 | `n` | Rename the selected session, including a closed session without reopening it |
-| `c` | Create a session in a selected remote workspace |
+| `c` | Create a session in the displayed default folder |
 | `r` | Refresh the list |
 | Escape | Leave the server browser |
 
@@ -173,12 +173,13 @@ and local `/remote` history. Wildcard and negated SSH patterns are not concrete
 hosts and are omitted. Entered hosts are remembered even if the connection fails
 or uses the default server directory; no credentials are recorded in this history.
 
-`r5` is an SSH alias. Creating a session offers existing remote workspaces.
-Workspace discovery defaults to `~/workspaces/`; set `PI_SERVER_WORKSPACES_DIR` to an absolute
-path on the daemon host to change that root. You can also enter another existing
-absolute remote path. `--cwd` filters the browser and selects the workspace for
-new sessions; `--session` selects a
-session directly. If both are given, the session must belong to that workspace.
+`r5` is an SSH alias. The browser starts at the remote workspace root:
+`PI_SERVER_WORKSPACES_DIR`, or `~/workspaces/` when unset. Its Folder line shows
+that creation context, and `c` creates there without another picker. Existing
+sessions remain visible and retain their own folders. Use an explicit `--cwd`
+with another existing absolute path to change the creation folder; it also refuses
+attaching a session from a different workspace. `--session` selects a session
+directly without changing its working directory.
 `--remote-dir` selects the remote daemon's server directory and is saved per host
 with its connection history. It is reused on later connections to that
 host; otherwise the usual remote server-directory discovery applies.

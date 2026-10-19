@@ -79,15 +79,26 @@ export function registerRemoteClient(pi: ExtensionAPI, dependencies: RemoteClien
   });
 }
 
-async function chooseWorkspace(client: DaemonClient, ui: ExtensionUIContext, host: string): Promise<string | undefined> {
-  const listed = await client.call({ type: "client_workspaces" });
-  const labels = (listed.data.workspaces as Array<{ path: string }>).map((entry) => entry.path);
-  const choice = await ui.select(`New session workspace on ${host}`, [...labels, "Enter another remote path"]);
-  if (choice === undefined) return undefined;
-  const cwd = labels.includes(choice) ? choice : await ui.input("Remote workspace path", listed.data.root);
-  if (!cwd) return undefined;
-  if (!cwd.startsWith("/")) throw new Error("The remote workspace must be an absolute path on the server");
-  return cwd;
+type RemoteSessionChoice = { action: "create"; cwd: string } | { action: "attach"; cwd: string; sessionId: string };
+
+/** The browser's creation context is not a constraint on existing sessions. */
+export async function chooseRemoteSession(client: DaemonClient, ui: ExtensionUIContext, host: string, options: { cwd?: string; sessionId?: string }): Promise<RemoteSessionChoice | undefined> {
+  if (options.sessionId) {
+    const selected = await resolveSession(client, options.sessionId);
+    return { action: "attach", cwd: checkedRemoteWorkspace(options.cwd, selected.cwd), sessionId: selected.sessionId };
+  }
+  let creationCwd = options.cwd;
+  if (creationCwd === undefined) {
+    const listed = await client.call({ type: "client_workspaces" });
+    const root: unknown = listed.data?.root;
+    if (typeof root !== "string" || !root.startsWith("/")) throw new Error("The server workspace root must be an absolute remote path");
+    creationCwd = root;
+  }
+  const choice = await browseRemoteSessions(ui, client, host, { cwd: creationCwd });
+  if (!choice) return undefined;
+  return choice.action === "create"
+    ? { action: "create", cwd: creationCwd }
+    : { action: "attach", cwd: checkedRemoteWorkspace(options.cwd, choice.session.cwd), sessionId: choice.session.sessionId };
 }
 
 async function connectHost(options: RemoteOptions, local: LocalFrontend): Promise<void> {
@@ -129,61 +140,42 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
     const connection = client;
     const transport = target;
     ui.setStatus("pi-remote", `SSH: ${options.host} (sessions)`);
-    for (;;) {
-      let cwd = options.cwd;
-      let sessionId: string;
-      let synced = false;
-      if (options.sessionId) {
-        const selected = await resolveSession(connection, options.sessionId);
-        cwd = checkedRemoteWorkspace(cwd, selected.cwd);
-        sessionId = selected.sessionId;
-      } else {
-        const choice = await browseRemoteSessions(ui, connection, options.host, { cwd: options.cwd });
-        if (!choice) return;
-        if (choice.action === "create") {
-          cwd = options.cwd ?? await chooseWorkspace(connection, ui, options.host);
-          if (!cwd) continue;
-          await syncPackages(connection, local, cwd);
-          synced = true;
-          const created = await connection.call({ type: "create_session", cwd });
-          sessionId = created.sessionId as string;
-        } else {
-          cwd = checkedRemoteWorkspace(cwd, choice.session.cwd);
-          sessionId = choice.session.sessionId;
-        }
-      }
-      if (!synced) await syncPackages(connection, local, cwd!);
-      await connection.call({ type: "open_session", sessionId });
-      const remote = await RemoteClientSession.connect(connection, sessionId, {
-        onDisconnect: () => {
-          ui.setStatus("pi-remote", `SSH: ${options.host} (disconnected)`);
-          ui.notify(`Disconnected from ${options.host}. Remote work has not been aborted. Use /remote disconnect to return locally, then reconnect.`, "warning");
-        },
-        localCommandCompletions: (prefix) => argumentCompletions(prefix, true),
-        onLocalCommand: async (text) => {
-          if (!/^\/remote(?:\s|$)/.test(text)) return false;
-          const args = text.replace(/^\/remote(?:\s|$)/, "").trim();
-          if (args === "disconnect") { await bridge.disconnect(); return true; }
-          const next = !args || args === "sessions"
-            ? { host: options.host, remoteDir, cwd: undefined, sessionId: undefined }
-            : await chooseRemoteConnection(args, ui);
-          if (!next) return true;
-          await bridge.disconnect();
-          try { await connectHost(next, local); }
-          catch (error) { ui.notify(error instanceof Error ? error.message : String(error), "error"); }
-          return true;
-        },
-      });
-      try { cwd = checkedRemoteWorkspace(cwd, remote.sessionManager.getCwd()); }
-      catch (error) { remote.dispose(); throw error; }
-      const dispose = remote.dispose.bind(remote);
-      remote.dispose = () => { dispose(); connection.close(); void transport.close(); };
-      await bridge.attach(remote);
-      attached = true;
-      ui.setStatus("pi-remote", `SSH: ${options.host}`);
-      ui.notify(`Attached to ${options.host}:${cwd}. /remote opens the server's sessions; /remote disconnect returns locally.`, "info");
-      return;
-    }
+    const choice = await chooseRemoteSession(connection, ui, options.host, options);
+    if (!choice) return;
+    let cwd = choice.cwd;
+    await syncPackages(connection, local, cwd);
+    const sessionId = choice.action === "create"
+      ? (await connection.call({ type: "create_session", cwd })).sessionId as string
+      : choice.sessionId;
+    await connection.call({ type: "open_session", sessionId });
+    const remote = await RemoteClientSession.connect(connection, sessionId, {
+      onDisconnect: () => {
+        ui.setStatus("pi-remote", `SSH: ${options.host} (disconnected)`);
+        ui.notify(`Disconnected from ${options.host}. Remote work has not been aborted. Use /remote disconnect to return locally, then reconnect.`, "warning");
+      },
+      localCommandCompletions: (prefix) => argumentCompletions(prefix, true),
+      onLocalCommand: async (text) => {
+        if (!/^\/remote(?:\s|$)/.test(text)) return false;
+        const args = text.replace(/^\/remote(?:\s|$)/, "").trim();
+        if (args === "disconnect") { await bridge.disconnect(); return true; }
+        const next = !args || args === "sessions"
+          ? { host: options.host, remoteDir, cwd: undefined, sessionId: undefined }
+          : await chooseRemoteConnection(args, ui);
+        if (!next) return true;
+        await bridge.disconnect();
+        try { await connectHost(next, local); }
+        catch (error) { ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+        return true;
+      },
+    });
+    try { cwd = checkedRemoteWorkspace(cwd, remote.sessionManager.getCwd()); }
+    catch (error) { remote.dispose(); throw error; }
+    const dispose = remote.dispose.bind(remote);
+    remote.dispose = () => { dispose(); connection.close(); void transport.close(); };
+    await bridge.attach(remote);
+    attached = true;
+    ui.setStatus("pi-remote", `SSH: ${options.host}`);
+    ui.notify(`Attached to ${options.host}:${cwd}. /remote opens the server's sessions; /remote disconnect returns locally.`, "info");
   } finally {
     if (!attached) { client?.close(); await target?.close(); ui.setStatus("pi-remote", undefined); }
   }
