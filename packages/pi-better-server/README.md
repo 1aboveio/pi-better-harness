@@ -87,9 +87,10 @@ connecting.
 `/remote` opens a native menu of SSH config aliases and previously entered hosts,
 plus an option to enter another SSH host. While connected, it opens connection
 details, host listing, and disconnect actions. `/remote list` displays the complete
-host catalog without connecting or switching hosts. The same catalog supplies
-argument suggestions; while connected, `list` and `disconnect` remain available
-in slash-command autocomplete.
+host catalog without connecting or switching hosts. Slash-command autocomplete
+shows actions only: `list` locally, and `list` plus `disconnect` while connected.
+Hostnames are not offered as autocomplete suggestions; `/remote r5` still works
+when typed directly.
 
 The catalog deduplicates literal SSH `Host` aliases (including `Include` files)
 and local `/remote` history. Wildcard and negated SSH patterns are not concrete

@@ -709,7 +709,7 @@ export class RemoteClientSession {
     if (this.options.onLocalCommand) commands.unshift({
       name: "remote", invocationName: "remote", description: "Open remote connection options",
       filePath: "client:/remote", sourceInfo: { path: "client", source: "client", scope: "user", origin: "top-level" },
-      getArgumentCompletions: (prefix: string) => remoteArgumentCompletions(prefix, ["list", "disconnect"]),
+      getArgumentCompletions: (prefix: string) => remoteArgumentCompletions(prefix, true),
       handler: (args: string) => this.prompt(`/remote${args ? ` ${args}` : ""}`),
     });
     return commands;

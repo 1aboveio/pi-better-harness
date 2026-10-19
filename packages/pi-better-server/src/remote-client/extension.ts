@@ -32,7 +32,7 @@ export default function remoteClientExtension(pi: ExtensionAPI): void {
   if (VERSION === "1.2.0") installPi12Bridge();
   pi.registerCommand("remote", {
     description: "Open remote connection options or connect to an SSH host",
-    getArgumentCompletions: async (prefix) => remoteArgumentCompletions(prefix, [...new Set(["list", ...await availableRemoteHosts()])]),
+    getArgumentCompletions: (prefix) => remoteArgumentCompletions(prefix),
     handler: async (args, ctx) => {
       // The command context is invalidated when its local runtime is retired.
       const ui = ctx.ui;

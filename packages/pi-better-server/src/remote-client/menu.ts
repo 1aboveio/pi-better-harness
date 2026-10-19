@@ -54,8 +54,9 @@ export async function chooseRemoteAction(ui: Pick<ExtensionUIContext, "select">,
   throw new Error("Unknown remote menu choice");
 }
 
-export function remoteArgumentCompletions(prefix: string, values: readonly string[]) {
+export function remoteArgumentCompletions(prefix: string, connected = false) {
+  const values = connected ? ["list", "disconnect"] : ["list"];
   const matches = values.filter((value) => value.toLowerCase().startsWith(prefix.trimStart().toLowerCase()))
-    .map((value) => ({ value, label: value, description: value === "disconnect" ? "Return to the local Pi session" : value === "list" ? "List SSH config hosts and connection history" : `Connect to ${value}` }));
+    .map((value) => ({ value, label: value, description: value === "disconnect" ? "Return to the local Pi session" : "List SSH config hosts and connection history" }));
   return matches.length ? matches : null;
 }

@@ -41,10 +41,15 @@ test("connected menu exposes details and disconnect with cancellation as a no-op
   assert.equal(await chooseRemoteAction({ select: async () => undefined }, "r5"), undefined);
 });
 
-test("slash-command arguments suggest matching hosts and the connected disconnect action", () => {
-  assert.deepEqual(remoteArgumentCompletions(" R", ["r5", "r6", "prod"])?.map(item => item.value), ["r5", "r6"]);
-  assert.deepEqual(remoteArgumentCompletions("dis", ["disconnect"])?.map(item => item.value), ["disconnect"]);
-  assert.equal(remoteArgumentCompletions("unknown", ["r5"]), null);
+test("slash-command autocomplete exposes actions only, never hostnames", () => {
+  assert.deepEqual(remoteArgumentCompletions("")?.map(item => item.value), ["list"]);
+  assert.deepEqual(remoteArgumentCompletions("", true)?.map(item => item.value), ["list", "disconnect"]);
+  assert.deepEqual(remoteArgumentCompletions(" LI")?.map(item => item.value), ["list"]);
+  assert.deepEqual(remoteArgumentCompletions("dis", true)?.map(item => item.value), ["disconnect"]);
+  for (const prefix of ["r", "r5", "user@", "prod", "unknown"]) {
+    assert.equal(remoteArgumentCompletions(prefix), null);
+    assert.equal(remoteArgumentCompletions(prefix, true), null);
+  }
 });
 
 test("host listing merges SSH profiles with entered history and preserves remembered directories", async t => {
