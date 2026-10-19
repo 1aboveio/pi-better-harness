@@ -40,6 +40,8 @@ import {
 import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
+import { completionGate, pauseGate, schedulerWaitUntil } from "./workflow-gates.js";
+import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
 import {
   EVENT_ACTIVITY,
   EVENT_READY,
@@ -57,6 +59,10 @@ const POLL_INTERVAL_MS = 2_000;
 const DEFAULT_IDLE_CONTINUATION_DELAY_MS = 60_000;
 const DEFAULT_MAX_NO_PROGRESS_RETRIES = 10;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+/** Never re-poll a workflow's scheduler sooner than this, even when its stated attempt time has passed. */
+const MIN_WAIT_DELAY_MS = 5_000;
+/** Workflow skills whose invocation binds a goal when none is active, so the run cannot stop silently. */
+const AUTO_BIND_SKILLS = new Set(["rush-issues", "resolve-issues"]);
 const WAKE_DISABLED =
   process.env.PI_BETTER_GOAL_DISABLE_WAKE === "1" ||
   process.env.PI_BETTER_EXTENSION_DISABLE_WAKE === "1";
@@ -312,6 +318,8 @@ export default function (pi: ExtensionAPI): void {
   let snapshotSequence = 0;
   let lastAppliedSnapshotSequence = 0;
   let foregroundRunning = false;
+  /** True between agent_start and agent_end: the agent loop will call the model again without a new prompt. */
+  let agentLoopActive = false;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let collecting = false;
   let collectionPending = false;
@@ -475,6 +483,21 @@ export default function (pi: ExtensionAPI): void {
       : null;
 
   /**
+   * The session's workflow owner when an active goal is bound to it through its skill command, else
+   * null. Only these goals are gated by the workflow's scheduler.
+   */
+  const boundWorkflow = (goal: GoalSnapshot, ctx: ExtensionContext): NonNullable<ReturnType<typeof currentWorkflowOwner>> | null => {
+    const owner = getWorkflow(ctx);
+    if (!owner || goal.status !== "active" || goal.command?.source !== "skill") return null;
+    try {
+      const bound = goalWorkflowOwner(goal);
+      return bound?.name === owner.name && bound.path === owner.path ? owner : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
    * The one resume path shared by `/goal resume`, the hotkey, and `goal_resume`:
    * reactivate a paused goal or reopen an active no-progress hold.
    */
@@ -565,6 +588,8 @@ export default function (pi: ExtensionAPI): void {
     ctx: ExtensionContext,
     kind: "continuation" | "background-drained",
     snapshot?: ActivitySnapshot,
+    /** Fixed delay for a workflow scheduler's wait; replaces any pending timer and ignores no-progress backoff. */
+    waitDelayMs?: number,
   ): void => {
     if (WAKE_DISABLED || !preferences.autoContinue || !isPokeable(goal) || continuationQueuedFor === goal.goalId) {
       return;
@@ -573,8 +598,8 @@ export default function (pi: ExtensionAPI): void {
     if (currentContinuationState(ctx, goal.goalId)?.blocked) {
       return;
     }
-    const signature = `${goal.goalId}:${kind}`;
-    if (idleContinuationTimer && (idleContinuationSignature === signature ||
+    const signature = `${goal.goalId}:${waitDelayMs === undefined ? kind : "wait"}`;
+    if (waitDelayMs === undefined && idleContinuationTimer && (idleContinuationSignature === signature ||
         (kind === "continuation" && idleContinuationSignature === `${goal.goalId}:background-drained`))) {
       return;
     }
@@ -584,7 +609,7 @@ export default function (pi: ExtensionAPI): void {
       idleContinuationTimer = undefined;
       idleContinuationSignature = "";
       void sendIdleContinuationAfterAudit(goal.goalId, ctx, kind, snapshot);
-    }, idleContinuationDelay(kind === "continuation" ? currentContinuationState(ctx, goal.goalId)?.noProgressRetries ?? 0 : 0));
+    }, waitDelayMs ?? idleContinuationDelay(kind === "continuation" ? currentContinuationState(ctx, goal.goalId)?.noProgressRetries ?? 0 : 0));
     idleContinuationTimer.unref?.();
   };
 
@@ -623,6 +648,8 @@ export default function (pi: ExtensionAPI): void {
     tokenBudget: number | null,
     ctx: ExtensionContext,
     source: "command",
+    /** False when the user's own message already invoked the command, so the goal must not send it again. */
+    dispatch = true,
   ): GoalSnapshot => {
     const objectiveError = validateObjective(objective);
     if (objectiveError) {
@@ -644,8 +671,8 @@ export default function (pi: ExtensionAPI): void {
     setGoal(goal, ctx, source);
     if (command) {
       if (owner) recordWorkflow(owner);
-      pi.sendUserMessage(commandInvocation(command), { deliverAs: "followUp", expandPromptTemplates: true });
-      if (command.source === "extension") scheduleIdleContinuation(goal, ctx, "continuation");
+      if (dispatch) pi.sendUserMessage(commandInvocation(command), { deliverAs: "followUp", expandPromptTemplates: true });
+      if (dispatch && command.source === "extension") scheduleIdleContinuation(goal, ctx, "continuation");
     } else {
       queueGoalContinuation(goal, ctx);
     }
@@ -700,11 +727,8 @@ export default function (pi: ExtensionAPI): void {
       }
     }
     if (waitingOnAnswer > 0) return `${waitingOnAnswer} background done; waiting on your answer`;
-    const background = snapshot?.backgroundRunning
-      ? `bg ${snapshot.activeBackgroundCount}${snapshot.unhealthyBackgroundCount ? `, ${snapshot.unhealthyBackgroundCount} unhealthy` : ""}`
-      : undefined;
-    if (goal?.status === "paused") return background ? `${pausedGoalStatus(goal, preferences.conversationalResume)} · ${background}` : pausedGoalStatus(goal, preferences.conversationalResume);
-    if (background) return background;
+    if (goal?.status === "paused") return pausedGoalStatus(goal, preferences.conversationalResume);
+    if (snapshot?.backgroundRunning) return undefined;
     const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
     if (continuation?.blocked) return "waiting: no progress";
     const goalStall = observeGoalStall(goal, continuation, {
@@ -1049,12 +1073,21 @@ export default function (pi: ExtensionAPI): void {
           details: { ok: true, goal: current },
         };
       }
+      const gated = boundWorkflow(current, ctx);
+      const verdict = gated ? await completionGate(ctx.sessionManager.getBranch(), gated) : null;
+      if (verdict && !verdict.allow) {
+        return {
+          content: [{ type: "text", text: verdict.message }],
+          details: { ok: false, goal: current, due: verdict.due },
+        };
+      }
       const goal = goalWithStatus(current, "complete");
       setGoal(goal, ctx, "tool");
       if (getWorkflow(ctx)) recordWorkflow(null);
+      const warning = verdict?.allow ? verdict.warning : undefined;
       return {
-        content: [{ type: "text", text: "Goal marked complete." }],
-        details: { ok: true, goal },
+        content: [{ type: "text", text: warning ? `Goal marked complete. ${warning}` : "Goal marked complete." }],
+        details: { ok: true, goal, ...(warning ? { warning } : {}) },
       };
     },
   });
@@ -1135,6 +1168,12 @@ export default function (pi: ExtensionAPI): void {
       const owner = getWorkflow(ctx);
       if (!owner) return { content: [{ type: "text", text: "No workflow owns this session." }], details: { released: false } };
       const goal = getGoal(ctx);
+      const gated = goal ? boundWorkflow(goal, ctx) : null;
+      const verdict = gated ? await pauseGate(ctx.sessionManager.getBranch(), gated) : null;
+      if (verdict && !verdict.allow) {
+        return { content: [{ type: "text", text: verdict.message }], details: { released: false, goalPaused: false } };
+      }
+      const warning = verdict?.allow ? verdict.warning : undefined;
       let resumeCommand: string | undefined;
       if (goal?.status === "active" && goal.command?.source === "skill") {
         const boundOwner = workflowOwnerFromSkill(goal.command.name.slice("skill:".length), goal.command.path, registeredSkillPath);
@@ -1145,7 +1184,7 @@ export default function (pi: ExtensionAPI): void {
       }
       recordWorkflow(null);
       return {
-        content: [{ type: "text", text: `Released ${owner.name} workflow ownership.${resumeCommand ? ` Its Goal is paused, not complete; the user's go-ahead or /goal resume rebinds /${resumeCommand}.` : ""}` }],
+        content: [{ type: "text", text: `Released ${owner.name} workflow ownership.${resumeCommand ? ` Its Goal is paused, not complete; the user's go-ahead or /goal resume rebinds /${resumeCommand}.` : ""}${warning ? ` ${warning}` : ""}` }],
         details: { released: true, owner: owner.name, goalPaused: resumeCommand !== undefined },
       };
     },
@@ -1186,6 +1225,7 @@ export default function (pi: ExtensionAPI): void {
     collectionPending = false;
     currentCtx = ctx;
     foregroundRunning = !ctx.isIdle();
+    agentLoopActive = false;
     try {
       preferences = readGoalPreferences();
     } catch (error) {
@@ -1241,7 +1281,21 @@ export default function (pi: ExtensionAPI): void {
       if (command) {
         try {
           const owner = workflowOwnerFromSkill(skillName, command.sourceInfo.path, registeredSkillPath);
-          if (owner) recordWorkflow(owner);
+          if (owner) {
+            // Without a goal nothing re-prompts the coordinator when it stops early, so bind one now
+            // exactly as `/goal <this invocation>` would. The user's message already runs the skill.
+            const existing = getGoal(ctx);
+            if (AUTO_BIND_SKILLS.has(skillName) && (!existing || existing.status === "complete")) {
+              try {
+                startOrReplaceGoal(event.text.trim(), null, ctx, "command", false);
+              } catch (error) {
+                recordWorkflow(owner);
+                notifyGoal(ctx, `Could not bind a goal to /skill:${skillName}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+              }
+            } else {
+              recordWorkflow(owner);
+            }
+          }
         } catch (error) {
           notifyGoal(ctx, error instanceof Error ? error.message : String(error), "error");
           return { action: "handled" as const };
@@ -1334,6 +1388,7 @@ export default function (pi: ExtensionAPI): void {
     agentGeneration = executionGeneration;
     currentCtx = ctx;
     foregroundRunning = true;
+    agentLoopActive = true;
     clearIdleContinuation();
     continuationQueuedFor = null;
     lastAgentEvidence = null;
@@ -1355,6 +1410,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", async (event, ctx) => {
+    agentLoopActive = false;
     lastAgentEvidence = agentGeneration === executionGeneration ? continuationEvidence(event.messages) : null;
     // Only an observed editor Escape with pause disabled exempts this abort.
     // Unknown interrupt sources retain the safety fallback on every host.
@@ -1447,6 +1503,21 @@ export default function (pi: ExtensionAPI): void {
     if (!isPokeable(goal) || snapshot.backgroundRunning) {
       return;
     }
+    // A run the scheduler says is only waiting (a retry is due at a known time) is not stuck: wake at
+    // that time and leave the no-progress count alone, since nothing the model could do changes it.
+    const waitOwner = preferences.autoContinue && !WAKE_DISABLED ? boundWorkflow(goal, ctx) : null;
+    if (waitOwner) {
+      const execution = executionGeneration;
+      const waitUntil = await schedulerWaitUntil(ctx.sessionManager.getBranch(), waitOwner);
+      if (execution !== executionGeneration) return;
+      if (waitUntil !== undefined) {
+        resetContinuationState(goal);
+        lastAgentEvidence = null;
+        scheduleIdleContinuation(goal, ctx, "continuation", snapshot,
+          Math.min(MAX_TIMER_DELAY_MS, Math.max(MIN_WAIT_DELAY_MS, waitUntil - Date.now())));
+        return;
+      }
+    }
     const evidence = lastAgentEvidence;
     if (!evidence) {
       scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
@@ -1481,6 +1552,29 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     scheduleIdleContinuation(goal, ctx, "continuation", snapshot);
+  });
+
+  // A compaction summary keeps run state but drops the coordinator skill's rules. Re-inject them
+  // (or the skill's own rehydrate script output) so the model sees them before its next step.
+  pi.on("session_compact", async (event, ctx) => {
+    const owner = getWorkflow(ctx);
+    if (!owner) return;
+    const content = await workflowRehydrateMessage(owner, ctx.cwd);
+    if (!content) return;
+    // Inside a running agent loop (mid-run compaction or an overflow retry) steer it into the next
+    // model call. Otherwise append it without triggering a turn: the next turn, whatever starts it,
+    // sees it. Steering after the loop ended would start an unprompted continuation.
+    const options = agentLoopActive || event.willRetry ? { deliverAs: "steer" as const } : { triggerTurn: false };
+    try {
+      pi.sendMessage({
+        customType: WORKFLOW_REHYDRATE_MESSAGE_TYPE,
+        content,
+        display: true,
+        details: { workflow: owner.name, path: owner.path, reason: event.reason },
+      }, options);
+    } catch {
+      // Best effort: never fail or block the session over a rehydrate notice.
+    }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {

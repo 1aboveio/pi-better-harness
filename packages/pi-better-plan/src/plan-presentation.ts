@@ -12,6 +12,8 @@ export interface PlanRow {
   label: string;
   title: string;
   status: DisplayStatus;
+  // Workflow cancellations keep skipped styling but are excluded from the completion total.
+  cancelled?: boolean;
   statusLabel?: string;
   details?: string[];
 }
@@ -65,7 +67,8 @@ export function renderPlanPresentation(
 ): string[] {
   const size = Math.max(1, Math.floor(width));
   const count = (status: DisplayStatus) => plan.rows.filter((row) => row.status === status).length;
-  const summary = [`${count("completed")}/${plan.rows.length} complete`];
+  const total = plan.rows.filter((row) => !row.cancelled).length;
+  const summary = [`${count("completed")}/${total} complete`];
   for (const [status, label] of [
     ["in_progress", "in progress"], ["implemented", "implemented"], ["reviewed", "review passed"],
     ["blocked", "blocked"], ["failed", "failed"],
@@ -129,16 +132,22 @@ export function renderPlanPresentation(
 }
 
 export function createPlanPresentationComponent(
-  plan: PlanPresentation, theme: PlanRenderTheme, onClose: () => void,
+  source: PlanPresentation | (() => PlanPresentation), theme: PlanRenderTheme, onClose: () => void,
 ): Component {
+  const presentation = () => typeof source === "function" ? source() : source;
+  const plan = presentation();
   let selected = plan.rows.findIndex((row) => row.status === "in_progress");
   if (selected < 0) selected = plan.rows.findIndex((row) => row.status !== "completed");
   if (selected < 0) selected = Math.max(0, plan.rows.length - 1);
   return {
-    render: (width) => renderPlanPresentation(plan, width, theme, true, selected),
+    render: (width) => {
+      const current = presentation();
+      selected = Math.min(selected, Math.max(0, current.rows.length - 1));
+      return renderPlanPresentation(current, width, theme, true, selected);
+    },
     handleInput(data) {
       if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
-      else if (matchesKey(data, "down")) selected = Math.min(Math.max(0, plan.rows.length - 1), selected + 1);
+      else if (matchesKey(data, "down")) selected = Math.min(Math.max(0, presentation().rows.length - 1), selected + 1);
       else if (matchesKey(data, "escape") || matchesKey(data, "left") || matchesKey(data, "ctrl+c")) onClose();
     },
     invalidate() {},

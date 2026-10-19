@@ -145,6 +145,12 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
   const events = new EventEmitter();
   let widgetFactory: any;
   let fullView = "";
+  let fullComponent: any;
+  let redraws = 0;
+  let fullRedraws = 0;
+  let holdFullPlan = false;
+  let closeFullPlan = () => {};
+  const tui = { requestRender() { redraws++; } };
   let notification = "";
   const ctx = {
     cwd, mode: "tui", hasUI: true,
@@ -153,7 +159,12 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
       setStatus() {}, setWidget(_name: string, factory: unknown) { widgetFactory = factory; },
       notify(message: string) { notification = message; },
       custom: async (factory: any) => {
-        fullView = factory({ requestRender() {} }, {}, {}, () => {}).render(140).join("\n");
+        let close = () => {};
+        const closed = new Promise<void>(resolve => { close = resolve; });
+        closeFullPlan = close;
+        fullComponent = factory({ requestRender() { fullRedraws++; } }, {}, {}, close);
+        fullView = fullComponent.render(140).join("\n");
+        if (holdFullPlan) await closed;
       },
     },
   } as unknown as ExtensionContext;
@@ -168,6 +179,11 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
     ctx,
     entries: () => entries,
     start: () => handlers.get("session_start")!({}, ctx),
+    shutdown: () => handlers.get("session_shutdown")!({}, ctx),
+    redraws: () => redraws,
+    fullRedraws: () => fullRedraws,
+    holdFullPlan: () => { holdFullPlan = true; },
+    closeFullPlan: () => { holdFullPlan = false; closeFullPlan(); },
     navigate: async (branch: WorkflowSessionEntry[]) => {
       entries = branch;
       await handlers.get("session_tree")!({}, ctx);
@@ -184,8 +200,8 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
       return { ...result, details: result.details as { hasPlan: boolean; plan: { runId?: string; planRevision?: number } | null } };
     },
     command: (args: string, context = ctx) => commands.get("plan")!.handler(args, context),
-    widget: () => widgetFactory({ requestRender() {} }, { fg: (_color: string, value: string) => value }).render(140).join("\n"),
-    fullView: () => fullView,
+    widget: () => widgetFactory(tui, { fg: (_color: string, value: string) => value }).render(140).join("\n"),
+    fullView: () => fullComponent ? fullComponent.render(140).join("\n") : fullView,
     notification: () => notification,
   };
 }
@@ -204,6 +220,125 @@ function writeLifecyclePlan(cwd: string, runId: string, revision = 1) {
 function workflowText(result: Awaited<ReturnType<ReturnType<typeof workflowHarness>["get"]>>) {
   return (result.content[0] as { text: string }).text;
 }
+
+test("canceled rows disappear at 30 seconds, redraw automatically, and can be reactivated", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 100_000 });
+  const cwd = mkdtempSync(join(tmpdir(), "plan-cancel-expiry-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const path = writeLifecyclePlan(cwd, "expiry");
+  const harness = workflowHarness(cwd);
+  t.after(() => harness.shutdown());
+  await harness.start();
+  harness.owner("fixture-workflow");
+  await harness.update({ workflow: {
+    path, revision: 1, event: "scope-added",
+    changes: [{ target: "unit", add: { id: "U2", title: "Optional work", stage: "pending", status: "pending" } }],
+  } });
+  await harness.command("expand");
+  harness.holdFullPlan();
+  t.after(() => harness.closeFullPlan());
+  const fullView = harness.command("");
+  await Promise.resolve();
+  assert.match(harness.fullView(), /1\/2 complete/);
+  const beforeCancellation = harness.fullRedraws();
+  await harness.update({ workflow: {
+    event: "scope-cancelled", changes: [{ id: "U2", set: { status: "cancelled" } }],
+  } });
+  assert.ok(harness.fullRedraws() > beforeCancellation, "an open overlay observes later cancellations");
+  assert.match(harness.fullView(), /Optional work\s+cancelled/);
+  assert.match(harness.widget(), /Optional work\s+cancelled/);
+  t.mock.timers.tick(29_999);
+  // Reloading the file must not restart the row's display deadline.
+  assert.match(workflowText(await harness.get()), /Optional work\s+cancelled/);
+  const persisted = readFileSync(path, "utf8");
+  const redraws = harness.redraws();
+  const fullRedraws = harness.fullRedraws();
+  t.mock.timers.tick(1);
+  assert.ok(harness.redraws() > redraws, "expiry requests a render without another tool call");
+  assert.ok(harness.fullRedraws() > fullRedraws, "an already-open full plan redraws at expiry too");
+  for (const view of [harness.widget(), harness.fullView(), workflowText(await harness.get())]) {
+    assert.doesNotMatch(view, /Optional work|cancelled/);
+    assert.match(view, /1\/1 complete/);
+  }
+  assert.equal(readFileSync(path, "utf8"), persisted, "display expiry does not mutate the workflow record");
+  await harness.update({ workflow: {
+    event: "scope-restored", changes: [{ id: "U2", set: { status: "pending" } }],
+  } });
+  assert.match(harness.widget(), /Optional work/);
+  assert.match(harness.widget(), /1\/2 complete/);
+  assert.match(harness.fullView(), /Optional work/);
+  assert.match(harness.fullView(), /1\/2 complete/);
+  await harness.update({ workflow: {
+    event: "scope-cancelled-again", changes: [{ id: "U2", set: { status: "cancelled" } }],
+  } });
+  t.mock.timers.tick(29_999);
+  assert.match(harness.widget(), /Optional work/);
+  t.mock.timers.tick(1);
+  assert.doesNotMatch(harness.widget(), /Optional work/);
+  assert.doesNotMatch(harness.fullView(), /Optional work/);
+  harness.closeFullPlan();
+  await fullView;
+});
+
+test("cancellation expiry survives session restore and stays scoped to its plan", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 100_000 });
+  const cwd = mkdtempSync(join(tmpdir(), "plan-cancel-restore-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const path = writeLifecyclePlan(cwd, "restore");
+  const first = workflowHarness(cwd);
+  await first.start();
+  first.owner("fixture-workflow");
+  await first.update({ workflow: {
+    path, revision: 1, event: "cancelled", changes: [{ id: "U1", set: { status: "cancelled" } }],
+  } });
+  assert.match(first.widget(), /Deliver restore/);
+  t.mock.timers.tick(20_000);
+  await first.shutdown();
+  const restored = workflowHarness(cwd, [...first.entries()]);
+  t.after(() => restored.shutdown());
+  await restored.start();
+  assert.match(restored.widget(), /Deliver restore/);
+  t.mock.timers.tick(9_999);
+  assert.match(restored.widget(), /Deliver restore/);
+  t.mock.timers.tick(1);
+  assert.doesNotMatch(restored.widget(), /Deliver restore/);
+  assert.match(restored.widget(), /0\/0 complete/);
+  const other = writeLifecyclePlan(cwd, "other");
+  await restored.update({ workflow: {
+    path: other, revision: 1, event: "cancelled", changes: [{ id: "U1", set: { status: "cancelled" } }],
+  } });
+  assert.match(restored.widget(), /Deliver other/, "the same unit ID in a different plan gets its own deadline");
+  t.mock.timers.tick(30_000);
+  assert.doesNotMatch(restored.widget(), /Deliver other/);
+});
+
+test("a persisted cancellation updates completion counts across workflow views", async (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "plan-counts-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const path = writeLifecyclePlan(cwd, "counts");
+  const harness = workflowHarness(cwd);
+  await harness.start();
+  harness.owner("fixture-workflow");
+  await harness.update({ workflow: {
+    path, revision: 1, event: "scope-added",
+    changes: [{ target: "unit", add: { id: "U2", title: "Optional work", stage: "pending", status: "pending" } }],
+  } });
+  assert.match(harness.widget(), /\b1\/2 complete\b/);
+  await harness.update({ workflow: {
+    revision: 2, event: "scope-cancelled",
+    changes: [{ id: "U2", set: { status: "cancelled" } }],
+  } });
+  assert.match(harness.widget(), /\b1\/1 complete\b/);
+  assert.match(workflowText(await harness.get()), /\b1\/1 complete\b/);
+  await harness.command("");
+  assert.match(harness.fullView(), /\b1\/1 complete\b/);
+  assert.match(harness.fullView(), /Optional work\s+cancelled/);
+  harness.owner(null);
+  const restored = workflowHarness(cwd, [...harness.entries()]);
+  await restored.start();
+  assert.match(restored.widget(), /\b1\/1 complete\b/);
+  assert.match(workflowText(await restored.get()), /read-only handoff/);
+});
 
 test("released workflow stays inspectable but cannot write; replacement and clear persist on their branches", async (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "released-plan-"));

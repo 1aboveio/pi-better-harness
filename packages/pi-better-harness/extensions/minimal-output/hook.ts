@@ -174,8 +174,10 @@ function compactCall(component: ToolComponent, width: number, theme?: Theme, ind
   const suffix = failed ? " (failed)" : running ? " (running)" : "";
   const icon = TOOL_ICONS[component.toolName] ?? "\u25c7";
   const title = ` ${icon} ${label}`;
+  const visibleDetail = animationTime === undefined ? detail : truncateToWidth(detail,
+    Math.max(0, width - Math.min(indent, Math.max(0, width - 1)) - visibleWidth(title) - 2));
   const styled = theme
-    ? ` ${toolIdentity(icon, label, failed ? "error" : running ? "accent" : "muted", theme, animationTime)}${detail ? `  ${theme.fg("dim", detail)}` : ""}${theme.fg(failed ? "error" : "dim", suffix)}`
+    ? ` ${toolIdentity(icon, label, failed ? "error" : running ? "accent" : "muted", theme, animationTime, visibleDetail)}${theme.fg(failed ? "error" : "dim", suffix)}`
     : `${title}${detail ? `  ${detail}` : ""}${suffix}`;
   return [truncateToWidth(`${" ".repeat(Math.min(indent, Math.max(0, width - 1)))}${styled}`, width)];
 }

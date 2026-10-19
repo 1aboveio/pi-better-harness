@@ -181,10 +181,48 @@ test("workflow failures and unknown statuses never look active or completed", ()
     id: String(index), title: `Task ${index}`, stage: "review", status, dependsOn: [],
   }));
   const rendered = renderRushPlan(workflow, 100).join("\n");
-  assert.match(rendered, /0\/5 complete · 1 blocked · 1 failed · 1 skipped · 1 unknown/);
+  assert.match(rendered, /0\/4 complete · 1 blocked · 1 failed · 1 skipped · 1 unknown/);
   assert.match(rendered, /×\s+#0\s+Task 0\s+failed/);
   assert.match(rendered, /\?\s+#4\s+Task 4\s+awaiting-approval/);
   assert.doesNotMatch(rendered, /active/);
+});
+
+test("workflow completion counts exclude cancellation spellings but retain skipped and other unfinished rows", () => {
+  const statuses = [
+    "succeeded", "completed", "pending", "in-flight", "blocked", "failed",
+    "skipped", "not-applicable", "awaiting-approval", "cancelled", "canceled",
+  ];
+  const workflow = projectRushPlan({
+    runId: "counts", planRevision: 1, fleet: {},
+    units: statuses.map((status, index) => ({
+      id: String(index + 1), title: `Unit ${index + 1}`, stage: "done", status,
+    })),
+  }, "counts");
+  const compact = renderRushPlan(workflow, 160);
+  const expanded = renderRushPlan(workflow, 160, false, undefined, "rush-issues", false, true);
+  const full = renderRushPlan(workflow, 160, true);
+  const component = createRushPlanComponent(workflow, () => {}).render(160);
+  for (const lines of [compact, expanded, full, component]) {
+    assert.match(lines[0]!, /\b2\/9 complete\b/);
+  }
+  assert.doesNotMatch(compact.join("\n"), /Unit 10|Unit 11/, "hidden cancellations still affect the total");
+  for (const [id, status] of [[7, "skipped"], [8, "skipped"], [10, "cancelled"], [11, "canceled"]] as const) {
+    assert.match(full.join("\n"), new RegExp(`#${id}\\s+Unit ${id}\\s+${status}\\n`));
+  }
+});
+
+test("all-canceled workflow plans show zero eligible items without counting cancellations as completed", () => {
+  for (const statuses of [["cancelled"], ["canceled"], ["cancelled", "canceled"]]) {
+    const workflow = projectRushPlan({
+      runId: "canceled", planRevision: 1, fleet: {},
+      issues: statuses.map((status, index) => ({
+        id: String(index), title: `Canceled unit ${index}`, stage: "done", status,
+      })),
+    }, "canceled");
+    const lines = renderRushPlan(workflow, 100, true);
+    assert.match(lines[0]!, /\b0\/0 complete\b/);
+    assert.equal(lines.filter((line) => line.includes("Canceled unit")).length, statuses.length);
+  }
 });
 
 test("workflow summaries handle concurrent activity, idle, complete and empty plans", () => {

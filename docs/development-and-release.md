@@ -57,6 +57,7 @@ The package workspaces are:
 | `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |
 | `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
 | `packages/pi-better-plan` | `pi-better-plan` | yes | yes |
+| `packages/pi-better-server` | `pi-better-server` (`publishConfig.access` is `public`) | no, not in the publish workflow | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
@@ -165,6 +166,15 @@ CI uploads it as `navigator-golden`, including failure captures. Width/grapheme
 edge cases remain in `packages/navigator/index.test.ts`; the background process
 lifecycle golden test owns spawning/status/log API behavior. Neither substitutes
 for this terminal journey.
+
+### Codex thread move verification
+
+`packages/pi-better-server/test/codex-move.test.ts` moves a Codex thread between two
+real Codex app-servers and attaches the native Codex TUI. It requires codex-cli
+0.159.2 on `PATH` (or `PI_CODEX_BIN`); CI installs it with
+`npm install --global @openai/codex@0.159.2` next to tmux and bubblewrap. Each host
+gets a throwaway `CODEX_HOME` with a placeholder API key, so the test needs no
+`codex login` and sends no model request.
 
 ### Sandbox compatibility golden paths
 

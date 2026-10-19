@@ -40,6 +40,23 @@ describe("ssh-core package contract", () => {
     }
   });
 
+  // @covers ssh-core.control-master
+  // @level unit
+  it("falls back to a short per-user root when the agent directory is too long for a ControlPath", () => {
+    const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
+    try {
+      process.env.PI_CODING_AGENT_DIR = `/tmp/${"long-agent-dir-".repeat(8)}`;
+      const root = defaultSshControlPathRoot();
+      assert.match(root, /^\/tmp\/pi-ssh-/);
+      const resolved = resolveSshCommand({ command: "true", ssh: { host: "long.example" } });
+      const mux = createSshMuxController({ ...resolved, runner: new FakeRemoteRunner(), sessionScope: "long-agent-dir" });
+      assert.ok(Buffer.byteLength(mux.controlPath) <= 100, mux.controlPath);
+    } finally {
+      if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
+    }
+  });
+
   // @covers ssh-core.identity-argv
   // @level unit
   it("normalizes identity and enforces noninteractive SSH argv", () => {
@@ -253,6 +270,32 @@ describe("ssh-core package contract", () => {
         "-o", `ControlPath=${mux.controlPath}`,
         "--", "deploy@build.example", "printf ready",
       ]);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  // @covers ssh-core.control-master
+  // @level integration
+  it("forwards and cancels a Unix socket through the master and rejects unusable paths", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-mux-fwd-");
+    try {
+      const runner = new FakeRemoteRunner([successfulResult(""), failedResult(255, "forward refused")]);
+      const mux = createSshMuxController({
+        ...resolveSshCommand({ command: "true", ssh: { host: "fwd.example" } }),
+        runner,
+        sessionScope: "session-fwd",
+        controlPathRoot: join(fixtureRoot, "control"),
+      });
+      const local = join(fixtureRoot, "local.sock");
+      writeFileSync(local, "stale");
+      await mux.forwardUnixSocket(local, "/srv/pi-server.sock");
+      assert.deepEqual(runner.runCalls[0]?.argv?.slice(-10), [
+        "-o", "ControlMaster=no", "-o", `ControlPath=${mux.controlPath}`, "-O", "forward", "-L", `${local}:/srv/pi-server.sock`, "--", "fwd.example",
+      ]);
+      assert.equal(existsSync(local), false, "a stale local socket file is cleared before forwarding");
+      await assert.rejects(() => mux.cancelUnixSocketForward(local, "/srv/pi-server.sock"), /cancel.*forward refused/);
+      await assert.rejects(() => mux.forwardUnixSocket("/a b.sock", "/r.sock"), /localPath/);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }

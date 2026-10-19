@@ -60,6 +60,25 @@ jobs:
         run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
         working-directory: packages/pi-better-background-tasks
 
+  # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
+  pi-1x-compat:
+    name: pi-1x-compat
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: pi-better-server suite on Pi 1.x
+        run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.0.0 "$RUNNER_TEMP/pi-compat"
+
   ci:
     name: ci
     runs-on: ubuntu-latest
@@ -83,6 +102,8 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           bwrap --ro-bind / / -- /bin/true
+          npm install --global @openai/codex@0.159.2
+          test "$(codex --version)" = "codex-cli 0.159.2"
 
       - name: Typecheck
         run: npm run typecheck

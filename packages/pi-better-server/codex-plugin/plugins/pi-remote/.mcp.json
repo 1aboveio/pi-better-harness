@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "pi_remote": {
+      "command": "node",
+      "args": ["./server.mjs"],
+      "cwd": ".",
+      "env_vars": ["PI_REMOTE_BIN", "PI_SERVER_DIR", "PI_REMOTE_SERVER_DIR", "CODEX_HOME", "PI_CODEX_BIN", "PATH", "HOME"],
+      "default_tools_approval_mode": "prompt",
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 900
+    }
+  }
+}

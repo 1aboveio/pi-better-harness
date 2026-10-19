@@ -7,12 +7,14 @@ import {
 } from "./plan-presentation.js";
 
 export const WORKFLOW_PLAN_ENTRY = "pi-better-workflow-plan";
+export const CANCELLED_ROW_RETENTION_MS = 30_000;
 
 interface RushUnit {
   id: string;
   title: string;
   stage: string;
   status: string;
+  cancelledAt?: number;
   dependsOn: string[];
   worker?: string | number | undefined;
   note?: string | undefined;
@@ -134,7 +136,7 @@ function workflowStatus(status: string): DisplayStatus {
     case "pending": return "pending";
     case "blocked": return "blocked";
     case "failed": return "failed";
-    case "skipped": case "not-applicable": case "cancelled": return "skipped";
+    case "skipped": case "not-applicable": case "cancelled": case "canceled": return "skipped";
     default: return "unknown";
   }
 }
@@ -162,17 +164,23 @@ function presentRushPlan(plan: RushPlan, owner: string, readOnly = false): PlanP
   if (plan.spec?.title) metadata.push([{ color: "dim", text: plan.spec.title }]);
   return {
     metadata,
-    rows: plan.issues.map((unit) => {
+    rows: visibleRushUnits(plan).map((unit) => {
       const status = unitStatus(unit);
+      const cancelled = unit.status === "cancelled" || unit.status === "canceled";
       const details = [`${unit.stage} · ${unit.status}${unit.delivery ? ` · ${unit.delivery}` : ""}${unit.worker !== undefined ? ` · worker ${unit.worker}` : ""}`];
       if (unit.dependsOn.length) details.push(`after: ${unit.dependsOn.map((id) => `#${id}`).join(", ")}`);
       if (unit.note) details.push(unit.note);
       return {
-        label: `#${unit.id}`, title: unit.title, status, details,
-        ...(status === "unknown" || unit.status === "cancelled" ? { statusLabel: unit.status } : {}),
+        label: `#${unit.id}`, title: unit.title, status, cancelled, details,
+        ...(status === "unknown" || cancelled ? { statusLabel: unit.status } : {}),
       };
     }),
   };
+}
+
+export function visibleRushUnits(plan: RushPlan, now = Date.now()): RushPlan["issues"] {
+  return plan.issues.filter(unit => (unit.status !== "cancelled" && unit.status !== "canceled") ||
+    unit.cancelledAt === undefined || now < unit.cancelledAt + CANCELLED_ROW_RETENTION_MS);
 }
 
 export function renderRushPlan(
@@ -189,12 +197,12 @@ export function renderRushPlan(
 }
 
 export function createRushPlanComponent(
-  plan: RushPlan,
+  source: RushPlan | (() => RushPlan),
   onClose: () => void,
   fg?: (color: string, value: string) => string,
   owner = "rush-issues",
   readOnly = false,
 ): Component {
   const theme = fg ? { fg } : plainPlanTheme;
-  return createPlanPresentationComponent(presentRushPlan(plan, owner, readOnly), theme, onClose);
+  return createPlanPresentationComponent(() => presentRushPlan(typeof source === "function" ? source() : source, owner, readOnly), theme, onClose);
 }
