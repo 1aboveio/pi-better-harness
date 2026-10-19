@@ -134,7 +134,7 @@ socket.on("data", (chunk) => {
     executable,
     forwards,
     commands,
-    options: { host: "fixture.invalid", controlPathRoot: join(root, "mux") },
+    options: { host: "fixture.invalid", controlPathRoot: join(root, "mux"), ensureServer: false },
     next(kind: string): Promise<SshCommand> {
       const command = commands.find((candidate) => candidate.kind === kind && !consumed.has(candidate));
       if (command) {

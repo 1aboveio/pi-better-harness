@@ -272,7 +272,7 @@ function tuiEnv(): Record<string, string> {
 const NO_UPDATE_PROMPT = ["-c", "check_for_update_on_startup=false"];
 /** Run pi-remote without blocking this process: the daemons under test live in it. */
 async function runCli(args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const child = spawn("node", ["--import", "tsx", join(pkgRoot, "src", "remote-cli.ts"), ...args], { cwd: pkgRoot, env: process.env });
+  const child = spawn("node", ["--import", "tsx", join(pkgRoot, "src", "remote-cli.ts"), "--agent", "codex", ...args], { cwd: pkgRoot, env: process.env });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
@@ -281,7 +281,7 @@ async function runCli(args: string[]): Promise<{ status: number | null; stdout: 
   return { status, stdout, stderr };
 }
 
-const remoteCli = ["node", "--import", "tsx", join(pkgRoot, "src", "remote-cli.ts")];
+const remoteCli = ["node", "--import", "tsx", join(pkgRoot, "src", "remote-cli.ts"), "--agent", "codex"];
 
 describe("attach", { concurrency: false }, () => {
   it("pi-remote attach opens the native Codex TUI on the host's app-server through a forwarded socket", async () => {
@@ -326,7 +326,7 @@ if (remoteHost) {
       const repo = makeRepo(shortDir("cx-ws-"));
       plantThread(source.home, repo);
 
-      const destination = await resolveTarget({ host: remoteHost, remoteDir: `${work}/srv`, controlPathRoot: shortDir("cx-ctl-") });
+      const destination = await resolveTarget({ host: remoteHost, agent: "codex", remoteDir: `${work}/srv`, controlPathRoot: shortDir("cx-ctl-") });
       cleanups.push(() => destination.close());
       const client = await DaemonClient.connect(destination.socketPath);
       const result = await moveSession(source.client, client, { sessionId: THREAD_ID });
@@ -341,7 +341,7 @@ if (remoteHost) {
       client.close();
       await destination.close();
 
-      const again = await resolveTarget({ host: remoteHost, remoteDir: `${work}/srv`, controlPathRoot: shortDir("cx-ctl-") });
+      const again = await resolveTarget({ host: remoteHost, agent: "codex", remoteDir: `${work}/srv`, controlPathRoot: shortDir("cx-ctl-") });
       cleanups.push(() => again.close());
       const back = await DaemonClient.connect(again.socketPath);
       const endpoint = (await back.request({ type: "codex_endpoint" })).data as CodexEndpoint;

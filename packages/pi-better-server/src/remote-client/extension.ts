@@ -105,9 +105,9 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
       try {
         stage("establishing SSH...");
         pendingTarget = await local.dependencies.resolveTarget({
-          host: options.host, controlPathRoot, signal,
+          host: options.host, agent: "pi", controlPathRoot, signal,
           ...(remoteDir ? { remoteDir } : {}),
-          onProgress: phase => stage({ ssh: "establishing SSH...", directory: "finding remote server...", forward: "opening SSH tunnel..." }[phase]),
+          onProgress: phase => stage({ ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]),
         });
         signal.throwIfAborted();
         stage("contacting Pi server...");

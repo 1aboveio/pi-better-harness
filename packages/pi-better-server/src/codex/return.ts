@@ -76,7 +76,7 @@ async function localDaemon(serverDir: string, codex: CodexRuntimeOptions | undef
 export function resumeHint(cwd: string, sessionId: string, managed: boolean, serverDir: string): string {
   if (!managed) return `cd ${cwd} && codex resume ${sessionId}`;
   const env = serverDir === defaultServerDir() ? "" : `PI_SERVER_DIR=${serverDir} `;
-  return `${env}pi-remote attach ${sessionId}  (or: ${env}pi-remote steer ${sessionId} "<message>")`;
+  return `${env}pi-remote attach ${sessionId} --agent codex  (or: ${env}pi-remote steer ${sessionId} --agent codex "<message>")`;
 }
 
 export async function returnCodexThread(options: ReturnCodexOptions): Promise<ReturnCodexResult> {

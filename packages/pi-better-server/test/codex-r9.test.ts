@@ -138,7 +138,7 @@ if (!remoteHost) {
       const laptop = await startHost("rl2");
       const repo = makeRepo(shortDir("cx-ws-"));
       const id = await createThread(laptop, repo);
-      const destination = await resolveTarget({ host: remoteHost, remoteDir: `${work}/srv`, controlPathRoot: shortDir("cx-ctl-") });
+      const destination = await resolveTarget({ host: remoteHost, agent: "codex", remoteDir: `${work}/srv`, controlPathRoot: shortDir("cx-ctl-") });
       cleanups.push(() => destination.close());
       const client = await DaemonClient.connect(destination.socketPath);
       cleanups.push(() => client.close());

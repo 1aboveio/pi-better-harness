@@ -31,7 +31,7 @@ fs.appendFileSync(process.env.BOOTSTRAP_TEST_LOG, JSON.stringify({ command: "pi"
 process.exit(Number(process.env.BOOTSTRAP_TEST_PI_EXIT || 0));
 `)}, { mode: 0o755 });
 `, { mode: 0o755 });
-  const env: NodeJS.ProcessEnv = { ...process.env, NODE_VERSION: "24.14.1", PI_VERSION: "1.2.0", PI_CODING_AGENT_DIR: agentDir, BOOTSTRAP_TEST_LOG: log, ...overrides };
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: join(root, "home"), NODE_VERSION: "24.14.1", PI_VERSION: "1.2.0", PI_CODING_AGENT_DIR: agentDir, BOOTSTRAP_TEST_LOG: log, ...overrides };
   for (const name of ["HARNESS_VERSION", "MINIMAL_TOOLS_VERSION", "ASK_USER_QUESTION_VERSION", "WEB_TOOLS_VERSION"]) {
     delete env[name];
     if (overrides[name]) env[name] = overrides[name];

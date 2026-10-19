@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { defaultServerDir, socketPathFor } from "../paths.ts";
 import { createSshMuxController, resolveSshCommand, type SshMuxController } from "../shared-ssh-core/index.ts";
 import { createProcessRunner } from "./process-runner.ts";
+import { ensureArgs, parseReadiness, remoteEnsureScript } from "../startup/commands.ts";
+import { absolutePath, discoverLocalRuntime, INSTALL_GUIDANCE, parseRuntime, remoteRuntimeScript } from "../startup/runtime.ts";
 
 export interface TargetOptions {
   /** ssh alias (or user@host) of the machine running the daemon. Absent: the local daemon. */
@@ -16,7 +18,11 @@ export interface TargetOptions {
   controlPathRoot?: string;
   /** Cancels connection setup only, not a successfully resolved target. */
   signal?: AbortSignal;
-  onProgress?: (stage: "ssh" | "directory" | "forward") => void;
+  /** Pi startup is enabled by default. Transport-only callers can opt out. */
+  ensureServer?: boolean;
+  /** Codex must retain its own startup path; never auto-start a Pi daemon for it. */
+  agent?: "pi" | "codex";
+  onProgress?: (stage: "ssh" | "directory" | "server" | "forward") => void;
 }
 
 export interface Target {
@@ -38,15 +44,39 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
   const checkAbort = () => {
     if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
   };
-  const progress = (stage: "ssh" | "directory" | "forward") => {
+  const progress = (stage: "ssh" | "directory" | "server" | "forward") => {
     checkAbort();
     options.onProgress?.(stage);
     checkAbort();
   };
   checkAbort();
+  const ensureServer = options.ensureServer !== false && (options.agent ?? process.env.PI_SERVER_AGENT ?? "pi") === "pi";
   if (!options.host) {
+    let socketPath = options.socket;
+    const candidate = ensureServer && !options.socket ? discoverLocalRuntime() : undefined;
+    if (candidate) {
+      progress("directory");
+      const runner = createProcessRunner({ signal: options.signal });
+      const discovery = await runner.runOnce({
+        shell: false, argv: [candidate.launcher, "runtime", "--agent", "pi"],
+        env: candidate.discoveryEnv,
+      }, undefined, 30_000);
+      checkAbort();
+      if (discovery.exitCode !== 0) throw new Error(`Runtime discovery: ${discovery.stderr.trim() || "launcher failed"}. ${INSTALL_GUIDANCE}`);
+      const runtime = parseRuntime(discovery.stdout);
+      const serverDir = process.env.PI_SERVER_DIR || runtime.defaultServerDir;
+      progress("server");
+      const result = await runner.runOnce({
+        shell: false, argv: [runtime.launcher, ...ensureArgs(serverDir)],
+        env: { PI_CODING_AGENT_DIR: runtime.agentDir, PI_SERVER_DIR: serverDir },
+      }, undefined, 30_000);
+      checkAbort();
+      if (result.exitCode !== 0) throw new Error(`Server ensure at ${serverDir}: ${result.stderr.trim() || "launcher failed"}. ${INSTALL_GUIDANCE}`);
+      socketPath = parseReadiness(result.stdout, serverDir).socketPath;
+    }
+    socketPath ??= socketPathFor(defaultServerDir());
     return {
-      socketPath: options.socket ?? socketPathFor(defaultServerDir()),
+      socketPath,
       forwardSocket: async (remoteSocketPath) => ({ socketPath: remoteSocketPath, close: async () => undefined }),
       close: async () => undefined,
     };
@@ -69,17 +99,36 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
 
   progress("directory");
   let remoteDir = options.remoteDir ?? process.env.PI_REMOTE_SERVER_DIR;
-  if (!remoteDir) {
-    const probe = resolveSshCommand({ command: REMOTE_SERVER_DIR_SCRIPT, ssh: { host: options.host } });
-    const result = await runner.runOnce(mux.withMux(probe.commandSpec), undefined, 30_000);
+  let remoteSocket: string;
+  if (ensureServer) {
+    const discovery = resolveSshCommand({ command: remoteRuntimeScript(process.env.PI_SERVER_COMMAND), ssh: { host: options.host } });
+    const found = await runner.runOnce(mux.withMux(discovery.commandSpec), undefined, 30_000);
     checkAbort();
-    remoteDir = result.stdout.trim();
-    if (result.exitCode !== 0 || !remoteDir.startsWith("/")) {
-      throw new Error(`Could not find the daemon directory on ${options.host}: ${result.stderr.trim() || result.stdout.trim() || "empty answer"}`);
+    if (found.exitCode !== 0) throw new Error(`Runtime discovery on ${options.host}: ${found.stderr.trim() || "no installed runtime"}. ${INSTALL_GUIDANCE}`);
+    let runtime;
+    try { runtime = parseRuntime(found.stdout); }
+    catch (error) { throw new Error(`Runtime discovery on ${options.host}: ${String(error)}. ${INSTALL_GUIDANCE}`); }
+    remoteDir = absolutePath(remoteDir ?? runtime.defaultServerDir, "--remote-dir");
+    progress("server");
+    const ensure = resolveSshCommand({ command: remoteEnsureScript(runtime, remoteDir), ssh: { host: options.host } });
+    const result = await runner.runOnce(mux.withMux(ensure.commandSpec), undefined, 30_000);
+    checkAbort();
+    if (result.exitCode !== 0) throw new Error(`Server ensure on ${options.host} at ${remoteDir}: ${result.stderr.trim() || (result.timedOut ? "SSH readiness command timed out" : "launcher failed")}. ${INSTALL_GUIDANCE}`);
+    try { remoteSocket = parseReadiness(result.stdout, remoteDir).socketPath; }
+    catch (error) { throw new Error(`Server readiness on ${options.host} at ${remoteDir}: ${String(error)}`); }
+  } else {
+    if (!remoteDir) {
+      const probe = resolveSshCommand({ command: REMOTE_SERVER_DIR_SCRIPT, ssh: { host: options.host } });
+      const result = await runner.runOnce(mux.withMux(probe.commandSpec), undefined, 30_000);
+      checkAbort();
+      remoteDir = result.stdout.trim();
+      if (result.exitCode !== 0 || !remoteDir.startsWith("/")) {
+        throw new Error(`Could not find the daemon directory on ${options.host}: ${result.stderr.trim() || result.stdout.trim() || "empty answer"}`);
+      }
     }
+    if (!remoteDir.startsWith("/")) throw new Error(`--remote-dir must be an absolute path on ${options.host}: ${remoteDir}`);
+    remoteSocket = socketPathFor(remoteDir);
   }
-  if (!remoteDir.startsWith("/")) throw new Error(`--remote-dir must be an absolute path on ${options.host}: ${remoteDir}`);
-  const remoteSocket = socketPathFor(remoteDir);
 
   progress("forward");
   // A private directory keeps the forwarded socket reachable by this user only; /tmp keeps the path short.

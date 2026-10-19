@@ -42,6 +42,11 @@ if [ ! -x "$NODE_HOME/bin/node" ]; then
   tar -xJf "$tmp/node.tar.xz" -C "$PREFIX"
 fi
 export PATH="$NODE_HOME/bin:$PATH"
+PREFIX="$(node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$PREFIX")"
+NODE_HOME="$PREFIX/node-v$NODE_VERSION-$NODE_DIST"
+export PATH="$NODE_HOME/bin:$PATH"
+export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+export PI_SERVER_DIR="${PI_SERVER_DIR:-$PI_CODING_AGENT_DIR/server}"
 
 # Pi itself, pinned. The package.json keeps `npm` from treating $PREFIX as part of another project.
 if [ ! -f "$PREFIX/package.json" ]; then
@@ -67,12 +72,36 @@ rev="$(git -C "$PKG_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 printf 'node %s\npi %s\npi-better-harness %s\nharness-rev %s\n' "$NODE_VERSION" "$PI_VERSION" "$HARNESS_VERSION" "$rev" > "$PREFIX/VERSIONS"
 printf 'pi-codex-minimal-tools %s\nrpiv-ask-user-question %s\nrpiv-web-tools %s\n' "$MINIMAL_TOOLS_VERSION" "$ASK_USER_QUESTION_VERSION" "$WEB_TOOLS_VERSION" >> "$PREFIX/VERSIONS"
 
-cat > "$PREFIX/bin/pi-server" <<LAUNCHER
-#!/bin/sh
-export PATH="$NODE_HOME/bin:\$PATH"
-exec node "$PREFIX/server/src/cli.ts" "\$@"
-LAUNCHER
-chmod 755 "$PREFIX/bin/pi-server"
+# Register only runtime identity, never credentials or project/agent settings. Write atomically.
+PI_BOOTSTRAP_PREFIX="$PREFIX" PI_BOOTSTRAP_NODE_HOME="$NODE_HOME" node --input-type=module <<'NODE'
+import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+const prefix = process.env.PI_BOOTSTRAP_PREFIX;
+const nodeHome = process.env.PI_BOOTSTRAP_NODE_HOME;
+const launcher = join(prefix, "bin", "pi-server");
+const agentDir = resolve(process.env.PI_CODING_AGENT_DIR);
+const defaultServerDir = resolve(process.env.PI_SERVER_DIR);
+for (const value of [launcher, agentDir, defaultServerDir]) {
+  if (/[\0\r\n]/.test(value)) throw new Error("Runtime registration paths cannot contain NUL or line breaks");
+}
+const quote = (value) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+writeFileSync(launcher, [
+  "#!/bin/sh",
+  `export PATH=${quote(join(nodeHome, "bin"))}:"$PATH"`,
+  `export PI_SERVER_LAUNCHER=${quote(launcher)}`,
+  `if [ -z "\${PI_CODING_AGENT_DIR:-}" ]; then export PI_CODING_AGENT_DIR=${quote(agentDir)}; fi`,
+  `if [ -z "\${PI_SERVER_DIR:-}" ]; then export PI_SERVER_DIR=${quote(defaultServerDir)}; fi`,
+  `exec ${quote(join(nodeHome, "bin", "node"))} ${quote(join(prefix, "server", "src", "cli.ts"))} "$@"`,
+  "",
+].join("\n"));
+chmodSync(launcher, 0o755);
+const directory = join(process.env.HOME, ".pi");
+mkdirSync(directory, { recursive: true, mode: 0o700 });
+const manifest = join(directory, "remote-server.json");
+const temporary = `${manifest}.${process.pid}.tmp`;
+writeFileSync(temporary, JSON.stringify({ version: 1, agent: "pi", launcher, agentDir, defaultServerDir }) + "\n", { mode: 0o600, flag: "wx" });
+renameSync(temporary, manifest);
+NODE
 
 cat "$PREFIX/VERSIONS"
 echo "installed: $PREFIX/bin/pi-server"

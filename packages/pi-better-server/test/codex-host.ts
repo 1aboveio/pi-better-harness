@@ -134,7 +134,7 @@ export async function installPlugin(host: Host): Promise<void> {
   assert.match(listed.stdout, /pi-remote@pi-remote\s+installed, enabled/);
 }
 
-export const REMOTE_CLI = ["node", "--import", "tsx", join(pkgRoot, "src", "remote-cli.ts")];
+export const REMOTE_CLI = ["node", "--import", "tsx", join(pkgRoot, "src", "remote-cli.ts"), "--agent", "codex"];
 
 export function remote(args: string[], env: Record<string, string> = {}): Promise<CliResult> {
   return run([...REMOTE_CLI, ...args], env);

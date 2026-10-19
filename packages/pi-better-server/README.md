@@ -18,6 +18,49 @@ The directory is created with mode `0700` and tightened if it already exists.
 Each session's conversation is an ordinary Pi session JSONL in the usual
 `~/.pi/agent/sessions/` tree.
 
+### Session and daemon lifetime
+
+An active session is an open session, not a connected client or a currently
+generating model. Disconnecting does not close it. By default:
+
+- A session expires after **24 hours of inactivity**, even if an idle client is
+  attached. Expiry closes its runtime but keeps its transcript and index row.
+  Reopen it from the Closed tab to continue; interrupted tools are not replayed.
+- Executing models, tools, shell commands, compaction, and observable
+  session-owned background work prevent expiry, including silent execution.
+  A fresh inactivity window starts when execution finishes. Waiting for user
+  input is idle; expiry cancels pending dialogs rather than approving them.
+- A daemon with no active sessions shuts down after **30 minutes**. Polling,
+  heartbeats, and idle browser connections do not keep it alive.
+
+Configure independent millisecond durations in `PI_SERVER_DIR/lifecycle.json`:
+
+```json
+{
+  "sessionIdleMs": 86400000,
+  "daemonIdleMs": 1800000
+}
+```
+
+`0` disables the corresponding timer. Precedence is programmatic daemon options,
+then `PI_SERVER_SESSION_IDLE_MS` / `PI_SERVER_DAEMON_IDLE_MS`, then the saved file,
+then defaults. Values must be non-negative safe integers. Changes take effect
+on the next daemon start. The daemon owns the clocks; idle session deadlines
+survive restarts and include time offline. Renaming, listing, reading snapshots,
+and passive reconnect traffic do not refresh session activity.
+
+The server directory also contains an exclusive `daemon-owner/` claim. A live
+process owner is never evicted because a timer or connection attempt expired.
+Crash recovery reclaims dead ownership before reading or resuming the session
+index, preventing concurrent starters from creating competing transcript writers.
+
+The current Subagents provider scopes work by session. Older providers without
+ownership information are handled conservatively: process-wide active work can
+keep other idle sessions alive too. If a caller supplies a custom resource loader
+without activity observation, automatic expiry is disabled for that runtime;
+manual close remains available. Unknown external processes are not treated as
+observable session-owned work.
+
 ## Protocol
 
 Strict LF-delimited JSON lines. A session command is a Pi RPC command (the
@@ -65,6 +108,13 @@ start ordinary local Pi **1.2.0** with this package loaded at startup, then run
 `/remote connect r5`. The terminal keeps Pi's native local UI while the remote daemon owns
 the model, tools, workspace and session state. This connects to an existing remote
 workspace; it does not move or upload the local workspace or session.
+
+A stopped, installed Pi daemon is started automatically on the first connection.
+The client discovers the registered runtime, asks `pi-server ensure` to reuse or
+start it, verifies readiness and compatibility, and then opens the SSH tunnel.
+Stale socket files do not count as a running server. This does not install new
+packages, copy credentials, kill incompatible listeners, or replace busy daemons.
+Missing or incompatible runtimes produce installation/update guidance.
 
 ### Connect and disconnect
 
@@ -313,16 +363,31 @@ The same `move` core carries a Codex thread. Run one daemon per Codex host (`pi-
 
 ## Crash recovery
 
-A session stays `running` until `close_session`. On start the daemon reopens
-every running session at the last entry in its JSONL. It does not start a turn
-on its own.
+A session stays `running` until explicit close or inactivity expiry. On start the
+daemon reopens owned running sessions at the last entry in their JSONL. It does
+not start a turn or replay interrupted tools on its own. Persisted inactivity
+continues across downtime; interrupted execution receives a fresh idle window.
 
 ## Host bootstrap
 
 `scripts/bootstrap-host.sh [PREFIX]` installs a pinned Node, a pinned Pi and this
 package's `src/` under `PREFIX` (default `~/.pi-better-server`) with no root, and
-writes `PREFIX/bin/pi-server`. It also installs and enables these Pi packages by
-default through `pi install`:
+writes `PREFIX/bin/pi-server`. It atomically registers that launcher, agent
+directory and default server directory in `$HOME/.pi/remote-server.json`, mode
+`0600`. Native `/remote` and `pi-remote` use that same registration, so aliases
+such as `115` and `r5` select the same default state directory. Explicit
+`--remote-dir` remains authoritative. `PI_SERVER_COMMAND` may select an absolute
+installed launcher path; it is not a shell command.
+
+`pi-server ensure` prints one JSON readiness record and exits after starting or
+reusing the detached daemon. Its log is `<serverDir>/daemon.log`; connection
+cancellation does not kill an already launched daemon. No login script, tmux
+session, or boot service is needed. Codex transport callers use
+`pi-remote --agent codex ...` or `PI_SERVER_AGENT=codex`; Pi on-demand startup and
+these lifecycle timers do not manage Codex daemons.
+
+Bootstrap also installs and enables these Pi packages by default through
+`pi install`:
 
 | Package | Pinned version | Version override |
 | --- | --- | --- |

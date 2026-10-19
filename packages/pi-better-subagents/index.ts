@@ -163,6 +163,7 @@ import {
     type CatalogJobFields,
     type CatalogRunRecord,
 } from "./catalog-runtime.ts";
+import { registerSubagentsGoalProvider } from "./goal-provider.ts";
 import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
@@ -210,44 +211,6 @@ const SUBAGENT_ORCHESTRATION_GUIDELINES = [
     "When a structured plan is active, follow the current delegation mode. Track delegated and foreground deliverables only when delegation is permitted and actually underway; continue unblocked foreground work and integrate results before marking work complete.",
     "Do not treat launching a subagent as completion of the parent milestone; relevant terminal results must be inspected and integrated before verification or completion.",
 ];
-
-const GOAL_READY_EVENT = "pi-better-goal:ready";
-const GOAL_REGISTER_PROVIDER_EVENT = "pi-better-goal:register-provider";
-const goalReadySubscriptions = new WeakSet<ExtensionAPI>();
-
-function registerSubagentsGoalProvider(pi: ExtensionAPI): void {
-    const emitProvider = (): void => {
-        pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
-            id: "subagents",
-            label: "Subagents",
-            getActivity: () => ({
-                providerId: "subagents",
-                label: "Subagents",
-                items: listMetasForParent(process.pid).map((meta) => {
-                    const status = effectiveStatus(meta);
-                    const active = status === "running" || status === "orphaned";
-                    return {
-                        id: meta.id,
-                        ...(meta.name ? { label: meta.name } : {}),
-                        status,
-                        active,
-                        unhealthy: status === "orphaned",
-                        terminal: !active,
-                        attention: status === "orphaned" || status === "failed" || status === "killed" || status === "lost" || status === "exited",
-                        startedAt: meta.startedAt,
-                        ...(meta.endedAt !== undefined ? { endedAt: meta.endedAt } : {}),
-                    };
-                }),
-            }),
-            onActivityChanged: onMetaChanged,
-        });
-    };
-    if (!goalReadySubscriptions.has(pi)) {
-        pi.events?.on?.(GOAL_READY_EVENT, emitProvider);
-        goalReadySubscriptions.add(pi);
-    }
-    emitProvider();
-}
 
 // ---- retired live status widget ------------------------------------------
 //
