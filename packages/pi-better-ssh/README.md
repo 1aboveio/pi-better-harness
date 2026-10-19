@@ -97,6 +97,8 @@ Call `ssh_profile` with `status` to inspect the active profile or `clear` to rem
 
 ## ControlMaster
 
+On Windows, commands use independent SSH connections because native Windows OpenSSH does not support working ControlMaster sockets. Mux options from callers and SSH config are overridden. `ssh_mux status` reports mux down with an explanation, and `stop` has no master to stop. Linux and macOS retain connection reuse.
+
 `remote_bash` checks for a reusable ControlMaster and opens one when needed. Its ControlPath lives under the harness-owned `~/.pi/agent/ssh-control` directory, which is forced to mode `0700`; the socket key includes the connection identity and Pi session. A stale socket is removed and reopened once. Repeated commands for the same target and session reuse the master.
 
 Use `ssh_mux` with `status` or `stop` and either a target, the active profile, or `all:true` for masters observed in the current Pi process and session:

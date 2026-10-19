@@ -35,6 +35,7 @@ export interface RemoteBashDependencies {
   runner: RemoteRunner;
   sessionScope: string;
   controlPathRoot?: string;
+  platform?: NodeJS.Platform;
   muxRegistry?: Pick<SshMuxRegistry, "controllerFor">;
   activeProfile?: {
     host: string;
@@ -52,7 +53,7 @@ export interface RemoteBashResult {
   target: string;
   workdir?: string;
   mux: {
-    state: "up";
+    state: "up" | "down";
     reused: boolean;
   };
   truncation?: TruncationResult;
@@ -79,6 +80,7 @@ export async function executeRemoteBash(
       ...resolved,
       runner: dependencies.runner,
       sessionScope: dependencies.sessionScope,
+      ...(dependencies.platform !== undefined ? { platform: dependencies.platform } : {}),
       ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
     });
   const muxState = await mux.ensure();
@@ -113,7 +115,7 @@ export async function executeRemoteBash(
     truncated: truncation.truncated,
     target: resolved.identity.target,
     ...(effectiveParams.workdir !== undefined ? { workdir: effectiveParams.workdir } : {}),
-    mux: { state: "up", reused: muxState.reused },
+    mux: { state: muxState.state, reused: muxState.reused },
     ...(truncation.truncated ? { truncation } : {}),
     ...(fullOutputPath ? { fullOutputPath } : {}),
   };

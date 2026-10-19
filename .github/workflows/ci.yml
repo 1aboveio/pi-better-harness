@@ -4,10 +4,16 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Run only the Windows compatibility checks
+        type: boolean
+        default: false
 
 jobs:
   node24-sandbox:
     name: node24-sandbox
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -38,6 +44,9 @@ jobs:
   windows-verify:
     name: windows-verify
     runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -47,24 +56,54 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        id: install
         run: npm ci
+
+      # Existing SSH fixtures use /tmp; native Windows resolves it on this drive.
+      - name: Prepare SSH fixtures and report native OpenSSH
+        run: |
+          New-Item -ItemType Directory -Force -Path /tmp | Out-Null
+          & "$env:WINDIR\System32\OpenSSH\ssh.exe" -V
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Scoped on purpose: the root suite still assumes POSIX shells in places
       # (e.g. /bin/sh shebangs), so this lane proves what Windows must prove —
-      # strict types plus the Windows shell-resolution and log-redirect units —
+      # strict types, SSH contracts, shell resolution, and log redirection —
       # instead of failing on pre-existing POSIX-only expectations.
       - name: Typecheck the background-task package
         run: npm run typecheck -w pi-better-background-tasks
 
+      - name: Typecheck SSH core and extension
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm run typecheck -w ssh-core -w pi-better-ssh
+
+      - name: SSH core Windows contracts
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm test -w ssh-core
+
+      - name: SSH extension Windows integration and packaging
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: npm test -w pi-better-ssh
+
       - name: Windows process unit and integration checks
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
         working-directory: packages/pi-better-background-tasks
 
-  # Not a required check: runs the pi-better-server suite against Pi 1.x, which the workspace's Pi 0.82 cannot exercise.
+  # Exercise affected extensions against the minimum and current Pi 1.x SDKs.
   pi-1x-compat:
-    name: pi-1x-compat
+    name: pi-1x-compat (${{ matrix.pi-version }})
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        pi-version: ["1.0.0", "1.3.0"]
+    env:
+      PI_SDK_VERSION: ${{ matrix.pi-version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -76,11 +115,40 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: pi-better-server suite on Pi 1.x
-        run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.0.0 "$RUNNER_TEMP/pi-compat"
+      - name: Install selected Pi SDK without changing the lockfile
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ \
+            "@earendil-works/pi-coding-agent@$PI_SDK_VERSION" \
+            "@earendil-works/pi-ai@$PI_SDK_VERSION" \
+            "@earendil-works/pi-tui@$PI_SDK_VERSION"
+
+      - name: Verify each extension resolves the selected SDK
+        run: |
+          node --experimental-import-meta-resolve --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          import { resolve } from "node:path";
+          import { pathToFileURL } from "node:url";
+          for (const name of ["pi-better-background-tasks", "navigator", "pi-better-ssh"]) {
+            const parent = pathToFileURL(resolve("packages", name, "package.json"));
+            const entry = import.meta.resolve("@earendil-works/pi-coding-agent", parent.href);
+            const { version } = JSON.parse(readFileSync(new URL("../package.json", entry), "utf8"));
+            assert.equal(version, process.env.PI_SDK_VERSION, `${name} resolved the wrong Pi SDK`);
+            console.log(`${name}: Pi ${version} at ${entry}`);
+          }
+          NODE
+
+      - name: Typecheck affected extensions and shared modules
+        run: npm run typecheck -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
+
+      - name: Test background lifecycle, navigator, and SSH compatibility
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-sdk-compat-agent
+        run: npm test -w pi-better-background-tasks -w navigator -w ssh-core -w pi-better-ssh
 
   ci:
     name: ci
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,6 +255,7 @@ jobs:
 
   macos-sandbox:
     name: macos-sandbox
+    if: ${{ !inputs.windows_only }}
     runs-on: macos-latest
     env:
       # Turns "no backend, so skip" into a hard failure on the lane whose whole
@@ -245,6 +314,7 @@ jobs:
 
   linux-sandbox:
     name: linux-sandbox
+    if: ${{ !inputs.windows_only }}
     runs-on: ubuntu-latest
     env:
       # Same contract as the macOS lane: a runner that has lost bubblewrap must

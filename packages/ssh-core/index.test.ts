@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import {
-  createSshMuxController,
+  createSshMuxController as createPlatformSshMuxController,
   createTmuxSessionController,
   defaultSshControlPathRoot,
   resolveSshCommand,
   wrapRemoteBashCommand,
 } from "./index.js";
 import { FakeRemoteRunner, failedResult, successfulResult } from "./test-support/index.js";
+
+const createSshMuxController = (options: Parameters<typeof createPlatformSshMuxController>[0]) =>
+  createPlatformSshMuxController({ platform: "linux", ...options });
 
 // @covers ssh-core.package
 // @level unit
@@ -30,7 +33,7 @@ describe("ssh-core package contract", () => {
     const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
     try {
       process.env.PI_CODING_AGENT_DIR = "/tmp/pi-agent-home";
-      assert.equal(defaultSshControlPathRoot(), "/tmp/pi-agent-home/ssh-control");
+      assert.equal(defaultSshControlPathRoot(), join("/tmp/pi-agent-home", "ssh-control"));
     } finally {
       if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
@@ -44,7 +47,8 @@ describe("ssh-core package contract", () => {
     try {
       process.env.PI_CODING_AGENT_DIR = `/tmp/${"long-agent-dir-".repeat(8)}`;
       const root = defaultSshControlPathRoot();
-      assert.match(root, /^\/tmp\/pi-ssh-/);
+      assert.equal(dirname(root), join("/tmp"));
+      assert.match(basename(root), /^pi-ssh-/);
       const resolved = resolveSshCommand({ command: "true", ssh: { host: "long.example" } });
       const mux = createSshMuxController({ ...resolved, runner: new FakeRemoteRunner(), sessionScope: "long-agent-dir" });
       assert.ok(Buffer.byteLength(mux.controlPath) <= 100, mux.controlPath);
@@ -129,16 +133,17 @@ describe("ssh-core package contract", () => {
     try {
       const payload = "candidate $(printf injected) 'A'\nsecond line";
       const wrapped = wrapRemoteBashCommand({
-        command: "printf '%s|%s|%s' \"$PREFIX\" \"$RELEASE_LABEL\" \"$PWD\"",
+        command: "printf '%s|%s|%s' \"$PREFIX\" \"$RELEASE_LABEL\" \"$(pwd -P)\"",
         workdir,
         env: { RELEASE_LABEL: payload, EMPTY: "" },
         preamble: "PREFIX=profile",
       });
 
-      assert.equal(execFileSync("sh", ["-c", wrapped], { encoding: "utf8" }), `profile|${payload}|${workdir}`);
+      const shellWorkdir = execFileSync("sh", ["-c", "pwd -P"], { cwd: workdir, encoding: "utf8" }).trim();
+      assert.equal(execFileSync("sh", ["-c", wrapped], { encoding: "utf8" }), `profile|${payload}|${shellWorkdir}`);
       assert.equal(execFileSync("sh", ["-c", wrapRemoteBashCommand({ command: "pwd" })], {
         cwd: workdir, encoding: "utf8",
-      }).trim(), realpathSync(workdir));
+      }).trim(), shellWorkdir);
       assert.throws(() => wrapRemoteBashCommand({ command: "  " }), /remote bash command is required/);
       assert.throws(() => wrapRemoteBashCommand({ command: "true", workdir: "" }), /workdir must not be empty/);
       assert.throws(() => wrapRemoteBashCommand({ command: "true", env: { "BAD-NAME": "x" } }), /invalid remote environment variable name/);
@@ -210,7 +215,8 @@ describe("ssh-core package contract", () => {
 
       assert.equal(mux.controlPath, sameIdentity.controlPath);
       assert.notEqual(mux.controlPath, differentScope.controlPath);
-      assert.match(mux.controlPath, new RegExp(`^${controlPathRoot.replaceAll("/", "\\/")}\\/cm-[a-f0-9]{32}$`));
+      assert.equal(dirname(mux.controlPath), resolve(controlPathRoot));
+      assert.match(basename(mux.controlPath), /^cm-[a-f0-9]{32}$/);
 
       const opened = await mux.ensure();
       const reused = await mux.ensure();
@@ -218,7 +224,7 @@ describe("ssh-core package contract", () => {
       assert.equal(opened.reused, false);
       assert.equal(reused.state, "up");
       assert.equal(reused.reused, true);
-      assert.equal(statSync(controlPathRoot).mode & 0o777, 0o700);
+      if (process.platform !== "win32") assert.equal(statSync(controlPathRoot).mode & 0o777, 0o700);
 
       assert.deepEqual(runner.runCalls[0]?.argv, [
         "ssh",
@@ -410,7 +416,7 @@ describe("ssh-core package contract", () => {
       const actualRoot = join(fixtureRoot, "actual");
       const linkedRoot = join(fixtureRoot, "linked");
       mkdirSync(actualRoot);
-      symlinkSync(actualRoot, linkedRoot, "dir");
+      symlinkSync(resolve(actualRoot), linkedRoot, process.platform === "win32" ? "junction" : "dir");
       const linkedMux = createSshMuxController({
         ...resolved,
         runner,
@@ -419,6 +425,48 @@ describe("ssh-core package contract", () => {
       });
 
       await assert.rejects(() => linkedMux.status(), /ControlPath root must be a real directory/);
+      assert.equal(runner.runCalls.length, 0);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("disables mux management on Windows without creating control files or running SSH", async () => {
+    const runner = new FakeRemoteRunner();
+    const resolved = resolveSshCommand({ command: "true", ssh: { host: "windows.example" } });
+    const mux = createSshMuxController({
+      ...resolved, runner, sessionScope: "windows-session", platform: "win32",
+      controlPathRoot: `/unused/${"x".repeat(150)}`,
+    });
+
+    assert.equal(mux.controlPath, "");
+    assert.equal((await mux.ensure()).reused, false);
+    assert.equal((await mux.status()).state, "down");
+    assert.match((await mux.status()).detail, /disabled on Windows/);
+    assert.equal((await mux.cleanup()).state, "not_running");
+    assert.equal(runner.runCalls.length, 0);
+    assert.deepEqual(mux.withMux(resolved.commandSpec).argv?.slice(-9), [
+      "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ControlPath=none",
+      "--", "windows.example", "true",
+    ]);
+  });
+
+  it("rejects Windows socket forwarding without running SSH or removing local files", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-win-fwd-");
+    try {
+      const localPath = join(fixtureRoot, "local.sock");
+      writeFileSync(localPath, "keep this file");
+      const runner = new FakeRemoteRunner();
+      const mux = createSshMuxController({
+        ...resolveSshCommand({ command: "true", ssh: { host: "windows.example" } }),
+        runner, sessionScope: "windows-forward", platform: "win32",
+        controlPathRoot: join(fixtureRoot, "control"),
+      });
+
+      await assert.rejects(() => mux.forwardUnixSocket(localPath, "/remote.sock"), /forwarding.*not supported on Windows/);
+      await assert.rejects(() => mux.cancelUnixSocketForward(localPath, "/remote.sock"), /forwarding.*not supported on Windows/);
+      assert.equal(await readFile(localPath, "utf8"), "keep this file");
+      assert.equal(existsSync(join(fixtureRoot, "control")), false);
       assert.equal(runner.runCalls.length, 0);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });

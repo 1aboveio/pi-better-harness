@@ -62,6 +62,7 @@ const SshProfileParams = Type.Object({
 export interface RegisterRemoteBashDependencies {
   runner: RemoteBashDependencies["runner"];
   controlPathRoot?: string;
+  platform?: NodeJS.Platform;
   getActiveProfile?: () => SshProfile | undefined;
   muxRegistry?: SshMuxRegistry;
   onResult?: (result: RemoteBashResult, params: { host?: string }, ctx: ExtensionContext) => void | Promise<void>;
@@ -76,7 +77,7 @@ export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterR
   pi.registerTool({
     name: "remote_bash",
     label: "Remote Bash",
-    description: `Run one short remote bash command synchronously over a reusable SSH ControlMaster. Pass an SSH Host alias or user@host, or omit host when an active SSH profile supplies it; optional workdir, env, timeout, and structured identity fields are supported. Required SSH safety options cannot be disabled. Returns remote output and exitCode without turning a non-zero remote exit into a tool failure. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first), with full output saved locally. For long-running remote work, use bg_task_spawn (or bg_task_* lifecycle tools) with structured ssh instead. Pi's built-in bash remains local.`,
+    description: `Run one short remote bash command synchronously over SSH. Reuses a ControlMaster on Linux/macOS; uses independent connections on Windows. Pass an SSH Host alias or user@host, or omit host when an active SSH profile supplies it; optional workdir, env, timeout, and structured identity fields are supported. Required SSH safety options cannot be disabled. Returns remote output and exitCode without turning a non-zero remote exit into a tool failure. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first), with full output saved locally. For long-running remote work, use bg_task_spawn (or bg_task_* lifecycle tools) with structured ssh instead. Pi's built-in bash remains local.`,
     promptSnippet: "Run a short synchronous remote command through safe reusable SSH",
     promptGuidelines: [
       "Use remote_bash for short synchronous remote commands instead of writing ssh commands inside local bash.",
@@ -89,6 +90,7 @@ export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterR
       const result = await executeRemoteBash(params, {
         runner: dependencies.runner,
         sessionScope,
+        ...(dependencies.platform !== undefined ? { platform: dependencies.platform } : {}),
         ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
         ...(activeProfile ? { activeProfile } : {}),
         ...(dependencies.muxRegistry ? { muxRegistry: dependencies.muxRegistry } : {}),
@@ -106,6 +108,7 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
   let activeProfile: SshProfile | undefined;
   const muxRegistry = dependencies.muxRegistry ?? createSshMuxRegistry({
     runner: dependencies.runner,
+    ...(dependencies.platform !== undefined ? { platform: dependencies.platform } : {}),
     ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
     ...(dependencies.muxEntries ? { entries: dependencies.muxEntries } : {}),
   });
