@@ -390,7 +390,7 @@ describe("registered extension path: session_start reload cleanup", () => {
 
     // @covers navigator.hardening
     // @level integration
-    it("second session_start disposes live detail/arm timers, clears confirm, does not stack editor, republishes running-only affordance", async () => {
+    it("second session_start disposes live detail/arm timers, clears confirm, does not stack editor, keeps the persistent footer clear", async () => {
         timerSpies = installTimerSpies();
         const nav = bootRegisteredNavigator(mod, { writeMeta: registry.writeMeta, metaBase });
         const runningId = nav.seedRun({
@@ -408,15 +408,13 @@ describe("registered extension path: session_start reload cleanup", () => {
             startedAt: 50,
             endedAt: 90,
         });
-        const runningHint = "← work · 1";
-
-        // 1) First session_start installs the empty-editor wrapper + running-only footer.
+        // 1) First session_start installs the empty-editor wrapper without a persistent footer.
         await nav.start();
         assert.equal(nav.setEditorCount, 1, "first session_start installs editor once");
         assert.equal(nav.ui.factory?.__piBetterHarnessNavigatorFactory, true, "factory is marked");
         const footerAfterStart = nav.lastStatus("background-work-nav");
         const widgetAfterStart = nav.lastWidget("subagents");
-        assert.equal(footerAfterStart, runningHint, "first session_start publishes running-only count footer");
+        assert.equal(footerAfterStart, undefined, "running work must not publish a persistent count footer");
         assert.equal(widgetAfterStart, undefined, "running session_start clears the retired legacy subagent widget");
         assert.ok(
             nav.widgetCalls.some((c) => c[0] === "subagents" && c[1] === undefined),
@@ -469,14 +467,14 @@ describe("registered extension path: session_start reload cleanup", () => {
         assert.equal(nav.ui.factory, editorBefore, "same marked factory remains installed");
         assert.equal(nav.ui.factory?.__piBetterHarnessNavigatorFactory, true);
 
-        // 5c) Footer count is republished after lastNavigatorHint reset.
+        // 5c) Reload clears any stale footer badge without republishing a count.
         const footerAfterReload = nav.lastStatus("background-work-nav");
         const widgetAfterReload = nav.lastWidget("subagents");
-        assert.equal(footerAfterReload, runningHint, "reload republishes running-only navigator count footer");
+        assert.equal(footerAfterReload, undefined, "reload keeps the persistent navigator footer clear");
         assert.equal(widgetAfterReload, undefined, "reload keeps the retired legacy subagent widget cleared");
         assert.ok(
-            nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "background-work-nav" && typeof c[1] === "string"),
-            "reload path must re-invoke setStatus for the running count footer",
+            nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "background-work-nav" && c[1] === undefined),
+            "reload path must clear stale navigator footer state",
         );
         assert.ok(
             nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && c[1] === undefined),

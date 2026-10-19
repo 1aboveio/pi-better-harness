@@ -512,7 +512,7 @@ test("compact rows color the tool icon and name together, while arguments remain
   assert.match(rendered(component), /RESULT_BODY_SENTINEL/);
 });
 
-test("running names shimmer through both themes without changing text, width, or argument color", (t) => {
+test("running names and details shimmer through both themes without changing text or width", (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
   const hook = installMinimalOutputHook(prototype, () => themeModule.theme);
   handles.push(hook);
@@ -520,7 +520,8 @@ test("running names shimmer through both themes without changing text, width, or
   const components = [];
   let redraws = 0;
   const frames = [];
-  const ui = animationUI(() => components, () => { redraws++; frames.push(components.map(component => component.render(100)[0])); });
+  let renderWidth = 100;
+  const ui = animationUI(() => components, () => { redraws++; frames.push(components.map(component => component.render(renderWidth)[0])); });
   for (const name of ["read", "external_tool"]) {
     const component = new ToolExecutionComponent(name, `shimmer-${name}`, { path: "/tmp/demo" }, {}, undefined, ui, process.cwd());
     components.push(component);
@@ -530,14 +531,15 @@ test("running names shimmer through both themes without changing text, width, or
     const first = components.map(component => component.render(100)[0]);
     frames.length = 0;
     redraws = 0;
-    for (let frame = 0; frame < 10; frame++) t.mock.timers.tick(80);
-    assert.equal(redraws, 10, "two tools share one render request per 80ms tick");
+    for (let frame = 0; frame < 30; frame++) t.mock.timers.tick(80);
+    assert.equal(redraws, 30, "two tools share one render request per 80ms tick");
     for (let index = 0; index < components.length; index++) {
       assert.ok(frames.some(frame => frame[index] !== first[index]), "highlight travels through each running name");
+      const detailColors = new Set(frames.map(frame => /\x1b\[38;(?:2;\d+;\d+;\d+|5;\d+)mo\x1b\[22m/.exec(frame[index])?.[0]));
+      assert.ok(detailColors.size > 1, "the highlight reaches the final character of the detail");
       for (const frame of frames) {
         assert.equal(stripVTControlCharacters(frame[index]), stripVTControlCharacters(first[index]));
         assert.equal(visibleWidth(frame[index]), visibleWidth(first[index]));
-        assert.ok(frame[index].includes(themeModule.theme.fg("dim", "/tmp/demo")));
         assert.doesNotMatch(frame[index], /\x1b\[(?:48|4[0-7])[;m]/);
       }
     }
@@ -545,10 +547,47 @@ test("running names shimmer through both themes without changing text, width, or
       for (const component of components) assert.ok(component.render(width).every(line => visibleWidth(line) <= width));
     }
   }
+  components[0] = new ToolExecutionComponent("external_tool", "long-detail", { path: "x".repeat(5000) }, {}, undefined, ui, process.cwd());
+  renderWidth = 40;
+  const clipped = components[0].render(renderWidth)[0];
+  frames.length = 0;
+  for (let frame = 0; frame < 30; frame++) t.mock.timers.tick(80);
+  assert.ok(new Set(frames.map(frame => frame[0])).size > 1, "long hidden details do not stretch the sweep beyond the visible row");
+  for (const frame of frames) assert.equal(stripVTControlCharacters(frame[0]), stripVTControlCharacters(clipped));
+  assert.equal(visibleWidth(clipped), 40);
   for (const component of components) component.updateResult(payload, false);
   redraws = 0;
   t.mock.timers.tick(800);
   assert.equal(redraws, 0, "completed tools stop the shared clock immediately");
+});
+
+test("one shimmer sweep reaches every character of the name and detail", () => {
+  for (const mode of ["truecolor", "256color"]) {
+    const getFgAnsi = token => token === "accent" ? "\x1b[38;2;80;120;160m"
+      : token === "dim" ? "\x1b[38;2;100;100;100m" : "\x1b[38;2;245;245;245m";
+    const theme = { getFgAnsi, getColorMode: () => mode, fg: (token, text) => `${getFgAnsi(token)}${text}\x1b[39m` };
+    const label = "Read";
+    const detail = "/tmp/e\u0301-\ud83d\udc69\u200d\ud83d\udcbb";
+    const colors = new Map();
+    for (let time = 0; time < 2400; time += 40) {
+      const frame = toolIdentity("*", label, "accent", theme, time, detail);
+      assert.equal(stripVTControlCharacters(frame), `* ${label}  ${detail}`);
+      assert.ok(frame.includes("e\u0301"));
+      assert.ok(frame.includes("\ud83d\udc69\u200d\ud83d\udcbb"));
+      const characters = [...frame.matchAll(/(\x1b\[38;(?:2;\d+;\d+;\d+|5;\d+)m)([^\x1b]+)/gu)].slice(1);
+      characters.forEach(([_, color, text], index) => {
+        if (!text.trim()) return;
+        if (!colors.has(index)) colors.set(index, new Set());
+        colors.get(index).add(color);
+      });
+    }
+    assert.equal(colors.size, 12, "all non-space graphemes participate in the sweep");
+    for (const values of colors.values()) assert.ok(values.size > 1);
+    for (const tone of ["accent", "muted", "error"]) {
+      assert.equal(toolIdentity("*", label, tone, theme, undefined, detail),
+        `${theme.fg(tone, "* Read")}  ${theme.fg("dim", detail)}`);
+    }
+  }
 });
 
 test("tool-name shimmer preserves Unicode and degrades to static color for terminal-defined palettes", () => {
@@ -919,6 +958,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
   const handlers = new Map();
   const commands = new Map();
   const entries = [];
+  const statuses = [];
   const sessionManager = SessionManager.inMemory(process.cwd());
   let failSave = false;
   const pi = { events: events(), on: (name, handler) => handlers.set(name, handler),
@@ -935,7 +975,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
   let expanded = false;
   let page;
   const ctx = { mode: "tui", sessionManager, ui: {
-    theme: themeModule.theme, notify() {}, setStatus() {}, getToolsExpanded: () => expanded,
+    theme: themeModule.theme, notify() {}, setStatus: (...args) => statuses.push(args), getToolsExpanded: () => expanded,
     setToolsExpanded(value) { expanded = value; component.setExpanded(value); },
     custom(build) { return new Promise(resolve => { page = build({ requestRender() {} }, themeModule.theme, {}, resolve); }); },
   } };
@@ -982,6 +1022,7 @@ test("the contributed hub control changes real tool rows, shares command state, 
   await handlers.get("session_start")({}, ctx);
   registry.refresh();
   assert.equal(registry.controls().length, 2);
+  assert.deepEqual(statuses, [], "hub changes, commands, branch restoration, and reload must not publish a footer");
   registry.dispose();
 });
 
@@ -1083,18 +1124,19 @@ test("print and RPC modes refuse the toggle without changing saved preferences",
   }
 });
 
-test("the command toggles existing rows, persists session preference, and restores the hook on reload", async () => {
+test("the command toggles existing rows, persists session preference, and restores the hook on reload without a footer", async () => {
   const commands = new Map();
   const handlers = new Map();
   const entries = [];
   const notices = [];
+  const statuses = [];
   let expanded = false;
   const existing = tool("unknown_external_tool");
   const ctx = {
     mode: "tui", cwd: process.cwd(),
     sessionManager: { getBranch: () => entries },
     ui: {
-      notify: (message) => notices.push(message), setStatus() {},
+      notify: (message) => notices.push(message), setStatus: (...args) => statuses.push(args),
       getToolsExpanded: () => expanded,
       setToolsExpanded(value) { if (expanded === value) return; expanded = value; existing.setExpanded(value); },
     },
@@ -1122,6 +1164,7 @@ test("the command toggles existing rows, persists session preference, and restor
   assert.equal(entries.at(-1).data.enabled, false);
   assert.match(notices.at(-1), /Normal tool output restored/);
   assert.match(notices.find((message) => message.startsWith("Minimal tool output on")), /Compact call headers remain visible/);
+  assert.deepEqual(statuses, [], "startup, mode changes, and reload must not publish a footer");
 });
 
 const bundledCli = process.env.PI_MINIMAL_OUTPUT_HOST_CLI ?? join(sdk, "bundle/cli.js");

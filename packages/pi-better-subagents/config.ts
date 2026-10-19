@@ -8,7 +8,7 @@
  * `defaultTools` absent → the built-in SAFE_DEFAULT_TOOLS.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -89,19 +89,23 @@ export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetc
 export const SAFE_CLEAN_TOOLS = "read, bash";
 
 let cached: SubagentConfig | undefined;
+let cachedIdentity: string | undefined;
+let configOverrideForTests = false;
 let configPathForTests: string | undefined;
 let bundledConfigPathForTests: string | undefined;
 
 /** Test seam. Pass undefined to reload config.json on the next loadConfig call. */
 export function setConfigForTests(next: SubagentConfig | undefined): void {
     cached = next;
+    cachedIdentity = undefined;
+    configOverrideForTests = next !== undefined;
 }
 
 /** Test seam. Isolate user config, optionally supplying a package fallback. */
 export function setConfigPathForTests(path: string | undefined, bundledPath?: string): void {
     configPathForTests = path;
     bundledConfigPathForTests = bundledPath;
-    cached = undefined;
+    setConfigForTests(undefined);
 }
 
 export function configPath(): string {
@@ -128,8 +132,12 @@ function savedConfig(): SubagentConfig {
     return user === undefined ? {} : parseConfig(user);
 }
 
+function bundledConfigPath(): string | undefined {
+    return bundledConfigPathForTests ?? (configPathForTests ? undefined : join(selfDir(), "config.json"));
+}
+
 function bundledConfig(): SubagentConfig {
-    const path = bundledConfigPathForTests ?? (configPathForTests ? undefined : join(selfDir(), "config.json"));
+    const path = bundledConfigPath();
     if (!path) return {};
     try {
         return readConfig(path);
@@ -138,12 +146,31 @@ function bundledConfig(): SubagentConfig {
     }
 }
 
+function configIdentity(): string {
+    const paths = [configPath(), bundledConfigPath(),
+        configPathForTests ? undefined : join(piAgentDir(), "extensions", "pi-better-subagents-config.json")];
+    return JSON.stringify(paths.map(path => {
+        if (!path) return null;
+        try {
+            const stat = statSync(path, { bigint: true });
+            return [path, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String);
+        } catch (error) {
+            return [path, (error as NodeJS.ErrnoException).code];
+        }
+    }));
+}
+
 /** Saved user choices take precedence; missing/invalid files contribute no keys. */
 export function loadConfig(): SubagentConfig {
-    if (cached) return cached;
+    if (configOverrideForTests) return cached!;
+    const identity = configIdentity();
+    if (cached && cachedIdentity === identity) return cached;
     let user: SubagentConfig = {};
     try { user = savedConfig(); } catch { /* retain package fallback */ }
     cached = { ...bundledConfig(), ...user };
+    // Keep the pre-read identity: migration or a concurrent replacement must
+    // trigger another read rather than label an older value with a newer stat.
+    cachedIdentity = identity;
     return cached;
 }
 
@@ -162,10 +189,10 @@ export function writeSubagentSettings(settings: { delegationMode: DelegationMode
 
 function writeConfigSettings(settings: Partial<SubagentConfig>, path: string): void {
     if (path === configPath()) savedConfig();
-    const current = updateHarnessSetting("subagents", previous => ({
+    updateHarnessSetting("subagents", previous => ({
         ...(previous === undefined ? {} : parseConfig(previous)), ...settings,
     }), { agentDir: () => dirname(path) });
-    if (path === configPath()) cached = { ...bundledConfig(), ...current };
+    if (path === configPath()) setConfigForTests(undefined);
 }
 
 /** Normalize a comma/space tool list to pi's bare comma form: "a, b" → "a,b". */

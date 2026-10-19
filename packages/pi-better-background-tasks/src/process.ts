@@ -95,6 +95,10 @@ export function withWindowsLogRedirect(spec: CommandSpec, logPath: string): Comm
     return {
       ...spec,
       shell: true,
+      // The trampoline only redirects and execs an absolute program; sourcing
+      // the login profile (/etc/profile and friends) adds seconds of cold-start
+      // cost on a Windows runner and nothing the exec needs.
+      loginShell: false,
       // The MSYS2 runtime rewrites POSIX-looking argv (e.g. `/c`, `/opt/x.sh`)
       // when exec'ing native Windows binaries. Node spawn passed argv verbatim,
       // so conversion is disabled to keep raw-argv semantics unchanged. The
@@ -404,7 +408,7 @@ export function commandExecution(spec: CommandSpec): { execPath: string; execArg
     const [command, ...args] = spec.argv!;
     return { execPath: command!, execArgs: args };
   }
-  return { execPath: resolveDefaultShell(), execArgs: ["-lc", spec.command!] };
+  return { execPath: resolveDefaultShell(), execArgs: [spec.loginShell === false ? "-c" : "-lc", spec.command!] };
 }
 
 /** Stdio for a spawned task: stdin is always ignored; stdout/stderr are piped (collected) or ignored (redirected into the log by the child itself). */

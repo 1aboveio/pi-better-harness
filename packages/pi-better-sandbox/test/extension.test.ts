@@ -367,7 +367,7 @@ test("user_bash routes ! and !! through the same confined operations as the bash
     assert.equal(first.operations, second.operations);
 });
 
-test("every session start publishes an inactive policy and an available footer by default", async () => {
+test("every session start publishes an inactive policy without a footer by default", async () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("lifecycle");
@@ -378,11 +378,14 @@ test("every session start publishes an inactive policy and an available footer b
         assert.equal(policy?.state, "disabled", `consumer state after ${reason}`);
         assert.match(policy?.reason ?? "", /inactive by default/);
         assert.equal(policy?.projectRoot, root);
-        assert.equal(started.statuses.at(-1), "sandbox · available");
+        assert.deepEqual(started.statuses, []);
+        await recorded.handlers.get("session_tree")?.({}, started.ctx);
+        assert.equal(recorded.published.at(-1)?.state, "disabled");
+        assert.deepEqual(started.statuses, []);
     }
 });
 
-test("an unsafe launch directory publishes a failed policy, a loud footer, and a warning", async () => {
+test("an unsafe launch directory publishes a failed policy and a warning without a footer", async () => {
     const recorded = record();
     piBetterSandbox(recorded.pi);
 
@@ -390,7 +393,7 @@ test("an unsafe launch directory publishes a failed policy, a loud footer, and a
 
     const policy = recorded.published.at(-1);
     assert.equal(policy?.state, "failed");
-    assert.equal(started.statuses.at(-1), "sandbox · FAILED");
+    assert.deepEqual(started.statuses, []);
     assert.match(started.notifications.at(-1)?.text ?? "", /Relaunch pi/);
     assert.equal(started.notifications.at(-1)?.kind, "warning");
 });
@@ -486,12 +489,14 @@ test("a confirmed /sandbox off disables it, and /sandbox on restores it without 
 
     assert.equal(confirming.confirmations.length, 1);
     assert.equal(recorded.published.at(-1)?.state, "disabled");
-    assert.equal(started.statuses.at(-1), "sandbox · OFF");
+    assert.deepEqual(started.statuses, []);
+    assert.deepEqual(confirming.statuses, []);
 
     await recorded.commands.get("sandbox")?.handler("on", confirming.ctx);
 
     assert.equal(recorded.published.at(-1)?.state, "enabled");
-    assert.equal(started.statuses.at(-1), `sandbox · on · confirmed-off`);
+    assert.deepEqual(started.statuses, []);
+    assert.deepEqual(confirming.statuses, []);
 });
 
 test("/sandbox default on persists opt-in and applies it to future sessions", async () => {
@@ -587,7 +592,7 @@ test("confirmed command off persists its switch and retains permission details a
     piBetterSandbox(restored.pi);
     const reloaded = await startSession(restored, root, "reload", false);
     assert.equal(restored.published.at(-1)?.permissions?.enabled, false);
-    assert.equal(reloaded.statuses.at(-1), "sandbox · OFF");
+    assert.deepEqual(reloaded.statuses, []);
     assert.equal(restored.published.at(-1)?.permissions?.network, false);
     assert.equal(restored.published.at(-1)?.subagentPermissions?.outsideProject, "off");
     assert.equal(hasSandboxSetting("sandboxPermissions"), false);

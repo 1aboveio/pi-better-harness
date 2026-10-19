@@ -4,7 +4,125 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [pi-better-harness@0.31.1] - 2026-10-18
+
+### Changed
+
+- Bundle Goal 0.10.1. Keep all other component versions unchanged.
+
+## [pi-better-goal@0.10.1] - 2026-10-18
+
+### Fixed
+
+- Allow completion and handback after a fresh live scheduler sync confirms the workflow has settled, using read-only copies without changing the bound run files. (#553, #552)
+
+## [pi-better-harness@0.31.0] - 2026-10-18
+
+### Changed
+
+- Bundle Goal 0.10.0. Keep Sandbox 0.12.1, SSH 0.1.3, Background Tasks 0.9.1, Subagents 0.19.1, and Plan 0.9.1.
+
+## [pi-better-goal@0.10.0] - 2026-10-18
+
+### Added
+
+- Goal: scheduler-backed workflow gates. `update_goal` complete and `release_workflow` consult the bound resolve-issues scheduler and refuse while the run has work it can do itself (failing open with a warning when the scheduler cannot run); invoking `/skill:rush-issues` or `/skill:resolve-issues` with no active goal binds one; a scheduler `wait` schedules the next continuation at its stated time without counting as no progress.
+
+## [pi-better-harness@0.30.1] - 2026-10-17
+
+### Changed
+
+- Remove the routine minimal tool-output footer badge while preserving tool-output settings and rendering.
+- Bundle Sandbox 0.12.1, SSH 0.1.3, Background Tasks 0.9.1, Subagents 0.19.1, and Goal 0.9.1. Keep Plan at 0.9.1.
+
+## [pi-better-sandbox@0.12.1] - 2026-10-17
+
+### Changed
+
+- Remove the routine sandbox availability footer badge while retaining sandbox enforcement and actionable warnings.
+
+## [pi-better-ssh@0.1.3] - 2026-10-17
+
+### Fixed
+
+- Update the vendored shared SSH runtime with Unix-socket forwarding over multiplexed connections and compatibility with Node.js native TypeScript type stripping.
+- Fall back to a short per-user control socket directory when the default SSH control path would exceed the Unix-socket path limit, and require the control socket directory to be owned by the current user.
+
+## [pi-better-background-tasks@0.9.1] - 2026-10-17
+
+### Changed
+
+- Remove the shared work-count footer badge while preserving the keyboard work navigator.
+
+### Fixed
+
+- Update the vendored shared SSH runtime with Unix-socket forwarding over multiplexed connections and compatibility with Node.js native TypeScript type stripping.
+- Fall back to a short per-user control socket directory when the default SSH control path would exceed the Unix-socket path limit, and require the control socket directory to be owned by the current user.
+- Run the Windows raw-argv trampoline with non-login `bash -c` to avoid loading shell profiles on every spawn. Shell-string commands retain their login-shell behavior. (#533)
+
+## [pi-better-subagents@0.19.1] - 2026-10-17
+
+### Changed
+
+- Remove the shared work-count footer badge while preserving the keyboard work navigator.
+
+### Fixed
+
+- Guard asynchronous child finalizers and recovery-snapshot callbacks against stale session contexts, and clear the captured UI context on session shutdown. (#528)
+
+## [pi-better-goal@0.9.1] - 2026-10-17
+
+### Changed
+
+- Remove the routine background-count footer badge while preserving paused, stalled, and question feedback.
+
+## [pi-better-harness@0.30.0] - 2026-10-16
+
+### Changed
+
+- Bundle Subagents 0.19.0 with model-visible live settings, read-only capacity inspection, and launch-time enforcement of cap changes. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.19.0] - 2026-10-16
+
+### Added
+
+- Add the read-only `subagent_settings` tool with effective delegation mode, concurrency limit, setting sources, a stable revision, and running/reserved/available slots.
+- Refresh one temporary settings context block before every model request, including continuations after mid-run settings changes, without accumulating snapshots in session history.
+
+### Fixed
+
+- Refresh cached configuration when saved settings change, preserving session overrides.
+- Recheck live capacity immediately before child creation so a lowered cap applies to launches still awaiting preparation, without stopping existing children.
+
+## [pi-better-harness@0.29.2] - 2026-10-16
+
+### Fixed
+
+- Extend the active-tool shimmer through the entire visible tool name and detail text, preserving dim details between highlight passes and stable terminal layout.
+
+### Changed
+
+- Bundle Plan 0.9.1 with eligible completion counts and delayed hiding of canceled rows. Keep all other component versions unchanged.
+
+## [pi-better-plan@0.9.1] - 2026-10-16
+
+### Fixed
+
+- Exclude canceled workflow items from the completion-count denominator, recognizing both `canceled` and `cancelled` spellings.
+- Hide canceled rows 30 seconds after first observing cancellation without deleting workflow records. Preserve deadlines across session reloads and show reactivated items immediately.
+- Keep an open full-plan view synchronized with cancellation, expiry, and reactivation.
+
+## [pi-better-harness@0.29.1] - 2026-10-15
+
+### Changed
+
+- Bundle Goal 0.9.0 with the workflow re-read after compaction. Keep all other component versions unchanged. (#462)
+
+## [pi-better-goal@0.9.0] - 2026-10-15
+
+### Added
+
+- After a context compaction, re-inject the bound workflow coordinator skill as a `workflow-rehydrate` message. A skill's `scripts/rehydrate.mjs` (or `rehydrate.mjs`) output decides the text, and empty output injects nothing; without a script, or when it fails, the model is told to re-read its `SKILL.md` in full. (#462)
 
 ## [pi-better-harness@0.29.0] - 2026-10-11
 

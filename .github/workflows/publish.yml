@@ -61,6 +61,8 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           bwrap --ro-bind / / -- /bin/true
+          npm install --global @openai/codex@0.159.2
+          test "$(codex --version)" = "codex-cli 0.159.2"
 
       - name: Require the Linux Bubblewrap backend
         run: node --import tsx scripts/require-sandbox-backend.mjs linux-bubblewrap

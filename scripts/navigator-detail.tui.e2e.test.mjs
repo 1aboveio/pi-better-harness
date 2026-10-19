@@ -77,6 +77,7 @@ test("golden path: navigate both providers and read complete Unicode logs withou
       && screen.includes("background golden path") && screen.includes("中文")
       && !screen.includes("provider Background Tasks") && !screen.includes("provider Subagents"));
     saveScreen("overview", overview);
+    assertNoPersistentFooterBadges(overview);
     assertBlankRowBefore(overview, "subagents", "navigator section");
     sendKey("Down");
     const subagentPage = waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("provider Subagents")
@@ -126,6 +127,7 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", "golden-editor-alive"]);
     const returned = waitForScreen((screen) => screen.includes("golden-editor-alive") && !screen.includes("provider Background Tasks"));
     saveScreen("returned-to-editor", returned);
+    assertNoPersistentFooterBadges(returned);
     writeResult("pass");
   } catch (error) {
     try { saveScreen("failure", captureScreen()); } catch { /* The TUI may have exited. */ }
@@ -320,6 +322,7 @@ function launchPi(name, { multilineDiagnostic = false } = {}) {
   writeFileSync(probePath, probeExtension(probeStatePath, focusStealPath, replacePath, multilineDiagnostic));
   startPiSession();
   const state = waitForJson(probeStatePath);
+  waitForJson(`${probeStatePath}.activity.json`);
   const piPid = Number(execFileSync("tmux", [...tmuxArgs, "display-message", "-p", "-t", session, "#{pane_pid}"], { encoding: "utf8" }).trim());
   return { state, piPid, focusStealPath, replacePath };
 }
@@ -378,9 +381,18 @@ function probeExtension(path, focusStealPath, replacePath, multilineDiagnostic) 
   // test creates focusStealPath, the way any extension that wraps the editor does (with
   // "wrap" in the file, inside its own proxy component), and restores Pi's default
   // editor when it creates replacePath.
-  return `export default function(pi) {
+  return `import * as fs from "node:fs";
+export default function(pi) {
+  const activityPath = ${JSON.stringify(`${path}.activity.json`)};
+  pi.events.on("pi-better-goal:activity", (snapshot) => {
+    if (snapshot.activeBackgroundCount > 0 && !fs.existsSync(activityPath)) fs.writeFileSync(activityPath, JSON.stringify(snapshot));
+  });
   pi.on("session_start", async (_event, ctx) => {
     const fs = await import("node:fs");
+    pi.events.emit("pi-better-goal:register-provider", {
+      id: "footer-fixture",
+      getActivity: () => ({ providerId: "footer-fixture", items: [{ id: "footer-work", status: "running", active: true }] }),
+    });
     fs.writeFileSync(${JSON.stringify(path)}, JSON.stringify({ cwd: ctx.cwd, sessionId: ctx.sessionManager?.getSessionId() }, null, 2));
     if (${JSON.stringify(multilineDiagnostic)}) {
       const provider = globalThis[Symbol.for("pi-better-harness.navigator.state")]?.providers.get("subagents");
@@ -484,6 +496,11 @@ function assertSingleInputFrame(screen, pageName) {
     /^─{20,}$/u,
     `${pageName} input frame must be flush with the bottom so no second editor can render below it:\n${screen}`,
   );
+}
+
+function assertNoPersistentFooterBadges(screen) {
+  assert.doesNotMatch(screen, /← work ·|\bbg \d+|tools: minimal|sandbox · available/u,
+    `persistent operational badges must not appear:\n${screen}`);
 }
 
 function assertBlankRowBefore(screen, heading, sectionName) {
