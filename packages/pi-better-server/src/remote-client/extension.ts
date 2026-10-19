@@ -1,8 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, VERSION } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { DaemonClient } from "../client.ts";
 import { resolveTarget, type Target } from "../remote/target.ts";
@@ -10,6 +8,8 @@ import { resolveSession } from "../remote/sessions.ts";
 import { getPi12Bridge, installPi12Bridge } from "./pi-1.2-bridge.ts";
 import { planPackageSync, readLocalPackageCatalog, type PackageCatalog } from "./packages.ts";
 import { RemoteClientSession } from "./session.ts";
+import { availableRemoteHosts, chooseRemoteAction, chooseRemoteHost, remoteArgumentCompletions, showRemoteHostList } from "./menu.ts";
+import { rememberedServerDir, rememberRemoteHost } from "./profiles.ts";
 
 const USAGE = "/remote <ssh-alias> [--cwd <remote-path>] [--session <id>] [--remote-dir <server-dir>]";
 
@@ -31,7 +31,8 @@ export function checkedRemoteWorkspace(requested: string | undefined, actual: st
 export default function remoteClientExtension(pi: ExtensionAPI): void {
   if (VERSION === "1.2.0") installPi12Bridge();
   pi.registerCommand("remote", {
-    description: "Connect this native Pi UI to a remote Pi workspace over SSH",
+    description: "Open remote connection options or connect to an SSH host",
+    getArgumentCompletions: async (prefix) => remoteArgumentCompletions(prefix, [...new Set(["list", ...await availableRemoteHosts()])]),
     handler: async (args, ctx) => {
       // The command context is invalidated when its local runtime is retired.
       const ui = ctx.ui;
@@ -41,11 +42,16 @@ export default function remoteClientExtension(pi: ExtensionAPI): void {
       try {
         if (VERSION !== "1.2.0") throw new Error(`Native /remote currently requires Pi 1.2.0; this client is ${VERSION}. The local session is unchanged.`);
         if (!ctx.hasUI) throw new Error("/remote requires Pi's interactive terminal UI");
+        if (args.trim() === "list") { await showRemoteHostList(ui, await availableRemoteHosts()); return; }
+        if (args.trim() === "disconnect") { ui.notify("This Pi session is already local", "info"); return; }
         if (!ctx.isIdle()) throw new Error("Wait for the local session to finish or abort it before connecting remotely");
-        const options = parseRemoteArgs(args);
+        const chosenHost = args.trim() ? undefined : await chooseRemoteHost(ui, await availableRemoteHosts());
+        if (!args.trim() && !chosenHost) return;
+        const options = parseRemoteArgs(args.trim() || chosenHost!);
         const bridge = getPi12Bridge(ctx.sessionManager);
         if (!bridge) throw new Error("The Pi native remote bridge was not captured. Load this extension at Pi startup, then try /remote again.");
         const remoteDir = options.remoteDir ?? await rememberedServerDir(options.host);
+        await rememberRemoteHost(options.host, remoteDir).catch((error) => ui.notify(`Could not remember remote host: ${error instanceof Error ? error.message : String(error)}`, "warning"));
         // OpenSSH appends a temporary suffix; keep mux sockets short even for long agent paths.
         const controlPathRoot = join(process.env.PI_REMOTE_TMP ?? "/tmp", `pi-native-${process.getuid?.() ?? process.pid}`);
         target = await resolveTarget({ host: options.host, controlPathRoot, ...(remoteDir ? { remoteDir } : {}) });
@@ -92,8 +98,12 @@ export default function remoteClientExtension(pi: ExtensionAPI): void {
           },
           onLocalCommand: async (text) => {
             if (!/^\/remote(?:\s|$)/.test(text)) return false;
-            if (text.trim() !== "/remote disconnect") throw new Error("Use /remote disconnect before choosing another remote connection");
-            await bridge.disconnect();
+            const command = text.trim();
+            const action = command === "/remote" ? await chooseRemoteAction(ui, options.host) : command === "/remote disconnect" ? "disconnect" : command === "/remote list" ? "list" : undefined;
+            if (!["/remote", "/remote disconnect", "/remote list"].includes(command)) throw new Error("Use /remote to open connection options, /remote list to list hosts, or /remote disconnect before choosing another host");
+            if (action === "disconnect") await bridge.disconnect();
+            else if (action === "list") await showRemoteHostList(ui, await availableRemoteHosts());
+            else if (action === "details") ui.notify(`Host: ${options.host}\nWorkspace: ${remote.sessionManager.getCwd()}\nSession: ${remote.sessionId}\nModel: ${remote.model?.provider ?? "unknown"}/${remote.model?.id ?? "unknown"}`, "info");
             return true;
           },
         });
@@ -108,7 +118,7 @@ export default function remoteClientExtension(pi: ExtensionAPI): void {
         await bridge.attach(remote);
         attached = true;
         ui.setStatus("pi-remote", `SSH: ${options.host}`);
-        if (remoteDir) await rememberServerDir(options.host, remoteDir).catch(() => ui.notify("Connected, but could not save the remote server directory for the next connection", "warning"));
+
         ui.notify(`Connected to ${options.host}:${cwd}. Agent and tools execute remotely. /remote disconnect returns locally without stopping remote work.`, "info");
       } catch (error) {
         ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -140,28 +150,4 @@ async function syncPackages(client: DaemonClient, ctx: ExtensionCommandContext, 
   if (!approved) return;
   ctx.ui.notify("Installing approved remote extensions...", "info");
   await client.call({ type: "client_packages_install", cwd, packages: changes });
-}
-
-function hostProfile(host: string): string {
-  return join(getAgentDir(), "remote-client", "hosts", `${encodeURIComponent(host)}.json`);
-}
-
-async function rememberedServerDir(host: string): Promise<string | undefined> {
-  let text: string;
-  try { text = await readFile(hostProfile(host), "utf8"); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-  const value: unknown = JSON.parse(text);
-  if (!value || typeof value !== "object" || typeof (value as { serverDir?: unknown }).serverDir !== "string") throw new Error(`Invalid saved remote profile for ${host}`);
-  const directory = (value as { serverDir: string }).serverDir;
-  if (!directory.startsWith("/")) throw new Error(`Saved server directory for ${host} must be absolute`);
-  return directory;
-}
-
-async function rememberServerDir(host: string, serverDir: string): Promise<void> {
-  const directory = join(getAgentDir(), "remote-client", "hosts");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const path = hostProfile(host);
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify({ serverDir })}\n`, { mode: 0o600, flag: "wx" });
-  await rename(temporary, path);
 }

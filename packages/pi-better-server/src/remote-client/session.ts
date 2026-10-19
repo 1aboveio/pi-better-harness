@@ -1,6 +1,7 @@
 import { posix, win32 } from "node:path";
 import { buildContextEntries, buildSessionContext, SettingsManager, type RpcSessionState } from "@earendil-works/pi-coding-agent";
 import type { DaemonClient } from "../client.ts";
+import { remoteArgumentCompletions } from "./menu.ts";
 
 // Wire metadata and native UI objects differ between Pi 0.82 (repo types) and 1.2.
 // These values are presentation data only; none are an executable Agent or provider.
@@ -701,10 +702,17 @@ export class RemoteClientSession {
   }
 
   private commands(): any[] {
-    return this.cache.snapshot.commands.map((command) => ({ ...copy(command), invocationName: command.invocationName ?? command.name,
+    const commands: any[] = this.cache.snapshot.commands.filter((command) => !this.options.onLocalCommand || (command.invocationName ?? command.name) !== "remote").map((command) => ({ ...copy(command), invocationName: command.invocationName ?? command.name,
       filePath: command.sourceInfo?.path ?? `remote:/commands/${command.name}`,
       sourceInfo: command.sourceInfo ?? { path: "remote", source: "remote", scope: "project", origin: "top-level" },
       handler: (args: string) => this.prompt(`/${command.invocationName ?? command.name}${args ? ` ${args}` : ""}`) }));
+    if (this.options.onLocalCommand) commands.unshift({
+      name: "remote", invocationName: "remote", description: "Open remote connection options",
+      filePath: "client:/remote", sourceInfo: { path: "client", source: "client", scope: "user", origin: "top-level" },
+      getArgumentCompletions: (prefix: string) => remoteArgumentCompletions(prefix, ["list", "disconnect"]),
+      handler: (args: string) => this.prompt(`/remote${args ? ` ${args}` : ""}`),
+    });
+    return commands;
   }
   private assertConnected(): void {
     if (this.failed) throw this.failed;

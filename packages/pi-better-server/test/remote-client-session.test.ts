@@ -575,6 +575,21 @@ test("real daemon: asynchronous queue restoration clears only the remote queued 
   assert.equal(session.getLastAssistantText(), "tool-done:gate:restore-queue");
 });
 
+test("native command metadata retains the local remote menu and disconnect suggestions", async t => {
+  const f = await hosted(t);
+  const actions: string[] = [];
+  const session = await f.attach(f.owner, { onLocalCommand: async (text: string) => { actions.push(text); return true; } });
+  const command = session.extensionRunner.getCommand("remote");
+  assert.ok(command);
+  assert.deepEqual(command.getArgumentCompletions("li").map((item: any) => item.value), ["list"]);
+  assert.deepEqual(command.getArgumentCompletions("dis").map((item: any) => item.value), ["disconnect"]);
+  await command.handler("");
+  await command.handler("list");
+  await command.handler("disconnect");
+  assert.deepEqual(actions, ["/remote", "/remote list", "/remote disconnect"]);
+  assert.deepEqual((await f.owner.call({ type: "get_messages", sessionId: f.sessionId })).data.messages, []);
+});
+
 test("real daemon: metadata command handlers forward remotely and bash streams through the adapter", { timeout: 30_000 }, async t => {
   const f = await hosted(t);
   const session = await f.attach();

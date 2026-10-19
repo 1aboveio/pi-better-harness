@@ -75,6 +75,8 @@ startup bridge. Wait for local work, including `!` commands, to finish before
 connecting.
 
 ```text
+/remote
+/remote list
 /remote r5
 /remote r5 --cwd /home/user/workspaces/project
 /remote r5 --session <id-or-unique-prefix>
@@ -82,14 +84,26 @@ connecting.
 /remote disconnect
 ```
 
-`r5` is an SSH alias. Without selectors, `/remote` offers existing remote
+`/remote` opens a native menu of SSH config aliases and previously entered hosts,
+plus an option to enter another SSH host. While connected, it opens connection
+details, host listing, and disconnect actions. `/remote list` displays the complete
+host catalog without connecting or switching hosts. The same catalog supplies
+argument suggestions; while connected, `list` and `disconnect` remain available
+in slash-command autocomplete.
+
+The catalog deduplicates literal SSH `Host` aliases (including `Include` files)
+and local `/remote` history. Wildcard and negated SSH patterns are not concrete
+hosts and are omitted. Entered hosts are remembered even if the connection fails
+or uses the default server directory; no credentials are recorded in this history.
+
+`r5` is an SSH alias. Without workspace/session selectors, connecting offers existing remote
 workspaces, then lets you start a new session or resume one in that workspace.
 Discovery defaults to `~/workspaces/`; set `PI_SERVER_WORKSPACES_DIR` to an absolute
 path on the daemon host to change that root. You can also enter another existing
 absolute remote path. `--cwd` skips the workspace picker; `--session` selects a
 session directly. If both are given, the session must belong to that workspace.
 `--remote-dir` selects the remote daemon's server directory and is saved per host
-only after a successful connection. It is reused on later connections to that
+with its connection history. It is reused on later connections to that
 host; otherwise the usual remote server-directory discovery applies.
 
 `/remote disconnect` restores the original local history in a fresh local runtime.
