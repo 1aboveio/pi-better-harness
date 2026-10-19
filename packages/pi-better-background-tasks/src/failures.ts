@@ -201,7 +201,8 @@ function scheduleFailureAttention(pi: ExtensionAPI, id: string, getActiveSession
 
 return { suspendFailureAttention, resumeFailureAttention, stopFailureAttention, scheduleFailureAttention, failureAttentionFields };
 }
-const defaultAttention = createFailureAttention();
+/** Shared by the compatibility exports here and the legacy background runtime. */
+export const defaultAttention = createFailureAttention();
 export const { suspendFailureAttention, resumeFailureAttention, stopFailureAttention, scheduleFailureAttention, failureAttentionFields } = defaultAttention;
 
 export function terminalFailureAttention(id: string) {

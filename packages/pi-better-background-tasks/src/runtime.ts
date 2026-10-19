@@ -9,7 +9,7 @@ import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.j
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
 import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
 import { takeRecoverySnapshot } from "./shared-sandbox-core.js";
-import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, createFailureAttention, terminalFailureAttention } from "./failures.js";
+import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, createFailureAttention, defaultAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { formatCallbackFacts } from "./output.js";
@@ -79,8 +79,8 @@ export type FirstCheckWaitEnd = "timeout" | "aborted" | "suspended";
 export type FirstCheckOutcome = FirstWatchCheck | { pending: FirstCheckWaitEnd; waitedMs: number } | undefined;
 
 /** Each cached extension factory owns its scheduling and suspension state. */
-export function createBackgroundTaskRuntime() {
-const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = createFailureAttention();
+export function createBackgroundTaskRuntime(attention = createFailureAttention()) {
+const { resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention } = attention;
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const remoteSessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const processTimeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1330,6 +1330,6 @@ return { awaitFirstWatchCheck, suspendScheduledWork, resumeScheduledWork, spawnT
 }
 
 export type BackgroundTaskRuntime = ReturnType<typeof createBackgroundTaskRuntime>;
-const defaultRuntime = createBackgroundTaskRuntime();
+const defaultRuntime = createBackgroundTaskRuntime(defaultAttention);
 /** Compatibility for callers using the original singleton API. */
 export const { awaitFirstWatchCheck, suspendScheduledWork, resumeScheduledWork, spawnTask, startWatchTask, resumeRunningTask, stopTask } = defaultRuntime;
