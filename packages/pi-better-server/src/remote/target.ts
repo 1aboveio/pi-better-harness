@@ -14,6 +14,9 @@ export interface TargetOptions {
   remoteDir?: string;
   /** Where the ssh ControlMaster sockets live; default is ssh-core's. */
   controlPathRoot?: string;
+  /** Cancels connection setup only, not a successfully resolved target. */
+  signal?: AbortSignal;
+  onProgress?: (stage: "ssh" | "directory" | "forward") => void;
 }
 
 export interface Target {
@@ -32,6 +35,15 @@ export interface Target {
 const REMOTE_SERVER_DIR_SCRIPT = 'printf %s "${PI_SERVER_DIR:-${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/server}"';
 
 export async function resolveTarget(options: TargetOptions): Promise<Target> {
+  const checkAbort = () => {
+    if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+  };
+  const progress = (stage: "ssh" | "directory" | "forward") => {
+    checkAbort();
+    options.onProgress?.(stage);
+    checkAbort();
+  };
+  checkAbort();
   if (!options.host) {
     return {
       socketPath: options.socket ?? socketPathFor(defaultServerDir()),
@@ -41,20 +53,26 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
   }
   if (options.socket) throw new Error("--socket and --host cannot be combined; use --remote-dir to point at a remote daemon");
 
-  const runner = createProcessRunner();
+  const runner = createProcessRunner({ signal: options.signal });
   const base = resolveSshCommand({ command: "true", ssh: { host: options.host } });
-  const mux: SshMuxController = createSshMuxController({
+  const muxOptions = {
     ...base,
-    runner,
     sessionScope: "pi-remote",
     ...(options.controlPathRoot ? { controlPathRoot: options.controlPathRoot } : {}),
-  });
+  };
+  const mux: SshMuxController = createSshMuxController({ ...muxOptions, runner });
+  // The setup signal must not disable cleanup or forwards opened by the established target.
+  const liveMux = createSshMuxController({ ...muxOptions, runner: createProcessRunner() });
+  progress("ssh");
   await mux.ensure();
+  checkAbort();
 
+  progress("directory");
   let remoteDir = options.remoteDir ?? process.env.PI_REMOTE_SERVER_DIR;
   if (!remoteDir) {
     const probe = resolveSshCommand({ command: REMOTE_SERVER_DIR_SCRIPT, ssh: { host: options.host } });
     const result = await runner.runOnce(mux.withMux(probe.commandSpec), undefined, 30_000);
+    checkAbort();
     remoteDir = result.stdout.trim();
     if (result.exitCode !== 0 || !remoteDir.startsWith("/")) {
       throw new Error(`Could not find the daemon directory on ${options.host}: ${result.stderr.trim() || result.stdout.trim() || "empty answer"}`);
@@ -63,13 +81,17 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
   if (!remoteDir.startsWith("/")) throw new Error(`--remote-dir must be an absolute path on ${options.host}: ${remoteDir}`);
   const remoteSocket = socketPathFor(remoteDir);
 
+  progress("forward");
   // A private directory keeps the forwarded socket reachable by this user only; /tmp keeps the path short.
   const localDir = mkdtempSync(join(process.env.PI_REMOTE_TMP ?? (existsSync("/tmp") ? "/tmp" : tmpdir()), "pi-remote-"));
   const localSocket = join(localDir, "s.sock");
   try {
     await mux.forwardUnixSocket(localSocket, remoteSocket);
+    checkAbort();
   } catch (error) {
+    await liveMux.cancelUnixSocketForward(localSocket, remoteSocket).catch(() => undefined);
     rmSync(localDir, { recursive: true, force: true });
+    checkAbort();
     throw error;
   }
   return {
@@ -78,21 +100,22 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
       const dir = mkdtempSync(join(process.env.PI_REMOTE_TMP ?? (existsSync("/tmp") ? "/tmp" : tmpdir()), "pi-remote-"));
       const local = join(dir, "f.sock");
       try {
-        await mux.forwardUnixSocket(local, remoteSocketPath);
+        await liveMux.forwardUnixSocket(local, remoteSocketPath);
       } catch (error) {
+        await liveMux.cancelUnixSocketForward(local, remoteSocketPath).catch(() => undefined);
         rmSync(dir, { recursive: true, force: true });
         throw error;
       }
       return {
         socketPath: local,
         async close() {
-          await mux.cancelUnixSocketForward(local, remoteSocketPath).catch(() => undefined);
+          await liveMux.cancelUnixSocketForward(local, remoteSocketPath).catch(() => undefined);
           rmSync(dir, { recursive: true, force: true });
         },
       };
     },
     async close() {
-      await mux.cancelUnixSocketForward(localSocket, remoteSocket).catch(() => undefined);
+      await liveMux.cancelUnixSocketForward(localSocket, remoteSocket).catch(() => undefined);
       rmSync(localDir, { recursive: true, force: true });
     },
   };

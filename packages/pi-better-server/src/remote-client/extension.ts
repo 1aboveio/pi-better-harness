@@ -11,6 +11,7 @@ import { RemoteClientSession } from "./session.ts";
 import { availableRemoteHosts, chooseRemoteHost, remoteArgumentCompletions, showRemoteHostList } from "./menu.ts";
 import { rememberedServerDir, rememberRemoteHost } from "./profiles.ts";
 import { browseRemoteSessions } from "./session-browser.ts";
+import { withConnectionProgress } from "./connection-progress.ts";
 
 const USAGE = "/remote connect <ssh-alias> [--cwd <remote-path>] [--session <id>] [--remote-dir <server-dir>]";
 
@@ -98,9 +99,33 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
     const remoteDir = options.remoteDir ?? await rememberedServerDir(options.host);
     await rememberRemoteHost(options.host, remoteDir).catch((error) => ui.notify(`Could not remember remote host: ${error instanceof Error ? error.message : String(error)}`, "warning"));
     const controlPathRoot = join(process.env.PI_REMOTE_TMP ?? "/tmp", `pi-native-${process.getuid?.() ?? process.pid}`);
-    target = await local.dependencies.resolveTarget({ host: options.host, controlPathRoot, ...(remoteDir ? { remoteDir } : {}) });
-    client = await DaemonClient.connect(target.socketPath);
-    if (!["native-client-v1", "session-browser-v1"].every((capability) => client!.server?.capabilities?.includes(capability))) throw new Error("This daemon does not support the /remote session browser yet. Update pi-better-server on the remote host; the local session is unchanged.");
+    const setup = await withConnectionProgress(ui, options.host, async ({ signal, stage }) => {
+      let pendingTarget: Target | undefined;
+      let pendingClient: DaemonClient | undefined;
+      try {
+        stage("establishing SSH...");
+        pendingTarget = await local.dependencies.resolveTarget({
+          host: options.host, controlPathRoot, signal,
+          ...(remoteDir ? { remoteDir } : {}),
+          onProgress: phase => stage({ ssh: "establishing SSH...", directory: "finding remote server...", forward: "opening SSH tunnel..." }[phase]),
+        });
+        signal.throwIfAborted();
+        stage("contacting Pi server...");
+        pendingClient = await DaemonClient.connect(pendingTarget.socketPath, { signal });
+        signal.throwIfAborted();
+        stage("checking server compatibility...");
+        const capabilities = pendingClient.server?.capabilities ?? [];
+        if (!["native-client-v1", "session-browser-v1"].every(capability => capabilities.includes(capability))) throw new Error("This daemon does not support the /remote session browser yet. Update pi-better-server on the remote host; the local session is unchanged.");
+        return { target: pendingTarget, client: pendingClient };
+      } catch (error) {
+        pendingClient?.close();
+        await pendingTarget?.close().catch(() => undefined);
+        throw error;
+      }
+    }, async (late) => { late.client.close(); await late.target.close(); });
+    if (!setup) return;
+    target = setup.target;
+    client = setup.client;
     const connection = client;
     const transport = target;
     ui.setStatus("pi-remote", `SSH: ${options.host} (sessions)`);

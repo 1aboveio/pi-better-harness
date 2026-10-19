@@ -12,6 +12,8 @@ export class HandshakeError extends Error {
 }
 
 export interface ConnectOptions {
+  /** Cancels Unix connect and hello only; ignored after the client is returned. */
+  signal?: AbortSignal;
   /** Override what the client announces (tests use this to play an incompatible client). `false` skips the handshake. */
   hello?: { protocolVersion?: number; piVersion?: string; extensionVersions?: Record<string, string> } | false;
 }
@@ -43,29 +45,52 @@ export class DaemonClient {
   }
 
   static async connect(socketPath: string, options: ConnectOptions = {}): Promise<DaemonClient> {
-    const socket = await new Promise<Socket>((resolve, reject) => {
-      const s = connect(socketPath);
-      s.once("connect", () => resolve(s));
-      s.once("error", reject);
+    const { signal } = options;
+    const abortError = () => new DOMException("The operation was aborted", "AbortError");
+    if (signal?.aborted) throw abortError();
+    const socket = connect(socketPath);
+    let onAbort: () => void = () => undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        socket.destroy();
+        reject(abortError());
+      };
     });
-    const client = new DaemonClient(socket, undefined);
-    if (options.hello === false) return client;
-    const response = await client.request({
-      type: "hello",
-      protocolVersion: PROTOCOL_VERSION,
-      piVersion: PI_VERSION,
-      extensionVersions: { ...SERVER_EXTENSION_VERSIONS },
-      ...options.hello,
-    }).catch((error: unknown) => {
-      client.close();
+    let removeConnectListeners!: () => void;
+    const connected = new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+      removeConnectListeners = () => {
+        socket.removeListener("connect", resolve);
+        socket.removeListener("error", reject);
+      };
+    });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      if (signal?.aborted) onAbort();
+      await Promise.race([connected, aborted]);
+      if (signal?.aborted) throw abortError();
+      const client = new DaemonClient(socket, undefined);
+      if (options.hello === false) return client;
+      const response = await Promise.race([client.request({
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        piVersion: PI_VERSION,
+        extensionVersions: { ...SERVER_EXTENSION_VERSIONS },
+        ...options.hello,
+      }), aborted]);
+      if (signal?.aborted) throw abortError();
+      if (!response.success) throw new HandshakeError(response.error ?? "daemon rejected the handshake");
+      client.server = response.data as HelloData;
+      return client;
+    } catch (error) {
+      socket.destroy();
+      if (signal?.aborted) throw abortError();
       throw error;
-    });
-    if (!response.success) {
-      client.close();
-      throw new HandshakeError(response.error ?? "daemon rejected the handshake");
+    } finally {
+      removeConnectListeners();
+      signal?.removeEventListener("abort", onAbort);
     }
-    client.server = response.data as HelloData;
-    return client;
   }
 
   /** Send one command and wait for its response. A `success:false` response resolves; it is not thrown. */

@@ -93,6 +93,12 @@ and press Enter to confirm a connection. `/remote connect` opens a host picker;
 actions only. Host suggestions appear only after `connect`, with a complete
 `connect <host>` completion value. `/remote r5` remains a supported shorthand.
 
+While connecting, a native spinner shows the current stage: establishing SSH,
+finding the remote server, opening the tunnel, or contacting the Pi daemon.
+Escape cancels that attempt and returns to the local UI. It does not stop any
+remote sessions or shared SSH connection. Connection failures retain their original
+error message; the spinner does not imply that an unreachable host is available.
+
 Connecting opens the server's root session browser, not a workspace picker.
 It has **Active sessions** and **Closed sessions** tabs and always displays its
 keyboard shortcuts:
