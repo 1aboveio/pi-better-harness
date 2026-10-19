@@ -75,6 +75,9 @@ jobs:
 
       - name: Typecheck SSH core and extension
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        # ssh-core's tsc script needs shell glob expansion, which cmd.exe lacks.
+        env:
+          npm_config_script_shell: bash
         run: npm run typecheck -w ssh-core -w pi-better-ssh
 
       - name: SSH core Windows contracts
