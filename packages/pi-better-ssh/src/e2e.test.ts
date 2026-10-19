@@ -1,21 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failedResult, FakeRemoteRunner, successfulResult } from "../../ssh-core/test-support/index.js";
-import sshExtension, { registerRemoteBashTool, registerSshExtension } from "./index.js";
+import sshExtension, {
+  registerRemoteBashTool as registerRemoteBashToolProduction,
+  registerSshExtension as registerSshExtensionProduction,
+} from "./index.js";
 
-vi.mock("./shared-ssh-core/index.js", async (importOriginal) => {
-  const core = await importOriginal<typeof import("./shared-ssh-core/index.js")>();
-  return {
-    ...core,
-    createSshMuxController: (options: Parameters<typeof core.createSshMuxController>[0]) =>
-      core.createSshMuxController({ ...options, platform: "linux" }),
-  };
-});
+const registerRemoteBashTool: typeof registerRemoteBashToolProduction = (pi, dependencies) =>
+  registerRemoteBashToolProduction(pi, { platform: "linux", ...dependencies });
+const registerSshExtension: typeof registerSshExtensionProduction = (pi, dependencies) =>
+  registerSshExtensionProduction(pi, { platform: "linux", ...dependencies });
 
 type JsonSchema = {
   description?: string;
@@ -44,6 +43,10 @@ type RegisteredTool = {
 // @covers pi-better-ssh.tool-contract
 // @level integration
 describe("pi-better-ssh extension", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("registers explicit SSH tools without overriding local bash", () => {
     const harness = createHarness();
     sshExtension(harness.pi);
@@ -273,17 +276,65 @@ describe("pi-better-ssh extension", () => {
     }
   });
 
-  it("executes through an injected fake and returns a non-zero exit as a normal tool result", async () => {
+  it("uses one independent Windows connection without recording mux masters", async () => {
+    const runner = new FakeRemoteRunner([successfulResult("windows command\n")]);
+    const muxEntries = new Map();
+    const harness = createHarness("windows-mux-session");
+    registerSshExtension(harness.pi, { runner, muxEntries, platform: "win32" });
+
+    const result = await harness.execute("remote_bash", { command: "hostname", host: "ops@windows-host" });
+    expect(result.content[0]?.text).toContain("windows command");
+    expect(result.details).toMatchObject({
+      output: "windows command\n",
+      exitCode: 0,
+      target: "ops@windows-host",
+      mux: { state: "down", reused: false },
+    });
+    expect(runner.runCalls).toHaveLength(1);
+    expect(runner.runCalls[0]).toMatchObject({
+      shell: false,
+      argv: expect.arrayContaining(["ControlMaster=no", "ControlPersist=no", "ControlPath=none"]),
+    });
+    expect(runner.runCalls[0]?.argv?.slice(-3, -1)).toEqual(["--", "ops@windows-host"]);
+    expect(runner.runCalls[0]?.command).toContain("hostname");
+    expect(muxEntries.size).toBe(0);
+
+    for (const [action, state] of [["status", "down"], ["stop", "not_running"]] as const) {
+      const target = await harness.execute("ssh_mux", { action, host: "ops@windows-host" });
+      expect(target.details).toMatchObject({
+        action,
+        scope: "target",
+        masters: [{
+          target: "ops@windows-host",
+          state,
+          controlPath: "",
+          detail: expect.stringMatching(/disabled.*Windows/i),
+        }],
+      });
+      expect(target.content[0]?.text).toMatch(/disabled.*Windows/i);
+      expect(muxEntries.size).toBe(0);
+
+      const all = await harness.execute("ssh_mux", { action, all: true });
+      expect(all.details).toEqual({ action, scope: "all", masters: [] });
+    }
+    expect(muxEntries.size).toBe(0);
+    expect(runner.runCalls).toHaveLength(1);
+    expect(runner.spawnCalls).toHaveLength(0);
+  });
+
+  it.each(["linux", "win32"] as const)("executes through an injected fake on %s and returns a non-zero exit as a normal tool result", async (platform) => {
     const fixtureRoot = mkdtempSync("/tmp/pi-better-ssh-tool-");
     try {
       const runner = new FakeRemoteRunner([
-        failedResult(255, "missing"),
-        successfulResult(""),
-        successfulResult("Master running\n"),
+        ...(platform === "win32" ? [] : [
+          failedResult(255, "missing"),
+          successfulResult(""),
+          successfulResult("Master running\n"),
+        ]),
         failedResult(23, "remote check failed\n"),
       ]);
       const harness = createHarness("tool-session-216");
-      registerRemoteBashTool(harness.pi, { runner, controlPathRoot: join(fixtureRoot, "control") });
+      registerRemoteBashTool(harness.pi, { runner, platform, controlPathRoot: join(fixtureRoot, "control") });
 
       const result = await harness.execute("remote_bash", {
         command: "check-release",
@@ -298,8 +349,9 @@ describe("pi-better-ssh extension", () => {
         cancelled: false,
         truncated: false,
         target: "release-alias",
-        mux: { state: "up", reused: false },
+        mux: { state: platform === "win32" ? "down" : "up", reused: false },
       });
+      expect(runner.runCalls).toHaveLength(platform === "win32" ? 1 : 4);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
@@ -307,12 +359,13 @@ describe("pi-better-ssh extension", () => {
 
   // @covers pi-better-ssh.release-contract
   // @level integration
-  it("loads the independently packed extension registered in the root bundle", () => {
-    const directory = mkdtempSync(join(tmpdir(), "pi-ssh-pack-"));
+  it.each(["set", "unset"])("loads the independently packed extension registered in the root bundle with npm_execpath %s", (npmExecpath) => {
+    vi.stubEnv("npm_execpath", npmExecpath === "set" ? resolveNpmCli() : undefined);
+    const directory = mkdtempSync(join(tmpdir(), "pi ssh pack-"));
     const packageRoot = fileURLToPath(new URL("../", import.meta.url));
     const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
     try {
-      const packOutput = JSON.parse(execFileSync(process.execPath, [process.env.npm_execpath!,
+      const packOutput = JSON.parse(execFileSync(process.execPath, [resolveNpmCli(),
         "pack", "--ignore-scripts", "--json", "--pack-destination", directory,
         "--cache", join(directory, "npm-cache"),
       ], { cwd: packageRoot, encoding: "utf8" }));
@@ -340,6 +393,27 @@ describe("pi-better-ssh extension", () => {
     }
   }, 20_000);
 });
+
+function resolveNpmCli(): string {
+  if (process.env.npm_execpath) return process.env.npm_execpath;
+
+  const directories = [dirname(process.execPath), ...(process.env.PATH ?? "").split(delimiter).filter(Boolean)];
+  for (const directory of directories) {
+    const candidates = [
+      join(directory, "node_modules/npm/bin/npm-cli.js"),
+      join(directory, "../lib/node_modules/npm/bin/npm-cli.js"),
+    ];
+    // POSIX npm is commonly a symlink; Windows npm.cmd uses the adjacent npm layout above.
+    try {
+      candidates.unshift(realpathSync(join(directory, "npm")));
+    } catch {
+      // This PATH directory need not contain npm.
+    }
+    const cli = candidates.find((candidate) => basename(candidate) === "npm-cli.js" && existsSync(candidate));
+    if (cli) return cli;
+  }
+  throw new Error("Cannot find npm-cli.js on PATH or beside Node; install npm to run the packaging test");
+}
 
 function createHarness(sessionId = "session-216", entries: SessionEntry[] = []) {
   const tools = new Map<string, RegisteredTool>();

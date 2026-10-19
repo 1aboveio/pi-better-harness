@@ -35,6 +35,7 @@ export interface RemoteBashDependencies {
   runner: RemoteRunner;
   sessionScope: string;
   controlPathRoot?: string;
+  platform?: NodeJS.Platform;
   muxRegistry?: Pick<SshMuxRegistry, "controllerFor">;
   activeProfile?: {
     host: string;
@@ -79,6 +80,7 @@ export async function executeRemoteBash(
       ...resolved,
       runner: dependencies.runner,
       sessionScope: dependencies.sessionScope,
+      ...(dependencies.platform !== undefined ? { platform: dependencies.platform } : {}),
       ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
     });
   const muxState = await mux.ensure();

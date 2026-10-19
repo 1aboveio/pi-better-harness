@@ -47,7 +47,8 @@ describe("ssh-core package contract", () => {
     try {
       process.env.PI_CODING_AGENT_DIR = `/tmp/${"long-agent-dir-".repeat(8)}`;
       const root = defaultSshControlPathRoot();
-      assert.match(root, /^\/tmp\/pi-ssh-/);
+      assert.equal(dirname(root), join("/tmp"));
+      assert.match(basename(root), /^pi-ssh-/);
       const resolved = resolveSshCommand({ command: "true", ssh: { host: "long.example" } });
       const mux = createSshMuxController({ ...resolved, runner: new FakeRemoteRunner(), sessionScope: "long-agent-dir" });
       assert.ok(Buffer.byteLength(mux.controlPath) <= 100, mux.controlPath);
@@ -132,7 +133,7 @@ describe("ssh-core package contract", () => {
     try {
       const payload = "candidate $(printf injected) 'A'\nsecond line";
       const wrapped = wrapRemoteBashCommand({
-        command: "printf '%s|%s|%s' \"$PREFIX\" \"$RELEASE_LABEL\" \"$PWD\"",
+        command: "printf '%s|%s|%s' \"$PREFIX\" \"$RELEASE_LABEL\" \"$(pwd -P)\"",
         workdir,
         env: { RELEASE_LABEL: payload, EMPTY: "" },
         preamble: "PREFIX=profile",
@@ -448,6 +449,28 @@ describe("ssh-core package contract", () => {
       "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ControlPath=none",
       "--", "windows.example", "true",
     ]);
+  });
+
+  it("rejects Windows socket forwarding without running SSH or removing local files", async () => {
+    const fixtureRoot = mkdtempSync("/tmp/ssh-core-win-fwd-");
+    try {
+      const localPath = join(fixtureRoot, "local.sock");
+      writeFileSync(localPath, "keep this file");
+      const runner = new FakeRemoteRunner();
+      const mux = createSshMuxController({
+        ...resolveSshCommand({ command: "true", ssh: { host: "windows.example" } }),
+        runner, sessionScope: "windows-forward", platform: "win32",
+        controlPathRoot: join(fixtureRoot, "control"),
+      });
+
+      await assert.rejects(() => mux.forwardUnixSocket(localPath, "/remote.sock"), /forwarding.*not supported on Windows/);
+      await assert.rejects(() => mux.cancelUnixSocketForward(localPath, "/remote.sock"), /forwarding.*not supported on Windows/);
+      assert.equal(await readFile(localPath, "utf8"), "keep this file");
+      assert.equal(existsSync(join(fixtureRoot, "control")), false);
+      assert.equal(runner.runCalls.length, 0);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   // @covers ssh-core.tmux-session

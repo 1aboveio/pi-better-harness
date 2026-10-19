@@ -14,7 +14,7 @@
     "test-support/**/*.ts"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --types node --strict --skipLibCheck index.ts test-support/*.ts *.test.ts",
+    "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test *.test.ts"
   },
   "devDependencies": {

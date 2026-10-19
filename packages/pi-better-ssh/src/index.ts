@@ -62,6 +62,7 @@ const SshProfileParams = Type.Object({
 export interface RegisterRemoteBashDependencies {
   runner: RemoteBashDependencies["runner"];
   controlPathRoot?: string;
+  platform?: NodeJS.Platform;
   getActiveProfile?: () => SshProfile | undefined;
   muxRegistry?: SshMuxRegistry;
   onResult?: (result: RemoteBashResult, params: { host?: string }, ctx: ExtensionContext) => void | Promise<void>;
@@ -89,6 +90,7 @@ export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterR
       const result = await executeRemoteBash(params, {
         runner: dependencies.runner,
         sessionScope,
+        ...(dependencies.platform !== undefined ? { platform: dependencies.platform } : {}),
         ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
         ...(activeProfile ? { activeProfile } : {}),
         ...(dependencies.muxRegistry ? { muxRegistry: dependencies.muxRegistry } : {}),
@@ -106,6 +108,7 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
   let activeProfile: SshProfile | undefined;
   const muxRegistry = dependencies.muxRegistry ?? createSshMuxRegistry({
     runner: dependencies.runner,
+    ...(dependencies.platform !== undefined ? { platform: dependencies.platform } : {}),
     ...(dependencies.controlPathRoot ? { controlPathRoot: dependencies.controlPathRoot } : {}),
     ...(dependencies.muxEntries ? { entries: dependencies.muxEntries } : {}),
   });

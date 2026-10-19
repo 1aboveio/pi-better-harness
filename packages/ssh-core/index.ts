@@ -351,8 +351,13 @@ export function createSshMuxController(options: SshMuxControllerOptions): SshMux
       detail: "SSH multiplexing is disabled on Windows; commands use independent connections.",
       commandResult,
     };
+    const unsupportedForward = async (): Promise<SshMuxForwardResult> => {
+      throw new SshMuxError("SSH Unix socket forwarding is not supported on Windows without ControlMaster.", commandResult);
+    };
     return {
       controlPath: "",
+      forwardUnixSocket: unsupportedForward,
+      cancelUnixSocketForward: unsupportedForward,
       status: async () => disabled,
       ensure: async () => ({ ...disabled, reused: false }),
       cleanup: async () => ({ ...disabled, state: "not_running" }),

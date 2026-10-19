@@ -27,6 +27,7 @@ export interface SshMuxRegistry {
 export function createSshMuxRegistry(options: {
   runner: RemoteRunner;
   controlPathRoot?: string;
+  platform?: NodeJS.Platform;
   entries?: SshMuxEntryMap;
 }): SshMuxRegistry {
   const entries = options.entries ?? processMuxEntries();
@@ -36,6 +37,7 @@ export function createSshMuxRegistry(options: {
       ...resolved,
       runner: options.runner,
       sessionScope,
+      ...(options.platform !== undefined ? { platform: options.platform } : {}),
       ...(options.controlPathRoot ? { controlPathRoot: options.controlPathRoot } : {}),
     });
 
