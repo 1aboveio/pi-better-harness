@@ -186,7 +186,33 @@ on its own.
 
 `scripts/bootstrap-host.sh [PREFIX]` installs a pinned Node, a pinned Pi and this
 package's `src/` under `PREFIX` (default `~/.pi-better-server`) with no root, and
-writes `PREFIX/bin/pi-server`. `PI_VERSION=1.0.0` picks the Pi version (default 0.82.1);
+writes `PREFIX/bin/pi-server`. It also installs and enables these Pi packages by
+default through `pi install`:
+
+| Package | Pinned version | Version override |
+| --- | --- | --- |
+| `@vanillagreen/pi-codex-minimal-tools` | `2.1.4` | `MINIMAL_TOOLS_VERSION` |
+| `@juicesharp/rpiv-ask-user-question` | `2.13.9` | `ASK_USER_QUESTION_VERSION` |
+| `@juicesharp/rpiv-web-tools` | `2.13.9` | `WEB_TOOLS_VERSION` |
+| `pi-better-harness` | `0.31.0` | `HARNESS_VERSION` |
+
+Pi registers the packages in `PI_CODING_AGENT_DIR` (default `~/.pi/agent`), so native
+Pi and daemon sessions using that agent directory load the same extensions. Set
+`PI_CODING_AGENT_DIR` both when
+bootstrapping and when launching Pi/the daemon if using an isolated agent directory:
+
+```sh
+export PI_CODING_AGENT_DIR="$HOME/.pi-server-agent"
+PI_VERSION=1.2.0 scripts/bootstrap-host.sh
+~/.pi-better-server/bin/pi-server
+```
+
+Provider and web-search credentials are still provisioned separately on the host.
+The daemon's attach console does not gain native Pi's custom extension screens; use native Pi in tmux
+for the full UI. Project workspaces belong outside the runtime installation, for
+example under `~/workspaces/`.
+
+`PI_VERSION=1.0.0` picks the Pi version (default 0.82.1);
 the daemon works on Pi 0.82 and 1.x, and `hello` reports the installed one. On Pi 1.x the
 `prompt`, `steer` and `follow_up` responses carry Pi's `data.disposition`
 (`started`, `handled` or `queued`); on 0.82 they carry no data.

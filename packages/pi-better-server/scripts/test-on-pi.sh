@@ -23,7 +23,7 @@ printf '{ "name": "pi-compat", "private": true }\n' > "$PREFIX/package.json"
   tsx@^4.22.3 typescript@^6.0.0 @types/node@^25.0.0)
 
 cp "$ROOT_DIR/scripts/isolate-registry.mjs" "$PREFIX/scripts/"
-cp -R "$PKG_DIR/src" "$PKG_DIR/test" "$PKG_DIR/package.json" "$PKG_DIR/tsconfig.json" "$PREFIX/packages/pi-better-server/"
+cp -R "$PKG_DIR/src" "$PKG_DIR/test" "$PKG_DIR/scripts" "$PKG_DIR/package.json" "$PKG_DIR/tsconfig.json" "$PREFIX/packages/pi-better-server/"
 [ -d "$PKG_DIR/codex-plugin" ] && cp -R "$PKG_DIR/codex-plugin" "$PREFIX/packages/pi-better-server/"
 
 cd "$PREFIX/packages/pi-better-server"

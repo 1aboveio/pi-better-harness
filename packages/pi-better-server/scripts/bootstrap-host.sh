@@ -3,17 +3,24 @@
 #
 #   scripts/bootstrap-host.sh [PREFIX]        (default PREFIX: $HOME/.pi-better-server)
 #
-# Everything lands under PREFIX; nothing system-wide is touched and no root is
-# needed. It pins three things:
+# The runtime/server live under PREFIX; Pi packages live in the Pi agent directory.
+# Nothing system-wide is touched and no root is needed. The setup pins:
 #   NODE_VERSION  the Node.js runtime (>= 22.18 so .ts runs without a loader)
 #   PI_VERSION    @earendil-works/pi-coding-agent
-#   the harness   this package's own src/, copied from the checkout that holds this script
-# Override the first two with environment variables.
+#   HARNESS_VERSION  pi-better-harness, installed as a Pi package
+#   MINIMAL_TOOLS_VERSION, ASK_USER_QUESTION_VERSION, WEB_TOOLS_VERSION
+#   the server    this package's own src/, copied from the checkout that holds this script
+# Override package versions with environment variables. Pi registers extensions
+# in PI_CODING_AGENT_DIR (default ~/.pi/agent), shared by native Pi and the daemon.
 set -euo pipefail
 
 PREFIX="${1:-${PI_SERVER_PREFIX:-$HOME/.pi-better-server}}"
 NODE_VERSION="${NODE_VERSION:-24.14.1}"
 PI_VERSION="${PI_VERSION:-0.82.1}"
+HARNESS_VERSION="${HARNESS_VERSION:-0.31.0}"
+MINIMAL_TOOLS_VERSION="${MINIMAL_TOOLS_VERSION:-2.1.4}"
+ASK_USER_QUESTION_VERSION="${ASK_USER_QUESTION_VERSION:-2.13.9}"
+WEB_TOOLS_VERSION="${WEB_TOOLS_VERSION:-2.13.9}"
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$(uname -s)-$(uname -m)" in
@@ -42,13 +49,23 @@ if [ ! -f "$PREFIX/package.json" ]; then
 fi
 (cd "$PREFIX" && npm install --no-audit --no-fund --save-exact "@earendil-works/pi-coding-agent@$PI_VERSION")
 
-# The harness stays outside node_modules: Node refuses to run .ts files from there.
+# Register extensions with Pi, not just npm: the SDK loads configured Pi packages.
+for package in \
+  "npm:@vanillagreen/pi-codex-minimal-tools@$MINIMAL_TOOLS_VERSION" \
+  "npm:@juicesharp/rpiv-ask-user-question@$ASK_USER_QUESTION_VERSION" \
+  "npm:@juicesharp/rpiv-web-tools@$WEB_TOOLS_VERSION" \
+  "npm:pi-better-harness@$HARNESS_VERSION"; do
+  "$PREFIX/node_modules/.bin/pi" install "$package"
+done
+
+# The server stays outside node_modules: Node refuses to run .ts files from there.
 rm -rf "$PREFIX/server"
 mkdir -p "$PREFIX/server"
 cp -R "$PKG_DIR/src" "$PREFIX/server/src"
 printf '{ "type": "module" }\n' > "$PREFIX/server/package.json"
 rev="$(git -C "$PKG_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
-printf 'node %s\npi %s\nharness-rev %s\n' "$NODE_VERSION" "$PI_VERSION" "$rev" > "$PREFIX/VERSIONS"
+printf 'node %s\npi %s\npi-better-harness %s\nharness-rev %s\n' "$NODE_VERSION" "$PI_VERSION" "$HARNESS_VERSION" "$rev" > "$PREFIX/VERSIONS"
+printf 'pi-codex-minimal-tools %s\nrpiv-ask-user-question %s\nrpiv-web-tools %s\n' "$MINIMAL_TOOLS_VERSION" "$ASK_USER_QUESTION_VERSION" "$WEB_TOOLS_VERSION" >> "$PREFIX/VERSIONS"
 
 cat > "$PREFIX/bin/pi-server" <<LAUNCHER
 #!/bin/sh
