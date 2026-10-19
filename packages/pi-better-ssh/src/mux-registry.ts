@@ -41,7 +41,7 @@ export function createSshMuxRegistry(options: {
 
   const controllerFor = (resolved: ResolvedSshCommand, sessionScope: string): SshMuxController => {
     const controller = makeController(resolved, sessionScope);
-    entries.set(controller.controlPath, { sessionScope, resolved });
+    if (controller.controlPath) entries.set(controller.controlPath, { sessionScope, resolved });
     return controller;
   };
 
