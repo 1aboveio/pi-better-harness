@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import backgroundTasksExtension from "./index.js";
 import { recordFailure } from "./failures.js";
-import { getCallbackBatcher } from "./shared-callback-batcher.js";
+import { CALLBACK_SETTINGS_ENTRY, getCallbackBatcher } from "./shared-callback-batcher.js";
 import { metaPathFor, readMeta, taskDir, writeMeta } from "./registry.js";
 
 type JsonSchema = {
@@ -603,6 +603,10 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
     },
     sessionManager: {
       getSessionId: () => sessionId,
+      getBranch: () => [{
+        type: "custom", customType: CALLBACK_SETTINGS_ENTRY,
+        data: { version: 1, mode: "hold" },
+      }],
     },
   };
   const pi = {

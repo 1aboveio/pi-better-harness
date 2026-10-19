@@ -836,7 +836,9 @@ describe("status cursor delegation (#323)", () => {
 describe("#332 navigator rows", () => {
   it("history-only failures keep the command in the row; an actionable incident still leads it", () => {
     ensureBackgroundTasksNavigatorProvider({} as any);
-    ensureBackgroundTasksNavigator({ cwd: origin.cwd, hasUI: false, sessionManager: { getSessionId: () => origin.sessionId } } as any);
+    ensureBackgroundTasksNavigator({ cwd: origin.cwd, mode: "tui", hasUI: true,
+      ui: { setStatus() {}, setWidget() {}, setEditorComponent() {} },
+      sessionManager: { getSessionId: () => origin.sessionId } } as any);
     const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("background-tasks");
     const quiet = fixture({ status: "running", endedAt: undefined, command: "rg needle src" });
     recordFailure(quiet, "exit", "exited with declared expected code 1", "q1", { expected: true });
