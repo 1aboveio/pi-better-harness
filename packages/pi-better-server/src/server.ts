@@ -125,16 +125,25 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             const summary = await registry.open(sessionId);
             return reply({ sessionId, data: summary });
           }
+          if (type === "rename_session") {
+            const summary = await registry.rename(sessionId, command.name as string);
+            return reply({ sessionId, data: summary });
+          }
           if (type === "start_companion") {
             const summary = await registry.open(sessionId);
             const info = await companions.start(sessionId, summary.cwd);
             return reply({ sessionId, data: info });
           }
           if (type === "stop_companion") return reply({ sessionId, data: { stopped: await companions.stop(sessionId) } });
-          control.unsubscribe(sessionId);
-          await companions.stop(sessionId);
-          await registry.close(sessionId);
-          return reply({ sessionId });
+          if (type === "close_session") {
+            const blocked = registry.ownership.blockedReason(sessionId);
+            if (blocked) throw new Error(blocked);
+            control.unsubscribe(sessionId);
+            await companions.stop(sessionId);
+            await registry.close(sessionId);
+            return reply({ sessionId });
+          }
+          throw new Error(`Unknown daemon command: ${type}`);
         }
         const sessionId = typeof command.sessionId === "string" ? command.sessionId : "";
         if (!sessionId) {

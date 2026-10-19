@@ -33,6 +33,7 @@ export interface ClientSnapshot {
 export interface RemoteClientSessionOptions {
   onDisconnect?: () => void;
   onLocalCommand?: (text: string) => Promise<boolean>;
+  localCommandCompletions?: (prefix: string) => ReturnType<typeof remoteArgumentCompletions> | Promise<ReturnType<typeof remoteArgumentCompletions>>;
 }
 
 function unsupported(operation: string): never {
@@ -709,7 +710,7 @@ export class RemoteClientSession {
     if (this.options.onLocalCommand) commands.unshift({
       name: "remote", invocationName: "remote", description: "Open remote connection options",
       filePath: "client:/remote", sourceInfo: { path: "client", source: "client", scope: "user", origin: "top-level" },
-      getArgumentCompletions: (prefix: string) => remoteArgumentCompletions(prefix, true),
+      getArgumentCompletions: (prefix: string) => this.options.localCommandCompletions?.(prefix) ?? remoteArgumentCompletions(prefix, true),
       handler: (args: string) => this.prompt(`/remote${args ? ` ${args}` : ""}`),
     });
     return commands;

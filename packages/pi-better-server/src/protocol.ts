@@ -78,6 +78,7 @@ export type DaemonCommand =
       thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
     }
   | { id?: string; type: "open_session"; sessionId: string }
+  | { id?: string; type: "rename_session"; sessionId: string; name: string }
   | { id?: string; type: "close_session"; sessionId: string }
   | { id?: string; type: "start_companion"; sessionId: string }
   | { id?: string; type: "stop_companion"; sessionId: string }
@@ -120,6 +121,7 @@ export type DaemonResponse =
   | { id?: string; type: "response"; command: "list_sessions"; success: true; data: { sessions: SessionSummary[] } }
   | { id?: string; type: "response"; command: "create_session"; success: true; sessionId: string; data: SessionSummary }
   | { id?: string; type: "response"; command: "open_session"; success: true; sessionId: string; data: SessionSummary }
+  | { id?: string; type: "response"; command: "rename_session"; success: true; sessionId: string; data: SessionSummary }
   | { id?: string; type: "response"; command: "close_session"; success: true; sessionId: string }
   | { id?: string; type: "response"; command: "start_companion"; success: true; sessionId: string; data: CompanionInfo }
   | { id?: string; type: "response"; command: "stop_companion"; success: true; sessionId: string; data: { stopped: boolean } };
@@ -144,7 +146,7 @@ export const MOVE_COMMANDS: ReadonlySet<string> = new Set([
   "move_preflight",
 ]);
 
-export const DAEMON_COMMANDS: ReadonlySet<string> = new Set(["list_sessions", "create_session", "open_session", "close_session", "start_companion", "stop_companion", ...MOVE_COMMANDS]);
+export const DAEMON_COMMANDS: ReadonlySet<string> = new Set(["list_sessions", "create_session", "open_session", "rename_session", "close_session", "start_companion", "stop_companion", ...MOVE_COMMANDS]);
 
 export const CONTROL_COMMANDS: ReadonlySet<string> = new Set(["subscribe", "acquire_control", "release_control", "extension_ui_response"]);
 

@@ -124,8 +124,36 @@ export class SessionRegistry {
     return this.serialize(sessionId, () => this.openNow(sessionId));
   }
 
+  /** Rename without hosting a closed session or changing its lifecycle state. */
+  rename(sessionId: string, name: string): Promise<SessionSummary> {
+    return this.serialize(sessionId, async () => {
+      const entry = this.entries.get(sessionId);
+      if (!entry) throw new Error(`Unknown session: ${sessionId}`);
+      const blocked = this.ownership.blockedReason(sessionId);
+      if (blocked) throw new Error(blocked);
+      if (typeof name !== "string" || !name.trim()) throw new Error("name must be a non-empty string");
+      const trimmed = name.trim();
+      const hosted = this.live.get(sessionId);
+      if (hosted) {
+        hosted.session.setSessionName(trimmed);
+        this.touch(sessionId);
+      } else {
+        let savedName = trimmed;
+        if (entry.sessionFile && existsSync(entry.sessionFile)) {
+          const manager = SessionManager.open(entry.sessionFile, undefined, entry.cwd);
+          manager.appendSessionInfo(trimmed);
+          savedName = manager.getSessionName() ?? trimmed;
+        }
+        entry.name = savedName;
+        entry.updatedAt = new Date().toISOString();
+        this.persist();
+      }
+      return this.summarize(entry);
+    });
+  }
+
   /**
-   * Run open / close / retire / release / forget for one session one after another,
+   * Run open / rename / close / retire / release / forget for one session one after another,
    * so each sees the settled result of the one before and the last call wins:
    * `closed` and a live session can never coexist once the calls have settled.
    */
@@ -296,7 +324,10 @@ export class SessionRegistry {
   /** Reopen at the last persisted entry; a session that never reached disk restarts empty under the same id. */
   private reopen(entry: IndexEntry): SessionManager {
     if (entry.sessionFile && existsSync(entry.sessionFile)) return SessionManager.open(entry.sessionFile, undefined, entry.cwd);
-    return SessionManager.create(entry.cwd, undefined, { id: entry.sessionId });
+    const manager = SessionManager.create(entry.cwd, undefined, { id: entry.sessionId });
+    // Setup-only sessions have no transcript; their indexed name must reach the new manager.
+    if (entry.name) manager.appendSessionInfo(entry.name);
+    return manager;
   }
 
   private touch(sessionId: string): void {

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { availableRemoteHosts, chooseRemoteAction, chooseRemoteHost, remoteArgumentCompletions, savedRemoteHosts, showRemoteHostList } from "../src/remote-client/menu.ts";
+import { availableRemoteHosts, chooseRemoteHost, remoteArgumentCompletions, savedRemoteHosts, showRemoteHostList } from "../src/remote-client/menu.ts";
 import { rememberedServerDir, rememberRemoteHost } from "../src/remote-client/profiles.ts";
 
 test("host menu discovers saved profiles without treating temp files or malformed names as hosts", async t => {
@@ -34,18 +34,14 @@ test("manual host entry trims aliases and rejects command arguments", async () =
   }
 });
 
-test("connected menu exposes details and disconnect with cancellation as a no-op", async () => {
-  assert.equal(await chooseRemoteAction({ select: async () => "Connection details" }, "r5"), "details");
-  assert.equal(await chooseRemoteAction({ select: async () => "List hosts" }, "r5"), "list");
-  assert.equal(await chooseRemoteAction({ select: async () => "Disconnect" }, "r5"), "disconnect");
-  assert.equal(await chooseRemoteAction({ select: async () => undefined }, "r5"), undefined);
-});
-
-test("slash-command autocomplete exposes actions only, never hostnames", () => {
-  assert.deepEqual(remoteArgumentCompletions("")?.map(item => item.value), ["list"]);
-  assert.deepEqual(remoteArgumentCompletions("", true)?.map(item => item.value), ["list", "disconnect"]);
+test("root autocomplete offers actions while connect completion is scoped to hosts", () => {
+  assert.deepEqual(remoteArgumentCompletions("", false, ["r5"])?.map(item => item.value), ["connect", "list"]);
+  assert.deepEqual(remoteArgumentCompletions("", true, ["r5"])?.map(item => item.value), ["connect", "list", "sessions", "disconnect"]);
   assert.deepEqual(remoteArgumentCompletions(" LI")?.map(item => item.value), ["list"]);
   assert.deepEqual(remoteArgumentCompletions("dis", true)?.map(item => item.value), ["disconnect"]);
+  assert.deepEqual(remoteArgumentCompletions("connect ", false, ["r5", "r6"])?.map(item => item.value), ["connect r5", "connect r6"]);
+  assert.deepEqual(remoteArgumentCompletions("connect r5", true, ["r5", "r6"])?.map(item => item.value), ["connect r5"]);
+  assert.equal(remoteArgumentCompletions("connect missing", false, ["r5"]), null);
   for (const prefix of ["r", "r5", "user@", "prod", "unknown"]) {
     assert.equal(remoteArgumentCompletions(prefix), null);
     assert.equal(remoteArgumentCompletions(prefix, true), null);
@@ -68,15 +64,15 @@ test("host listing merges SSH profiles with entered history and preserves rememb
   assert.equal(await rememberedServerDir("r5", root), "/custom/server");
 });
 
-test("remote list is read-only and handles an empty catalog", async () => {
+test("remote list returns a host for confirmation and handles an empty catalog", async () => {
   const shown: string[][] = [];
   const notes: string[] = [];
   const ui = {
     select: async (_title: string, hosts: string[]) => { shown.push(hosts); return hosts[0]; },
     notify: (message: string) => { notes.push(message); },
   };
-  await showRemoteHostList(ui, ["r5", "r6"]);
-  await showRemoteHostList(ui, []);
+  assert.equal(await showRemoteHostList(ui, ["r5", "r6"]), "r5");
+  assert.equal(await showRemoteHostList(ui, []), undefined);
   assert.deepEqual(shown, [["r5", "r6"]]);
   assert.equal(notes.length, 1);
 });

@@ -27,9 +27,11 @@ export async function availableRemoteHosts(agentDir = getAgentDir(), configPath?
   return [...new Set([...history, ...aliases].filter(validRemoteHost))].sort((a, b) => a.localeCompare(b));
 }
 
-export async function showRemoteHostList(ui: Pick<ExtensionUIContext, "select" | "notify">, hosts: readonly string[]): Promise<void> {
+export async function showRemoteHostList(ui: Pick<ExtensionUIContext, "select" | "notify">, hosts: readonly string[]): Promise<string | undefined> {
   if (!hosts.length) { ui.notify("No SSH host aliases or remote connection history found", "info"); return; }
-  await ui.select("Remote hosts (SSH config and history)", [...hosts]);
+  const selected = await ui.select("Remote hosts (SSH config and history)", [...hosts]);
+  if (selected !== undefined && !hosts.includes(selected)) throw new Error("Unknown remote host selection");
+  return selected;
 }
 
 export async function chooseRemoteHost(ui: MenuUi, hosts: readonly string[]): Promise<string | undefined> {
@@ -45,18 +47,20 @@ export async function chooseRemoteHost(ui: MenuUi, hosts: readonly string[]): Pr
   return host;
 }
 
-export async function chooseRemoteAction(ui: Pick<ExtensionUIContext, "select">, host: string): Promise<"details" | "list" | "disconnect" | undefined> {
-  const choice = await ui.select(`Remote: ${host}`, ["Connection details", "List hosts", "Disconnect"]);
-  if (choice === undefined) return undefined;
-  if (choice === "Connection details") return "details";
-  if (choice === "List hosts") return "list";
-  if (choice === "Disconnect") return "disconnect";
-  throw new Error("Unknown remote menu choice");
-}
-
-export function remoteArgumentCompletions(prefix: string, connected = false) {
-  const values = connected ? ["list", "disconnect"] : ["list"];
-  const matches = values.filter((value) => value.toLowerCase().startsWith(prefix.trimStart().toLowerCase()))
-    .map((value) => ({ value, label: value, description: value === "disconnect" ? "Return to the local Pi session" : "List SSH config hosts and connection history" }));
+export function remoteArgumentCompletions(prefix: string, connected = false, hosts: readonly string[] = []) {
+  const input = prefix.trimStart().toLowerCase();
+  if (/^connect(?:\s|$)/.test(input)) {
+    const hostPrefix = input.replace(/^connect\s*/, "");
+    const matches = hosts.filter((host) => host.toLowerCase().startsWith(hostPrefix))
+      .map((host) => ({ value: `connect ${host}`, label: host, description: `Connect to ${host}` }));
+    return matches.length ? matches : null;
+  }
+  const values = connected ? ["connect", "list", "sessions", "disconnect"] : ["connect", "list"];
+  const descriptions: Record<string, string> = {
+    connect: "Connect to a remote host", list: "List SSH config hosts and connection history",
+    sessions: "Open the server session browser", disconnect: "Return to the local Pi session",
+  };
+  const matches = values.filter((value) => value.startsWith(input))
+    .map((value) => ({ value, label: value, description: descriptions[value] }));
   return matches.length ? matches : null;
 }
