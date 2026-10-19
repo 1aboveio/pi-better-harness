@@ -35,7 +35,8 @@
   },
   "pi": {
     "extensions": [
-      "./src/detach/extension.ts"
+      "./src/detach/extension.ts",
+      "./src/remote-client/extension.ts"
     ]
   },
   "scripts": {

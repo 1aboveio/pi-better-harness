@@ -120,7 +120,9 @@ export function registerDetach(pi: ExtensionAPI, deps: DetachDeps = { resolveTar
     return departed.has(sessionId) ? `This session moved away from this Pi process; resume it in a new process with \`pi --session\` after \`pi-remote return ${sessionId}\`.` : undefined;
   };
   const guard = (ctx: { sessionManager: { getSessionId(): string } }): void => {
-    const manager = ctx.sessionManager as unknown as { flushed?: boolean; _persist?: (entry: unknown) => void; _rewriteFile?: () => void };
+    // The manager survives runtime replacement; extension contexts do not.
+    const stable = { sessionManager: ctx.sessionManager };
+    const manager = stable.sessionManager as unknown as { flushed?: boolean; _persist?: (entry: unknown) => void; _rewriteFile?: () => void };
     if (guarded.has(manager)) return;
     guarded.add(manager);
     const rewrite = typeof manager._rewriteFile === "function" ? manager._rewriteFile : undefined;
@@ -131,7 +133,7 @@ export function registerDetach(pi: ExtensionAPI, deps: DetachDeps = { resolveTar
       const original = manager[method];
       if (typeof original !== "function") continue;
       (manager as Record<string, unknown>)[method] = function (this: unknown, ...args: unknown[]) {
-        if (blockedFor(ctx)) {
+        if (blockedFor(stable)) {
           dropped = true;
           return undefined;
         }

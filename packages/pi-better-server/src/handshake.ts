@@ -7,7 +7,7 @@ export const SERVER_VERSION = "0.1.0";
 export const SERVER_EXTENSION_VERSIONS: Readonly<Record<string, string>> = { "pi-better-server": SERVER_VERSION };
 
 export function serverHello(): HelloData {
-  return { protocolVersion: PROTOCOL_VERSION, piVersion: PI_VERSION, extensionVersions: { ...SERVER_EXTENSION_VERSIONS } };
+  return { protocolVersion: PROTOCOL_VERSION, piVersion: PI_VERSION, extensionVersions: { ...SERVER_EXTENSION_VERSIONS }, capabilities: ["native-client-v1", "package-sync-v1"] };
 }
 
 function majorMinor(version: string): string | undefined {

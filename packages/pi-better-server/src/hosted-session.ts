@@ -1,4 +1,5 @@
 import type { AgentSession, AgentSessionEvent, RpcCommand, RpcResponse, RpcSessionState } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import type { EventLog, LoggedEvent, Replay } from "./event-log.ts";
 import { UNSUPPORTED_SESSION_COMMANDS } from "./protocol.ts";
 import { UiBridge, type PendingDialog } from "./ui-bridge.ts";
@@ -27,6 +28,15 @@ function fail(id: string | undefined, command: string, error: string): RpcRespon
   return { ...(id !== undefined ? { id } : {}), type: "response", command, success: false, error };
 }
 
+/** Model metadata crosses hosts; headers, endpoint URLs and auth must not. */
+function clientModel(model: AgentSession["model"]) {
+  return model ? {
+    id: model.id, provider: model.provider, name: model.name, api: model.api,
+    reasoning: model.reasoning, input: model.input, cost: model.cost,
+    contextWindow: model.contextWindow, maxTokens: model.maxTokens,
+  } : undefined;
+}
+
 /**
  * One live Pi `AgentSession` plus the Pi RPC command dispatcher for it.
  * The dispatcher mirrors Pi's own `runRpcMode` handler for the commands that
@@ -34,6 +44,9 @@ function fail(id: string | undefined, command: string, error: string): RpcRespon
  * difference: `steer` on an idle session starts the next turn.
  */
 export class HostedSession {
+  readonly generation = randomUUID();
+  private activeMessage: unknown;
+  private readonly activeTools = new Map<string, unknown>();
   private readonly listeners = new Set<Listener>();
   private readonly unsubscribe: () => void;
   readonly session: AgentSession;
@@ -60,6 +73,10 @@ export class HostedSession {
     this.onActivity = onActivity;
     this.ui = new UiBridge((event) => this.publish(event));
     this.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+      if (event.type === "message_start" || event.type === "message_update") this.activeMessage = event.message;
+      if (event.type === "message_end") this.activeMessage = undefined;
+      if (event.type === "tool_execution_start" || event.type === "tool_execution_update") this.activeTools.set(event.toolCallId, event);
+      if (event.type === "tool_execution_end") this.activeTools.delete(event.toolCallId);
       this.publish(event);
       if (event.type === "agent_start") this.runIdle = session.waitForIdle().catch(() => undefined);
       if (event.type === "agent_end") for (const release of [...this.releaseOnAgentEnd]) release();
@@ -74,6 +91,37 @@ export class HostedSession {
 
   get isStreaming(): boolean {
     return this.session.isStreaming;
+  }
+
+  private rpcState(): RpcSessionState {
+    const session = this.session;
+    return {
+      model: session.model, thinkingLevel: session.thinkingLevel,
+      isStreaming: session.isStreaming, isCompacting: session.isCompacting,
+      steeringMode: session.steeringMode, followUpMode: session.followUpMode,
+      sessionFile: session.sessionFile, sessionId: session.sessionId,
+      sessionName: session.sessionName, autoCompactionEnabled: session.autoCompactionEnabled,
+      messageCount: session.messages.length, pendingMessageCount: session.pendingMessageCount,
+    };
+  }
+
+  /** A single JS-turn snapshot plus cursor; the native client subscribes after this cursor. */
+  async clientSnapshot(): Promise<Record<string, unknown>> {
+    const session = this.session;
+    const models = await session.modelRuntime.getAvailable();
+    const manager = session.sessionManager;
+    const commands = session.extensionRunner.getRegisteredCommands().map((entry) => ({ name: entry.invocationName, description: entry.description }));
+    const snapshot = {
+      generation: this.generation, lastSeq: this.lastSeq,
+      sessionId: session.sessionId, cwd: manager.getCwd(), name: session.sessionName,
+      sessionFile: session.sessionFile, state: { ...this.rpcState(), model: clientModel(session.model), lastSeq: this.lastSeq, hasController: this.hasController, needsInput: this.needsInput, steering: session.getSteeringMessages(), followUp: session.getFollowUpMessages() },
+      messages: session.messages, entries: manager.getEntries(), leafId: manager.getLeafId(),
+      tools: session.getAllTools().map((tool) => ({ name: tool.name, description: tool.description, parameters: session.getToolDefinition(tool.name)?.parameters })),
+      commands, models: models.map(clientModel), contextUsage: session.getContextUsage(), stats: session.getSessionStats(),
+      activeMessage: this.activeMessage, activeTools: [...this.activeTools.values()],
+    };
+    // Detach mutable message/entry arrays before yielding back to another model event.
+    return JSON.parse(JSON.stringify(snapshot));
   }
 
   /** A turn is starting or running: queue steers for it instead of starting another one. */
@@ -299,21 +347,8 @@ export class HostedSession {
           await session.abort();
           return ok(id, "abort");
         case "get_state": {
-          const state: RpcSessionState = {
-            model: session.model,
-            thinkingLevel: session.thinkingLevel,
-            isStreaming: session.isStreaming,
-            isCompacting: session.isCompacting,
-            steeringMode: session.steeringMode,
-            followUpMode: session.followUpMode,
-            sessionFile: session.sessionFile,
-            sessionId: session.sessionId,
-            sessionName: session.sessionName,
-            autoCompactionEnabled: session.autoCompactionEnabled,
-            messageCount: session.messages.length,
-            pendingMessageCount: session.pendingMessageCount,
-          };
-          return ok(id, "get_state", { ...state, lastSeq: this.lastSeq, hasController: this.hasController, needsInput: this.needsInput });
+          const state = this.rpcState();
+          return ok(id, "get_state", { ...state, model: clientModel(session.model), lastSeq: this.lastSeq, hasController: this.hasController, needsInput: this.needsInput });
         }
         case "set_model": {
           const models = await session.modelRuntime.getAvailable();
@@ -321,12 +356,14 @@ export class HostedSession {
           if (!model) return fail(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
           await session.setModel(model);
           this.onActivity();
-          return ok(id, "set_model", model);
+          return ok(id, "set_model", clientModel(model));
         }
-        case "cycle_model":
-          return ok(id, "cycle_model", (await session.cycleModel()) ?? null);
+        case "cycle_model": {
+          const result = await session.cycleModel();
+          return ok(id, "cycle_model", result ? { ...result, model: clientModel(result.model) } : null);
+        }
         case "get_available_models":
-          return ok(id, "get_available_models", { models: await session.modelRuntime.getAvailable() });
+          return ok(id, "get_available_models", { models: (await session.modelRuntime.getAvailable()).map(clientModel) });
         case "set_thinking_level":
           session.setThinkingLevel(command.level);
           return ok(id, "set_thinking_level");
@@ -353,8 +390,21 @@ export class HostedSession {
         case "abort_retry":
           session.abortRetry();
           return ok(id, "abort_retry");
-        case "bash":
-          return ok(id, "bash", await session.executeBash(command.command, undefined, { excludeFromContext: command.excludeFromContext, id }));
+        case "bash": {
+          let guardError: string | undefined;
+          const off = session.extensionRunner.onError((error) => { if (error.event === "user_bash") guardError = error.error; });
+          let intercepted: Awaited<ReturnType<typeof session.extensionRunner.emitUserBash>>;
+          try {
+            intercepted = await session.extensionRunner.emitUserBash({ type: "user_bash", command: command.command, excludeFromContext: command.excludeFromContext ?? false, cwd: session.sessionManager.getCwd() });
+            // Older Pi versions report guard errors without throwing; still fail closed.
+            if (guardError) throw new Error(guardError);
+          } finally { off(); }
+          if (intercepted?.result) {
+            session.recordBashResult(command.command, intercepted.result, { excludeFromContext: command.excludeFromContext });
+            return ok(id, "bash", intercepted.result);
+          }
+          return ok(id, "bash", await session.executeBash(command.command, undefined, { excludeFromContext: command.excludeFromContext, operations: intercepted?.operations, id }));
+        }
         case "abort_bash":
           session.abortBash();
           return ok(id, "abort_bash");

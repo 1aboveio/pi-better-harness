@@ -58,6 +58,96 @@ connection, when the protocol versions differ or when a stated `piVersion` is on
 a different Pi major.minor. Extension versions are reported, never enforced.
 A client that skips `hello` is still served.
 
+## Native remote client (`/remote`, experimental)
+
+The native client provides an experimental VS Code Remote-style workflow:
+start ordinary local Pi **1.2.0** with this package loaded at startup, then run
+`/remote r5`. The terminal keeps Pi's native local UI while the remote daemon owns
+the model, tools, workspace and session state. This connects to an existing remote
+workspace; it does not move or upload the local workspace or session.
+
+### Connect and disconnect
+
+The opt-in extension is loaded through the normal `pi.extensions` package manifest
+(`src/remote-client/extension.ts`), not a separate client launcher. Configure the
+package before starting Pi: loading it later with `/reload` cannot capture the
+startup bridge. Wait for local work, including `!` commands, to finish before
+connecting.
+
+```text
+/remote r5
+/remote r5 --cwd /home/user/workspaces/project
+/remote r5 --session <id-or-unique-prefix>
+/remote r5 --remote-dir /home/user/.pi/agent/server
+/remote disconnect
+```
+
+`r5` is an SSH alias. Without selectors, `/remote` offers existing remote
+workspaces, then lets you start a new session or resume one in that workspace.
+Discovery defaults to `~/workspaces/`; set `PI_SERVER_WORKSPACES_DIR` to an absolute
+path on the daemon host to change that root. You can also enter another existing
+absolute remote path. `--cwd` skips the workspace picker; `--session` selects a
+session directly. If both are given, the session must belong to that workspace.
+`--remote-dir` selects the remote daemon's server directory and is saved per host
+only after a successful connection. It is reused on later connections to that
+host; otherwise the usual remote server-directory discovery applies.
+
+`/remote disconnect` restores the original local history in a fresh local runtime.
+It releases the client connection without aborting the remote session or its work.
+A lost connection disables remote commands; use `/remote disconnect` to return
+locally, then connect again. There is no automatic server setup: provision the
+remote daemon, workspace and provider credentials separately.
+
+### Compatibility and controls
+
+The native bridge in `src/remote-client/pi-1.2-bridge.ts` uses private Pi internals
+and supports **exactly Pi 1.2.0** on the local client. This is narrower than the
+daemon's general Pi compatibility. Client and daemon Pi major.minor versions must
+match, and the remote daemon must be upgraded to code advertising
+`native-client-v1`. An older daemon is refused before the local runtime is replaced.
+This describes work in development, not a production release.
+
+Core native controls for `/model`, `/thinking` and `!` shell commands operate on
+the remote session. While connected, these local/session-management operations
+are blocked: `/new`, `/fork`, `/clone`, `/tree`, `/resume`, `/import`, `/reload`,
+`/trust`, `/share`, `/settings`, `/login`, `/logout`, `/export`, `/debug`,
+`/scoped-models` and `/bug`. Disconnect before using them locally.
+
+Standard remote extension dialogs (select, confirm, input, editor), notifications,
+status and text widgets can be presented locally. Arbitrary remote `ctx.ui.custom`
+screens, custom component widgets and remote extension renderers are not supported.
+Synchronizing a package installation does not provide full extension UI parity.
+
+### Package synchronization
+
+Before attaching to the remote session, the client reads the locally
+configured, installed npm/git package catalog. It resolves npm packages to their
+installed exact versions and git packages to full installed commit pins. The
+confirmation previews additions and replacements, including `extensions`,
+`skills`, `prompts`, `themes` filters and `autoload`. Declining skips synchronization
+and continues with the remote catalog. Remote-only packages are retained.
+
+Only approved package declarations are synchronized. Credentials, settings outside
+those declarations and local extension/resource sources are not copied;
+unsupported local entries are reported. The preview uses the selected remote
+workspace's effective catalog. Installs update the remote global packages. A
+trusted project declaration that overrides an approved package causes refusal rather than rewriting the
+repository's `.pi/settings.json`; manage that override on the remote host. Package
+updates are refused while any daemon session is live (even idle) or loading its
+runtime. Close those sessions before retrying an update. Installation stops on the
+first failure; earlier successful installs are not rolled back.
+
+### Verification status
+
+Real-host verification used bundled Pi 1.2.0 on the laptop with the native UI:
+`!hostname` returned `r5`, and a model-driven remote tool call returned
+`CLIENT_REMOTE_OK r5`. `/remote disconnect` restored the local session; reconnecting
+through the workspace/session pickers restored the remote conversation. After
+deliberately dropping the SSH transport, `/remote disconnect` also restored the
+local UI. The isolated Pi 1.2.0 server suite passed with 236 tests and five gated
+remote-host skips. This is compatibility evidence, not full custom-extension UI
+parity or a production release.
+
 ## pi-remote
 
 ```sh
@@ -68,6 +158,10 @@ node src/remote-cli.ts tail <session>
 node src/remote-cli.ts answer <session> [--request <id>] (--value <text> | --confirm | --deny | --cancel)
 node src/remote-cli.ts move <session> --to <ssh-alias> [--to-remote-dir <dir>] [--to-cwd <dir>]
 ```
+
+For Pi sessions, `pi-remote attach` still opens the daemon's companion console in
+tmux (over SSH for a remote host). It is not the native local `/remote` client
+described above.
 
 A session is named by id, unique id prefix, or name. `ls` shows status (running,
 idle, needs-input), last activity, cwd and git branch. `steer` queues into a
@@ -208,9 +302,10 @@ PI_VERSION=1.2.0 scripts/bootstrap-host.sh
 ```
 
 Provider and web-search credentials are still provisioned separately on the host.
-The daemon's attach console does not gain native Pi's custom extension screens; use native Pi in tmux
-for the full UI. Project workspaces belong outside the runtime installation, for
-example under `~/workspaces/`.
+The daemon's attach console does not gain native Pi's custom extension screens;
+use native Pi on the host in tmux for those screens. The local native `/remote`
+client above also cannot transport arbitrary custom screens. Project workspaces
+belong outside the runtime installation, for example under `~/workspaces/`.
 
 `PI_VERSION=1.0.0` picks the Pi version (default 0.82.1);
 the daemon works on Pi 0.82 and 1.x, and `hello` reports the installed one. On Pi 1.x the
@@ -221,7 +316,7 @@ isolated install, leaving the repo's lockfile alone.
 
 ## Detach and return (`/detach`, `pi-remote return`)
 
-`/detach <ssh-alias> [--remote-dir <dir>] [--to-cwd <dir>]` is a Pi command (registered by `src/detach/extension.ts`, listed under `pi.extensions`). It moves the current plain local session and its workspace into the daemon on that host with the same move protocol as `pi-remote move`; this machine stands in as the source (`LocalSource`). Afterwards the local session is read-only (input is refused with a pointer to `return`); follow the remote one with `pi-remote tail <session> --host <alias>` and `steer` until the attach TUI is available.
+`/detach <ssh-alias> [--remote-dir <dir>] [--to-cwd <dir>]` is a Pi command (registered by `src/detach/extension.ts`, listed under `pi.extensions`). It moves the current plain local session and its workspace into the daemon on that host with the same move protocol as `pi-remote move`; this machine stands in as the source (`LocalSource`). Afterwards the local session is read-only (input is refused with a pointer to `return`); follow the remote one with `pi-remote tail <session> --host <alias>` and `steer`, use `pi-remote attach` for the companion console, or connect from another local Pi process with native `/remote` above.
 
 `pi-remote return --host <alias> <session> [--to-cwd <empty dir>]` pulls it back: the workspace is rebuilt (default: where it lived before the detach if that directory is gone or empty; /detach leaves the original in place, so normally a new `<name>-returned` directory beside it, which the command prints; the original is never touched), the transcript is placed in Pi's session directory, and the daemon's copy is retired (`moved`; its workspace directory is left on the host). A returned session can be detached again.
 

@@ -64,6 +64,7 @@ export interface HelloData {
   protocolVersion: number;
   piVersion: string;
   extensionVersions: Record<string, string>;
+  capabilities?: string[];
 }
 
 export type DaemonCommand =
@@ -128,7 +129,7 @@ export type SessionResponse = RpcResponse & { sessionId?: string };
 export type ServerMessage =
   | DaemonResponse
   | SessionResponse
-  | { type: "event"; sessionId: string; seq: number; event: unknown };
+  | { type: "event"; sessionId: string; seq: number; generation?: string; event: unknown };
 
 export const MOVE_COMMANDS: ReadonlySet<string> = new Set([
   "move_fence",

@@ -91,8 +91,9 @@ export class DaemonClient {
     return () => this.eventListeners.delete(listener);
   }
 
-  onClose(listener: () => void): void {
+  onClose(listener: () => void): () => void {
     this.closeListeners.add(listener);
+    return () => this.closeListeners.delete(listener);
   }
 
   close(): void {

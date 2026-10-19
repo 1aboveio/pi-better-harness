@@ -8,6 +8,7 @@ import { defaultServerDir, ensureServerDir, socketPathFor } from "./paths.ts";
 import { MoveService } from "./move/service.ts";
 import { CONTROL_COMMANDS, DAEMON_COMMANDS, encodeLine, failure, LineDecoder, MOVE_COMMANDS, type MoveCommand, type ServerMessage } from "./protocol.ts";
 import { SessionRegistry, type SessionRegistryOptions } from "./registry.ts";
+import { NativeClientHost, NATIVE_HOST_COMMANDS } from "./remote-client/host.ts";
 
 export interface DaemonOptions {
   /** Defaults to `~/.pi/agent/server` (or `$PI_SERVER_DIR`). */
@@ -52,6 +53,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
   const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log });
   await registry.resumeAll();
+  const nativeHost = new NativeClientHost(registry);
   const companions = new CompanionManager({
     socketPath,
     ...options.companion,
@@ -83,6 +85,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       const id = typeof command.id === "string" ? command.id : undefined;
       const type = typeof command.type === "string" ? command.type : "";
       const reply = (message: Record<string, unknown>): void => send({ ...(id !== undefined ? { id } : {}), type: "response", command: type, success: true, ...message } as ServerMessage);
+      let releaseSessionOperation: (() => void) | undefined;
       try {
         if (!type) {
           send(failure(id, "unknown", "Missing command type"));
@@ -95,6 +98,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           socket.end(); // an incompatible client gets the reason, then the door
           return;
         }
+        if (NATIVE_HOST_COMMANDS.has(type)) return reply({ data: await nativeHost.handle(command) });
+        if (nativeHost.busy && type !== "list_sessions") {
+          send(failure(id, type, "Remote extensions are being updated; retry after installation finishes"));
+          return;
+        }
+        if (MOVE_COMMANDS.has(type) || (DAEMON_COMMANDS.has(type) && type !== "list_sessions")) releaseSessionOperation = nativeHost.enterSessionOperation();
         if (MOVE_COMMANDS.has(type)) {
           return reply(await moves.handle(command as MoveCommand));
         }
@@ -144,11 +153,19 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           send(failure(id, type, reason ? `Session ${sessionId} failed to resume: ${reason}` : `Session not open: ${sessionId}`, sessionId));
           return;
         }
+        if (type === "client_snapshot") return reply({ sessionId, data: await hosted.clientSnapshot() });
+        if (type === "clear_queue") return reply({ sessionId, data: hosted.session.clearQueue() });
+        if (type === "abort_compaction") {
+          hosted.session.abortCompaction();
+          return reply({ sessionId });
+        }
         const { sessionId: _addressed, ...rpc } = command;
         const response = await hosted.handle(rpc as RpcCommand);
         send({ ...response, sessionId } as ServerMessage);
       } catch (error) {
         send(failure(id, type || "unknown", error instanceof Error ? error.message : String(error)));
+      } finally {
+        releaseSessionOperation?.();
       }
     };
 
