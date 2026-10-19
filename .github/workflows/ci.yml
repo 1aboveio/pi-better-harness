@@ -56,7 +56,15 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        id: install
         run: npm ci
+
+      # Existing SSH fixtures use /tmp; native Windows resolves it on this drive.
+      - name: Prepare SSH fixtures and report native OpenSSH
+        run: |
+          New-Item -ItemType Directory -Force -Path /tmp | Out-Null
+          & "$env:WINDIR\System32\OpenSSH\ssh.exe" -V
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Scoped on purpose: the root suite still assumes POSIX shells in places
       # (e.g. /bin/sh shebangs), so this lane proves what Windows must prove —
@@ -66,24 +74,19 @@ jobs:
         run: npm run typecheck -w pi-better-background-tasks
 
       - name: Typecheck SSH core and extension
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: npm run typecheck -w ssh-core -w pi-better-ssh
 
-      # Existing SSH fixtures use /tmp; native Windows resolves it on this drive.
-      - name: Prepare SSH fixtures and report native OpenSSH
-        run: |
-          New-Item -ItemType Directory -Force -Path /tmp | Out-Null
-          & "$env:WINDIR\System32\OpenSSH\ssh.exe" -V
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
       - name: SSH core Windows contracts
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: npm test -w ssh-core
 
       - name: SSH extension Windows integration and packaging
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: npm test -w pi-better-ssh
 
       - name: Windows process unit and integration checks
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: npx vitest run src/process-windows.test.ts src/process-windows.integration.test.ts src/runtime-windows.test.ts
         working-directory: packages/pi-better-background-tasks
 
