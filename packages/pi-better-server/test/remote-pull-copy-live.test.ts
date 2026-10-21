@@ -3,12 +3,30 @@ import { once } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import { DaemonClient } from "../src/client.ts";
 import { pullAttachedSession } from "../src/remote-client/extension.ts";
 import { RemoteClientSession } from "../src/remote-client/session.ts";
 import { parseRemoteTransferArgs, type TransferFrontend } from "../src/remote-client/transfer-command.ts";
 import { makeEnv, spawnDaemon, waitFor } from "./helpers.ts";
+
+function progressUi(t: TestContext): Pick<ExtensionUIContext, "custom"> {
+  let active: (Component & { dispose?(): void }) | undefined;
+  t.after(() => active?.dispose?.());
+  return { custom: factory => new Promise(resolve => {
+    assert.equal(active, undefined, "Progress screens must not overlap");
+    const created = factory(
+      { requestRender() {} } as unknown as TUI,
+      { fg: (_color: string, text: string) => text } as Theme,
+      {} as Parameters<typeof factory>[2],
+      value => { active?.dispose?.(); active = undefined; resolve(value); },
+    );
+    assert.ok(!("then" in created), "Progress factories are synchronous");
+    active = created;
+    assert.ok(active.render(100).length > 0, "A pending remote operation renders progress");
+  }) };
+}
 
 async function fixture(t: TestContext) {
   const previous = { ...process.env };
@@ -41,6 +59,7 @@ async function fixture(t: TestContext) {
     connected: { host: "attached-host", remoteDir: host.serverDir, sessionId },
     resolveTarget: async () => ({ socketPath, forwardSocket: async () => assert.fail("No SSH in this test"), close: async () => {} }),
     ui: {
+      ...progressUi(t),
       confirm: async () => true,
       input: async () => local.cwd,
       notify: (message: string) => { notices.push(message); },

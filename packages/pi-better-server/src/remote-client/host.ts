@@ -1,12 +1,21 @@
-import { readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { HostedSession } from "../hosted-session.ts";
 import type { SessionRegistry } from "../registry.ts";
 import { installPackageCatalog, readLocalPackageCatalog, type PackageSpec } from "./packages.ts";
 
-export const NATIVE_HOST_COMMANDS = new Set(["client_workspaces", "client_packages", "client_packages_install"]);
+export const NATIVE_HOST_COMMANDS = new Set([
+  "client_workspaces", "client_packages", "client_packages_install", "client_browse_directory", "client_create_directory",
+]);
+
+async function existingDirectory(value: unknown): Promise<string> {
+  if (typeof value !== "string" || !isAbsolute(value)) throw new Error("path must be an existing absolute remote directory");
+  const path = await realpath(value);
+  if (!(await stat(path)).isDirectory()) throw new Error("path must be an existing absolute remote directory");
+  return path;
+}
 
 type Maintenance = {
   assertIdle(): void;
@@ -125,6 +134,32 @@ export class NativeClientHost {
   }
 
   async handle(command: Record<string, unknown>): Promise<unknown> {
+    if (command.type === "client_browse_directory") {
+      const path = await existingDirectory(command.path);
+      const directories: Array<{ name: string; path: string }> = [];
+      for (const item of await readdir(path, { withFileTypes: true })) {
+        if (item.isDirectory()) directories.push({ name: item.name, path: join(path, item.name) });
+        else if (item.isSymbolicLink()) {
+          try {
+            if ((await stat(join(path, item.name))).isDirectory()) directories.push({ name: item.name, path: join(path, item.name) });
+          } catch (error) {
+            // A dangling link is not a browsable directory; other filesystem errors remain visible.
+            if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+          }
+        }
+      }
+      return { path, parent: dirname(path) === path ? null : dirname(path), directories: directories.sort((a, b) => a.name.localeCompare(b.name)) };
+    }
+    if (command.type === "client_create_directory") {
+      const name = command.name;
+      if (typeof name !== "string" || !name.trim() || name === "." || name === ".." || /[/\\\\\x00-\x1f\x7f-\x9f]/.test(name)) {
+        throw new Error("name must be a single new child folder name without traversal, slashes or control characters");
+      }
+      const parent = await existingDirectory(command.path);
+      const path = join(parent, name);
+      await mkdir(path);
+      return { path };
+    }
     if (command.type === "client_workspaces") {
       const root = process.env.PI_SERVER_WORKSPACES_DIR ?? join(homedir(), "workspaces");
       if (!isAbsolute(root)) throw new Error("PI_SERVER_WORKSPACES_DIR must be an absolute path");

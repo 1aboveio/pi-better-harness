@@ -15,6 +15,8 @@ import { withConnectionProgress } from "./connection-progress.ts";
 import { registerLocalOwnershipGuard } from "../detach/extension.ts";
 import { parseRemoteTransferArgs, runRemoteTransfer, type RemoteTransferArgs, type TransferFrontend } from "./transfer-command.ts";
 import { observeLocalTransferWork } from "./local-work.ts";
+import { browseRemoteFolders } from "./folder-browser.ts";
+import { showRemoteProgress } from "./remote-progress.ts";
 
 const USAGE = "/remote connect <ssh-alias> [--cwd <remote-path>] [--session <id>] [--remote-dir <server-dir>]";
 
@@ -106,12 +108,12 @@ export function registerRemoteClient(pi: ExtensionAPI, dependencies: RemoteClien
   });
 }
 
-type RemoteSessionChoice = { action: "create"; cwd: string } | { action: "attach"; cwd: string; sessionId: string };
+type RemoteSessionChoice = { action: "create"; cwd: string } | { action: "attach"; cwd: string; sessionId: string } | { action: "transfer"; copy: boolean; cwd: string };
 
 /** Connecting does not authorize a handoff: explicitly choose mode and scope first. */
-export async function chooseConnectionTransfer(ui: Pick<ExtensionUIContext, "select">): Promise<"browse" | { copy: boolean; includeWorkspace: boolean } | undefined> {
+export async function chooseConnectionTransfer(ui: Pick<ExtensionUIContext, "select">, copy?: boolean): Promise<"browse" | { copy: boolean; includeWorkspace: boolean } | undefined> {
   const modes = ["Browse remote sessions", "Move current session here", "Copy current session here"];
-  const mode = await ui.select("Connected: continue working", modes);
+  const mode = copy === undefined ? await ui.select("Connected: continue working", modes) : modes[copy ? 2 : 1];
   if (mode === undefined) return undefined;
   if (mode === modes[0]) return "browse";
   if (mode !== modes[1] && mode !== modes[2]) throw new Error("Unknown connection action");
@@ -123,23 +125,37 @@ export async function chooseConnectionTransfer(ui: Pick<ExtensionUIContext, "sel
 }
 
 /** The browser's creation context is not a constraint on existing sessions. */
-export async function chooseRemoteSession(client: DaemonClient, ui: ExtensionUIContext, host: string, options: { cwd?: string; sessionId?: string }): Promise<RemoteSessionChoice | undefined> {
+export async function chooseRemoteSession(client: DaemonClient, ui: ExtensionUIContext, host: string, options: { cwd?: string; sessionId?: string; allowTransfer?: boolean }): Promise<RemoteSessionChoice | undefined> {
   if (options.sessionId) {
-    const selected = await resolveSession(client, options.sessionId);
+    const sessionId = options.sessionId;
+    const result = await showRemoteProgress(ui, host, "Finding remote session...", () => resolveSession(client, sessionId));
+    if (!result) return undefined;
+    const selected = result.value;
     return { action: "attach", cwd: checkedRemoteWorkspace(options.cwd, selected.cwd), sessionId: selected.sessionId };
   }
   let creationCwd = options.cwd;
   if (creationCwd === undefined) {
-    const listed = await client.call({ type: "client_workspaces" });
+    const result = await showRemoteProgress(ui, host, "Loading remote browser...", () => client.call({ type: "client_workspaces" }));
+    if (!result) return undefined;
+    const listed = result.value;
     const root: unknown = listed.data?.root;
     if (typeof root !== "string" || !root.startsWith("/")) throw new Error("The server workspace root must be an absolute remote path");
     creationCwd = root;
   }
-  const choice = await browseRemoteSessions(ui, client, host, { cwd: creationCwd });
+  const choice = await browseRemoteSessions(ui, client, host, {
+    cwd: creationCwd, allowTransfer: options.allowTransfer,
+    selectFolder: initialPath => {
+      if (client.server && !client.server.capabilities?.includes("folder-browser-v1")) {
+        ui.notify("Update pi-better-server on the remote host to browse or create folders. Existing sessions are still available.", "warning");
+        return Promise.resolve(undefined);
+      }
+      return browseRemoteFolders(ui, client, host, initialPath);
+    },
+  });
   if (!choice) return undefined;
-  return choice.action === "create"
-    ? { action: "create", cwd: creationCwd }
-    : { action: "attach", cwd: checkedRemoteWorkspace(options.cwd, choice.session.cwd), sessionId: choice.session.sessionId };
+  if (choice.action === "attach") return { action: "attach", cwd: checkedRemoteWorkspace(options.cwd, choice.session.cwd), sessionId: choice.session.sessionId };
+  const cwd = choice.cwd ?? creationCwd;
+  return choice.action === "create" ? { action: "create", cwd } : { action: "transfer", copy: choice.copy, cwd };
 }
 
 async function connectHost(options: RemoteOptions, local: LocalFrontend): Promise<void> {
@@ -181,51 +197,63 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
     const connection = client;
     const transport = target;
     ui.setStatus("pi-remote", `SSH: ${options.host} (sessions)`);
-    const transferChoice = !options.sessionId && local.localSession ? await chooseConnectionTransfer(ui) : "browse";
-    if (transferChoice === undefined) return;
-    const transferred = transferChoice === "browse" ? undefined : await runRemoteTransfer({
-      direction: "push", host: options.host, remoteDir,
-      copy: transferChoice.copy, includeWorkspace: transferChoice.includeWorkspace, cwd: options.cwd,
-    }, { ui, cwd: local.cwd, localSession: local.localSession, resolveTarget: local.dependencies.resolveTarget,
-      beforeTransfer: (client, destination) => syncPackages(client, local, destination) });
-    if (transferChoice !== "browse" && !transferred) return;
-    const choice = transferred
-      ? { action: "attach" as const, cwd: transferred.cwd, sessionId: transferred.sessionId }
-      : await chooseRemoteSession(connection, ui, options.host, options);
+    let choice: Exclude<RemoteSessionChoice, { action: "transfer" }> | undefined;
+    let transferred = false;
+    for (;;) {
+      const selected = await chooseRemoteSession(connection, ui, options.host, { ...options, allowTransfer: !!local.localSession });
+      if (!selected || selected.action !== "transfer") { choice = selected; break; }
+      const transferChoice = await chooseConnectionTransfer(ui, selected.copy);
+      if (!transferChoice || transferChoice === "browse") continue;
+      const result = await runRemoteTransfer({
+        direction: "push", host: options.host, remoteDir,
+        copy: transferChoice.copy, includeWorkspace: transferChoice.includeWorkspace, cwd: selected.cwd,
+      }, { ui, cwd: local.cwd, localSession: local.localSession, resolveTarget: local.dependencies.resolveTarget,
+        beforeTransfer: async (client, destination) => {
+          if (!await syncPackages(client, local, destination)) throw new Error("Remote extension check cancelled; no transfer was started.");
+        } });
+      if (!result) continue;
+      choice = { action: "attach", cwd: result.cwd, sessionId: result.sessionId };
+      transferred = true;
+      break;
+    }
     if (!choice) return;
     let cwd = choice.cwd;
-    if (!transferred) await syncPackages(connection, local, cwd);
-    const sessionId = choice.action === "create"
-      ? (await connection.call({ type: "create_session", cwd })).sessionId as string
-      : choice.sessionId;
-    await connection.call({ type: "open_session", sessionId });
-    const remote = await RemoteClientSession.connect(connection, sessionId, {
-      onDisconnect: () => {
-        ui.setStatus("pi-remote", `SSH: ${options.host} (disconnected)`);
-        ui.notify(`Disconnected from ${options.host}. Remote work has not been aborted. Use /remote disconnect to return locally, then reconnect.`, "warning");
-      },
-      localCommandCompletions: (prefix) => argumentCompletions(prefix, true),
-      onLocalCommand: async (text) => {
-        if (!/^\/remote(?:\s|$)/.test(text)) return false;
-        const args = text.replace(/^\/remote(?:\s|$)/, "").trim();
-        if (/^pull(?:\s|$)/.test(args)) {
-          await pullAttachedSession(parseRemoteTransferArgs(args), {
-            ui, cwd: local.cwd, resolveTarget: local.dependencies.resolveTarget,
-            connected: { host: options.host, remoteDir, sessionId }, localSession: local.localSession,
-          }, connection, remote, () => bridge.disconnect());
+    if (!transferred && !await syncPackages(connection, local, cwd)) return;
+    let sessionId = choice.action === "attach" ? choice.sessionId : "";
+    const selectedChoice = choice;
+    const opened = await showRemoteProgress(ui, options.host, choice.action === "create" ? "Starting remote session..." : "Opening remote session...", async (): Promise<RemoteClientSession> => {
+      if (selectedChoice.action === "create") sessionId = (await connection.call({ type: "create_session", cwd })).sessionId as string;
+      await connection.call({ type: "open_session", sessionId });
+      return RemoteClientSession.connect(connection, sessionId, {
+        onDisconnect: () => {
+          ui.setStatus("pi-remote", `SSH: ${options.host} (disconnected)`);
+          ui.notify(`Disconnected from ${options.host}. Remote work has not been aborted. Use /remote disconnect to return locally, then reconnect.`, "warning");
+        },
+        localCommandCompletions: (prefix) => argumentCompletions(prefix, true),
+        onLocalCommand: async (text) => {
+          if (!/^\/remote(?:\s|$)/.test(text)) return false;
+          const args = text.replace(/^\/remote(?:\s|$)/, "").trim();
+          if (/^pull(?:\s|$)/.test(args)) {
+            await pullAttachedSession(parseRemoteTransferArgs(args), {
+              ui, cwd: local.cwd, resolveTarget: local.dependencies.resolveTarget,
+              connected: { host: options.host, remoteDir, sessionId }, localSession: local.localSession,
+            }, connection, remote, () => bridge.disconnect());
+            return true;
+          }
+          if (args === "disconnect") { await bridge.disconnect(); return true; }
+          const next = !args || args === "sessions"
+            ? { host: options.host, remoteDir, cwd: undefined, sessionId: undefined }
+            : await chooseRemoteConnection(args, ui);
+          if (!next) return true;
+          await bridge.disconnect();
+          try { await connectHost(next, { ...local, localSession: undefined }); }
+          catch (error) { ui.notify(error instanceof Error ? error.message : String(error), "error"); }
           return true;
-        }
-        if (args === "disconnect") { await bridge.disconnect(); return true; }
-        const next = !args || args === "sessions"
-          ? { host: options.host, remoteDir, cwd: undefined, sessionId: undefined }
-          : await chooseRemoteConnection(args, ui);
-        if (!next) return true;
-        await bridge.disconnect();
-        try { await connectHost(next, { ...local, localSession: undefined }); }
-        catch (error) { ui.notify(error instanceof Error ? error.message : String(error), "error"); }
-        return true;
-      },
-    });
+        },
+      });
+    }, { cancellable: false });
+    if (!opened) return;
+    const remote = opened.value;
     try { cwd = checkedRemoteWorkspace(cwd, remote.sessionManager.getCwd()); }
     catch (error) { remote.dispose(); throw error; }
     const dispose = remote.dispose.bind(remote);
@@ -278,25 +306,29 @@ export async function pullAttachedSession(
   return result;
 }
 
-async function syncPackages(client: DaemonClient, local: Pick<LocalFrontend, "cwd" | "ui">, cwd: string): Promise<void> {
+export async function syncPackages(client: DaemonClient, local: Pick<LocalFrontend, "cwd" | "ui">, cwd: string): Promise<boolean> {
   const { ui } = local;
-  const localCatalog = await readLocalPackageCatalog(undefined, local.cwd);
-  const remote = (await client.call({ type: "client_packages", cwd })).data as PackageCatalog;
+  const catalogs = await showRemoteProgress(ui, "Remote", "Checking workspace extensions...", async () => ({
+    localCatalog: await readLocalPackageCatalog(undefined, local.cwd),
+    remote: (await client.call({ type: "client_packages", cwd })).data as PackageCatalog,
+  }));
+  if (!catalogs) return false;
+  const { localCatalog, remote } = catalogs.value;
   if (localCatalog.unsupported.length) ui.notify(`Local-only extensions will not be copied: ${localCatalog.unsupported.join(", ")}`, "warning");
   const plan = planPackageSync(localCatalog.packages, remote.packages);
   const changes = [...plan.install];
   for (const conflict of plan.conflicts ?? []) {
     if (!changes.some((entry) => entry.source === conflict.local.source)) changes.push(conflict.local);
   }
-  if (!changes.length) return;
+  if (!changes.length) return true;
   const preview = [
     ...plan.install.map((entry) => `Install: ${JSON.stringify(entry)}`),
     ...(plan.conflicts ?? []).map((entry) => `Replace: ${JSON.stringify(entry.remote)}\nWith: ${JSON.stringify(entry.local)}`),
   ].join("\n\n");
   const approved = await ui.confirm("Sync remote extensions?", `Target workspace: ${cwd}\n\n${preview}\n\nOnly these package declarations are synced. Credentials, provider settings, and local extension source are not copied. Remote-only packages are kept. Trusted project overrides must be managed on the remote host.`);
-  if (!approved) return;
-  ui.notify("Installing approved remote extensions...", "info");
-  await client.call({ type: "client_packages_install", cwd, packages: changes });
+  if (!approved) return true;
+  await showRemoteProgress(ui, "Remote", "Installing approved remote extensions...", () => client.call({ type: "client_packages_install", cwd, packages: changes }), { cancellable: false });
+  return true;
 }
 
 export default function remoteClientExtension(pi: ExtensionAPI): void { registerRemoteClient(pi); }

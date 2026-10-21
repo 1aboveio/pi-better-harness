@@ -11,6 +11,8 @@ import { chooseRemoteHost, availableRemoteHosts } from "./menu.ts";
 import { rememberedServerDir, validRemoteHost } from "./profiles.ts";
 import { parseArgs } from "node:util";
 import { localBlockedReason, localStateDir } from "../detach/local-state.ts";
+import { withConnectionProgress } from "./connection-progress.ts";
+import { showRemoteProgress } from "./remote-progress.ts";
 
 export interface RemoteTransferArgs {
   direction: "push" | "pull";
@@ -80,10 +82,31 @@ export async function runRemoteTransfer(args: RemoteTransferArgs, frontend: Tran
   const remoteDir = args.remoteDir ?? (frontend.connected?.host === host ? frontend.connected.remoteDir : undefined) ?? await rememberedServerDir(host);
   let target: Target | undefined;
   let client: DaemonClient | undefined;
+  let operationFailed = false;
   try {
-    ui.notify(`Connecting to ${host} for ${args.direction}...`, "info");
-    target = await (frontend.resolveTarget ?? resolveTarget)({ host, agent: "pi", ...(remoteDir ? { remoteDir } : {}) });
-    client = await DaemonClient.connect(target.socketPath);
+    const setup = await withConnectionProgress(ui, host, async ({ signal, stage }) => {
+      let pendingTarget: Target | undefined;
+      let pendingClient: DaemonClient | undefined;
+      try {
+        stage("establishing SSH...");
+        pendingTarget = await (frontend.resolveTarget ?? resolveTarget)({
+          host, agent: "pi", signal, ...(remoteDir ? { remoteDir } : {}),
+          onProgress: phase => stage({ ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]),
+        });
+        signal.throwIfAborted();
+        stage("contacting Pi server...");
+        pendingClient = await DaemonClient.connect(pendingTarget.socketPath, { signal });
+        signal.throwIfAborted();
+        return { target: pendingTarget, client: pendingClient };
+      } catch (error) {
+        pendingClient?.close();
+        await pendingTarget?.close().catch(() => undefined);
+        throw error;
+      }
+    }, async late => { late.client.close(); await late.target.close(); });
+    if (!setup) return undefined;
+    target = setup.target;
+    client = setup.client;
     const connection = client;
     const required = ["session-transfer-v1", "compressed-bundle-v1"];
     if (!required.every(capability => connection.server?.capabilities?.includes(capability))) {
@@ -94,7 +117,9 @@ export async function runRemoteTransfer(args: RemoteTransferArgs, frontend: Tran
     else {
       let ref = args.sessionId ?? (frontend.connected?.host === host ? frontend.connected.sessionId : undefined);
       if (!ref) {
-        const listed = (await connection.call({ type: "list_sessions" })).data.sessions as Array<{ sessionId: string; name?: string; cwd: string; ownership?: string }>;
+        const loaded = await showRemoteProgress(ui, host, "Loading remote sessions...", () => connection.call({ type: "list_sessions" }));
+        if (!loaded) return undefined;
+        const listed = loaded.value.data.sessions as Array<{ sessionId: string; name?: string; cwd: string; ownership?: string }>;
         const available = listed.filter(session => !session.ownership);
         if (!available.length) throw new Error(`No transferable sessions on ${host}`);
         const labels = available.map(session => `${line(session.name || "Untitled session")}  ${session.sessionId}  ${line(session.cwd)}`);
@@ -103,12 +128,16 @@ export async function runRemoteTransfer(args: RemoteTransferArgs, frontend: Tran
         ref = available[labels.indexOf(selected)]?.sessionId;
         if (!ref) throw new Error("Unknown remote session selection");
       }
-      const selected = await resolveSession(connection, ref);
+      const resolved = await showRemoteProgress(ui, host, "Resolving remote session...", () => resolveSession(connection, ref));
+      if (!resolved) return undefined;
+      const selected = resolved.value;
       source = { sessionId: selected.sessionId, cwd: selected.cwd, sessionFile: selected.sessionFile, name: selected.name, model: selected.model, createdAt: selected.createdAt };
     }
     let defaultCwd = frontend.cwd;
-    if (args.direction === "push") {
-      const root: unknown = (await connection.call({ type: "client_workspaces" })).data.root;
+    if (args.direction === "push" && args.cwd === undefined) {
+      const loaded = await showRemoteProgress(ui, host, "Finding remote workspace...", () => connection.call({ type: "client_workspaces" }));
+      if (!loaded) return undefined;
+      const root: unknown = loaded.value.data.root;
       if (typeof root !== "string" || !root.startsWith("/")) throw new Error("Invalid remote workspace root");
       defaultCwd = root;
     }
@@ -135,10 +164,13 @@ export async function runRemoteTransfer(args: RemoteTransferArgs, frontend: Tran
     }
     const shared = { toCwd: cwd, copy: args.copy, includeWorkspace: args.includeWorkspace, compression: "gzip" as const,
       onProgress: (message: string) => ui.notify(message, "info"), connect: async () => connection, host };
-    const result = args.direction === "push"
-      ? await detachSession({ ...shared, session: source, isBusy: frontend.localSession!.isBusy })
-      : await returnSession({ ...shared, ref: source.sessionId,
-        ...(frontend.localSession?.info.sessionFile ? { sessionFiles: [frontend.localSession.info.sessionFile] } : {}) });
+    const transferred = await showRemoteProgress(ui, host, "Transferring conversation...", () => args.direction === "push"
+      ? detachSession({ ...shared, session: source, isBusy: frontend.localSession!.isBusy })
+      : returnSession({ ...shared, ref: source.sessionId,
+        ...(frontend.localSession?.info.sessionFile ? { sessionFiles: [frontend.localSession.info.sessionFile] } : {}) }),
+    { cancellable: false });
+    if (!transferred) return undefined;
+    const result = transferred.value;
     if (args.direction === "push" && !args.copy) markLocalSessionDeparted(frontend.localSession!.pi, source.sessionId, frontend.localSession!.manager);
     const follow = args.direction === "push"
       ? `/remote connect ${host} --session ${result.sessionId}${remoteDir ? ` --remote-dir ${remoteDir}` : ""}`
@@ -146,8 +178,12 @@ export async function runRemoteTransfer(args: RemoteTransferArgs, frontend: Tran
     ui.notify(`${args.copy ? "Copied" : "Moved"} session to ${destinationLabel}:${result.cwd}.\n${follow}\n${args.copy ? "The source remains available; changes do not merge automatically." : "The source will not run this session again. Resume at the destination."}`, "info");
     return { direction: args.direction, copy: args.copy, host, sessionId: result.sessionId, cwd: result.cwd,
       ...("sessionFile" in result && result.sessionFile ? { sessionFile: result.sessionFile } : {}) };
+  } catch (error) {
+    operationFailed = true;
+    throw error;
   } finally {
     client?.close();
-    await target?.close();
+    if (operationFailed) await target?.close().catch(() => undefined);
+    else await target?.close();
   }
 }

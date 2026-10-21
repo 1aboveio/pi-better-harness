@@ -2,10 +2,18 @@ import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
 import { Key, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import type { DaemonClient } from "../client.ts";
 import type { SessionSummary } from "../protocol.ts";
+import { showRemoteProgress } from "./remote-progress.ts";
 
 type BrowserTab = "active" | "closed";
-export type RemoteSessionBrowserResult = { action: "attach"; session: SessionSummary } | { action: "create" } | undefined;
+export type RemoteSessionBrowserResult = { action: "attach"; session: SessionSummary } | { action: "create"; cwd?: string } | { action: "transfer"; copy: boolean; cwd?: string } | undefined;
 export type RemoteSessionBrowserIntent = RemoteSessionBrowserResult | { action: "refresh" } | { action: "close" | "rename"; session: SessionSummary };
+
+interface BrowserOptions {
+  cwd?: string;
+  loading?: string;
+  allowTransfer?: boolean;
+  selectFolder?: (initialPath: string) => Promise<string | undefined>;
+}
 
 const singleLine = (value: string): string => value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 const inTab = (session: SessionSummary, tab: BrowserTab): boolean => tab === "active"
@@ -18,7 +26,16 @@ export class RemoteSessionBrowserState {
   error: string | undefined;
   private selectedIds: Record<BrowserTab, string | undefined> = { active: undefined, closed: undefined };
 
-  rows(tab = this.tab): SessionSummary[] { return this.sessions.filter(session => inTab(session, tab)); }
+  rows(tab = this.tab): SessionSummary[] {
+    const groups = new Map<string, SessionSummary[]>();
+    for (const session of this.sessions) {
+      if (!inTab(session, tab)) continue;
+      const group = groups.get(session.cwd) ?? [];
+      group.push(session);
+      groups.set(session.cwd, group);
+    }
+    return [...groups.values()].flat();
+  }
   get selected(): SessionSummary | undefined { return this.rows().find(session => session.sessionId === this.selectedIds[this.tab]); }
 
   replaceSessions(sessions: SessionSummary[]): void {
@@ -61,9 +78,9 @@ export class RemoteSessionBrowser implements Component {
   readonly state: RemoteSessionBrowserState;
   private readonly host: string;
   private readonly ui: BrowserUI;
-  private readonly options: { cwd?: string; loading?: string };
+  private readonly options: BrowserOptions;
 
-  constructor(state: RemoteSessionBrowserState, host: string, ui: BrowserUI, options: { cwd?: string; loading?: string } = {}) {
+  constructor(state: RemoteSessionBrowserState, host: string, ui: BrowserUI, options: BrowserOptions = {}) {
     this.state = state;
     this.host = host;
     this.ui = ui;
@@ -89,7 +106,7 @@ export class RemoteSessionBrowser implements Component {
       "Tab tabs",
       ...(selected ? [width < 40 ? "Enter open" : this.state.tab === "closed" ? "Enter reopen" : "Enter attach",
         ...(this.state.tab === "active" ? ["x close"] : []), "F2 rename"] : []),
-      "n new", "r refresh", "Esc back",
+      "n new", "r refresh", ...(this.options.allowTransfer ? ["m move", "c copy"] : []), "Esc back",
     ];
     const legend: string[] = [];
     for (const command of commands) {
@@ -114,26 +131,42 @@ export class RemoteSessionBrowser implements Component {
     if (fixed() + minimumBody + scrollRoom > budget) spacious = false;
     while (header.length && fixed() + minimumBody + scrollRoom > budget) header.pop();
     const available = Math.max(0, budget - fixed());
-    const bodyHeight = Math.min(10, Math.max(0, available - (rows.length > available && available > 1 ? 1 : 0)));
-    const start = Math.min(Math.max(0, selectedIndex - Math.floor(bodyHeight / 2)), Math.max(0, rows.length - bodyHeight));
+    const unreservedHeight = Math.min(10, available);
+    const entryCount = rows.length + (unreservedHeight >= 4 ? new Set(rows.map(session => session.cwd)).size : 0);
+    const bodyHeight = Math.max(0, unreservedHeight - (entryCount > unreservedHeight && available > 1 ? 1 : 0));
+    const grouped = bodyHeight >= 4;
+    const entries: Array<{ folder: string } | { session: SessionSummary }> = [];
+    let lastFolder: string | undefined;
+    for (const session of rows) {
+      if (grouped && session.cwd !== lastFolder) entries.push({ folder: session.cwd });
+      entries.push({ session });
+      lastFolder = session.cwd;
+    }
+    const selectedEntry = Math.max(0, entries.findIndex(entry => "session" in entry && entry.session.sessionId === selected?.sessionId));
+    let start = Math.min(Math.max(0, selectedEntry - Math.floor(bodyHeight / 2)), Math.max(0, entries.length - bodyHeight));
+    // Repeat the visible group's path when scrolling starts inside its sessions.
+    const firstEntry = entries[start];
+    const context = grouped && firstEntry && "session" in firstEntry ? [theme.fg("muted", fit(singleLine(firstEntry.session.cwd)))] : [];
+    if (context.length && selectedEntry >= start + bodyHeight - 1) start++;
     const body: string[] = [];
     if (this.options.loading) body.push(theme.fg("muted", fit(this.options.loading)));
     else if (!rows.length) body.push(theme.fg("muted", fit(this.state.tab === "active" ? "No active sessions" : "No closed sessions")));
-    else for (const session of rows.slice(start, start + bodyHeight)) {
-      const chosen = session.sessionId === selected?.sessionId;
-      const badge = available === 1 && rows.length > 1 ? `(${selectedIndex + 1}/${rows.length})` : `[${sessionActivity(session)}]`;
-      const statusWidth = Math.min(visibleWidth(badge), Math.max(0, width - 5));
-      const folder = singleLine(session.cwd).replace(/\/$/, "").split("/").at(-1) || "/";
-      const folderWidth = width >= 64 ? Math.min(26, Math.floor(width / 4)) : 0;
-      const nameWidth = Math.max(0, width - 2 - statusWidth - 2 - (folderWidth ? folderWidth + 2 : 0));
-      const name = fit(singleLine(session.name || "Untitled session"), nameWidth);
-      const paddedName = name + " ".repeat(Math.max(0, nameWidth - visibleWidth(name)));
-      const shortFolder = fit(folder, folderWidth);
-      const folderText = folderWidth ? shortFolder + " ".repeat(Math.max(0, folderWidth - visibleWidth(shortFolder))) + "  " : "";
-      const statusColor = session.ownership || session.needsInput.length ? "warning" : session.isStreaming ? "accent" : "muted";
-      body.push(fit(`${chosen ? theme.fg("accent", "> ") : "  "}${chosen ? theme.fg("accent", paddedName) : paddedName}  ${theme.fg("muted", folderText)}${theme.fg(statusColor, fit(badge, statusWidth))}`));
+    else {
+      body.push(...context);
+      for (const entry of entries.slice(start, start + Math.max(0, bodyHeight - context.length))) {
+        if ("folder" in entry) { body.push(theme.fg("muted", fit(singleLine(entry.folder)))); continue; }
+        const session = entry.session;
+        const chosen = session.sessionId === selected?.sessionId;
+        const badge = available === 1 && rows.length > 1 ? `(${selectedIndex + 1}/${rows.length})` : `[${sessionActivity(session)}]`;
+        const statusWidth = Math.min(visibleWidth(badge), Math.max(0, width - 5));
+        const nameWidth = Math.max(0, width - 2 - statusWidth - 2);
+        const name = fit(singleLine(session.name || "Untitled session"), nameWidth);
+        const paddedName = name + " ".repeat(Math.max(0, nameWidth - visibleWidth(name)));
+        const statusColor = session.ownership || session.needsInput.length ? "warning" : session.isStreaming ? "accent" : "muted";
+        body.push(fit(`${chosen ? theme.fg("accent", "> ") : "  "}${chosen ? theme.fg("accent", paddedName) : paddedName}  ${theme.fg(statusColor, fit(badge, statusWidth))}`));
+      }
     }
-    const scrolling = rows.length > bodyHeight && bodyHeight > 0 && available > 1 ? [theme.fg("dim", fit(`(${selectedIndex + 1}/${rows.length})`))] : [];
+    const scrolling = entries.length > bodyHeight && bodyHeight > 0 && available > 1 ? [theme.fg("dim", fit(`(${selectedIndex + 1}/${rows.length})`))] : [];
     const gap = spacious ? [""] : [];
     return [...header, ...gap, ...tabLines, ...gap, ...errors, ...body, ...scrolling,
       ...(details.length ? [...gap, ...details] : []), ...gap, ...legend.map(line => theme.fg("dim", line))].slice(0, budget).map(line => fit(line));
@@ -146,6 +179,7 @@ export class RemoteSessionBrowser implements Component {
     if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
       this.state.changeTab();
     } else if (matchesKey(data, "n")) { this.finish({ action: "create" }); return; }
+    else if (this.options.allowTransfer && (matchesKey(data, "m") || matchesKey(data, "c"))) { this.finish({ action: "transfer", copy: matchesKey(data, "c") }); return; }
     else if (matchesKey(data, "r")) { this.finish({ action: "refresh" }); return; }
     else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
       const rows = this.state.rows();
@@ -181,31 +215,17 @@ export class RemoteSessionBrowser implements Component {
 
 type PendingResult<T> = { value: T } | { error: unknown } | undefined;
 
-/** The operation is already started by the caller, never by the custom-screen factory. */
-async function showPending<T>(ui: ExtensionUIContext, state: RemoteSessionBrowserState, host: string, options: { cwd?: string }, loading: string, pending: Promise<T>): Promise<PendingResult<T>> {
-  const settled = pending.then(value => ({ value }), error => ({ error }));
-  return ui.custom<PendingResult<T>>((tui, theme, _keys, done) => {
-    let disposed = false;
-    const screen = new RemoteSessionBrowser(state, host, {
-      theme, requestRender: () => tui.requestRender(), rows: () => tui.terminal.rows,
-      done: () => { if (!disposed) { disposed = true; done(undefined); } },
-    }, { ...options, loading });
-    void settled.then(result => { if (!disposed) { disposed = true; done(result); } });
-    return {
-      render: width => screen.render(width),
-      handleInput: data => screen.handleInput(data),
-      invalidate: () => screen.invalidate(),
-      dispose: () => { disposed = true; screen.dispose(); },
-    };
-  });
+async function showPending<T>(ui: ExtensionUIContext, host: string, loading: string, run: () => Promise<T>, cancellable = true): Promise<PendingResult<T>> {
+  try { return await showRemoteProgress(ui, host, loading, run, { cancellable }); }
+  catch (error) { return { error }; }
 }
 
-export async function browseRemoteSessions(ui: ExtensionUIContext, client: DaemonClient, host: string, options: { cwd?: string } = {}): Promise<{ action: "attach"; session: SessionSummary } | { action: "create" } | undefined> {
+export async function browseRemoteSessions(ui: ExtensionUIContext, client: DaemonClient, host: string, options: BrowserOptions = {}): Promise<RemoteSessionBrowserResult> {
   const state = new RemoteSessionBrowserState();
   let refresh = true;
   for (;;) {
     if (refresh) {
-      const result = await showPending(ui, state, host, options, "Loading sessions...", client.call({ type: "list_sessions" }));
+      const result = await showPending(ui, host, "Loading sessions...", () => client.call({ type: "list_sessions" }));
       if (!result) return undefined;
       if ("error" in result) state.error = `Refresh failed: ${errorText(result.error)}. Press r to retry.`;
       else state.replaceSessions(result.value.data.sessions as SessionSummary[]);
@@ -214,7 +234,15 @@ export async function browseRemoteSessions(ui: ExtensionUIContext, client: Daemo
     const intent = await ui.custom<RemoteSessionBrowserIntent>((tui, theme, _keys, done) => new RemoteSessionBrowser(state, host, {
       theme, requestRender: () => tui.requestRender(), rows: () => tui.terminal.rows, done,
     }, options));
-    if (!intent || intent.action === "attach" || intent.action === "create") return intent;
+    if (!intent || intent.action === "attach") return intent;
+    if (intent.action === "create" || intent.action === "transfer") {
+      if (!options.selectFolder) return intent;
+      try {
+        const cwd = await options.selectFolder(options.cwd ?? "/");
+        if (cwd !== undefined) return { ...intent, cwd };
+      } catch (error) { state.error = `Folder browser failed: ${errorText(error)}. Press n to retry.`; }
+      continue;
+    }
     state.error = undefined;
     if (intent.action === "refresh") { refresh = true; continue; }
     const session = intent.session;
@@ -229,7 +257,7 @@ export async function browseRemoteSessions(ui: ExtensionUIContext, client: Daemo
       if (!name) { state.error = "Name cannot be empty. Press F2 to rename again."; continue; }
       command = { type: "rename_session", sessionId: session.sessionId, name };
     }
-    const result = await showPending(ui, state, host, options, intent.action === "close" ? "Closing session..." : "Renaming session...", client.call(command));
+    const result = await showPending(ui, host, intent.action === "close" ? "Closing session..." : "Renaming session...", () => client.call(command), false);
     if (!result) return undefined;
     if ("error" in result) state.error = `${intent.action === "close" ? "Close" : "Rename"} failed: ${errorText(result.error)}. Press ${intent.action === "close" ? "x" : "F2"} to retry or r to refresh.`;
     refresh = true;

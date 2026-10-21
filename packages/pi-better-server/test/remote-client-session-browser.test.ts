@@ -78,6 +78,44 @@ test("all tab shortcuts and up/down selection work before render, and Enter targ
   assert.equal(renders(), 7);
 });
 
+test("folder groups are contiguous and keyboard selection follows sessions, not headings", () => {
+  const state = new RemoteSessionBrowserState();
+  state.replaceSessions([
+    summary("alpha-first", { cwd: "/work/alpha", name: "Alpha first" }),
+    summary("beta-first", { cwd: "/work/beta", name: "Beta first" }),
+    summary("alpha-second", { cwd: "/work/alpha", name: "Alpha second" }),
+    summary("beta-second", { cwd: "/work/beta", name: "Beta second" }),
+  ]);
+  const { screen, intents } = component(state, 40);
+  const output = plain(screen.render(100));
+  assert.ok(output.indexOf("/work/alpha") < output.indexOf("Alpha first"));
+  assert.ok(output.indexOf("Alpha second") < output.indexOf("/work/beta"));
+  assert.ok(output.indexOf("/work/beta") < output.indexOf("Beta first"));
+  screen.handleInput(keys.down);
+  assert.equal(state.selected?.sessionId, "alpha-second");
+  screen.handleInput(keys.down);
+  assert.equal(state.selected?.sessionId, "beta-first");
+  screen.handleInput(keys.enter);
+  assert.deepEqual(intents, [{ action: "attach", session: state.sessions[1] }]);
+});
+
+test("scrolling folder groups keeps the selected session visible across terminal sizes", () => {
+  const state = new RemoteSessionBrowserState();
+  state.replaceSessions(Array.from({ length: 24 }, (_, index) => summary(`s-${index}`, {
+    name: `Session ${index}`, cwd: `/work/folder-${Math.floor(index / 2)}`,
+  })));
+  for (const height of [12, 20, 40]) {
+    const { screen } = component(state, height);
+    for (const session of state.rows()) {
+      state.select(session.sessionId);
+      const lines = screen.render(64);
+      const selected = lines.find(line => plain([line]).startsWith("> "));
+      assert.ok(selected && plain([selected]).includes(session.name!), `Selected ${session.sessionId} hidden at height ${height}`);
+      assert.ok(lines.length <= height - 3);
+    }
+  }
+});
+
 test("n creates from active, closed, and empty tabs; the former c key does nothing", () => {
   for (const variant of ["active", "closed", "empty-active", "empty-closed"] as const) {
     const state = new RemoteSessionBrowserState();
@@ -188,7 +226,8 @@ test("wide rows give long names room and keep context-specific shortcut pairs in
   const lines = screen.render(110).map(line => plain([line]));
   const row = lines.find(line => line.startsWith("> "))!;
   assert.ok(row.includes(name), row);
-  assert.match(row, /中文-project\s+\[closed\]$/);
+  assert.match(row, /\[closed\]$/);
+  assert.ok(lines.some(line => line === "/work/中文-project"), "full folder path is the group heading, not a repeated column");
   assert.ok(lines.some(line => line.includes("Folder: /home/test/workspaces")));
   for (const command of ["Enter reopen", "F2 rename", "n new", "r refresh", "Esc back"]) {
     assert.ok(lines.some(line => line.includes(command)), `shortcut pair split: ${command}`);
@@ -249,6 +288,26 @@ test("short viewports reserve Pi footer space, retain tabs and actions, and scro
     checkFrame(10, true);
     screen.handleInput(keys.enter);
     assert.deepEqual(intents, [{ action: "attach", session: state.sessions[10] }]);
+  }
+});
+
+test("local transfer shortcuts leave room for the selected session in a short terminal", () => {
+  const state = new RemoteSessionBrowserState();
+  state.replaceSessions([
+    summary("one", { name: "Selected", cwd: "/work/one" }),
+    summary("two", { cwd: "/work/two" }),
+    summary("three", { cwd: "/work/three" }),
+    summary("four", { cwd: "/work/four" }),
+  ]);
+  for (const [width, height] of [[20, 10], [32, 12], [100, 30]] as const) {
+    const screen = new RemoteSessionBrowser(state, "r5", {
+      theme, rows: () => height, requestRender() {}, done() {},
+    }, { allowTransfer: true });
+    const lines = screen.render(width);
+    const output = plain(lines);
+    assert.match(output, /> Selected/);
+    for (const shortcut of ["m move", "c copy", "Esc back"]) assert.ok(output.includes(shortcut), shortcut);
+    assert.ok(lines.length <= height - 3);
   }
 });
 
@@ -385,6 +444,31 @@ test("rename uses the new daemon command with the selected ID, trims names, refr
   assert.equal(result && "session" in result ? result.session.status : undefined, "closed");
   assert.deepEqual(commands.map(c => c.type), ["list_sessions", "rename_session", "list_sessions"]);
   assert.equal(ui.remaining(), 0);
+});
+
+test("cancelling folder selection returns to the selected session without a remote mutation", async t => {
+  const sessions = [summary("first"), summary("second")];
+  const { client, commands } = await wireDaemon(t, () => ({ data: { sessions } }));
+  const initialPaths: string[] = [];
+  const ui = scriptedUI([send(keys.down, "n"), send(keys.enter)]);
+  const choice = await browseRemoteSessions(ui.ui, client, "host", {
+    cwd: "/work/default",
+    selectFolder: async path => { initialPaths.push(path); return undefined; },
+  });
+  assert.deepEqual(choice, { action: "attach", session: sessions[1] });
+  assert.deepEqual(initialPaths, ["/work/default"]);
+  assert.deepEqual(commands, [{ type: "list_sessions" }]);
+});
+
+test("create and explicit move/copy actions return the chosen folder without creating or transferring a session", async t => {
+  const { client, commands } = await wireDaemon(t, () => ({ data: { sessions: [] } }));
+  for (const [key, expected] of [["n", { action: "create", cwd: "/chosen/project" }], ["m", { action: "transfer", copy: false, cwd: "/chosen/project" }], ["c", { action: "transfer", copy: true, cwd: "/chosen/project" }]] as const) {
+    const ui = scriptedUI([send(key)]);
+    assert.deepEqual(await browseRemoteSessions(ui.ui, client, "host", {
+      cwd: "/work/default", allowTransfer: true, selectFolder: async () => "/chosen/project",
+    }), expected);
+  }
+  assert.ok(commands.every(command => command.type === "list_sessions"));
 });
 
 test("close confirms busy and needsInput sessions outside custom; cancellation preserves selection and makes no mutation", async t => {

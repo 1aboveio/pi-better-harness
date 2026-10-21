@@ -152,11 +152,12 @@ Escape cancels that attempt and returns to the local UI. It does not stop any
 remote sessions or shared SSH connection. Connection failures retain their original
 error message; the spinner does not imply that an unreachable host is available.
 
-When the local session has history, connecting offers **Browse remote sessions**,
-**Move current session here**, or **Copy current session here**. Selecting an
-explicit `--session` attaches directly instead. Browsing opens the server's root
-session browser, not a workspace picker. It has **Active sessions** and **Closed
-sessions** tabs and displays its keyboard shortcuts:
+Connecting opens the server's session landing page, including when the local
+session has history. Selecting an explicit `--session` attaches directly instead.
+The landing page has **Active sessions** and **Closed sessions** tabs, with sessions
+grouped by their full working folder. Move and Copy remain explicit actions when
+a local conversation is available; connecting alone never authorizes a transfer.
+The browser displays its keyboard shortcuts:
 
 | Key | Action |
 | --- | --- |
@@ -165,9 +166,25 @@ sessions** tabs and displays its keyboard shortcuts:
 | Enter | Attach to the selected session; reopen it if closed |
 | `x` | Close the selected active session; confirm if busy or waiting for input |
 | F2 | Rename the selected session, including a closed session without reopening it |
-| `n` | Create a session in the displayed default folder |
+| `n` | Browse remote folders before starting a new session |
 | `r` | Refresh the list |
+| `m` / `c` | Move / copy the local conversation; choose a destination folder and transfer scope first |
 | Escape | Leave the server browser |
+
+New Session opens a folder picker. Up / Down selects a folder, Enter opens it,
+`s` chooses the current folder, and `n` creates a new child folder there. The
+parent-folder entry navigates up; Escape returns to the same session selection.
+Creating a folder navigates into it but does not start a session until you press
+`s`. Existing folders, files, and symbolic links are never replaced. If the
+default workspace root is missing, navigate to its parent and explicitly create
+or select a directory; browsing does not create missing directories automatically.
+
+Native loaders show progress while loading the browser, listing folders, creating
+a folder, checking or installing extensions, and opening or starting a session.
+Escape can dismiss a read-only wait. Writes that the daemon cannot cancel keep
+their progress visible until the outcome is known. Folder browsing requires a
+daemon advertising `folder-browser-v1`; older daemons can still list and attach
+existing sessions and show update guidance when folder browsing is requested.
 
 Fenced and moved sessions cannot be attached, closed or renamed from the browser.
 While attached, `/remote` or `/remote sessions` returns to this host-level page
@@ -178,12 +195,13 @@ and local `/remote` history. Wildcard and negated SSH patterns are not concrete
 hosts and are omitted. Entered hosts are remembered even if the connection fails
 or uses the default server directory; no credentials are recorded in this history.
 
-`r5` is an SSH alias. The browser starts at the remote workspace root:
-`PI_SERVER_WORKSPACES_DIR`, or `~/workspaces/` when unset. Its Folder line shows
-that creation context, and `n` creates there without another picker. Existing
+`r5` is an SSH alias. The folder picker starts at the remote workspace root:
+`PI_SERVER_WORKSPACES_DIR`, or `~/workspaces/` when unset. The landing page's Folder
+line shows this starting context, not a filter on existing sessions. Existing
 sessions remain visible and retain their own folders. Use an explicit `--cwd`
-with another existing absolute path to change the creation folder; it also refuses
-attaching a session from a different workspace. `--session` selects a session
+with another absolute path to change where folder browsing begins; it also refuses
+attaching an existing session from a different workspace. You can navigate to
+other directories accessible to the SSH user. `--session` selects a session
 directly without changing its working directory.
 `--remote-dir` selects the remote daemon's server directory and is saved per host
 with its connection history. It is reused on later connections to that

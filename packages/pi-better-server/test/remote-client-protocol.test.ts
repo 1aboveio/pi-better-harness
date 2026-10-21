@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtemp, mkdir, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { startDaemon, type Daemon } from "../src/server.ts";
 import { Client, gate, makeEnv, waitFor, type Env } from "./helpers.ts";
@@ -81,6 +82,83 @@ test("workspace discovery uses remote workspace roots rather than the daemon ins
     { name: "alpha", path: join(root, "alpha") },
     { name: "bravo", path: join(root, "bravo") },
   ]);
+});
+
+test("folder browsing reaches absolute directories outside the workspace root and resolves directory links", async () => {
+  const { env, client } = await setup();
+  const root = await mkdtemp(join(env.root, "folders-"));
+  await mkdir(join(root, "bravo"));
+  await mkdir(join(root, "alpha"));
+  await mkdir(join(root, ".hidden"));
+  await writeFile(join(root, "file"), "not a folder");
+  await symlink(join(root, "alpha"), join(root, "linked"));
+  await symlink(join(root, "missing"), join(root, "dangling"));
+  const previous = process.env.PI_SERVER_WORKSPACES_DIR;
+  process.env.PI_SERVER_WORKSPACES_DIR = env.cwd;
+  cleanups.push(() => {
+    if (previous === undefined) delete process.env.PI_SERVER_WORKSPACES_DIR;
+    else process.env.PI_SERVER_WORKSPACES_DIR = previous;
+  });
+  const listed = await client.request({ type: "client_browse_directory", path: root });
+  assert.equal(listed.success, true, JSON.stringify(listed));
+  assert.deepEqual(listed.data, {
+    path: root, parent: dirname(root), directories: [".hidden", "alpha", "bravo", "linked"].map(name => ({ name, path: join(root, name) })),
+  });
+  const linked = await client.request({ type: "client_browse_directory", path: join(root, "linked") });
+  assert.equal(linked.success, true, JSON.stringify(linked));
+  assert.deepEqual(linked.data, { path: join(root, "alpha"), parent: root, directories: [] });
+  const filesystemRoot = await client.request({ type: "client_browse_directory", path: "/" });
+  assert.equal(filesystemRoot.success, true, JSON.stringify(filesystemRoot));
+  assert.equal(filesystemRoot.data.path, "/");
+  assert.equal(filesystemRoot.data.parent, null);
+});
+
+test("folder commands reject invalid paths and leave missing workspace roots absent", async () => {
+  const { env, client } = await setup();
+  const missing = join(env.root, "absent", "workspaces");
+  const file = join(env.root, "plain-file");
+  await writeFile(file, "untouched");
+  for (const type of ["client_browse_directory", "client_create_directory"]) {
+    for (const path of [undefined, null, 42, "relative", "", file, missing]) {
+      const result = await client.request({ type, path, name: "child" });
+      assert.equal(result.success, false, `${type}: ${String(path)}`);
+      assert.match(result.error, path === missing ? /ENOENT/ : /absolute remote directory/);
+    }
+  }
+  assert.equal(existsSync(join(env.root, "absent")), false);
+  assert.equal(await readFile(file, "utf8"), "untouched");
+});
+
+test("folder creation validates a single child and never replaces a file, directory or symlink", async () => {
+  const { env, client } = await setup();
+  const parent = join(env.root, "create-parent");
+  await mkdir(parent);
+  for (const name of [undefined, 42, "", "   ", ".", "..", "../escape", "a/b", "a\\b", "/absolute", "line\nbreak", "nul\0byte", "escape\x1b", "delete\x7f", "control\x85"]) {
+    const result = await client.request({ type: "client_create_directory", path: parent, name });
+    assert.equal(result.success, false, JSON.stringify(name));
+    assert.match(result.error, /single new child folder name/);
+  }
+  assert.deepEqual(await readdir(parent), []);
+  await writeFile(join(parent, "file"), "keep file");
+  await mkdir(join(parent, "directory"));
+  await writeFile(join(parent, "directory", "marker"), "keep directory");
+  await symlink(join(parent, "directory"), join(parent, "link"));
+  await symlink(join(parent, "missing"), join(parent, "dangling"));
+  for (const name of ["file", "directory", "link", "dangling"]) {
+    const result = await client.request({ type: "client_create_directory", path: parent, name });
+    assert.equal(result.success, false, name);
+    assert.match(result.error, /EEXIST/);
+  }
+  assert.equal(await readFile(join(parent, "file"), "utf8"), "keep file");
+  assert.equal(await readFile(join(parent, "directory", "marker"), "utf8"), "keep directory");
+  assert.equal(await realpath(join(parent, "link")), join(parent, "directory"));
+  const created = await client.request({ type: "client_create_directory", path: parent, name: "project with spaces" });
+  assert.equal(created.success, true, JSON.stringify(created));
+  assert.deepEqual(created.data, { path: join(parent, "project with spaces") });
+  assert.deepEqual(await readdir(created.data.path), []);
+  const contenders = await Promise.all([1, 2].map(() => client.request({ type: "client_create_directory", path: parent, name: "once" })));
+  assert.equal(contenders.filter(result => result.success).length, 1);
+  assert.match(contenders.find(result => !result.success)!.error, /EEXIST/);
 });
 
 test("package synchronization refuses to replace extension code during remote execution", async () => {
