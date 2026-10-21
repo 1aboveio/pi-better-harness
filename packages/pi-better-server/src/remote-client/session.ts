@@ -34,6 +34,40 @@ export interface RemoteClientSessionOptions {
   onDisconnect?: () => void;
   onLocalCommand?: (text: string) => Promise<boolean>;
   localCommandCompletions?: (prefix: string) => ReturnType<typeof remoteArgumentCompletions> | Promise<ReturnType<typeof remoteArgumentCompletions>>;
+  reconnectAfterUpgrade?: (notice: RuntimeUpgradeNotice, signal: AbortSignal) => Promise<ReplacementRemoteTransport>;
+  onReconnected?: (client: DaemonClient) => void;
+  onUpgradeStatus?: (phase: "restarting" | "reconnecting" | "ready", notice: RuntimeUpgradeNotice) => void;
+}
+
+export interface RuntimeUpgradeNotice { operationId: string; buildId: string }
+export interface ReplacementRemoteTransport {
+  client: DaemonClient;
+  dispose?: () => void | Promise<void>;
+}
+
+class SupersededTransportError extends Error {
+  constructor() { super("The remote transport changed during this request. Its outcome is not replayed; check the refreshed remote history."); }
+}
+
+function upgradeNotice(event: Presentation): RuntimeUpgradeNotice | undefined {
+  if (event.type !== "runtime_upgrade" || event.phase !== "restarting") return undefined;
+  if (![event.operationId, event.buildId].every(value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{5,255}$/.test(value))) return undefined;
+  return { operationId: event.operationId, buildId: event.buildId };
+}
+
+function validateReplacement(client: DaemonClient, previous: DaemonClient, notice: RuntimeUpgradeNotice): void {
+  const hello = client.server as Presentation | undefined;
+  if ((hello?.build?.contentId ?? hello?.buildId) !== notice.buildId) throw new Error("Upgrade reconnect reached a different server build");
+  if (typeof hello?.instanceId !== "string" || !hello.instanceId) throw new Error("Upgrade reconnect has no daemon instance identity");
+  if (previous.server?.piVersion && hello.piVersion !== previous.server.piVersion) throw new Error("Upgrade reconnect changed the Pi SDK version");
+  if (previous.server?.instanceId && hello.instanceId === previous.server.instanceId) throw new Error("Upgrade reconnect reached the previous daemon instance");
+}
+
+function loggedUpgrade(envelope: Envelope, sessionId: string, generation?: string, lastSeq = 0): RuntimeUpgradeNotice | undefined {
+  if (envelope.sessionId !== sessionId || typeof envelope.generation !== "string" || !envelope.generation ||
+    (generation !== undefined && envelope.generation !== generation) ||
+    typeof envelope.seq !== "number" || !Number.isSafeInteger(envelope.seq) || envelope.seq <= lastSeq) return undefined;
+  return upgradeNotice(envelope.event ?? {});
 }
 
 function unsupported(operation: string): never {
@@ -383,7 +417,7 @@ export class RemoteClientSession {
   // In-memory presentation preferences only. The bridge may replace these with
   // the existing local UI preferences; neither option persists remote state.
   settingsManager: any;
-  private readonly client: DaemonClient;
+  private client: DaemonClient;
   private readonly cache: RemoteSessionCache;
   private readonly options: RemoteClientSessionOptions;
   private readonly listeners = new Set<Listener>();
@@ -406,6 +440,13 @@ export class RemoteClientSession {
   private bashOutput?: (chunk: string) => void;
   private bashRunning = false;
   private pendingBashSnapshot = false;
+  private transportEpoch = 0;
+  private transportReady = true;
+  private pendingUpgrade?: RuntimeUpgradeNotice;
+  private reconnecting?: Promise<void>;
+  private reconnectAbort?: AbortController;
+  private disposeReplacement?: () => void | Promise<void>;
+  private disconnectNotified = false;
 
   private constructor(client: DaemonClient, snapshot: ClientSnapshot, options: RemoteClientSessionOptions) {
     this.client = client;
@@ -463,25 +504,35 @@ export class RemoteClientSession {
   private readonly presentationSignal = new AbortController();
 
   static async connect(client: DaemonClient, sessionId: string, options: RemoteClientSessionOptions = {}): Promise<RemoteClientSession> {
+    return this.attach(client, sessionId, options);
+  }
+
+  private static async attach(client: DaemonClient, sessionId: string, options: RemoteClientSessionOptions,
+    owned?: ReplacementRemoteTransport, completedNotice?: RuntimeUpgradeNotice): Promise<RemoteClientSession> {
     // Listen before reading the snapshot: the supplied client may already be subscribed.
     let session: RemoteClientSession | undefined;
     const early: Envelope[] = [];
     let closed = false;
     const detach = client.onEvent((event) => {
       if (event.sessionId !== sessionId) return;
-      if (session) session.receive(event);
+      if (session) session.receive(event, client, 0);
       else early.push(event);
     });
-    const detachClose = client.onClose(() => { closed = true; session?.disconnect(); });
+    const detachClose = client.onClose(() => { closed = true; session?.disconnect(client, 0); });
     try {
       const response = await client.call({ type: "client_snapshot", sessionId });
       validateSnapshot(response.data);
       if (response.data.sessionId !== sessionId) throw new Error("client_snapshot returned a different session");
       session = new RemoteClientSession(client, response.data, options);
+      if (owned) session.disposeReplacement = owned.dispose ?? (() => {});
       session.detachEvents = detach;
       session.deactivateClose = detachClose;
+      for (const event of early) session.receive(event, client, 0);
+      if (closed && session.pendingUpgrade) {
+        session.disconnect(client, 0);
+        throw new SupersededTransportError();
+      }
       if (closed) throw new Error("Remote connection closed during snapshot");
-      session.buffered.push(...early);
       await session.resubscribe();
       const lease = await session.request("acquire_control");
       session.controller = true;
@@ -490,10 +541,47 @@ export class RemoteClientSession {
       session.receiving = true;
       session.drain();
       await session.flushReceivedEvents();
+      if (completedNotice) {
+        options.onReconnected?.(client);
+        session.upgradeStatus("ready", completedNotice);
+      }
       return session;
     } catch (error) {
+      if (session && (error instanceof SupersededTransportError || session.pendingUpgrade) && options.reconnectAfterUpgrade && !session.failed && !session.detached) {
+        if (!session.reconnecting && session.pendingUpgrade) session.disconnect(client, 0);
+        await session.reconnecting;
+        session.assertConnected();
+        session.receiving = true;
+        session.drain();
+        await session.flushReceivedEvents();
+        return session;
+      }
       if (session) session.dispose();
-      else { detach(); detachClose(); }
+      else {
+        detach(); detachClose();
+        if (owned) { client.close(); await owned.dispose?.(); }
+        // No projection exists yet. A logged notice must carry its own valid
+        // generation and cursor; the replacement still has to prove its identity.
+        let generation: string | undefined;
+        let lastSeq = 0;
+        let notice: RuntimeUpgradeNotice | undefined;
+        for (const envelope of early) {
+          if (envelope.sessionId !== sessionId || typeof envelope.generation !== "string" || !envelope.generation ||
+            typeof envelope.seq !== "number" || !Number.isSafeInteger(envelope.seq) || envelope.seq <= lastSeq) continue;
+          generation ??= envelope.generation;
+          notice ??= loggedUpgrade(envelope, sessionId, generation, lastSeq);
+          if (envelope.generation === generation) lastSeq = envelope.seq;
+        }
+        if (closed && notice && options.reconnectAfterUpgrade) {
+          const abort = new AbortController();
+          options.onUpgradeStatus?.("restarting", notice);
+          options.onUpgradeStatus?.("reconnecting", notice);
+          const replacement = await options.reconnectAfterUpgrade(notice, abort.signal);
+          try { validateReplacement(replacement.client, client, notice); }
+          catch (error) { replacement.client.close(); await replacement.dispose?.(); throw error; }
+          return this.attach(replacement.client, sessionId, options, replacement, notice);
+        }
+      }
       throw error;
     }
   }
@@ -510,7 +598,7 @@ export class RemoteClientSession {
   get thinkingLevel(): any { return this.cache.snapshot.state.thinkingLevel; }
   get isStreaming(): boolean { return this.cache.snapshot.state.isStreaming; }
   get isCompacting(): boolean { return this.cache.snapshot.state.isCompacting; }
-  get isIdle(): boolean { return !this.detached && !this.failed && !this.isStreaming && !this.isCompacting && !this.bashRunning && !this.reconciling && this.lastSeq >= this.subscribedSeq; }
+  get isIdle(): boolean { return !this.detached && !this.failed && !this.isStreaming && !this.isCompacting && !this.bashRunning && !this.reconciling && !this.reconnecting && this.lastSeq >= this.subscribedSeq; }
   get isBashRunning(): boolean { return this.bashRunning; }
   get retryAttempt(): number { return this.cache.retryAttempt; }
   get pendingMessageCount(): number { return this.cache.snapshot.state.pendingMessageCount; }
@@ -573,6 +661,7 @@ export class RemoteClientSession {
   }
 
   async prompt(text: string, options: Presentation = {}): Promise<any> {
+    if (this.reconnecting && !this.failed && !this.detached && !/^\/remote(?:\s+(?:disconnect|sessions))?\s*$/i.test(text)) throw new Error("Remote server upgrade is reconnecting; commands are paused and will not be replayed");
     if (await this.options.onLocalCommand?.(text)) return "handled";
     this.assertConnected();
     if (options.tools || options.systemPrompt) return unsupported("Per-prompt local tools/system prompt");
@@ -697,6 +786,8 @@ export class RemoteClientSession {
   dispose(): void {
     if (this.detached) return;
     this.detached = true;
+    this.transportEpoch++;
+    this.reconnectAbort?.abort();
     this.detachEvents?.();
     this.deactivateClose?.();
     this.deactivateClose = undefined;
@@ -711,6 +802,7 @@ export class RemoteClientSession {
       this.controller = false;
       void this.client.call({ type: "release_control", sessionId: this.sessionId }).catch(() => undefined);
     }
+    this.cleanupReplacement();
   }
 
   private commands(): any[] {
@@ -733,8 +825,20 @@ export class RemoteClientSession {
   private async request(type: string, payload: Presentation = {}): Promise<any> {
     this.assertConnected();
     const reads = ["client_snapshot", "subscribe", "acquire_control", "get_available_thinking_levels", "get_available_models"];
+    if (this.reconnecting && !reads.includes(type)) throw new Error("Remote server upgrade is reconnecting; commands are disabled until it completes");
     if (this.reconciling && !reads.includes(type)) throw new Error("Remote snapshot reconciliation is in progress; commands are disabled until it completes");
-    return (await this.client.call({ ...payload, type, sessionId: this.sessionId })).data;
+    if (!this.transportReady) throw new Error("Remote server upgrade is reconnecting; requests are paused");
+    const client = this.client;
+    const epoch = this.transportEpoch;
+    try {
+      const response = await client.call({ ...payload, type, sessionId: this.sessionId });
+      if (epoch !== this.transportEpoch || client !== this.client) throw new SupersededTransportError();
+      this.assertConnected();
+      return response.data;
+    } catch (error) {
+      if (epoch !== this.transportEpoch) throw new SupersededTransportError();
+      throw error;
+    }
   }
   private async resubscribe(): Promise<void> {
     const response = await this.request("subscribe", { sinceSeq: this.lastSeq });
@@ -749,22 +853,31 @@ export class RemoteClientSession {
     if (!Number.isSafeInteger(seq) || seq < 0) throw new Error("Invalid remote subscription cursor");
     this.subscribedSeq = Math.max(seq, this.lastSeq);
   }
-  private receive(envelope: Envelope): void {
-    if (this.detached || this.failed) return;
+  private receive(envelope: Envelope, client = this.client, epoch = this.transportEpoch): void {
+    if (this.detached || this.failed || client !== this.client || epoch !== this.transportEpoch || envelope.sessionId !== this.sessionId) return;
+    // Arm before close even if an earlier metadata read is pending. The new peer
+    // must still prove the expected build and an authoritative session snapshot.
+    if (this.options.reconnectAfterUpgrade) {
+      const notice = loggedUpgrade(envelope, this.sessionId, this.generation, this.lastSeq);
+      if (notice && !this.pendingUpgrade) {
+        this.pendingUpgrade = notice;
+        this.upgradeStatus("restarting", notice);
+      }
+    }
     this.buffered.push(envelope);
     if (this.receiving) this.drain();
   }
-  private draining = false;
+  private draining?: Promise<void>;
   private drain(): void {
     if (this.draining || this.reconciling || !this.receiving || this.detached || this.failed) return;
-    this.draining = true;
-    void this.drainEvents().catch((error) => this.fail(error)).finally(() => {
-      this.draining = false;
+    this.draining = this.drainEvents().catch((error) => this.fail(error)).finally(() => {
+      this.draining = undefined;
       if (this.buffered.length) this.drain();
     });
   }
   private async drainEvents(): Promise<void> {
-    while (this.buffered.length && !this.reconciling && !this.detached && !this.failed) {
+    const epoch = this.transportEpoch;
+    while (this.buffered.length && !this.reconciling && this.receiving && !this.detached && !this.failed && epoch === this.transportEpoch) {
       const envelope = this.buffered.shift()!;
       try {
         const event = this.cache.apply(envelope);
@@ -861,13 +974,19 @@ export class RemoteClientSession {
     })().finally(() => { this.presentationRefresh = undefined; });
     return this.presentationRefresh;
   }
-  private disconnect(): void {
-    if (this.detached || this.failed) return;
+  private disconnect(client = this.client, epoch = this.transportEpoch): void {
+    if (this.detached || this.failed || client !== this.client || epoch !== this.transportEpoch) return;
+    if (this.pendingUpgrade && this.options.reconnectAfterUpgrade) {
+      if (this.reconnecting) this.invalidateTransport();
+      else this.reconnectUpgrade(this.pendingUpgrade);
+      return;
+    }
     this.controller = false;
     this.fail(new Error("Remote connection closed; reconnect and obtain a fresh snapshot before sending commands"));
-    this.options.onDisconnect?.();
+    this.notifyDisconnect();
   }
   private fail(error: unknown): void {
+    if (error instanceof SupersededTransportError) return;
     if (this.detached || this.failed) return;
     this.failed = error instanceof Error ? error : new Error(String(error));
     this.detachEvents?.();
@@ -877,6 +996,113 @@ export class RemoteClientSession {
     this.rejectIdle(this.failed);
     this.report(this.failed);
   }
+  private notifyDisconnect(): void {
+    if (this.disconnectNotified || this.detached) return;
+    this.disconnectNotified = true;
+    this.options.onDisconnect?.();
+  }
+
+  private upgradeStatus(phase: "restarting" | "reconnecting" | "ready", notice: RuntimeUpgradeNotice): void {
+    try { this.options.onUpgradeStatus?.(phase, notice); }
+    catch (error) { this.report(error); }
+  }
+
+  private cleanupReplacement(): void {
+    const dispose = this.disposeReplacement;
+    this.disposeReplacement = undefined;
+    if (!dispose) return;
+    this.client.close();
+    void Promise.resolve().then(dispose).catch(error => this.report(error));
+  }
+
+  private invalidateTransport(): void {
+    this.transportEpoch++;
+    this.transportReady = false;
+    this.receiving = false;
+    this.controller = false;
+    this.detachEvents?.();
+    this.deactivateClose?.();
+    this.buffered = [];
+    this.uiRequests.length = 0;
+    this.cancelLocalDialogs();
+    for (const waiter of this.eventWaiters) waiter.reject(new SupersededTransportError());
+    this.eventWaiters.clear();
+  }
+
+  private reconnectUpgrade(notice: RuntimeUpgradeNotice): void {
+    const reconnect = this.options.reconnectAfterUpgrade!;
+    const abort = new AbortController();
+    this.reconnectAbort = abort;
+    this.invalidateTransport();
+    this.reconnecting = (async () => {
+      // One worker owns all successive replacements, including a restart that
+      // closes the next peer before its snapshot/control/replay finishes.
+      for (;;) {
+        const previous = this.client;
+        this.pendingUpgrade = undefined;
+        this.upgradeStatus("reconnecting", notice);
+        await Promise.allSettled([this.reconciling, this.presentationRefresh, this.draining]);
+        abort.signal.throwIfAborted();
+        this.assertConnected();
+        let replacement: ReplacementRemoteTransport | undefined;
+        let adopted = false;
+        try {
+          replacement = await reconnect(notice, abort.signal);
+          abort.signal.throwIfAborted();
+          this.assertConnected();
+          validateReplacement(replacement.client, previous, notice);
+          this.cleanupReplacement();
+          const client = replacement.client;
+          const epoch = this.transportEpoch;
+          this.client = client;
+          this.transportReady = true;
+          this.presentationRefresh = undefined;
+          this.disposeReplacement = replacement.dispose ?? (() => {});
+          adopted = true;
+          this.detachEvents = client.onEvent(event => this.receive(event, client, epoch));
+          this.deactivateClose = client.onClose(() => this.disconnect(client, epoch));
+          this.controller = true;
+          await this.reconcile();
+          this.assertConnected();
+          if (epoch !== this.transportEpoch) throw new SupersededTransportError();
+          for (const event of this.activeEvents()) this.emit(event);
+          this.receiving = true;
+          this.drain();
+          await this.flushReceivedEvents();
+          this.assertConnected();
+          if (epoch !== this.transportEpoch) throw new SupersededTransportError();
+          this.options.onReconnected?.(client);
+          this.disconnectNotified = false;
+          this.upgradeStatus("ready", notice);
+          // Status callbacks may close a peer whose next notice is already armed.
+          if (epoch !== this.transportEpoch) throw new SupersededTransportError();
+          return;
+        } catch (error) {
+          if (!(error instanceof SupersededTransportError) || !this.pendingUpgrade || this.detached || this.failed) throw error;
+          notice = this.pendingUpgrade;
+        } finally {
+          if (!adopted && replacement) {
+            replacement.client.close();
+            await replacement.dispose?.();
+          }
+        }
+      }
+    })().catch(error => {
+      if (this.detached) return;
+      this.controller = false;
+      this.fail(error);
+      this.cleanupReplacement();
+      this.notifyDisconnect();
+    }).finally(() => {
+      this.reconnecting = undefined;
+      if (this.reconnectAbort === abort) this.reconnectAbort = undefined;
+      this.drain();
+      this.presentDialogs();
+      this.resolveEventWaiters();
+      this.resolveIdle();
+    });
+  }
+
   private report(error: unknown): void {
     if (this.detached) return;
     const message = error instanceof Error ? error.message : String(error);
@@ -924,7 +1150,7 @@ export class RemoteClientSession {
     this.dialogs.clear();
   }
   private presentDialogs(): void {
-    if (!this.controller || !this.uiContext || this.reconciling || this.detached || this.failed) return;
+    if (!this.controller || !this.uiContext || this.reconciling || this.reconnecting || this.detached || this.failed) return;
     for (const dialog of this.dialogs.values()) {
       if (!this.dialogControllers.has(dialog.id)) void this.showDialog(dialog).catch((error) => this.report(error));
     }

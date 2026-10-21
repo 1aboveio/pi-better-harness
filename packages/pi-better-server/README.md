@@ -94,8 +94,11 @@ owns one session file.
 
 ## Handshake
 
-A client may open with `hello { protocolVersion, piVersion?, extensionVersions? }`.
-The daemon answers with its own `{ protocolVersion, piVersion, extensionVersions }`.
+A client may open with `hello { protocolVersion, piVersion?, extensionVersions?, capabilities? }`.
+The daemon answers with its own versions and capabilities, plus the managed
+`build` and daemon `instanceId` when available. Native clients supporting transport
+replacement announce `runtime-reconnect-v1`; eligible daemons advertise
+`safe-upgrade-v1`.
 It rejects the client, with an error naming both sides, then closes the
 connection, when the protocol versions differ or when a stated `piVersion` is on
 a different Pi major.minor. Extension versions are reported, never enforced.
@@ -109,12 +112,11 @@ start ordinary local Pi **1.2.0** with this package loaded at startup, then run
 the model, tools, workspace and session state. Your local conversation stays separate
 unless you explicitly choose to move or copy it after connecting.
 
-A stopped, installed Pi daemon is started automatically on the first connection.
-The client discovers the registered runtime, asks `pi-server ensure` to reuse or
-start it, verifies readiness and compatibility, and then opens the SSH tunnel.
-Stale socket files do not count as a running server. This does not install new
-packages, copy credentials, kill incompatible listeners, or replace busy daemons.
-Missing or incompatible runtimes produce installation/update guidance.
+Connecting installs or stages the matching server build automatically, verifies
+readiness and compatibility, and then opens the SSH tunnel. A registered runtime
+keeps its agent and server directories. A new host uses `~/.pi/agent` and
+`~/.pi/agent/server`. See [automatic server updates](#automatic-server-updates)
+for busy sessions, older daemons and manual launcher overrides.
 
 ### Connect and disconnect
 
@@ -268,6 +270,62 @@ status and text widgets can be presented locally. Arbitrary remote `ctx.ui.custo
 screens, custom component widgets and remote extension renderers are not supported.
 Synchronizing a package installation does not provide full extension UI parity.
 
+### Automatic server updates
+
+Native `/remote connect` builds an artifact from the client's installed package
+files, including unpublished source changes. A Git checkout is not required.
+The build identity includes the source, target platform, SDK, Node version and
+dependency lock. Supported remote targets are Linux and macOS on x64 and arm64.
+
+The server runs from an immutable release under
+`~/.pi-better-server/managed/releases/<build-id>`, outside `node_modules`. Each
+release contains private Node **24.14.1** and SDK **1.2.0** dependencies installed
+on the target. Node checksums and locked dependency integrity are verified. If
+target downloads fail, the client downloads and uploads verified archives instead.
+Concurrent connectors share the same release only after integrity validation.
+Published releases are not overwritten to repair corruption.
+
+Staging can proceed while sessions run. Activation waits for all sessions to be
+idle, including SDK preflight and settlement, queued messages, compaction, shell
+commands, dialogs and observable background work. Native cache warming is also
+protected, including pending decision and provider requests. Activity observation
+does not hold the upgrade admission fence while waiting. Unsupported SDK guards
+or unobservable activity defer activation rather than establishing idleness.
+
+An eligible daemon records the stop commitment, closes execution admission and
+notifies attached native clients before releasing ownership. The successor adopts
+the same state directory only after that release. Each client keeps its existing
+session adapter and UI bindings, validates the new build and daemon instance, and
+reconciles its snapshot, event cursor and controller lease. Interrupted requests
+are not replayed. Recovery reconnects to the announced build in the selected
+state directory; it does not install or activate the recovering client's build.
+An unannounced connection failure still requires reconnecting.
+
+The runtime update does not rerun bootstrap, install its default extension list,
+copy credentials or rewrite agent preferences. Remote-only packages and session
+histories remain in their existing directories. Global runtime registration is
+updated only after verified readiness for the registered default state directory.
+Workspace package synchronization remains a separate approval step below.
+
+Older daemons without `safe-upgrade-v1`, unknown owners, incompatible protocols
+and SDK downgrades are deferred. A missing socket or elapsed timeout is not
+permission to replace a live owner. An unverified legacy state directory may need
+an explicit migration before automatic activation can proceed. The client leaves
+the old daemon running and reports the reason instead of killing it.
+
+Activation records live in `<serverDir>/activation.json` and `activation.log`.
+`recovery-required` preserves an ambiguous or adopted candidate for inspection;
+it does not authorize another writer or a rollback. Automatic rollback is limited
+to a proven candidate exit before adoption and restores code only, not settings,
+packages or history. Repeating that failed operation does not stop the restored
+runtime. A fresh request needs verified rollback completion and ownership before
+starting another attempt. Do not delete ownership files to force an update.
+
+An explicit `PI_SERVER_COMMAND` opts out of managed installation and keeps that
+absolute launcher authoritative. Older SDK CLI clients retain registered-launcher
+startup by default. Codex daemons and explicit local sockets are not managed by
+this native installation workflow.
+
 ### Reload remote extensions
 
 While connected, `/reload` reloads the daemon's extension runtime, tools and
@@ -310,12 +368,34 @@ UI: `!hostname` returned `r5`, and a model-driven remote tool call returned
 `CLIENT_REMOTE_OK r5`. Disconnect, reconnect and lost-transport recovery restored
 the expected local and remote histories.
 
-At this development checkpoint, the complete server suite passes on both supported
-SDK test layouts: **483 passed, 8 gated skips on SDK 0.82.1**, and **486 passed,
-5 gated skips on SDK 1.2.0**. Both TypeScript checks pass. Test workers are bounded
-to four to avoid oversubscribing subprocess-heavy transport fixtures.
+The complete server suite passes on both supported SDK test layouts: **702 passed,
+18 expected skips on SDK 0.82.1**, and **713 passed, 7 expected skips on SDK 1.2.0**.
+Each layout covers 720 tests with no failures or cancellations. Both TypeScript
+checks pass. Skips cover SDK-specific behavior and opt-in installation checks.
+Test workers are bounded to four to avoid oversubscribing subprocess-heavy fixtures.
 
-Current-source native Pi 1.2.0 checks verified browser creation and its first model
+Real-process upgrade checks attach two native session adapters to one managed
+daemon, defer activation during a gated tool, reconnect both views, and continue
+with their original objects, history and UI bindings. Pull-copy and move use the
+replacement clients. See [upgrade integration](test/remote-upgrade-native.test.ts),
+[transport races](test/remote-upgrade-reconnect.test.ts),
+[startup admission](test/startup-admission.test.ts), and
+[SDK quiescence](test/maintenance-sdk-quiescence.test.ts).
+
+An actual Pi 1.2.0 terminal journey passed 44 checks against the current complete
+backend and client. It verified busy deferral, transport-only recovery without
+another activation, unchanged UI and session object identities, live replies,
+pull-copy and disconnect. No local model ran during attachment, and cleanup left
+no owned processes or sockets.
+
+Separate private installations on macOS arm64 and Linux x64 verified Node 24.14.1,
+SDK 1.2.0 and sealed-release reuse. The macOS check exercised client-download and
+upload fallback. A Linux SSH cancellation check entered a bounded dependency
+subprocess, aborted its transport, and verified scratch and lock cleanup while
+preserving a published-release sentinel. Synthetic agent files remained unchanged;
+these installer checks did not start a production daemon.
+
+Earlier native Pi 1.2.0 checks verified browser creation and its first model
 reply, live updates and controller access after pull-copy, and newly reloaded
 commands and tools without reconnecting. Both native journeys used private fake
 providers, not external model credentials. See the regressions for
@@ -462,6 +542,10 @@ continues across downtime; interrupted execution receives a fresh idle window.
 
 ## Host bootstrap
 
+Bootstrap is optional for native `/remote connect`. It remains available for
+manual installations and registered-launcher CLI startup. Managed runtime updates
+do not rerun bootstrap or install the extension defaults listed here.
+
 `scripts/bootstrap-host.sh [PREFIX]` installs a pinned Node, a pinned Pi and this
 package's `src/` under `PREFIX` (default `~/.pi-better-server`) with no root, and
 writes `PREFIX/bin/pi-server`. It atomically registers that launcher, agent
@@ -525,6 +609,8 @@ Preflight runs before anything is fenced, and a refusal leaves the source untouc
 - free disk at the workspace location is at least 3x the bundle plus a reserve (`PI_REMOTE_MIN_FREE_BYTES`, default 256 MiB).
 - the repo remote answers `git ls-remote` from the receiving side.
 
-The daemon exposes these as `move_preflight`. Not covered: installing for the user automatically (the refusal prints the command instead).
+The daemon exposes these checks as `move_preflight`; that RPC does not install
+or upgrade a runtime. Connection setup follows the managed or registered-launcher
+policy above before transfer preflight runs.
 
 If `/detach` leaves this machine's copy fenced (the target was unreachable, or its reply was lost), the error prints the recovery command. It acts on this machine's record and first asks the daemon whether it holds the session: `pi-remote recover <session> --abort --host <alias>` reopens the local session when the daemon does not hold it; `pi-remote recover <session> --retire --move-id <id> --host <alias>` records it as moved when the daemon does. A Pi process that detached a session never runs it again, even after a `return`; resume it with `pi --session` in a new process.

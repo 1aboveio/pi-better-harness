@@ -17,8 +17,15 @@ import { parseRemoteTransferArgs, runRemoteTransfer, type RemoteTransferArgs, ty
 import { observeLocalTransferWork } from "./local-work.ts";
 import { browseRemoteFolders } from "./folder-browser.ts";
 import { showRemoteProgress } from "./remote-progress.ts";
+import { NATIVE_RECONNECT_CAPABILITIES, openUpgradeTransport } from "./upgrade-transport.ts";
 
 const USAGE = "/remote connect <ssh-alias> [--cwd <remote-path>] [--session <id>] [--remote-dir <server-dir>]";
+const UPGRADE_STAGES: Record<string, string> = {
+  artifact: "preparing matching server...", probe: "checking remote platform...", "node-download": "preparing private Node runtime...",
+  "node-upload": "uploading verified Node runtime...", dependencies: "checking server dependencies...", "dependencies-upload": "uploading verified dependencies...",
+  staged: "matching server staged...", activating: "activating matching server...", ready: "matching server ready...", deferred: "server update staged; current daemon continues...",
+};
+const resolveNativeTarget: typeof resolveTarget = options => resolveTarget({ ...options, managedRuntime: true });
 
 export function parseRemoteArgs(text: string) {
   const words = text.trim().split(/\s+/).filter(Boolean);
@@ -60,7 +67,7 @@ export async function chooseRemoteConnection(args: string, ui: Pick<ExtensionUIC
 }
 
 /** Registers the local UI client; remote work never creates a local agent loop. */
-export function registerRemoteClient(pi: ExtensionAPI, dependencies: RemoteClientDependencies = { resolveTarget }): void {
+export function registerRemoteClient(pi: ExtensionAPI, dependencies: RemoteClientDependencies = { resolveTarget: resolveNativeTarget }): void {
   registerLocalOwnershipGuard(pi);
   const localWork = observeLocalTransferWork(pi);
   if (VERSION === "1.2.0") installPi12Bridge();
@@ -163,23 +170,35 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
   let target: Target | undefined;
   let client: DaemonClient | undefined;
   let attached = false;
+  const closeInitialTransport = async () => {
+    const initialClient = client;
+    const initialTarget = target;
+    client = undefined;
+    target = undefined;
+    initialClient?.close();
+    await initialTarget?.close();
+  };
   try {
-    const remoteDir = options.remoteDir ?? await rememberedServerDir(options.host);
-    await rememberRemoteHost(options.host, remoteDir).catch((error) => ui.notify(`Could not remember remote host: ${error instanceof Error ? error.message : String(error)}`, "warning"));
+    let remoteDir = options.remoteDir ?? await rememberedServerDir(options.host);
     const controlPathRoot = join(process.env.PI_REMOTE_TMP ?? "/tmp", `pi-native-${process.getuid?.() ?? process.pid}`);
+    let deferredUpgrade: string | undefined;
     const setup = await withConnectionProgress(ui, options.host, async ({ signal, stage }) => {
       let pendingTarget: Target | undefined;
       let pendingClient: DaemonClient | undefined;
       try {
         stage("establishing SSH...");
         pendingTarget = await local.dependencies.resolveTarget({
-          host: options.host, agent: "pi", controlPathRoot, signal,
+          host: options.host, agent: "pi", controlPathRoot, signal, managedRuntime: true,
           ...(remoteDir ? { remoteDir } : {}),
           onProgress: phase => stage({ ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]),
+          onUpgradeProgress: (phase, detail) => {
+            if (phase === "deferred") deferredUpgrade = detail;
+            stage(UPGRADE_STAGES[phase] ?? "checking matching server...");
+          },
         });
         signal.throwIfAborted();
         stage("contacting Pi server...");
-        pendingClient = await DaemonClient.connect(pendingTarget.socketPath, { signal });
+        pendingClient = await DaemonClient.connect(pendingTarget.socketPath, { signal, hello: { capabilities: [...NATIVE_RECONNECT_CAPABILITIES] } });
         signal.throwIfAborted();
         stage("checking server compatibility...");
         const capabilities = pendingClient.server?.capabilities ?? [];
@@ -194,8 +213,14 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
     if (!setup) return;
     target = setup.target;
     client = setup.client;
-    const connection = client;
-    const transport = target;
+    remoteDir = target.serverDir ?? remoteDir;
+    await rememberRemoteHost(options.host, remoteDir).catch((error) => ui.notify(`Could not remember remote host: ${error instanceof Error ? error.message : String(error)}`, "warning"));
+    if (deferredUpgrade) {
+      const safe = client.server?.capabilities?.includes("safe-upgrade-v1");
+      ui.notify(safe ? `Server update staged; activation is deferred. ${deferredUpgrade}`
+        : `Server update staged. The current daemon cannot perform a verified automatic handoff and was left running. ${deferredUpgrade}`, safe ? "info" : "warning");
+    }
+    let connection = client;
     ui.setStatus("pi-remote", `SSH: ${options.host} (sessions)`);
     let choice: Exclude<RemoteSessionChoice, { action: "transfer" }> | undefined;
     let transferred = false;
@@ -225,6 +250,15 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
       if (selectedChoice.action === "create") sessionId = (await connection.call({ type: "create_session", cwd })).sessionId as string;
       await connection.call({ type: "open_session", sessionId });
       return RemoteClientSession.connect(connection, sessionId, {
+        reconnectAfterUpgrade: (notice, signal) => openUpgradeTransport({
+          host: options.host, agent: "pi", controlPathRoot, managedRuntime: true, ...(remoteDir ? { remoteDir } : {}),
+        }, local.dependencies, signal, notice.buildId),
+        onReconnected: replacement => {
+          connection = replacement;
+          void closeInitialTransport().catch(error => ui.notify(`Remote tunnel cleanup: ${String(error)}`, "warning"));
+        },
+        onUpgradeStatus: phase => ui.setStatus("pi-remote", phase === "ready"
+          ? `SSH: ${options.host}` : `SSH: ${options.host} (${phase === "restarting" ? "server restarting" : "reconnecting"})`),
         onDisconnect: () => {
           ui.setStatus("pi-remote", `SSH: ${options.host} (disconnected)`);
           ui.notify(`Disconnected from ${options.host}. Remote work has not been aborted. Use /remote disconnect to return locally, then reconnect.`, "warning");
@@ -257,13 +291,13 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
     try { cwd = checkedRemoteWorkspace(cwd, remote.sessionManager.getCwd()); }
     catch (error) { remote.dispose(); throw error; }
     const dispose = remote.dispose.bind(remote);
-    remote.dispose = () => { dispose(); connection.close(); void transport.close(); };
+    remote.dispose = () => { dispose(); void closeInitialTransport().catch(() => undefined); };
     await bridge.attach(remote);
     attached = true;
     ui.setStatus("pi-remote", `SSH: ${options.host}`);
     ui.notify(`Attached to ${options.host}:${cwd}. /remote opens the server's sessions; /remote disconnect returns locally.`, "info");
   } finally {
-    if (!attached) { client?.close(); await target?.close(); ui.setStatus("pi-remote", undefined); }
+    if (!attached) { await closeInitialTransport(); ui.setStatus("pi-remote", undefined); }
   }
 }
 
