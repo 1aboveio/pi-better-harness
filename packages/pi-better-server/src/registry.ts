@@ -153,7 +153,7 @@ export class SessionRegistry {
     this.entries.set(sessionId, entry);
     return this.serialize(sessionId, async () => {
       try {
-        const hosted = await this.host(entry, manager);
+        const hosted = await this.host(entry, manager, !request.model && !this.options.sessionOptions?.model);
         if (request.model) {
           const models = await hosted.session.modelRuntime.getAvailable();
           const model = models.find((m) => m.provider === request.model?.provider && m.id === request.model?.modelId);
@@ -349,19 +349,19 @@ export class SessionRegistry {
     if (hosted) await hosted.dispose({ abort: true });
   }
 
-  private host(entry: IndexEntry, manager?: SessionManager): Promise<HostedSession> {
+  private host(entry: IndexEntry, manager?: SessionManager, useDefaultModel = false): Promise<HostedSession> {
     const releasing = this.releasing.get(entry.sessionId);
-    if (releasing) return releasing.then(() => this.host(entry, manager));
+    if (releasing) return releasing.then(() => this.host(entry, manager, useDefaultModel));
     const existing = this.live.get(entry.sessionId);
     if (existing) return Promise.resolve(existing);
     const inFlight = this.pending.get(entry.sessionId);
     if (inFlight) return inFlight;
-    const started = this.start(entry, manager).finally(() => this.pending.delete(entry.sessionId));
+    const started = this.start(entry, manager, useDefaultModel).finally(() => this.pending.delete(entry.sessionId));
     this.pending.set(entry.sessionId, started);
     return started;
   }
 
-  private async start(entry: IndexEntry, manager?: SessionManager): Promise<HostedSession> {
+  private async start(entry: IndexEntry, manager?: SessionManager, useDefaultModel = false): Promise<HostedSession> {
     const sessionManager = manager ?? this.reopen(entry);
     const activity = new SessionActivity(this.log);
     let session: AgentSession | undefined;
@@ -372,7 +372,7 @@ export class SessionRegistry {
       let resourceLoader = supplied?.resourceLoader;
       if (!resourceLoader) {
         resourceLoader = new DefaultResourceLoader({
-          cwd: entry.cwd, agentDir: supplied?.agentDir ?? getAgentDir(), settingsManager, eventBus: activity.events,
+          cwd: entry.cwd, agentDir: supplied?.agentDir ?? getAgentDir(), settingsManager, eventBus: activity.runtimeEvents,
           extensionsOverride: (base) => ({
             ...base,
             extensions: base.extensions.map((extension) => ({
@@ -381,12 +381,21 @@ export class SessionRegistry {
             })),
           }),
         });
+        const reload = resourceLoader.reload.bind(resourceLoader);
+        resourceLoader.reload = async (...args) => {
+          // SDK 0.82 leaves pi.events subscriptions alive after session_shutdown.
+          // Revoke them before factories run, including listeners added during shutdown.
+          // extensionsOverride runs too late: new factories have already subscribed there.
+          activity.resetRuntime();
+          await reload(...args);
+        };
         await resourceLoader.reload();
       } else {
         this.log(`session ${entry.sessionId}: automatic expiry disabled with a caller-owned resource loader because background activity is unobservable`);
         activity.markUnobservable();
       }
       ({ session } = await createAgentSession({ ...supplied, customTools: supplied?.customTools?.map((tool) => activity.wrapTool(tool)), settingsManager, resourceLoader, cwd: entry.cwd, sessionManager }));
+      if (useDefaultModel) await this.initializeDefaultModel(session);
       if (!manager) await this.restoreSavedModel(session, sessionManager, entry.model);
       const events = new EventLog(join(this.options.serverDir, "events", `${entry.sessionId}.jsonl`), this.options.eventLog);
       const runtime = new HostedSession(session, events, (kind) => {
@@ -409,6 +418,41 @@ export class SessionRegistry {
       if (hosted) await hosted.dispose({ abort: true });
       else session?.dispose();
       throw error;
+    }
+  }
+
+  /** Extension providers register after the SDK selects its initial model. Only new sessions use defaults. */
+  private async initializeDefaultModel(session: AgentSession): Promise<void> {
+    const provider = session.settingsManager.getDefaultProvider();
+    const modelId = session.settingsManager.getDefaultModel();
+    if (!provider || !modelId) return;
+    if (session.model?.provider === provider && session.model.id === modelId) return;
+    const model = session.modelRuntime.getModel(provider, modelId);
+    const unavailable = () => new Error(`Configured model ${provider}/${modelId} is unavailable. Check the daemon's provider extension, credentials, and default model settings, or request an explicit model.`);
+    if (!model) throw unavailable();
+    // Legacy SDK setters save defaults. Isolate only those writes, never mutate or
+    // restore shared settings while an asynchronous credential check is in flight.
+    const settings = session.settingsManager;
+    const descriptor = Object.getOwnPropertyDescriptor(session, "settingsManager");
+    const sessionSettings = new Proxy(settings, {
+      get(target, key) {
+        if (["setDefaultModelAndProvider", "setDefaultThinkingLevel", "setModelThinkingLevel"].includes(String(key))) return () => {};
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    try {
+      Object.defineProperty(session, "settingsManager", { value: sessionSettings, configurable: true, writable: true });
+      await session.setModel(model);
+      if (this.options.sessionOptions?.thinkingLevel !== undefined) {
+        session.setThinkingLevel(this.options.sessionOptions.thinkingLevel);
+      }
+    } catch {
+      // Auth failures can contain credential helper output. Do not expose it to clients.
+      throw unavailable();
+    } finally {
+      if (descriptor) Object.defineProperty(session, "settingsManager", descriptor);
+      else delete (session as unknown as Record<string, unknown>).settingsManager;
     }
   }
 

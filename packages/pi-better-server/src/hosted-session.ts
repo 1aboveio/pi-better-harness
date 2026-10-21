@@ -171,6 +171,23 @@ export class HostedSession {
 
   refreshActivity(): Promise<void> { return this.activity?.refresh() ?? Promise.resolve(); }
 
+  /** Keep subscriptions and controller leases while the host admission fence excludes execution. */
+  async reload(): Promise<void> {
+    if (this.disposed) throw new Error("Session runtime is closed; explicitly close and reopen the session");
+    try {
+      // The owned loader resets activity after SDK shutdown, before constructing extensions.
+      await this.session.reload();
+      this.activity?.attach(this.session, () => this.onActivity("work"));
+      await this.refreshActivity();
+      this.publish({ type: "remote_resources_reloaded" });
+      this.onActivity();
+    } catch (error) {
+      // A partially rebuilt runtime must not execute with an unknown set of guards.
+      this.fence();
+      throw new Error(`Remote reload failed; close and reopen this session. History is preserved. ${String(error)}`);
+    }
+  }
+
   /** Fence pre-fetched dispatch references before close crosses its first await. */
   fence(): void { this.disposed = true; }
 

@@ -88,8 +88,8 @@ export class RemoteSessionBrowser implements Component {
     const commands = this.options.loading ? ["Esc cancel"] : [
       "Tab tabs",
       ...(selected ? [width < 40 ? "Enter open" : this.state.tab === "closed" ? "Enter reopen" : "Enter attach",
-        ...(this.state.tab === "active" ? ["x close"] : []), "n rename"] : []),
-      "c new", "r refresh", "Esc back",
+        ...(this.state.tab === "active" ? ["x close"] : []), "F2 rename"] : []),
+      "n new", "r refresh", "Esc back",
     ];
     const legend: string[] = [];
     for (const command of commands) {
@@ -145,7 +145,7 @@ export class RemoteSessionBrowser implements Component {
     if (this.options.loading) return;
     if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
       this.state.changeTab();
-    } else if (matchesKey(data, "c")) { this.finish({ action: "create" }); return; }
+    } else if (matchesKey(data, "n")) { this.finish({ action: "create" }); return; }
     else if (matchesKey(data, "r")) { this.finish({ action: "refresh" }); return; }
     else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
       const rows = this.state.rows();
@@ -155,14 +155,14 @@ export class RemoteSessionBrowser implements Component {
     } else {
       const session = this.state.selected;
       if (!session) return;
-      if (matchesKey(data, Key.enter) || matchesKey(data, "x") || matchesKey(data, "n")) {
+      if (matchesKey(data, Key.enter) || matchesKey(data, "x") || matchesKey(data, Key.f2)) {
         if (session.ownership !== undefined) {
           this.state.error = session.ownership === "moved"
             ? "Session moved away; cannot attach, close, or rename on this host. Select another session."
             : "Session fenced for a move; cannot attach, close, or rename. Refresh or select another session.";
         } else if (matchesKey(data, Key.enter)) { this.finish({ action: "attach", session }); return; }
         else if (matchesKey(data, "x") && this.state.tab === "active") { this.finish({ action: "close", session }); return; }
-        else if (matchesKey(data, "n")) { this.finish({ action: "rename", session }); return; }
+        else if (matchesKey(data, Key.f2)) { this.finish({ action: "rename", session }); return; }
         else return;
       } else return;
     }
@@ -226,12 +226,12 @@ export async function browseRemoteSessions(ui: ExtensionUIContext, client: Daemo
       const input = await ui.input(`Rename session (${session.sessionId})`, session.name);
       if (input === undefined) continue;
       const name = input.trim();
-      if (!name) { state.error = "Name cannot be empty. Press n to rename again."; continue; }
+      if (!name) { state.error = "Name cannot be empty. Press F2 to rename again."; continue; }
       command = { type: "rename_session", sessionId: session.sessionId, name };
     }
     const result = await showPending(ui, state, host, options, intent.action === "close" ? "Closing session..." : "Renaming session...", client.call(command));
     if (!result) return undefined;
-    if ("error" in result) state.error = `${intent.action === "close" ? "Close" : "Rename"} failed: ${errorText(result.error)}. Press ${intent.action === "close" ? "x" : "n"} to retry or r to refresh.`;
+    if ("error" in result) state.error = `${intent.action === "close" ? "Close" : "Rename"} failed: ${errorText(result.error)}. Press ${intent.action === "close" ? "x" : "F2"} to retry or r to refresh.`;
     refresh = true;
   }
 }

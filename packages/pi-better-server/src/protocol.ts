@@ -90,16 +90,16 @@ export type DaemonCommand =
  */
 export type MoveCommand =
   | { id?: string; type: "move_fence"; sessionId: string; moveId: string; waitMs?: number }
-  | { id?: string; type: "move_export"; sessionId: string; moveId: string }
+  | { id?: string; type: "move_export"; sessionId: string; moveId: string; includeWorkspace?: boolean; compression?: "gzip" | "none" }
   | { id?: string; type: "move_read"; moveId: string; offset: number; length: number }
   | { id?: string; type: "move_retire"; sessionId: string; moveId: string; movedTo: string }
   | { id?: string; type: "move_unfence"; sessionId: string; moveId?: string }
-  | { id?: string; type: "move_begin"; moveId: string; sessionId: string; size: number; sha256: string; cwd?: string; rebindProvider?: string }
+  | { id?: string; type: "move_begin"; moveId: string; sessionId: string; sourceSessionId?: string; copy?: boolean; includeWorkspace?: boolean; size: number; sha256: string; cwd?: string; rebindProvider?: string }
   | { id?: string; type: "move_write"; moveId: string; offset: number; data: string }
   | { id?: string; type: "move_commit"; moveId: string }
   | { id?: string; type: "move_abort"; moveId: string; sessionId: string }
   /** Checks to run on the receiving daemon before anything is fenced; with `sessionId`, also describes that session for a pull. */
-  | { id?: string; type: "move_preflight"; sessionId?: string; model?: string; modelProvider?: string; rebindProvider?: string; repoRemote?: string; requireGh?: boolean; bytes?: number; dir?: string };
+  | { id?: string; type: "move_preflight"; sessionId?: string; includeWorkspace?: boolean; model?: string; modelProvider?: string; rebindProvider?: string; repoRemote?: string; requireGh?: boolean; bytes?: number; dir?: string };
 
 /**
  * Event delivery and control, all addressed to one session:
@@ -114,7 +114,8 @@ export type ControlCommand =
   | { id?: string; type: "release_control"; sessionId: string }
   | ({ id?: string; type: "extension_ui_response"; sessionId: string; requestId: string } & DialogAnswer);
 
-export type ClientCommand = HelloCommand | DaemonCommand | ControlCommand | SessionCommand;
+export type ClientCommand = HelloCommand | DaemonCommand | ControlCommand | SessionCommand
+  | { id?: string; type: "client_reload"; sessionId: string };
 
 export type DaemonResponse =
   | { id?: string; type: "response"; command: "hello"; success: true; data: HelloData }

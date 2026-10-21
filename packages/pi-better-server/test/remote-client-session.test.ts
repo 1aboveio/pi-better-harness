@@ -403,6 +403,54 @@ test("bash fails closed after repeated replay truncation and unsubscribes close 
   assert.equal(f.calls.some(command => command.type === "abort" || command.type === "abort_bash"), false);
 });
 
+for (const trigger of ["explicit", "event"] as const) {
+  test(`reload ${trigger} refresh cannot reuse a snapshot captured before resources changed`, { timeout: 10_000 }, async t => {
+    const f = await wire(t);
+    f.client.server = { protocolVersion: 1, piVersion: VERSION, extensionVersions: {}, capabilities: ["remote-reload-v1"] };
+    const session = await RemoteClientSession.connect(f.client, "session-a");
+    t.after(() => session.dispose());
+    let captured!: () => void;
+    const snapshotCaptured = new Promise<void>(resolve => { captured = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let accepted!: () => void;
+    const reloadAccepted = new Promise<void>(resolve => { accepted = resolve; });
+    let hold = true;
+    const update = () => { f.current = { ...f.current, tools: [{ name: "new_remote_tool", description: "After reload" }], commands: [{ name: "new_remote_command" }] }; };
+    f.handle = async command => {
+      if (command.type === "set_model") return publicModel;
+      if (command.type === "client_snapshot" && hold) {
+        hold = false;
+        const previous = structuredClone(f.current);
+        captured();
+        await held;
+        return previous;
+      }
+      if (command.type === "client_reload") { update(); accepted(); return {}; }
+    };
+    const modelChange = session.setModel(publicModel);
+    await snapshotCaptured;
+    try {
+      if (trigger === "explicit") {
+        const reload = session.reload();
+        await reloadAccepted;
+        release();
+        await Promise.all([modelChange, reload]);
+      } else {
+        update();
+        const observed = untilEvent(session, "remote_resources_reloaded");
+        f.send({ sessionId: "session-a", generation: "generation-a", seq: 11, event: { type: "remote_resources_reloaded" } });
+        await observed;
+        release();
+        await modelChange;
+        await waitFor("resources from a post-reload snapshot", () => Boolean(session.getToolDefinition("new_remote_tool")), 2_000);
+      }
+      assert.ok(session.getToolDefinition("new_remote_tool"));
+      assert.ok(session.extensionRunner.getRegisteredCommands().some((command: any) => command.name === "new_remote_command"));
+    } finally { release(); }
+  });
+}
+
 async function hosted(t: TestContext, configure?: (env: ReturnType<typeof makeEnv>) => void) {
   const previous = { ...process.env };
   const env = makeEnv();

@@ -49,16 +49,18 @@ export async function chooseRemoteHost(ui: MenuUi, hosts: readonly string[]): Pr
 
 export function remoteArgumentCompletions(prefix: string, connected = false, hosts: readonly string[] = []) {
   const input = prefix.trimStart().toLowerCase();
-  if (/^connect(?:\s|$)/.test(input)) {
-    const hostPrefix = input.replace(/^connect\s*/, "");
+  if (/^(connect|pull)(?:\s|$)/.test(input)) {
+    const action = input.split(/\s+/, 1)[0]!;
+    const hostPrefix = input.slice(action.length).trimStart();
     const matches = hosts.filter((host) => host.toLowerCase().startsWith(hostPrefix))
-      .map((host) => ({ value: `connect ${host}`, label: host, description: `Connect to ${host}` }));
+      .map((host) => ({ value: `${action} ${host}`, label: host, description: `${action === "connect" ? "Connect to" : "Pull session from"} ${host}` }));
     return matches.length ? matches : null;
   }
-  const values = connected ? ["connect", "list", "sessions", "disconnect"] : ["connect", "list"];
+  const values = connected ? ["connect", "list", "sessions", "pull", "disconnect"] : ["connect", "list", "pull"];
   const descriptions: Record<string, string> = {
     connect: "Connect to a remote host", list: "List SSH config hosts and connection history",
     sessions: "Open the server session browser", disconnect: "Return to the local Pi session",
+    pull: "Transfer a remote session to this machine",
   };
   const matches = values.filter((value) => value.startsWith(input))
     .map((value) => ({ value, label: value, description: descriptions[value] }));

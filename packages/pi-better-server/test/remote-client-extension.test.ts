@@ -8,7 +8,7 @@ import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { DaemonClient } from "../src/client.ts";
 import type { SessionSummary } from "../src/protocol.ts";
 import { SessionRegistry } from "../src/registry.ts";
-import { checkedRemoteWorkspace, chooseRemoteConnection, chooseRemoteSession, parseRemoteArgs } from "../src/remote-client/extension.ts";
+import { checkedRemoteWorkspace, chooseConnectionTransfer, chooseRemoteConnection, chooseRemoteSession, parseRemoteArgs } from "../src/remote-client/extension.ts";
 import { NativeClientHost } from "../src/remote-client/host.ts";
 
 test("remote command accepts an SSH alias and explicit remote connection selectors", () => {
@@ -50,6 +50,47 @@ test("connect without a host opens selection and explicit connect bypasses selec
   assert.equal(selections, 1);
   assert.equal((await chooseRemoteConnection("connect r6", ui, ["r5"]))?.host, "r6");
   assert.equal(selections, 1);
+});
+
+test("connection transfer offers browse, move, and copy; browsing skips scope selection", async () => {
+  const prompts: Array<{ title: string; options: string[] }> = [];
+  const result = await chooseConnectionTransfer({ select: async (title, options) => {
+    prompts.push({ title, options: [...options] });
+    return "Browse remote sessions";
+  } });
+  assert.equal(result, "browse");
+  assert.equal(prompts.length, 1, "browsing must not ask for transfer scope");
+  assert.deepEqual(prompts[0]?.options, ["Browse remote sessions", "Move current session here", "Copy current session here"]);
+});
+
+test("connection transfer cancellation at either prompt returns no transfer decision", async () => {
+  for (const mode of [undefined, "Move current session here", "Copy current session here"]) {
+    let selections = 0;
+    const result = await chooseConnectionTransfer({ select: async () => ++selections === 1 ? mode : undefined });
+    assert.equal(result, undefined);
+    assert.equal(selections, mode === undefined ? 1 : 2);
+  }
+});
+
+test("connection transfer preserves copy versus handoff and defaults to conversation-only scope", async () => {
+  for (const [mode, copy] of [["Move current session here", false], ["Copy current session here", true]] as const) {
+    for (const [scope, includeWorkspace] of [["Conversation only", false], ["Conversation and workspace files", true]] as const) {
+      let selections = 0;
+      const result = await chooseConnectionTransfer({ select: async (_title, options) => {
+        if (++selections === 1) return mode;
+        assert.deepEqual(options, ["Conversation only", "Conversation and workspace files"], "conversation only is the default scope");
+        return scope;
+      } });
+      assert.deepEqual(result, { copy, includeWorkspace }, `${mode}: ${scope}`);
+      assert.equal(selections, 2);
+    }
+  }
+});
+
+test("connection transfer refuses unrecognized selections instead of authorizing a transfer", async () => {
+  await assert.rejects(chooseConnectionTransfer({ select: async () => "push" }), /Unknown connection action/);
+  let selections = 0;
+  await assert.rejects(chooseConnectionTransfer({ select: async () => ++selections === 1 ? "Move current session here" : "Everything" }), /Unknown transfer scope/);
 });
 
 function remoteSession(status: "running" | "closed" = "running"): SessionSummary {
@@ -101,10 +142,10 @@ function folderClient(root: unknown, sessions: SessionSummary[] = []) {
   return { client, commands };
 }
 
-test("browser c uses the daemon-reported root, not a child workspace or local path, without a picker", async () => {
+test("browser n uses the daemon-reported root, not a child workspace or local path, without a picker", async () => {
   for (const root of ["/srv/configured-workspaces", "/home/remote-user/workspaces"]) {
     const { client, commands } = folderClient(root);
-    const { ui, frames } = folderUI(["c"]);
+    const { ui, frames } = folderUI(["c", "n"]);
     assert.deepEqual(await chooseRemoteSession(client, ui, "host", {}), { action: "create", cwd: root });
     assert.ok(frames.some(frame => frame.includes(root)), `Empty browser shows its creation context:\n${frames.join("\n")}`);
     assert.deepEqual(commands, [{ type: "client_workspaces" }, { type: "list_sessions" }]);
@@ -145,7 +186,7 @@ test("explicit cwd overrides creation context but still rejects a mismatching br
   const session = remoteSession();
   const { client, commands } = folderClient(undefined, [session]);
   const cwd = "/explicit/workspace";
-  assert.deepEqual(await chooseRemoteSession(client, folderUI(["c"]).ui, "host", { cwd }), { action: "create", cwd });
+  assert.deepEqual(await chooseRemoteSession(client, folderUI(["n"]).ui, "host", { cwd }), { action: "create", cwd });
   await assert.rejects(chooseRemoteSession(client, folderUI(["\r"]).ui, "host", { cwd }), /not the requested \/explicit\/workspace/);
   assert.deepEqual(await chooseRemoteSession(client, folderUI(["\r"]).ui, "host", { cwd: session.cwd }), {
     action: "attach", cwd: session.cwd, sessionId: session.sessionId,
@@ -180,7 +221,7 @@ test("a missing host root is discoverable but package preflight rejects it witho
   const client = { call: async (command: Record<string, unknown>) => ({
     data: command.type === "list_sessions" ? { sessions: [] } : await host.handle(command),
   }) } as unknown as DaemonClient;
-  const choice = await chooseRemoteSession(client, folderUI(["c"]).ui, "host", {});
+  const choice = await chooseRemoteSession(client, folderUI(["n"]).ui, "host", {});
   assert.equal(choice?.cwd, root);
   await assert.rejects(client.call({ type: "client_packages", cwd: choice?.cwd }), error => {
     assert.match((error as Error).message, /ENOENT/);

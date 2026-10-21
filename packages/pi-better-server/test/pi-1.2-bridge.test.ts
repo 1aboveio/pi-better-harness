@@ -44,6 +44,7 @@ async function fixture(version = "1.2.0") {
         text = text.trim();
         const command = text.split(" ", 1)[0];
         const handlers: Record<string, () => any> = {
+          "/reload": () => this.handleReloadCommand(),
           "/trust": () => this.showTrustSelector(), "/share": () => this.handleShareCommand(),
           "/settings": () => this.showSettingsSelector(), "/login": () => this.handleLoginCommand(),
           "/logout": () => this.showOAuthSelector("logout"), "/export": () => this.handleExportCommand(text),
@@ -174,6 +175,7 @@ async function fixture(version = "1.2.0") {
       },
       emit: (event: any) => Promise.all([...listeners].map(listener => listener(event))),
       bindExtensions: async () => { events.push(`bind-${label}`); },
+      reload: async () => { events.push(`${label}-reload`); },
       prompt: async () => events.push(`${label}-prompt`), steer: async () => {}, followUp: async () => {},
       abort: async () => { events.push(`abort-${label}`); }, waitForIdle: async () => {},
       executeBash: async (command: string) => { events.push(`${label}-bash:${command}`); return { output: label }; },
@@ -261,6 +263,8 @@ test("attach tears down local work, gates native commands, and routes bash with 
   for (const command of ["/new", "/fork", "/tree", "/reload", "/resume", "/import path", "/new extra"]) {
     await f.mode.defaultEditor.onSubmit(command);
   }
+  assert.equal(f.events.filter(value => value === "remote-reload").length, 1);
+  assert.equal(f.events.includes("local-reload"), false);
   f.mode.handleClearCommand();
   f.mode.showTreeSelector();
   assert.equal((await f.host.newSession()).cancelled, true);

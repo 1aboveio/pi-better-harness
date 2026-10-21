@@ -11,7 +11,7 @@ import { browseRemoteSessions, RemoteSessionBrowser, RemoteSessionBrowserState, 
 import { startDaemon } from "../src/server.ts";
 import { makeEnv } from "./helpers.ts";
 
-const keys = { up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C", tab: "\t", shiftTab: "\x1b[Z", enter: "\r", escape: "\x1b" };
+const keys = { f2: "\x1bOQ", up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C", tab: "\t", shiftTab: "\x1b[Z", enter: "\r", escape: "\x1b" };
 const theme = {
   fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`,
   bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
@@ -78,6 +78,28 @@ test("all tab shortcuts and up/down selection work before render, and Enter targ
   assert.equal(renders(), 7);
 });
 
+test("n creates from active, closed, and empty tabs; the former c key does nothing", () => {
+  for (const variant of ["active", "closed", "empty-active", "empty-closed"] as const) {
+    const state = new RemoteSessionBrowserState();
+    if (variant === "active" || variant === "closed") {
+      state.replaceSessions([summary("selected", { status: variant === "closed" ? "closed" : "running" })]);
+    }
+    if (variant === "closed" || variant === "empty-closed") state.changeTab();
+    const selected = state.selected;
+    const { screen, intents, renders } = component(state);
+    screen.handleInput("c");
+    assert.deepEqual(intents, [], `${variant}: c must not create or leave the browser`);
+    assert.equal(state.selected, selected);
+    assert.equal(renders(), 0);
+    screen.handleInput("n");
+    assert.deepEqual(intents, [{ action: "create" }], variant);
+    assert.equal(state.selected, selected, "creation does not rename or replace the selected row");
+    screen.handleInput(keys.f2);
+    screen.handleInput(keys.enter);
+    assert.deepEqual(intents, [{ action: "create" }], "a finished browser ignores more input");
+  }
+});
+
 test("non-owned rows are labeled and reject attach, close, and rename without leaving the browser", () => {
   for (const ownership of ["fenced", "moved"] as const) {
     for (const status of ["running", "closed"] as const) {
@@ -86,7 +108,7 @@ test("non-owned rows are labeled and reject attach, close, and rename without le
       if (ownership === "moved" || status === "closed") state.changeTab();
       const { screen, intents, renders } = component(state);
       assert.match(plain(screen.render(100)), new RegExp(`\\[${ownership}`));
-      for (const key of [keys.enter, "x", "n"]) {
+      for (const key of [keys.enter, "x", keys.f2]) {
         screen.handleInput(key);
         assert.deepEqual(intents, [], `${ownership}/${status}: ${JSON.stringify(key)} must stay in browser`);
         assert.equal(state.selected?.sessionId, "non-owned");
@@ -99,7 +121,7 @@ test("non-owned rows are labeled and reject attach, close, and rename without le
       assert.deepEqual(intents, [{ action: "refresh" }]);
 
       const create = component(state);
-      create.screen.handleInput("c");
+      create.screen.handleInput("n");
       assert.deepEqual(create.intents, [{ action: "create" }]);
     }
   }
@@ -118,7 +140,7 @@ test("moved rows are labeled and cannot attach or close; closed rows only return
   screen.handleInput(keys.down);
   screen.handleInput("x");
   assert.deepEqual(intents, []);
-  screen.handleInput("n");
+  screen.handleInput(keys.f2);
   assert.deepEqual(intents, [{ action: "rename", session: state.selected }]);
 });
 
@@ -138,7 +160,7 @@ test("dense rendering bounds ANSI/wide text, keeps the shortcut legend, and scro
       const output = plain(lines);
       assert.match(output, /39 中文/);
       assert.match(output, /ID: id-39/);
-      for (const shortcut of [width < 40 ? "Enter open" : "Enter attach", "x close", "n rename", "c new", "r refresh", "Esc back"]) {
+      for (const shortcut of [width < 40 ? "Enter open" : "Enter attach", "x close", "F2 rename", "n new", "r refresh", "Esc back"]) {
         assert.ok(output.replace(/\n/g, " ").includes(shortcut), shortcut);
       }
       assert.ok(lines.length <= 24, `height at ${width}`);
@@ -168,7 +190,7 @@ test("wide rows give long names room and keep context-specific shortcut pairs in
   assert.ok(row.includes(name), row);
   assert.match(row, /中文-project\s+\[closed\]$/);
   assert.ok(lines.some(line => line.includes("Folder: /home/test/workspaces")));
-  for (const command of ["Enter reopen", "n rename", "c new", "r refresh", "Esc back"]) {
+  for (const command of ["Enter reopen", "F2 rename", "n new", "r refresh", "Esc back"]) {
     assert.ok(lines.some(line => line.includes(command)), `shortcut pair split: ${command}`);
   }
   assert.ok(!lines.some(line => line.includes("x close")));
@@ -188,7 +210,7 @@ test("a resized TTY overrides a stale UI height and keeps the action footer visi
   const { screen } = component(state, 30, { cwd: "/home/test/workspaces" });
   const lines = screen.render(32);
   assert.ok(lines.length <= 9, "reserve three lines for Pi's path, model and SSH footer");
-  for (const command of ["Enter open", "n rename", "c new", "r refresh", "Esc back"]) {
+  for (const command of ["Enter open", "F2 rename", "n new", "r refresh", "Esc back"]) {
     assert.ok(lines.some(line => plain([line]).includes(command)), command);
   }
 });
@@ -205,7 +227,7 @@ test("short viewports reserve Pi footer space, retain tabs and actions, and scro
       assert.ok(lines.length <= height - 2, `${width}x${height}: ${lines.length} component lines leave no Pi footer`);
       assert.ok(lines.every(line => visibleWidth(line) <= width), `${width}x${height}: horizontal overflow`);
       const output = plain(lines).replace(/\n/g, " ");
-      for (const label of ["Active", "Closed", "Tab", width < 40 ? "Enter open" : "Enter attach", "x close", "n rename", "c new", "r refresh", "Esc back"]) {
+      for (const label of ["Active", "Closed", "Tab", width < 40 ? "Enter open" : "Enter attach", "x close", "F2 rename", "n new", "r refresh", "Esc back"]) {
         assert.ok(output.toLowerCase().includes(label.toLowerCase()), `${width}x${height}: missing ${label}`);
       }
       if (!withError) assert.ok(lines.filter(line => /Row\d+/.test(plain([line]))).length >= (width === 20 && height === 10 ? 1 : 2), `${width}x${height}: insufficient navigable rows`);
@@ -243,8 +265,8 @@ test("empty, loading, and single-session layouts fit short viewports without hid
       const output = plain(lines).replace(/\n/g, " ");
       assert.ok(lines.length <= height - 2, `${variant} at ${width}x${height}: vertical overflow`);
       assert.ok(lines.every(line => visibleWidth(line) <= width), `${variant} at ${width}x${height}: horizontal overflow`);
-      const labels = variant === "loading" ? ["Active", "Closed", "Esc cancel"] : ["Active", "Closed", "Tab", "c new", "r refresh", "Esc back",
-        ...(variant === "active" || variant === "closed" ? [width < 40 ? "Enter open" : variant === "closed" ? "Enter reopen" : "Enter attach", "n rename"] : [])];
+      const labels = variant === "loading" ? ["Active", "Closed", "Esc cancel"] : ["Active", "Closed", "Tab", "n new", "r refresh", "Esc back",
+        ...(variant === "active" || variant === "closed" ? [width < 40 ? "Enter open" : variant === "closed" ? "Enter reopen" : "Enter attach", "F2 rename"] : [])];
       for (const label of labels) {
         assert.ok(output.toLowerCase().includes(label.toLowerCase()), `${variant} at ${width}x${height}: missing ${label}`);
       }
@@ -257,12 +279,12 @@ test("empty and loading screens retain create/escape affordances; disposed scree
   const state = new RemoteSessionBrowserState();
   const { screen, intents } = component(state);
   assert.match(plain(screen.render(80)), /No active sessions/);
-  screen.handleInput("x"); screen.handleInput("n"); screen.handleInput(keys.enter);
+  screen.handleInput("x"); screen.handleInput(keys.f2); screen.handleInput(keys.enter); screen.handleInput("c");
   assert.deepEqual(intents, []);
-  screen.handleInput("c");
+  screen.handleInput("n");
   assert.deepEqual(intents, [{ action: "create" }]);
   const disposed = component(state);
-  disposed.screen.dispose(); disposed.screen.handleInput("c");
+  disposed.screen.dispose(); disposed.screen.handleInput("n");
   assert.deepEqual(disposed.intents, []);
 });
 
@@ -352,8 +374,9 @@ test("rename uses the new daemon command with the selected ID, trims names, refr
     sessions = [sessions[1]!, sessions[0]!].map(s => s.sessionId === "second" ? { ...s, name: "New name" } : s);
     return {};
   });
-  const ui = scriptedUI([send(keys.tab, keys.down, "n"), screen => {
+  const ui = scriptedUI([send(keys.tab, keys.down, keys.f2), screen => {
     assert.match(plain(screen.render(100)), /New name/);
+    assert.match(plain(screen.render(100)), /ID: second/);
     screen.handleInput?.(keys.enter);
   }], { input: async () => "  New name  " });
   const result = await browseRemoteSessions(ui.ui, client, "test-host");
@@ -382,7 +405,7 @@ test("close confirms busy and needsInput sessions outside custom; cancellation p
 });
 
 test("close and rename failures stay in the browser with retry guidance and refresh server state", async t => {
-  for (const action of ["x", "n"]) {
+  for (const action of ["x", keys.f2]) {
     const { client, commands } = await wireDaemon(t, command => command.type === "list_sessions"
       ? { data: { sessions: [summary("selected")] } }
       : { success: false, error: "permission denied" });
@@ -410,7 +433,7 @@ test("refresh failures can be retried and an empty server can return create with
     const output = plain(screen.render(100));
     assert.doesNotMatch(output, /Refresh failed/);
     assert.match(output, /Folder: \/workspace/);
-    screen.handleInput?.("c");
+    screen.handleInput?.("n");
   }]);
   assert.deepEqual(await browseRemoteSessions(ui.ui, client, "host", { cwd: "/workspace" }), { action: "create" });
   assert.deepEqual(commands, [{ type: "list_sessions" }, { type: "list_sessions" }]);
@@ -419,8 +442,8 @@ test("refresh failures can be retried and an empty server can return create with
 test("cancelled or blank rename sends no mutation and leaves the selected closed row available", async t => {
   const { client, commands } = await wireDaemon(t, () => ({ data: { sessions: [summary("closed", { status: "closed" })] } }));
   let inputs = 0;
-  const ui = scriptedUI([send(keys.tab, "n"), send("n"), screen => {
-    assert.match(plain(screen.render(100)), /Name cannot be empty/);
+  const ui = scriptedUI([send(keys.tab, keys.f2), send(keys.f2), screen => {
+    assert.match(plain(screen.render(100)), /Name cannot be empty.*F2/);
     screen.handleInput?.(keys.enter);
   }], { input: async () => ++inputs === 1 ? undefined : "   " });
   const result = await browseRemoteSessions(ui.ui, client, "host");
@@ -432,7 +455,7 @@ test("Escape leaves a pending loading screen; late completion cannot finish or r
   let release!: (value: Record<string, unknown>) => void;
   const pending = new Promise<Record<string, unknown>>(resolve => { release = resolve; });
   const { client } = await wireDaemon(t, () => pending);
-  const ui = scriptedUI([], { loading: send("c", keys.escape) });
+  const ui = scriptedUI([], { loading: send("n", keys.f2, "c", keys.escape) });
   assert.equal(await browseRemoteSessions(ui.ui, client, "host"), undefined);
   release({ data: { sessions: [] } });
   // A following real socket round trip drains the earlier response without sleeps.
@@ -472,7 +495,7 @@ test("real daemon: close and rename the selected duplicate-name session, then re
   const ui = scriptedUI([send(keys.down, "x"), screen => {
     screen.handleInput?.(keys.tab);
     assert.match(plain(screen.render(100)), /Duplicate .*\[closed\]/);
-    screen.handleInput?.("n");
+    screen.handleInput?.(keys.f2);
   }, screen => {
     assert.match(plain(screen.render(100)), /Renamed closed .*\[closed\]/);
     screen.handleInput?.(keys.enter);
@@ -489,4 +512,5 @@ test("real daemon: close and rename the selected duplicate-name session, then re
   assert.equal(daemon.registry.list().find(session => session.sessionId === target.sessionId)?.name, "Renamed closed");
   assert.equal(daemon.registry.get(target.sessionId), undefined);
   assert.equal(daemon.registry.entry(other as string)?.status, "running");
+  assert.equal(daemon.registry.list().find(session => session.sessionId === other)?.name, "Duplicate");
 });

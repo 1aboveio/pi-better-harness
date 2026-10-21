@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createEventBus, type AgentSession, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type AgentSession, type EventBus, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 interface ActivityProvider {
   id: string;
@@ -8,9 +8,27 @@ interface ActivityProvider {
   onActivityChanged?(notify: () => void): () => void;
 }
 
-/** One bus per runtime; legacy providers may conservatively report process-wide work. */
+/** One bus per hosted session; legacy providers may conservatively report process-wide work. */
 export class SessionActivity {
   readonly events = createEventBus();
+  private readonly runtimeUnsubscribers = new Set<() => void>();
+  /** Extensions share the host bus, but their subscriptions end at each loader reload. */
+  readonly runtimeEvents: EventBus = {
+    emit: (channel, data) => this.events.emit(channel, data),
+    on: (channel, handler) => {
+      if (this.disposed) return () => undefined;
+      const unsubscribe = this.events.on(channel, (data) => {
+        // An emit already in progress can still hold a removed listener.
+        if (this.runtimeUnsubscribers.has(release)) return handler(data);
+      });
+      const release = () => {
+        this.runtimeUnsubscribers.delete(release);
+        unsubscribe();
+      };
+      this.runtimeUnsubscribers.add(release);
+      return release;
+    },
+  };
   private readonly providers = new Map<string, ActivityProvider>();
   private readonly toolContext = new AsyncLocalStorage<string>();
   private readonly unsubscribers = new Map<string, () => void>();
@@ -52,6 +70,16 @@ export class SessionActivity {
 
   get busy(): boolean { return this.unobservable || this.active; }
   get checking(): boolean { return this.refreshing !== undefined; }
+
+  /** After shutdown, before any new factories run; the host admission guard has already proved idleness. */
+  resetRuntime(): void {
+    for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
+    this.unsubscribers.clear();
+    for (const unsubscribe of this.runtimeUnsubscribers) unsubscribe();
+    this.providers.clear();
+    this.active = false;
+    this.revision++;
+  }
 
   /** Missing background signals cannot establish idleness for this runtime. */
   markUnobservable(): void {
@@ -104,8 +132,7 @@ export class SessionActivity {
 
   dispose(): void {
     this.disposed = true;
-    for (const unsubscribe of this.unsubscribers.values()) unsubscribe();
-    this.unsubscribers.clear();
+    this.resetRuntime();
     this.events.clear();
   }
 }

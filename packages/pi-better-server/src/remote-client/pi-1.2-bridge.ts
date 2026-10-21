@@ -11,7 +11,7 @@ import { InteractiveMode, VERSION } from "@earendil-works/pi-coding-agent";
  * Its executeBash must execute remotely; its dispose must detach, not kill the
  * hosted session. Local extensions must honor Pi's session_shutdown contract.
  * Arbitrary extension-owned timers cannot be sandboxed by an in-process bridge.
- * New/fork/tree/clone/resume/import/reload are intentionally unavailable remotely.
+ * New/fork/tree/clone/resume/import are intentionally unavailable remotely.
  */
 export interface Pi12Bridge {
   attach(remoteSession: unknown): Promise<void>;
@@ -35,7 +35,6 @@ const blockedUi = {
   showSessionSelector: "/resume",
   handleResumeSession: "/resume",
   handleImportCommand: "/import",
-  handleReloadCommand: "/reload",
   showTrustSelector: "/trust",
   handleShareCommand: "/share",
   showSettingsSelector: "/settings",
@@ -190,12 +189,22 @@ class Controller implements Pi12Bridge {
     for (const [name, command] of Object.entries(blockedUi)) {
       this.replace(this.mode, name, () => this.warning(command));
     }
+    this.replace(this.mode, "handleReloadCommand", () => this.uiAction(async () => {
+      await this.remote!.reload();
+      this.mode.showStatus("Remote extensions reloaded");
+    }));
     for (const name of blockedHost) {
       this.replace(this.host, name, async () => this.warning(name));
     }
     const handleEvent = this.mode.handleEvent as Method;
     let snapshotTools: Map<string, Native> | undefined;
     this.replace(this.mode, "handleEvent", (event: Native) => {
+      if (event.type === "remote_metadata_updated") {
+        this.mode.setupAutocompleteProvider?.();
+        this.mode.footer.invalidate();
+        this.mode.ui.requestRender();
+        return;
+      }
       if (event.type === "remote_snapshot") {
         this.mode.streamingComponent = undefined;
         this.mode.streamingMessage = undefined;
@@ -338,12 +347,13 @@ class Controller implements Pi12Bridge {
     return new Proxy(remote, {
       get: (target, key) => {
         if (key === "extensionRunner") return runner;
-        if (key === "reload" || key === "navigateTree") return async () => this.warning(String(key));
+        if (key === "navigateTree") return async () => this.warning(String(key));
         if (key === "bindExtensions") return async (bindings: Native) => {
           const actions = { ...bindings.commandContextActions };
-          for (const name of ["newSession", "fork", "switchSession", "navigateTree", "reload"]) {
+          for (const name of ["newSession", "fork", "switchSession", "navigateTree"]) {
             actions[name] = async () => this.warning(name);
           }
+          actions.reload = () => target.reload();
           await target.bindExtensions({ ...bindings, commandContextActions: actions });
         };
         const value = Reflect.get(target, key, target);

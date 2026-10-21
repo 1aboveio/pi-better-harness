@@ -131,7 +131,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           if (NATIVE_HOST_COMMANDS.has(type)) return reply({ data: await nativeHost.handle(command) });
-          if (nativeHost.busy && type !== "list_sessions") {
+          if (nativeHost.busy && !["list_sessions", "client_snapshot", "subscribe", "acquire_control", "release_control", "extension_ui_response"].includes(type)) {
             send(failure(id, type, "Remote extensions are being updated; retry after installation finishes"));
             return;
           }
@@ -195,6 +195,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             const reason = registry.resumeError(sessionId);
             send(failure(id, type, reason ? `Session ${sessionId} failed to resume: ${reason}` : `Session not open: ${sessionId}`, sessionId));
             return;
+          }
+          if (type === "client_reload") {
+            if (!hosted.isController(control)) throw new Error("Acquire the session controller lease before reloading");
+            await nativeHost.reload(sessionId);
+            return reply({ sessionId });
           }
           if (type === "client_snapshot") return reply({ sessionId, data: await hosted.clientSnapshot() });
           if (type === "clear_queue") return reply({ sessionId, data: hosted.session.clearQueue() });
@@ -266,6 +271,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       closed,
       sweepIdle() {
         if (draining) return stopped ?? Promise.resolve();
+        if (nativeHost.busy) return Promise.resolve();
         maintenance ??= (async () => {
           const expired = await registry.expireIdle(now());
           if (draining) return;

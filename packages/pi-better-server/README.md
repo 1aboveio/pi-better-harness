@@ -106,8 +106,8 @@ A client that skips `hello` is still served.
 The native client provides an experimental VS Code Remote-style workflow:
 start ordinary local Pi **1.2.0** with this package loaded at startup, then run
 `/remote connect r5`. The terminal keeps Pi's native local UI while the remote daemon owns
-the model, tools, workspace and session state. This connects to an existing remote
-workspace; it does not move or upload the local workspace or session.
+the model, tools, workspace and session state. Your local conversation stays separate
+unless you explicitly choose to move or copy it after connecting.
 
 A stopped, installed Pi daemon is started automatically on the first connection.
 The client discovers the registered runtime, asks `pi-server ensure` to reuse or
@@ -135,6 +135,9 @@ connecting.
 /remote r5 --remote-dir /home/user/.pi/agent/server
 /remote disconnect
 /remote sessions
+/remote pull
+/remote pull r5 --session <id-or-unique-prefix> --cwd /local/existing/project
+/remote pull r5 --session <id> --copy
 ```
 
 `/remote list` displays SSH aliases and previously entered hosts. Select a host
@@ -149,9 +152,11 @@ Escape cancels that attempt and returns to the local UI. It does not stop any
 remote sessions or shared SSH connection. Connection failures retain their original
 error message; the spinner does not imply that an unreachable host is available.
 
-Connecting opens the server's root session browser, not a workspace picker.
-It has **Active sessions** and **Closed sessions** tabs and always displays its
-keyboard shortcuts:
+When the local session has history, connecting offers **Browse remote sessions**,
+**Move current session here**, or **Copy current session here**. Selecting an
+explicit `--session` attaches directly instead. Browsing opens the server's root
+session browser, not a workspace picker. It has **Active sessions** and **Closed
+sessions** tabs and displays its keyboard shortcuts:
 
 | Key | Action |
 | --- | --- |
@@ -159,8 +164,8 @@ keyboard shortcuts:
 | Tab / Shift-Tab / Left / Right | Switch tabs |
 | Enter | Attach to the selected session; reopen it if closed |
 | `x` | Close the selected active session; confirm if busy or waiting for input |
-| `n` | Rename the selected session, including a closed session without reopening it |
-| `c` | Create a session in the displayed default folder |
+| F2 | Rename the selected session, including a closed session without reopening it |
+| `n` | Create a session in the displayed default folder |
 | `r` | Refresh the list |
 | Escape | Leave the server browser |
 
@@ -175,7 +180,7 @@ or uses the default server directory; no credentials are recorded in this histor
 
 `r5` is an SSH alias. The browser starts at the remote workspace root:
 `PI_SERVER_WORKSPACES_DIR`, or `~/workspaces/` when unset. Its Folder line shows
-that creation context, and `c` creates there without another picker. Existing
+that creation context, and `n` creates there without another picker. Existing
 sessions remain visible and retain their own folders. Use an explicit `--cwd`
 with another existing absolute path to change the creation folder; it also refuses
 attaching a session from a different workspace. `--session` selects a session
@@ -185,10 +190,45 @@ with its connection history. It is reused on later connections to that
 host; otherwise the usual remote server-directory discovery applies.
 
 `/remote disconnect` restores the original local history in a fresh local runtime.
-It releases the client connection without aborting the remote session or its work.
+After a handoff, that original history stays read-only; resume a returned transcript
+using the path printed by `/remote pull`. Disconnecting releases the connection
+without aborting the remote session or its work.
 A lost connection disables remote commands; use `/remote disconnect` to return
 locally, then connect again. There is no automatic server setup: provision the
 remote daemon, workspace and provider credentials separately.
+
+### Move or copy a conversation
+
+Sending the local session is part of `/remote connect`; there is no separate
+`/remote push` command. Choose move or copy, then the transfer scope and destination.
+A final confirmation shows the session, source, destination, scope and ownership
+outcome before a transfer begins.
+
+The default is a **conversation-only handoff** into an existing folder. Project
+files in that folder are untouched, and neither folder needs to be a Git repository.
+Workspace files are optional and require a new or empty destination. A transfer
+never merges existing conversations.
+
+A handoff keeps the session ID and fences the source before taking its snapshot.
+The source becomes read-only after the destination acknowledges ownership. If the
+outcome cannot be determined, the source stays fenced and recovery guidance is
+printed. Do not start another writer until that outcome is resolved. A copy gets
+a new session ID, and both conversations remain independently writable.
+
+`/remote pull` brings a remote session back. While connected it defaults to that
+host and session; otherwise it offers host and session selection. `--copy` keeps
+the remote source writable. `--with-workspace` includes files, and `--cwd` selects
+the local destination. Pulling a handoff of the currently attached session also
+disconnects that remote view. The result prints the local transcript path and its
+`pi --session` command; retained older snapshots are not writable substitutes.
+
+Native transfers gzip the archive **before sending it over the connection**.
+Conversation entries are retained, not compacted; transcript metadata records the
+destination folder and, for copies, the new ID. Decoded archives are limited to
+1 GiB and checked before import. Both ends must advertise `session-transfer-v1`
+and `compressed-bundle-v1`. Legacy raw archives remain readable. Provider
+credentials and machine settings are not synchronized, but conversation text and
+optional workspace files can contain secrets: review the scope before approving.
 
 ### Compatibility and controls
 
@@ -201,7 +241,7 @@ This describes work in development, not a production release.
 
 Core native controls for `/model`, `/thinking` and `!` shell commands operate on
 the remote session. While connected, these local/session-management operations
-are blocked: `/new`, `/fork`, `/clone`, `/tree`, `/resume`, `/import`, `/reload`,
+are blocked: `/new`, `/fork`, `/clone`, `/tree`, `/resume`, `/import`,
 `/trust`, `/share`, `/settings`, `/login`, `/logout`, `/export`, `/debug`,
 `/scoped-models` and `/bug`. Disconnect before using them locally.
 
@@ -209,6 +249,20 @@ Standard remote extension dialogs (select, confirm, input, editor), notification
 status and text widgets can be presented locally. Arbitrary remote `ctx.ui.custom`
 screens, custom component widgets and remote extension renderers are not supported.
 Synchronizing a package installation does not provide full extension UI parity.
+
+### Reload remote extensions
+
+While connected, `/reload` reloads the daemon's extension runtime, tools and
+commands, then refreshes native client metadata and command completion. It does
+not reload laptop extensions or settings. The daemon must advertise
+`remote-reload-v1`; older daemons return update guidance.
+
+Reload requires idle sessions because Pi changes process-wide provider
+registrations. Model, tool, bash, compaction and observable background work,
+pending activity checks, dialogs and runtime maintenance prevent reload. It
+preserves conversation history, event subscriptions and the controller lease.
+A failed runtime rebuild is fenced; explicitly close and reopen that session
+before executing again.
 
 ### Package synchronization
 
@@ -225,20 +279,39 @@ unsupported local entries are reported. The preview uses the selected remote
 workspace's effective catalog. Installs update the remote global packages. A
 trusted project declaration that overrides an approved package causes refusal rather than rewriting the
 repository's `.pi/settings.json`; manage that override on the remote host. Package
-updates are refused while any daemon session is live (even idle) or loading its
-runtime. Close those sessions before retrying an update. Installation stops on the
-first failure; earlier successful installs are not rolled back.
+updates require idle daemon sessions and refuse concurrent runtime loading or
+maintenance. Approved updates automatically refresh hosted runtimes and connected
+clients. Installation stops on the first failure; earlier successful installs are
+not rolled back, so idle runtimes are refreshed even after an install failure.
+Busy work is not aborted to make an update proceed.
 
 ### Verification status
 
-Real-host verification used bundled Pi 1.2.0 on the laptop with the native UI:
-`!hostname` returned `r5`, and a model-driven remote tool call returned
-`CLIENT_REMOTE_OK r5`. `/remote disconnect` restored the local session; reconnecting
-through the workspace/session pickers restored the remote conversation. After
-deliberately dropping the SSH transport, `/remote disconnect` also restored the
-local UI. The isolated Pi 1.2.0 server suite passed with 236 tests and five gated
-remote-host skips. This is compatibility evidence, not full custom-extension UI
-parity or a production release.
+Earlier real-host verification used bundled Pi 1.2.0 on the laptop with the native
+UI: `!hostname` returned `r5`, and a model-driven remote tool call returned
+`CLIENT_REMOTE_OK r5`. Disconnect, reconnect and lost-transport recovery restored
+the expected local and remote histories.
+
+At this development checkpoint, the complete server suite passes on both supported
+SDK test layouts: **483 passed, 8 gated skips on SDK 0.82.1**, and **486 passed,
+5 gated skips on SDK 1.2.0**. Both TypeScript checks pass. Test workers are bounded
+to four to avoid oversubscribing subprocess-heavy transport fixtures.
+
+Current-source native Pi 1.2.0 checks verified browser creation and its first model
+reply, live updates and controller access after pull-copy, and newly reloaded
+commands and tools without reconnecting. Both native journeys used private fake
+providers, not external model credentials. See the regressions for
+[new-session selection](test/remote-new-session-model.test.ts),
+[attached-source copies](test/remote-pull-copy-live.test.ts), and
+[remote reload](test/remote-reload.test.ts).
+
+A separate temporary daemon on `r5` verified compressed copy and handoff in both
+SSH directions, returned-session continuation, and remote reload. Its repetitive
+740,842-byte seeded transcript travelled in a 3,550-byte archive, a 99.52% reduction;
+original conversation entries and existing destination files were preserved.
+All owned test runtimes were stopped. The active host daemon was not upgraded or
+restarted. These checks are development compatibility evidence, not full custom
+extension UI parity or a production release.
 
 ## pi-remote
 

@@ -83,11 +83,14 @@ test("workspace discovery uses remote workspace roots rather than the daemon ins
   ]);
 });
 
-test("package synchronization refuses to replace extension code owned by live daemon sessions", async () => {
-  const { client } = await setup();
+test("package synchronization refuses to replace extension code during remote execution", async () => {
+  const { client, env, sessionId } = await setup();
+  await client.request({ type: "prompt", sessionId, message: "tool package-update" });
+  await waitFor("package update gate", gate(env, "package-update").started);
   const result = await client.request({ type: "client_packages_install", packages: [{ source: "npm:pi-better-harness@0.31.0" }] });
   assert.equal(result.success, false);
-  assert.match(result.error, /Close remote daemon sessions/);
+  assert.match(result.error, /Wait for remote/);
+  gate(env, "package-update").release();
 });
 
 test("remote shell commands run the remote user_bash extension hooks", async () => {
@@ -119,7 +122,7 @@ test("extension sync cannot race a session still loading its extension runtime",
     cleanups.push(() => other.close());
     const result = await other.request({ type: "client_packages_install", packages: [] });
     assert.equal(result.success, false);
-    assert.match(result.error, /Close remote daemon sessions/);
+    assert.match(result.error, /maintenance is already in progress/);
   } finally {
     writeFileSync(released, "release");
     assert.equal((await opening).success, true);

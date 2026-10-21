@@ -34,17 +34,30 @@ test("manual host entry trims aliases and rejects command arguments", async () =
   }
 });
 
-test("root autocomplete offers actions while connect completion is scoped to hosts", () => {
-  assert.deepEqual(remoteArgumentCompletions("", false, ["r5"])?.map(item => item.value), ["connect", "list"]);
-  assert.deepEqual(remoteArgumentCompletions("", true, ["r5"])?.map(item => item.value), ["connect", "list", "sessions", "disconnect"]);
+test("root autocomplete offers local or connected actions without exposing host aliases or push", () => {
+  assert.deepEqual(remoteArgumentCompletions("", false, ["r5"])?.map(item => item.value), ["connect", "list", "pull"]);
+  assert.deepEqual(remoteArgumentCompletions("", true, ["r5"])?.map(item => item.value), ["connect", "list", "sessions", "pull", "disconnect"]);
   assert.deepEqual(remoteArgumentCompletions(" LI")?.map(item => item.value), ["list"]);
   assert.deepEqual(remoteArgumentCompletions("dis", true)?.map(item => item.value), ["disconnect"]);
-  assert.deepEqual(remoteArgumentCompletions("connect ", false, ["r5", "r6"])?.map(item => item.value), ["connect r5", "connect r6"]);
-  assert.deepEqual(remoteArgumentCompletions("connect r5", true, ["r5", "r6"])?.map(item => item.value), ["connect r5"]);
-  assert.equal(remoteArgumentCompletions("connect missing", false, ["r5"]), null);
-  for (const prefix of ["r", "r5", "user@", "prod", "unknown"]) {
-    assert.equal(remoteArgumentCompletions(prefix), null);
-    assert.equal(remoteArgumentCompletions(prefix, true), null);
+  assert.deepEqual(remoteArgumentCompletions("pu")?.map(item => item.value), ["pull"]);
+  for (const connected of [false, true]) {
+    for (const prefix of ["r", "r5", "user@", "prod", "unknown", "push", "push r5"]) {
+      assert.equal(remoteArgumentCompletions(prefix, connected, ["r5", "user@r6", "prod"]), null, `${connected}: ${prefix}`);
+    }
+  }
+});
+
+test("connect and pull host completions are scoped to the chosen action", () => {
+  for (const connected of [false, true]) {
+    for (const action of ["connect", "pull"]) {
+      assert.deepEqual(remoteArgumentCompletions(`${action} `, connected, ["r5", "user@r6"])?.map(item => item.value), [`${action} r5`, `${action} user@r6`]);
+      assert.deepEqual(remoteArgumentCompletions(`${action} r5`, connected, ["r5", "user@r6"])?.map(item => item.value), [`${action} r5`]);
+      assert.deepEqual(remoteArgumentCompletions(`  ${action.toUpperCase()} U`, connected, ["r5", "user@r6"])?.map(item => item.value), [`${action} user@r6`]);
+      assert.equal(remoteArgumentCompletions(`${action} missing`, connected, ["r5"]), null);
+      assert.equal(remoteArgumentCompletions(`${action} r5 --cwd `, connected, ["r5"]), null);
+    }
+    assert.equal(remoteArgumentCompletions("list r5", connected, ["r5"]), null);
+    assert.equal(remoteArgumentCompletions("sessions r5", connected, ["r5"]), null);
   }
 });
 

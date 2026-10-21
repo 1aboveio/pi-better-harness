@@ -679,8 +679,19 @@ export class RemoteClientSession {
   setCacheWarmingMode(): never { return unsupported("setCacheWarmingMode (no daemon RPC)"); }
   recordBashResult(): never { return unsupported("recordBashResult (daemon owns persistence)"); }
   exportToJsonl(): never { return unsupported("exportToJsonl (no daemon RPC)"); }
-  reload(): never { return unsupported("reload (no daemon RPC)"); }
+  async reload(): Promise<void> {
+    if (!this.client.server?.capabilities?.includes("remote-reload-v1")) throw new Error("Update pi-better-server on the remote host to enable /reload");
+    await this.request("client_reload");
+    await this.refreshPresentation(true);
+  }
   getUserMessagesForForking(): never { return unsupported("Forking a pinned remote session"); }
+
+  /** A transfer can resume this source in a new hosted generation without closing the socket. */
+  async reconcileAfterTransfer(): Promise<void> {
+    this.assertConnected();
+    await this.reconcile();
+    await this.flushReceivedEvents();
+  }
 
   /** Detach only. The caller owns the connection; a lost UI never aborts the remote agent. */
   dispose(): void {
@@ -775,6 +786,7 @@ export class RemoteClientSession {
         // Persisted message IDs and usage are not in message_end events. Refresh on
         // lifecycle boundaries, never on an interval and never by polling tools.
         // Bash results executed during a run are persisted only when Pi settles.
+        if (event.type === "remote_resources_reloaded") await this.refreshPresentation(true);
         if (event.type === "agent_settled" && this.pendingBashSnapshot) {
           await this.reconcile();
           this.pendingBashSnapshot = this.isStreaming;
@@ -826,8 +838,11 @@ export class RemoteClientSession {
     return this.reconciling;
   }
   private presentationRefresh?: Promise<void>;
-  private refreshPresentation(): Promise<void> {
-    if (this.presentationRefresh) return this.presentationRefresh;
+  private refreshPresentation(requireFresh = false): Promise<void> {
+    if (this.presentationRefresh) {
+      const pending = this.presentationRefresh;
+      return requireFresh ? pending.then(() => this.refreshPresentation()) : pending;
+    }
     this.presentationRefresh = (async () => {
       const previous = this.cache.snapshot;
       const snapshot = await this.request("client_snapshot") as ClientSnapshot;
