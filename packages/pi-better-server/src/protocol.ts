@@ -11,6 +11,7 @@
  */
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import type { CompanionInfo } from "./companion.ts";
+import type { ServerBuild, UpgradeRequest } from "./startup/managed-types.ts";
 import type { DialogAnswer, PendingDialog } from "./ui-bridge.ts";
 
 export type { DialogAnswer, PendingDialog };
@@ -58,6 +59,8 @@ export interface HelloCommand {
   piVersion?: string;
   /** Extension and harness versions the client runs, by package name. Reported, not enforced. */
   extensionVersions?: Record<string, string>;
+  /** Optional native transport features; ordinary SDK compatibility is unchanged. */
+  capabilities?: string[];
 }
 
 export interface HelloData {
@@ -65,6 +68,9 @@ export interface HelloData {
   piVersion: string;
   extensionVersions: Record<string, string>;
   capabilities?: string[];
+  build?: ServerBuild;
+  /** Token of the exclusive owner, distinct for every daemon incarnation. */
+  instanceId?: string;
 }
 
 export type DaemonCommand =
@@ -115,6 +121,8 @@ export type ControlCommand =
   | ({ id?: string; type: "extension_ui_response"; sessionId: string; requestId: string } & DialogAnswer);
 
 export type ClientCommand = HelloCommand | DaemonCommand | ControlCommand | SessionCommand
+  | ({ id?: string; type: "runtime_upgrade" } & UpgradeRequest)
+  | { id?: string; type: "runtime_upgrade_status" }
   | { id?: string; type: "client_reload"; sessionId: string };
 
 export type DaemonResponse =

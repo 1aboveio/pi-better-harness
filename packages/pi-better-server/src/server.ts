@@ -1,6 +1,6 @@
-import { chmodSync, existsSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, unlinkSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
-import type { RpcCommand } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type RpcCommand } from "@earendil-works/pi-coding-agent";
 import { CompanionManager, type CompanionManagerOptions } from "./companion.ts";
 import { ConnectionControl } from "./control.ts";
 import { checkHello } from "./handshake.ts";
@@ -9,7 +9,12 @@ import { MoveService } from "./move/service.ts";
 import { CONTROL_COMMANDS, DAEMON_COMMANDS, encodeLine, failure, LineDecoder, MOVE_COMMANDS, type MoveCommand, type ServerMessage } from "./protocol.ts";
 import { SessionRegistry, type SessionRegistryOptions } from "./registry.ts";
 import { NativeClientHost, NATIVE_HOST_COMMANDS } from "./remote-client/host.ts";
-import { claimDaemonOwner } from "./daemon-owner.ts";
+import { claimDaemonOwner, inspectDaemonOwner } from "./daemon-owner.ts";
+import { readOwnBuild, readStagedRuntime } from "./startup/artifact.ts";
+import { canonicalStateDir, commitActivationStop, compatibleUpgrade, hasActivationReservations, readActivationJournal } from "./startup/activation.ts";
+import { admitDaemonStartup, startupIntentFromEnv } from "./startup/admission.ts";
+import type { IdleSessionsLease, UpgradeRequest } from "./startup/managed-types.ts";
+import { HostedSession } from "./hosted-session.ts";
 import { readLifecycleConfig, type LifecycleConfig } from "./lifecycle-config.ts";
 
 export interface DaemonOptions extends Partial<LifecycleConfig> {
@@ -51,7 +56,7 @@ function socketIsLive(path: string): Promise<boolean> {
 }
 
 export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> {
-  const serverDir = options.serverDir ?? defaultServerDir();
+  const serverDir = canonicalStateDir(options.serverDir ?? defaultServerDir());
   const socketPath = socketPathFor(serverDir);
   const log = options.log ?? (() => undefined);
   ensureServerDir(serverDir);
@@ -59,6 +64,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
   const now = options.now ?? Date.now;
   const startupGraceMs = options.startupGraceMs ?? 30_000;
   if (!Number.isSafeInteger(startupGraceMs) || startupGraceMs < 0) throw new Error("startupGraceMs must be a non-negative integer");
+  // A directory rename can replace an empty lock directory. Preserve ambiguous state
+  // before claiming; admission still rereads disk after the claim and socket probe.
+  if (inspectDaemonOwner(serverDir).status === "ambiguous") throw new Error("Startup admission: ownership is ambiguous");
   const releaseOwner = claimDaemonOwner(serverDir);
   let cleanupStartup = async (): Promise<void> => undefined;
   try {
@@ -67,10 +75,25 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       unlinkSync(socketPath); // left behind by a daemon that died without cleaning up
     }
 
+    const build = readOwnBuild();
+    const owner = inspectDaemonOwner(serverDir);
+    const instanceId = owner.status === "live" ? owner.owner.token : undefined;
+    admitDaemonStartup({ canonicalServerDir: serverDir, agentDir: getAgentDir(), build, intent: startupIntentFromEnv(process.env) });
     const registry = new SessionRegistry({ serverDir, sessionOptions: options.sessionOptions, eventLog: options.eventLog, log, sessionIdleMs: config.sessionIdleMs, now });
     cleanupStartup = () => registry.shutdown();
     await registry.resumeAll();
     const nativeHost = new NativeClientHost(registry);
+    // Structural port permits independent integration with the shared maintenance owner.
+    const sessionMaintenance = (registry as SessionRegistry & { maintenance?: {
+      readonly busy: boolean;
+      enterSessionOperation(): () => void;
+      withIdleSessions<T>(purpose: "upgrade", run: (live: HostedSession[], lease: IdleSessionsLease) => Promise<T>): Promise<T>;
+    } }).maintenance;
+    const safeUpgrade = !!(build && instanceId && sessionMaintenance
+      && typeof sessionMaintenance.withIdleSessions === "function" && "publishRuntimeEvent" in HostedSession.prototype);
+    let pendingUpgrade: UpgradeRequest | undefined;
+    const reconnectControllers = new Map<ConnectionControl, boolean>();
+    let upgradeCommitted = false;
     const companions = new CompanionManager({
       socketPath,
       ...options.companion,
@@ -120,8 +143,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             return;
           }
           if (type === "hello") {
-            const verdict = checkHello(command);
+            const verdict = checkHello(command, { build, instanceId, safeUpgrade });
             if (verdict.ok) {
+              reconnectControllers.set(control, Array.isArray(command.capabilities) && command.capabilities.includes("runtime-reconnect-v1"));
               if (!greeted) startupUntil = Math.max(startupUntil, now() + startupGraceMs);
               greeted = true;
               return reply({ data: verdict.data });
@@ -130,12 +154,27 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
             socket.end(); // an incompatible client gets the reason, then the door
             return;
           }
+          if (type === "runtime_upgrade_status") return reply({ data: readActivationJournal(serverDir) ?? null });
+          if (type === "runtime_upgrade") {
+            if (!safeUpgrade || !build) throw new Error("This daemon cannot safely activate managed runtimes");
+            if (typeof command.operationId !== "string" || typeof command.runtime !== "object" || !command.runtime) throw new Error("Invalid upgrade request");
+            const runtime = readStagedRuntime((command.runtime as { manifestPath: string }).manifestPath);
+            const journal = readActivationJournal(serverDir);
+            if (command.serverDir !== serverDir || command.agentDir !== realpathSync(getAgentDir())
+              || !journal || journal.operationId !== command.operationId || journal.desiredBuild.contentId !== runtime.build.contentId
+              || journal.previousOwner?.token !== instanceId || journal.phase !== "prepared") throw new Error("Upgrade request does not match this daemon's activation journal");
+            if (!compatibleUpgrade(build, runtime.build)) throw new Error("Unsafe SDK downgrade or incompatible protocol");
+            if (pendingUpgrade && pendingUpgrade.operationId !== command.operationId) throw new Error("activation-conflict: another upgrade is pending");
+            pendingUpgrade = { runtime, operationId: command.operationId, serverDir, agentDir: command.agentDir as string };
+            setImmediate(() => { void daemon.sweepIdle().catch(error => log(`upgrade maintenance failed: ${String(error)}`)); });
+            return reply({ data: { status: "deferred", operationId: command.operationId, reason: "Waiting for idle sessions" } });
+          }
           if (NATIVE_HOST_COMMANDS.has(type)) return reply({ data: await nativeHost.handle(command) });
-          if (nativeHost.busy && !["list_sessions", "client_snapshot", "subscribe", "acquire_control", "release_control", "extension_ui_response"].includes(type)) {
+          if ((sessionMaintenance?.busy || nativeHost.busy) && !["list_sessions", "client_snapshot", "subscribe", "acquire_control", "release_control", "extension_ui_response"].includes(type)) {
             send(failure(id, type, "Remote extensions are being updated; retry after installation finishes"));
             return;
           }
-          if (MOVE_COMMANDS.has(type) || (DAEMON_COMMANDS.has(type) && type !== "list_sessions")) releaseSessionOperation = nativeHost.enterSessionOperation();
+          if (MOVE_COMMANDS.has(type) || (DAEMON_COMMANDS.has(type) && type !== "list_sessions")) releaseSessionOperation = sessionMaintenance ? sessionMaintenance.enterSessionOperation() : nativeHost.enterSessionOperation();
           if (MOVE_COMMANDS.has(type)) {
             return reply(await moves.handle(command as MoveCommand));
           }
@@ -239,6 +278,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       socket.on("error", () => undefined);
       socket.on("close", () => {
         sockets.delete(socket);
+        reconnectControllers.delete(control);
         control.dispose();
       });
     });
@@ -271,8 +311,37 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       closed,
       sweepIdle() {
         if (draining) return stopped ?? Promise.resolve();
-        if (nativeHost.busy) return Promise.resolve();
+        if (sessionMaintenance?.busy || nativeHost.busy) return Promise.resolve();
         maintenance ??= (async () => {
+          if (pendingUpgrade && sessionMaintenance) {
+            const request = pendingUpgrade;
+            const journal = readActivationJournal(serverDir);
+            if (!journal || journal.operationId !== request.operationId || !hasActivationReservations(journal)) pendingUpgrade = undefined;
+            else {
+              try {
+                // Observe background completion before taking the idle fence. A slow or
+                // failed provider must leave admitted work and dialog answers usable.
+                const live = registry.list().filter(item => item.live).map(item => registry.get(item.sessionId)!);
+                if (live.some(hosted => hosted.activityChecking)) throw new Error("Wait for remote activity observation to finish before upgrading");
+                await Promise.all(live.map(hosted => hosted.refreshActivity()));
+                if (draining) return;
+                await sessionMaintenance.withIdleSessions("upgrade", async (live, lease) => {
+                  // Older attached views have no replacement-transport contract. Let them detach first.
+                  const legacyController = () => live.some(hosted => hosted.controllerIs(controller =>
+                    !(controller instanceof ConnectionControl) || reconnectControllers.get(controller) !== true));
+                  if (legacyController()) throw new Error("Waiting for legacy controllers to detach");
+                  commitActivationStop(request, lease, () => { draining = true; upgradeCommitted = true; });
+                  for (const hosted of live) {
+                    (hosted as HostedSession & { publishRuntimeEvent(event: unknown): void }).publishRuntimeEvent({
+                      type: "runtime_upgrade", phase: "restarting", operationId: request.operationId, buildId: request.runtime.build.contentId,
+                    });
+                  }
+                });
+              } catch (error) { log(`upgrade waiting: ${String(error)}`); }
+              // Pending upgrades take priority over expiry and release their idle fence on busy passes.
+              return;
+            }
+          }
           const expired = await registry.expireIdle(now());
           if (draining) return;
           for (const sessionId of expired) await companions.stop(sessionId);
@@ -283,7 +352,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           zeroSince ??= now();
           if (config.daemonIdleMs === 0 || now() - zeroSince < config.daemonIdleMs || now() < startupUntil) return;
           // No create/open can slip between this check and the synchronous admission fence.
-          if (inFlight > 0 || nativeHost.busy || registry.hasPendingOperations) return;
+          if (inFlight > 0 || sessionMaintenance?.busy || nativeHost.busy || registry.hasPendingOperations) return;
           draining = true;
           log("idle timeout with no active sessions; shutting down");
         })().finally(() => { maintenance = undefined; });
@@ -295,6 +364,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
           draining = true;
           if (timer) clearInterval(timer);
           await pendingMaintenance?.catch(error => log(`maintenance interrupted during shutdown: ${String(error)}`));
+          if (upgradeCommitted) {
+            // Let queued restarting events reach both attached views before closing their transports.
+            await Promise.all([...sockets].map(socket => new Promise<void>(resolve => {
+              const timeout = setTimeout(resolve, 1_000);
+              socket.write("", () => { clearTimeout(timeout); resolve(); });
+            })));
+          }
           const closed = new Promise<void>((resolve) => server.close(() => resolve()));
           for (const socket of sockets) socket.destroy();
           await closed;
@@ -308,6 +384,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
       },
     };
     const durations = [config.sessionIdleMs, config.daemonIdleMs].filter(value => value > 0);
+    if (safeUpgrade) durations.push(1_000);
     if (durations.length) {
       timer = setInterval(() => { void daemon.sweepIdle().catch(error => log(`lifecycle maintenance failed: ${String(error)}`)); }, Math.max(5, Math.min(30_000, ...durations)));
       timer.unref();

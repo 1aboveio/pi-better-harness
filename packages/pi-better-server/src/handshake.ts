@@ -1,4 +1,6 @@
 import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import { readOwnBuild } from "./startup/artifact.ts";
+import type { ServerBuild } from "./startup/managed-types.ts";
 import { PROTOCOL_VERSION, type HelloCommand, type HelloData } from "./protocol.ts";
 
 /** Kept equal to package.json `version`; a test pins that. */
@@ -6,8 +8,14 @@ export const SERVER_VERSION = "0.1.0";
 
 export const SERVER_EXTENSION_VERSIONS: Readonly<Record<string, string>> = { "pi-better-server": SERVER_VERSION };
 
-export function serverHello(): HelloData {
-  return { protocolVersion: PROTOCOL_VERSION, piVersion: PI_VERSION, extensionVersions: { ...SERVER_EXTENSION_VERSIONS }, capabilities: ["native-client-v1", "package-sync-v1", "session-browser-v1", "folder-browser-v1", "session-transfer-v1", "compressed-bundle-v1", "remote-reload-v1"] };
+export interface HelloIdentity { build?: ServerBuild; instanceId?: string; safeUpgrade?: boolean }
+
+export function serverHello(identity: HelloIdentity = {}): HelloData {
+  const build = identity.build ?? readOwnBuild();
+  return { protocolVersion: PROTOCOL_VERSION, piVersion: PI_VERSION, extensionVersions: { ...SERVER_EXTENSION_VERSIONS },
+    ...(build ? { build } : {}), ...(identity.instanceId ? { instanceId: identity.instanceId } : {}),
+    capabilities: ["native-client-v1", "package-sync-v1", "session-browser-v1", "folder-browser-v1", "session-transfer-v1", "compressed-bundle-v1", "remote-reload-v1",
+      ...(identity.safeUpgrade && build && identity.instanceId ? ["safe-upgrade-v1"] : [])] };
 }
 
 function majorMinor(version: string): string | undefined {
@@ -21,8 +29,8 @@ function majorMinor(version: string): string | undefined {
  * match by major.minor when the client states its version. Extension versions
  * are reported back but never cause a rejection.
  */
-export function checkHello(command: Record<string, unknown>): { ok: true; data: HelloData } | { ok: false; error: string } {
-  const server = serverHello();
+export function checkHello(command: Record<string, unknown>, identity: HelloIdentity = {}): { ok: true; data: HelloData } | { ok: false; error: string } {
+  const server = serverHello(identity);
   const { protocolVersion, piVersion, extensionVersions } = command as Partial<HelloCommand>;
   if (typeof protocolVersion !== "number" || !Number.isInteger(protocolVersion)) {
     return { ok: false, error: `hello requires an integer protocolVersion; this daemon speaks protocol ${server.protocolVersion}` };

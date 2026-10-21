@@ -15,7 +15,7 @@ export interface ConnectOptions {
   /** Cancels Unix connect and hello only; ignored after the client is returned. */
   signal?: AbortSignal;
   /** Override what the client announces (tests use this to play an incompatible client). `false` skips the handshake. */
-  hello?: { protocolVersion?: number; piVersion?: string; extensionVersions?: Record<string, string> } | false;
+  hello?: { protocolVersion?: number; piVersion?: string; extensionVersions?: Record<string, string>; capabilities?: string[] } | false;
 }
 
 type Message = { id?: string; type: string; success?: boolean; error?: string; data?: any; sessionId?: string; [key: string]: unknown };

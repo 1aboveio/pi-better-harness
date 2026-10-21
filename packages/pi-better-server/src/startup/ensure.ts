@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,9 @@ import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import { DaemonClient, HandshakeError } from "../client.ts";
 import { serverHello } from "../handshake.ts";
 import { ensureServerDir, socketPathFor } from "../paths.ts";
+import { readActiveRuntime, activateStagedRuntime, type ActivateOptions } from "./activation.ts";
+import { readOwnBuild, readStagedRuntime } from "./artifact.ts";
+import { checkStartupAdmission } from "./admission.ts";
 import { PROTOCOL_VERSION, type HelloData } from "../protocol.ts";
 
 export interface Readiness {
@@ -28,6 +31,9 @@ export interface EnsureOptions {
 }
 
 export const NATIVE_CAPABILITIES = ["native-client-v1", "session-browser-v1"] as const;
+
+/** Managed ensure reports a pending/recovery outcome instead of replacing a legacy owner. */
+export function ensureDesiredRuntime(options: ActivateOptions) { return activateStagedRuntime(options); }
 
 function abortCheck(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
@@ -61,7 +67,7 @@ export async function ensureDaemon(options: EnsureOptions): Promise<Readiness> {
   abortCheck(options.signal);
   const timeoutMs = options.timeoutMs ?? 15_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) throw new Error("Ensure timeout must be an integer from 1 to 120000 ms");
-  const serverDir = resolve(options.serverDir);
+  const serverDir = existsSync(options.serverDir) ? realpathSync(options.serverDir) : resolve(options.serverDir);
   const socketPath = socketPathFor(serverDir);
   const deadline = Date.now() + timeoutMs;
   const ready = (hello: HelloData): Readiness => ({ version: 1, agent: "pi", serverDir, socketPath, hello });
@@ -71,10 +77,13 @@ export async function ensureDaemon(options: EnsureOptions): Promise<Readiness> {
     if (!absent(error)) throw new Error(`Server health at ${socketPath}: ${error instanceof Error ? error.message : String(error)}. Existing listener was not replaced; inspect or update it explicitly.`);
   }
   abortCheck(options.signal);
-  try { validateHello(serverHello(), options); }
+  const active = readActiveRuntime(serverDir);
+  const selected = active ? readStagedRuntime(active.manifestPath) : undefined;
+  try { validateHello(selected ? { ...serverHello({ build: selected.build }), piVersion: selected.build.piSdkVersion } : serverHello(), options); }
   catch (error) {
     throw new Error(`Server runtime at ${serverDir} is incompatible: ${error instanceof Error ? error.message : String(error)}. Update/register a compatible installed runtime; no daemon was launched.`);
   }
+  checkStartupAdmission({ canonicalServerDir: serverDir, agentDir: options.agentDir, build: selected?.build ?? readOwnBuild(), intent: { kind: "ordinary" } });
   if (Date.now() >= deadline) throw new Error(`Server readiness timed out at ${socketPath} before launch`);
   const logPath = join(serverDir, "daemon.log");
   let exitDetail = "";
@@ -83,11 +92,16 @@ export async function ensureDaemon(options: EnsureOptions): Promise<Readiness> {
     const fd = openSync(logPath, "a", 0o600);
     try {
       // No inherited SSH pipes or controlling terminal: the product daemon outlives this ensure client.
-      const child = spawn(process.execPath, [fileURLToPath(new URL("../cli.ts", import.meta.url)), "--agent", "pi"], {
+      const childEnv = { ...process.env, PI_SERVER_DIR: serverDir, PI_CODING_AGENT_DIR: options.agentDir, PI_SERVER_AGENT: "pi" };
+      // Normal restart of an active build is not a replay of a completed activation.
+      delete (childEnv as NodeJS.ProcessEnv).PI_SERVER_ACTIVATION_ID;
+      delete (childEnv as NodeJS.ProcessEnv).PI_SERVER_ROLLBACK_OPERATION_ID;
+      delete (childEnv as NodeJS.ProcessEnv).PI_SERVER_ROLLBACK_PERMIT;
+      const child = spawn(selected?.node ?? process.execPath, [selected?.entrypoint ?? fileURLToPath(new URL("../cli.ts", import.meta.url)), "--agent", "pi"], {
         detached: true,
         cwd: serverDir,
         stdio: ["ignore", fd, fd],
-        env: { ...process.env, PI_SERVER_DIR: serverDir, PI_CODING_AGENT_DIR: options.agentDir, PI_SERVER_AGENT: "pi" },
+        env: childEnv,
       });
       child.on("error", (error) => { exitDetail = `launch failed: ${error.message}`; });
       child.on("exit", (code, signal) => { exitDetail = `launcher exited (${signal ?? code})`; });

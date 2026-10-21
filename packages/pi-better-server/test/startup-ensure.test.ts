@@ -128,6 +128,10 @@ if (operation === "forward" || operation === "cancel") {
 describe("on-demand Pi startup", { concurrency: false, timeout: 120_000 }, () => {
   it("concurrent fresh ensures converge on one real writer and retain each accepted session", async (t) => {
     const { setup, env } = environment(t);
+    // Ordinary ensure must not forward a coordinator's inherited startup credentials.
+    env.PI_SERVER_ACTIVATION_ID = "unrelated-activation";
+    env.PI_SERVER_ROLLBACK_OPERATION_ID = "unrelated-rollback";
+    env.PI_SERVER_ROLLBACK_PERMIT = "stale-permit";
     const records = await Promise.all(Array.from({ length: 4 }, () => ensure(env)));
     assert.ok(records.every((record) => record.socketPath === join(setup.serverDir, "pi-server.sock")));
     const clients = await Promise.all(records.map((record) => DaemonClient.connect(record.socketPath)));
@@ -240,9 +244,11 @@ describe("on-demand Pi startup", { concurrency: false, timeout: 120_000 }, () =>
     assert.equal(existsSync(join(setup.serverDir, "daemon.log")), false);
   });
 
-  it("discovers a registered trial root before ensure, survives SSH exit, and honors explicit remote dirs", async (t) => {
+  it("uses an explicit trial launcher before ensure, survives SSH exit, and honors explicit remote dirs", async (t) => {
     const { setup, env } = environment(t);
     const runtime = register(setup);
+    // This fixture exercises manual startup; managed installation has its own binary-upload fixture.
+    env.PI_SERVER_COMMAND = runtime.launcher;
     delete env.PI_SERVER_DIR;
     delete env.PI_CODING_AGENT_DIR;
     const ssh = fakeSsh(setup, env);
@@ -325,6 +331,11 @@ describe("on-demand Pi startup", { concurrency: false, timeout: 120_000 }, () =>
         delete env.PI_SERVER_DIR;
       }
       const remote = branch.startsWith("remote");
+      if (remote) {
+        // Keep these real-daemon ensure tests on the explicit manual-startup path.
+        env.PI_SERVER_COMMAND = runtime.launcher;
+        env.PI_CODING_AGENT_DIR = runtime.agentDir;
+      }
       const ssh = remote ? fakeSsh(setup, env) : undefined;
       setEnv(t, env);
       const target = await resolveTarget({ agent: "pi", ...(remote ? { host: "fixture", controlPathRoot: join(setup.root, "mux") } : {}) });
@@ -340,7 +351,7 @@ describe("on-demand Pi startup", { concurrency: false, timeout: 120_000 }, () =>
 
   it("cancels server setup without killing the shared SSH master or opening a forward", async (t) => {
     const { setup, env } = environment(t);
-    register(setup);
+    env.PI_SERVER_COMMAND = register(setup).launcher;
     const ssh = fakeSsh(setup, env, true);
     setEnv(t, env);
     const controller = new AbortController();
@@ -367,15 +378,19 @@ describe("on-demand Pi startup", { concurrency: false, timeout: 120_000 }, () =>
     assert.equal(existsSync(setup.serverDir), false);
   });
 
-  it("rejects missing and malformed registrations with installation guidance before forwarding", async (t) => {
+  it("rejects broken explicit launchers and malformed managed registrations before forwarding", async (t) => {
     const { setup, env } = environment(t);
     const ssh = fakeSsh(setup, env);
+    env.PI_SERVER_COMMAND = join(setup.root, "missing-launcher");
     setEnv(t, env);
     await assert.rejects(resolveTarget({ host: "fixture", controlPathRoot: join(setup.root, "mux") }), /Runtime discovery.*bootstrap-host.sh/s);
+    delete process.env.PI_SERVER_COMMAND;
     mkdirSync(join(setup.root, ".pi"));
     writeFileSync(join(setup.root, ".pi", "remote-server.json"), JSON.stringify({ version: 1, agent: "pi", launcher: "relative" }));
     await assert.rejects(resolveTarget({ host: "fixture", controlPathRoot: join(setup.root, "mux") }), /runtime.launcher.*absolute path/);
     writeFileSync(join(setup.root, ".pi", "remote-server.json"), JSON.stringify({ version: 1, agent: "pi", launcher: join(setup.root, "missing-launcher"), agentDir: setup.agentDir, defaultServerDir: setup.serverDir }));
+    process.env.PI_SERVER_COMMAND = join(setup.root, "discovery-only-launcher");
+    writeFileSync(process.env.PI_SERVER_COMMAND, `#!/bin/sh\ncat ${shellQuote(join(setup.root, ".pi/remote-server.json"))}\n`, { mode: 0o700 });
     await assert.rejects(resolveTarget({ host: "fixture", controlPathRoot: join(setup.root, "mux") }), /Server ensure.*bootstrap-host.sh/s);
     assert.equal(ssh.commands().some((entry) => entry.operation === "forward"), false);
     assert.throws(() => parseRuntime('{"version":2}'), /Unsupported/);

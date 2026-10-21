@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { parseArgs } from "node:util";
-import { resolveAgent, type ServerAgent } from "./cli-args.ts";
+import { randomUUID } from "node:crypto";
+import { parseManagedStartupArgs, resolveAgent, type ServerAgent } from "./cli-args.ts";
 import { absolutePath, launcherRuntime, registeredRuntime } from "./startup/runtime.ts";
 
 const log = (message: string): void => void process.stderr.write(`[pi-better-server] ${message}\n`);
@@ -27,21 +27,30 @@ async function main(): Promise<void> {
     process.env.PI_CODING_AGENT_DIR ||= selected.agentDir;
     process.env.PI_SERVER_DIR ||= selected.defaultServerDir;
   }
-  if (argv[0] === "ensure") {
+  if (["ensure", "activate", "activation-worker"].includes(argv[0] ?? "")) {
     if (agent !== "pi") throw new Error("Server ensure supports Pi only; start the Codex daemon explicitly");
-    const { values } = parseArgs({ args: argv.slice(1), options: {
-      agent: { type: "string" },
-      "server-dir": { type: "string" },
-      "timeout-ms": { type: "string" },
-      "pi-version": { type: "string" },
-      "protocol-version": { type: "string" },
-      "require-capability": { type: "string", multiple: true },
-    } });
+    const values = parseManagedStartupArgs(argv.slice(1));
     const controller = new AbortController();
     const stop = (): void => controller.abort();
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
     try {
+      const manifest = values["desired-runtime"] ?? values.runtime;
+      if (argv[0] !== "ensure" && !manifest) throw new Error("--runtime is required");
+      if (manifest) {
+        const { readStagedRuntime } = await import("./startup/artifact.ts");
+        const { activateStagedRuntime, runActivationWorker } = await import("./startup/activation.ts");
+        const request = {
+          runtime: readStagedRuntime(absolutePath(manifest, "runtime manifest")),
+          serverDir: absolutePath(values["server-dir"] ?? process.env.PI_SERVER_DIR, "serverDir"),
+          agentDir: absolutePath(values["agent-dir"] ?? process.env.PI_CODING_AGENT_DIR, "agentDir"),
+          operationId: values["operation-id"] ?? randomUUID(), signal: controller.signal,
+          timeoutMs: values["timeout-ms"] === undefined ? undefined : Number(values["timeout-ms"]),
+        };
+        const outcome = argv[0] === "activation-worker" ? await runActivationWorker(request) : await activateStagedRuntime(request);
+        process.stdout.write(`${JSON.stringify(argv[0] === "ensure" && outcome.status === "ready" ? outcome.readiness : outcome)}\n`);
+        return;
+      }
       const { ensureDaemon } = await import("./startup/ensure.ts");
       const record = await ensureDaemon({
         serverDir: absolutePath(values["server-dir"] ?? process.env.PI_SERVER_DIR, "serverDir"),

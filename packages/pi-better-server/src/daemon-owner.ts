@@ -2,11 +2,58 @@ import { mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
-interface Owner {
+export interface DaemonOwnerIdentity {
   pid: number;
   token: string;
   boot?: string;
   start?: string;
+}
+
+type Owner = DaemonOwnerIdentity;
+
+export function currentOwnerIdentity(token = randomUUID()): DaemonOwnerIdentity {
+  return { pid: process.pid, token, ...linuxIdentity(process.pid) };
+}
+
+export function ownerIsAlive(owner: DaemonOwnerIdentity): boolean {
+  return alive(owner);
+}
+
+export type OwnerInspection =
+  | { status: "missing" | "ambiguous"; reason?: string }
+  | { status: "live" | "dead"; owner: DaemonOwnerIdentity };
+
+/** Read-only, fail-closed inspection using the same PID-reuse checks as claiming. */
+export function inspectDaemonOwner(serverDir: string, lockName = "daemon-owner"): OwnerInspection {
+  const lock = join(serverDir, lockName);
+  try {
+    const names = readdirSync(lock);
+    if (names.length !== 1) return { status: "ambiguous", reason: "Ownership directory is empty or has multiple entries" };
+    const owner: Owner = JSON.parse(readFileSync(join(lock, names[0]!), "utf8"));
+    validateOwner(owner, names[0]!, lock);
+    return { status: alive(owner) ? "live" : "dead", owner };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // A disappearing file inside a published directory is not proof of no owner.
+      try { readdirSync(lock); } catch (again) {
+        if ((again as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing" };
+      }
+    }
+    return { status: "ambiguous", reason: String(error) };
+  }
+}
+
+export function validateDaemonOwnerIdentity(value: unknown): asserts value is DaemonOwnerIdentity {
+  const owner = value as Owner;
+  validateOwner(owner, `owner-${owner?.token}.json`, "activation journal");
+}
+
+function validateOwner(previous: Owner, name: string, lock: string): void {
+  if (!previous || typeof previous !== "object" || Array.isArray(previous)
+    || !Number.isSafeInteger(previous.pid) || previous.pid <= 0 || previous.pid > 2_147_483_647
+    || typeof previous.token !== "string" || !UUID.test(previous.token) || name !== `owner-${previous.token}.json`
+    || (previous.boot !== undefined && (typeof previous.boot !== "string" || !UUID.test(previous.boot)))
+    || (previous.start !== undefined && (typeof previous.start !== "string" || !/^\d+$/.test(previous.start)))) throw new Error(`Invalid daemon ownership in ${lock}`);
 }
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -28,11 +75,11 @@ function alive(owner: Owner): boolean {
 }
 
 /** Claim ownership before reading the index. A live owner is never reclaimed on a timer. */
-export function claimDaemonOwner(serverDir: string): () => void {
+export function claimDaemonOwner(serverDir: string, lockName = "daemon-owner"): () => void {
   const token = randomUUID();
-  const owner: Owner = { pid: process.pid, token, ...linuxIdentity(process.pid) };
-  const lock = join(serverDir, "daemon-owner");
-  const candidate = join(serverDir, `.daemon-owner-${token}`);
+  const owner = currentOwnerIdentity(token);
+  const lock = join(serverDir, lockName);
+  const candidate = join(serverDir, `.${lockName}-${token}`);
   const name = `owner-${token}.json`;
   mkdirSync(candidate, { mode: 0o700 });
   let claimed = false;
@@ -64,11 +111,7 @@ export function claimDaemonOwner(serverDir: string): () => void {
       let previous: Owner;
       try { previous = JSON.parse(readFileSync(path, "utf8")); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
-      if (!previous || typeof previous !== "object" || Array.isArray(previous)
-        || !Number.isSafeInteger(previous.pid) || previous.pid <= 0 || previous.pid > 2_147_483_647
-        || typeof previous.token !== "string" || !UUID.test(previous.token) || names[0] !== `owner-${previous.token}.json`
-        || (previous.boot !== undefined && (typeof previous.boot !== "string" || !UUID.test(previous.boot)))
-        || (previous.start !== undefined && (typeof previous.start !== "string" || !/^\d+$/.test(previous.start)))) throw new Error(`Invalid daemon ownership in ${lock}`);
+      validateOwner(previous, names[0]!, lock);
       if (alive(previous)) throw new Error(`Daemon owner ${previous.pid} is already running for ${serverDir}; refusing another writer`);
       // Remove only the exact stale owner's file. A competing claimant publishes a different token.
       try { unlinkSync(path); }

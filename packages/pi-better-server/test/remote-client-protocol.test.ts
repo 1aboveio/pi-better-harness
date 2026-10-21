@@ -200,7 +200,7 @@ test("extension sync cannot race a session still loading its extension runtime",
     cleanups.push(() => other.close());
     const result = await other.request({ type: "client_packages_install", packages: [] });
     assert.equal(result.success, false);
-    assert.match(result.error, /maintenance is already in progress/);
+    assert.match(result.error, /session operations are already in progress/);
   } finally {
     writeFileSync(released, "release");
     assert.equal((await opening).success, true);
