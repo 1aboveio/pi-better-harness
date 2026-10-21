@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createAgentSession, DefaultResourceLoader, getAgentDir, SettingsManager, SessionManager, type AgentSession, type CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
+import { HostMaintenance } from "./maintenance.ts";
 import { SessionActivity } from "./session-activity.ts";
 import { readGitBranch } from "./git.ts";
 import { join } from "node:path";
@@ -70,9 +71,11 @@ export class SessionRegistry {
   private shutdownTask: Promise<void> | undefined;
   /** Which sessions this daemon may write to; fenced and moved-away sessions are not resumed or opened. */
   readonly ownership: OwnershipStore;
+  readonly maintenance: HostMaintenance;
 
   constructor(options: SessionRegistryOptions) {
     this.options = options;
+    this.maintenance = new HostMaintenance(this);
     this.now = options.now ?? Date.now;
     this.sessionIdleMs = options.sessionIdleMs ?? 86_400_000;
     if (!Number.isFinite(this.sessionIdleMs) || this.sessionIdleMs < 0) throw new Error("sessionIdleMs must be a non-negative finite number");
@@ -92,7 +95,7 @@ export class SessionRegistry {
 
   /** Recheck under the same serialization as open/close; no await between the final check and fencing. */
   async expireIdle(now = this.now()): Promise<string[]> {
-    if (this.sessionIdleMs === 0) return [];
+    if (this.sessionIdleMs === 0 || this.maintenance.busy || this.stopping) return [];
     const expired = await Promise.all([...this.entries.keys()].map((sessionId) => this.serialize(sessionId, async () => {
       const entry = this.entries.get(sessionId);
       const hosted = this.live.get(sessionId);
@@ -111,6 +114,8 @@ export class SessionRegistry {
 
   /** Resume every session the index marks running, at its last persisted entry. */
   async resumeAll(): Promise<void> {
+    this.maintenance.assertAdmission();
+    if (this.stopping) throw new Error("Session registry is shutting down");
     const running = [...this.entries.values()].filter((entry) => entry.status === "running" && !this.ownership.blockedReason(entry.sessionId));
     await Promise.all(
       running.map(async (entry) => {
@@ -138,6 +143,7 @@ export class SessionRegistry {
   }
 
   async create(request: CreateSessionRequest): Promise<SessionSummary> {
+    this.maintenance.assertAdmission();
     if (this.stopping) throw new Error("Session registry is shutting down");
     this.creating++;
     try { return await this.createNow(request); }
@@ -212,6 +218,8 @@ export class SessionRegistry {
    */
   private serialize<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
     if (this.stopping) return Promise.reject(new Error("Session registry is shutting down"));
+    try { this.maintenance.assertAdmission(); }
+    catch (error) { return Promise.reject(error); }
     const prior = this.operations.get(sessionId) ?? Promise.resolve();
     const result = prior.then(run, run);
     const tail = result.catch(() => undefined);
@@ -302,12 +310,15 @@ export class SessionRegistry {
   }
 
   /** Dry-run the provider's credentials as a session on this daemon would resolve them. */
-  checkProviderAuth(provider: string): Promise<void> {
-    return checkProviderAuth(provider, this.options.serverDir, this.options.sessionOptions);
+  async checkProviderAuth(provider: string): Promise<void> {
+    const release = this.maintenance.enterSessionOperation();
+    try { await checkProviderAuth(provider, this.options.serverDir, this.options.sessionOptions); }
+    finally { release(); }
   }
 
   /** Add (or replace a closed) session that arrived from another daemon, then host it. */
   async adopt(entry: IndexEntry): Promise<SessionSummary> {
+    this.maintenance.assertAdmission();
     if (this.stopping) throw new Error("Session registry is shutting down");
     if (this.live.has(entry.sessionId)) throw new Error(`Session ${entry.sessionId} is already live here`);
     this.entries.set(entry.sessionId, { ...entry, status: "running" });
@@ -363,7 +374,8 @@ export class SessionRegistry {
 
   private async start(entry: IndexEntry, manager?: SessionManager, useDefaultModel = false): Promise<HostedSession> {
     const sessionManager = manager ?? this.reopen(entry);
-    const activity = new SessionActivity(this.log);
+    this.maintenance.registerManager(sessionManager);
+    const activity = new SessionActivity(this.log, () => this.maintenance.enterTool(sessionManager), () => this.maintenance.enterSessionOperation());
     let session: AgentSession | undefined;
     let hosted: HostedSession | undefined;
     try {
@@ -378,6 +390,7 @@ export class SessionRegistry {
             extensions: base.extensions.map((extension) => ({
               ...extension,
               tools: new Map([...extension.tools].map(([name, tool]) => [name, { ...tool, definition: activity.wrapTool(tool.definition) }])),
+              commands: new Map([...extension.commands].map(([name, command]) => [name, { ...command, handler: activity.wrapCommand(command.handler) }])),
             })),
           }),
         });
@@ -413,6 +426,7 @@ export class SessionRegistry {
       this.persist();
       return runtime;
     } catch (error) {
+      this.maintenance.revokeManager(sessionManager);
       this.live.delete(entry.sessionId);
       activity.dispose();
       if (hosted) await hosted.dispose({ abort: true });

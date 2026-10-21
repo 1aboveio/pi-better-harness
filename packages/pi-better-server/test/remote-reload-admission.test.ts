@@ -181,30 +181,24 @@ test("maintenance guards SDK work admission in every idle session and restores h
   }
 });
 
-test("work admitted through a previously captured SDK prompt stops pending reloads without abort", { timeout: 30_000 }, async t => {
+test("a retained SDK prompt is refused during reload and every idle runtime still reloads", { timeout: 30_000 }, async t => {
   const f = await setup(t);
-  // A callback may already hold a method reference before the temporary guards exist.
   const prompt = f.a.session.prompt.bind(f.a.session);
-  const toolStarted = deferred();
-  const off = f.a.session.subscribe(event => { if (event.type === "tool_execution_start") toolStarted.resolve(); });
-  t.after(off);
-  let work: Promise<unknown> | undefined;
+  let refused = false;
   startup(f, async (_pi, ctx) => {
     if (ctx.sessionManager.getSessionId() !== f.a.session.sessionId) return;
-    work = prompt("tool gated");
-    await toolStarted.promise;
+    await assert.rejects(prompt("tool gated"), /maintenance/);
+    refused = true;
   });
-  await assert.rejects(f.sync(), /partial: 1\/2 reloaded, 0 failed, 1 deferred/);
-  await waitFor("gated tool to execute", gate(f.env, "gated").started);
-  assert.deepEqual(f.reloads, ["A"]);
-  assert.equal(f.a.executionActive, true);
-  assert.equal(gate(f.env, "gated").finished(), false);
+  await f.sync();
+  assert.equal(refused, true);
+  assert.deepEqual(f.reloads, ["A", "B"]);
+  assert.equal(gate(f.env, "gated").started(), false);
   assert.equal(f.aborts(), 0);
   admissionReleased(f);
   historiesKept(f);
-  gate(f.env, "gated").release();
-  await work;
-  assert.equal(f.a.session.getLastAssistantText(), "tool-done:gate:gated");
+  await prompt("after reload");
+  assert.equal(f.a.session.getLastAssistantText(), "echo:after reload");
 });
 
 test("a startup dialog stops pending SDK reloads and can still be answered", { timeout: 30_000 }, async t => {

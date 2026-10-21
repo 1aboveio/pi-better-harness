@@ -14,12 +14,23 @@ export class SessionActivity {
   private readonly runtimeUnsubscribers = new Set<() => void>();
   /** Extensions share the host bus, but their subscriptions end at each loader reload. */
   readonly runtimeEvents: EventBus = {
-    emit: (channel, data) => this.events.emit(channel, data),
+    emit: (channel, data) => { if (!this.runtimeRevoked && !this.disposed) this.events.emit(channel, data); },
     on: (channel, handler) => {
-      if (this.disposed) return () => undefined;
+      if (this.disposed || this.runtimeRevoked) return () => undefined;
       const unsubscribe = this.events.on(channel, (data) => {
         // An emit already in progress can still hold a removed listener.
-        if (this.runtimeUnsubscribers.has(release)) return handler(data);
+        if (!this.runtimeUnsubscribers.has(release) || this.runtimeRevoked) return;
+        this.pendingHandlers++;
+        let asynchronous = false;
+        try {
+          const result = handler(data) as unknown as void | Promise<void>;
+          if (result && typeof result.then === "function") {
+            asynchronous = true;
+            this.changed();
+            return Promise.resolve(result).finally(() => { this.pendingHandlers--; this.changed(); });
+          }
+          return result;
+        } finally { if (!asynchronous) this.pendingHandlers--; }
       });
       const release = () => {
         this.runtimeUnsubscribers.delete(release);
@@ -41,8 +52,14 @@ export class SessionActivity {
   private unobservable = false;
   private legacySubagentsLogged = false;
   private readonly log: (message: string) => void;
+  private readonly enterTool: () => () => void;
+  private readonly enterCommand: () => () => void;
+  private pendingHandlers = 0;
+  private runtimeRevoked = false;
 
-  constructor(log: (message: string) => void) {
+  constructor(log: (message: string) => void, enterTool: () => () => void = () => () => undefined, enterCommand = enterTool) {
+    this.enterTool = enterTool;
+    this.enterCommand = enterCommand;
     this.log = log;
     this.events.on("pi-better-goal:register-provider", (value) => {
       const provider = value as ActivityProvider | undefined;
@@ -65,10 +82,22 @@ export class SessionActivity {
   get toolCallId(): string | undefined { return this.toolContext.getStore(); }
 
   wrapTool(tool: ToolDefinition): ToolDefinition {
-    return { ...tool, execute: (...args) => this.toolContext.run(args[0], () => tool.execute(...args)) };
+    return { ...tool, execute: async (...args) => {
+      const release = this.enterTool();
+      try { return await this.toolContext.run(args[0], () => tool.execute(...args)); }
+      finally { release(); }
+    } };
   }
 
-  get busy(): boolean { return this.unobservable || this.active; }
+  wrapCommand<T extends (...args: any[]) => Promise<void>>(handler: T): T {
+    return (async (...args: Parameters<T>) => {
+      const release = this.enterCommand();
+      try { await handler(...args); }
+      finally { release(); }
+    }) as T;
+  }
+
+  get busy(): boolean { return this.unobservable || this.active || this.pendingHandlers > 0; }
   get checking(): boolean { return this.refreshing !== undefined; }
 
   /** After shutdown, before any new factories run; the host admission guard has already proved idleness. */
@@ -79,6 +108,12 @@ export class SessionActivity {
     this.providers.clear();
     this.active = false;
     this.revision++;
+  }
+
+  /** A fenced runtime cannot receive late bus callbacks or register new background providers. */
+  revokeRuntime(): void {
+    this.runtimeRevoked = true;
+    for (const unsubscribe of this.runtimeUnsubscribers) unsubscribe();
   }
 
   /** Missing background signals cannot establish idleness for this runtime. */

@@ -3,6 +3,7 @@ import type { AgentSession, AgentSessionEvent, RpcCommand, RpcResponse, RpcSessi
 import { randomUUID } from "node:crypto";
 import type { EventLog, LoggedEvent, Replay } from "./event-log.ts";
 import { UNSUPPORTED_SESSION_COMMANDS } from "./protocol.ts";
+import { assertHostedAdmission, fenceHostedSession, reloadHostedSession } from "./maintenance.ts";
 import type { SessionActivity } from "./session-activity.ts";
 import { UiBridge, type PendingDialog } from "./ui-bridge.ts";
 
@@ -56,6 +57,8 @@ export class HostedSession {
   private readonly onActivity: (kind?: "work" | "metadata") => void;
   private readonly activity: SessionActivity | undefined;
   private disposed = false;
+  private runtimeReleased = false;
+  private operations = 0;
   private readonly commandsInFlight = new Set<CommandWork>();
   private readonly workContext = new AsyncLocalStorage<CommandWork>();
   private readonly dialogWork = new Map<string, { command?: CommandWork; toolCallId?: string }>();
@@ -131,6 +134,13 @@ export class HostedSession {
 
   /** A single JS-turn snapshot plus cursor; the native client subscribes after this cursor. */
   async clientSnapshot(): Promise<Record<string, unknown>> {
+    if (this.disposed) throw new Error("Session runtime is closed; explicitly reopen the session");
+    this.operations++;
+    try { return await this.readClientSnapshot(); }
+    finally { this.operations--; }
+  }
+
+  private async readClientSnapshot(): Promise<Record<string, unknown>> {
     const session = this.session;
     const models = await session.modelRuntime.getAvailable();
     const manager = session.sessionManager;
@@ -167,6 +177,7 @@ export class HostedSession {
   }
 
   get activityChecking(): boolean { return this.activity?.checking ?? false; }
+  get operationsActive(): boolean { return this.operations > 0; }
   get isDisposed(): boolean { return this.disposed; }
 
   refreshActivity(): Promise<void> { return this.activity?.refresh() ?? Promise.resolve(); }
@@ -176,7 +187,7 @@ export class HostedSession {
     if (this.disposed) throw new Error("Session runtime is closed; explicitly close and reopen the session");
     try {
       // The owned loader resets activity after SDK shutdown, before constructing extensions.
-      await this.session.reload();
+      await reloadHostedSession(this.session);
       this.activity?.attach(this.session, () => this.onActivity("work"));
       await this.refreshActivity();
       this.publish({ type: "remote_resources_reloaded" });
@@ -189,7 +200,7 @@ export class HostedSession {
   }
 
   /** Fence pre-fetched dispatch references before close crosses its first await. */
-  fence(): void { this.disposed = true; }
+  fence(): void { this.disposed = true; fenceHostedSession(this.session); this.activity?.revokeRuntime(); }
 
   get lastSeq(): number {
     return this.log.last;
@@ -204,7 +215,11 @@ export class HostedSession {
     return this.controller !== undefined;
   }
 
+  /** Activation notices share the normal sequence and replay log, including after commitStop. */
+  publishRuntimeEvent(event: unknown): void { this.publish(event); }
+
   private publish(event: unknown): void {
+    if (this.runtimeReleased) return;
     const logged = this.log.append(event);
     for (const listener of this.listeners) listener(logged);
   }
@@ -265,6 +280,7 @@ export class HostedSession {
     await aborted;
     this.unsubscribe();
     this.listeners.clear();
+    this.runtimeReleased = true;
     this.log.flush();
     this.session.dispose();
   }
@@ -399,6 +415,9 @@ export class HostedSession {
   async handle(command: RpcCommand): Promise<RpcResponse> {
     if (this.disposed) return fail(command.id, command.type, "Session runtime is closed; explicitly reopen the session");
     const passive = command.type.startsWith("get_") || command.type === "set_session_name";
+    try { if (!command.type.startsWith("get_")) assertHostedAdmission(this.session, command.type === "set_session_name"); }
+    catch (error) { return fail(command.id, command.type, String(error)); }
+    this.operations++;
     const work: CommandWork = { kind: command.type, dialogs: 0 };
     if (!passive) {
       // Installed synchronously, before dispatch can reach provider/preflight awaits.
@@ -408,6 +427,7 @@ export class HostedSession {
     }
     try { return await this.workContext.run(work, () => this.dispatch(command)); }
     finally {
+      this.operations--;
       if (!passive) {
         this.commandsInFlight.delete(work);
         this.onActivity("work");
