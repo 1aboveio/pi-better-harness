@@ -57,7 +57,7 @@ The package workspaces are:
 | `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |
 | `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
 | `packages/pi-better-plan` | `pi-better-plan` | yes | yes |
-| `packages/pi-better-server` | `pi-better-server` (`publishConfig.access` is `public`) | no, not in the publish workflow | no |
+| `packages/pi-better-server` | `pi-better-server` | yes | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
@@ -416,10 +416,14 @@ deprecate the unattested one — not to relax the check.
 
 ### npm version skew between CI and publish
 
-`publish.yml` runs `npm install --global npm@latest` before `npm run verify`,
-while `ci.yml` uses the runner image's bundled npm. The two lanes therefore run
-different npm majors, and a change in npm's own output can pass CI and still
-break the release.
+`publish.yml` runs only from `main` and pins Node 24.14.1 and npm 11.19.0.
+The Node pin matches the managed-runtime tests; the npm pin supports trusted
+publishing without depending on a changing `npm@latest`. CI's host-side lane
+still uses Node 22.
+
+When updating either pin, verify the release workflow as well as ordinary CI.
+The lanes have historically used different npm majors, and a change in npm's
+output can pass CI and still break a release.
 
 This has happened once: npm 12 changed `npm pack --json` from an array of packed
 results to an object keyed by package name, which broke four pack assertions that
