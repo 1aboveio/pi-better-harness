@@ -7,6 +7,13 @@ import ts from "typescript";
 // startup capture, validation, lifecycle ordering, and rollback implementation.
 async function fixture(version = "1.2.0") {
   const events: string[] = [];
+  const container = () => ({
+    children: [] as any[],
+    clear() { this.children = []; },
+    addChild(child: any) { this.children.push(child); },
+    invalidate() {},
+    render(width: number): string[] { return this.children.flatMap(child => typeof child === "string" ? [child] : child.render?.(width) ?? []); },
+  });
   class InteractiveMode {
     [key: string]: any;
     constructor(host: any) {
@@ -17,12 +24,27 @@ async function fixture(version = "1.2.0") {
       this.editor = this.defaultEditor;
       this.compactionQueuedMessages = [];
       this.footer = { invalidations: 0, invalidate() { this.invalidations++; } };
-      this.ui = { renders: 0, terminal: {}, requestRender() { this.renders++; } };
-      this.renderer = {};
+      this.headerContainer = container();
+      this.loadedResourcesContainer = container();
+      this.chatContainer = container();
+      this.documentContainer = container();
+      for (const child of [this.headerContainer, this.loadedResourcesContainer, this.chatContainer]) this.documentContainer.addChild(child);
+      this.editorContainer = container();
+      this.editorContainer.addChild(this.editor);
+      this.pendingMessagesContainer = container();
+      this.widgetContainerAbove = container();
+      this.widgetContainerBelow = container();
+      this.statusContainer = container();
+      this.footerContainer = container();
+      this.ui = Object.assign(container(), { renders: 0, terminal: { rows: 24, columns: 100 },
+        requestRender(_force?: boolean) { this.renders++; },
+      });
+      for (const child of [this.documentContainer, this.pendingMessagesContainer, this.statusContainer,
+        this.widgetContainerAbove, this.editorContainer, this.widgetContainerBelow, this.footerContainer]) this.ui.addChild(child);
+      this.renderer = this.ui;
       this.pendingTools = new Map();
       this.entriesRenderedByBoundaryCompaction = new Set();
       this.programStatus = { reset() {} };
-      this.chatContainer = { children: [] as any[], clear() { this.children = []; }, addChild(child: any) { this.children.push(child); } };
       this.themeController = { setThemeName: (name: string) => events.push(`theme:${name}`) };
       this.unsubscribe = () => events.push("unsubscribe-local");
       host.beforeSessionInvalidate = () => this.resetExtensionUI();
@@ -32,6 +54,8 @@ async function fixture(version = "1.2.0") {
     get sessionManager() { return this.session.sessionManager; }
     async init() { this.setupEditorSubmitHandler(); }
     async rebindCurrentSession() {
+      this.loadedResourcesContainer.clear();
+      this.rebuildChatFromMessages();
       this.unsubscribe?.();
       this.unsubscribe = this.session.subscribe(async (event: any) => { await this.handleEvent(event); });
       await this.session.bindExtensions({ commandContextActions: {}, mode: "tui" });
@@ -247,6 +271,85 @@ test("capture is idempotent; invalid adapters and local bash leave the live sess
   await assert.rejects(f.controller.attach(f.remote), /local ! command/);
   assert.equal(f.host.session, f.local);
   assert.deepEqual(f.events, []);
+});
+
+test("browse owns a clean screen and cancellation or failure restores the live local view", async () => {
+  const f = await captured();
+  f.mode.headerContainer.addChild("Pi startup help");
+  f.mode.loadedResourcesContainer.addChild("Loaded local extensions");
+  f.mode.chatContainer.addChild("Old local chat and package warning");
+  f.mode.pendingMessagesContainer.addChild("Queued local input");
+  f.mode.widgetContainerAbove.addChild("Local widget");
+  f.mode.footerContainer.addChild("Local footer");
+  const before = f.mode.ui.render(100);
+  const roots = [...f.mode.ui.children];
+  const submit = f.mode.defaultEditor.onSubmit;
+  const unsubscribe = f.mode.unsubscribe;
+  f.mode.defaultEditor.setText("unsent local draft");
+  for (const fail of [false, true]) {
+    const endBrowse = f.controller.beginBrowse();
+    try {
+      f.mode.editorContainer.clear();
+      f.mode.editorContainer.addChild("Remote session browser");
+      assert.deepEqual(f.mode.ui.render(100), ["Remote session browser"]);
+      assert.equal(f.host.session, f.local);
+      assert.equal(f.mode.unsubscribe, unsubscribe);
+      assert.deepEqual(f.manager.history, ["original history"]);
+      if (fail) throw new Error("browser failed");
+    } catch (error) {
+      if (!fail || !(error instanceof Error) || error.message !== "browser failed") throw error;
+    } finally {
+      // Native custom() restores its editor before the caller's finally runs.
+      f.mode.editorContainer.clear();
+      f.mode.editorContainer.addChild(f.mode.editor);
+      endBrowse();
+      endBrowse();
+    }
+    assert.deepEqual(f.mode.ui.render(100), before);
+    assert.deepEqual(f.mode.ui.children, roots);
+    assert.equal(f.mode.defaultEditor.getText(), "unsent local draft");
+    assert.equal(f.mode.defaultEditor.onSubmit, submit);
+    assert.deepEqual(f.events, []);
+  }
+  await f.local.prompt("still local");
+  assert.equal(f.events.at(-1), "local-prompt");
+});
+
+test("browse fails closed before changing the screen when native renderer methods are missing", async () => {
+  const f = await captured();
+  f.mode.headerContainer.addChild("Local startup header");
+  const before = f.mode.ui.render(100);
+  const clear = f.mode.ui.clear;
+  f.mode.ui.clear = undefined;
+  assert.throws(() => f.controller.beginBrowse(), /InteractiveMode.ui lacks clear/);
+  assert.deepEqual(f.mode.ui.render(100), before);
+  assert.equal(f.host.session, f.local);
+  assert.deepEqual(f.events, []);
+  f.mode.ui.clear = clear;
+  const cleanup = f.controller.beginBrowse();
+  assert.throws(() => f.controller.beginBrowse(), /cannot begin browsing/);
+  cleanup();
+  const nextCleanup = f.controller.beginBrowse();
+  cleanup();
+  assert.deepEqual(f.mode.ui.render(100), []);
+  nextCleanup();
+  assert.deepEqual(f.mode.ui.render(100), before);
+});
+
+test("attach ends browsing and removes the startup header until local return", async () => {
+  for (const browsing of [false, true]) {
+    const f = await captured();
+    f.mode.headerContainer.addChild("Pi startup help");
+    f.mode.chatContainer.addChild("Old local warning");
+    const endBrowse = browsing ? f.controller.beginBrowse() : () => {};
+    await f.controller.attach(f.remote);
+    endBrowse(); // A delayed finally must not restore the local screen over remote.
+    assert.equal(f.mode.ui.render(100).includes("Pi startup help"), false);
+    assert.equal(f.mode.ui.render(100).includes("Old local warning"), false);
+    assert.throws(() => f.controller.beginBrowse(), /cannot begin browsing/);
+    await f.controller.disconnect();
+    assert.equal(f.mode.ui.render(100).includes("Pi startup help"), true);
+  }
 });
 
 test("attach tears down local work, gates native commands, and routes bash with a frozen runner", async () => {

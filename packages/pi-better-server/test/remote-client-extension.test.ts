@@ -240,13 +240,16 @@ test("an older daemon retains existing-session access and gives update guidance 
   const session = remoteSession();
   const { client, commands } = folderClient("/work", [session]);
   Object.defineProperty(client, "server", { value: { capabilities: ["native-client-v1", "session-browser-v1"] } });
-  const ui = folderUI([send("n"), send(keys.enter)]);
+  const ui = folderUI([send("n"), screen => {
+    assert.match(screen.render(100).join("\n"), /Update pi-better-server/);
+    screen.handleInput?.(keys.enter);
+  }]);
   const notices: string[] = [];
   ui.ui.notify = message => { notices.push(message); };
   assert.deepEqual(await chooseRemoteSession(client, ui.ui, "host", {}), {
     action: "attach", cwd: session.cwd, sessionId: session.sessionId,
   });
-  assert.ok(notices.some(message => message.includes("Update pi-better-server")));
+  assert.deepEqual(notices, [], "Update guidance belongs in the visible browser, not the hidden local notification area");
   assert.deepEqual(commands, [{ type: "client_workspaces" }, { type: "list_sessions" }]);
   ui.assertComplete();
 });

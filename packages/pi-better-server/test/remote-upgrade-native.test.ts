@@ -232,6 +232,7 @@ test("two native sessions survive a busy managed upgrade, then pull and disconne
   await gated;
   await waitFor("both native views ready without another activation request", () => [a, b].every(view => view.phases.includes("ready")), 30_000);
   const readyAt = performance.now();
+  await waitFor("activation readiness persisted after client reconnection", () => readActivationJournal(env.serverDir)?.phase === "ready");
   const journal = readActivationJournal(env.serverDir)!;
   assert.equal(journal.phase, "ready");
   assert.equal(journal.desiredBuild.contentId, after.build.contentId);

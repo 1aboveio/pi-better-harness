@@ -11,6 +11,7 @@ export type RemoteSessionBrowserIntent = RemoteSessionBrowserResult | { action: 
 interface BrowserOptions {
   cwd?: string;
   loading?: string;
+  notice?: string;
   allowTransfer?: boolean;
   selectFolder?: (initialPath: string) => Promise<string | undefined>;
 }
@@ -121,14 +122,16 @@ export class RemoteSessionBrowser implements Component {
       ...wrapTextWithAnsi(`cwd: ${singleLine(selected.cwd)}`, width).slice(0, 2).map(line => theme.fg("muted", line)),
       theme.fg("dim", fit(`ID: ${singleLine(selected.sessionId).slice(0, 8)}`)),
     ] : [];
+    let notices = this.options.notice ? wrapTextWithAnsi(singleLine(this.options.notice), width).slice(0, budget < 14 ? 1 : 2).map(line => theme.fg("warning", line)) : [];
     const errors = this.state.error ? wrapTextWithAnsi(singleLine(this.state.error), width).slice(0, budget < 14 ? 1 : 2).map(line => theme.fg("error", line)) : [];
     let spacious = width >= 48 && budget >= 16;
     const gaps = () => spacious ? 3 + (details.length ? 1 : 0) : 0;
     const minimumBody = Math.min(3, Math.max(1, rows.length));
-    const fixed = () => header.length + tabLines.length + errors.length + details.length + legend.length + gaps();
+    const fixed = () => header.length + tabLines.length + notices.length + errors.length + details.length + legend.length + gaps();
     const scrollRoom = rows.length > minimumBody ? 1 : 0;
     if (fixed() + minimumBody + scrollRoom > budget) details = [];
     if (fixed() + minimumBody + scrollRoom > budget) spacious = false;
+    if (fixed() + minimumBody + scrollRoom > budget) notices = [];
     while (header.length && fixed() + minimumBody + scrollRoom > budget) header.pop();
     const available = Math.max(0, budget - fixed());
     const unreservedHeight = Math.min(10, available);
@@ -168,7 +171,7 @@ export class RemoteSessionBrowser implements Component {
     }
     const scrolling = entries.length > bodyHeight && bodyHeight > 0 && available > 1 ? [theme.fg("dim", fit(`(${selectedIndex + 1}/${rows.length})`))] : [];
     const gap = spacious ? [""] : [];
-    return [...header, ...gap, ...tabLines, ...gap, ...errors, ...body, ...scrolling,
+    return [...header, ...gap, ...tabLines, ...gap, ...notices, ...errors, ...body, ...scrolling,
       ...(details.length ? [...gap, ...details] : []), ...gap, ...legend.map(line => theme.fg("dim", line))].slice(0, budget).map(line => fit(line));
   }
 

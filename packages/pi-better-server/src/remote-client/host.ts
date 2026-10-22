@@ -103,15 +103,18 @@ export class NativeClientHost {
       }
       return { root, workspaces: workspaces.sort((a, b) => a.name.localeCompare(b.name)) };
     }
-    const cwd = command.cwd === undefined ? process.cwd() : command.cwd;
-    if (typeof cwd !== "string" || !isAbsolute(cwd) || !(await stat(cwd)).isDirectory()) throw new Error("cwd must be an existing absolute remote workspace directory");
-    if (command.type === "client_packages") return readLocalPackageCatalog(getAgentDir(), cwd);
+    if (command.scope !== undefined && command.scope !== "global") throw new Error("Unknown package scope");
+    const global = command.scope === "global";
+    const cwd = global ? undefined : command.cwd === undefined ? process.cwd() : command.cwd;
+    if (!global && (typeof cwd !== "string" || !isAbsolute(cwd) || !(await stat(cwd)).isDirectory())) throw new Error("cwd must be an existing absolute remote workspace directory");
+    const catalog = () => readLocalPackageCatalog(getAgentDir(), cwd as string | undefined, { scope: global ? "global" : "workspace" });
+    if (command.type === "client_packages") return catalog();
     if (command.type !== "client_packages_install") throw new Error("Unknown native client host command");
     if (!Array.isArray(command.packages)) throw new Error("packages must be an array of pinned Pi package specifications");
     return this.registry.maintenance.withIdleSessions("packages", async (live, maintenance) => {
       let installError: unknown;
       try {
-        await installPackageCatalog(command.packages as PackageSpec[], { agentDir: getAgentDir(), cwd });
+        await installPackageCatalog(command.packages as PackageSpec[], { agentDir: getAgentDir(), ...(global ? {} : { cwd: cwd as string }) });
       } catch (error) { installError = error; }
       // Pi mutates process-wide provider registrations, so reload serially under a
       // fresh global idle check, including providers registered by preceding reloads.
@@ -121,7 +124,7 @@ export class NativeClientHost {
         throw reloadError;
       }
       if (installError) throw installError;
-      return readLocalPackageCatalog(getAgentDir(), cwd);
+      return catalog();
     });
   }
 }

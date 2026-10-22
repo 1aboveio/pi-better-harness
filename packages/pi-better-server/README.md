@@ -154,8 +154,10 @@ Escape cancels that attempt and returns to the local UI. It does not stop any
 remote sessions or shared SSH connection. Connection failures retain their original
 error message; the spinner does not imply that an unreachable host is available.
 
-Connecting opens the server's session landing page, including when the local
-session has history. Selecting an explicit `--session` attaches directly instead.
+Connecting opens the server's session landing page after extension synchronization,
+including when the local session has history. The browser takes over a clean native
+screen; leaving it or cancelling setup restores the local view and history.
+Selecting an explicit `--session` attaches directly after the same extension check.
 The landing page has **Active sessions** and **Closed sessions** tabs, with sessions
 grouped by their full working folder. Move and Copy remain explicit actions when
 a local conversation is available; connecting alone never authorizes a transfer.
@@ -342,24 +344,31 @@ before executing again.
 
 ### Package synchronization
 
-Before attaching to the remote session, the client reads the locally
-configured, installed npm/git package catalog. It resolves npm packages to their
-installed exact versions and git packages to full installed commit pins. The
-confirmation previews additions and replacements, including `extensions`,
-`skills`, `prompts`, `themes` filters and `autoload`. Declining skips synchronization
-and continues with the remote catalog. Remote-only packages are retained.
+Immediately after connecting, before the session browser opens, the client reads
+the locally configured, installed npm/git package catalog and compares it with the
+remote host's global catalog. It resolves npm packages to their installed exact
+versions and git packages to full installed commit pins. The confirmation previews
+additions and replacements, including `extensions`, `skills`, `prompts`, `themes`
+filters and `autoload`. Declining skips synchronization and continues to the
+browser with the installed remote catalog. Remote-only packages are retained.
 
 Only approved package declarations are synchronized. Credentials, settings outside
-those declarations and local extension/resource sources are not copied;
-unsupported local entries are reported. The preview uses the selected remote
-workspace's effective catalog. Installs update the remote global packages. A
-trusted project declaration that overrides an approved package causes refusal rather than rewriting the
-repository's `.pi/settings.json`; manage that override on the remote host. Package
-updates require idle daemon sessions and refuse concurrent runtime loading or
-maintenance. Approved updates automatically refresh hosted runtimes and connected
-clients. Installation stops on the first failure; earlier successful installs are
-not rolled back, so idle runtimes are refreshed even after an install failure.
-Busy work is not aborted to make an update proceed.
+those declarations and local extension/resource sources are not copied. Unsupported
+local resources are summarized once, with repeated selectors collapsed rather
+than printed as dozens of identical warnings. The approved target is the remote
+host's global package configuration, not a workspace chosen later in the browser.
+Trusted project declarations remain untouched and can still override global
+packages in that workspace; manage those declarations on the remote host.
+
+Host-level sync requires `global-package-sync-v1`. Older daemons keep their existing
+sessions and extensions; the client reports that updates are deferred and still
+opens the browser. Busy work is not aborted and sessions are never closed just to
+update packages. New daemons require idle sessions and refuse concurrent runtime
+loading or maintenance. Approved updates automatically refresh hosted runtimes and
+connected clients. Installation stops on the first failure; earlier successful
+installs are not rolled back, so idle runtimes are refreshed after a partial install.
+Explicit legacy and busy refusals defer the update; other installation failures
+remain errors rather than being reported as success.
 
 ### Verification status
 

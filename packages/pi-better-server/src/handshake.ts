@@ -4,7 +4,7 @@ import type { ServerBuild } from "./startup/managed-types.ts";
 import { PROTOCOL_VERSION, type HelloCommand, type HelloData } from "./protocol.ts";
 
 /** Kept equal to package.json `version`; a test pins that. */
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.1.1";
 
 export const SERVER_EXTENSION_VERSIONS: Readonly<Record<string, string>> = { "pi-better-server": SERVER_VERSION };
 
@@ -14,7 +14,7 @@ export function serverHello(identity: HelloIdentity = {}): HelloData {
   const build = identity.build ?? readOwnBuild();
   return { protocolVersion: PROTOCOL_VERSION, piVersion: PI_VERSION, extensionVersions: { ...SERVER_EXTENSION_VERSIONS },
     ...(build ? { build } : {}), ...(identity.instanceId ? { instanceId: identity.instanceId } : {}),
-    capabilities: ["native-client-v1", "package-sync-v1", "session-browser-v1", "folder-browser-v1", "session-transfer-v1", "compressed-bundle-v1", "remote-reload-v1",
+    capabilities: ["native-client-v1", "package-sync-v1", "global-package-sync-v1", "session-browser-v1", "folder-browser-v1", "session-transfer-v1", "compressed-bundle-v1", "remote-reload-v1",
       ...(identity.safeUpgrade && build && identity.instanceId ? ["safe-upgrade-v1"] : [])] };
 }
 

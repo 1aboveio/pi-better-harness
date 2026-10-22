@@ -14,6 +14,10 @@ import { InteractiveMode, VERSION } from "@earendil-works/pi-coding-agent";
  * New/fork/tree/clone/resume/import are intentionally unavailable remotely.
  */
 export interface Pi12Bridge {
+  /** Screen-only scope. Call after connecting, before sync/browser; clean up in finally.
+   * Idempotent cleanup restores local mounts; attach also ends the scope itself.
+   */
+  beginBrowse(): () => void;
   attach(remoteSession: unknown): Promise<void>;
   disconnect(): Promise<void>;
   readonly mode?: unknown;
@@ -139,6 +143,7 @@ class Controller implements Pi12Bridge {
   private local: { manager: Native; cwd: string; agentDir: string } | undefined;
   private changing = false;
   private guarded = false;
+  private endBrowse: (() => void) | undefined;
   private readonly restores: (() => void)[] = [];
 
   readonly mode: Native;
@@ -166,6 +171,54 @@ class Controller implements Pi12Bridge {
     methods(object(this.mode.programStatus, "InteractiveMode.programStatus"), ["reset"], "programStatus");
   }
 
+  private checkScreen(): void {
+    const ui = object(this.mode.ui, "InteractiveMode.ui");
+    methods(ui, ["clear", "addChild", "requestRender"], "InteractiveMode.ui");
+    if (!Array.isArray(ui.children)) throw failure("InteractiveMode.ui.children is missing.");
+    methods(object(this.mode.editorContainer, "InteractiveMode.editorContainer"), ["render"], "editorContainer");
+    const header = object(this.mode.headerContainer, "InteractiveMode.headerContainer");
+    methods(header, ["render"], "headerContainer");
+    writable(header, "render");
+    if (ui.mode === "fullscreen") {
+      methods(ui, ["setLayoutRoot"], "InteractiveMode.ui");
+      object(this.mode.fullscreenLayoutRoot, "InteractiveMode.fullscreenLayoutRoot");
+    }
+  }
+
+  beginBrowse(): () => void {
+    if (this.changing || this.remote || this.local || this.endBrowse) {
+      throw failure("cannot begin browsing during another browse or session replacement.");
+    }
+    if (!this.mode.isInitialized) throw failure("the interactive UI has not finished starting.");
+    this.checkScreen();
+    const ui = this.mode.ui as Native;
+    const roots = [...ui.children];
+    const layoutRoot = this.mode.fullscreenLayoutRoot;
+    let active = true;
+    const cleanup = () => {
+      if (!active) return;
+      active = false;
+      this.endBrowse = undefined;
+      ui.clear();
+      for (const root of roots) ui.addChild(root);
+      if (ui.mode === "fullscreen") ui.setLayoutRoot(layoutRoot);
+      ui.requestRender(true);
+    };
+    this.endBrowse = cleanup;
+    try {
+      // Native custom/select/input screens all use this container. Unmount the
+      // surrounding local view, not its children or its still-live runtime.
+      ui.clear();
+      ui.addChild(this.mode.editorContainer);
+      if (ui.mode === "fullscreen") ui.setLayoutRoot(this.mode.editorContainer);
+      ui.requestRender(true);
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+    return cleanup;
+  }
+
   private warning(operation: string): { cancelled: true } {
     const guidance = operation === "/settings"
       ? "Use /model or /thinking for supported remote controls. Disconnect /remote to change local settings."
@@ -186,6 +239,9 @@ class Controller implements Pi12Bridge {
   private guard(): void {
     if (this.guarded) return;
     this.guarded = true;
+    // Native renderCurrentSessionState clears chat/resources, but retains the
+    // startup header. Hide its rendering only for the remote attachment.
+    this.replace(this.mode.headerContainer, "render", () => []);
     for (const [name, command] of Object.entries(blockedUi)) {
       this.replace(this.mode, name, () => this.warning(command));
     }
@@ -367,6 +423,7 @@ class Controller implements Pi12Bridge {
     if (this.remote === remoteSession) return;
     if (this.remote || this.local) throw failure("disconnect the current remote session before attaching another.");
     this.checkHost();
+    this.checkScreen();
     if (!this.mode.isInitialized) throw failure("the interactive UI has not finished starting.");
     const remote = object(remoteSession, "RemoteSession");
     const local = object(this.host.session, "local session");
@@ -391,6 +448,7 @@ class Controller implements Pi12Bridge {
       }
     }
     if (local.isBashRunning) throw failure("wait for the local ! command to finish before connecting.");
+    this.endBrowse?.();
     this.local = { manager: local.sessionManager, cwd: this.host.cwd, agentDir: this.host.services.agentDir };
     this.changing = true;
     this.guard();
@@ -408,6 +466,7 @@ class Controller implements Pi12Bridge {
       this.host.apply({ session: this.remoteView(remote), services: this.host.services, diagnostics: [], modelFallbackMessage: undefined });
       this.state.managers.set(remote.sessionManager, this);
       await this.host.finishSessionReplacement();
+      this.mode.ui.requestRender(true);
     } catch (error) {
       // Teardown can fail before its final dispose (for example during UI
       // cleanup). Never leave that outgoing executor live during recovery.
@@ -465,6 +524,7 @@ class Controller implements Pi12Bridge {
     try {
       await this.host.finishSessionReplacement();
       this.local = undefined;
+      this.mode.ui.requestRender(true);
     } catch (error) {
       this.guard();
       await this.host.teardownCurrent("resume");
