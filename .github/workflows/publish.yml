@@ -14,6 +14,7 @@ on:
           - pi-better-subagents
           - pi-better-goal
           - pi-better-plan
+          - pi-better-server
           - pi-better-harness
 
 permissions:
@@ -28,6 +29,8 @@ jobs:
   publish:
     name: publish ${{ inputs.package }}
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 60
     environment: npm-publish
 
     steps:
@@ -35,11 +38,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.14.1
           registry-url: https://registry.npmjs.org
 
-      - name: Install latest npm with trusted publishing support
-        run: npm install --global npm@latest
+      - name: Install pinned npm with trusted publishing support
+        run: npm install --global npm@11.19.0
 
       - name: Show toolchain
         run: |
@@ -86,6 +89,7 @@ jobs:
             pi-better-subagents) WORKSPACE="packages/pi-better-subagents" ;;
             pi-better-goal) WORKSPACE="packages/pi-better-goal" ;;
             pi-better-plan) WORKSPACE="packages/pi-better-plan" ;;
+            pi-better-server) WORKSPACE="packages/pi-better-server" ;;
             pi-better-harness) WORKSPACE="packages/pi-better-harness" ;;
             *) echo "Unsupported package: $PACKAGE" >&2; exit 1 ;;
           esac
@@ -191,6 +195,20 @@ jobs:
             pi-better-plan)
               check_pack_file /tmp/package-pack.json src/index.ts
               check_pack_file /tmp/package-pack.json src/shared-execution-policy.ts
+              ;;
+            pi-better-server)
+              check_pack_file /tmp/package-pack.json src/index.ts
+              check_pack_file /tmp/package-pack.json src/cli.ts
+              check_pack_file /tmp/package-pack.json src/remote-cli.ts
+              check_pack_file /tmp/package-pack.json src/remote-client/extension.ts
+              check_pack_file /tmp/package-pack.json src/remote-client/session-browser.ts
+              check_pack_file /tmp/package-pack.json src/remote-client/folder-browser.ts
+              check_pack_file /tmp/package-pack.json src/remote-client/remote-progress.ts
+              check_pack_file /tmp/package-pack.json src/shared-ssh-core/index.ts
+              check_pack_file /tmp/package-pack.json scripts/private-runtime/format.ts
+              check_pack_file /tmp/package-pack.json scripts/private-runtime/installer.ts
+              check_pack_file /tmp/package-pack.json scripts/private-runtime/package.json
+              check_pack_file /tmp/package-pack.json scripts/private-runtime/package-lock.json
               ;;
             pi-better-harness)
               for required in \
