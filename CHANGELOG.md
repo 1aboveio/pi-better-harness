@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-server@0.1.1] - 2026-10-22
+
+### Fixed
+
+- Check and synchronize approved host-level extensions immediately after remote connection, before opening the session browser.
+- Show the remote browser on a clean native screen, restoring the local view and history after cancellation or failure.
+- Deduplicate and summarize unsupported local-resource warnings, and keep update guidance visible inside the browser.
+- Defer unsupported legacy or busy-daemon extension updates without closing sessions or blocking the browser.
+
 ## [pi-better-harness@0.31.1] - 2026-10-18
 
 ### Changed

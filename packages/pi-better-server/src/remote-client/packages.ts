@@ -145,15 +145,25 @@ function identity(value: unknown): string | undefined {
 
 function unsupportedLabel(value: unknown): string {
   const source = typeof value === "string" ? value : value && typeof value === "object" ? (value as PackageSpec).source : undefined;
-  if (typeof source !== "string" || /[\x00-\x1f\x7f]/.test(source)) return "[unsupported package source]";
-  if (/^(?:\.\.?\/|\/|~\/)/.test(source)) return source;
+  if (typeof source !== "string" || /[\p{C}]/u.test(source)) return "[unsupported package source]";
+  if (/^(?:\.\.?\/|\/|~\/)/.test(source) && /^[\p{L}\p{M}\p{N}._~@/ -]+$/u.test(source)) return source;
   try { parse(source); return source; } catch { return "[unsupported package source]"; }
 }
 
-function readPackageSettings(agentDir: string, cwd: string) {
+function resourceLabel(value: unknown): string {
+  // Resource paths and selectors are not package declarations or installable sources.
+  if (typeof value === "string" && /^[\p{L}\p{M}\p{N}._~@/ !+*?\[\]{},()-]+$/u.test(value)) {
+    if (/^[!+-]|[\*?]/.test(value)) return "[local resource selectors]";
+    return value;
+  }
+  return unsupportedLabel(value);
+}
+
+function readPackageSettings(agentDir: string, cwd: string, scope: "global" | "workspace" = "workspace") {
   const manager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
   const errors = manager.drainErrors();
   if (errors.length) throw new Error("Cannot read Pi package settings", { cause: errors[0]!.error });
+  if (scope === "global") return { global: manager.getGlobalSettings(), project: {} };
   const trusted = new ProjectTrustStore(agentDir).get(cwd) ?? (manager.getDefaultProjectTrust() === "always");
   if (trusted) manager.setProjectTrusted(true);
   if (manager.drainErrors().length) throw new Error("Cannot read trusted project package settings");
@@ -163,17 +173,20 @@ function readPackageSettings(agentDir: string, cwd: string) {
 /** Reads only package declarations, never auth, environment, or resource contents.
  * Session-only trust overrides are not discoverable here. A host with resolved
  * session state should prefer its own pinned PackageSpec[] over rediscovery.
+ * Global scope skips project settings and trust entirely; workspace is the default.
  */
-export async function readLocalPackageCatalog(agentDir = getAgentDir(), cwd = process.cwd()): Promise<PackageCatalog> {
+export async function readLocalPackageCatalog(
+  agentDir = getAgentDir(), cwd = process.cwd(), options: { scope?: "global" | "workspace" } = {},
+): Promise<PackageCatalog> {
   agentDir = resolve(agentDir);
   cwd = resolve(cwd);
-  const { global, project } = readPackageSettings(agentDir, cwd);
+  const { global, project } = readPackageSettings(agentDir, cwd, options.scope);
   const selected = new Map<string, { value: unknown; base: string; layered: boolean }>();
   const catalog: PackageCatalog = { packages: [], unsupported: [] };
   for (const [settings, base] of [[global, agentDir], [project, join(cwd, ".pi")]] as const) {
     for (const key of resources) {
       const paths = settings[key];
-      if (Array.isArray(paths)) for (const path of paths) catalog.unsupported.push(unsupportedLabel(path));
+      if (Array.isArray(paths)) for (const path of paths) catalog.unsupported.push(resourceLabel(path));
     }
     for (const value of entries(settings as Record<string, unknown>)) {
       const key = identity(value);
@@ -206,6 +219,7 @@ export async function readLocalPackageCatalog(agentDir = getAgentDir(), cwd = pr
       catalog.unsupported.push(unsupportedLabel(value));
     }
   }
+  catalog.unsupported = [...new Set(catalog.unsupported)];
   return catalog;
 }
 

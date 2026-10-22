@@ -36,6 +36,18 @@ Sanitize remote text before rendering; truncate by visible terminal columns.
 
 ## Progress And Safety
 
+After connection, a screen-only browse scope unmounts the surrounding local
+transcript, startup header, widgets and footer. It mounts Pi's existing editor
+container so native progress, confirmations and custom screens keep working.
+Cancellation and failure restore the original mounts without replacing the local
+runtime or changing its history. Remote attachment hides the local startup header
+until disconnect.
+
+Host-level extension checks and approved updates finish before opening the
+session browser. Deferred-update notices are rendered inside the browser rather
+than sent only to its hidden local notification area. Unsupported local resources
+are deduplicated and summarized. Legacy and busy refusals do not close sessions.
+
 Use native Pi loaders, without invented percentages, for remote waits. The SSH
 loader names each connection stage. Browser and folder reads can be dismissed;
 late replies cannot complete a disposed screen. Unabortable writes remain visible

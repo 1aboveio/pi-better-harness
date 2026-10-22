@@ -132,7 +132,7 @@ export async function chooseConnectionTransfer(ui: Pick<ExtensionUIContext, "sel
 }
 
 /** The browser's creation context is not a constraint on existing sessions. */
-export async function chooseRemoteSession(client: DaemonClient, ui: ExtensionUIContext, host: string, options: { cwd?: string; sessionId?: string; allowTransfer?: boolean }): Promise<RemoteSessionChoice | undefined> {
+export async function chooseRemoteSession(client: DaemonClient, ui: ExtensionUIContext, host: string, options: { cwd?: string; sessionId?: string; allowTransfer?: boolean; notice?: string }): Promise<RemoteSessionChoice | undefined> {
   if (options.sessionId) {
     const sessionId = options.sessionId;
     const result = await showRemoteProgress(ui, host, "Finding remote session...", () => resolveSession(client, sessionId));
@@ -150,11 +150,10 @@ export async function chooseRemoteSession(client: DaemonClient, ui: ExtensionUIC
     creationCwd = root;
   }
   const choice = await browseRemoteSessions(ui, client, host, {
-    cwd: creationCwd, allowTransfer: options.allowTransfer,
+    cwd: creationCwd, allowTransfer: options.allowTransfer, notice: options.notice,
     selectFolder: initialPath => {
       if (client.server && !client.server.capabilities?.includes("folder-browser-v1")) {
-        ui.notify("Update pi-better-server on the remote host to browse or create folders. Existing sessions are still available.", "warning");
-        return Promise.resolve(undefined);
+        return Promise.reject(new Error("Update pi-better-server on the remote host to browse or create folders. Existing sessions are still available."));
       }
       return browseRemoteFolders(ui, client, host, initialPath);
     },
@@ -165,11 +164,12 @@ export async function chooseRemoteSession(client: DaemonClient, ui: ExtensionUIC
   return choice.action === "create" ? { action: "create", cwd } : { action: "transfer", copy: choice.copy, cwd };
 }
 
-async function connectHost(options: RemoteOptions, local: LocalFrontend): Promise<void> {
+export async function connectHost(options: RemoteOptions, local: LocalFrontend): Promise<void> {
   const { ui, bridge } = local;
   let target: Target | undefined;
   let client: DaemonClient | undefined;
   let attached = false;
+  let endBrowse: (() => void) | undefined;
   const closeInitialTransport = async () => {
     const initialClient = client;
     const initialTarget = target;
@@ -214,36 +214,34 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
     target = setup.target;
     client = setup.client;
     remoteDir = target.serverDir ?? remoteDir;
+    endBrowse = bridge.beginBrowse();
     await rememberRemoteHost(options.host, remoteDir).catch((error) => ui.notify(`Could not remember remote host: ${error instanceof Error ? error.message : String(error)}`, "warning"));
+    const notices: string[] = [];
     if (deferredUpgrade) {
+      notices.push("Server update deferred; the current daemon and its sessions were left running.");
       const safe = client.server?.capabilities?.includes("safe-upgrade-v1");
       ui.notify(safe ? `Server update staged; activation is deferred. ${deferredUpgrade}`
         : `Server update staged. The current daemon cannot perform a verified automatic handoff and was left running. ${deferredUpgrade}`, safe ? "info" : "warning");
     }
     let connection = client;
     ui.setStatus("pi-remote", `SSH: ${options.host} (sessions)`);
+    if (!await syncPackages(connection, local, undefined, { scope: "global", host: options.host, onNotice: message => notices.push(message) })) return;
     let choice: Exclude<RemoteSessionChoice, { action: "transfer" }> | undefined;
-    let transferred = false;
     for (;;) {
-      const selected = await chooseRemoteSession(connection, ui, options.host, { ...options, allowTransfer: !!local.localSession });
+      const selected = await chooseRemoteSession(connection, ui, options.host, { ...options, allowTransfer: !!local.localSession, notice: notices.join(" ") });
       if (!selected || selected.action !== "transfer") { choice = selected; break; }
       const transferChoice = await chooseConnectionTransfer(ui, selected.copy);
       if (!transferChoice || transferChoice === "browse") continue;
       const result = await runRemoteTransfer({
         direction: "push", host: options.host, remoteDir,
         copy: transferChoice.copy, includeWorkspace: transferChoice.includeWorkspace, cwd: selected.cwd,
-      }, { ui, cwd: local.cwd, localSession: local.localSession, resolveTarget: local.dependencies.resolveTarget,
-        beforeTransfer: async (client, destination) => {
-          if (!await syncPackages(client, local, destination)) throw new Error("Remote extension check cancelled; no transfer was started.");
-        } });
+      }, { ui, cwd: local.cwd, localSession: local.localSession, resolveTarget: local.dependencies.resolveTarget });
       if (!result) continue;
       choice = { action: "attach", cwd: result.cwd, sessionId: result.sessionId };
-      transferred = true;
       break;
     }
     if (!choice) return;
     let cwd = choice.cwd;
-    if (!transferred && !await syncPackages(connection, local, cwd)) return;
     let sessionId = choice.action === "attach" ? choice.sessionId : "";
     const selectedChoice = choice;
     const opened = await showRemoteProgress(ui, options.host, choice.action === "create" ? "Starting remote session..." : "Opening remote session...", async (): Promise<RemoteClientSession> => {
@@ -293,11 +291,13 @@ async function connectHost(options: RemoteOptions, local: LocalFrontend): Promis
     const dispose = remote.dispose.bind(remote);
     remote.dispose = () => { dispose(); void closeInitialTransport().catch(() => undefined); };
     await bridge.attach(remote);
+    endBrowse = undefined;
     attached = true;
     ui.setStatus("pi-remote", `SSH: ${options.host}`);
     ui.notify(`Attached to ${options.host}:${cwd}. /remote opens the server's sessions; /remote disconnect returns locally.`, "info");
   } finally {
-    if (!attached) { await closeInitialTransport(); ui.setStatus("pi-remote", undefined); }
+    try { endBrowse?.(); }
+    finally { if (!attached) { await closeInitialTransport(); ui.setStatus("pi-remote", undefined); } }
   }
 }
 
@@ -340,15 +340,33 @@ export async function pullAttachedSession(
   return result;
 }
 
-export async function syncPackages(client: DaemonClient, local: Pick<LocalFrontend, "cwd" | "ui">, cwd: string): Promise<boolean> {
+export async function syncPackages(
+  client: DaemonClient, local: Pick<LocalFrontend, "cwd" | "ui">, cwd?: string,
+  options: { scope?: "global"; host?: string; onNotice?: (message: string) => void } = {},
+): Promise<boolean> {
   const { ui } = local;
-  const catalogs = await showRemoteProgress(ui, "Remote", "Checking workspace extensions...", async () => ({
+  const notice = (message: string) => {
+    if (options.onNotice) options.onNotice(message);
+    else ui.notify(message, "warning");
+  };
+  const host = options.host ?? "Remote";
+  const global = options.scope === "global";
+  if (global && client.server && !client.server.capabilities?.includes("global-package-sync-v1")) {
+    notice("Extension sync deferred: this daemon does not support safe host-level updates. Existing sessions were left running; continuing with installed extensions.");
+    return true;
+  }
+  const target = global ? { scope: "global" } : { cwd };
+  const catalogs = await showRemoteProgress(ui, host, global ? "Checking remote extensions..." : "Checking workspace extensions...", async () => ({
     localCatalog: await readLocalPackageCatalog(undefined, local.cwd),
-    remote: (await client.call({ type: "client_packages", cwd })).data as PackageCatalog,
+    remote: (await client.call({ type: "client_packages", ...target })).data as PackageCatalog,
   }));
   if (!catalogs) return false;
   const { localCatalog, remote } = catalogs.value;
-  if (localCatalog.unsupported.length) ui.notify(`Local-only extensions will not be copied: ${localCatalog.unsupported.join(", ")}`, "warning");
+  const unsupported = [...new Set(localCatalog.unsupported)];
+  if (unsupported.length) {
+    const visible = unsupported.slice(0, 3).map(value => value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 100));
+    notice(`Local-only resources are not synced: ${visible.join(", ")}${unsupported.length > visible.length ? ` (+${unsupported.length - visible.length} more)` : ""}.`);
+  }
   const plan = planPackageSync(localCatalog.packages, remote.packages);
   const changes = [...plan.install];
   for (const conflict of plan.conflicts ?? []) {
@@ -359,9 +377,19 @@ export async function syncPackages(client: DaemonClient, local: Pick<LocalFronte
     ...plan.install.map((entry) => `Install: ${JSON.stringify(entry)}`),
     ...(plan.conflicts ?? []).map((entry) => `Replace: ${JSON.stringify(entry.remote)}\nWith: ${JSON.stringify(entry.local)}`),
   ].join("\n\n");
-  const approved = await ui.confirm("Sync remote extensions?", `Target workspace: ${cwd}\n\n${preview}\n\nOnly these package declarations are synced. Credentials, provider settings, and local extension source are not copied. Remote-only packages are kept. Trusted project overrides must be managed on the remote host.`);
+  const targetLabel = global ? "Target: remote host global extensions" : `Target workspace: ${cwd}`;
+  const approved = await ui.confirm("Sync remote extensions?", `${targetLabel}\n\n${preview}\n\nOnly these package declarations are synced. Credentials, provider settings, and local extension source are not copied. Remote-only packages are kept. Trusted project overrides must be managed on the remote host.`);
   if (!approved) return true;
-  await showRemoteProgress(ui, "Remote", "Installing approved remote extensions...", () => client.call({ type: "client_packages_install", cwd, packages: changes }), { cancellable: false });
+  try {
+    await showRemoteProgress(ui, host, "Installing approved remote extensions...", () => client.call({ type: "client_packages_install", ...target, packages: changes }), { cancellable: false });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const deferred = /^Close remote daemon sessions before updating extensions[;.]/.test(message)
+      || /^Wait for remote (?:model|work|dialogs|activity observation)\b/.test(message)
+      || /^Remote session (?:operations are already|maintenance is) in progress(?:[;. ]|$)/.test(message);
+    if (!deferred) throw error;
+    notice("Extension update deferred by the remote daemon. No sessions were closed; continuing with installed extensions. Retry when remote work is idle or after migrating the legacy daemon.");
+  }
   return true;
 }
 

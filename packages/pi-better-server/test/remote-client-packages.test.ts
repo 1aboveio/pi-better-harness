@@ -88,10 +88,109 @@ test("catalog pins installed npm versions and exports only package fields, not s
     { source: "npm:@example/tools@1.2.3", ...filters },
     { source: "npm:ranged@2.5.0" }, { source: "npm:tagged@3.0.0-beta.2" },
   ]);
-  assert.deepEqual(catalog.unsupported, ["/private/extension.ts", "./private-extension.ts", "[unsupported package source]", "[unsupported package source]", "npm:missing@1.0.0"]);
+  assert.deepEqual(catalog.unsupported, ["/private/extension.ts", "./private-extension.ts", "[unsupported package source]", "npm:missing@1.0.0"]);
   assert.doesNotMatch(JSON.stringify(catalog), /SECRET|secret/);
   assert.equal(readFileSync(f.settings, "utf8"), before);
   assert.equal(readJson(join(f.agentDir, "auth.json")).token, "auth-secret");
+});
+
+test("catalog summarizes 80 resource selectors and bare paths without hiding local directories", async t => {
+  const f = fixture(t);
+  const bare = Array.from({ length: 40 }, (_, i) => `skills/local-${i}/SKILL.md`);
+  const selectors = Array.from({ length: 40 }, (_, i) => `${["", "!", "+", "-"][i % 4]}skills/group-${i}/*`);
+  const localDirs = ["./local-tools", "/private/local-skills"];
+  json(f.settings, { skills: [...selectors, ...bare], packages: [...localDirs, ...localDirs] });
+  json(join(f.cwd, ".pi", "settings.json"), { skills: [...selectors, ...bare], extensions: [localDirs[0]] });
+  new ProjectTrustStore(f.agentDir).set(f.root, true);
+
+  const catalog = await readLocalPackageCatalog(f.agentDir, f.cwd);
+  assert.deepEqual(catalog.packages, []);
+  assert.deepEqual(new Set(catalog.unsupported), new Set(["[local resource selectors]", ...bare, ...localDirs]));
+  assert.equal(catalog.unsupported.length, new Set(catalog.unsupported).size);
+});
+
+test("catalog keeps safe resource paths and deduplicates redacted registry, URL and control entries", async t => {
+  const f = fixture(t);
+  const unsafe = [
+    "registry:private?token=REGISTRY-SECRET",
+    "https://user:URL-SECRET@example.com/tools?token=QUERY-SECRET",
+    "git:https://user:GIT-SECRET@example.com/team/tools",
+    "./https://user:PATH-SECRET@example.com/tools",
+    "/private/tools?token=PATH-QUERY-SECRET",
+    "skills/hidden\u001b[31mCONTROL-SECRET",
+    "skills/hidden\u009bCONTROL-SECRET",
+    "skills/hidden\u202eCONTROL-SECRET",
+  ];
+  json(f.settings, {
+    extensions: ["extensions/local tool.ts", "npm:missing@latest", ...unsafe],
+    skills: ["skills", "skills", ...unsafe],
+    prompts: ["+prompts/review.md", "!prompts/old.md"],
+    themes: ["themes/*.json", "-themes/old.json"],
+    packages: ["npm:missing@latest", unsafe[1], unsafe[1]],
+  });
+  const catalog = await readLocalPackageCatalog(f.agentDir, f.cwd);
+  assert.deepEqual(catalog, {
+    packages: [],
+    unsupported: ["extensions/local tool.ts", "npm:missing@latest", "[unsupported package source]", "skills", "[local resource selectors]"],
+  });
+  assert.doesNotMatch(JSON.stringify(catalog), /SECRET/);
+});
+
+test("global catalog omits trusted project declarations without reading project settings or trust", async t => {
+  const f = fixture(t);
+  json(f.settings, { defaultProjectTrust: "always", packages: ["npm:shared"], skills: ["global-skills"] });
+  const projectPath = join(f.cwd, ".pi", "settings.json");
+  json(projectPath, { packages: ["npm:shared", "npm:project-only"], skills: ["project-skills"] });
+  f.installed(f.agentDir, "shared", "1.0.0");
+  f.installed(join(f.cwd, ".pi"), "shared", "2.0.0");
+  f.installed(join(f.cwd, ".pi"), "project-only", "3.0.0");
+  const trust = new ProjectTrustStore(f.agentDir);
+  trust.set(f.root, true);
+  const trustPath = join(f.agentDir, "trust.json");
+  const before = [f.settings, projectPath, trustPath].map(path => readFileSync(path, "utf8"));
+  const expected = { packages: [{ source: "npm:shared@1.0.0" }], unsupported: ["global-skills"] };
+  assert.deepEqual(await readLocalPackageCatalog(f.agentDir, f.cwd, { scope: "global" }), expected);
+  assert.deepEqual([f.settings, projectPath, trustPath].map(path => readFileSync(path, "utf8")), before);
+  assert.deepEqual((await readLocalPackageCatalog(f.agentDir, f.cwd, { scope: "workspace" })).packages, [
+    { source: "npm:shared@2.0.0" }, { source: "npm:project-only@3.0.0" },
+  ]);
+
+  writeFileSync(projectPath, "{ broken");
+  await assert.rejects(readLocalPackageCatalog(f.agentDir, f.cwd), /Cannot read trusted project package settings/);
+  // An existing lock makes even an attempted project/trust read observable.
+  mkdirSync(`${projectPath}.lock`);
+  mkdirSync(`${trustPath}.lock`);
+  assert.deepEqual(await readLocalPackageCatalog(f.agentDir, f.cwd, { scope: "global" }), expected);
+  assert.equal(readFileSync(projectPath, "utf8"), "{ broken");
+  assert.equal(readFileSync(trustPath, "utf8"), before[2]);
+  assert.deepEqual(readdirSync(`${projectPath}.lock`), []);
+  assert.deepEqual(readdirSync(`${trustPath}.lock`), []);
+});
+
+test("workspace catalog hides untrusted project resource paths and retains SDK skill migration", async t => {
+  const f = fixture(t);
+  const localDirs = ["skills/local", "~/shared-skills"];
+  json(f.settings, { defaultProjectTrust: "always", skills: { customDirectories: localDirs } });
+  const projectPath = join(f.cwd, ".pi", "settings.json");
+  json(projectPath, { skills: [...localDirs, "project/PRIVATE-RESOURCE"], packages: ["./PRIVATE-PACKAGE"] });
+  const trust = new ProjectTrustStore(f.agentDir);
+  trust.set(f.cwd, false);
+  const expected = { packages: [], unsupported: localDirs };
+  assert.deepEqual(await readLocalPackageCatalog(f.agentDir, f.cwd), expected);
+  writeFileSync(projectPath, "{ broken");
+  assert.deepEqual(await readLocalPackageCatalog(f.agentDir, f.cwd, { scope: "workspace" }), expected);
+  trust.set(f.cwd, true);
+  await assert.rejects(readLocalPackageCatalog(f.agentDir, f.cwd), /Cannot read trusted project package settings/);
+});
+
+test("global catalog still rejects malformed global settings and creates no project or trust files", async t => {
+  const f = fixture(t);
+  json(f.settings, { packages: [] });
+  assert.deepEqual(await readLocalPackageCatalog(f.agentDir, f.cwd, { scope: "global" }), { packages: [], unsupported: [] });
+  assert.deepEqual(readdirSync(f.agentDir), ["settings.json"]);
+  assert.deepEqual(readdirSync(f.cwd), []);
+  writeFileSync(f.settings, "{ broken");
+  await assert.rejects(readLocalPackageCatalog(f.agentDir, f.cwd, { scope: "global" }), /Cannot read Pi package settings/);
 });
 
 test("project declarations require Pi trust, replace global entries, and use the project Pi npm root", async t => {

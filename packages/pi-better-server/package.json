@@ -1,6 +1,6 @@
 {
   "name": "pi-better-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Daemon that hosts Pi agent sessions behind a local Unix socket with session-addressed Pi RPC.",
   "license": "MIT",
   "type": "module",

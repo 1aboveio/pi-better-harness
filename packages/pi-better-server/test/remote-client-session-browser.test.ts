@@ -311,6 +311,23 @@ test("local transfer shortcuts leave room for the selected session in a short te
   }
 });
 
+test("connection notices stay inside the browser and do not displace selection or actions on short screens", () => {
+  const state = new RemoteSessionBrowserState();
+  state.replaceSessions([summary("selected", { name: "Selected" })]);
+  for (const [width, height] of [[100, 30], [32, 12], [20, 10]] as const) {
+    const screen = new RemoteSessionBrowser(state, "r5", {
+      theme, rows: () => height, requestRender() {}, done() {},
+    }, { allowTransfer: true, notice: "Extension update deferred; existing remote sessions were left running." });
+    const lines = screen.render(width);
+    const output = plain(lines);
+    assert.match(output, /> Selected/);
+    assert.match(output, /Esc back/);
+    assert.ok(lines.length <= height - 3);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    if (width === 100) assert.match(output, /Extension update deferred/);
+  }
+});
+
 test("empty, loading, and single-session layouts fit short viewports without hiding tabs or action legends", () => {
   for (const [width, height] of [[32, 12], [20, 10], [100, 8]] as const) {
     for (const variant of ["empty", "loading", "active", "closed"] as const) {
