@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { createAgentSession, SessionManager, type AgentSession, type CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, SettingsManager, SessionManager, type AgentSession, type CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
+import { HostMaintenance } from "./maintenance.ts";
+import { SessionActivity } from "./session-activity.ts";
 import { readGitBranch } from "./git.ts";
 import { join } from "node:path";
 import { EventLog, type EventLogOptions } from "./event-log.ts";
@@ -20,6 +22,10 @@ export interface IndexEntry {
   model?: { provider: string; modelId: string };
   createdAt: string;
   updatedAt: string;
+  /** Meaningful activity, independent of metadata writes. Offline time counts as idle. */
+  lastActivityAt?: string;
+  /** Recovery marker only, never evidence that interrupted work should be replayed. */
+  activityBusy?: boolean;
 }
 
 interface IndexFile {
@@ -31,6 +37,9 @@ export type CreateSessionRequest = Extract<DaemonCommand, { type: "create_sessio
 
 export interface SessionRegistryOptions {
   serverDir: string;
+  /** Inactivity expiry; zero disables it. Defaults to 24 hours. */
+  sessionIdleMs?: number;
+  now?: () => number;
   /** Extra `createAgentSession` options for every hosted session (resource loader, tools, ...). */
   sessionOptions?: Omit<CreateAgentSessionOptions, "cwd" | "sessionManager">;
   log?: (message: string) => void;
@@ -55,18 +64,58 @@ export class SessionRegistry {
   private readonly resumeErrors = new Map<string, string>();
   private readonly log: (message: string) => void;
   private readonly options: SessionRegistryOptions;
+  private readonly now: () => number;
+  private readonly sessionIdleMs: number;
+  private creating = 0;
+  private stopping = false;
+  private shutdownTask: Promise<void> | undefined;
   /** Which sessions this daemon may write to; fenced and moved-away sessions are not resumed or opened. */
   readonly ownership: OwnershipStore;
+  readonly maintenance: HostMaintenance;
 
   constructor(options: SessionRegistryOptions) {
     this.options = options;
+    this.maintenance = new HostMaintenance(this);
+    this.now = options.now ?? Date.now;
+    this.sessionIdleMs = options.sessionIdleMs ?? 86_400_000;
+    if (!Number.isFinite(this.sessionIdleMs) || this.sessionIdleMs < 0) throw new Error("sessionIdleMs must be a non-negative finite number");
     this.log = options.log ?? (() => undefined);
     this.ownership = new OwnershipStore(ownershipPathFor(options.serverDir));
     this.load();
   }
 
+  /** Owned running entries include failed resumes: they may still be recoverable. */
+  get activeCount(): number {
+    return [...this.entries.values()].filter((entry) => entry.status === "running" && !this.ownership.blockedReason(entry.sessionId)).length;
+  }
+
+  get hasPendingOperations(): boolean {
+    return this.creating > 0 || this.operations.size > 0 || this.pending.size > 0 || this.releasing.size > 0;
+  }
+
+  /** Recheck under the same serialization as open/close; no await between the final check and fencing. */
+  async expireIdle(now = this.now()): Promise<string[]> {
+    if (this.sessionIdleMs === 0 || this.maintenance.busy || this.stopping) return [];
+    const expired = await Promise.all([...this.entries.keys()].map((sessionId) => this.serialize(sessionId, async () => {
+      const entry = this.entries.get(sessionId);
+      const hosted = this.live.get(sessionId);
+      if (!entry || entry.status !== "running" || !hosted || this.ownership.blockedReason(sessionId)) return undefined;
+      await hosted.refreshActivity();
+      if (this.ownership.blockedReason(sessionId)) return undefined;
+      this.workChanged(sessionId);
+      const last = Date.parse(entry.lastActivityAt ?? entry.updatedAt);
+      if (hosted.executionActive || hosted.activityChecking || !Number.isFinite(last) || now - last < this.sessionIdleMs) return undefined;
+      // dispose fences dispatch synchronously, including references fetched before this expiry.
+      await this.closeNow(sessionId);
+      return sessionId;
+    })));
+    return expired.filter((id): id is string => id !== undefined);
+  }
+
   /** Resume every session the index marks running, at its last persisted entry. */
   async resumeAll(): Promise<void> {
+    this.maintenance.assertAdmission();
+    if (this.stopping) throw new Error("Session registry is shutting down");
     const running = [...this.entries.values()].filter((entry) => entry.status === "running" && !this.ownership.blockedReason(entry.sessionId));
     await Promise.all(
       running.map(async (entry) => {
@@ -94,29 +143,39 @@ export class SessionRegistry {
   }
 
   async create(request: CreateSessionRequest): Promise<SessionSummary> {
+    this.maintenance.assertAdmission();
+    if (this.stopping) throw new Error("Session registry is shutting down");
+    this.creating++;
+    try { return await this.createNow(request); }
+    finally { this.creating--; }
+  }
+
+  private async createNow(request: CreateSessionRequest): Promise<SessionSummary> {
     const sessionId = randomUUID();
     const cwd = request.cwd ?? process.cwd();
     const manager = SessionManager.create(cwd, undefined, { id: sessionId });
-    const now = new Date().toISOString();
-    const entry: IndexEntry = { sessionId, cwd, sessionFile: manager.getSessionFile() ?? "", status: "running", createdAt: now, updatedAt: now };
+    const now = new Date(this.now()).toISOString();
+    const entry: IndexEntry = { sessionId, cwd, sessionFile: manager.getSessionFile() ?? "", status: "running", createdAt: now, updatedAt: now, lastActivityAt: now };
     this.entries.set(sessionId, entry);
-    try {
-      const hosted = await this.host(entry, manager);
-      if (request.model) {
-        const models = await hosted.session.modelRuntime.getAvailable();
-        const model = models.find((m) => m.provider === request.model?.provider && m.id === request.model?.modelId);
-        if (!model) throw new Error(`Model not found: ${request.model.provider}/${request.model.modelId}`);
-        await hosted.session.setModel(model);
+    return this.serialize(sessionId, async () => {
+      try {
+        const hosted = await this.host(entry, manager, !request.model && !this.options.sessionOptions?.model);
+        if (request.model) {
+          const models = await hosted.session.modelRuntime.getAvailable();
+          const model = models.find((m) => m.provider === request.model?.provider && m.id === request.model?.modelId);
+          if (!model) throw new Error(`Model not found: ${request.model.provider}/${request.model.modelId}`);
+          await hosted.session.setModel(model);
+        }
+        if (request.thinkingLevel) hosted.session.setThinkingLevel(request.thinkingLevel);
+        if (request.name) hosted.session.setSessionName(request.name);
+        this.touch(sessionId);
+      } catch (error) {
+        await this.discard(sessionId);
+        throw error;
       }
-      if (request.thinkingLevel) hosted.session.setThinkingLevel(request.thinkingLevel);
-      if (request.name) hosted.session.setSessionName(request.name);
-      this.touch(sessionId);
-    } catch (error) {
-      await this.discard(sessionId);
-      throw error;
-    }
-    this.persist();
-    return this.summarize(entry);
+      this.persist();
+      return this.summarize(entry);
+    });
   }
 
   /** Attach to a hosted session, or bring a closed / not-yet-resumed one back to life. */
@@ -124,12 +183,43 @@ export class SessionRegistry {
     return this.serialize(sessionId, () => this.openNow(sessionId));
   }
 
+  /** Rename without hosting a closed session or changing its lifecycle state. */
+  rename(sessionId: string, name: string): Promise<SessionSummary> {
+    return this.serialize(sessionId, async () => {
+      const entry = this.entries.get(sessionId);
+      if (!entry) throw new Error(`Unknown session: ${sessionId}`);
+      const blocked = this.ownership.blockedReason(sessionId);
+      if (blocked) throw new Error(blocked);
+      if (typeof name !== "string" || !name.trim()) throw new Error("name must be a non-empty string");
+      const trimmed = name.trim();
+      const hosted = this.live.get(sessionId);
+      if (hosted) {
+        hosted.session.setSessionName(trimmed);
+        this.touch(sessionId, false);
+      } else {
+        let savedName = trimmed;
+        if (entry.sessionFile && existsSync(entry.sessionFile)) {
+          const manager = SessionManager.open(entry.sessionFile, undefined, entry.cwd);
+          manager.appendSessionInfo(trimmed);
+          savedName = manager.getSessionName() ?? trimmed;
+        }
+        entry.name = savedName;
+        entry.updatedAt = new Date(this.now()).toISOString();
+        this.persist();
+      }
+      return this.summarize(entry);
+    });
+  }
+
   /**
-   * Run open / close / retire / release / forget for one session one after another,
+   * Run open / rename / close / retire / release / forget for one session one after another,
    * so each sees the settled result of the one before and the last call wins:
    * `closed` and a live session can never coexist once the calls have settled.
    */
   private serialize<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+    if (this.stopping) return Promise.reject(new Error("Session registry is shutting down"));
+    try { this.maintenance.assertAdmission(); }
+    catch (error) { return Promise.reject(error); }
     const prior = this.operations.get(sessionId) ?? Promise.resolve();
     const result = prior.then(run, run);
     const tail = result.catch(() => undefined);
@@ -153,21 +243,25 @@ export class SessionRegistry {
       this.resumeErrors.delete(sessionId);
       this.persist();
     }
+    this.touch(sessionId);
     return this.summarize(entry);
   }
 
   /** Stop the session for good: abort any turn, release it, and do not resume it on boot. */
   close(sessionId: string): Promise<void> {
     if (!this.entries.has(sessionId)) return Promise.reject(new Error(`Unknown session: ${sessionId}`));
-    return this.serialize(sessionId, async () => {
-      const entry = this.entries.get(sessionId);
-      if (!entry) throw new Error(`Unknown session: ${sessionId}`);
-      await this.releaseLive(sessionId, true);
-      entry.status = "closed";
-      entry.updatedAt = new Date().toISOString();
-      this.resumeErrors.delete(sessionId);
-      this.persist();
-    });
+    return this.serialize(sessionId, () => this.closeNow(sessionId));
+  }
+
+  private async closeNow(sessionId: string): Promise<void> {
+    const entry = this.entries.get(sessionId);
+    if (!entry) throw new Error(`Unknown session: ${sessionId}`);
+    await this.releaseLive(sessionId, true);
+    entry.status = "closed";
+    entry.activityBusy = false;
+    entry.updatedAt = new Date(this.now()).toISOString();
+    this.resumeErrors.delete(sessionId);
+    this.persist();
   }
 
   /** The index row for a session, or undefined. */
@@ -187,6 +281,7 @@ export class SessionRegistry {
    */
   private releaseLive(sessionId: string, abort: boolean): Promise<void> {
     const prior = this.releasing.get(sessionId);
+    this.live.get(sessionId)?.fence();
     const run = (async () => {
       await prior;
       await this.pending.get(sessionId)?.catch(() => undefined);
@@ -208,19 +303,23 @@ export class SessionRegistry {
       const entry = this.entries.get(sessionId);
       if (entry) {
         entry.status = "closed";
-        entry.updatedAt = new Date().toISOString();
+        entry.updatedAt = new Date(this.now()).toISOString();
         this.persist();
       }
     });
   }
 
   /** Dry-run the provider's credentials as a session on this daemon would resolve them. */
-  checkProviderAuth(provider: string): Promise<void> {
-    return checkProviderAuth(provider, this.options.serverDir, this.options.sessionOptions);
+  async checkProviderAuth(provider: string): Promise<void> {
+    const release = this.maintenance.enterSessionOperation();
+    try { await checkProviderAuth(provider, this.options.serverDir, this.options.sessionOptions); }
+    finally { release(); }
   }
 
   /** Add (or replace a closed) session that arrived from another daemon, then host it. */
   async adopt(entry: IndexEntry): Promise<SessionSummary> {
+    this.maintenance.assertAdmission();
+    if (this.stopping) throw new Error("Session registry is shutting down");
     if (this.live.has(entry.sessionId)) throw new Error(`Session ${entry.sessionId} is already live here`);
     this.entries.set(entry.sessionId, { ...entry, status: "running" });
     try {
@@ -243,10 +342,15 @@ export class SessionRegistry {
   }
 
   /** Release every live session without changing what the index says should be running. */
-  async shutdown(): Promise<void> {
-    const hosted = [...this.live.values()];
-    this.live.clear();
-    await Promise.all(hosted.map((session) => session.dispose({ abort: true })));
+  shutdown(): Promise<void> {
+    this.stopping = true;
+    this.shutdownTask ??= (async () => {
+      await Promise.allSettled([...this.operations.values(), ...this.pending.values(), ...this.releasing.values()]);
+      const hosted = [...this.live.values()];
+      this.live.clear();
+      await Promise.all(hosted.map((session) => session.dispose({ abort: true })));
+    })();
+    return this.shutdownTask;
   }
 
   private async discard(sessionId: string): Promise<void> {
@@ -256,29 +360,114 @@ export class SessionRegistry {
     if (hosted) await hosted.dispose({ abort: true });
   }
 
-  private host(entry: IndexEntry, manager?: SessionManager): Promise<HostedSession> {
+  private host(entry: IndexEntry, manager?: SessionManager, useDefaultModel = false): Promise<HostedSession> {
     const releasing = this.releasing.get(entry.sessionId);
-    if (releasing) return releasing.then(() => this.host(entry, manager));
+    if (releasing) return releasing.then(() => this.host(entry, manager, useDefaultModel));
     const existing = this.live.get(entry.sessionId);
     if (existing) return Promise.resolve(existing);
     const inFlight = this.pending.get(entry.sessionId);
     if (inFlight) return inFlight;
-    const started = this.start(entry, manager).finally(() => this.pending.delete(entry.sessionId));
+    const started = this.start(entry, manager, useDefaultModel).finally(() => this.pending.delete(entry.sessionId));
     this.pending.set(entry.sessionId, started);
     return started;
   }
 
-  private async start(entry: IndexEntry, manager?: SessionManager): Promise<HostedSession> {
+  private async start(entry: IndexEntry, manager?: SessionManager, useDefaultModel = false): Promise<HostedSession> {
     const sessionManager = manager ?? this.reopen(entry);
-    const { session } = await createAgentSession({ ...this.options.sessionOptions, cwd: entry.cwd, sessionManager });
-    if (!manager) await this.restoreSavedModel(session, sessionManager, entry.model);
-    const events = new EventLog(join(this.options.serverDir, "events", `${entry.sessionId}.jsonl`), this.options.eventLog);
-    const hosted = new HostedSession(session, events, () => this.touch(entry.sessionId));
-    await hosted.bindUi();
-    this.live.set(entry.sessionId, hosted);
-    entry.sessionFile = session.sessionFile ?? entry.sessionFile;
-    this.persist();
-    return hosted;
+    this.maintenance.registerManager(sessionManager);
+    const activity = new SessionActivity(this.log, () => this.maintenance.enterTool(sessionManager), () => this.maintenance.enterSessionOperation());
+    let session: AgentSession | undefined;
+    let hosted: HostedSession | undefined;
+    try {
+      const supplied = this.options.sessionOptions;
+      const settingsManager = supplied?.settingsManager ?? SettingsManager.create(entry.cwd, supplied?.agentDir ?? getAgentDir());
+      let resourceLoader = supplied?.resourceLoader;
+      if (!resourceLoader) {
+        resourceLoader = new DefaultResourceLoader({
+          cwd: entry.cwd, agentDir: supplied?.agentDir ?? getAgentDir(), settingsManager, eventBus: activity.runtimeEvents,
+          extensionsOverride: (base) => ({
+            ...base,
+            extensions: base.extensions.map((extension) => ({
+              ...extension,
+              tools: new Map([...extension.tools].map(([name, tool]) => [name, { ...tool, definition: activity.wrapTool(tool.definition) }])),
+              commands: new Map([...extension.commands].map(([name, command]) => [name, { ...command, handler: activity.wrapCommand(command.handler) }])),
+            })),
+          }),
+        });
+        const reload = resourceLoader.reload.bind(resourceLoader);
+        resourceLoader.reload = async (...args) => {
+          // SDK 0.82 leaves pi.events subscriptions alive after session_shutdown.
+          // Revoke them before factories run, including listeners added during shutdown.
+          // extensionsOverride runs too late: new factories have already subscribed there.
+          activity.resetRuntime();
+          await reload(...args);
+        };
+        await resourceLoader.reload();
+      } else {
+        this.log(`session ${entry.sessionId}: automatic expiry disabled with a caller-owned resource loader because background activity is unobservable`);
+        activity.markUnobservable();
+      }
+      ({ session } = await createAgentSession({ ...supplied, customTools: supplied?.customTools?.map((tool) => activity.wrapTool(tool)), settingsManager, resourceLoader, cwd: entry.cwd, sessionManager }));
+      if (useDefaultModel) await this.initializeDefaultModel(session);
+      if (!manager) await this.restoreSavedModel(session, sessionManager, entry.model);
+      const events = new EventLog(join(this.options.serverDir, "events", `${entry.sessionId}.jsonl`), this.options.eventLog);
+      const runtime = new HostedSession(session, events, (kind) => {
+        if (this.live.get(entry.sessionId) !== runtime || runtime.isDisposed) return;
+        if (kind === "work") this.workChanged(entry.sessionId);
+        else this.touch(entry.sessionId, kind !== "metadata");
+      }, activity);
+      hosted = runtime;
+      await runtime.bindUi();
+      this.live.set(entry.sessionId, runtime);
+      // Restoring context never replays interrupted tools. A confirmed interrupted run gets a fresh window.
+      if (entry.activityBusy) entry.lastActivityAt = new Date(this.now()).toISOString();
+      entry.activityBusy = runtime.executionActive;
+      entry.sessionFile = session.sessionFile ?? entry.sessionFile;
+      this.persist();
+      return runtime;
+    } catch (error) {
+      this.maintenance.revokeManager(sessionManager);
+      this.live.delete(entry.sessionId);
+      activity.dispose();
+      if (hosted) await hosted.dispose({ abort: true });
+      else session?.dispose();
+      throw error;
+    }
+  }
+
+  /** Extension providers register after the SDK selects its initial model. Only new sessions use defaults. */
+  private async initializeDefaultModel(session: AgentSession): Promise<void> {
+    const provider = session.settingsManager.getDefaultProvider();
+    const modelId = session.settingsManager.getDefaultModel();
+    if (!provider || !modelId) return;
+    if (session.model?.provider === provider && session.model.id === modelId) return;
+    const model = session.modelRuntime.getModel(provider, modelId);
+    const unavailable = () => new Error(`Configured model ${provider}/${modelId} is unavailable. Check the daemon's provider extension, credentials, and default model settings, or request an explicit model.`);
+    if (!model) throw unavailable();
+    // Legacy SDK setters save defaults. Isolate only those writes, never mutate or
+    // restore shared settings while an asynchronous credential check is in flight.
+    const settings = session.settingsManager;
+    const descriptor = Object.getOwnPropertyDescriptor(session, "settingsManager");
+    const sessionSettings = new Proxy(settings, {
+      get(target, key) {
+        if (["setDefaultModelAndProvider", "setDefaultThinkingLevel", "setModelThinkingLevel"].includes(String(key))) return () => {};
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    try {
+      Object.defineProperty(session, "settingsManager", { value: sessionSettings, configurable: true, writable: true });
+      await session.setModel(model);
+      if (this.options.sessionOptions?.thinkingLevel !== undefined) {
+        session.setThinkingLevel(this.options.sessionOptions.thinkingLevel);
+      }
+    } catch {
+      // Auth failures can contain credential helper output. Do not expose it to clients.
+      throw unavailable();
+    } finally {
+      if (descriptor) Object.defineProperty(session, "settingsManager", descriptor);
+      else delete (session as unknown as Record<string, unknown>).settingsManager;
+    }
   }
 
   /**
@@ -296,13 +485,28 @@ export class SessionRegistry {
   /** Reopen at the last persisted entry; a session that never reached disk restarts empty under the same id. */
   private reopen(entry: IndexEntry): SessionManager {
     if (entry.sessionFile && existsSync(entry.sessionFile)) return SessionManager.open(entry.sessionFile, undefined, entry.cwd);
-    return SessionManager.create(entry.cwd, undefined, { id: entry.sessionId });
+    const manager = SessionManager.create(entry.cwd, undefined, { id: entry.sessionId });
+    // Setup-only sessions have no transcript; their indexed name must reach the new manager.
+    if (entry.name) manager.appendSessionInfo(entry.name);
+    return manager;
   }
 
-  private touch(sessionId: string): void {
+  private workChanged(sessionId: string): void {
+    const entry = this.entries.get(sessionId);
+    const hosted = this.live.get(sessionId);
+    if (!entry || !hosted || hosted.isDisposed) return;
+    const busy = hosted.executionActive;
+    if (busy === !!entry.activityBusy) return;
+    entry.activityBusy = busy;
+    if (!busy) this.touch(sessionId);
+    else this.persist();
+  }
+
+  private touch(sessionId: string, meaningful = true): void {
     const entry = this.entries.get(sessionId);
     if (!entry) return;
-    entry.updatedAt = new Date().toISOString();
+    entry.updatedAt = new Date(this.now()).toISOString();
+    if (meaningful) entry.lastActivityAt = entry.updatedAt;
     const name = this.live.get(sessionId)?.session.sessionName;
     if (name) entry.name = name;
     const model = this.live.get(sessionId)?.session.model;
@@ -339,7 +543,10 @@ export class SessionRegistry {
     const path = indexPathFor(this.options.serverDir);
     if (!existsSync(path)) return;
     const parsed = JSON.parse(readFileSync(path, "utf8")) as IndexFile;
-    for (const entry of parsed.sessions) this.entries.set(entry.sessionId, entry);
+    for (const entry of parsed.sessions) {
+      entry.lastActivityAt ??= entry.updatedAt;
+      this.entries.set(entry.sessionId, entry);
+    }
   }
 
   private persist(): void {

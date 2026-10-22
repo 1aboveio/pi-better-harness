@@ -35,13 +35,14 @@
   },
   "pi": {
     "extensions": [
-      "./src/detach/extension.ts"
+      "./src/detach/extension.ts",
+      "./src/remote-client/extension.ts"
     ]
   },
   "scripts": {
     "pretest": "node ../../scripts/sync-shared-ssh-core.mjs",
     "prepack": "node ../../scripts/sync-shared-ssh-core.mjs",
-    "test": "node --import tsx --import ../../scripts/isolate-registry.mjs --test test/*.test.ts",
+    "test": "node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm test"
   },

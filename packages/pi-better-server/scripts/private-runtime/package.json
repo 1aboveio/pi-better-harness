@@ -1,0 +1,17 @@
+{
+  "name": "pi-better-server-private-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-ai": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0"
+  },
+  "overrides": {
+    "@earendil-works/pi-agent-core": "1.2.0",
+    "@earendil-works/pi-mcp": "1.2.0",
+    "@earendil-works/pi-codemode": "1.2.0",
+    "@earendil-works/pi-telemetry": "1.2.0"
+  }
+}

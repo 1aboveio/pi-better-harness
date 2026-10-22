@@ -7,10 +7,10 @@
  * Target: begin -> write* -> commit (verify, rebuild workspace, import session) | abort.
  * The CLI drives both ends; see move/orchestrate.ts for the order and failure handling.
  */
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { createBundle, materializeWorkspace, sha256File, verifyBundle } from "./bundle.ts";
-import type { AgentMoveAdapter } from "./adapter.ts";
+import { assertExistingDirectory, type AgentMoveAdapter } from "./adapter.ts";
 import { InboundTransfer, readChunk } from "./transfer.ts";
 import type { MoveCommand } from "../protocol.ts";
 
@@ -27,10 +27,14 @@ export interface CommitAck {
   worktreeBytes: number;
   /** The rebuilt workspace matched the manifest's per-file checksums. */
   verified: true;
+  sessionFile?: string;
 }
 
 interface Inbound {
   sessionId: string;
+  sourceSessionId: string;
+  includeWorkspace?: boolean;
+  committing?: Promise<CommitAck>;
   cwd?: string;
   rebindProvider?: string;
   transfer: InboundTransfer;
@@ -60,7 +64,7 @@ export class MoveHost {
       case "move_fence":
         return { sessionId: command.sessionId, data: await this.fence(command.sessionId, checkId("moveId", command.moveId), command.waitMs ?? DEFAULT_FENCE_WAIT_MS) };
       case "move_export":
-        return { sessionId: command.sessionId, data: this.export(command.sessionId, checkId("moveId", command.moveId)) };
+        return { sessionId: command.sessionId, data: this.export(command.sessionId, checkId("moveId", command.moveId), command.includeWorkspace, command.compression) };
       case "move_read":
         return { data: this.read(checkId("moveId", command.moveId), command.offset, command.length) };
       case "move_retire":
@@ -77,8 +81,9 @@ export class MoveHost {
       case "move_commit":
         return { data: await this.commit(checkId("moveId", command.moveId)) };
       case "move_abort":
-        return { data: this.abort(checkId("moveId", command.moveId), command.sessionId) };
+        return { data: await this.abort(checkId("moveId", command.moveId), command.sessionId) };
       case "move_preflight": {
+        if (command.includeWorkspace === false && command.dir !== undefined) assertExistingDirectory(command.dir);
         const report = (await this.adapter.readiness?.(command)) ?? { checks: [] };
         return { data: { daemonId: this.adapter.ownership.daemonId, ...report } };
       }
@@ -99,11 +104,17 @@ export class MoveHost {
     }
     // No await between the last check and the fence, so no prompt can slip in.
     const record = adapter.ownership.fence(sessionId, moveId);
-    await adapter.stop(sessionId);
+    try {
+      await adapter.stop(sessionId);
+    } catch (error) {
+      adapter.ownership.unfence(sessionId, moveId);
+      await adapter.resume(sessionId);
+      throw error;
+    }
     return { daemonId: adapter.ownership.daemonId, epoch: record.epoch };
   }
 
-  private export(sessionId: string, moveId: string): { size: number; sha256: string; files: number; worktreeFiles: number; excluded: number } {
+  private export(sessionId: string, moveId: string, includeWorkspace?: boolean, compression?: "gzip" | "none"): { size: number; sha256: string; files: number; worktreeFiles: number; excluded: number } {
     const { adapter } = this;
     const record = adapter.ownership.get(sessionId);
     if (record.state !== "fenced" || record.moveId !== moveId) throw new Error(`Session ${sessionId} is not fenced by move ${moveId}`);
@@ -114,6 +125,8 @@ export class MoveHost {
     const outFile = join(dir, "bundle.tar");
     const manifest = createBundle({
       ...adapter.bundleSession(sessionId),
+      ...(includeWorkspace !== undefined ? { includeWorkspace } : {}),
+      ...(compression !== undefined ? { compression } : {}),
       outFile,
       ownership: { epoch: record.epoch, from: adapter.ownership.daemonId, moveId },
     });
@@ -146,6 +159,9 @@ export class MoveHost {
   private async begin(command: Extract<MoveCommand, { type: "move_begin" }>): Promise<void> {
     const moveId = checkId("moveId", command.moveId);
     const sessionId = checkId("sessionId", command.sessionId);
+    const sourceSessionId = command.sourceSessionId === undefined ? sessionId : checkId("sourceSessionId", command.sourceSessionId);
+    if ((command.copy === true) !== (sourceSessionId !== sessionId)) throw new Error("Copy requires a different destination session id; handoff must preserve the source id");
+    if (command.includeWorkspace === false) assertExistingDirectory(command.cwd);
     if (this.aborted.has(moveId)) throw new Error(`Move ${moveId} was aborted`);
     if (this.inbound.has(moveId)) throw new Error(`Move ${moveId} already started`);
     if (!Number.isInteger(command.size) || command.size < 0 || typeof command.sha256 !== "string") throw new Error("move_begin needs size and sha256");
@@ -155,50 +171,78 @@ export class MoveHost {
     // Preflight is async: a duplicate or an abort may have landed while it ran.
     if (this.aborted.has(moveId)) throw new Error(`Move ${moveId} was aborted`);
     if (this.inbound.has(moveId)) throw new Error(`Move ${moveId} already started`);
+    if ([...this.inbound.values()].some((item) => item.sessionId === sessionId && !item.ack)) throw new Error(`Session ${sessionId} already has an inbound transfer`);
+    this.adapter.assertCanImport(sessionId);
     const transfer = new InboundTransfer(join(this.movesDir, moveId, "bundle.tar"), command.size, command.sha256);
-    this.inbound.set(moveId, { sessionId, ...(command.cwd ? { cwd: command.cwd } : {}), ...(command.rebindProvider ? { rebindProvider: command.rebindProvider } : {}), transfer });
+    this.inbound.set(moveId, { sessionId, sourceSessionId, ...(command.includeWorkspace !== undefined ? { includeWorkspace: command.includeWorkspace } : {}), ...(command.cwd ? { cwd: command.cwd } : {}), ...(command.rebindProvider ? { rebindProvider: command.rebindProvider } : {}), transfer });
   }
 
   private write(moveId: string, offset: number, data: string): number {
     const inbound = this.inbound.get(moveId);
     if (!inbound) throw new Error(`Move ${moveId} was not started or was aborted`);
+    if (inbound.committing || inbound.ack) throw new Error(`Move ${moveId} is already committing or committed`);
     return inbound.transfer.write(offset, Buffer.from(data, "base64"));
   }
 
   private async commit(moveId: string): Promise<CommitAck> {
-    const { adapter } = this;
-    if (this.aborted.has(moveId)) throw new Error(`Move ${moveId} was aborted`);
     const inbound = this.inbound.get(moveId);
-    if (!inbound) throw new Error(`Move ${moveId} was not started or was aborted`);
-    if (inbound.ack) return inbound.ack; // retry after a lost reply
+    if (!inbound || this.aborted.has(moveId)) throw new Error(`Move ${moveId} was not started or was aborted`);
+    if (inbound.ack) return inbound.ack;
+    inbound.committing ??= this.commitOnce(moveId, inbound);
+    return inbound.committing;
+  }
+
+  private async commitOnce(moveId: string, inbound: Inbound): Promise<CommitAck> {
+    const { adapter } = this;
     const moveDir = join(this.movesDir, moveId);
     const { sessionId } = inbound;
 
     inbound.transfer.finish(); // size + sha256 of the whole archive
     const extracted = verifyBundle(inbound.transfer.path, join(moveDir, "work"));
     let dest: string | undefined;
+    let workspaceBuilt = false;
+    let destExisted = false;
     const previousOwnership = adapter.ownership.peek(sessionId);
     const snapshot = adapter.snapshot(sessionId);
     let acquired = false;
     try {
       const { manifest } = extracted;
-      if (manifest.session.id !== sessionId) throw new Error(`Bundle is for session ${manifest.session.id}, not ${sessionId}`);
+      if (manifest.session.id !== inbound.sourceSessionId) throw new Error(`Bundle is for session ${manifest.session.id}, not ${inbound.sourceSessionId}`);
+      if (manifest.ownership.moveId !== moveId) throw new Error("Bundle ownership moveId does not match the transfer");
+      const includeWorkspace = manifest.workspaceIncluded !== false;
+      if (inbound.includeWorkspace !== undefined && inbound.includeWorkspace !== includeWorkspace) throw new Error("Bundle workspace mode does not match the transfer request");
+      adapter.assertCanImport(sessionId);
+      if (previousOwnership?.state === "moved" && (previousOwnership.movedTo !== manifest.ownership.from || manifest.ownership.epoch <= previousOwnership.epoch)) {
+        throw new Error(`Session ${sessionId} is not returning from its known owner at a newer epoch`);
+      }
       adapter.checkBundle(manifest);
       const cwdName = typeof manifest.session.metadata?.cwdName === "string" ? manifest.session.metadata.cwdName : "workspace";
+      if (basename(cwdName) !== cwdName || cwdName === "." || cwdName === "..") throw new Error("Invalid workspace name in bundle");
       dest = resolve(inbound.cwd ?? join(this.serverDir, "workspaces", sessionId, cwdName));
-      const built = materializeWorkspace(extracted, dest);
+      let built;
+      if (includeWorkspace) {
+        destExisted = existsSync(dest);
+        built = materializeWorkspace(extracted, dest);
+        workspaceBuilt = true;
+      } else {
+        assertExistingDirectory(inbound.cwd);
+        built = { cwd: inbound.cwd, files: 0, bytes: 0 };
+      }
 
       const record = adapter.ownership.acquire(sessionId, manifest.ownership.epoch + 1, moveId);
       acquired = true;
-      await adapter.importSession({ sessionId, moveId, manifest, extractedDir: extracted.dir, cwd: built.cwd, ...(inbound.rebindProvider ? { rebindProvider: inbound.rebindProvider } : {}) });
-      inbound.ack = { sessionId, daemonId: adapter.ownership.daemonId, cwd: built.cwd, epoch: record.epoch, worktreeFiles: built.files, worktreeBytes: built.bytes, verified: true };
+      const imported = await adapter.importSession({ sessionId, sourceSessionId: inbound.sourceSessionId, moveId, manifest, extractedDir: extracted.dir, cwd: built.cwd, ...(inbound.rebindProvider ? { rebindProvider: inbound.rebindProvider } : {}) });
+      inbound.ack = { sessionId, daemonId: adapter.ownership.daemonId, cwd: built.cwd, epoch: record.epoch, worktreeFiles: built.files, worktreeBytes: built.bytes, verified: true, ...(imported?.sessionFile ? { sessionFile: imported.sessionFile } : {}) };
       return inbound.ack;
     } catch (error) {
       if (acquired) {
-        adapter.ownership.release(sessionId, previousOwnership);
         await adapter.restore(sessionId, snapshot);
+        adapter.ownership.release(sessionId, previousOwnership);
       }
-      if (dest) rmSync(dest, { recursive: true, force: true });
+      if (dest && workspaceBuilt) {
+        if (destExisted) for (const name of readdirSync(dest)) rmSync(join(dest, name), { recursive: true, force: true });
+        else rmSync(dest, { recursive: true, force: true });
+      }
       throw error;
     } finally {
       rmSync(extracted.dir, { recursive: true, force: true });
@@ -207,8 +251,11 @@ export class MoveHost {
   }
 
   /** Cancel an inbound move. If it already committed, say so instead of undoing it: the target owns the session. */
-  private abort(moveId: string, sessionId: string): { committed: boolean } {
+  private async abort(moveId: string, sessionId: string): Promise<{ committed: boolean }> {
     const inbound = this.inbound.get(moveId);
+    if (inbound && inbound.sessionId !== sessionId) throw new Error("Abort sessionId does not match the transfer");
+    // An import may be awaiting provider startup. Do not report failure while it can still commit.
+    await inbound?.committing?.catch(() => undefined);
     const record = this.adapter.ownership.get(sessionId);
     const committed = inbound?.ack !== undefined || (record.state === "owned" && record.moveId === moveId);
     if (committed) return { committed: true };

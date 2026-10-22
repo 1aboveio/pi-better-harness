@@ -68,7 +68,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Provision private runtime test Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - name: Export private runtime test Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+
+      - name: Restore host Node 22
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -76,8 +85,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: pi-better-server suite on Pi 1.x
-        run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.0.0 "$RUNNER_TEMP/pi-compat"
+      - name: Install pinned Codex test dependency
+        run: |
+          npm install --global @openai/codex@0.159.2
+          test "$(codex --version)" = "codex-cli 0.159.2"
+
+      - name: pi-better-server suite on supported native Pi 1.2
+        run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.2.0 "$RUNNER_TEMP/pi-compat"
 
   ci:
     name: ci
@@ -85,7 +99,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Provision private runtime test Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - name: Export private runtime test Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+
+      - name: Restore host Node 22
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm

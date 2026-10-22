@@ -58,7 +58,7 @@ export const command: Subcommand = {
       if (typeof toSocket === "string") {
         client = await DaemonClient.connect(toSocket);
       } else {
-        destination = await resolveTarget({ host: to as string, ...(typeof values["to-remote-dir"] === "string" ? { remoteDir: values["to-remote-dir"] } : {}) });
+        destination = await resolveTarget({ host: to as string, agent: isCodexHost(source) ? "codex" : "pi", signal: context.signal, ...(typeof values["to-remote-dir"] === "string" ? { remoteDir: values["to-remote-dir"] } : {}) });
         client = await DaemonClient.connect(destination.socketPath);
       }
       const rebindProvider = typeof values["codex-provider"] === "string" ? values["codex-provider"] : undefined;

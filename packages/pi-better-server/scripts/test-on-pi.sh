@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run this package's test suite against a given Pi version without touching the repo's lockfile.
 #
-#   scripts/test-on-pi.sh 1.0.0 [PREFIX]    (default PREFIX: <package>/.pi-compat/<version>)
+#   scripts/test-on-pi.sh 1.2.0 [PREFIX]    (default PREFIX: <package>/.pi-compat/<version>)
 #
 # Installs @earendil-works/pi-coding-agent@VERSION and pi-ai@VERSION into PREFIX,
 # copies the package next to them, and runs `node --test` there so every import
@@ -23,10 +23,12 @@ printf '{ "name": "pi-compat", "private": true }\n' > "$PREFIX/package.json"
   tsx@^4.22.3 typescript@^6.0.0 @types/node@^25.0.0)
 
 cp "$ROOT_DIR/scripts/isolate-registry.mjs" "$PREFIX/scripts/"
-cp -R "$PKG_DIR/src" "$PKG_DIR/test" "$PKG_DIR/package.json" "$PKG_DIR/tsconfig.json" "$PREFIX/packages/pi-better-server/"
+cp -R "$PKG_DIR/src" "$PKG_DIR/test" "$PKG_DIR/scripts" "$PKG_DIR/package.json" "$PKG_DIR/tsconfig.json" "$PREFIX/packages/pi-better-server/"
 [ -d "$PKG_DIR/codex-plugin" ] && cp -R "$PKG_DIR/codex-plugin" "$PREFIX/packages/pi-better-server/"
+# Background-activity regressions load the real sibling provider against this SDK.
+cp -R "$ROOT_DIR/packages/pi-better-subagents" "$PREFIX/packages/pi-better-subagents"
 
 cd "$PREFIX/packages/pi-better-server"
 installed="$(node -p "require('$PREFIX/node_modules/@earendil-works/pi-coding-agent/package.json').version")"
 echo "testing against pi-coding-agent $installed"
-node --import tsx --import ../../scripts/isolate-registry.mjs --test test/*.test.ts
+node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 test/*.test.ts

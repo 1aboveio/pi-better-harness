@@ -4,6 +4,7 @@ import { resolveTarget, type Target, type TargetOptions } from "./target.ts";
 
 /** Options every `pi-remote` subcommand accepts. */
 export const GLOBAL_OPTIONS = {
+  agent: { type: "string" },
   host: { type: "string" },
   socket: { type: "string" },
   "remote-dir": { type: "string" },
@@ -53,7 +54,7 @@ export function createContext(options: ContextOptions): RemoteContext {
     signal: options.signal ?? new AbortController().signal,
     connect() {
       target ??= resolveTarget(options);
-      client ??= target.then((t) => DaemonClient.connect(t.socketPath));
+      client ??= target.then((t) => DaemonClient.connect(t.socketPath, { signal: options.signal }));
       return client;
     },
     async forwardSocket(remoteSocketPath) {
