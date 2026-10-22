@@ -590,4 +590,3 @@ test("a replacement live coordinator cannot use an earlier coordinator's rollbac
   assert.deepEqual(inspectDaemonOwner(result.env.serverDir), { status: "dead", owner: readActivationJournal(result.env.serverDir)!.previousOwner },
     "refusing the launch preserves the previous stale owner record");
 });
-
