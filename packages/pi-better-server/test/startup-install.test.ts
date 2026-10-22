@@ -8,6 +8,7 @@ import { createServerArtifact, ownPackageDir, readStagedRuntime } from "../src/s
 import { digest } from "../scripts/private-runtime/format.ts";
 import { stageRuntime } from "../src/startup/install.ts";
 import type { RunRemote, RuntimePlatform } from "../src/startup/managed-types.ts";
+import { privateRuntimeNode } from "./private-runtime-node.ts";
 
 function execute(command: string, args: string[], env: NodeJS.ProcessEnv, input?: Buffer, onStderr?: (text: string) => void) {
   return new Promise<{ exitCode: number | null; stdout: string; stderr: string }>((resolve, reject) => {
@@ -35,9 +36,17 @@ function fixture(t: any) {
   const artifact = createServerArtifact({ platform: `${process.platform}-${process.arch}` as RuntimePlatform, packageDir: pkg });
   const root = join(home, "managed"); mkdirSync(root);
   const trace = join(home, "npm-installs");
-  function work(name: string) {
+  function work(name: string, nodeVersion?: string) {
+    const privateNode = privateRuntimeNode();
     const path = join(root, name); mkdirSync(join(path, "node/bin"), { recursive: true });
-    writeFileSync(join(path, "node/bin/node"), `#!/bin/sh\nexec '${process.execPath.replaceAll("'", `'"'"'`)}' "$@"\n`, { mode: 0o755 });
+    let versionArgs = "";
+    if (nodeVersion) {
+      // Only the mismatch rejection test overrides the real binary's version.
+      const preload = join(path, "node", "fixture-version.mjs");
+      writeFileSync(preload, `Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(nodeVersion)} });`);
+      versionArgs = ` --import '${preload.replaceAll("'", `'"'"'`)}'`;
+    }
+    writeFileSync(join(path, "node/bin/node"), `#!/bin/sh\nexec '${privateNode.node.replaceAll("'", `'"'"'`)}'${versionArgs} "$@"\n`, { mode: 0o755 });
     const npm = join(path, "node/lib/node_modules/npm/bin"); mkdirSync(npm, { recursive: true });
     // npm is the external boundary here. The real pinned npm/SDK closure is exercised by the opt-in integration below.
     writeFileSync(join(npm, "npm-cli.js"), `const fs=require('node:fs'); const p=require('node:path'); if (!process.argv.includes('--ignore-scripts')) throw Error('scripts allowed'); fs.appendFileSync(${JSON.stringify(trace)}, 'install\\n'); const d=p.join(process.cwd(),'node_modules/@earendil-works/pi-coding-agent');fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,'package.json'),JSON.stringify({name:'@earendil-works/pi-coding-agent',version:'1.2.0',type:'module',main:'index.js'}));fs.writeFileSync(p.join(d,'index.js'),"export const VERSION='1.2.0';");`);
@@ -71,6 +80,14 @@ test("first install and same-build connectors publish once, isolate imports, and
   assert.notEqual(corrupted.exitCode, 0);
   assert.match(corrupted.stderr, /corrupt cache.*integrity/);
   assert.equal(readFileSync(sdk, "utf8"), "corrupt cached SDK", "staging does not repair or overwrite a published build");
+});
+
+test("installer rejects a runtime whose Node version differs from its artifact", async t => {
+  const setup = fixture(t);
+  const result = await setup.install(setup.work("wrong-node", "22.0.0"));
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /Node version mismatch/);
+  assert.equal(existsSync(join(setup.root, "releases", setup.artifact.build.contentId)), false);
 });
 
 test("cancelled install removes only its candidate and releases its owner lock", async (t) => {

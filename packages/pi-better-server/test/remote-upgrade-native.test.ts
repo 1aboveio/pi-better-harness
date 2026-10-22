@@ -19,12 +19,14 @@ import { activationArgs } from "../src/startup/commands.ts";
 import type { ActivationResult, StagedRuntime } from "../src/startup/managed-types.ts";
 import { digest, stable } from "../scripts/private-runtime/format.ts";
 import { gate, llmCalls, makeEnv, waitFor, type Env } from "./helpers.ts";
+import { privateRuntimeNode } from "./private-runtime-node.ts";
 
 // Like activation-upgrade.test.ts, stage real source with this test process's SDK.
 // The build IDs differ, but no server, adapter, bridge, or wire implementation is patched.
 function stage(env: Env, seed: string): StagedRuntime {
+  const privateNode = privateRuntimeNode();
   const identity = { format: 1 as const, sourceDigest: digest(seed), dependencyLockDigest: digest(`test SDK ${VERSION}`),
-    piSdkVersion: VERSION, nodeVersion: process.versions.node, platform: `${process.platform}-${process.arch}` as StagedRuntime["build"]["platform"],
+    piSdkVersion: VERSION, nodeVersion: privateNode.version, platform: `${process.platform}-${process.arch}` as StagedRuntime["build"]["platform"],
     protocolVersion: 1, serverVersion: "0.1.0" };
   const build = { ...identity, contentId: digest(stable(identity)) };
   const installRoot = join(env.root, "managed");
@@ -37,7 +39,7 @@ function stage(env: Env, seed: string): StagedRuntime {
   writeFileSync(join(root, "managed-build.json"), JSON.stringify(build));
   symlinkSync(fileURLToPath(new URL("../../../node_modules", import.meta.url)), join(root, "node_modules"));
   mkdirSync(join(root, "node", "bin"), { recursive: true });
-  symlinkSync(process.execPath, join(root, "node", "bin", "node"));
+  symlinkSync(privateNode.node, join(root, "node", "bin", "node"));
   const runtime = { format: 1 as const, build, root, installRoot, node: join(root, "node", "bin", "node"),
     entrypoint: join(root, "src", "cli.ts"), manifestPath: join(root, "runtime.json") };
   writeFileSync(runtime.manifestPath, JSON.stringify(runtime));
@@ -49,7 +51,7 @@ async function activate(env: Env, runtime: StagedRuntime, operationId: string): 
     PI_SERVER_DAEMON_IDLE_MS: "0", PI_SERVER_SESSION_IDLE_MS: "0" };
   delete (childEnv as NodeJS.ProcessEnv).PI_SERVER_COMMAND;
   delete (childEnv as NodeJS.ProcessEnv).PI_SERVER_LAUNCHER;
-  const child = spawn(process.execPath, [runtime.entrypoint, ...activationArgs(runtime, env.agentDir, env.serverDir, operationId)], {
+  const child = spawn(runtime.node, [runtime.entrypoint, ...activationArgs(runtime, env.agentDir, env.serverDir, operationId)], {
     env: childEnv, stdio: ["ignore", "pipe", "pipe"], timeout: 30_000,
   });
   let stdout = "", stderr = "";
