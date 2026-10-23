@@ -62,8 +62,9 @@ for (const mode of ["regular", "fullscreen"]) {
       tmux("send-keys", "-t", "proof", "-l", text);
       tmux("send-keys", "-t", "proof", "Enter");
     };
-    const local = ["LOCAL_TRANSCRIPT_SENTINEL", "LOCAL_WARNING_SENTINEL", "LOCAL_WIDGET_SENTINEL", "LOCAL_FOOTER_SENTINEL", "LOCAL_DRAFT_SENTINEL"];
-    const isLocal = () => local.every(text => screen().includes(text));
+    const local = ["LOCAL_TRANSCRIPT_SENTINEL", "LOCAL_WARNING_SENTINEL", "LOCAL_WIDGET_SENTINEL", "LOCAL_DRAFT_SENTINEL"];
+    const footer = ["LOCAL_FOOTER_SENTINEL", "NAV_HINT"];
+    const isLocal = () => [...local, ...footer].every(text => screen().includes(text));
     const isBrowser = () => screen().includes("Remote: bridge-native");
     const resize = async (columns: number, rows: number) => {
       tmux("resize-window", "-t", "proof", "-x", String(columns), "-y", String(rows));
@@ -78,6 +79,14 @@ for (const mode of ["regular", "fullscreen"]) {
       const actual = screen();
       assert.match(actual.trimStart(), /^Remote: bridge-native/);
       for (const marker of [...local, "startup help", "Pi can explain", "to interrupt"]) assert.equal(actual.includes(marker), false, actual);
+      for (const marker of footer) assert.ok(actual.includes(marker), actual);
+      if (mode === "fullscreen") {
+        const lines = actual.split("\n");
+        if (lines.at(-1) === "") lines.pop();
+        const frame = JSON.parse(readFileSync(join(root, "frame.json"), "utf8"));
+        assert.equal(lines.length, frame.rows, "check the actual terminal height, including blank rows");
+        assert.ok(lines.slice(-3).some(line => line.includes("LOCAL_FOOTER_SENTINEL")), actual);
+      }
     };
     await wait("startup", () => screen().includes("Pi can explain"));
     send("/bridge-seed");
@@ -101,7 +110,7 @@ for (const mode of ["regular", "fullscreen"]) {
     await wait("native remote transcript", () => existsSync(join(root, "attach.json")) && screen().includes("REMOTE_TRANSCRIPT_SENTINEL"));
     assert.deepEqual(JSON.parse(readFileSync(join(root, "attach.json"), "utf8")), { attached: true, shutdowns: 1 });
     const attached = screen();
-    for (const marker of [...local, "startup help", "Pi can explain", "to interrupt"]) assert.equal(attached.includes(marker), false, attached);
+    for (const marker of [...local, ...footer, "startup help", "Pi can explain", "to interrupt"]) assert.equal(attached.includes(marker), false, attached);
     t.diagnostic(`Pi 1.2.0 ${mode}: actual tmux screen clean at 100x32 and 42x18; Escape/failure restore; native attach clean`);
   });
 }

@@ -30,6 +30,7 @@ export default function (pi) {
       ctx.ui.notify("LOCAL_WARNING_SENTINEL", "warning");
       ctx.ui.setWidget("browse-proof", ["LOCAL_WIDGET_SENTINEL"]);
       ctx.ui.setStatus("browse-proof", "LOCAL_FOOTER_SENTINEL");
+      ctx.ui.setStatus("browse-nav-proof", "NAV_HINT");
       ctx.ui.setEditorText("LOCAL_DRAFT_SENTINEL");
       report("seed", { ready: true });
     },

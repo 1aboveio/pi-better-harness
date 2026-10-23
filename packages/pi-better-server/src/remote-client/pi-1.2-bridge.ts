@@ -176,12 +176,14 @@ class Controller implements Pi12Bridge {
     methods(ui, ["clear", "addChild", "requestRender"], "InteractiveMode.ui");
     if (!Array.isArray(ui.children)) throw failure("InteractiveMode.ui.children is missing.");
     methods(object(this.mode.editorContainer, "InteractiveMode.editorContainer"), ["render"], "editorContainer");
+    methods(object(this.mode.footerContainer, "InteractiveMode.footerContainer"), ["render"], "footerContainer");
     const header = object(this.mode.headerContainer, "InteractiveMode.headerContainer");
     methods(header, ["render"], "headerContainer");
     writable(header, "render");
     if (ui.mode === "fullscreen") {
       methods(ui, ["setLayoutRoot"], "InteractiveMode.ui");
-      object(this.mode.fullscreenLayoutRoot, "InteractiveMode.fullscreenLayoutRoot");
+      const root = object(this.mode.fullscreenLayoutRoot, "InteractiveMode.fullscreenLayoutRoot");
+      if (typeof root.constructor !== "function" || root.constructor === Object) throw failure("fullscreen layout cannot compose the browse footer.");
     }
   }
 
@@ -194,6 +196,12 @@ class Controller implements Pi12Bridge {
     const ui = this.mode.ui as Native;
     const roots = [...ui.children];
     const layoutRoot = this.mode.fullscreenLayoutRoot;
+    // Reuse Pi 1.2's native stack type without importing a newer TUI API on SDK 0.82.
+    const browseRoot = ui.mode === "fullscreen" ? new layoutRoot.constructor([
+      { component: this.mode.editorContainer, basis: 0, grow: 1, shrink: 1, minSize: 0 },
+      { component: this.mode.footerContainer, basis: "auto", grow: 0, shrink: 0 },
+    ]) : undefined;
+    if (browseRoot) methods(browseRoot, ["render"], "browse layout");
     let active = true;
     const cleanup = () => {
       if (!active) return;
@@ -206,11 +214,11 @@ class Controller implements Pi12Bridge {
     };
     this.endBrowse = cleanup;
     try {
-      // Native custom/select/input screens all use this container. Unmount the
-      // surrounding local view, not its children or its still-live runtime.
+      // Keep the live footer/status map, but hide the local transcript and widgets.
       ui.clear();
       ui.addChild(this.mode.editorContainer);
-      if (ui.mode === "fullscreen") ui.setLayoutRoot(this.mode.editorContainer);
+      ui.addChild(this.mode.footerContainer);
+      if (ui.mode === "fullscreen") ui.setLayoutRoot(browseRoot);
       ui.requestRender(true);
     } catch (error) {
       cleanup();
