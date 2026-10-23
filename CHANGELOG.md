@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-server@0.1.3] - 2026-10-23
+
+### Fixed
+
+- Reuse authenticated managed Node runtimes and verified source archives on reconnect, avoiding repeated downloads and uploads while retaining runtime integrity checks.
+- Keep the live navigator and status footer visible on the remote home screen in regular and fullscreen modes without showing local conversation history or widgets.
+- Keep concurrent activation callers waiting while the coordinator verifies and retires an abandoned staged build, instead of reporting a premature conflict.
+
 ## [pi-better-server@0.1.2] - 2026-10-23
 
 ### Fixed
