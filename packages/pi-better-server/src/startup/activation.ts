@@ -298,11 +298,21 @@ export const defaultActivationPorts: ActivationPorts = {
 export async function runActivationWorker(request: UpgradeRequest, ports: ActivationPorts = defaultActivationPorts): Promise<ActivationResult> {
   const serverDir = canonicalStateDir(request.serverDir);
   let release: () => void;
-  try { release = claimDaemonOwner(serverDir, LOCK); }
-  catch (error) {
-    const journal = readActivationJournal(serverDir);
-    if (journal) return journal.desiredBuild.contentId === request.runtime.build.contentId ? result(journal) : conflict(journal);
-    return { status: "deferred", operationId: request.operationId, reason: `Activation coordinator already owns this directory: ${message(error)}` };
+  for (let attempt = 0; ; attempt++) {
+    try { release = claimDaemonOwner(serverDir, LOCK); break; }
+    catch (error) {
+      const journal = readActivationJournal(serverDir);
+      // A staged journal can still name the abandoned build while the coordinator
+      // awaits stale-owner proof. Keep this worker alive so its caller keeps waiting.
+      if (journal?.phase === "staged" && journal.desiredBuild.contentId !== request.runtime.build.contentId
+        && journal.rollbackPermit === undefined && reservedAgainst(request, journal.operationId)
+        && inspectDaemonOwner(serverDir, LOCK).status === "live" && attempt < 300) {
+        await ports.pause();
+        continue;
+      }
+      if (journal) return journal.desiredBuild.contentId === request.runtime.build.contentId ? result(journal) : conflict(journal);
+      return { status: "deferred", operationId: request.operationId, reason: `Activation coordinator already owns this directory: ${message(error)}` };
+    }
   }
   let journal: ActivationJournal | undefined;
   try {
