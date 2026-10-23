@@ -22,6 +22,7 @@ import { NATIVE_RECONNECT_CAPABILITIES, openUpgradeTransport } from "./upgrade-t
 const USAGE = "/remote connect <ssh-alias> [--cwd <remote-path>] [--session <id>] [--remote-dir <server-dir>]";
 const UPGRADE_STAGES: Record<string, string> = {
   artifact: "preparing matching server...", probe: "checking remote platform...", "node-download": "preparing private Node runtime...",
+  verifying: "verifying installed server...", "verification-upload": "sending server verification data...",
   "node-upload": "uploading verified Node runtime...", dependencies: "checking server dependencies...", "dependencies-upload": "uploading verified dependencies...",
   staged: "matching server staged...", activating: "activating matching server...", ready: "matching server ready...", deferred: "server update staged; current daemon continues...",
 };

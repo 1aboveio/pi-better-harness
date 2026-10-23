@@ -6,14 +6,15 @@ import { gunzipSync } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
 import { digest, stable, validatePayload, validateStaged } from "./format.ts";
 
-const [work, installRoot, expectedSha, mode] = process.argv.slice(2) as [string, string, string, string];
+const [work, installRoot, expectedSha, mode, expectedBuildId] = process.argv.slice(2) as [string, string, string, string, string | undefined];
 let lock: string | undefined;
 let acquired = false;
 let ownsWork = false;
 let candidate: string | undefined;
 function cancelled() { if (existsSync(join(work, "cancel"))) throw new Error("installation cancelled"); }
 function plainDirectory(path: string) {
-  if (existsSync(path) && (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink())) throw new Error(`permission: unsafe directory ${path}`);
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error(`permission: unsafe directory ${path}`);
   mkdirSync(path, { recursive: true, mode: 0o700 });
 }
 function inventory(root: string): Record<string, string> {
@@ -61,9 +62,13 @@ try {
   writeFileSync(join(work, "installer.pid"), String(process.pid), { flag: "wx", mode: 0o600 });
   ownsWork = true;
   cancelled();
-  const bytes = readFileSync(join(work, "artifact.gz"));
+  const archivePath = join(work, "artifact.gz");
+  const archive = lstatSync(archivePath);
+  if (!archive.isFile() || archive.isSymbolicLink() || archive.size > 32 * 1024 * 1024) throw new Error("artifact integrity mismatch or size limit");
+  const bytes = readFileSync(archivePath);
   if (bytes.length > 32 * 1024 * 1024 || digest(bytes) !== expectedSha) throw new Error("artifact integrity mismatch or size limit");
   const payload = validatePayload(JSON.parse(gunzipSync(bytes, { maxOutputLength: 64 * 1024 * 1024 }).toString()));
+  if ((mode === "reuse-only" || expectedBuildId !== undefined) && payload.build.contentId !== expectedBuildId) throw new Error("cached artifact build identity mismatch");
   if (`${process.platform}-${process.arch}` !== payload.build.platform || process.versions.node !== payload.build.nodeVersion) throw new Error("unsupported platform or Node version mismatch");
   if (realpathSync(installRoot) !== resolve(installRoot)) throw new Error("permission: install root contains symlink");
   const releases = join(installRoot, "releases");
@@ -87,8 +92,10 @@ try {
   }
   writeFileSync(join(lock, "owner.json"), JSON.stringify({ pid: process.pid, work }), { flag: "wx", mode: 0o600 });
   const runtime = validateStaged({ format: 1, build: payload.build, root: finalRoot, node: join(finalRoot, "node/bin/node"), entrypoint: join(finalRoot, "src/cli.ts"), manifestPath: join(finalRoot, "runtime.json"), installRoot });
-  if (existsSync(finalRoot)) {
-    if (lstatSync(finalRoot).isSymbolicLink()) throw new Error("corrupt cache: release symlink");
+  const release = lstatSync(finalRoot, { throwIfNoEntry: false });
+  if (release) {
+    if (release.isSymbolicLink()) throw new Error("corrupt cache: release symlink");
+    if (!release.isDirectory()) throw new Error("corrupt cache: expected release directory");
     for (const path of [runtime.manifestPath, join(finalRoot, "integrity.json"), ...payload.files.map((file) => join(finalRoot, file.path))]) {
       if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) throw new Error(`corrupt cache: expected regular file ${path}`);
     }
@@ -98,6 +105,7 @@ try {
     cancelled();
     process.stdout.write(JSON.stringify(runtime));
   } else {
+    if (mode === "reuse-only") throw new Error("reuse-only: release absent");
     candidate = join(work, "release");
     removeOwned(candidate);
     mkdirSync(candidate, { mode: 0o700 });
@@ -106,6 +114,7 @@ try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       writeFileSync(path, Buffer.from(file.data, "base64"), { flag: "wx", mode: 0o600 });
     }
+    cpSync(join(work, "artifact.gz"), join(candidate, "artifact.gz"));
     cpSync(join(work, "node"), join(candidate, "node"), { recursive: true, dereference: false, verbatimSymlinks: true });
     const deps = join(work, "dependencies");
     plainDirectory(deps);
