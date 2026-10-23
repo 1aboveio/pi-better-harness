@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { getAgentDir, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -313,7 +313,13 @@ export async function installPackageCatalog(packages: PackageSpec[], options: { 
       for (const item of approved) {
         try {
           await run(process.execPath, [cli, "install", item.source], {
-            cwd: agentDir, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+            cwd: agentDir,
+            env: {
+              ...process.env,
+              // The managed runtime's npm and its Node shebang live beside this executable.
+              PATH: [dirname(process.execPath), process.env.PATH].filter(Boolean).join(delimiter),
+              PI_CODING_AGENT_DIR: agentDir,
+            },
             encoding: "utf8", maxBuffer: 4 * 1024 * 1024,
           });
         } catch {

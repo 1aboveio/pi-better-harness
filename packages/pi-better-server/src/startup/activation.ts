@@ -213,9 +213,10 @@ export async function activateStagedRuntime(options: ActivateOptions): Promise<A
       const journal = readActivationJournal(serverDir);
       if (journal && !freshRollbackRequest(journal, request)) {
         if (journal.desiredBuild.contentId !== options.runtime.build.contentId) {
-          // The detached worker has not necessarily replaced the previous ready journal yet.
-          // Keep this caller's reservation until that worker can claim the next activation.
-          if (journal.phase !== "ready" || !reservedAgainst(request, journal.operationId)) { unreserve(); return conflict(journal); }
+          // The detached worker may still be replacing a ready journal or retiring
+          // a stale staged activation. Keep its caller reservation until it decides.
+          const awaitingWorker = journal.phase === "staged" && worker.exitCode === null && worker.signalCode === null;
+          if ((journal.phase !== "ready" && !awaitingWorker) || !reservedAgainst(request, journal.operationId)) { unreserve(); return conflict(journal); }
         } else if (journal.phase === "ready") {
           const probe = await defaultActivationPorts.probe(serverDir);
           if (matches(probe, journal)) { unreserve(); return result(journal); }
@@ -322,6 +323,29 @@ export async function runActivationWorker(request: UpgradeRequest, ports: Activa
     if (journal?.phase === "ready" && journal.desiredBuild.contentId === request.runtime.build.contentId) {
       const probe = await ports.probe(serverDir);
       if (probe.kind === "ready" && matches(probe, journal)) { clearReservations(journal); return result(journal); }
+    }
+    // A legacy daemon may have exited after deferring a staged build. Its durable
+    // reservation must not block every later build. Only the exclusive coordinator
+    // can retire it, after proving no writer remains and preserving compatibility.
+    if (journal?.phase === "staged" && journal.desiredBuild.contentId !== request.runtime.build.contentId
+      && journal.rollbackPermit === undefined && !journal.candidateOwner
+      && realpathSync(journal.agentDir) === realpathSync(request.agentDir)
+      && reservedAgainst(request, journal.operationId)) {
+      const probe = await ports.probe(serverDir);
+      const owner = inspectDaemonOwner(serverDir);
+      const previous = journal.previousBuild ?? journal.previousCompatibility;
+      if (probe.kind === "absent" && (owner.status === "missing" || owner.status === "dead")
+        && journal.previousOwner && !ownerIsAlive(journal.previousOwner)
+        && previous && compatibleUpgrade(previous, request.runtime.build)
+        && reservedAgainst(request, journal.operationId)) {
+        const retired = journal;
+        journal = { ...request, serverDir, version: 1, phase: "staged", desiredBuild: request.runtime.build,
+          previousBuild: retired.previousBuild, previousRuntime: retired.previousRuntime,
+          previousCompatibility: retired.previousCompatibility, previousOwner: retired.previousOwner,
+          emptyNamespace: retired.emptyNamespace };
+        save(journal);
+        clearReservations(retired);
+      }
     }
     if (journal && journal.desiredBuild.contentId !== request.runtime.build.contentId && journal.phase !== "ready"
       && (committed(journal.phase) || hasActivationReservations(journal))) return conflict(journal);

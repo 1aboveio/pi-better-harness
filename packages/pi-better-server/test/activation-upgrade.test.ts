@@ -107,6 +107,41 @@ test("managed connect restarts its proven exited ready owner without losing sess
   assert.equal(listed[0].name, "retained after idle stop");
 });
 
+test("managed CLI retires a stale legacy activation after owner exit and preserves sessions", { timeout: 30_000 }, async t => {
+  const env = fixture(t);
+  const before = staged(env, "stale-legacy");
+  const after = staged(env, "stale-successor");
+  const initial = await activate(env, before, "initial");
+  assert.equal(initial.status, "ready");
+  const client = await connected(t, env, initial.readiness);
+  const created = await client.call({ type: "create_session", cwd: env.cwd, model: { provider: "fake", modelId: "fake-1" } });
+  const owner = inspectDaemonOwner(env.serverDir);
+  assert.equal(owner.status, "live");
+  if (owner.status !== "live") throw new Error("missing isolated owner");
+  process.kill(owner.owner.pid, "SIGTERM");
+  await waitFor("previous owner release", () => inspectDaemonOwner(env.serverDir).status === "missing");
+  // Reproduce the durable pre-upgrade format left by an older client on r5.
+  writeFileSync(join(env.serverDir, "activation.json"), JSON.stringify({
+    version: 1, runtime: before, desiredBuild: before.build, serverDir: env.serverDir, agentDir: env.agentDir,
+    operationId: "abandoned", phase: "staged", emptyNamespace: false, previousOwner: owner.owner,
+    previousCompatibility: { piSdkVersion: PI_VERSION, protocolVersion: 1 },
+    reason: "Legacy or unverified live daemon; staged runtime is pending verified owner exit",
+  }));
+  writeFileSync(join(env.serverDir, "activation-reservations", "a".repeat(64)), JSON.stringify({
+    buildId: before.build.contentId, operationId: "abandoned", baseOperationId: null,
+  }));
+  const [outcome, coalesced] = await Promise.all([
+    activate(env, after, "fresh-request"), activate(env, after, "coalesced-request"),
+  ]);
+  assert.equal(outcome.status, "ready", JSON.stringify(outcome));
+  assert.equal(coalesced.status, "ready", JSON.stringify(coalesced));
+  assert.equal(coalesced.readiness.hello.instanceId, outcome.readiness.hello.instanceId);
+  assert.equal(outcome.readiness.hello.build.contentId, after.build.contentId);
+  const next = await connected(t, env, outcome.readiness);
+  assert.deepEqual((await next.call({ type: "list_sessions" })).data.sessions.map((s: any) => s.sessionId), [created.sessionId]);
+  assert.equal(reservations(env).length, 0);
+});
+
 test("ready activation updates registration atomically while preserving registered directories", { timeout: 30_000 }, async t => {
   const env = fixture(t);
   const runtime = staged(env, "registered-default");

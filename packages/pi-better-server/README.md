@@ -316,6 +316,12 @@ an explicit migration before automatic activation can proceed. The client leaves
 the old daemon running and reports the reason instead of killing it.
 
 Activation records live in `<serverDir>/activation.json` and `activation.log`.
+When an older build remains staged after its daemon exits, a new activation can
+retire that build's reservations under the exclusive activation lock. Cleanup
+requires an absent listener, verified previous-owner exit, the same agent
+directory, and compatible SDK/protocol versions. It preserves session files and
+compatibility evidence; live or ambiguous owners and committed upgrades remain
+blocked.
 `recovery-required` preserves an ambiguous or adopted candidate for inspection;
 it does not authorize another writer or a rollback. Automatic rollback is limited
 to a proven candidate exit before adoption and restores code only, not settings,
