@@ -3,7 +3,7 @@ import { posix } from "node:path";
 import { decodeServerArtifact } from "./artifact.ts";
 import { absolutePath, probeRemoteRuntime, shellQuote } from "./runtime.ts";
 import type { RunRemote, ServerArtifact, StagedRuntime } from "./managed-types.ts";
-import { NODE_CHECKSUMS, validateStaged } from "../../scripts/private-runtime/format.ts";
+import { NODE_CHECKSUMS, NODE_EXECUTABLE_CHECKSUMS, validateStaged } from "../../scripts/private-runtime/format.ts";
 
 export interface StageRuntimeOptions {
   run: RunRemote;
@@ -61,30 +61,90 @@ export async function stageRuntime(options: StageRuntimeOptions): Promise<Staged
 
     signal?.throwIfAborted();
     signal?.addEventListener("abort", cancel, { once: true });
-    onProgress?.("node-download");
-    signal?.throwIfAborted();
-    const archive = `node-v${artifact.build.nodeVersion}-${probe.platform}`;
-    const url = `https://nodejs.org/dist/v${artifact.build.nodeVersion}/${archive}.tar.gz`;
-    const sha = NODE_CHECKSUMS[probe.platform];
-    const tar = `${work}/node.tar.gz`;
-    const remote = await run(`curl -q --fail --silent --show-error --location --proto '=https' --connect-timeout 10 --max-time 120 ${q(url)} -o ${q(tar)}`, undefined, 125_000);
-    signal?.throwIfAborted();
-    if (remote.exitCode !== 0 || remote.timedOut) {
-      onProgress?.("node-upload");
-      await checked(`cat > ${q(tar)}`, await download(url, `sha256-${sha}`, signal), 120_000);
+    const finalRoot = `${root}/releases/${artifact.build.contentId}`;
+    const cachedArtifact = `${finalRoot}/artifact.gz`;
+    const artifactPath = `${work}/artifact.gz`;
+    // Older releases may lack the archive. Its contents are authenticated by the fresh installer against the requested build.
+    const archiveCache = await checked(`set -eu
+p=${q(finalRoot)}
+while [ "$p" != / ]; do
+  [ ! -L "$p" ] || { echo 'corrupt cache: symlink release path' >&2; exit 1; }
+  [ ! -e "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; } || { echo 'corrupt cache: unsafe release directory' >&2; exit 1; }
+  p=$(dirname "$p")
+done
+if [ -L ${q(cachedArtifact)} ]; then echo 'corrupt cache: artifact symlink' >&2; exit 1; fi
+if [ ! -e ${q(cachedArtifact)} ]; then
+  if [ -e ${q(finalRoot)} ]; then printf 'legacy\\n'; else printf 'absent\\n'; fi
+  exit 0
+fi
+[ -f ${q(cachedArtifact)} ] || { echo 'corrupt cache: expected regular artifact' >&2; exit 1; }
+[ "$(wc -c < ${q(cachedArtifact)})" -le 33554432 ] || { echo 'corrupt cache: artifact size limit' >&2; exit 1; }
+cp ${q(cachedArtifact)} ${q(artifactPath)}
+[ "$(wc -c < ${q(artifactPath)})" -le 33554432 ] || { echo 'corrupt cache: artifact size limit' >&2; exit 1; }
+if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum ${q(artifactPath)} | cut -d ' ' -f 1); else actual=$(shasum -a 256 ${q(artifactPath)} | cut -d ' ' -f 1); fi
+printf 'reuse:%s\\n' "$actual"`, undefined, 120_000);
+    const archiveResponse = archiveCache.stdout.trim();
+    const archiveDigest = /^reuse:([a-f0-9]{64})$/.exec(archiveResponse)?.[1];
+    const archiveState = archiveDigest ? "reuse" : archiveResponse;
+    if (archiveState !== "reuse" && archiveState !== "absent" && archiveState !== "legacy") throw new Error("Runtime staging: unexpected artifact cache probe result");
+    if (archiveState !== "reuse") {
+      onProgress?.("verification-upload");
+      await checked(`cat > ${q(artifactPath)}`, artifact.bytes, 120_000);
     }
-    await checked(`set -eu; if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum ${q(tar)} | cut -d ' ' -f 1); else actual=$(shasum -a 256 ${q(tar)} | cut -d ' ' -f 1); fi; [ "$actual" = ${q(sha)} ] || { echo 'Node archive integrity mismatch' >&2; exit 1; }; tar -xzf ${q(tar)} -C ${q(work)}; mv ${q(`${work}/${archive}`)} ${q(`${work}/node`)}; rm ${q(tar)}`, undefined, 120_000);
-    await checked(`cat > ${q(`${work}/artifact.gz`)}`, artifact.bytes);
     for (const name of ["installer.ts", "format.ts"]) {
       const file = payload.files.find((entry) => entry.path === `scripts/private-runtime/${name}`)!;
       await checked(`cat > ${q(`${work}/${name}`)}`, Buffer.from(file.data, "base64"));
     }
-    const invoke = (offline: boolean) => `env -i HOME=${q(`${work}/home`)} PATH=${q(`${work}/node/bin:/usr/bin:/bin`)} ${q(`${work}/node/bin/node`)} ${q(`${work}/installer.ts`)} ${q(work)} ${q(root)} ${q(artifact.sha256)} ${offline ? "offline" : "online"}`;
-    onProgress?.("dependencies");
+    const cachedNode = `${finalRoot}/node/bin/node`;
+    const node = `${work}/node/bin/node`;
+    onProgress?.("verifying");
+    // Authenticate the scratch copy before executing any bytes from the cached release.
+    const cached = await checked(`set -eu
+p=${q(`${root}/releases`)}
+while [ "$p" != / ]; do
+  [ ! -L "$p" ] || { echo 'corrupt cache: symlink release path' >&2; exit 1; }
+  [ ! -e "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; } || { echo 'corrupt cache: unsafe release directory' >&2; exit 1; }
+  p=$(dirname "$p")
+done
+[ ! -L ${q(finalRoot)} ] || { echo 'corrupt cache: release symlink' >&2; exit 1; }
+if [ ! -e ${q(finalRoot)} ]; then printf 'absent\\n'; exit 0; fi
+[ -d ${q(finalRoot)} ] && [ -x ${q(finalRoot)} ] || { echo 'corrupt cache: expected accessible release directory' >&2; exit 1; }
+p=${q(cachedNode)}
+while [ "$p" != ${q(finalRoot)} ]; do
+  [ ! -L "$p" ] || { echo 'corrupt cache: symlink Node path' >&2; exit 1; }
+  p=$(dirname "$p")
+done
+[ -f ${q(cachedNode)} ] && [ -x ${q(cachedNode)} ] || { echo 'corrupt cache: expected regular Node executable' >&2; exit 1; }
+mkdir -p ${q(`${work}/node/bin`)}
+cp ${q(cachedNode)} ${q(node)}
+if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum ${q(node)} | cut -d ' ' -f 1); else actual=$(shasum -a 256 ${q(node)} | cut -d ' ' -f 1); fi
+[ "$actual" = ${q(NODE_EXECUTABLE_CHECKSUMS[probe.platform])} ] || { echo 'Node executable integrity mismatch' >&2; exit 1; }
+printf 'reuse\\n'`, undefined, 120_000);
+    const cachedState = cached.stdout.trim();
+    if (cachedState !== "reuse" && cachedState !== "absent") throw new Error("Runtime staging: unexpected cache probe result");
+    if (cachedState === "absent" && archiveState !== "absent") throw new Error("Runtime staging: cached release disappeared during verification");
+    const reuse = cachedState === "reuse";
+    if (!reuse) {
+      onProgress?.("node-download");
+      signal?.throwIfAborted();
+      const archive = `node-v${artifact.build.nodeVersion}-${probe.platform}`;
+      const url = `https://nodejs.org/dist/v${artifact.build.nodeVersion}/${archive}.tar.gz`;
+      const sha = NODE_CHECKSUMS[probe.platform];
+      const tar = `${work}/node.tar.gz`;
+      const remote = await run(`curl -q --fail --silent --show-error --location --proto '=https' --connect-timeout 10 --max-time 120 ${q(url)} -o ${q(tar)}`, undefined, 125_000);
+      signal?.throwIfAborted();
+      if (remote.exitCode !== 0 || remote.timedOut) {
+        onProgress?.("node-upload");
+        await checked(`cat > ${q(tar)}`, await download(url, `sha256-${sha}`, signal), 120_000);
+      }
+      await checked(`set -eu; if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum ${q(tar)} | cut -d ' ' -f 1); else actual=$(shasum -a 256 ${q(tar)} | cut -d ' ' -f 1); fi; [ "$actual" = ${q(sha)} ] || { echo 'Node archive integrity mismatch' >&2; exit 1; }; tar -xzf ${q(tar)} -C ${q(work)}; mv ${q(`${work}/${archive}`)} ${q(`${work}/node`)}; rm ${q(tar)}`, undefined, 120_000);
+    }
+    const invoke = (mode: "online" | "offline" | "reuse-only") => `env -i HOME=${q(`${work}/home`)} PATH=${q(`${work}/node/bin:/usr/bin:/bin`)} ${q(node)} ${q(`${work}/installer.ts`)} ${q(work)} ${q(root)} ${q(archiveDigest ?? artifact.sha256)} ${mode} ${q(artifact.build.contentId)}`;
+    if (!reuse) onProgress?.("dependencies");
     signal?.throwIfAborted();
-    let installed = await run(invoke(false), undefined, 600_000);
+    let installed = await run(invoke(reuse ? "reuse-only" : "online"), undefined, 600_000);
     signal?.throwIfAborted();
-    if (installed.exitCode === 75) {
+    if (!reuse && installed.exitCode === 75) {
       onProgress?.("dependencies-upload");
       const lock = JSON.parse(Buffer.from(payload.files.find((f) => f.path === "scripts/private-runtime/package-lock.json")!.data, "base64").toString());
       await checked(`mkdir -p ${q(`${work}/archives`)}`);
@@ -98,7 +158,7 @@ export async function stageRuntime(options: StageRuntimeOptions): Promise<Staged
         const failed = batch.find((result) => result.status === "rejected");
         if (failed?.status === "rejected") throw failed.reason;
       }
-      installed = await run(invoke(true), undefined, 600_000);
+      installed = await run(invoke("offline"), undefined, 600_000);
       signal?.throwIfAborted();
     }
     if (installed.exitCode !== 0 || installed.timedOut) throw new Error(`Runtime staging: ${installed.stderr || "installer failed"}`);

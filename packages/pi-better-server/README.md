@@ -287,6 +287,17 @@ target downloads fail, the client downloads and uploads verified archives instea
 Concurrent connectors share the same release only after integrity validation.
 Published releases are not overwritten to repair corruption.
 
+Repeat connections to an already installed matching release verify and reuse its
+private Node without downloading Node or dependencies again. Before running any
+cached executable, the client copies it into its own staging directory and checks
+its SHA-256 against a pinned executable checksum. The freshly uploaded installer
+then validates the complete release, manifest and source under the build lock.
+New releases also retain the original source archive under the release inventory;
+repeat connections copy and authenticate it locally rather than uploading it again.
+Older releases without an archive still use a verified upload for compatibility.
+A present but corrupted release is an error, not permission to replace it. A new
+build still needs the normal first-install downloads and verification.
+
 Staging can proceed while sessions run. Activation waits for all sessions to be
 idle, including SDK preflight and settlement, queued messages, compaction, shell
 commands, dialogs and observable background work. Native cache warming is also

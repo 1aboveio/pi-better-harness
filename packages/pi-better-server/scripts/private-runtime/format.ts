@@ -8,6 +8,14 @@ export const NODE_CHECKSUMS: Record<RuntimePlatform, string> = {
   "darwin-x64": "2526230ad7d922be82d4fdb1e7ee1e84303e133e3b4b0ec4c2897ab31de0253d",
   "darwin-arm64": "25495ff85bd89e2d8a24d88566d7e2f827c6b0d3d872b2cebf75371f93fcb1fe",
 };
+// Extracted bin/node hashes from the archives authenticated by NODE_CHECKSUMS.
+// Source: https://nodejs.org/dist/v24.14.1/SHASUMS256.txt
+export const NODE_EXECUTABLE_CHECKSUMS: Record<RuntimePlatform, string> = {
+  "linux-x64": "bf9112eb83a827dc9f9c8d19bb7bddcbf00f7b2fedae18fdcaee05406981f20a",
+  "linux-arm64": "7fac13c04c19207c3e904a7721f8c045e6b99493471e2df85444f764cdd21934",
+  "darwin-x64": "9ab4f6249a8de4671c3205ef58621dfb19d120a9c59fd96ed206571bafb0319c",
+  "darwin-arm64": "35d4bc736bbe4161f0c074aa140ddb74586e46969bc2ad63d32c838bec4463ff",
+};
 export function digest(value: string | Buffer): string { return createHash("sha256").update(value).digest("hex"); }
 export function stable(value: any): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
