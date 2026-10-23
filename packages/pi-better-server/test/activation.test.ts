@@ -127,6 +127,66 @@ for (const guard of ["exited", "live", "ambiguous", "unknown-compatibility", "do
   });
 }
 
+for (const scenario of ["same-build", "different-build", "live-owner"] as const) {
+  test(`concurrent stale activation waits for retirement proof: ${scenario}`, { timeout: 5_000 }, async t => {
+    const f = fixture(t);
+    const source = `import {currentOwnerIdentity} from ${JSON.stringify(new URL("../src/daemon-owner.ts", import.meta.url).href)}; console.log(JSON.stringify(currentOwnerIdentity()));`;
+    const old = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8" });
+    assert.equal(old.status, 0, old.stderr);
+    const journal = { ...f.request, operationId: "abandoned", runtime: f.previous, desiredBuild: f.previous.build,
+      version: 1, phase: "staged", emptyNamespace: false, previousOwner: JSON.parse(old.stdout),
+      previousCompatibility: { piSdkVersion: "1.2.0", protocolVersion: 1 }, reason: "Waiting for legacy owner exit" };
+    writeFileSync(join(f.serverDir, "activation.json"), JSON.stringify(journal));
+    mkdirSync(join(f.serverDir, "activation-reservations"));
+    writeFileSync(join(f.serverDir, "activation-reservations", "a".repeat(64)), JSON.stringify({
+      buildId: f.previous.build.contentId, operationId: "abandoned", baseOperationId: null,
+    }));
+    writeFileSync(join(f.serverDir, "sessions.json"), "persisted-state");
+    if (scenario === "live-owner") f.serve(f.previous);
+    const target = scenario === "different-build"
+      ? { ...f.desired, build: { ...f.desired.build, contentId: "c".repeat(64), sourceDigest: "c".repeat(64) } } : f.desired;
+    let entered!: () => void;
+    const probing = new Promise<void>(resolve => { entered = resolve; });
+    let releaseProbe!: () => void;
+    const held = new Promise<void>(resolve => { releaseProbe = resolve; });
+    t.after(releaseProbe);
+    const probe = f.ports.probe;
+    f.ports.probe = async dir => { entered(); await held; return probe(dir); };
+    const winner = activateStagedRuntime({ ...f.request, ports: f.ports });
+    await probing;
+    const coordinator = inspectDaemonOwner(f.serverDir, "activation-owner");
+    assert.equal(coordinator.status, "live");
+    let retrying!: () => void;
+    const contended = new Promise<void>(resolve => { retrying = resolve; });
+    const contender = activateStagedRuntime({ ...f.request, runtime: target, operationId: "second-observer", ports: {
+      ...f.ports, pause: async () => { retrying(); await winner; },
+    } });
+    try {
+      await Promise.race([contended, contender.then(outcome => {
+        assert.fail(`Contender returned before the coordinator finished stale-owner proof: ${JSON.stringify(outcome)}`);
+      })]);
+      assert.equal(readActivationJournal(f.serverDir)?.operationId, "abandoned");
+      assert.deepEqual(inspectDaemonOwner(f.serverDir, "activation-owner"), coordinator);
+      assert.equal(f.launches, 0);
+    } finally { releaseProbe(); await winner; }
+    const [outcome, coalesced] = await Promise.all([winner, contender]);
+    assert.equal(outcome.status, scenario === "live-owner" ? "deferred" : "ready");
+    if (scenario === "same-build") assert.deepEqual(coalesced, outcome);
+    else {
+      assert.equal(coalesced.status, "deferred");
+      assert.match(coalesced.reason, /activation-conflict/);
+      assert.equal(coalesced.operationId, scenario === "live-owner" ? "abandoned" : f.request.operationId);
+    }
+    assert.equal(f.launches, scenario === "live-owner" ? 0 : 1);
+    assert.equal(f.schedules, 0);
+    assert.equal(readActivationJournal(f.serverDir)?.desiredBuild.contentId,
+      scenario === "live-owner" ? f.previous.build.contentId : f.desired.build.contentId);
+    assert.equal(readFileSync(join(f.serverDir, "sessions.json"), "utf8"), "persisted-state");
+    if (scenario === "live-owner") assert.equal(hasActivationReservations(journal), true);
+    else assert.equal(readdirSync(join(f.serverDir, "activation-reservations")).length, 0);
+  });
+}
+
 for (const state of ["legacy-listener", "live-no-socket", "ambiguous-owner", "missing-owner-nonempty"]) {
   test(`${state} never schedules a stop or launches a successor`, async t => {
     const f = fixture(t);
