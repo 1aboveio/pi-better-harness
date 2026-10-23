@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import { ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { installPackageCatalog, planPackageSync, readLocalPackageCatalog, type PackageSpec } from "../src/remote-client/packages.ts";
@@ -495,6 +496,75 @@ test("installer refuses malformed existing settings before invoking Pi and keeps
   assert.equal(lstatSync(f.settings).isSymbolicLink(), true);
   assert.equal(readJson(target).defaultProvider, "keep-provider");
   assert.deepEqual(readJson(target).packages, [{ source: "npm:tools@1.0.0", extensions: [] }]);
+});
+
+test("managed installer resolves private npm and node through PATH without host npm and redacts failures", { skip: process.platform === "win32" }, async t => {
+  for (const pathMode of ["inherited", "empty", "absent"] as const) await t.test(pathMode, async t => {
+    const f = fixture(t);
+    const bin = join(f.root, "private runtime", "node", "bin");
+    mkdirSync(bin, { recursive: true });
+    const node = join(bin, "node");
+    // A symlink would resolve process.execPath back to the host's Node directory.
+    copyFileSync(process.execPath, node);
+    // Homebrew's Node needs its sibling shared libraries after relocation.
+    const lib = join(dirname(process.execPath), "../lib");
+    if (existsSync(lib)) symlinkSync(lib, join(bin, "../lib"), "dir");
+    const inheritedBin = join(f.root, "inherited tools");
+    mkdirSync(inheritedBin);
+    for (const command of ["npm", "node"]) {
+      writeFileSync(join(inheritedBin, command), `#!${process.execPath}\nprocess.exit(91);\n`, { mode: 0o755 });
+    }
+    writeFileSync(join(inheritedBin, "package-sync-helper"), "#!/usr/bin/env node\nconsole.log('inherited-tool');\n", { mode: 0o755 });
+    const inheritedPath = pathMode === "inherited" ? [inheritedBin, join(f.root, "other tools")].join(delimiter) : "";
+    writeFileSync(join(bin, "npm"), `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const args = process.argv.slice(2);
+if (args.includes('fail@1.0.0')) {
+  console.log('registry-stdout-DO-NOT-FORWARD');
+  console.error('registry-stderr-DO-NOT-FORWARD');
+  process.exit(23);
+}
+const nestedNode = execFileSync('node', ['-e', 'console.log(process.execPath)'], {encoding:'utf8'}).trim();
+const helper = ${JSON.stringify(pathMode)} === 'inherited' ? execFileSync('package-sync-helper', [], {encoding:'utf8'}).trim() : null;
+writeFileSync(join(process.env.PI_CODING_AGENT_DIR, 'npm-args.json'), JSON.stringify({args, execPath:process.execPath, nestedNode, helper, path:process.env.PATH}));
+const root = args[args.indexOf('--prefix') + 1];
+const manifestDir = join(root, 'node_modules', 'fixture-tools');
+mkdirSync(manifestDir, {recursive:true});
+writeFileSync(join(manifestDir, 'package.json'), JSON.stringify({name:'fixture-tools', version:'1.2.3'}));
+`, { mode: 0o755 });
+    json(f.settings, { enableInstallTelemetry: false, enableAnalytics: false, defaultProvider: "keep-me" });
+    const approved = { source: "npm:fixture-tools@1.2.3", extensions: [], autoload: false };
+    const env = { ...process.env, PATH: inheritedPath };
+    if (pathMode === "absent") delete (env as NodeJS.ProcessEnv).PATH;
+    const output = execFileSync(node, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", `
+      import { writeFileSync } from 'node:fs';
+      import { installPackageCatalog } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "../src/remote-client/packages.ts")).href)};
+      const options = ${JSON.stringify({ agentDir: f.agentDir, cwd: f.cwd })};
+      await installPackageCatalog([${JSON.stringify(approved)}], options);
+      try {
+        await installPackageCatalog([{source:'npm:fail@1.0.0'}], options);
+        throw new Error('Expected install failure');
+      } catch (error) {
+        writeFileSync(${JSON.stringify(join(f.root, "failure.json"))}, JSON.stringify({message:error.message, stack:error.stack, cause:error.cause}));
+      }
+      writeFileSync(${JSON.stringify(join(f.root, "parent-path.json"))}, JSON.stringify({path:process.env.PATH}));
+    `], { cwd: f.cwd, env, encoding: "utf8", timeout: 30_000 });
+    const npm = readJson(join(f.agentDir, "npm-args.json"));
+    assert.ok(npm.args.includes("install") && npm.args.includes("fixture-tools@1.2.3"));
+    assert.equal(npm.execPath, node);
+    assert.equal(npm.nestedNode, node);
+    assert.equal(npm.helper, pathMode === "inherited" ? "inherited-tool" : null);
+    assert.equal(npm.path, inheritedPath ? `${bin}${delimiter}${inheritedPath}` : bin);
+    assert.deepEqual(readJson(join(f.root, "parent-path.json")), pathMode === "absent" ? {} : { path: inheritedPath });
+    assert.deepEqual(readJson(f.settings).packages, [approved]);
+    assert.equal(readJson(f.settings).defaultProvider, "keep-me");
+    const failure = readJson(join(f.root, "failure.json"));
+    assert.equal(failure.message, "Package install failed: npm:fail@1.0.0");
+    assert.equal(failure.cause, undefined);
+    assert.doesNotMatch(JSON.stringify(failure) + output, /registry-stdout|registry-stderr|DO-NOT-FORWARD/);
+  });
 });
 
 test("default CLI is resolved from the installed Pi manifest and works with SDK settings", async t => {

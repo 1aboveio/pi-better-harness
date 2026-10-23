@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { activateStagedRuntime, adoptActivation, commitActivationStop, compatibleUpgrade, hasActivationReservations, readActivationJournal, runActivationWorker, type ActivationPorts, type ActivationProbe } from "../src/startup/activation.ts";
-import { claimDaemonOwner, inspectDaemonOwner } from "../src/daemon-owner.ts";
+import { claimDaemonOwner, currentOwnerIdentity, inspectDaemonOwner } from "../src/daemon-owner.ts";
 import type { IdleSessionsLease, ServerBuild, StagedRuntime, UpgradeRequest } from "../src/startup/managed-types.ts";
 
 function fixture(t: TestContext) {
-  const root = mkdtempSync(join(tmpdir(), "pi-activation-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-activation-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const serverDir = join(root, "state");
   const agentDir = join(root, "agent");
@@ -86,6 +86,46 @@ test("same target coalesces across canonical aliases while a different target co
   assert.equal(readActivationJournal(f.serverDir)?.desiredBuild.contentId, f.desired.build.contentId);
   assert.equal(f.launches, 1);
 });
+
+for (const guard of ["exited", "live", "ambiguous", "unknown-compatibility", "downgrade", "protocol", "agent", "candidate", "previous-alive", "cancelled", "prepared", "starting"] as const) {
+  test(`stale staged activation cleanup: ${guard}`, async t => {
+    const f = fixture(t);
+    const source = `import {claimDaemonOwner,inspectDaemonOwner} from ${JSON.stringify(new URL("../src/daemon-owner.ts", import.meta.url).href)}; const release=claimDaemonOwner(${JSON.stringify(f.serverDir)}); console.log(JSON.stringify(inspectDaemonOwner(${JSON.stringify(f.serverDir)}).owner)); release();`;
+    const old = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8" });
+    assert.equal(old.status, 0, old.stderr);
+    const previousOwner = JSON.parse(old.stdout);
+    const journal = { ...f.request, serverDir: realpathSync(f.serverDir), operationId: "abandoned", runtime: f.previous, desiredBuild: f.previous.build,
+      version: 1, phase: guard === "prepared" || guard === "starting" ? guard : "staged", emptyNamespace: false,
+      previousOwner: guard === "previous-alive" ? currentOwnerIdentity() : previousOwner,
+      candidateOwner: guard === "candidate" ? previousOwner : undefined,
+      previousCompatibility: guard === "unknown-compatibility" ? undefined : {
+        piSdkVersion: guard === "downgrade" ? "2.0.0" : "1.2.0", protocolVersion: guard === "protocol" ? 2 : 1,
+      }, reason: "Legacy or unverified live daemon; staged runtime is pending verified owner exit" };
+    writeFileSync(join(f.serverDir, "activation.json"), JSON.stringify(journal));
+    mkdirSync(join(f.serverDir, "activation-reservations"));
+    writeFileSync(join(f.serverDir, "activation-reservations", "a".repeat(64)), JSON.stringify({
+      buildId: f.previous.build.contentId, operationId: "abandoned", baseOperationId: null,
+    }));
+    writeFileSync(join(f.serverDir, "sessions.json"), "persisted-state");
+    if (guard === "live") f.serve(f.previous);
+    if (guard === "ambiguous") { mkdirSync(join(f.serverDir, "daemon-owner")); writeFileSync(join(f.serverDir, "daemon-owner", "foreign"), "keep"); }
+    const controller = new AbortController();
+    if (guard === "cancelled") f.ports.probe = async () => { controller.abort(); return { kind: "absent" }; };
+    const outcome = await activateStagedRuntime({ ...f.request, ports: f.ports, signal: controller.signal,
+      agentDir: guard === "agent" ? f.root : f.agentDir });
+    assert.equal(outcome.status, guard === "exited" ? "ready" : "deferred");
+    assert.equal(f.launches, guard === "exited" ? 1 : 0);
+    assert.equal(f.schedules, 0);
+    assert.equal(readFileSync(join(f.serverDir, "sessions.json"), "utf8"), "persisted-state");
+    if (guard === "exited") {
+      assert.equal(readActivationJournal(f.serverDir)?.desiredBuild.contentId, f.desired.build.contentId);
+      assert.equal(readdirSync(join(f.serverDir, "activation-reservations")).length, 0);
+    } else {
+      assert.equal(readActivationJournal(f.serverDir)?.operationId, "abandoned");
+      assert.equal(hasActivationReservations(journal), true);
+    }
+  });
+}
 
 for (const state of ["legacy-listener", "live-no-socket", "ambiguous-owner", "missing-owner-nonempty"]) {
   test(`${state} never schedules a stop or launches a successor`, async t => {

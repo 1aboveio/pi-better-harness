@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-server@0.1.2] - 2026-10-23
+
+### Fixed
+
+- Retire stale staged activation reservations after verified daemon exit, preserving compatibility checks and session state so a newer build can start.
+- Expose the managed runtime's bundled Node and npm to package-sync installers when the remote shell does not include them in `PATH`.
+
 ## [pi-better-server@0.1.1] - 2026-10-22
 
 ### Fixed
