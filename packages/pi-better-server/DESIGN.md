@@ -37,8 +37,11 @@ Sanitize remote text before rendering; truncate by visible terminal columns.
 ## Progress And Safety
 
 After connection, a screen-only browse scope unmounts the surrounding local
-transcript, startup header, widgets and footer. It mounts Pi's existing editor
-container so native progress, confirmations and custom screens keep working.
+transcript, startup header and widgets. It mounts Pi's existing editor and live
+footer containers so native progress, confirmations and custom screens keep
+working, with navigator hints and extension status visible below the home page.
+Fullscreen browsing uses Pi's native vertical layout to pin the footer at the
+bottom while the browser occupies the remaining height.
 Cancellation and failure restore the original mounts without replacing the local
 runtime or changing its history. Remote attachment hides the local startup header
 until disconnect.

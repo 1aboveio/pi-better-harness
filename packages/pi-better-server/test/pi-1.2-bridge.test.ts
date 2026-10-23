@@ -291,7 +291,7 @@ test("browse owns a clean screen and cancellation or failure restores the live l
     try {
       f.mode.editorContainer.clear();
       f.mode.editorContainer.addChild("Remote session browser");
-      assert.deepEqual(f.mode.ui.render(100), ["Remote session browser"]);
+      assert.deepEqual(f.mode.ui.render(100), ["Remote session browser", "Local footer"]);
       assert.equal(f.host.session, f.local);
       assert.equal(f.mode.unsubscribe, unsubscribe);
       assert.deepEqual(f.manager.history, ["original history"]);
@@ -315,6 +315,51 @@ test("browse owns a clean screen and cancellation or failure restores the live l
   assert.equal(f.events.at(-1), "local-prompt");
 });
 
+for (const mode of ["regular", "fullscreen"]) {
+  test(`browse retains the live footer and navigator in ${mode} without exposing local content`, async () => {
+    const f = await captured();
+    let status = "NAV_HINT | connected to r5";
+    f.mode.footerContainer.addChild({ render: () => [status] });
+    f.mode.chatContainer.addChild("Local transcript must stay hidden");
+    f.mode.widgetContainerAbove.addChild("Local widget must stay hidden");
+    f.mode.ui.mode = mode;
+    class NativeStack {
+      readonly entries: any[];
+      constructor(entries: any[]) { this.entries = entries; }
+      render(width: number) { return this.entries.flatMap(entry => entry.component.render(width)); }
+    }
+    const originalRoot = new NativeStack(f.mode.ui.children.map((component: any) => ({ component })));
+    f.mode.fullscreenLayoutRoot = originalRoot;
+    f.mode.ui.layoutRoot = originalRoot;
+    f.mode.ui.setLayoutRoot = function (root: any) { this.layoutRoot = root; };
+    const render = f.mode.ui.render;
+    f.mode.ui.render = function (width: number) {
+      return this.mode === "fullscreen" ? this.layoutRoot.render(width) : render.call(this, width);
+    };
+    const before = f.mode.ui.render(100);
+    const roots = [...f.mode.ui.children];
+    const endBrowse = f.controller.beginBrowse();
+    f.mode.editorContainer.clear();
+    f.mode.editorContainer.addChild("Remote home page");
+    assert.deepEqual(f.mode.ui.render(100), ["Remote home page", status]);
+    assert.deepEqual(f.mode.ui.children, [f.mode.editorContainer, f.mode.footerContainer]);
+    status = "NAV_HINT | remote status changed";
+    assert.deepEqual(f.mode.ui.render(42), ["Remote home page", status]);
+    if (mode === "fullscreen") {
+      assert.notEqual(f.mode.ui.layoutRoot, originalRoot);
+      assert.equal(f.mode.ui.layoutRoot.entries[1].component, f.mode.footerContainer);
+      assert.equal(f.mode.ui.layoutRoot.entries[1].shrink, 0);
+    }
+    status = "NAV_HINT | connected to r5";
+    f.mode.editorContainer.clear();
+    f.mode.editorContainer.addChild(f.mode.editor);
+    endBrowse();
+    assert.deepEqual(f.mode.ui.children, roots);
+    assert.equal(f.mode.ui.layoutRoot, originalRoot);
+    assert.deepEqual(f.mode.ui.render(100), before);
+  });
+}
+
 test("browse fails closed before changing the screen when native renderer methods are missing", async () => {
   const f = await captured();
   f.mode.headerContainer.addChild("Local startup header");
@@ -335,6 +380,28 @@ test("browse fails closed before changing the screen when native renderer method
   nextCleanup();
   assert.deepEqual(f.mode.ui.render(100), before);
 });
+
+for (const fault of ["missing-footer", "invalid-stack", "throwing-stack"]) {
+  test(`browse rejects ${fault} before changing the mounted screen`, async () => {
+    const f = await captured();
+    f.mode.headerContainer.addChild("Original local view");
+    const roots = [...f.mode.ui.children];
+    const before = f.mode.ui.render(100);
+    if (fault === "missing-footer") f.mode.footerContainer = undefined;
+    else {
+      f.mode.ui.mode = "fullscreen";
+      f.mode.ui.setLayoutRoot = () => { throw new Error("must not change layout"); };
+      f.mode.fullscreenLayoutRoot = fault === "invalid-stack" ? {} : {
+        constructor: class { constructor() { throw new Error("stack constructor failed"); } },
+      };
+    }
+    assert.throws(() => f.controller.beginBrowse(), /footerContainer|fullscreen layout|stack constructor failed/);
+    assert.deepEqual(f.mode.ui.children, roots);
+    assert.deepEqual(f.mode.ui.render(100), before);
+    assert.equal(f.host.session, f.local);
+    assert.deepEqual(f.events, []);
+  });
+}
 
 test("attach ends browsing and removes the startup header until local return", async () => {
   for (const browsing of [false, true]) {
