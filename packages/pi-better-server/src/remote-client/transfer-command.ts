@@ -84,14 +84,17 @@ export async function runRemoteTransfer(args: RemoteTransferArgs, frontend: Tran
   let client: DaemonClient | undefined;
   let operationFailed = false;
   try {
-    const setup = await withConnectionProgress(ui, host, async ({ signal, stage }) => {
+    const setup = await withConnectionProgress(ui, host, async ({ signal, stage, sshConnected }) => {
       let pendingTarget: Target | undefined;
       let pendingClient: DaemonClient | undefined;
       try {
         stage("establishing SSH...");
         pendingTarget = await (frontend.resolveTarget ?? resolveTarget)({
           host, agent: "pi", signal, ...(remoteDir ? { remoteDir } : {}),
-          onProgress: phase => stage({ ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]),
+          onProgress: phase => {
+            if (phase !== "ssh") sshConnected();
+            stage({ ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]);
+          },
         });
         signal.throwIfAborted();
         stage("contacting Pi server...");

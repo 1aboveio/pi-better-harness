@@ -53,8 +53,9 @@ are deduplicated and summarized. Legacy and busy refusals do not close sessions.
 
 Use native Pi loaders, without invented percentages, for remote waits. The SSH
 loader names each connection stage and shows that stage's elapsed time, plus the
-time spent on the whole attempt. `localhost` uses the same loader without SSH
-stages. Finished stages stay visible with their duration. Browser and folder reads can be dismissed;
+time spent on the whole attempt. Once SSH succeeds, the screen says Connected and
+later stages are remote progress. `localhost` uses the same loader without that
+Connected switch. Finished stages stay visible with their duration. Browser and folder reads can be dismissed;
 late replies cannot complete a disposed screen. Unabortable writes remain visible
 until settled. No input or confirmation dialog nests inside a custom-screen
 factory. Move and Copy require explicit intent, destination and transfer scope.
