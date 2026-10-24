@@ -153,9 +153,10 @@ actions only. Host suggestions appear only after `connect`, with a complete
 
 While connecting, a native spinner names each stage and shows how long that stage
 and the whole attempt have taken. Finished stages stay on screen with their duration.
-Remote stages are establishing SSH, finding the remote server, opening the tunnel, and
-contacting the Pi daemon. Local stages are finding the local server, starting or checking
-it, and contacting it. Escape cancels that attempt and returns to the local UI. It does not stop any
+Once SSH succeeds, the screen says Connected. Later stages are remote progress, not
+another connection attempt: finding the remote server, starting or checking the Pi
+server, opening the tunnel, and contacting the daemon. Local stages stay under Connecting,
+because there is no SSH step. Escape cancels that attempt and returns to the local UI. It does not stop any
 remote sessions or shared SSH connection. Connection failures retain their original
 error message; the spinner does not imply that an unreachable host is available.
 

@@ -187,7 +187,7 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
     let remoteDir = options.remoteDir ?? await rememberedServerDir(options.host);
     const controlPathRoot = join(process.env.PI_REMOTE_TMP ?? "/tmp", `pi-native-${process.getuid?.() ?? process.pid}`);
     let deferredUpgrade: string | undefined;
-    const setup = await withConnectionProgress(ui, options.host, async ({ signal, stage }) => {
+    const setup = await withConnectionProgress(ui, options.host, async ({ signal, stage, sshConnected }) => {
       let pendingTarget: Target | undefined;
       let pendingClient: DaemonClient | undefined;
       try {
@@ -196,9 +196,13 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
         pendingTarget = await local.dependencies.resolveTarget({
           host: localConnect ? undefined : options.host, agent: "pi", controlPathRoot, signal, managedRuntime: true,
           ...(remoteDir ? { remoteDir } : {}),
-          onProgress: phase => stage(localConnect
-            ? { directory: "finding local server...", server: "starting or checking Pi server...", ssh: "finding local server...", forward: "connecting to local socket..." }[phase]
-            : { ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]),
+          onProgress: phase => {
+            // The ssh phase is the connection. Everything after it is work on the remote.
+            if (!localConnect && phase !== "ssh") sshConnected();
+            stage(localConnect
+              ? { directory: "finding local server...", server: "starting or checking Pi server...", ssh: "finding local server...", forward: "connecting to local socket..." }[phase]
+              : { ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]);
+          },
           onUpgradeProgress: (phase, detail) => {
             if (phase === "deferred") deferredUpgrade = detail;
             stage(UPGRADE_STAGES[phase] ?? "checking matching server...");

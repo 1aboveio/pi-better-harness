@@ -56,6 +56,31 @@ test("connection spinner renders pending stages and preserves a successful conne
   assert.equal(h.completions(), 1);
 });
 
+test("SSH success says connected, and later stages are remote progress", async t => {
+  const h = nativeUi(t);
+  const ssh = deferred<void>();
+  const remote = deferred<void>();
+  const attempt = withConnectionProgress(h.ui, "r5", async progress => {
+    progress.stage("establishing SSH...");
+    await ssh.promise;
+    progress.sshConnected();
+    progress.stage("finding remote server...");
+    await remote.promise;
+    return "ready";
+  }, () => {});
+  await turn();
+  assert.match(h.render().join("\n"), /Connecting to r5: establishing SSH/);
+  assert.doesNotMatch(h.render().join("\n"), /Connected to r5/);
+  ssh.resolve();
+  await turn();
+  const after = h.render().join("\n");
+  assert.match(after, /Connected to r5/);
+  assert.match(after, /Remote: finding remote server/);
+  assert.doesNotMatch(after, /Connecting to r5: finding remote server/);
+  remote.resolve();
+  assert.equal(await attempt, "ready");
+});
+
 test("connection failure preserves the original SSH error for the caller", async t => {
   const h = nativeUi(t);
   const error = new Error("SSH ControlMaster for 115: Host is down");

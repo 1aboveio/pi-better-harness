@@ -4,6 +4,8 @@ import { CancellableLoader, truncateToWidth } from "@earendil-works/pi-tui";
 export interface ConnectionProgress {
   signal: AbortSignal;
   stage(message: string): void;
+  /** SSH is up. Later stages are work on the remote, not the connection itself. */
+  sshConnected(): void;
 }
 
 type Outcome<T> = { kind: "connected"; value: T } | { kind: "failed"; error: unknown } | { kind: "cancelled" };
@@ -37,11 +39,16 @@ export async function withConnectionProgress<T>(
       const loader = new CancellableLoader(tui, text => theme.fg("accent", text), text => theme.fg("muted", text), `Connecting to ${host}: preparing...`);
       let finished = false;
       let abandoned = false;
+      let sshReady = false;
+      const prefix = () => sshReady ? "Remote" : `Connecting to ${host}`;
+      const paint = (message: string, started = Date.now()) => {
+        loader.setMessage(`${prefix()}: ${message} · ${formatStageDuration(Date.now() - started)}`);
+      };
       // Elapsed labels tick even when the current stage produces no new messages.
       const ticker = setInterval(() => {
         if (finished) return;
         const current = stages.at(-1);
-        if (current) loader.setMessage(`Connecting to ${host}: ${current.message} · ${formatStageDuration(Date.now() - current.startedAt)}`);
+        if (current) paint(current.message, current.startedAt);
         tui.requestRender();
       }, 500);
       const stage = (message: string) => {
@@ -50,7 +57,14 @@ export async function withConnectionProgress<T>(
         if (current?.message === message) return;
         if (current) current.durationMs = Date.now() - current.startedAt;
         stages.push({ message, startedAt: Date.now() });
-        if (!finished) loader.setMessage(`Connecting to ${host}: ${message}`);
+        if (!finished) loader.setMessage(`${prefix()}: ${message}`);
+        tui.requestRender();
+      };
+      const sshConnected = () => {
+        if (finished || sshReady) return;
+        sshReady = true;
+        const current = stages.at(-1);
+        if (current) loader.setMessage(`${prefix()}: ${current.message}`);
         tui.requestRender();
       };
       const stop = () => {
@@ -67,7 +81,7 @@ export async function withConnectionProgress<T>(
       loader.onAbort = () => { if (!finished) { abandon!(); done({ kind: "cancelled" }); } };
       void Promise.resolve().then(() => {
         controller.signal.throwIfAborted();
-        return connect({ signal: controller.signal, stage });
+        return connect({ signal: controller.signal, stage, sshConnected });
       }).then(value => {
         if (abandoned) { void Promise.resolve().then(() => disposeLate(value)).catch(() => undefined); return; }
         finished = true;
@@ -86,8 +100,9 @@ export async function withConnectionProgress<T>(
           const now = Date.now();
           const history = stages.slice(0, -1).map(doneStage =>
             theme.fg("muted", fit(`  ✓ ${doneStage.message} ${formatStageDuration(doneStage.durationMs ?? now - doneStage.startedAt)}`)));
+          const connected = sshReady ? [theme.fg("accent", fit(`Connected to ${host}`))] : [];
           const elapsed = theme.fg("dim", fit(`Esc cancel · ${formatStageDuration(now - startedAt)}`));
-          return [...history, ...loader.render(width), elapsed];
+          return [...history, ...connected, ...loader.render(width), elapsed];
         },
         handleInput: data => loader.handleInput(data),
         invalidate: () => loader.invalidate(),
