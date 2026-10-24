@@ -121,6 +121,7 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
   const ensureServer = options.ensureServer !== false && (options.agent ?? process.env.PI_SERVER_AGENT ?? "pi") === "pi";
   if (!options.host) {
     let socketPath = options.socket;
+    const requestedDir = options.remoteDir ? absolutePath(options.remoteDir, "--remote-dir") : undefined;
     let serverDir: string | undefined;
     const candidate = ensureServer && !options.socket ? discoverLocalRuntime() : undefined;
     if (candidate) {
@@ -133,7 +134,7 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
       checkAbort();
       if (discovery.exitCode !== 0) throw new Error(`Runtime discovery: ${discovery.stderr.trim() || "launcher failed"}. ${INSTALL_GUIDANCE}`);
       const runtime = parseRuntime(discovery.stdout);
-      serverDir = process.env.PI_SERVER_DIR || runtime.defaultServerDir;
+      serverDir = requestedDir ?? (process.env.PI_SERVER_DIR || runtime.defaultServerDir);
       progress("server");
       const result = await runner.runOnce({
         shell: false, argv: [runtime.launcher, ...ensureArgs(serverDir)],
@@ -144,7 +145,7 @@ export async function resolveTarget(options: TargetOptions): Promise<Target> {
       socketPath = parseReadiness(result.stdout, serverDir).socketPath;
     }
     if (socketPath === undefined) {
-      serverDir = defaultServerDir();
+      serverDir = requestedDir ?? defaultServerDir();
       socketPath = socketPathFor(serverDir);
     }
     return {

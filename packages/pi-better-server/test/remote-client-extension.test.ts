@@ -14,6 +14,8 @@ import { NativeClientHost } from "../src/remote-client/host.ts";
 test("remote command accepts an SSH alias and explicit remote connection selectors", () => {
   assert.equal(parseRemoteArgs("r5").host, "r5");
   assert.equal(parseRemoteArgs("connect r5").host, "r5");
+  assert.equal(parseRemoteArgs("connect localhost").host, "localhost");
+  assert.equal(parseRemoteArgs("local").host, "localhost");
   assert.deepEqual(parseRemoteArgs("r5 --cwd /home/user/workspaces/project --session selected --remote-dir /home/user/server"), {
     host: "r5", cwd: "/home/user/workspaces/project", sessionId: "selected", remoteDir: "/home/user/server",
   });
