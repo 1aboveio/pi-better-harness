@@ -108,14 +108,16 @@ A client that skips `hello` is still served.
 
 The native client provides an experimental VS Code Remote-style workflow:
 start ordinary local Pi **1.2.0** with this package loaded at startup, then run
-`/remote connect r5`. The terminal keeps Pi's native local UI while the remote daemon owns
+`/remote connect r5`, or `/remote connect localhost` for the daemon on this machine.
+The terminal keeps Pi's native local UI while the daemon owns
 the model, tools, workspace and session state. Your local conversation stays separate
 unless you explicitly choose to move or copy it after connecting.
 
-Connecting installs or stages the matching server build automatically, verifies
-readiness and compatibility, and then opens the SSH tunnel. A registered runtime
-keeps its agent and server directories. A new host uses `~/.pi/agent` and
-`~/.pi/agent/server`. See [automatic server updates](#automatic-server-updates)
+`localhost` skips SSH. It talks to the local daemon socket, starting that daemon
+through the installed runtime when one is registered. A remote host installs or stages
+the matching server build, verifies readiness and compatibility, and then opens the SSH
+tunnel. A registered runtime keeps its agent and server directories. A new host uses
+`~/.pi/agent` and `~/.pi/agent/server`. See [automatic server updates](#automatic-server-updates)
 for busy sessions, older daemons and manual launcher overrides.
 
 ### Connect and disconnect
@@ -131,6 +133,7 @@ connecting.
 /remote list
 /remote connect
 /remote connect r5
+/remote connect localhost
 /remote r5
 /remote r5 --cwd /home/user/workspaces/project
 /remote r5 --session <id-or-unique-prefix>
@@ -148,9 +151,11 @@ and press Enter to confirm a connection. `/remote connect` opens a host picker;
 actions only. Host suggestions appear only after `connect`, with a complete
 `connect <host>` completion value. `/remote r5` remains a supported shorthand.
 
-While connecting, a native spinner shows the current stage: establishing SSH,
-finding the remote server, opening the tunnel, or contacting the Pi daemon.
-Escape cancels that attempt and returns to the local UI. It does not stop any
+While connecting, a native spinner names each stage and shows how long that stage
+and the whole attempt have taken. Finished stages stay on screen with their duration.
+Remote stages are establishing SSH, finding the remote server, opening the tunnel, and
+contacting the Pi daemon. Local stages are finding the local server, starting or checking
+it, and contacting it. Escape cancels that attempt and returns to the local UI. It does not stop any
 remote sessions or shared SSH connection. Connection failures retain their original
 error message; the spinner does not imply that an unreachable host is available.
 

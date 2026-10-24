@@ -49,8 +49,9 @@ test("root autocomplete offers local or connected actions without exposing host 
 
 test("connect and pull host completions are scoped to the chosen action", () => {
   for (const connected of [false, true]) {
+    assert.deepEqual(remoteArgumentCompletions("connect ", connected, ["r5", "user@r6"])?.map(item => item.value), ["connect localhost", "connect r5", "connect user@r6"]);
+    assert.deepEqual(remoteArgumentCompletions("pull ", connected, ["r5", "user@r6"])?.map(item => item.value), ["pull r5", "pull user@r6"]);
     for (const action of ["connect", "pull"]) {
-      assert.deepEqual(remoteArgumentCompletions(`${action} `, connected, ["r5", "user@r6"])?.map(item => item.value), [`${action} r5`, `${action} user@r6`]);
       assert.deepEqual(remoteArgumentCompletions(`${action} r5`, connected, ["r5", "user@r6"])?.map(item => item.value), [`${action} r5`]);
       assert.deepEqual(remoteArgumentCompletions(`  ${action.toUpperCase()} U`, connected, ["r5", "user@r6"])?.map(item => item.value), [`${action} user@r6`]);
       assert.equal(remoteArgumentCompletions(`${action} missing`, connected, ["r5"]), null);
@@ -59,6 +60,13 @@ test("connect and pull host completions are scoped to the chosen action", () => 
     assert.equal(remoteArgumentCompletions("list r5", connected, ["r5"]), null);
     assert.equal(remoteArgumentCompletions("sessions r5", connected, ["r5"]), null);
   }
+});
+
+test("the host picker can choose the local daemon without asking for an SSH alias", async () => {
+  let inputs = 0;
+  const input = async () => { inputs++; return "unexpected"; };
+  assert.equal(await chooseRemoteHost({ select: async () => "Connect to localhost (this machine, no SSH)", input }, ["r5"]), "localhost");
+  assert.equal(inputs, 0);
 });
 
 test("host listing merges SSH profiles with entered history and preserves remembered directories", async t => {

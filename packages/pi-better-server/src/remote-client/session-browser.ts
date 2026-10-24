@@ -115,7 +115,8 @@ export class RemoteSessionBrowser implements Component {
       if (previous && visibleWidth(`${previous}  ${command}`) <= width) legend[legend.length - 1] = `${previous}  ${command}`;
       else legend.push(fit(command));
     }
-    let header = [theme.bold(fit(`Remote: ${singleLine(this.host)}`)),
+    const hostLabel = this.host === "localhost" ? "Local daemon" : `Remote: ${singleLine(this.host)}`;
+    let header = [theme.bold(fit(hostLabel)),
       ...(this.options.cwd ? [theme.fg("muted", fit(`Folder: ${singleLine(this.options.cwd)}`))] : [])];
     let details = selected ? [
       ...wrapTextWithAnsi(singleLine(selected.name || "Untitled session"), width).slice(0, 2).map(line => theme.fg("accent", line)),
@@ -134,7 +135,8 @@ export class RemoteSessionBrowser implements Component {
     if (fixed() + minimumBody + scrollRoom > budget) notices = [];
     while (header.length && fixed() + minimumBody + scrollRoom > budget) header.pop();
     const available = Math.max(0, budget - fixed());
-    const unreservedHeight = Math.min(10, available);
+    // Use the height the terminal offers; only very short windows shed rows.
+    const unreservedHeight = available;
     const entryCount = rows.length + (unreservedHeight >= 4 ? new Set(rows.map(session => session.cwd)).size : 0);
     const bodyHeight = Math.max(0, unreservedHeight - (entryCount > unreservedHeight && available > 1 ? 1 : 0));
     const grouped = bodyHeight >= 4;

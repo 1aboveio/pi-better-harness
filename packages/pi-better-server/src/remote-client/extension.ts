@@ -8,7 +8,7 @@ import { resolveSession } from "../remote/sessions.ts";
 import { getPi12Bridge, installPi12Bridge, type Pi12Bridge } from "./pi-1.2-bridge.ts";
 import { planPackageSync, readLocalPackageCatalog, type PackageCatalog } from "./packages.ts";
 import { RemoteClientSession } from "./session.ts";
-import { availableRemoteHosts, chooseRemoteHost, remoteArgumentCompletions, showRemoteHostList } from "./menu.ts";
+import { availableRemoteHosts, chooseRemoteHost, LOCAL_HOST, remoteArgumentCompletions, showRemoteHostList } from "./menu.ts";
 import { rememberedServerDir, rememberRemoteHost } from "./profiles.ts";
 import { browseRemoteSessions } from "./session-browser.ts";
 import { withConnectionProgress } from "./connection-progress.ts";
@@ -19,7 +19,10 @@ import { browseRemoteFolders } from "./folder-browser.ts";
 import { showRemoteProgress } from "./remote-progress.ts";
 import { NATIVE_RECONNECT_CAPABILITIES, openUpgradeTransport } from "./upgrade-transport.ts";
 
-const USAGE = "/remote connect <ssh-alias> [--cwd <remote-path>] [--session <id>] [--remote-dir <server-dir>]";
+const USAGE = "/remote connect <ssh-alias|localhost> [--cwd <remote-path>] [--session <id>] [--remote-dir <server-dir>]";
+/** `localhost` names the daemon on this machine: a plain Unix socket, no SSH setup. */
+export { LOCAL_HOST };
+export const isLocalHost = (host: string): boolean => host === LOCAL_HOST;
 const UPGRADE_STAGES: Record<string, string> = {
   artifact: "preparing matching server...", probe: "checking remote platform...", "node-download": "preparing private Node runtime...",
   verifying: "verifying installed server...", "verification-upload": "sending server verification data...",
@@ -35,7 +38,8 @@ export function parseRemoteArgs(text: string) {
     cwd: { type: "string" }, session: { type: "string" }, "remote-dir": { type: "string" },
   } });
   if (positionals.length !== 1) throw new Error(`Usage: ${USAGE}`);
-  return { host: positionals[0]!, cwd: values.cwd, sessionId: values.session, remoteDir: values["remote-dir"] };
+  const host = positionals[0] === "local" ? LOCAL_HOST : positionals[0]!;
+  return { host, cwd: values.cwd, sessionId: values.session, remoteDir: values["remote-dir"] };
 }
 
 type RemoteOptions = ReturnType<typeof parseRemoteArgs>;
@@ -187,11 +191,14 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
       let pendingTarget: Target | undefined;
       let pendingClient: DaemonClient | undefined;
       try {
-        stage("establishing SSH...");
+        const localConnect = isLocalHost(options.host);
+        stage(localConnect ? "finding local server..." : "establishing SSH...");
         pendingTarget = await local.dependencies.resolveTarget({
-          host: options.host, agent: "pi", controlPathRoot, signal, managedRuntime: true,
+          host: localConnect ? undefined : options.host, agent: "pi", controlPathRoot, signal, managedRuntime: true,
           ...(remoteDir ? { remoteDir } : {}),
-          onProgress: phase => stage({ ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]),
+          onProgress: phase => stage(localConnect
+            ? { directory: "finding local server...", server: "starting or checking Pi server...", ssh: "finding local server...", forward: "connecting to local socket..." }[phase]
+            : { ssh: "establishing SSH...", directory: "finding remote server...", server: "starting or checking Pi server...", forward: "opening SSH tunnel..." }[phase]),
           onUpgradeProgress: (phase, detail) => {
             if (phase === "deferred") deferredUpgrade = detail;
             stage(UPGRADE_STAGES[phase] ?? "checking matching server...");
@@ -199,7 +206,12 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
         });
         signal.throwIfAborted();
         stage("contacting Pi server...");
-        pendingClient = await DaemonClient.connect(pendingTarget.socketPath, { signal, hello: { capabilities: [...NATIVE_RECONNECT_CAPABILITIES] } });
+        try {
+          pendingClient = await DaemonClient.connect(pendingTarget.socketPath, { signal, hello: { capabilities: [...NATIVE_RECONNECT_CAPABILITIES] } });
+        } catch (error) {
+          if (!localConnect) throw error;
+          throw new Error(`Could not reach the local Pi server at ${pendingTarget.socketPath}: ${error instanceof Error ? error.message : String(error)}. Start it with the pi-better-server CLI or install the native runtime, then retry /remote connect localhost.`);
+        }
         signal.throwIfAborted();
         stage("checking server compatibility...");
         const capabilities = pendingClient.server?.capabilities ?? [];
@@ -225,7 +237,8 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
         : `Server update staged. The current daemon cannot perform a verified automatic handoff and was left running. ${deferredUpgrade}`, safe ? "info" : "warning");
     }
     let connection = client;
-    ui.setStatus("pi-remote", `SSH: ${options.host} (sessions)`);
+    const targetLabel = isLocalHost(options.host) ? "local daemon" : `SSH: ${options.host}`;
+    ui.setStatus("pi-remote", `${targetLabel} (sessions)`);
     if (!await syncPackages(connection, local, undefined, { scope: "global", host: options.host, onNotice: message => notices.push(message) })) return;
     let choice: Exclude<RemoteSessionChoice, { action: "transfer" }> | undefined;
     for (;;) {
@@ -249,17 +262,18 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
       if (selectedChoice.action === "create") sessionId = (await connection.call({ type: "create_session", cwd })).sessionId as string;
       await connection.call({ type: "open_session", sessionId });
       return RemoteClientSession.connect(connection, sessionId, {
-        reconnectAfterUpgrade: (notice, signal) => openUpgradeTransport({
-          host: options.host, agent: "pi", controlPathRoot, managedRuntime: true, ...(remoteDir ? { remoteDir } : {}),
-        }, local.dependencies, signal, notice.buildId),
+        reconnectAfterUpgrade: (notice, signal) => openUpgradeTransport(isLocalHost(options.host)
+          ? { agent: "pi", managedRuntime: true, ...(remoteDir ? { remoteDir } : {}) }
+          : { host: options.host, agent: "pi", controlPathRoot, managedRuntime: true, ...(remoteDir ? { remoteDir } : {}) },
+        local.dependencies, signal, notice.buildId),
         onReconnected: replacement => {
           connection = replacement;
           void closeInitialTransport().catch(error => ui.notify(`Remote tunnel cleanup: ${String(error)}`, "warning"));
         },
         onUpgradeStatus: phase => ui.setStatus("pi-remote", phase === "ready"
-          ? `SSH: ${options.host}` : `SSH: ${options.host} (${phase === "restarting" ? "server restarting" : "reconnecting"})`),
+          ? targetLabel : `${targetLabel} (${phase === "restarting" ? "server restarting" : "reconnecting"})`),
         onDisconnect: () => {
-          ui.setStatus("pi-remote", `SSH: ${options.host} (disconnected)`);
+          ui.setStatus("pi-remote", `${targetLabel} (disconnected)`);
           ui.notify(`Disconnected from ${options.host}. Remote work has not been aborted. Use /remote disconnect to return locally, then reconnect.`, "warning");
         },
         localCommandCompletions: (prefix) => argumentCompletions(prefix, true),
@@ -294,7 +308,7 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
     await bridge.attach(remote);
     endBrowse = undefined;
     attached = true;
-    ui.setStatus("pi-remote", `SSH: ${options.host}`);
+    ui.setStatus("pi-remote", targetLabel);
     ui.notify(`Attached to ${options.host}:${cwd}. /remote opens the server's sessions; /remote disconnect returns locally.`, "info");
   } finally {
     try { endBrowse?.(); }

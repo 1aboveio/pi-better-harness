@@ -6,6 +6,8 @@ import { sshHostAliases } from "./ssh-hosts.ts";
 
 type MenuUi = Pick<ExtensionUIContext, "select" | "input">;
 const OTHER_HOST = "Connect to another SSH host...";
+const LOCAL_HOST_LABEL = "Connect to localhost (this machine, no SSH)";
+export const LOCAL_HOST = "localhost";
 
 export async function savedRemoteHosts(agentDir = getAgentDir()): Promise<string[]> {
   let files;
@@ -36,8 +38,9 @@ export async function showRemoteHostList(ui: Pick<ExtensionUIContext, "select" |
 
 export async function chooseRemoteHost(ui: MenuUi, hosts: readonly string[]): Promise<string | undefined> {
   const labels = hosts.map((host) => `Connect to ${host}`);
-  const choice = await ui.select("Remote", [...labels, OTHER_HOST]);
+  const choice = await ui.select("Remote", [LOCAL_HOST_LABEL, ...labels, OTHER_HOST]);
   if (choice === undefined) return undefined;
+  if (choice === LOCAL_HOST_LABEL) return LOCAL_HOST;
   const index = labels.indexOf(choice);
   if (index !== -1) return hosts[index];
   if (choice !== OTHER_HOST) throw new Error("Unknown remote menu choice");
@@ -52,8 +55,10 @@ export function remoteArgumentCompletions(prefix: string, connected = false, hos
   if (/^(connect|pull)(?:\s|$)/.test(input)) {
     const action = input.split(/\s+/, 1)[0]!;
     const hostPrefix = input.slice(action.length).trimStart();
-    const matches = hosts.filter((host) => host.toLowerCase().startsWith(hostPrefix))
-      .map((host) => ({ value: `${action} ${host}`, label: host, description: `${action === "connect" ? "Connect to" : "Pull session from"} ${host}` }));
+    const candidates = action === "connect" ? [LOCAL_HOST, ...hosts.filter((host) => host !== LOCAL_HOST)] : [...hosts];
+    const matches = candidates.filter((host) => host.toLowerCase().startsWith(hostPrefix))
+      .map((host) => ({ value: `${action} ${host}`, label: host,
+        description: host === LOCAL_HOST ? "Connect to the daemon on this machine" : `${action === "connect" ? "Connect to" : "Pull session from"} ${host}` }));
     return matches.length ? matches : null;
   }
   const values = connected ? ["connect", "list", "sessions", "pull", "disconnect"] : ["connect", "list", "pull"];
