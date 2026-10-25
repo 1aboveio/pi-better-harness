@@ -6,7 +6,7 @@
  * vendored here as `shared-sandbox-core.ts`. This file holds only the subagent
  * shape of that call: the detached child's writable directory is the whole
  * policy, and the wrapped executable is always the pi binary. Detached spawning
- * policy (default-on, explicit request, explicit opt-out) stays in index.ts and
+ * policy (opt-in or human-enabled profile) stays in permission-policy.ts and
  * is passed through unchanged.
  */
 
@@ -61,7 +61,7 @@ export function sandboxSupported(): boolean {
 }
 
 /**
- * Resolve the caller's default-on, explicit-request, and opt-out policy before
+ * Resolve the caller's activation and explicit-request policy before
  * spawning. A selected backend always returns its wrapper; callers never retry
  * the child directly when that wrapper exits or cannot initialize.
  */

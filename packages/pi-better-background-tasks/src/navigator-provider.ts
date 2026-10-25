@@ -15,7 +15,7 @@ import { failurePath, failureView } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
 import { stopTask } from "./runtime.js";
-import { observeBackgroundTaskStall } from "./stall.js";
+import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
 
 let unregister: (() => void) | undefined;
@@ -152,8 +152,8 @@ function detailFromMeta(meta: BackgroundTaskMeta | undefined, now: number, optio
   if (meta.deadlineAt) metadata.push({ label: "deadline", value: formatDuration(meta.deadlineAt - now) });
   if (meta.lastCheckedAt) metadata.push({ label: "checked", value: `${formatDuration(now - meta.lastCheckedAt)} ago` });
   if (meta.status === "running") {
-    const stall = observeBackgroundTaskStall(meta, now);
-    if (stall.state !== "healthy") metadata.push({ label: "activity", value: stall.state });
+    const activity = formatBackgroundTaskStall(observeBackgroundTaskStall(meta, now));
+    if (activity) metadata.push({ label: "activity", value: activity });
   }
   if (meta.lastExitCode !== undefined) metadata.push({ label: "exit", value: String(meta.lastExitCode) });
   if (meta.error) metadata.push({ label: "error", value: meta.error });
@@ -223,9 +223,8 @@ function factsForMeta(meta: BackgroundTaskMeta, now: number): string[] {
   const incident = actionableFailures(readFailureState(failurePath(meta.id)))[0];
   if (incident) facts.push(`${failureLabel(incident)}: ${incident.summary}`);
   if (meta.status === "running") {
-    const stall = observeBackgroundTaskStall(meta, now);
-    if (stall.state === "stalled") facts.push("stalled");
-    else if (stall.state === "quiet") facts.push("quiet");
+    const activity = formatBackgroundTaskStall(observeBackgroundTaskStall(meta, now));
+    if (activity) facts.push(activity);
   }
   if (meta.kind === "command_watch" && meta.intervalMs) facts.push(`every ${formatDuration(meta.intervalMs)}`);
   if (meta.deadlineAt && meta.status === "running") facts.push(`${formatDuration(meta.deadlineAt - now)} left`);

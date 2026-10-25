@@ -2,15 +2,37 @@
 
 ## Status
 
-Accepted. Extends ADR 0003's shared enforcement mechanism and ADR 0004's opt-in Main/default-on Subagents policy. Amended by [ADR 0008](0008-write-without-delete.md): the file rows gain Write (no removal) and Write & delete (formerly Read / write), and the Subagents default becomes Outside project = Write.
+Accepted. Extends ADR 0003's shared enforcement mechanism and ADR 0004's opt-in activation policy for all three profiles. Amended by [#572](https://github.com/1aboveio/pi-better-harness/issues/572) to add an independent Background tasks profile, replacing ADR 0004's Main inheritance for local background launches. Amended by [ADR 0008](0008-write-without-delete.md): the file rows gain Write (no removal) and Write & delete (formerly Read / write), and the Subagents default becomes Outside project = Write.
 
 ## Decision
 
-`/sandbox` presents one flat table with independent Main and Subagents columns. The rows are Sandbox, Project files, Outside project, Stored credentials, Run commands & applications, and Network access. File rows use Off, Read, and Read / write; the remaining rows use Off and On. Detail cells show a dimmed literal `-` when their column's Sandbox switch is Off. Inactive values are retained, never replaced by unrestricted values.
+`/sandbox` presents one flat table with independent Main, Subagents, and Background tasks columns. The rows are Sandbox, Project files, Outside project, Stored credentials, Run commands & applications, and Network access. File rows use Off, Read, and Read / write; the remaining rows use Off and On. Detail cells show a dimmed literal `-` when their column's Sandbox switch is Off. Inactive values are retained, never replaced by unrestricted values.
 
-Defaults are Main sandbox Off, Subagents sandbox On, project Read / write, outside Read, stored credentials Read, commands On, network On. Human changes affect subsequent operations and launches. Save as defaults persists both columns; unsaved choices are session-local. Existing activation preferences migrate into the Main switch.
+Fresh Main, Subagents, and Background tasks sandbox switches are all Off, following the user's post-#572 amendment to ADR 0004. Retained detail defaults are project Write & delete, commands On, and network On. Main and Background tasks retain outside Read and stored credentials Read; Subagents retain outside Write and stored credentials Write & delete. These detail values apply only when a profile is enabled. Explicit saved switches and details remain unchanged. Human changes affect subsequent operations and launches. Save as defaults persists all three columns; unsaved choices are session-local. Existing activation preferences migrate into the Main switch.
 
 The permission table has no folder selectors, app integrations, or expandable groups. Existing protected-path rules remain stricter than broad file permissions.
+
+### Background tasks amendment (#572)
+
+Background tasks uses the same permission-profile shape as Main. Fresh profiles
+start Off with Main's detail defaults. A version 1 global or session record
+without `background` inherits a separate copy of its existing Main profile,
+including activation and every detail value. Activation-only preferences feed
+both profiles when no permission record exists. Explicit Background values are
+validated; malformed data fails closed instead of falling back. Subsequent
+Main toggles and `/sandbox default on|off` change only Main. Session edits and
+Ctrl+S persist the independent profile using the existing version 1 envelopes.
+
+The existing `pi-better-sandbox:policy` event keeps its Main fields and adds a
+frozen `background` object with `state`, `writableRoot`, `denyWrite`, `reason`,
+and `permissions` (the same shape as foreground permissions, present once
+settings load). The `inactive` presentation state maps to `disabled` on the
+wire. Background state uses its own activation and permissions with the same
+backend, canonical-root, runtime-path, protected-path, and load-error checks as
+Main. Background can therefore be enabled, unavailable, or failed while Main
+is Off. Policy requests republish both profiles; launches retain snapshots.
+Older consumers reading only the top-level event fields continue to follow Main
+until upgraded. Subagent policy and tool admission are unchanged.
 
 ## Credential scope
 
@@ -27,6 +49,24 @@ The shared core owns file access decisions and OS wrapper rules. Main and Subage
 Runtime system libraries and temporary paths need bounded allowances so the sandbox can execute at all. These allowances must be documented and must not grant a whole home directory or override credential-file restrictions. Linux backend limitations must be explicit and fail closed.
 
 ## Verification
+
+The #572 producer change was verified on macOS with:
+
+- `node --import tsx --test packages/pi-better-sandbox/test/*.test.ts`: 228 passed;
+  one Linux-only kernel test skipped.
+- `node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/sandbox-permissions.tui.e2e.test.mjs`:
+  all seven passed, including Background edits, session reload before saving,
+  Ctrl+S persistence, new-session defaults, and unchanged trusted-tool groups.
+- `node node_modules/typescript/bin/tsc --noEmit -p packages/pi-better-sandbox/tsconfig.json`:
+  passed.
+- Test-quality lint on the change and scoped `git diff --check`: passed.
+
+Regression coverage includes old global, legacy-file, and session profiles;
+activation-only migration; independent navigation and disabled detail retention;
+late policy requests; frozen launch snapshots; branch restoration; malformed
+Background profiles; unavailable backends; unsafe roots; and runtime symlinks
+checked against Background's own permissions. Background-task consumer execution,
+provenance, status, and diagnostics remain outside this producer change.
 
 Required evidence includes table keyboard behavior and width bounds; persistence and migration; matching file decisions and actual kernel enforcement; credential-file precedence; launch-time snapshots; and real-kernel checks using disposable synthetic files. No real credential values should be inspected by these tests.
 

@@ -1,7 +1,6 @@
 /**
- * Whole-session demonstration: the harness starts foreground execution
- * inactive, then a human opt-in write-confines every first-party foreground
- * execution path at once. Default-on subagents remain independently confined.
+ * Whole-session demonstration: fresh sandbox profiles start Off. Main and
+ * Background opt in independently, then enforce their selected kernel policy.
  *
  * Nothing here is a stand-in for the product. The extension set is read out of
  * the published meta package's own manifest and loaded through its own shims, in
@@ -191,12 +190,12 @@ test("the harness loads the sandbox alongside every other default extension", { 
 
 // @covers harness.default-capability
 // @level e2e
-test("the harness starts inactive, then one opt-in policy governs the whole session", { skip }, async () => {
+test("the harness starts unconfined, then Main and Background opt in independently", { skip }, async () => {
   assert.equal(initialForegroundPolicy.state, "disabled");
   const sessionPolicy = sessionManager.getBranch().find((entry) =>
     entry.type === "custom" && entry.customType === "pi-better-sandbox-permissions");
   assert.equal(sessionPolicy?.data.permissions.main.enabled, true, "opt-in must be persisted before enforcement changes");
-  assert.match(initialForegroundPolicy.reason, /inactive by default/);
+  assert.match(initialForegroundPolicy.reason, /Background tasks sandbox is off/);
 
   notifications.length = 0;
   await commands.get("sandbox").handler("", { ...ctx, mode: "rpc" });
@@ -206,10 +205,23 @@ test("the harness starts inactive, then one opt-in policy governs the whole sess
   assert.ok(text.includes(projectRoot), `/sandbox must name the canonical project root: ${text}`);
   assert.ok(text.includes(support.executable), `/sandbox must name the resolved backend: ${text}`);
 
-  // The same policy, as the other harness extensions receive it over pi.events.
+  // Main opt-in does not implicitly enable the independent Background profile.
   const { currentForegroundSandboxPolicy } = await import(
     "../packages/pi-better-background-tasks/src/sandbox.ts"
   );
+  assert.equal(currentForegroundSandboxPolicy(pi).state, "disabled");
+  const previousCustom = ctx.ui.custom;
+  ctx.ui.custom = async (factory) => {
+    const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, inverse: (text) => text };
+    const page = factory({ requestRender() {} }, theme, {}, () => {});
+    page.handleInput("\u001b[C");
+    page.handleInput("\u001b[C");
+    page.handleInput(" ");
+    await Promise.resolve();
+    return null;
+  };
+  try { await commands.get("sandbox").handler("", ctx); }
+  finally { ctx.ui.custom = previousCustom; }
   const policy = currentForegroundSandboxPolicy(pi);
   assert.equal(policy.state, "enabled");
   assert.equal(policy.writableRoot, projectRoot, "consumers must see the same writable root");
@@ -295,7 +307,7 @@ test("edit: a packaged deny path cannot be edited, an ordinary file can", { skip
 
 // @covers background-task.sandbox-policy-contract
 // @level e2e
-test("local background tasks inherit the same policy", { skip }, async () => {
+test("local background tasks use their explicitly enabled independent policy", { skip }, async () => {
   const { resolveForegroundSandboxPlan } = await import(
     "../packages/pi-better-background-tasks/src/sandbox.ts"
   );
@@ -368,7 +380,7 @@ test("subagents run through the same shared mechanism", { skip }, async () => {
     { sandboxEnabled: true, explicitSandbox: false },
   );
 
-  assert.ok(command, "a default-on subagent spawn must be wrapped, never bare");
+  assert.ok(command, "a subagent with confinement enabled must be wrapped, never bare");
   assert.equal(command.file, support.executable);
   execFileSync(command.file, command.fileArgs, { cwd: projectRoot });
   assert.equal(readFileSync(inside, "utf8"), "inside\n");

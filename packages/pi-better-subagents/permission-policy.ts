@@ -88,7 +88,7 @@ export function currentSandboxPermissions(pi: unknown): PermissionSnapshot | und
     return mirror?.policy;
 }
 
-/** Resolve before allocating a run. Absent settings retain the legacy default-on policy. */
+/** Resolve before allocating a run. Absent settings require an explicit sandbox request. */
 export function resolveSubagentPermissions(pi: unknown, requestedSandbox: boolean | undefined): {
     sandboxEnabled: boolean;
     enforced: boolean;
@@ -102,7 +102,7 @@ export function resolveSubagentPermissions(pi: unknown, requestedSandbox: boolea
         throw new Error("Main sandbox profile disables commands. Enable commands in the sandbox UI before launching a subagent.");
     }
     const child = snapshot?.subagentPermissions;
-    if (!child) return { sandboxEnabled: requestedSandbox !== false, enforced: false, tools };
+    if (!child) return { sandboxEnabled: requestedSandbox === true, enforced: false, tools };
     if (child.enabled && requestedSandbox === false) {
         throw new Error("Subagent sandbox is enforced by the human-enabled profile; sandbox:false cannot bypass it. Change Subagents permissions in the sandbox UI.");
     }

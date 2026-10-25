@@ -21,15 +21,17 @@ export interface SandboxPermissionProfile {
 }
 export interface SandboxPermissionSettings {
     main: SandboxPermissionProfile;
+    background: SandboxPermissionProfile;
     subagents: SandboxPermissionProfile;
     /** Extension tools a confined subagent may use (ADR 0009). */
     subagentTools: SubagentToolSettings;
 }
 
 /**
- * Return fresh profiles so changing one column never changes the other.
- * Subagents default to Outside project = Write and credentials = Write & delete.
- * Main keeps Read for both rows. Explicit saved profiles retain their values.
+ * Return fresh profiles so changing one column never changes another.
+ * All sandbox switches default to Off. Subagents retain Outside project = Write
+ * and credentials = Write & delete when enabled. Main keeps Read for both rows.
+ * Explicit saved profiles retain their values.
  */
 export function defaultSandboxPermissions(): SandboxPermissionSettings {
     const profile = (): SandboxPermissionProfile => ({
@@ -41,7 +43,7 @@ export function defaultSandboxPermissions(): SandboxPermissionSettings {
         network: true,
         processAccess: "read",
     });
-    return { main: profile(), subagents: { ...profile(), enabled: true, outsideProject: "write", storedCredentials: "read-write" }, subagentTools: defaultSubagentTools() };
+    return { main: profile(), background: profile(), subagents: { ...profile(), outsideProject: "write", storedCredentials: "read-write" }, subagentTools: defaultSubagentTools() };
 }
 
 function isProfile(value: unknown): value is SandboxPermissionProfile {
@@ -64,8 +66,8 @@ const FILE_RANK: Record<FileAccess, number> = { off: 0, read: 1, write: 2, "read
  */
 export function describeLoosening(previous: SandboxPermissionSettings, next: SandboxPermissionSettings): string[] {
     const changes: string[] = [];
-    for (const column of ["main", "subagents"] as const) {
-        const label = column === "main" ? "Main" : "Subagents";
+    for (const column of ["main", "subagents", "background"] as const) {
+        const label = column === "main" ? "Main" : column === "background" ? "Background tasks" : "Subagents";
         const a = previous[column];
         const b = next[column];
         if (a.enabled && !b.enabled) changes.push(`${label}: sandbox off`);
@@ -93,11 +95,16 @@ export function parseSandboxPermissions(value: unknown): SandboxPermissionSettin
     if (!isProfile(settings.main) || !isProfile(settings.subagents)) {
         throw new Error("Sandbox settings require Main and Subagents profiles with explicit permission values.");
     }
+    if (settings.background !== undefined && !isProfile(settings.background)) {
+        throw new Error("Background tasks profile requires explicit permission values.");
+    }
     const copy = (p: SandboxPermissionProfile): SandboxPermissionProfile => ({
         enabled: p.enabled, projectFiles: p.projectFiles, outsideProject: p.outsideProject,
         storedCredentials: p.storedCredentials, commands: p.commands, network: p.network,
         processAccess: p.processAccess ?? "off",
     });
+    // Missing Background tasks inherits Main once, without linking the profiles.
     // Files written before the Tools section existed get the default tool set.
-    return { main: copy(settings.main), subagents: copy(settings.subagents), subagentTools: parseSubagentTools(settings.subagentTools) };
+    return { main: copy(settings.main), background: copy(settings.background ?? settings.main),
+        subagents: copy(settings.subagents), subagentTools: parseSubagentTools(settings.subagentTools) };
 }

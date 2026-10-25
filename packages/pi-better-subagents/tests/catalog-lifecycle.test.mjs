@@ -4,6 +4,7 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +27,7 @@ const {
     roleSlug,
     tiersForLaunch,
 } = await import("../catalog-runtime.ts");
+const { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } = await import("../permission-policy.ts");
 const { configureTierPolicy } = await import("../tier-policy.ts");
 const { setConfigForTests } = await import("../config.ts");
 const { buildDetailLines, buildNavigatorDetail } = await import("../navigator.mjs");
@@ -347,6 +349,29 @@ Edited instructions.
         assert.equal(retiled.capabilities.effective.nesting.allowNested, false);
         assert.equal(retiled.capabilities.effective.extensions.providerExtensions, "unknown");
         assert.notDeepEqual(first.capabilities.effective, retiled.capabilities.effective);
+    });
+
+    it("keeps sandbox capability inspection scoped to its Pi event bus", () => {
+        const h = fixture().host();
+        noteCatalogHost(h);
+        setConfigForTests({ defaultModel: null, tierPolicy: null });
+        const snapshot = loadLaunchSnapshot(h);
+        const input = { inspection: { id: "role.developer", found: true }, snapshotDigest: snapshot.digest };
+        const events = new EventEmitter();
+        const permissions = { enabled: true, projectFiles: "write", outsideProject: "read",
+            storedCredentials: "off", commands: true, network: false };
+        events.on(SANDBOX_POLICY_REQUEST_CHANNEL, () => events.emit(SANDBOX_POLICY_CHANNEL, {
+            state: "disabled", subagentPermissions: permissions,
+        }));
+        const enabled = createLaunchEnricher({ events });
+        const fresh = createLaunchEnricher({ events: new EventEmitter() });
+        assert.equal(enabled(input).capabilities.effective.sandbox.enabled, true);
+        assert.deepEqual(fresh(input).capabilities.effective.sandbox, {
+            enabled: false, applied: false, writes: "unconfined",
+        });
+        assert.deepEqual(enabled(input).capabilities.effective.sandbox.permissions, permissions);
+        assert.equal(enabled(input).capabilities.effective.workspace.cwd, h.cwd);
+        assert.equal(enabled(input).capabilities.grantedByCatalog, false);
     });
 
     it("applies each ambiguous job's choice only to that job", async () => {

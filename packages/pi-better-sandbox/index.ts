@@ -29,6 +29,7 @@ import {
     SANDBOX_COMMAND_NAME,
     sandboxArgumentCompletions,
 } from "./commands.ts";
+import { createBackgroundAdmission, isBackgroundLaunch } from "./background-admission.ts";
 import { DenyRuleManager } from "./deny-rules.ts";
 import {
     FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
@@ -58,7 +59,9 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     // it is resolved lazily and re-read on every session start.
     let shellPath: string | undefined;
     const ownEntry = fileURLToPath(import.meta.url);
+    const backgroundAdmission = createBackgroundAdmission(pi);
     const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
+        admitExtensionTool: (name, input, sourcePath) => backgroundAdmission(name, input, sourcePath) !== undefined,
         processAccess: () => controller.permissionSettings()?.main.processAccess ?? "off",
         diagnostics,
         trustedSources: [ownEntry,
@@ -72,14 +75,18 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             return { block: true, reason };
         };
         const status = controller.status();
+        const name = event.toolName;
+        const backgroundLaunch = isBackgroundLaunch(name, event.input);
+        const admission = backgroundAdmission(name, event.input);
+        // Main Off must not let an old consumer ignore the independent Background profile.
+        if (backgroundLaunch && controller.backgroundStatus().permissions?.enabled && admission !== "local-launch") {
+            return block("Sandbox: background launch has no verified compatible local adapter. Update the background extension; structured SSH is not a confined execution surface.", "tool-admission");
+        }
         if (status.state === "inactive" || status.state === "disabled") return;
         const permissions = status.permissions;
         if (!permissions) return;
-        const name = event.toolName;
-        const action = (event.input as { action?: string }).action;
-        const launch = ["bash", "powershell", "remote_bash", "subagent_spawn", "subagent_spawn_batch", "bg_task_spawn", "bg_task_watch"].includes(name) ||
-            (name === "bg_task" && (action === "spawn" || action === "watch"));
-        if (!permissions.commands && (launch || name === "grep" || name === "find")) {
+        const launch = ["bash", "powershell", "remote_bash", "subagent_spawn", "subagent_spawn_batch"].includes(name) || backgroundLaunch;
+        if (!permissions.commands && ((launch && admission !== "local-launch") || name === "grep" || name === "find")) {
             return block("Sandbox: Run commands & applications is Off. Change it in /sandbox to launch work.", "command-execution");
         }
         if (!permissions.network && (["web_search", "web_fetch", "firecrawl_scrape", "firecrawl_extract", "remote_bash", "mcp", "mcpScript"].includes(name) || name.startsWith("mcp__") ||
@@ -95,13 +102,13 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     });
 
     const announce = (status: ForegroundSandboxStatus): void => {
-        publishForegroundSandboxPolicy(pi.events, status);
+        publishForegroundSandboxPolicy(pi.events, status, controller.backgroundStatus());
     };
 
     // A consumer that loaded after the last publication can ask for the current
     // policy instead of waiting for the next change.
     pi.events.on(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, () => {
-        publishForegroundSandboxPolicy(pi.events, controller.status());
+        publishForegroundSandboxPolicy(pi.events, controller.status(), controller.backgroundStatus());
     });
 
     // The one validation and persistence path for write-deny rules, shared by
@@ -122,6 +129,8 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
             const message = `Sandbox permissions could not be loaded: ${error instanceof Error ? error.message : String(error)}`;
             settings.main.enabled = true;
             settings.main.commands = false;
+            settings.background.enabled = true;
+            settings.background.commands = false;
             settings.subagents.commands = false;
             settings.subagentTools = { applyPatch: true, trusted: [] };
             controller.setPermissionSettings(settings);
@@ -252,6 +261,7 @@ export {
     FOREGROUND_SANDBOX_POLICY_CHANNEL,
     FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL,
     type ForegroundSandboxPolicyEvent,
+    type BackgroundSandboxPolicy,
     freezePolicy,
     publishForegroundSandboxPolicy,
     requestForegroundSandboxPolicy,

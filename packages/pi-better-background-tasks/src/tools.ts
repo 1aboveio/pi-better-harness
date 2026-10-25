@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { advertiseBackgroundAdapter } from "./adapter-contract.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import {
   classifyOwnership,
@@ -12,12 +13,13 @@ import {
   formatStopResult,
   type OutputOptions,
 } from "./output.js";
-import { readOutputControls } from "./shared-log-utils.js";
+import { cursorKind, readOutputControls } from "./shared-log-utils.js";
 import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
-import { ForegroundSandboxBlockedError } from "./sandbox.js";
+import { backgroundProcessDiagnosticsAccess, ForegroundSandboxBlockedError } from "./sandbox.js";
+import { inspectTaskProcess } from "./task-diagnostics.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 
@@ -123,6 +125,7 @@ const IdParams = Type.Object({
   ...CursorFields,
 });
 const HistoryField = {
+  diagnostics: Type.Optional(Type.Boolean({ description: "For status: sample registered task process identity, CPU time, state and wait evidence. Requires current Process access Read in both Main and Background tasks. No arguments, environment or remote probes; a snapshot cannot prove useful work or a hang." })),
   history: Type.Optional(Type.Boolean({ description: "If true, return an incident page that also lists failure history: expected failures and recovered or superseded incidents. Default output lists only failures that need action and counts the rest." })),
 };
 const StatusParams = Type.Object({
@@ -193,6 +196,14 @@ const BACKGROUND_ORCHESTRATION_GUIDELINES = [
 export function registerTools(pi: ExtensionAPI): void {
   let activeSession: BackgroundTaskCallbackOrigin | undefined;
   const getActiveSession = () => activeSession;
+  const schemas = new Map<string, object>();
+  const register: ExtensionAPI["registerTool"] = (definition) => {
+    // A reload must not share schema identity with the previous registration.
+    const parameters = { ...definition.parameters };
+    schemas.set(definition.name, parameters);
+    pi.registerTool({ ...definition, parameters });
+  };
+  advertiseBackgroundAdapter(pi, schemas);
 
   pi.on("session_start", async (_event, ctx) => {
     setCallbackBatchContext(pi, ctx);
@@ -225,7 +236,7 @@ export function registerTools(pi: ExtensionAPI): void {
     cancelCallbackBatch(pi);
   });
 
-  pi.registerTool({
+  register({
     name: "bg_task_spawn",
     label: "BG Spawn",
     description: "Start a long-running background process and return immediately with its task id. For remote work, prefer structured ssh: pass ssh:{host,user} and put the remote command in command; spawn defaults to a remote tmux session with durable local logs and real remote stop. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. If tmux is missing, the preset attempts to install tmux non-interactively and fails closed with operator guidance when setup cannot proceed. Explicit remote.session=direct skips tmux, but direct mode has weaker stop semantics and may leave the remote process running. Never wait or poll in the foreground.",
@@ -239,7 +250,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "bg_task_watch",
     label: "BG Watch",
     description: `Poll a command in the background until success_when, failure_when, or timeout matches. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command; each interval opens a direct one-shot SSH poll without tmux installation. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. Returns its task id once the first check finishes. ${WATCH_CHECK_GUIDANCE} Default timeout 900 seconds; pass timeout_seconds:0 to disable.`,
@@ -253,7 +264,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "bg_task_list",
     label: "BG List",
     description: "List durable background tasks as compact rows under a 1 KiB UTF-8 budget (10 entries default), newest first. Current-session only unless all:true. Nonblocking. Pass the returned nextCursor as cursor to page further (every task is reachable), or statusCursor to get a small no-change response or failure-only updates; a higher limit/max_bytes gives a larger explicit page.",
@@ -264,18 +275,18 @@ export function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "bg_task_status",
     label: "BG Status",
     description: "Inspect one background task. Default output is a compact model-facing summary (1 KiB UTF-8) with matched condition, exit/signal, stop error, and failure counts before progress. Current-session only unless all:true; unknown ownership is a gap, not missing or healthy. Pass verbose:true only when full raw metadata is explicitly needed. Environment values are omitted. A raw log nextCursor passed as cursor continues the raw log page; an incidentCursor pages incidents that need action; history:true lists failure history too. After a terminal callback, call this first and call bg_task_log only if the summary is insufficient.",
     parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return text(formatStatus(inspectMeta(params.id), statusOptions(params, activeSession)));
+      return text(taskStatus(pi, params.id, params, statusOptions(params, activeSession)));
     },
   });
 
-  pi.registerTool({
+  register({
     name: "bg_task_log",
     label: "BG Log",
     description: "Read a background task log. Default output is a compact 10-line terminal-aware tail for model ingestion (1 KiB UTF-8). Current-session only unless all:true. Pass lines for a bounded tail (tail_lines is a deprecated alias); lines:0 pages the retained raw log from the oldest retained offset (16 KiB pages, 64 KiB hard cap) with a caller-owned cursor. Capture and retention loss are disclosed; this is not a full-history archive. Nonblocking.",
@@ -289,7 +300,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "bg_task_stop",
     label: "BG Stop",
     description: "Cancel a watcher or terminate a background task. Only a task owned by the current session stops; a foreign-session or unverifiable task is refused unless all:true. For a tmux-backed SSH task, stop kills its remote tmux session before marking it cancelled. Direct SSH stop only tears down the local client and may leave the remote process running.",
@@ -302,7 +313,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "bg_task",
     label: "BG Task",
     description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn returns immediately; do not poll in foreground. For action:watch: " + WATCH_CHECK_GUIDANCE + " For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override. Stop and clear change only current-session tasks: clear dismisses every owned terminal task, or one task with id (all:true allows another session's task by id).",
@@ -317,7 +328,7 @@ export function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  register({
     name: "bg_status",
     label: "BG Status",
     description: "Action wrapper for inspecting background tasks: list, status, log, stop, or clear. Nonblocking. Status is compact by default; log returns a compact tail by default. Use verbose:true or lines:0 only for explicit full-data recovery. Shares the same output assembler as the standalone tools. Current-session default; pass all:true to override. Stop and clear change only current-session tasks (clear with id and all:true for another session's task).",
@@ -351,6 +362,19 @@ function statusOptions(params: Record<string, unknown>, origin?: BackgroundTaskC
     all: params.all === true,
     ...scopeOptions(origin),
   };
+}
+
+function taskStatus(pi: ExtensionAPI, id: string, params: Record<string, unknown>, options: OutputOptions): string {
+  const inspection = inspectMeta(id);
+  const enriched: OutputOptions = { ...options };
+  const kind = cursorKind(options.cursor);
+  if (params.diagnostics === true && !options.history && (!kind || kind === "s" || kind === "t") &&
+      inspection.meta && classifyOwnership(inspection.meta, options) === "allow") {
+    enriched.processDiagnostics = inspectTaskProcess(inspection.meta, backgroundProcessDiagnosticsAccess(pi));
+    // Fresh samples bypass status suppression, not raw or incident pagination.
+    if (kind === "s") enriched.cursor = undefined;
+  }
+  return formatStatus(inspection, enriched);
 }
 
 function logOptions(params: Record<string, unknown>, origin?: BackgroundTaskCallbackOrigin): OutputOptions {
@@ -409,7 +433,7 @@ async function runAction(
       return formatList(listOptions(params, callbackOrigin));
     case "status":
       if (!params.id) return "Invalid parameters: status requires id.";
-      return formatStatus(inspectMeta(String(params.id)), statusOptions(params, callbackOrigin));
+      return taskStatus(pi, String(params.id), params, statusOptions(params, callbackOrigin));
     case "log":
       if (!params.id) return "Invalid parameters: log requires id.";
       return formatLog(String(params.id), logOptions(params, callbackOrigin));

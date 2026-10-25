@@ -62,23 +62,62 @@ async function settle() {
     await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
-test("default table has the locked rows and independent Main/Subagents values", () => {
+test("default table starts all profiles Off and hides retained details", () => {
     const h = harness();
     const lines = table(h.page, 84).map(plain);
-    assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents/);
-    assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
-    assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
-    assert.match(lines[3]!, /Outside project\s+-\s+Write\s*$/);
-    assert.match(lines[4]!, /Stored credentials\s+-\s+Write & delete\s*$/);
-    assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
-    assert.match(lines[6]!, /Network access\s+-\s+On/);
-    assert.match(lines[7]!, /Process access\s+-\s+Read/);
+    assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents\s+Background tasks/);
+    assert.match(lines[1]!, /Sandbox\s+Off\s+Off\s+Off/);
+    for (const line of lines.slice(2, 8)) assert.match(line, /\s+-\s+-\s+-\s*$/);
     assert.match(lines[8]!, /Subagents · Tools/);
     assert.match(lines[9]!, /Guarded \(follows the file rules\)/);
     assert.match(lines[10]!, /\[x\] apply_patch\s+harness adapter/);
     assert.match(lines[11]!, /Trusted \(runs outside the file rules\)/);
     assert.match(lines[12]!, /> \[x\] @juicesharp\/rpiv-web-tools 2\/2/);
     assert.ok(!lines.some((line) => /\[x\] web_fetch/.test(line)), "tools are initially folded");
+});
+
+test("Background cells navigate, retain disabled values, and save independently of Main and Subagents", async () => {
+    const h = harness();
+    h.press(Key.right, Key.right, Key.right, Key.space);
+    await settle();
+    assert.equal(h.current.background.enabled, true, "Right clamps at Background tasks");
+    assert.deepEqual(h.current.main, h.initial.main);
+    assert.deepEqual(h.current.subagents, h.initial.subagents);
+    const selected = h.page.render(100).find((line) => line.includes("\x1b[44m"))!;
+    assert.match(selected, /\x1b\[7m[\s\S]*On/);
+    assert.match(plain(table(h.page, 100)[1]!), /Sandbox\s+Off\s+Off\s+On/);
+    h.press(Key.down, Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.outsideProject, "write");
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.storedCredentials, "read-write");
+    h.press(Key.down, Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.commands, false);
+    assert.equal(h.current.background.network, false);
+    assert.equal(h.current.background.processAccess, "off");
+    h.press(...Array(6).fill(Key.up), Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.projectFiles, "read-write", "disabled details cannot change");
+    assert.match(table(h.page, 100)[2]!, /\x1b\[2m- /);
+    h.press(Key.up, Key.space);
+    await settle();
+    assert.equal(h.current.background.outsideProject, "write");
+    h.press("\x13");
+    await settle();
+    assert.deepEqual(h.saved, [h.current]);
+    h.press(Key.left, Key.left, Key.left, Key.space);
+    await settle();
+    assert.equal(h.current.main.enabled, true, "Left clamps at Main");
+    assert.deepEqual(h.current.background, h.saved[0]!.background);
+    assert.deepEqual(h.current.subagents, h.initial.subagents);
 });
 
 test("selected rows have a full-width background and bold text, with an inverse active cell", () => {
@@ -90,7 +129,7 @@ test("selected rows have a full-width background and bold text, with an inverse 
     assert.match(selected[0]!, /\x1b\[1m/);
     assert.match(selected[0]!, /\x1b\[7m[\s\S]*Off/);
     h.press(Key.right);
-    assert.match(selectedLines()[0]!, /\x1b\[7m[\s\S]*On/);
+    assert.match(selectedLines()[0]!, /\x1b\[7m[\s\S]*Off/);
     h.press(...Array(8).fill(Key.down));
     selected = selectedLines();
     assert.equal(selected.length, 1);
@@ -110,7 +149,7 @@ test("disabled details are dimmed and inactive but survive off/on toggles", asyn
     h.press(Key.up, Key.space);
     await settle();
     assert.equal(h.current.main.enabled, true);
-    assert.match(plain(table(h.page)[2]!), /Project files\s+Write & delete\s+Write & delete/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+Write & delete\s+-\s+-/);
     h.press(Key.down, Key.space);
     await settle();
     assert.equal(h.current.main.projectFiles, "off");
@@ -118,15 +157,17 @@ test("disabled details are dimmed and inactive but survive off/on toggles", asyn
     await settle();
     assert.equal(h.current.main.enabled, false);
     assert.equal(h.current.main.projectFiles, "off");
-    assert.match(plain(table(h.page)[2]!), /Project files\s+-\s+Write & delete/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+-\s+-\s+-/);
     h.press(Key.space);
     await settle();
-    assert.match(plain(table(h.page)[2]!), /Project files\s+Off\s+Write & delete/);
+    assert.match(plain(table(h.page)[2]!), /Project files\s+Off\s+-\s+-/);
 });
 
 test("arrows select profiles, Space cycles, Enter folds only, Ctrl+S saves, Escape closes", async () => {
     const h = harness();
-    h.press(Key.right, Key.down, Key.space);
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
     await settle();
     assert.equal(h.current.subagents.projectFiles, "off");
     h.press(Key.space);
@@ -156,34 +197,38 @@ test("arrows select profiles, Space cycles, Enter folds only, Ctrl+S saves, Esca
 test("file rows cycle four levels and credentials remain independent under Outside Write", async () => {
     const h = harness();
     const hint = () => h.page.render(140).map(plain).find((line) => /deletable|rename-based|Known credential/.test(line));
-    h.press(Key.right, Key.down, Key.down);
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press(Key.down, Key.down);
     assert.match(hint()!, /Write: git and rename-based saves fail outside the project except in worktree folders/);
     h.press(Key.down);
     assert.match(hint()!, /Known credential files follow this row independently of Outside project/);
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "off", "Write & delete to Off tightens immediately");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Off\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Off\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "read");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "read-write", "credentials skip unsupported Write");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s+-\s*$/);
     assert.equal(h.current.subagents.outsideProject, "write");
 });
 
 test("Process access cycles only Off and Read without changing other permissions", async () => {
     const h = harness();
-    h.press(Key.right, ...Array(6).fill(Key.down), Key.space);
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press(...Array(6).fill(Key.down), Key.space);
     await settle();
     assert.equal(h.current.subagents.processAccess, "off");
     assert.equal(h.current.main.processAccess, "read");
     assert.match(plain(table(h.page, 100)[7]!), /Process access\s+-\s+Off/);
-    assert.deepEqual({ ...h.current.subagents, processAccess: "read" }, h.initial.subagents);
+    assert.deepEqual({ ...h.current.subagents, processAccess: "read" }, { ...h.initial.subagents, enabled: true });
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.processAccess, "read");
@@ -191,9 +236,11 @@ test("Process access cycles only Off and Read without changing other permissions
 
 test("a single Space applies both looser and tighter permission changes", async () => {
     const h = harness();
-    h.press(Key.right, Key.down, Key.down, Key.space);
+    h.press(Key.right, Key.space);
     await settle();
-    assert.equal(h.changes.length, 1);
+    h.press(Key.down, Key.down, Key.space);
+    await settle();
+    assert.equal(h.changes.length, 2);
     assert.equal(h.current.subagents.outsideProject, "read-write");
     assert.ok(!h.page.render(140).map(plain).join("\n").includes("Press Space again"));
     h.press(Key.space);
@@ -208,13 +255,15 @@ test("ctrl+s saves the current defaults from any row", async () => {
     h.press("\x13");
     await settle();
     assert.equal(h.saved.length, 1);
-    assert.equal(h.saved[0]!.subagents.enabled, false);
+    assert.equal(h.saved[0]!.subagents.enabled, true);
     assert.match(h.page.render(100).map(plain).join("\n"), /ctrl\+s Save default/);
 });
 
 test("saving looser defaults happens on the first Ctrl+S and names what loosened", async () => {
     const h = harness({ loosening: (next) => next.subagents.network ? [] : ["Subagents: network on"] });
-    h.press(Key.right, ...Array(5).fill(Key.down), Key.space);
+    h.press(Key.right, Key.space);
+    await settle();
+    h.press(...Array(5).fill(Key.down), Key.space);
     await settle();
     assert.equal(h.current.subagents.network, false);
     h.press("\x13");
@@ -234,15 +283,15 @@ test("change and save failures stay inline without optimistic state or closing",
     h.press(Key.right, Key.space);
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /change failed/);
-    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/);
+    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
     failChange = false;
     h.press(Key.space);
     await settle();
-    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/);
+    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/);
     h.press("\x13");
     await settle();
     assert.match(plain(h.page.render(80).at(-1)!), /save failed/);
-    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+Off/, "failed defaults save preserves the edit");
+    assert.match(plain(table(h.page)[1]!), /Sandbox\s+Off\s+On/, "failed defaults save preserves the edit");
     assert.equal(h.closes, 0);
     failSave = false;
     h.press("\x13");

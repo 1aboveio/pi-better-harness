@@ -24,6 +24,7 @@ import { resolveRoleAssignment, type RoleAssignment } from "./role-assignment.ts
 import { configureTierPolicy, DEFAULT_TIER_POLICY, type TierPolicy, type TierSpec } from "./tier-policy.ts";
 import { canonicalAgentId, canonicalRoleId, shortRoleName, type Diagnostic, type ThinkingLevel } from "./catalog-schema.ts";
 import { withAgentSessionSettings, type AgentSessionOverrides } from "./agent-session-settings.ts";
+import { currentSandboxPermissions } from "./permission-policy.ts";
 
 export interface CatalogHost {
     cwd: string;
@@ -161,7 +162,7 @@ export function loadLaunchSnapshot(host: CatalogHost): CatalogSnapshot {
     }), host.getSessionSettings?.() ?? host.sessionSettings);
 }
 
-export function createLaunchEnricher(): LaunchEnricher {
+export function createLaunchEnricher(pi?: unknown): LaunchEnricher {
     let cache: { key: string; rows: Map<string, CatalogResolutionAttachment> } | undefined;
     return ({ inspection, snapshotDigest }) => {
         const host = notedHost.current;
@@ -207,6 +208,7 @@ export function createLaunchEnricher(): LaunchEnricher {
                     config,
                     model: enrichment.actualModel,
                     cwd: host.cwd,
+                    sandboxPermissions: currentSandboxPermissions(pi)?.subagentPermissions,
                 }),
             },
         };

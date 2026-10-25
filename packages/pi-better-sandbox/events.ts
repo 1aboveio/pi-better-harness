@@ -21,6 +21,11 @@ export const FOREGROUND_SANDBOX_POLICY_CHANNEL = "pi-better-sandbox:policy";
 /** Channel a late-loading consumer emits on to ask for the current policy. */
 export const FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL = "pi-better-sandbox:policy-request";
 
+/** Background-specific launch policy, carried alongside the unchanged Main fields. */
+export type BackgroundSandboxPolicy = Pick<ForegroundSandboxStatus, "writableRoot" | "denyWrite" | "reason" | "permissions"> & {
+    readonly state: Exclude<ForegroundSandboxStatus["state"], "inactive">;
+};
+
 /**
  * The immutable payload published on the policy channel.
  *
@@ -30,14 +35,26 @@ export const FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL = "pi-better-sandbox:poli
  */
 export type ForegroundSandboxPolicyEvent = Omit<ForegroundSandboxStatus, "state"> & {
     readonly state: Exclude<ForegroundSandboxStatus["state"], "inactive">;
+    readonly background: BackgroundSandboxPolicy;
 };
 
-/** Deep-freeze a status so a consumer cannot mutate another consumer's copy. */
-export function freezePolicy(status: ForegroundSandboxStatus): ForegroundSandboxPolicyEvent {
+/** Deep-freeze launch-policy data so consumers cannot change each other's copy. */
+export function freezePolicy(
+    status: ForegroundSandboxStatus,
+    background: ForegroundSandboxStatus = status,
+): ForegroundSandboxPolicyEvent {
     return Object.freeze({
         ...status,
         state: status.state === "inactive" ? "disabled" : status.state,
         denyWrite: Object.freeze([...status.denyWrite]),
+        ...(status.permissions ? { permissions: Object.freeze({ ...status.permissions }) } : {}),
+        background: Object.freeze({
+            state: background.state === "inactive" ? "disabled" : background.state,
+            writableRoot: background.writableRoot,
+            denyWrite: Object.freeze([...background.denyWrite]),
+            reason: background.reason,
+            ...(background.permissions ? { permissions: Object.freeze({ ...background.permissions }) } : {}),
+        }),
     });
 }
 
@@ -45,8 +62,9 @@ export function freezePolicy(status: ForegroundSandboxStatus): ForegroundSandbox
 export function publishForegroundSandboxPolicy(
     events: EventBus,
     status: ForegroundSandboxStatus,
+    background: ForegroundSandboxStatus = status,
 ): ForegroundSandboxPolicyEvent {
-    const payload = freezePolicy(status);
+    const payload = freezePolicy(status, background);
     events.emit(FOREGROUND_SANDBOX_POLICY_CHANNEL, payload);
     return payload;
 }

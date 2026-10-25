@@ -367,7 +367,7 @@ describe("subagent_spawn_batch end-to-end", () => {
             "tc1",
             {
                 batchName: "reviewers",
-                shared: { model: "test/model", tools: "read,bash", sandbox: false },
+                shared: { model: "test/model", tools: "read,bash" },
                 jobs: [
                     { prompt: "say hello" },
                     { prompt: "say world" },
@@ -402,6 +402,8 @@ describe("subagent_spawn_batch end-to-end", () => {
             assert.equal(meta.batchName, "reviewers");
             assert.equal(meta.status, "running");
             assert.equal(meta.model, "test/model");
+            assert.equal(meta.taskRuntime, false);
+            assert.equal(meta.sandbox, undefined);
         }
     });
 
@@ -888,17 +890,33 @@ describe("subagent_spawn_batch end-to-end", () => {
         assert.doesNotMatch(batch.content[0].text, /→ sa_[a-z0-9_]+/);
     });
 
-    it("single subagent_spawn still works and leaves batch fields empty", async () => {
+    it("explicit true without published settings rejects an unsupported runtime instead of launching unconfined", async () => {
+        const { tools } = loadExtension(mod);
+        const ctx = makeCtx();
+        await assert.rejects(tools.subagent_spawn.execute("explicit-single", {
+            prompt: "probe", model: "test/model", sandbox: true,
+        }, null, null, ctx), /Task sandbox requires a supported active Pi SDK/);
+        const batch = await tools.subagent_spawn_batch.execute("explicit-batch", {
+            shared: { model: "test/model", sandbox: true }, jobs: [{ prompt: "probe" }],
+        }, null, null, ctx);
+        assert.match(JSON.stringify(batch), /Task sandbox requires a supported active Pi SDK/);
+        assert.doesNotMatch(batch.content[0].text, /→ sa_[a-z0-9_]+/);
+        assert.ok(registry.listMetas().every((meta) => meta.status !== "running"));
+    });
+
+    it("single subagent_spawn defaults unconfined without published settings and leaves batch fields empty", async () => {
         const { tools } = loadExtension(mod);
         const ctx = makeCtx();
 
-        const res = await tools.subagent_spawn.execute("tc", { prompt: "solo", tools: "read,bash", sandbox: false }, null, null, ctx);
+        const res = await tools.subagent_spawn.execute("tc", { prompt: "solo", tools: "read,bash" }, null, null, ctx);
         const text = res.content[0].text;
         const match = text.match(/id=(sa_[a-z0-9_]+)/);
         assert.ok(match);
         const meta = registry.readMeta(match[1]);
         assert.equal(meta.batchId, undefined);
         assert.equal(meta.batchName, undefined);
+        assert.equal(meta.taskRuntime, false);
+        assert.equal(meta.sandbox, undefined);
     });
 
     it("parses model@effort and records the resolved effort for the navigator", async () => {

@@ -292,8 +292,8 @@ describe.skipIf(!support.supported)(
   () => {
     // @covers background-task.sandbox-local-spawn
     // @level integration
-    it("confines a spawned task's writes while leaving reads alone", async () => {
-      const harness = createHarness({ announceBeforeLoad: enabledPolicy() });
+    it("confines a spawned task's writes while Main is off and Background tasks is on", async () => {
+      const harness = createHarness({ announceBeforeLoad: { ...disabledPolicy(), background: enabledPolicy() } });
 
       const id = taskIdIn(await harness.execute("bg_task_spawn", {
         command: probeCommand(),
@@ -308,6 +308,7 @@ describe.skipIf(!support.supported)(
       expect(existsSync(outsideProbe)).toBe(false);
       expectDenialsHeld();
       expect(meta.launchArgv?.[0]).toBe(support.executable);
+      expect(meta.sandbox).toMatchObject({ confinement: "confined", policySource: "background", backend: support.backend, changesAffectTask: false });
     });
 
     // @covers background-task.sandbox-local-spawn
