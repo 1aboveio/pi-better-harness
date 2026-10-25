@@ -12,7 +12,9 @@ test("permission storage migrates activation and round-trips inactive values", (
     const root = mkdtempSync(join(tmpdir(), "sandbox-permission-settings-"));
     const seams = { agentDir: () => root };
     try {
-        assert.deepEqual(readPermissionSettings(seams), defaultSandboxPermissions());
+        const fresh = readPermissionSettings(seams);
+        assert.deepEqual([fresh.main.enabled, fresh.subagents.enabled, fresh.background.enabled], [false, false, false]);
+        assert.deepEqual(fresh, defaultSandboxPermissions());
         writeSandboxDefault("on", seams);
         assert.equal(readPermissionSettings(seams).main.enabled, true);
         assert.equal(readPermissionSettings(seams).background.enabled, true);
@@ -44,6 +46,7 @@ test("old global and legacy files migrate Background from Main and save it indep
             const settings = defaultSandboxPermissions();
             Object.assign(settings.main, { enabled: true, projectFiles: "read", outsideProject: "off",
                 storedCredentials: "off", commands: false, network: false, processAccess: "off" });
+            Object.assign(settings.subagents, { enabled: true, outsideProject: "off", storedCredentials: "off" });
             const { background: _background, ...permissions } = settings;
             const old = { version: 1, permissions };
             mkdirSync(join(root, "extensions"));
@@ -53,6 +56,7 @@ test("old global and legacy files migrate Background from Main and save it indep
             writeFileSync(source, original);
             const migrated = readPermissionSettings(seams);
             assert.deepEqual(migrated.background, settings.main);
+            assert.deepEqual(migrated.subagents, settings.subagents);
             assert.equal(readFileSync(source, "utf8"), original, "reading leaves the original profile untouched");
             migrated.main.enabled = false;
             migrated.main.network = true;
@@ -145,6 +149,7 @@ test("legacy permissions migrate without altering either legacy data or unrelate
         mkdirSync(join(root, "extensions"));
         const permissions = defaultSandboxPermissions();
         permissions.main.network = false;
+        permissions.subagents.enabled = true;
         const legacy = JSON.stringify({ version: 1, permissions });
         writeFileSync(legacyPath, legacy);
         const other = { theme: "light", piBetterHarness: { sandbox: { version: 1, default: "on" }, goal: { enabled: true } } };

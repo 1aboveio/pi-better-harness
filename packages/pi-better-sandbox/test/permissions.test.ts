@@ -2,16 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultSandboxPermissions, describeLoosening, parseSandboxPermissions } from "../permissions.ts";
 
-test("permission defaults preserve independent Main, Subagents and Background tasks columns", () => {
+test("fresh permission defaults start all sandbox switches Off with independent profiles", () => {
     const settings = defaultSandboxPermissions();
     assert.equal(settings.main.enabled, false);
+    assert.equal(settings.subagents.enabled, false);
+    assert.equal(settings.background.enabled, false);
     assert.deepEqual(settings.background, settings.main);
     settings.background.enabled = true;
     settings.background.outsideProject = "off";
     assert.equal(settings.main.enabled, false);
     assert.equal(settings.main.outsideProject, "read");
-    assert.equal(settings.subagents.enabled, true);
-    assert.deepEqual(settings.subagents, { ...settings.main, enabled: true, outsideProject: "write", storedCredentials: "read-write" });
+    assert.equal(settings.subagents.enabled, false);
+    assert.deepEqual(settings.subagents, { ...settings.main, outsideProject: "write", storedCredentials: "read-write" });
     assert.equal(settings.main.processAccess, "read");
     assert.equal(settings.subagents.processAccess, "read");
     settings.main.processAccess = "off";
@@ -62,12 +64,13 @@ test("legacy profiles keep Process access Off and malformed values fail closed",
 
 test("describes only the changes that grant more", () => {
     const before = defaultSandboxPermissions();
-    const after = defaultSandboxPermissions();
+    before.subagents.enabled = true;
+    const after = structuredClone(before);
     after.subagents.outsideProject = "read-write";
     after.main.network = false;
     after.subagents.projectFiles = "write";
     assert.deepEqual(describeLoosening(before, after), ["Subagents: outsideProject write → read-write"]);
-    const disabled = defaultSandboxPermissions();
+    const disabled = structuredClone(before);
     disabled.subagents.enabled = false;
     assert.deepEqual(describeLoosening(before, disabled), ["Subagents: sandbox off"]);
 });

@@ -75,10 +75,10 @@ is present; without this extension it uses adaptive guidance.
   completion and **returns a result**. There is no mid-task child→parent blocking
   call for a subagent to waste wall-clock on — a child missing a piece of info
   resolves it from what it was given, or records it unavailable and returns.
-- **Safe by default.** Every subagent is OS-sandboxed — writes confined to its
-  working directory, reads and network open — and scoped to an explicit tool
-  allowlist. It can't corrupt the parent, escape its directory, or recurse into
-  more subagents without opt-in.
+- **Sandboxing is opt-in.** Fresh Subagents settings start Off. Enable the
+  Subagents profile in `/sandbox` or request `sandbox:true` for kernel confinement.
+  An enabled human profile cannot be bypassed with `sandbox:false`. Explicit
+  saved profiles and session choices retain their values.
 - **Observable.** A live status widget and on-demand queries show each run's
   elapsed time and token/cost spend.
 
@@ -285,13 +285,16 @@ given.
 
 ## Autonomy & safety
 
-Every subagent is confined by default, and the confinement is **self-contained** —
-it does not depend on any other extension being installed.
+Subagents start unconfined in fresh settings. Without published settings, an
+omitted `sandbox` also starts unconfined. Explicit `sandbox:true` enables task
+confinement without requiring another extension; `sandbox:false` cannot bypass
+an enabled human profile. Saved enabled profiles and session choices stay enabled.
 
-- **Task sandbox (default on, macOS and Linux).** Pi startup, authentication,
+- **Task sandbox (opt-in, macOS and Linux).** Pi startup, authentication,
   provider transport, and session persistence run as trusted runtime operations.
   Admitted task tools run under `sandbox-exec` or Linux Bubblewrap. Project files
-  default to Read / write and outside files to Read, including `~/.pi`; runtime
+  default to Write & delete and outside files to Write. Task access to `~/.pi`
+  follows the outside and credential-file rules; runtime
   control files remain protected. Commands use private scratch plus explicit
   runtime exceptions for `/tmp` and the current user's macOS temporary and MDS
   cache directories when Outside is Read or Read/write. Credential and control
@@ -306,7 +309,8 @@ it does not depend on any other extension being installed.
 ### Write sandbox
 
 The shared `sandbox-core` and `task-sandbox` modules enforce task operations in
-both Main and Subagents. The defaults are Main Off and Subagents On. Subagents
+Main, Subagents, and Background tasks. All three sandbox switches default Off.
+When enabled, Subagents
 use Project files = Write & delete and Outside project = **Write**: tasks write
 across home and temp (tool caches such as `~/.gradle` and `~/.npm` just work), but
 outside the workspace they can only remove or rename files in temp, hidden home
@@ -741,8 +745,8 @@ sudo dnf install bubblewrap
 sudo pacman -S bubblewrap
 ```
 
-When `bwrap` is absent, explicit sandbox requests fail with an installation hint;
-default-on sandboxing preserves the documented direct-execution fallback. Once
+When `bwrap` is absent, explicit sandbox requests and enabled human profiles
+fail with an installation hint. Unconfined launches need no backend. Once
 `bwrap` is selected, a launch failure fails closed rather than retrying the child
 without confinement.
 

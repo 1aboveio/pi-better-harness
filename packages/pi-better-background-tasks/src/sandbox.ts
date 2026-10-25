@@ -109,7 +109,7 @@ export class ForegroundSandboxBlockedError extends Error {
 
   constructor(policy: ForegroundSandboxPolicy, detail?: string) {
     super(
-      `Foreground sandbox is ${policy.state}; this local background task was blocked rather than launched unconfined. ${detail ?? policy.reason}`,
+      `${policy.policySource === "background" ? "Background tasks" : "Foreground"} sandbox is ${policy.state}; this local background task was blocked rather than launched unconfined. ${detail ?? policy.reason}`,
     );
     this.name = "ForegroundSandboxBlockedError";
     this.policy = policy;
@@ -159,7 +159,7 @@ function eventBusOf(pi: unknown): PolicyEventBus | undefined {
  * understands, so an unrelated extension emitting on the channel cannot clear a
  * real policy or invent one.
  */
-function readPolicy(data: unknown): ForegroundSandboxPolicy | undefined {
+function readPolicy(data: unknown, profile = "Main"): ForegroundSandboxPolicy | undefined {
   if (!data || typeof data !== "object") return undefined;
   const value = data as Record<string, unknown>;
   if (typeof value.state !== "string" || !VALID_STATES.has(value.state)) return undefined;
@@ -169,7 +169,7 @@ function readPolicy(data: unknown): ForegroundSandboxPolicy | undefined {
     : [];
   const permissions = value.permissions === undefined ? undefined : readPermissions(value.permissions);
   if (value.permissions !== undefined && !permissions) {
-    throw new Error("Invalid Main sandbox permission profile; update permissions in the sandbox UI.");
+    throw new Error(`Invalid ${profile} sandbox permission profile; update permissions in the sandbox UI.`);
   }
   return {
     state: value.state as ForegroundSandboxState,
@@ -215,7 +215,7 @@ export function observeForegroundSandboxPolicy(pi: unknown): void {
     try {
       const published = data && typeof data === "object" ? data as Record<string, unknown> : undefined;
       const hasBackground = published && Object.hasOwn(published, "background");
-      const policy = readPolicy(hasBackground ? published.background : data);
+      const policy = readPolicy(hasBackground ? published.background : data, hasBackground ? "Background tasks" : "Main");
       if (hasBackground && !policy) throw new Error("Invalid Background tasks sandbox policy; update permissions in /sandbox.");
       const access = (value: unknown): unknown => {
         if (!value || typeof value !== "object") return undefined;
@@ -412,6 +412,7 @@ function blocked(plan: ForegroundSandboxPlan & { confined: true }, detail: strin
   return new ForegroundSandboxBlockedError(
     {
       state: "failed",
+      policySource: launchPolicies.get(plan)?.policySource,
       writableRoot: plan.writableRoot,
       denyWrite: plan.denyWrite,
       reason: detail,

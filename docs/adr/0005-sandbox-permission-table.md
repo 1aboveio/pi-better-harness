@@ -2,13 +2,13 @@
 
 ## Status
 
-Accepted. Extends ADR 0003's shared enforcement mechanism and ADR 0004's opt-in Main/default-on Subagents policy. Amended by [#572](https://github.com/1aboveio/pi-better-harness/issues/572) to add an independent Background tasks profile, replacing ADR 0004's Main inheritance for local background launches. Amended by [ADR 0008](0008-write-without-delete.md): the file rows gain Write (no removal) and Write & delete (formerly Read / write), and the Subagents default becomes Outside project = Write.
+Accepted. Extends ADR 0003's shared enforcement mechanism and ADR 0004's opt-in activation policy for all three profiles. Amended by [#572](https://github.com/1aboveio/pi-better-harness/issues/572) to add an independent Background tasks profile, replacing ADR 0004's Main inheritance for local background launches. Amended by [ADR 0008](0008-write-without-delete.md): the file rows gain Write (no removal) and Write & delete (formerly Read / write), and the Subagents default becomes Outside project = Write.
 
 ## Decision
 
 `/sandbox` presents one flat table with independent Main, Subagents, and Background tasks columns. The rows are Sandbox, Project files, Outside project, Stored credentials, Run commands & applications, and Network access. File rows use Off, Read, and Read / write; the remaining rows use Off and On. Detail cells show a dimmed literal `-` when their column's Sandbox switch is Off. Inactive values are retained, never replaced by unrestricted values.
 
-Defaults are Main sandbox Off, Subagents sandbox On, project Read / write, outside Read, stored credentials Read, commands On, network On. Human changes affect subsequent operations and launches. Save as defaults persists all three columns; unsaved choices are session-local. Existing activation preferences migrate into the Main switch.
+Fresh Main, Subagents, and Background tasks sandbox switches are all Off, following the user's post-#572 amendment to ADR 0004. Retained detail defaults are project Write & delete, commands On, and network On. Main and Background tasks retain outside Read and stored credentials Read; Subagents retain outside Write and stored credentials Write & delete. These detail values apply only when a profile is enabled. Explicit saved switches and details remain unchanged. Human changes affect subsequent operations and launches. Save as defaults persists all three columns; unsaved choices are session-local. Existing activation preferences migrate into the Main switch.
 
 The permission table has no folder selectors, app integrations, or expandable groups. Existing protected-path rules remain stricter than broad file permissions.
 

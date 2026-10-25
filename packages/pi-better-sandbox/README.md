@@ -11,8 +11,9 @@ pi install npm:pi-better-sandbox
 ```
 
 Either way you keep starting Pi the way you always have — `pi`. There is
-no launcher or wrapper command. Main and Background tasks start inactive;
-Subagents start confined. Open `/sandbox` to change any column, or use
+no launcher or wrapper command. Main, Subagents, and Background tasks all start
+inactive in fresh settings. Saved global profiles and session choices, including
+enabled switches, keep their values. Open `/sandbox` to change any column, or use
 `/sandbox on` for the current Main session. Edits apply immediately and are
 saved to the current session branch. **Ctrl+S** saves all three profiles as
 defaults for new sessions.
@@ -20,14 +21,14 @@ defaults for new sessions.
 ```text
 Sandbox permissions               Main             Subagents         Background tasks
 
-Sandbox                           Off              On                Off
+Sandbox                           Off              Off               Off
 
-Project files                     -                Write & delete    -
-Outside project                   -                Write             -
-Stored credentials                -                Write & delete    -
-Run commands & applications       -                On                -
-Network access                    -                On                -
-Process access                    -                Read              -
+Project files                     -                -                 -
+Outside project                   -                -                 -
+Stored credentials                -                -                 -
+Run commands & applications       -                -                 -
+Network access                    -                -                 -
+Process access                    -                -                 -
 
   Subagents · Tools
     Guarded (follows the file rules)
@@ -436,6 +437,13 @@ are left untouched. An existing global key always wins, including the deny-rule
 Updates use locked atomic replacement and preserve unrelated Pi settings and
 other harness keys.
 
+Fresh configurations now start all three sandbox switches Off. Saved enabled
+profiles stay enabled, and session choices still restore on resume, fork, reload,
+and tree navigation. No saved permissions are reset by the new activation default.
+Standalone subagents also default to unconfined without published settings;
+`sandbox:true` still requests kernel confinement, and `sandbox:false` cannot
+bypass a human-enabled Subagents profile.
+
 A version 1 global or session permission record without `background` inherits a
 copy of its existing Main profile, including its switch and every permission.
 Migration preserves the existing behavior and does not link future edits.
@@ -454,7 +462,7 @@ package never reads it, and it has no effect on the harness.
 
 ## Lifecycle
 
-The foreground sandbox is inactive by default. Permission edits, including
+All three sandbox switches are inactive in fresh settings. Permission edits, including
 Sandbox switches and `/sandbox on|off`, auto-persist as Pi custom entries on the
 current session branch, not as global defaults. Resume, fork, reload and session
 tree navigation restore the latest policy on the active branch. A branch with

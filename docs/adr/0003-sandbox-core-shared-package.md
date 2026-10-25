@@ -4,7 +4,10 @@ The kernel-enforced write confinement proven by `pi-better-subagents` is needed 
 
 ## Status
 
-accepted and implemented by epic [#229](https://github.com/1aboveio/pi-better-harness/issues/229), extraction slice [#230](https://github.com/1aboveio/pi-better-harness/issues/230)
+accepted and implemented by epic [#229](https://github.com/1aboveio/pi-better-harness/issues/229), extraction slice [#230](https://github.com/1aboveio/pi-better-harness/issues/230).
+The later [ADR 0004 amendment](0004-foreground-sandbox-opt-in.md) makes all fresh
+sandbox switches opt-in; the default-on references below record the extraction's
+original behavior, not current activation defaults.
 
 ## Considered Options
 

@@ -29,8 +29,9 @@ export interface SandboxPermissionSettings {
 
 /**
  * Return fresh profiles so changing one column never changes another.
- * Subagents default to Outside project = Write and credentials = Write & delete.
- * Main keeps Read for both rows. Explicit saved profiles retain their values.
+ * All sandbox switches default to Off. Subagents retain Outside project = Write
+ * and credentials = Write & delete when enabled. Main keeps Read for both rows.
+ * Explicit saved profiles retain their values.
  */
 export function defaultSandboxPermissions(): SandboxPermissionSettings {
     const profile = (): SandboxPermissionProfile => ({
@@ -42,7 +43,7 @@ export function defaultSandboxPermissions(): SandboxPermissionSettings {
         network: true,
         processAccess: "read",
     });
-    return { main: profile(), background: profile(), subagents: { ...profile(), enabled: true, outsideProject: "write", storedCredentials: "read-write" }, subagentTools: defaultSubagentTools() };
+    return { main: profile(), background: profile(), subagents: { ...profile(), outsideProject: "write", storedCredentials: "read-write" }, subagentTools: defaultSubagentTools() };
 }
 
 function isProfile(value: unknown): value is SandboxPermissionProfile {

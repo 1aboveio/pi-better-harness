@@ -647,17 +647,17 @@ nodeTest("sandbox contributes its standalone permissions opener at load and on r
     assert.equal(recorded.published.length, before, "opening does not change task policy");
     assert.deepEqual(recorded.branch, []);
     assert.equal(hasSandboxSetting("sandboxPermissions"), false);
-    // Change the default-on Subagents switch, avoiding any kernel dependency.
+    // Enable Subagents explicitly, avoiding any kernel dependency in this UI test.
     await permissionsPage(recorded, root, async (_page, press) => {
         await press("\x1b[C");
         await press(" ");
     }, contribution.open);
-    assert.equal(recorded.published.at(-1)?.subagentPermissions?.enabled, false);
+    assert.equal(recorded.published.at(-1)?.subagentPermissions?.enabled, true);
     await permissionsPage(recorded, root, async (page, press) => {
-        assert.match(page.render(100).join("\n"), /Sandbox\s+Off\s+Off/);
+        assert.match(page.render(100).join("\n"), /Sandbox\s+Off\s+On/);
         await press("\x13");
     });
-    assert.equal(readPermissionSettings().subagents.enabled, false);
+    assert.equal(readPermissionSettings().subagents.enabled, true);
 
     await recorded.handlers.get("session_shutdown")!({}, started.ctx);
     const count = registrations.length;
@@ -668,7 +668,7 @@ nodeTest("sandbox contributes its standalone permissions opener at load and on r
     piBetterSandbox(standalone.pi);
     await startSession(standalone, root, "startup", false, false);
     await permissionsPage(standalone, root, async (page) => {
-        assert.match(page.render(100).join("\n"), /Sandbox\s+Off\s+Off/);
+        assert.match(page.render(100).join("\n"), /Sandbox\s+Off\s+On/);
     });
     await standalone.handlers.get("session_shutdown")!({}, started.ctx);
 });
@@ -774,6 +774,9 @@ test("UI edits persist both profiles and tools to session only and immediately e
         await press("\x1b[B");
         await press(" "); // Main network off.
         await press("\x1b[C");
+        for (let i = 0; i < 5; i++) await press("\x1b[A");
+        await press(" "); // Subagents on.
+        for (let i = 0; i < 5; i++) await press("\x1b[B");
         await press(" "); // Subagents network off.
         await press("\x1b[B"); // Skip the independent Process access row.
         await press("\x1b[B");
@@ -785,9 +788,9 @@ test("UI edits persist both profiles and tools to session only and immediately e
     });
     const expected = defaultSandboxPermissions();
     Object.assign(expected.main, { enabled: true, projectFiles: "off", commands: false, network: false });
-    expected.subagents.network = false;
+    Object.assign(expected.subagents, { enabled: true, network: false });
     expected.subagentTools = { applyPatch: false, trusted: [] };
-    assert.equal(recorded.branch.length, 7, "each policy edit creates one custom entry");
+    assert.equal(recorded.branch.length, 8, "each policy edit creates one custom entry");
     const last = recorded.branch.at(-1)!;
     assert.equal(last.type, "custom");
     assert.deepEqual((last as { data: unknown }).data, { version: 1, permissions: expected });
@@ -815,13 +818,13 @@ test("a session append failure is visible, leaves the UI and enforcement unchang
         const before = structuredClone(recorded.published.at(-1));
         await press(" ");
         assert.match(page.render(120).join("\n"), /session append failed/);
-        assert.match(page.render(120).join("\n"), /Sandbox\s+Off\s+On/);
+        assert.match(page.render(120).join("\n"), /Sandbox\s+Off\s+Off/);
         assert.deepEqual(recorded.published.at(-1), before);
         assert.deepEqual(recorded.branch, []);
         assert.equal(hasSandboxSetting("sandboxPermissions"), false);
         append.mock.restore();
         await press(" ");
-        assert.match(page.render(120).join("\n"), /Sandbox\s+On\s+On/);
+        assert.match(page.render(120).join("\n"), /Sandbox\s+On\s+Off/);
         assert.equal(recorded.published.at(-1)?.permissions?.enabled, true);
         assert.equal(recorded.branch.length, 1);
     });
@@ -867,7 +870,7 @@ test("session policy survives fresh extension resume, fork and reload; new sessi
     const initial = defaultSandboxPermissions();
     initial.main.enabled = true;
     initial.main.network = false;
-    initial.subagents.enabled = false;
+    initial.subagents.enabled = true;
     initial.subagentTools = { applyPatch: false, trusted: [{ name: "helper", package: "npm:fixture" }] };
     const branch = [sessionEntry({ version: 1, permissions: initial })];
     const defaults = defaultSandboxPermissions();
@@ -895,6 +898,7 @@ test("tree navigation restores only the active branch's latest policy and its en
     const a = defaultSandboxPermissions();
     a.main.enabled = true;
     a.main.commands = false;
+    a.subagents.enabled = true;
     const b = structuredClone(a);
     b.main.enabled = false;
     b.background.enabled = true;
@@ -958,14 +962,17 @@ test("invalid latest session policies fail closed on start and tree navigation r
 
 test("Ctrl+S alone saves global defaults; a failed save retains session edits and reload policy", async () => {
     forgetSandboxPreference();
+    const saved = defaultSandboxPermissions();
+    saved.subagents.enabled = true;
+    writePermissionSettings(saved);
     const recorded = record();
     piBetterSandbox(recorded.pi);
     const root = project("save-defaults-session");
-    await startSession(recorded, root, "startup", false);
+    await startSession(recorded, root, "startup", false, false);
     await permissionsPage(recorded, root, async (page, press) => {
         await press("\x1b[C");
         await press(" "); // Disable Subagents, a loosening.
-        assert.equal(hasSandboxSetting("sandboxPermissions"), false);
+        assert.equal(readPermissionSettings().subagents.enabled, true);
         const branch = structuredClone(recorded.branch);
         rmSync(permissionSettingsPath(), { force: true });
         mkdirSync(permissionSettingsPath(), { recursive: true }); // Global settings cannot be read from a directory.
@@ -979,6 +986,7 @@ test("Ctrl+S alone saves global defaults; a failed save retains session edits an
         await startSession(restored, root, "reload", false, false);
         assert.equal(restored.published.at(-1)?.subagentPermissions?.enabled, false, "valid session policy does not read broken global defaults");
         rmSync(permissionSettingsPath(), { recursive: true });
+        writePermissionSettings(saved);
         await press("\x13");
         assert.match(page.render(120).join("\n"), /Defaults saved\. Looser: Subagents: sandbox off/);
         assert.deepEqual(recorded.branch, branch, "saving defaults does not alter session history");

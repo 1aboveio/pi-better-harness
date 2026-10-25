@@ -25,10 +25,35 @@ function fixture(before = false) {
 }
 
 describe("subagent permission policy", () => {
-    it("keeps the default-on switch when there is no publisher or event bus", () => {
-        assert.deepEqual(resolveSubagentPermissions({}, undefined), { sandboxEnabled: true, enforced: false, tools: defaultSubagentTools() });
-        const pi = { events: new EventEmitter() };
-        assert.deepEqual(resolveSubagentPermissions(pi, false), { sandboxEnabled: false, enforced: false, tools: defaultSubagentTools() });
+    it("defaults off without a publisher, while honoring explicit true and false", () => {
+        for (const pi of [{}, { events: new EventEmitter() }]) {
+            for (const requested of [undefined, false, true]) {
+                assert.deepEqual(resolveSubagentPermissions(pi, requested), {
+                    sandboxEnabled: requested === true, enforced: false, tools: defaultSubagentTools(),
+                });
+            }
+        }
+    });
+
+    it("defaults off when published settings omit the Subagents profile", () => {
+        const { pi, publish } = fixture();
+        publish({ state: "disabled", permissions: main });
+        assert.equal(resolveSubagentPermissions(pi, undefined).sandboxEnabled, false);
+        assert.equal(resolveSubagentPermissions(pi, true).sandboxEnabled, true);
+    });
+
+    it("honors an explicitly disabled profile unless true requests confinement", () => {
+        const { pi, publish } = fixture();
+        publish({ state: "disabled", permissions: main, subagentPermissions: { ...child, enabled: false } });
+        for (const requested of [undefined, false]) {
+            assert.equal(resolveSubagentPermissions(pi, requested).sandboxEnabled, false);
+        }
+        const plan = resolveSubagentPermissions(pi, true);
+        assert.equal(plan.sandboxEnabled, true);
+        assert.equal(plan.enforced, true);
+        assert.deepEqual(plan.permissions, {
+            projectFiles: "read-write", outsideProject: "read", storedCredentials: "read", commands: true, network: true,
+        });
     });
 
     it("carries published subagent tools and rejects a malformed tool list", () => {

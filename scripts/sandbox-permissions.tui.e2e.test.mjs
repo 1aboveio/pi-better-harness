@@ -151,15 +151,19 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         let text = wait(/Sandbox permissions\s+Main\s+Subagents\s+Background tasks/);
         assert.doesNotMatch(text, /Save as defaults/);
         assert.match(text, /ctrl\+s Save default/);
-        assert.match(text, /Sandbox\s+Off\s+On/);
+        assert.match(text, /Sandbox\s+Off\s+Off\s+Off/);
         const focused = tmux("capture-pane", "-t", "permissions", "-e", "-p").split("\n")
             .find((line) => line.replace(/\x1b\[[0-9;]*m/g, "").startsWith("> Sandbox"));
         assert.ok(focused, "selected row is visible in the real terminal");
         assert.match(focused, /\x1b\[[0-9;]*48;[0-9;]*m/, "selected row uses a colored background");
         assert.match(focused, /\x1b\[(?:\d+;)*1(?:;\d+)*m/, "selected row is bold");
         assert.match(focused, /\x1b\[(?:\d+;)*7(?:;\d+)*m/, "active cell has inverse styling");
-        assert.match(text, /Project files\s+-\s+Write & delete/);
-        assert.match(text, /Stored credentials\s+-\s+Write & delete/);
+        assert.match(text, /Project files\s+-\s+-\s+-/);
+        assert.match(text, /Stored credentials\s+-\s+-\s+-/);
+        key("Right"); key("Space"); wait(/Sandbox\s+Off\s+On\s+Off/);
+        key("Left");
+        wait(/Project files\s+-\s+Write & delete/);
+        wait(/Stored credentials\s+-\s+Write & delete/);
         key("Space"); wait(/Sandbox\s+On\s+On/);
         key("Down"); key("Space"); wait(/Project files\s+Off\s+Write & delete/);
         key("Up"); key("Space"); wait(/Project files\s+-\s+Write & delete/);
@@ -268,7 +272,7 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         tmux("new-session", "-d", "-s", "permissions", "-x", "130", "-y", "50", command);
         wait(/sandbox/);
         literal("/sandbox"); key("Enter");
-        let text = waitSelected(/^Sandbox\s+Off\s+On\s+Off\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
+        let text = waitSelected(/^Sandbox\s+Off\s+Off\s+Off\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
         assert.match(text, /\[ \].*fixture-alpha.*0\/1/);
         assert.match(text, /\[ \].*fixture-beta.*0\/1/);
         assert.match(text, /> \[ \] atlas \([^\n]*fixture-alpha\) 0\/2/);
@@ -305,7 +309,7 @@ test("trusted groups fold, bulk select and persist individual tools in the real 
         key("Escape"); wait(/^(?![\s\S]*Sandbox permissions\s+Main)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
         literal("/sandbox"); key("Enter");
-        text = waitSelected(/^Sandbox\s+Off\s+On\s+Off\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
+        text = waitSelected(/^Sandbox\s+Off\s+Off\s+Off\s*$/, (frame) => /Subagents · Tools[\s\S]*ctrl\+s Save default/.test(frame));
         assert.match(text, /atlas \([^\n]*fixture-alpha\).*2\/2/);
         assert.match(text, /atlas \([^\n]*fixture-beta\).*0\/1/);
         assert.doesNotMatch(text, /mcp__atlas__read/, "fold state is not persisted");

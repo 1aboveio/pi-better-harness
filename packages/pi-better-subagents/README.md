@@ -1,6 +1,6 @@
 # pi-better-subagents
 
-`pi-better-subagents` is a Pi extension for detached, sandboxed subagent runs that keep the foreground Pi session free.
+`pi-better-subagents` is a Pi extension for detached, optionally sandboxed subagent runs that keep the foreground Pi session free.
 
 ## Quick Answer
 
@@ -13,7 +13,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 ## Core Features
 - Non-blocking subagent launches, with an optional role and named-agent catalog (`docs/agent-catalog.md`, `docs/agent-catalog-lifecycle.md`).
 - Typed foreground `subagent_spawn_batch` launch receipts for native Pi codemode (Pi 0.99.1+), preserving direct tool calls, per-run callbacks, and batch capacity/catalog guarantees. See [codemode batch launches](docs/usage.md#codemode-batch-launches).
-- Default OS write sandboxing on macOS and Linux.
+- Opt-in OS task sandboxing on macOS and Linux.
 - Explicit tool allowlists for child sessions.
 - Durable logs, result retrieval, and [failure observations](docs/failure-observations.md) independent of lifecycle status. A live child handles its own tool errors; the parent is woken only for actionable incidents, and children can classify handled failures with `failure_disposition`.
 - Live background-work navigator for active runs.
@@ -30,6 +30,8 @@ Try it for one run:
 ```sh
 pi -e npm:pi-better-subagents
 ```
+
+Sandboxing starts Off for fresh settings, including standalone subagents without published settings. Explicit saved profiles and session choices remain unchanged. Set `sandbox:true` for a confined launch; `sandbox:false` cannot bypass a human-enabled Subagents profile.
 
 Linux confinement requires a usable `bubblewrap` backend and Pi SDK 0.82.1 or newer. `/sandbox` controls the independent Subagents profile, which each launch freezes. Pi handles its own startup, authentication, and provider connection; task tools obey the selected file, command, and network permissions. Outside project defaults to Write: tasks write across home and temp but can remove files outside the workspace only in temp, hidden home directories, and worktree folders (Linux keeps ordinary home folders read-only instead). Confined children admit `read`, `write`, `edit`, and `bash`, the guarded `apply_patch` (Codex patches that follow the file rules), and the trusted tools ticked in `/sandbox` → Subagents · Tools (default `web_fetch` and `web_search`), which run outside the file rules. Other requested tools are reported as unavailable, with the reason. See [usage notes](https://github.com/1aboveio/pi-better-harness/blob/main/packages/pi-better-subagents/docs/usage.md#write-sandbox) for the runtime boundary and supported configurations.
 
@@ -92,8 +94,8 @@ Use this package for independent coding, review, research, or verification work 
 |-------------|---------|
 | Pi | Required |
 | Install method | `pi install npm:pi-better-subagents` |
-| macOS sandboxing | Supported by default |
-| Linux sandboxing | Uses `bubblewrap` when available |
+| macOS sandboxing | Supported when enabled |
+| Linux sandboxing | Requires usable `bubblewrap` when enabled |
 | Development runtime | Node.js 22+ |
 
 ## Update Or Remove
