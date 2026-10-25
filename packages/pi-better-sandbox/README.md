@@ -1,6 +1,6 @@
 # pi-better-sandbox
 
-Sandbox permissions for Pi's foreground tools and detached subagents.
+Sandbox permissions for Pi's foreground tools, detached subagents, and local background tasks.
 
 ![Pi Better Sandbox package preview](https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-sandbox.png)
 
@@ -11,22 +11,23 @@ pi install npm:pi-better-sandbox
 ```
 
 Either way you keep starting Pi the way you always have — `pi`. There is
-no launcher or wrapper command. Main starts inactive; Subagents start confined.
-Open `/sandbox` to change either column, or use `/sandbox on` for the current
-Main session. Edits apply immediately and are saved to the current session branch.
-**Ctrl+S** saves both profiles as defaults for new sessions.
+no launcher or wrapper command. Main and Background tasks start inactive;
+Subagents start confined. Open `/sandbox` to change any column, or use
+`/sandbox on` for the current Main session. Edits apply immediately and are
+saved to the current session branch. **Ctrl+S** saves all three profiles as
+defaults for new sessions.
 
 ```text
-Sandbox permissions               Main             Subagents
+Sandbox permissions               Main             Subagents         Background tasks
 
-Sandbox                           Off              On
+Sandbox                           Off              On                Off
 
-Project files                     -                Write & delete
-Outside project                   -                Write
-Stored credentials                -                Write & delete
-Run commands & applications       -                On
-Network access                    -                On
-Process access                    -                Read
+Project files                     -                Write & delete    -
+Outside project                   -                Write             -
+Stored credentials                -                Write & delete    -
+Run commands & applications       -                On                -
+Network access                    -                On                -
+Process access                    -                Read              -
 
   Subagents · Tools
     Guarded (follows the file rules)
@@ -156,7 +157,7 @@ Space applies every change immediately, including higher permission levels,
 capabilities switched on, and a sandbox switched off. `ctrl+s` saves the
 defaults from any row on the first press, and the note names anything that
 loosened. Enter only folds tool groups; it never saves defaults. The focused
-row has a full-width background and bold text; the selected Main/Subagents cell
+row has a full-width background and bold text; the selected profile cell
 also uses inverse styling. No model
 tool can change these settings. Other rows toggle Off/On. Detail cells under an
 Off sandbox display a dimmed `-` and cannot be changed; their values return when
@@ -200,13 +201,20 @@ environment variables, are excluded. Write & delete may be needed by a CLI that
 refreshes a token or updates its credential database. This row applies
 independently of Project files and Outside project.
 
-**Process access** controls the fixed `process_list` tool: **Off** or
-**Read** (default for fresh Main and Subagents profiles). Read returns current-user process IDs and names only, with optional
+**Process access** uses **Off** or **Read** (default for fresh profiles).
+Main and Subagents control the fixed `process_list` tool. Its Read setting
+returns current-user process IDs and names only, with optional
 literal name filtering and a bounded result limit. It does not expose command
 arguments, environment variables, debugger attachment, signals, termination,
 or emulator/ADB operations. Explicit saved values are preserved, and legacy
 saved profiles without this setting stay Off until a human enables Read;
-subagents snapshot the setting at launch.
+subagents snapshot the setting at launch. Background tasks uses this row for
+explicit task-status process diagnostics, not `process_list`. Those diagnostics
+require current Read in both Main and Background tasks. They check a registered
+PID's start identity and can report state, CPU time and wait evidence without
+arguments or environment values. They are unavailable under Main confinement;
+no unconfined fallback runs. Task confinement remains the policy recorded when
+the task launched, independent of current diagnostic permission.
 
 The inventory helper uses a fixed system `pgrep` command under the existing
 kernel policy, without a shell or model-controlled arguments. It can work with
@@ -270,6 +278,14 @@ Main SSH tools, and unadmitted MCP, scripting, background, and nested-agent
 tools, still lack admission adapters and fail closed under an enabled actor
 profile. SSH through confined `bash` receives local file, credential, and network
 restrictions; remote effects remain outside the local filesystem policy.
+
+Verified first-party Background tools have a separate, versioned admission
+adapter. It checks the loaded extension's canonical source and exact current
+schema identity before admitting local spawn/watch and explicit registry
+operations. Background's column controls the executable, independently of
+Main's commands switch. Missing or incompatible adapters fail closed when
+Background confinement is enabled, even with Main Off. Remote stop receives no
+local-adapter exemption under Main confinement. See [ADR 0017](../../docs/adr/0017-background-adapter-admission.md).
 
 Overriding `write` and `edit` changes nothing you can see: the parameter
 schemas, prompt guidance, call rendering, write previews, edit diffs, result
@@ -420,6 +436,13 @@ are left untouched. An existing global key always wins, including the deny-rule
 Updates use locked atomic replacement and preserve unrelated Pi settings and
 other harness keys.
 
+A version 1 global or session permission record without `background` inherits a
+copy of its existing Main profile, including its switch and every permission.
+Migration preserves the existing behavior and does not link future edits.
+Saving defaults or a session edit writes the separate `background` profile.
+An explicitly malformed Background tasks profile fails closed; it is never
+replaced by Main or fresh defaults.
+
 A saved permission profile keeps its values: a saved `read-write` is now shown as Write & delete, and a saved
 Subagents Outside project = Read stays Read. Only a fresh configuration, or
 **Ctrl+S** after you choose Write, uses the new Subagents default. To
@@ -437,11 +460,15 @@ current session branch, not as global defaults. Resume, fork, reload and session
 tree navigation restore the latest policy on the active branch. A branch with
 no permission entry and a new session inherit saved global settings. Invalid
 persisted session policy fails closed rather than falling back to defaults.
-Ctrl+S writes both profiles to `piBetterHarness.sandboxPermissions` in global
+Ctrl+S writes all three profiles to `piBetterHarness.sandboxPermissions` in global
 `settings.json`. When no saved profile exists, the Main switch inherits the
 activation preference from `piBetterHarness.sandbox`, including migrated legacy
-activation preferences.
-`/sandbox default on|off` remains available and updates Main's saved switch.
+activation preferences. Background tasks initially inherits that Main profile.
+`/sandbox default on|off` remains available and updates only Main's saved switch.
+After migration, Main changes never change Background tasks. Enable Background
+tasks while Main is Off to confine new local background launches independently.
+Running tasks keep their launch policy. The Subagents column and Tools section
+remain independent and unchanged.
 Failed default saves leave the current session's edits intact. Write-deny rules
 retain their global persistence in `piBetterHarness.sandboxDenyRules` through
 `/sandbox deny` and `/sandbox rules`. Session entries and runtime control-plane
@@ -530,6 +557,31 @@ and [documented setuid/setgid limitation](https://github.com/navikt/cplt/blob/ma
 
 The effective policy is published as a frozen snapshot on Pi's extension event
 bus. It carries policy and status only — never a way to run anything.
+
+The top-level fields still describe Main. The additive `background` field
+contains the independently computed local Background tasks launch policy:
+
+```ts
+type BackgroundSandboxPolicy = {
+  state: "enabled" | "disabled" | "unavailable" | "failed";
+  writableRoot: string | undefined;
+  denyWrite: readonly string[];
+  reason: string;
+  permissions?: Readonly<SandboxPermissionProfile>;
+};
+```
+
+`permissions` has the same shape as the existing foreground profile: `enabled`,
+`projectFiles`, `outsideProject`, `storedCredentials`, `commands`, `network`,
+and `processAccess`. It is present after settings load. `background`, its
+`denyWrite` array, and its permission object are frozen copies. Background
+checks the backend, project root, and runtime-path safety independently of Main;
+Main Off does not suppress a requested Background sandbox. `inactive` is
+published as `disabled`. Invalid loaded policy fails both profiles closed.
+
+The existing `pi-better-sandbox:policy-request` channel republishes both profiles.
+Consumers should snapshot `policy.background` at launch. Older consumers that
+only read the top-level fields continue to follow Main until upgraded.
 
 ```ts
 import {

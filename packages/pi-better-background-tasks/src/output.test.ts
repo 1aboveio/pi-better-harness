@@ -1,6 +1,7 @@
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { afterEach, describe, expect, it } from "vitest";
-import { recordFailure } from "./failures.js";
+import { appendFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { failurePath, recordFailure } from "./failures.js";
+import { markFailureAttentionDelivered, pendingFailureAttention, readFailureState } from "./shared-failure-observations.js";
 import { packCallbackBatch } from "./shared-callback-batcher.js";
 import { pageTaskLog, readLog, retainLogTail } from "./logs.js";
 import {
@@ -69,6 +70,198 @@ const ctx = {
   cwd: origin.cwd,
   sessionManager: { getSessionId: () => origin.sessionId },
 };
+
+describe("progress observations and launch provenance (#572)", () => {
+  const startedAt = Date.parse("2026-10-25T00:00:00Z");
+  let taskSequence = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(startedAt);
+    vi.stubEnv("PI_BETTER_STALL_QUIET_MS", "60000");
+    vi.stubEnv("PI_BETTER_STALL_MS", "300000");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  function running(overrides: Partial<BackgroundTaskMeta> = {}): BackgroundTaskMeta {
+    const task = fixture({ id: `bg_progress_572_${++taskSequence}`, kind: "process", status: "running", startedAt,
+      endedAt: undefined, lastProgressAt: startedAt, ...overrides });
+    utimesSync(task.logPath, new Date(startedAt), new Date(startedAt));
+    return task;
+  }
+
+  function cursorOf(text: string): string {
+    const cursor = text.match(/statusCursor=(\S+)/)?.[1];
+    expect(cursor).toBeTruthy();
+    return cursor!;
+  }
+
+  it("changes status revisions exactly at quiet/stall boundaries, not on every clock tick, and recovers on output", () => {
+    const task = running();
+    const first = formatStatus(task);
+    const freshCursor = cursorOf(first);
+    vi.setSystemTime(startedAt + 59_999);
+    expect(formatStatus(task, { cursor: freshCursor })).toContain("No new evidence since cursor");
+
+    vi.setSystemTime(startedAt + 60_000);
+    const quiet = formatStatus(task, { cursor: freshCursor });
+    expect(quiet).not.toContain("No new evidence since cursor");
+    expect(quiet).toContain("is running");
+    expect(quiet).toContain("quiet; no observed progress for 1m00s");
+    expect(quiet).toContain("2026-10-25T00:00:00.000Z");
+    expect(quiet).toContain("Silence alone does not prove the task is hung.");
+    const quietCursor = cursorOf(quiet);
+    expect(quietCursor).not.toBe(freshCursor);
+
+    vi.setSystemTime(startedAt + 299_999);
+    const stillQuiet = formatStatus(task, { cursor: quietCursor });
+    expect(stillQuiet).toContain("No new evidence since cursor");
+    expect(stillQuiet).toContain("no observed progress for 5m00s");
+    expect(cursorOf(stillQuiet)).toBe(quietCursor);
+
+    vi.setSystemTime(startedAt + 300_000);
+    const stale = formatStatus(task, { cursor: quietCursor });
+    expect(stale).not.toContain("No new evidence since cursor");
+    expect(stale).toContain("suspected stall; no observed progress for 5m00s");
+    const staleCursor = cursorOf(stale);
+    expect(staleCursor).not.toBe(quietCursor);
+    expect(utf8ByteLength(stale)).toBeLessThanOrEqual(1024);
+
+    appendFileSync(task.logPath, "new checkpoint\n");
+    utimesSync(task.logPath, new Date(startedAt + 300_000), new Date(startedAt + 300_000));
+    const recovered = formatStatus(task, { cursor: staleCursor });
+    expect(recovered).not.toContain("No new evidence since cursor");
+    expect(recovered).not.toMatch(/suspected stall|no observed progress/);
+    expect(recovered).toContain("new checkpoint");
+    expect(cursorOf(recovered)).not.toBe(staleCursor);
+  });
+
+  it("refreshes the last observed time on a completed watch poll without new log output", () => {
+    const task = running({ kind: "command_watch" });
+    vi.setSystemTime(startedAt + 300_000);
+    const stale = formatStatus(task);
+    task.lastCheckedAt = startedAt + 300_000;
+    const recovered = formatStatus(task, { cursor: cursorOf(stale) });
+    expect(recovered).not.toContain("No new evidence since cursor");
+    expect(recovered).not.toContain("suspected stall");
+    expect(recovered).toContain("last check: 0s ago");
+  });
+
+  it.each(["succeeded", "failed", "cancelled", "timed_out"] as const)("does not turn an old %s task into a suspected stall", (status) => {
+    const task = running({ status, endedAt: startedAt + 1_000 });
+    vi.setSystemTime(startedAt + 3_600_000);
+    expect(formatStatus(task)).not.toMatch(/suspected stall|no observed progress|Silence alone/);
+  });
+
+  it("keeps stale progress observations beside failures and unreadable-log evidence", () => {
+    const task = running();
+    vi.setSystemTime(startedAt + 300_000);
+    recordFailure(task, "poll", "poll could not run", "poll-1", { category: "operation" });
+    rmSync(task.logPath);
+    const text = formatStatus(task);
+    expect(text).toMatch(/^Action required/);
+    expect(text).toContain("log unreadable");
+    expect(text).toContain("suspected stall; no observed progress for 5m00s");
+    expect(text).toContain("Silence alone does not prove the task is hung.");
+    expect(utf8ByteLength(text)).toBeLessThanOrEqual(1024);
+  });
+
+  it.each(["confined", "unconfined", "unknown"] as const)("shows recorded %s launch provenance without inferring it from current permissions", (confinement) => {
+    const sandbox = { confinement, backend: confinement === "confined" ? "seatbelt" : undefined,
+      policySource: "background" as const, policySummary: "Background launch-time permission profile", changesAffectTask: false as const };
+    const task = Object.assign(running(), { sandbox });
+    for (const text of [formatLaunch(task), formatStatus(task)]) {
+      expect(text).toContain(`sandbox: ${confinement}`);
+      expect(text).toContain("source: background");
+      expect(text).toContain("later changes do not affect this task");
+      if (sandbox.backend) expect(text).toContain(sandbox.backend);
+      expect(utf8ByteLength(text)).toBeLessThanOrEqual(1024);
+    }
+    const verbose = JSON.parse(formatStatus(task, { verbose: true }));
+    expect(verbose.sandbox).toEqual(sandbox);
+  });
+
+  it("continues verbose metadata when live process samples change or are omitted", () => {
+    const task = running();
+    task.argv = ["first-argument", "x".repeat(10_000), "final-argument"];
+    const diagnostics = { availability: "available", identity: "matches", state: "S", cpuTime: "0:00.01", waitChannel: "pipe_read", limit: "One snapshot." } as const;
+    const first = formatStatus(task, { verbose: true, processDiagnostics: diagnostics, maxBytes: 1024 });
+    const cursor = first.match(/nextCursor=(\S+)/)?.[1];
+    expect(cursor).toBeDefined();
+    const changed = formatStatus(task, { verbose: true, processDiagnostics: { ...diagnostics, state: "R", cpuTime: "0:00.02" }, cursor, maxBytes: 1024 });
+    expect(changed).not.toContain("reset=source-replaced");
+    expect(changed).not.toContain("first-argument");
+    let next = changed.match(/nextCursor=(\S+)/)?.[1];
+    let tail = "";
+    for (let page = 0; page < 30 && next; page++) {
+      const text = formatStatus(task, { cursor: next, maxBytes: 1024 });
+      expect(text).not.toContain("reset=source-replaced");
+      tail += text;
+      next = text.match(/nextCursor=(\S+)/)?.[1];
+    }
+    expect(next).toBeUndefined();
+    expect(tail).toContain("final-argument");
+  });
+
+  it("reports missing launch provenance as unknown and invalidates the cursor when provenance appears", () => {
+    const task = running();
+    const first = formatStatus(task);
+    expect(first).toContain("sandbox: unknown; launch-time policy was not recorded.");
+    expect(formatLaunch(task)).toContain("sandbox: unknown; launch-time policy was not recorded.");
+    Object.assign(task, { sandbox: { confinement: "unknown", policySource: "no-publisher", policySummary: "No launch record", changesAffectTask: false } });
+    const restored = formatStatus(task, { cursor: cursorOf(first) });
+    expect(restored).not.toContain("No new evidence since cursor");
+    expect(restored).toContain("sandbox: unknown");
+  });
+
+  it("uses suspected-stall wording in navigator rows and details, and clears it after output", () => {
+    ensureBackgroundTasksNavigatorProvider({} as any);
+    ensureBackgroundTasksNavigator({ ...ctx, hasUI: false } as any);
+    const provider = (globalThis as any)[Symbol.for("pi-better-harness.navigator.state")].providers.get("background-tasks");
+    const task = running();
+    vi.setSystemTime(startedAt + 60_000);
+    expect(provider.listRows(Date.now()).find((row: any) => row.id === task.id).facts.join("\n")).toContain("quiet; no observed progress for 1m00s");
+    vi.setSystemTime(startedAt + 300_000);
+    const row = provider.listRows(Date.now()).find((row: any) => row.id === task.id);
+    expect(row.status).toBe("running");
+    expect(row.facts.join("\n")).toContain("suspected stall; no observed progress for 5m00s");
+    const activity = provider.detail(task.id, Date.now()).metadata.find((field: any) => field.label === "activity");
+    expect(activity.value).toContain("suspected stall; no observed progress for 5m00s");
+    appendFileSync(task.logPath, "checkpoint\n");
+    utimesSync(task.logPath, new Date(Date.now()), new Date(Date.now()));
+    expect(provider.listRows(Date.now()).find((row: any) => row.id === task.id).facts.join("\n")).not.toContain("suspected stall");
+    expect(provider.detail(task.id, Date.now()).metadata.some((field: any) => field.label === "activity")).toBe(false);
+  });
+
+  it("counts earlier failure deliveries without repeating them in completion facts", () => {
+    const task = running();
+    recordFailure(task, "first", "first failure already delivered", "first", { category: "operation" });
+    const path = failurePath(task.id);
+    const pending = pendingFailureAttention(readFailureState(path), Date.now(), { terminal: true });
+    expect(pending).toBeDefined();
+    markFailureAttentionDelivered(path, pending!, Date.now());
+    recordFailure(task, "second", "new failure awaiting delivery", "second", { category: "operation" });
+    task.status = "failed";
+    task.endedAt = Date.now();
+    const facts = formatCallbackFacts(task);
+    expect(facts.failureRows).toHaveLength(1);
+    expect(facts.failureRows![0]).toContain("new failure awaiting delivery");
+    expect(JSON.stringify(facts)).not.toContain("first failure already delivered");
+    expect(facts.incidentCount).toBe(1);
+    expect(facts.decision).toContain("1 other active failure observation");
+    const remaining = pendingFailureAttention(readFailureState(path), Date.now(), { terminal: true });
+    expect(remaining).toBeDefined();
+    markFailureAttentionDelivered(path, remaining!, Date.now());
+    const delivered = formatCallbackFacts(task);
+    expect(delivered.failureRows).toBeUndefined();
+    expect(delivered.incidentCount).toBeUndefined();
+    expect(delivered.decision).toContain("2 other active failure observations");
+  });
+});
 
 describe("background output budgets", () => {
   it("uses revised consumer defaults and clamps explicit pages to the core hard cap", () => {

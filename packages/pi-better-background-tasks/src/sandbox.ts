@@ -1,5 +1,7 @@
 /**
- * Foreground write-sandbox policy for locally launched background tasks.
+ * Background launch sandbox policy. New publishers provide a separate Background
+ * tasks profile; older publishers retain the historical Main-policy behavior.
+ * Every task keeps its policy snapshot for its whole lifetime.
  *
  * `pi-better-sandbox` owns the foreground policy and publishes an immutable
  * snapshot of it on `pi.events`. This module is the consumer side of that wire
@@ -39,7 +41,7 @@ type SandboxPermissions = {
   commands: boolean;
   network: boolean;
 };
-import type { CommandSpec } from "./types.js";
+import type { CommandSpec, TaskSandboxProvenance } from "./types.js";
 import { SandboxDiagnostics, diagnosticPackageVersion, type DiagnosticResource } from "./shared-sandbox-diagnostics.js";
 
 function backgroundDiagnostics(policy: unknown): SandboxDiagnostics | undefined {
@@ -63,7 +65,7 @@ function backgroundDiagnostics(policy: unknown): SandboxDiagnostics | undefined 
  * is an optional peer.
  */
 export const FOREGROUND_SANDBOX_REMEDY =
-  "Run unconfined on purpose with /sandbox off, or work in a session that has a backend.";
+  "Change the controlling Sandbox column in /sandbox, or work in a session that has a backend.";
 
 /** Channel `pi-better-sandbox` publishes every effective-policy change on. */
 export const FOREGROUND_SANDBOX_POLICY_CHANNEL = "pi-better-sandbox:policy";
@@ -92,6 +94,7 @@ export interface ForegroundSandboxPolicy {
   /** Human-readable evidence for why `state` is what it is. */
   readonly reason: string;
   readonly permissions?: Readonly<SandboxPermissions & { enabled: boolean }>;
+  readonly policySource?: "background" | "main-legacy";
 }
 
 /** The minimum `pi.events` surface this module uses. */
@@ -124,6 +127,12 @@ export type ForegroundSandboxPlan =
     };
 
 const UNCONFINED: ForegroundSandboxPlan = { confined: false };
+const launchPolicies = new WeakMap<ForegroundSandboxPlan, ForegroundSandboxPolicy | undefined>();
+function capturePlan(plan: ForegroundSandboxPlan, policy: ForegroundSandboxPolicy | undefined): ForegroundSandboxPlan {
+  const snapshot = { ...plan };
+  launchPolicies.set(snapshot, policy);
+  return snapshot;
+}
 
 const VALID_STATES = new Set<string>(["inactive", "enabled", "disabled", "unavailable", "failed"]);
 
@@ -134,7 +143,8 @@ const VALID_STATES = new Set<string>(["inactive", "enabled", "disabled", "unavai
  * sessions inside one process (and separate tests) cannot read each other's
  * policy.
  */
-const mirrors = new WeakMap<PolicyEventBus, { policy: ForegroundSandboxPolicy | undefined; error?: Error }>();
+type PolicyMirror = { policy: ForegroundSandboxPolicy | undefined; error?: Error; processAccess?: "off" | "read"; mainConfined?: boolean };
+const mirrors = new WeakMap<PolicyEventBus, PolicyMirror>();
 
 function eventBusOf(pi: unknown): PolicyEventBus | undefined {
   const events = (pi as { events?: unknown } | undefined)?.events;
@@ -177,7 +187,8 @@ function readPermissions(value: unknown): ForegroundSandboxPolicy["permissions"]
   const access = (v: unknown) => credential(v) || v === "write";
   if (typeof p.enabled !== "boolean" || typeof p.commands !== "boolean" ||
       typeof p.network !== "boolean" || !access(p.projectFiles) ||
-      !access(p.outsideProject) || !credential(p.storedCredentials)) return undefined;
+      !access(p.outsideProject) || !credential(p.storedCredentials) ||
+      (p.processAccess !== undefined && p.processAccess !== "off" && p.processAccess !== "read")) return undefined;
   return Object.freeze({
     enabled: p.enabled, commands: p.commands, network: p.network,
     projectFiles: p.projectFiles as SandboxPermissions["projectFiles"],
@@ -198,14 +209,25 @@ export function observeForegroundSandboxPolicy(pi: unknown): void {
   const events = eventBusOf(pi);
   if (!events || mirrors.has(events)) return;
 
-  const mirror: { policy: ForegroundSandboxPolicy | undefined; error?: Error } = { policy: undefined };
+  const mirror: PolicyMirror = { policy: undefined };
   mirrors.set(events, mirror);
   events.on(FOREGROUND_SANDBOX_POLICY_CHANNEL, (data) => {
     try {
-      const policy = readPolicy(data);
+      const published = data && typeof data === "object" ? data as Record<string, unknown> : undefined;
+      const hasBackground = published && Object.hasOwn(published, "background");
+      const policy = readPolicy(hasBackground ? published.background : data);
+      if (hasBackground && !policy) throw new Error("Invalid Background tasks sandbox policy; update permissions in /sandbox.");
+      const access = (value: unknown): unknown => {
+        if (!value || typeof value !== "object") return undefined;
+        return (value as { permissions?: { processAccess?: unknown } }).permissions?.processAccess;
+      };
+      mirror.mainConfined = published?.state !== "disabled" && published?.state !== "inactive";
+      mirror.processAccess = access(data) === "read" && access(hasBackground ? published.background : data) === "read" ? "read" : "off";
+      if (policy) Object.assign(policy, { policySource: hasBackground ? "background" : "main-legacy" });
       if (policy) { mirror.policy = policy; mirror.error = undefined; }
     } catch (error) {
       mirror.error = error as Error;
+      mirror.processAccess = "off";
     }
   });
   events.emit(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, undefined);
@@ -230,6 +252,28 @@ export function currentForegroundSandboxPolicy(pi: unknown): ForegroundSandboxPo
   return mirror?.policy;
 }
 
+/** Current diagnostics permissions are independent of the task's launch snapshot. */
+export function backgroundProcessDiagnosticsAccess(pi: unknown): "read" | "off" | "unknown" | "confined" {
+  try { currentForegroundSandboxPolicy(pi); } catch { return "off"; }
+  const events = eventBusOf(pi);
+  const mirror = events ? mirrors.get(events) : undefined;
+  const access = mirror?.processAccess ?? "unknown";
+  return access === "read" && mirror?.mainConfined ? "confined" : access;
+}
+
+export function sandboxProvenance(plan: ForegroundSandboxPlan, remote = false): TaskSandboxProvenance {
+  const policy = launchPolicies.get(plan);
+  const policySource = remote ? "remote" : policy?.policySource ?? (policy ? "main-legacy" : "no-publisher");
+  if (remote) return { confinement: "unknown", policySource, policySummary: "Remote execution; local sandbox does not establish remote confinement.", changesAffectTask: false };
+  if (!plan.confined) return { confinement: "unconfined", policySource,
+    policySummary: policy ? "Sandbox disabled at launch." : "No sandbox policy publisher at launch.", changesAffectTask: false };
+  const support = describeSandboxSupport();
+  const p = plan.permissions;
+  return { confinement: "confined", policySource, ...(support.supported ? { backend: support.backend } : {}),
+    policySummary: p ? `project=${p.projectFiles}; outside=${p.outsideProject}; credentials=${p.storedCredentials}; commands=${p.commands ? "on" : "off"}; network=${p.network ? "on" : "off"}`
+      : "Project write confinement with protected paths.", changesAffectTask: false };
+}
+
 /**
  * Decide how a local launch must be confined, before the task has an id, a
  * directory, or a log.
@@ -239,15 +283,15 @@ export function currentForegroundSandboxPolicy(pi: unknown): ForegroundSandboxPo
  */
 export function resolveForegroundSandboxPlan(pi: unknown, remote = false, operation?: unknown, tool = "bg_task_spawn"): ForegroundSandboxPlan {
   const policy = currentForegroundSandboxPolicy(pi);
-  if (remote && !policy?.permissions) return UNCONFINED; // Preserve legacy SSH behavior.
+  if (remote && !policy?.permissions) return capturePlan(UNCONFINED, policy); // Preserve legacy SSH behavior.
   try {
     const plan = planFor(policy);
     if (remote && plan.confined) {
       throw new ForegroundSandboxBlockedError(policy!, !plan.permissions?.network
-        ? "Main profile disables network. SSH launches are blocked."
-        : "Structured SSH cannot apply local file and credential permissions yet. Use SSH through confined bash, or change Main permissions in /sandbox.");
+        ? `${policy?.policySource === "background" ? "Background tasks" : "Main"} profile disables network. SSH launches are blocked.`
+        : `Structured SSH cannot apply local file and credential permissions yet. Use SSH through confined bash, or change ${policy?.policySource === "background" ? "Background tasks" : "Main"} permissions in /sandbox.`);
     }
-    return plan;
+    return capturePlan(plan, policy);
   } catch (error) {
     if (error instanceof ForegroundSandboxBlockedError) {
       const resource: DiagnosticResource = policy?.permissions?.enabled && !policy.permissions.commands ? "command-execution"
@@ -264,7 +308,7 @@ export function planFor(policy: ForegroundSandboxPolicy | undefined): Foreground
   // keeps its historical unsandboxed behaviour.
   if (!policy) return UNCONFINED;
   if (policy.permissions?.enabled && !policy.permissions.commands) {
-    throw new ForegroundSandboxBlockedError(policy, "Main profile disables commands. Change permissions in the sandbox UI before launching background tasks.");
+    throw new ForegroundSandboxBlockedError(policy, `${policy.policySource === "background" ? "Background tasks" : "Main"} profile disables commands. Change permissions in /sandbox before launching background tasks.`);
   }
   if (policy.state === "inactive" || policy.state === "disabled") return UNCONFINED;
   if (policy.state !== "enabled" || !policy.writableRoot) {

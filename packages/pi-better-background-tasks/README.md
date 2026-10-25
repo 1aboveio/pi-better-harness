@@ -17,47 +17,45 @@ Use `pi-better-background-tasks` when a command should keep running while the fo
 - Keep task metadata and logs available across reloads.
 - Retain completed task artifacts for seven days, then remove them during rate-limited maintenance.
 - Show active work in Pi's background-work navigator.
-- Flag running tasks with no observable output or completed poll as stalled.
+- Report quiet work and suspected stalls separately from task lifecycle.
 - Confine local task writes to the project directory when `pi-better-sandbox` is enabled.
 
 ## Write Sandbox
 
 When [`pi-better-sandbox`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme)
-is installed and enabled, every **local** task captures
-the effective foreground policy at launch and runs under the platform's write
-sandbox: reads and network stay unrestricted, writes are confined to the
-canonical project directory, and denied paths stay denied.
+is installed, local tasks follow the independent **Background tasks** column in
+`/sandbox`. Its Sandbox switch starts Off for fresh settings. When enabled,
+commands run under macOS Seatbelt or Linux Bubblewrap with that column's project,
+outside-project, credential-file, command and network permissions. Protected
+paths remain denied.
 
-The policy is captured once, when the task starts. The foreground sandbox is
-inactive by default, so local tasks ordinarily launch unconfined. A later
-`/sandbox on`, `/sandbox off`, `/sandbox default on|off`, or a deny-rule change
-reaches tasks launched after it; a task
-already running — including a watcher resumed in a later Pi session — keeps the
-policy it started with.
+The policy is captured once at launch. Later settings changes affect only new
+tasks. An existing process, including a watcher resumed in a later Pi session,
+keeps its launch policy. `/sandbox on|off` and `/sandbox default on|off` now
+change Main only; use the Background tasks column to change new task launches.
+Older settings migrate by copying Main's values into Background tasks once.
 
-If the foreground sandbox reports `unavailable` or `failed`, a local launch is
-refused with an explanation instead of running unconfined. `/sandbox off` is the
-deliberate way to run local tasks unsandboxed.
+If the Background policy is `unavailable` or `failed`, launch is refused rather
+than retried unconfined. Turning its Sandbox switch Off deliberately permits
+unconfined local launches.
 
-A task follows Main's permission profile. With Main's Outside project = Write, the
-task writes across home and temp but can remove files outside the project only in
-temp, hidden home directories, and worktree folders (see
+With Background tasks' Outside project = Write, the task can write across home
+and temp but can remove files outside the project only in temp, hidden home
+directories, and worktree folders (see
 [pi-better-sandbox](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-sandbox#readme)).
-On macOS, a task launched with Outside project = Write or Write & delete starts an
-APFS local snapshot (`tmutil localsnapshot`) in the background as a recovery aid.
-A failed snapshot is noted in the task log and never blocks the task.
+On macOS, Outside project = Write or Write & delete starts an APFS local snapshot
+(`tmutil localsnapshot`) as a recovery aid. A failed snapshot is noted in the log
+and never blocks execution.
 
-Structured remote SSH tasks are unaffected: the foreground sandbox describes this
-machine, and remote work keeps its existing remote semantics. Without
-`pi-better-sandbox` installed, local tasks behave exactly as they always have.
+Structured SSH cannot apply local file and credential permissions remotely, so
+an enabled permission-aware Background profile refuses those launches. When
+unconfined, SSH retains its documented remote behavior; local policy never
+establishes remote confinement. Without the sandbox extension, local tasks
+retain their historical unconfined behavior.
 
-Reads and network access are never restricted; only writes are. Pi's own
-process, `pi.exec` calls, and unrelated third-party extension code stay outside
-the guarantee, and confinement is per surface: a confined process on another
-first-party surface can still write this one's task registry. Installing
-[`pi-better-harness`](https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-harness#readme)
-installs the sandbox extension, but leaves foreground tools and local background
-tasks inactive until a human opts in.
+Pi's own process, provider transport, `pi.exec` calls, and unrelated runtime
+extensions remain outside the task boundary. Installing the harness does not
+activate Main or Background confinement by default.
 
 ## Remote SSH
 
@@ -104,6 +102,61 @@ While the same Pi process stays open, a local process that exits in the meantime
 is recorded as finished, and its callback is delivered when its session resumes.
 If you quit Pi first, nothing records that exit: when the session is resumed in a
 new Pi process, a task whose process is gone is marked lost.
+
+## Progress And Suspected Stalls
+
+A task can remain `running` without recent progress evidence. Compact status and
+navigator use the same observation. Process tasks use recorded progress and the
+log's modification time. Watches use recorded progress and completed polls. Before
+any progress, the task's launch time anchors the silence duration. This does not
+measure CPU activity, network waits, or useful application work.
+
+At 60 seconds without observed progress, work is `quiet`. At 5 minutes, it has a
+`suspected stall`. Both thresholds are inclusive. Set `PI_BETTER_STALL_QUIET_MS`
+and `PI_BETTER_STALL_MS` to positive millisecond durations to override them.
+Compact status shows the last observed time, silence duration, and a warning:
+silence alone does not prove the task is hung. Terminal tasks are not reported as
+suspected stalls. New output or a completed watch poll refreshes the observation.
+
+A status cursor changes when the observation crosses either threshold, even if
+metadata and log bytes have not changed. Within the same observation state,
+unchanged status still shows the current silence duration. A suspected stall
+records an observation, not a process failure. After the existing 60-second
+attention grace, callback-enabled tasks wake the parent once per silent spell.
+New progress closes the observation and a later spell can notify again. Quiet
+work does not alert, `callback:false` suppresses notification, and no silence
+threshold stops a task or changes its lifecycle. The active session's runtime
+checks observations once per second, including an in-flight watch poll. Reload
+restores monitoring and the persisted attention receipts. Log-retention writes
+are excluded from task progress.
+
+## Launch Policy And Diagnostics
+
+`/sandbox` has an independent **Background tasks** column. New tasks capture
+that column at launch; subsequent changes do not alter an existing process or
+its future watch polls. Older saved settings copy Main into Background tasks
+once so the migration preserves behavior. Older sandbox publishers without the
+Background field retain their Main-policy behavior.
+
+Launch and status show `confined`, `unconfined`, or `unknown`, plus the backend
+when known and the policy source. `verbose:true` includes the persisted policy
+summary. Restored tasks without recorded launch evidence report `unknown`;
+missing profile files or current process-tool denials are not confinement proof.
+Remote execution also reports unknown remote confinement.
+
+Use `bg_task_status` with `diagnostics:true` (or either wrapper's `status`
+action) for a bounded, current process snapshot. Both Main and Background tasks
+must currently permit **Process access: Read**, even when sandbox switches are
+Off. The result checks the recorded PID and start identity, then reports process
+state, accumulated CPU time, and available wait evidence. It never reads command
+arguments or environment values and never probes a remote host or descendants.
+A snapshot cannot establish useful work or a hang. Watch poll PIDs are not
+retained, so their activity evidence is explicitly unavailable.
+
+The process-activity adapter is unavailable under Main confinement; it never
+retries `ps` unconfined. Unsupported systems, absent launch identities, reused
+PIDs, and blocked diagnostics each receive a separate explanation. Diagnostics
+permissions do not change or describe the task's launch-time confinement.
 
 ## Watch conditions
 

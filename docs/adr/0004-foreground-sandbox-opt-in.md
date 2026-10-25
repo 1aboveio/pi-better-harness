@@ -4,7 +4,9 @@
 
 Accepted. Supersedes the default-on foreground policy in
 `docs/plans/pi-better-sandbox-design.md`; it does not change ADR 0003's shared
-mechanism or the subagent policy.
+mechanism or the subagent policy. The [ADR 0005 background-tasks amendment](0005-sandbox-permission-table.md#background-tasks-amendment-572)
+replaces local background tasks' Main inheritance with an independent profile;
+missing profiles migrate from Main without changing existing behavior.
 
 ## Context
 
@@ -29,7 +31,9 @@ opt-out. Their existing default-on policy remains appropriate.
   backend, unsafe root, or backend initialization failure blocks the operation.
 - Inactive mode never blocks because a backend is absent. Status distinguishes
   an available-but-inactive backend from an inactive unsupported platform.
-- Local background tasks inherit the foreground state captured at launch.
+- Local background tasks originally inherited the foreground state captured at
+  launch. ADR 0005's #572 amendment replaces this with an independent Background
+  tasks profile, still captured at launch.
 - The foreground-only `inactive` presentation state is published to extension
   consumers as the existing `disabled` enforcement state, preserving safe
   behavior across package-version skew.

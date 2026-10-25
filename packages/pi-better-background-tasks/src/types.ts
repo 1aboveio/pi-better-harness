@@ -82,6 +82,14 @@ export interface BackgroundTaskCallbackOrigin {
   sessionId?: string;
 }
 
+export interface TaskSandboxProvenance {
+  confinement: "confined" | "unconfined" | "unknown";
+  backend?: string;
+  policySource: "background" | "main-legacy" | "no-publisher" | "remote";
+  policySummary: string;
+  changesAffectTask: false;
+}
+
 export interface BackgroundTaskMeta {
   id: string;
   name?: string;
@@ -119,9 +127,13 @@ export interface BackgroundTaskMeta {
    * own request, so status, navigator, and goal surfaces read unchanged.
    */
   launchArgv?: string[];
+  /** Launch-time evidence, never inferred from current settings or missing profile files. */
+  sandbox?: TaskSandboxProvenance;
   maxLogBytes?: number;
   logDiscardedBytes?: number;
   logRetentionEvents?: number;
+  /** Own retention writes are not task output. Both fields must still match to ignore them. */
+  logMaintenance?: { mtimeMs: number; size: number };
   /** Incremented on every same-inode compaction so log-page cursors can detect it. */
   logGeneration?: number;
   /** Bytes never captured into watch/command buffers. Distinct from logDiscardedBytes. */

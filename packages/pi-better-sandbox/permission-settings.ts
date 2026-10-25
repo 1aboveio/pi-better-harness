@@ -17,6 +17,7 @@ export function readPermissionSettings(seams: SandboxPreferenceSeams = {}): Sand
     if (stored === undefined) {
         const settings = defaultSandboxPermissions();
         settings.main.enabled = readSandboxDefault(seams) === "on";
+        settings.background = { ...settings.main };
         return settings;
     }
     return parsePermissionSettings(stored).permissions;

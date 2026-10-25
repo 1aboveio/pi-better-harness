@@ -8,6 +8,8 @@ import backgroundTasksExtension from "./index.js";
 import { recordFailure } from "./failures.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { metaPathFor, readMeta, taskDir, writeMeta } from "./registry.js";
+import { currentProcessStartToken } from "./process-identity.js";
+import { FOREGROUND_SANDBOX_POLICY_CHANNEL, FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL } from "./sandbox.js";
 
 type JsonSchema = {
   description?: string;
@@ -32,6 +34,57 @@ function renderWidget(value: unknown, width = 120): string {
 }
 
 describe("extension e2e", () => {
+  it("#572 exposes permission-gated process evidence on every status entry point", async () => {
+    const harness = createHarness();
+    const id = "bg_diagnostics_572";
+    const logPath = join(taskDir(id), "output.log");
+    writeMeta({ id, kind: "process", status: "running", startedAt: Date.now(), logPath,
+      cwd: process.cwd(), spawnPid: process.pid, pid: process.pid, pidStartTime: currentProcessStartToken(),
+      callbackOrigin: { cwd: process.cwd(), sessionId: "test-session" },
+      sandbox: { confinement: "unconfined", policySource: "no-publisher", policySummary: "No policy at launch.", changesAffectTask: false } });
+    writeFileSync(logPath, "checkpoint\n");
+    const permissions = { enabled: false, commands: true, network: true, processAccess: "read",
+      projectFiles: "read-write", outsideProject: "read", storedCredentials: "read" };
+    let backgroundAccess = "off";
+    harness.events.on(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, () => harness.events.emit(FOREGROUND_SANDBOX_POLICY_CHANNEL, {
+      state: "disabled", permissions, background: { state: "disabled", permissions: { ...permissions, processAccess: backgroundAccess } },
+    }));
+    try {
+      for (const tool of ["bg_task_status", "bg_task", "bg_status"]) {
+        const result = JSON.parse(await harness.execute(tool, { action: "status", id, verbose: true, diagnostics: true }));
+        expect(result.processDiagnostics).toMatchObject({ availability: "blocked" });
+        expect(result.sandbox.confinement).toBe("unconfined");
+      }
+      backgroundAccess = "read";
+      const result = JSON.parse(await harness.execute("bg_task_status", { id, verbose: true, diagnostics: true }));
+      if (process.platform === "darwin" || process.platform === "linux") {
+        expect(result.processDiagnostics).toMatchObject({ availability: "available", identity: "matches" });
+      } else expect(result.processDiagnostics.availability).toBe("unavailable");
+      const compact = await harness.execute("bg_task_status", { id, diagnostics: true });
+      expect(compact).toContain("process diagnostics:");
+      expect(Buffer.byteLength(compact)).toBeLessThanOrEqual(1024);
+      writeMeta({ ...readMeta(id)!, argv: ["first-argument", "x".repeat(4_000), "last-argument"] });
+      const firstPage = await harness.execute("bg_task_status", { id, verbose: true, diagnostics: true, max_bytes: 1024 });
+      let cursor = firstPage.match(/nextCursor=(\S+)/)?.[1];
+      expect(cursor).toBeDefined();
+      let remaining = "";
+      for (let page = 0; page < 20 && cursor; page++) {
+        const text = await harness.execute("bg_task_status", { id, diagnostics: true, cursor, max_bytes: 1024 });
+        expect(text).not.toContain("reset=source-replaced");
+        expect(text).not.toContain(`"id": "${id}"`);
+        remaining += text;
+        cursor = text.match(/nextCursor=(\S+)/)?.[1];
+      }
+      expect(cursor).toBeUndefined();
+      expect(remaining).toContain("last-argument");
+      const foreign = { ...readMeta(id)!, callbackOrigin: { cwd: process.cwd(), sessionId: "another-session" } };
+      writeMeta(foreign);
+      const refused = await harness.execute("bg_task_status", { id, diagnostics: true, verbose: true });
+      expect(refused).toContain("outside the current session scope");
+      expect(refused).not.toContain("cpuTime");
+    } finally { rmSync(taskDir(id), { recursive: true, force: true }); }
+  });
+
   it("registers the public background task tools", () => {
     const harness = createHarness();
 

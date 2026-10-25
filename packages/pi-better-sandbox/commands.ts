@@ -28,7 +28,7 @@ import { DIAGNOSTICS_ACTIONS, handleDiagnosticsCommand } from "./diagnostics-com
 export const SANDBOX_COMMAND_NAME = "sandbox";
 
 export const SANDBOX_COMMAND_DESCRIPTION =
-    "Configure Main and Subagents sandbox permissions, activation defaults, and protected paths";
+    "Configure Main, Subagents, and Background tasks sandbox permissions, activation defaults, and protected paths";
 
 const USAGE = [
     "Usage:",
@@ -67,9 +67,9 @@ const NO_UI_REJECTION =
 const DEFAULT_OFF_TITLE = "Keep the foreground write sandbox off by default?";
 
 const DEFAULT_OFF_MESSAGE = [
-    "This session and future sessions will run foreground tools and local background",
-    "tasks with normal host write access until you run /sandbox on or change the",
-    "persistent default.",
+    "This session and future sessions will run foreground tools with normal host",
+    "write access until you run /sandbox on or change the persistent default.",
+    "Subagents and Background tasks keep their independent settings.",
 ].join("\n");
 
 const RESET_TITLE = "Restore the packaged write-deny defaults?";
@@ -195,7 +195,7 @@ export function createSandboxCommandHandler({
                 ctx.ui.notify(
                     mode === "on"
                         ? `Foreground sandbox default is ON. ${status.reason}`
-                        : "Foreground sandbox default is off. Foreground tools and local background tasks are unconfined.",
+                        : "Foreground sandbox default is off. Foreground tools are unconfined; Background tasks settings are unchanged.",
                     mode === "on" && status.state !== "enabled" ? "warning" : "info",
                 );
             } catch (error) {

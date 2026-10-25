@@ -41,7 +41,7 @@ const credentialValues: readonly CredentialAccess[] = ["off", "read", "read-writ
 const FILE_LABELS: Record<FileAccess, string> = { off: "Off", read: "Read", write: "Write", "read-write": "Write & delete" };
 
 /** The context line for the highlighted cell, or undefined. */
-function cellHint(key: string, profile: PermissionProfile | undefined): string | undefined {
+function cellHint(key: string, profile: PermissionProfile | undefined, column?: string): string | undefined {
     if (key === "projectFiles" || key === "outsideProject") {
         const level = profile?.[key];
         const where = key === "projectFiles" ? "in the project" : "outside the project";
@@ -50,13 +50,15 @@ function cellHint(key: string, profile: PermissionProfile | undefined): string |
             : "Always deletable: temp, hidden ~/.directories and worktree folders (.worktrees/, *-worktrees/).";
     }
     if (key === "storedCredentials") return "Known credential files follow this row independently of Outside project.";
-    if (key === "processAccess") return "process_list only: current-user PIDs and names. No process control; shell access is unchanged.";
+    if (key === "processAccess") return column === "background"
+        ? "Task status diagnostics: requires Read here and in Main. No process control; shell access is unchanged."
+        : "process_list: current-user PIDs and names. Main also gates task diagnostics. No process control.";
     return undefined;
 }
-const columns = ["main", "subagents"] as const;
+const columns = ["main", "subagents", "background"] as const;
 
 function snapshot(settings: PermissionSettings): PermissionSettings {
-    return { main: { ...settings.main }, subagents: { ...settings.subagents }, subagentTools: {
+    return { main: { ...settings.main }, subagents: { ...settings.subagents }, background: { ...settings.background }, subagentTools: {
         applyPatch: settings.subagentTools.applyPatch, trusted: settings.subagentTools.trusted.map((tool) => ({ ...tool })) } };
 }
 
@@ -241,11 +243,11 @@ export function createPermissionsPage(
                 requestRender();
             } else if (matchesKey(data, Key.left)) {
                 if (row >= rows.length) fold(false);
-                else column = 0;
+                else column = Math.max(0, column - 1);
                 requestRender();
             } else if (matchesKey(data, Key.right)) {
                 if (row >= rows.length) fold(true);
-                else column = 1;
+                else column = Math.min(columns.length - 1, column + 1);
                 requestRender();
             } else if (matchesKey(data, Key.space)) {
                 void change();
@@ -259,23 +261,24 @@ export function createPermissionsPage(
             const w = Math.max(0, Math.floor(width));
             const prefix = w >= 20 ? 2 : 0;
             const gap = w >= 8 ? 1 : 0;
-            const minimumCell = Math.max(1, Math.min(10, Math.floor((w - prefix - gap) / 3)));
-            const labelWidth = Math.min(28, Math.max(0, w - prefix - gap - 2 * minimumCell));
+            const minimumCell = Math.max(1, Math.min(16, Math.floor((w - prefix - gap) / 4)));
+            const labelWidth = Math.min(28, Math.max(0, w - prefix - gap - columns.length * minimumCell));
             const available = Math.max(0, w - prefix - labelWidth - gap);
-            const mainWidth = Math.ceil(available / 2);
-            const subWidth = available - mainWidth;
+            const widths = columns.map((_profile, index) => Math.floor(available / columns.length) +
+                (index < available % columns.length ? 1 : 0));
             const highlight = (text: string, selected: boolean): string => selected
                 ? theme.bg("selectedBg", theme.bold(cell(text, w))) : text;
-            const line = (label: string, main: string, sub: string, selected: boolean, dimMain = false, dimSub = false) => {
+            const line = (label: string, values: readonly string[], selected: boolean, dim: readonly boolean[] = []) => {
                 const marker = prefix ? (selected ? "> " : "  ") : "";
                 const labelPart = cell(label, labelWidth);
-                const mainPart = theme.fg(dimMain ? "dim" : "text", cell(main, mainWidth));
-                const subPart = theme.fg(dimSub ? "dim" : "text", cell(sub, subWidth));
+                const cells = values.map((value, index) => {
+                    const part = theme.fg(dim[index] ? "dim" : "text", cell(value, widths[index]!));
+                    return selected && column === index ? theme.inverse(part) : part;
+                });
                 return highlight(theme.fg(selected ? "accent" : "text", marker + labelPart) + " ".repeat(gap) +
-                    (selected && column === 0 ? theme.inverse(mainPart) : mainPart) +
-                    (selected && column === 1 ? theme.inverse(subPart) : subPart), selected);
+                    cells.join(""), selected);
             };
-            const output = [line("Sandbox permissions", "Main", "Subagents", false), ""];
+            const output = [line("Sandbox permissions", ["Main", "Subagents", "Background tasks"], false), ""];
             for (let i = 0; i < rows.length; i++) {
                 const entry = rows[i]!;
                 const value = (profile: PermissionProfile): string => {
@@ -283,8 +286,8 @@ export function createPermissionsPage(
                     const current = profile[entry.key];
                     return typeof current === "boolean" ? (current ? "On" : "Off") : FILE_LABELS[current];
                 };
-                output.push(line(entry.label, settings ? value(settings.main) : "-", settings ? value(settings.subagents) : "-",
-                    row === i, !settings || (i > 0 && !settings.main.enabled), !settings || (i > 0 && !settings.subagents.enabled)));
+                output.push(line(entry.label, columns.map((profile) => settings ? value(settings[profile]) : "-"),
+                    row === i, columns.map((profile) => !settings || (i > 0 && !settings[profile].enabled))));
                 if (i === 0) output.push("");
             }
             // Subagents · Tools: which extension tools a confined subagent may use.
@@ -317,10 +320,10 @@ export function createPermissionsPage(
             const selected = row < rows.length ? rows[row]!.key : undefined;
             const tool = row >= rows.length ? items[row - rows.length] : undefined;
             const contextual = tool ? (tool.kind === "guarded" ? GUARDED_HINT : TRUSTED_HINT)
-                : selected && settings ? cellHint(selected, settings[columns[column]!]) : undefined;
+                : selected && settings ? cellHint(selected, settings[columns[column]!], columns[column]) : undefined;
             for (const hint of [
                 "↑↓ Select · ←→ Column/fold · Space Toggle · ctrl+s Save default · Enter Fold · Esc Back",
-                "Changes apply to new launches. Background tasks follow their launcher.",
+                "Changes apply to new launches.",
                 "Stored credentials: known files only; excludes OS vaults and environment tokens.",
                 "Trusted tools run outside the file rules.",
                 ...(contextual ? [contextual] : []),

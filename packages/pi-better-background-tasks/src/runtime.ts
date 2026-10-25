@@ -7,7 +7,7 @@ import { currentProcessStartToken, readProcessStartToken } from "./process-ident
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.js";
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
-import { confineCommandSpec, resolveForegroundSandboxPlan } from "./sandbox.js";
+import { confineCommandSpec, resolveForegroundSandboxPlan, sandboxProvenance } from "./sandbox.js";
 import { takeRecoverySnapshot } from "./shared-sandbox-core.js";
 import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
@@ -24,6 +24,7 @@ import type {
   SshConnectionParams,
   TerminalResult,
 } from "./types.js";
+import { observeTaskStallAttention } from "./stall-attention.js";
 import { isTerminalStatus } from "./types.js";
 
 const watcherTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -262,6 +263,7 @@ export function spawnTask(
     cwd,
     env: params.env,
     launchArgv: launchArgvOf(commandSpec, launchSpec),
+    sandbox: sandboxProvenance(sandboxPlan, !!remoteTask),
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     pid: spawned?.child.pid,
     pidStartTime: spawned?.child.pid ? readProcessStartToken(spawned.child.pid) : undefined,
@@ -273,7 +275,7 @@ export function spawnTask(
     ...intent,
   };
   writeMeta(meta);
-  scheduleLogRetention(id);
+  scheduleLogRetention(pi, id, getActiveSession);
   if (tmuxBacked && remoteTask) {
     activeRemoteTasks.set(id, remoteTask);
     appendLine(logPath, `--- remote tmux bootstrap ${new Date(now).toISOString()} target=${remoteTask.metadata.ssh.target} session=${remoteTask.metadata.remote.sessionName} ---`);
@@ -533,6 +535,7 @@ export function startWatchTask(
     cwd,
     env: params.env,
     launchArgv: launchArgvOf(commandSpec, launchSpec),
+    sandbox: sandboxProvenance(sandboxPlan, !!remoteTask),
     maxLogBytes: resolveMaxLogBytes(params.max_log_bytes),
     spawnPid: process.pid,
     spawnPidStartTime: currentProcessStartToken(),
@@ -548,6 +551,7 @@ export function startWatchTask(
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
   for (const line of sandboxNotices) appendLine(meta.logPath, `--- ${line} ---`);
   writeMeta(meta);
+  scheduleLogRetention(pi, meta.id, getActiveSession);
   let resolveFirst!: (check: FirstWatchCheck | "suspended" | undefined) => void;
   const firstCheck = new Promise<FirstWatchCheck | "suspended" | undefined>((resolve) => { resolveFirst = resolve; });
   firstCheckWaiters.set(id, { promise: firstCheck, resolve: resolveFirst });
@@ -592,6 +596,7 @@ export function resumeRunningTask(
     writeMeta(meta);
   }
 
+  scheduleLogRetention(pi, meta.id, getActiveSession);
   const remoteTask = resolvePersistedRemoteTask(meta, dependencies.remoteRunner);
   if (meta.kind === "command_watch") {
     scheduleWatch(pi, meta.id, 0, getActiveSession, remoteTask
@@ -600,7 +605,6 @@ export function resumeRunningTask(
     return meta;
   }
 
-  scheduleLogRetention(meta.id);
   if (meta.remote?.session === "tmux" && meta.remote.sessionStarted !== false && remoteTask) {
     activeRemoteTasks.set(meta.id, remoteTask);
     scheduleRemoteSessionPoll(pi, meta.id, 0, getActiveSession);
@@ -1155,6 +1159,7 @@ async function notifyTerminal(
   meta: BackgroundTaskMeta,
   getActiveSession?: ActiveSessionProvider,
 ): Promise<void> {
+  observeTaskStallAttention(readMeta(meta.id) ?? meta);
   // A suspended instance has no active session: delivering or suppressing here would
   // be wrong either way. The instance that resumes the task delivers it (#324).
   if (scheduledWorkSuspended) return;
@@ -1260,16 +1265,17 @@ function launchArgvOf(commandSpec: CommandSpec, launchSpec: CommandSpec): string
   return launchSpec === commandSpec ? undefined : launchSpec.argv;
 }
 
-function scheduleLogRetention(id: string): void {
+function scheduleLogRetention(pi: ExtensionAPI, id: string, getActiveSession?: ActiveSessionProvider): void {
   stopLogRetention(id);
   if (scheduledWorkSuspended) return;
   const timer = setInterval(() => {
     const meta = readMeta(id);
-    if (!meta || meta.status !== "running" || meta.kind !== "process") {
+    if (!meta || meta.status !== "running") {
       stopLogRetention(id);
       return;
     }
-    enforceLogRetention(meta);
+    if (meta.kind === "process") enforceLogRetention(meta);
+    if (observeTaskStallAttention(meta)) scheduleFailureAttention(pi, id, getActiveSession);
   }, LOG_RETENTION_CHECK_MS);
   timer.unref();
   logRetentionTimers.set(id, timer);
@@ -1283,8 +1289,10 @@ function stopLogRetention(id: string): void {
 
 function enforceLogRetention(meta: BackgroundTaskMeta): void {
   try {
-    const mtimeMs = Math.trunc(statSync(meta.logPath).mtimeMs);
-    if (mtimeMs > (meta.lastProgressAt ?? meta.startedAt)) {
+    const log = statSync(meta.logPath);
+    const mtimeMs = Math.trunc(log.mtimeMs);
+    const maintenance = meta.logMaintenance?.mtimeMs === mtimeMs && meta.logMaintenance.size === log.size;
+    if (!maintenance && mtimeMs > (meta.lastProgressAt ?? meta.startedAt)) {
       meta.lastProgressAt = mtimeMs;
       writeMeta(meta);
     }
@@ -1296,6 +1304,10 @@ function enforceLogRetention(meta: BackgroundTaskMeta): void {
   meta.logDiscardedBytes = (meta.logDiscardedBytes ?? 0) + compacted.discardedBytes;
   meta.logRetentionEvents = (meta.logRetentionEvents ?? 0) + 1;
   meta.logGeneration = (meta.logGeneration ?? 0) + 1;
+  try {
+    const log = statSync(meta.logPath);
+    meta.logMaintenance = { mtimeMs: Math.trunc(log.mtimeMs), size: log.size };
+  } catch { /* Missing log remains an evidence gap. */ }
   writeMeta(meta);
 }
 

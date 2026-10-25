@@ -678,6 +678,82 @@ function sessionEntry(data: unknown, id = "policy", parentId: string | null = nu
         id, parentId, timestamp: "2026-01-01T00:00:00.000Z" };
 }
 
+nodeTest("Background UI edits publish, persist on the session branch, and restore independently of Main", async () => {
+    forgetDenyOverride();
+    forgetSandboxPreference();
+    const recorded = record();
+    piBetterSandbox(recorded.pi);
+    const root = project("background-session-policy");
+    const started = await startSession(recorded, root, "startup", false);
+    await permissionsPage(recorded, root, async (page, press) => {
+        assert.match(page.render(100).join("\n"), /Main\s+Subagents\s+Background tasks/);
+        await press("\x1b[C");
+        await press("\x1b[C");
+        await press(" "); // Background on while Main stays off.
+        await press("\x1b[B");
+        await press("\x1b[B");
+        await press(" "); // Outside project Read -> Write.
+        await press("\x1b[B");
+        await press("\x1b[B");
+        await press(" "); // Commands off.
+        await press("\x1b[B");
+        await press(" "); // Network off.
+    });
+    const expected = { ...defaultSandboxPermissions().background,
+        enabled: true, outsideProject: "write", commands: false, network: false };
+    const policy = recorded.published.at(-1)!;
+    assert.equal(policy.state, "disabled");
+    assert.equal(policy.background.state, support.supported ? "enabled" : "unavailable");
+    assert.deepEqual(policy.background.permissions, expected);
+    assert.deepEqual((recorded.branch.at(-1) as { data: unknown }).data, {
+        version: 1, permissions: { ...defaultSandboxPermissions(), background: expected },
+    });
+    assert.equal(hasSandboxSetting("sandboxPermissions"), false);
+    const previous = recorded.published.length;
+    recorded.events.emit(FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL, undefined);
+    assert.equal(recorded.published.length, previous + 1);
+    assert.deepEqual(recorded.published.at(-1)?.background, policy.background);
+    for (const reason of ["resume", "fork", "reload"] as const) {
+        const restored = record(structuredClone(recorded.branch));
+        piBetterSandbox(restored.pi);
+        await startSession(restored, root, reason, false, false);
+        assert.deepEqual(restored.published.at(-1)?.background, policy.background, reason);
+        await restored.handlers.get("session_shutdown")!({}, started.ctx);
+    }
+    await runSandbox(recorded, "on", started.ctx);
+    assert.deepEqual(recorded.published.at(-1)?.background, policy.background);
+    await runSandbox(recorded, "off", context(root, { confirm: true }).ctx);
+    assert.deepEqual(recorded.published.at(-1)?.background, policy.background);
+    await runSandbox(recorded, "default on", started.ctx);
+    assert.deepEqual(readPermissionSettings().background, expected);
+    await runSandbox(recorded, "default off", context(root, { confirm: true }).ctx);
+    assert.deepEqual(recorded.published.at(-1)?.background, policy.background);
+    assert.deepEqual(readPermissionSettings().background, expected);
+    await startSession(recorded, root, "new", false, false);
+    assert.deepEqual(recorded.published.at(-1)?.background.permissions, expected);
+    await recorded.handlers.get("session_shutdown")!({}, started.ctx);
+    forgetSandboxPreference();
+});
+
+nodeTest("old session snapshots inherit Main once and do not re-link Background after Main commands", async () => {
+    forgetSandboxPreference();
+    const settings = defaultSandboxPermissions();
+    Object.assign(settings.main, { enabled: true, outsideProject: "off", network: false, commands: false });
+    const { background: _background, ...legacy } = settings;
+    const recorded = record([sessionEntry({ version: 1, permissions: legacy })]);
+    piBetterSandbox(recorded.pi);
+    const root = project("background-session-migration");
+    const started = await startSession(recorded, root, "resume", false);
+    assert.deepEqual(recorded.published.at(-1)?.background.permissions, settings.main);
+    await runSandbox(recorded, "off", context(root, { confirm: true }).ctx);
+    assert.equal(recorded.published.at(-1)?.state, "disabled");
+    assert.deepEqual(recorded.published.at(-1)?.background.permissions, settings.main);
+    await startSession(recorded, root, "reload", false, false);
+    assert.equal(recorded.published.at(-1)?.state, "disabled");
+    assert.deepEqual(recorded.published.at(-1)?.background.permissions, settings.main);
+    await recorded.handlers.get("session_shutdown")!({}, started.ctx);
+});
+
 test("UI edits persist both profiles and tools to session only and immediately enforce restrictions", async () => {
     forgetDenyOverride();
     forgetSandboxPreference();
@@ -821,6 +897,8 @@ test("tree navigation restores only the active branch's latest policy and its en
     a.main.commands = false;
     const b = structuredClone(a);
     b.main.enabled = false;
+    b.background.enabled = true;
+    b.background.network = false;
     b.subagents.enabled = false;
     b.subagentTools.trusted = [];
     const ancestor = sessionEntry({ version: 1, permissions: a }, "ancestor");
@@ -835,6 +913,7 @@ test("tree navigation restores only the active branch's latest policy and its en
         recorded.branch = [...branch];
         await tree({ type: "session_tree", newLeafId: branch.at(-1)?.id ?? null, oldLeafId: "child" }, started.ctx);
         assert.deepEqual(recorded.published.at(-1)?.permissions, expected.main);
+        assert.deepEqual(recorded.published.at(-1)?.background.permissions, expected.background);
         assert.deepEqual(recorded.published.at(-1)?.subagentPermissions, expected.subagents);
         assert.deepEqual(recorded.published.at(-1)?.subagentTools, expected.subagentTools);
         assert.ok(recorded.published.at(-1)?.denyWrite.includes(join(root, "build")), "deny rules remain global");
@@ -847,6 +926,7 @@ test("invalid latest session policies fail closed on start and tree navigation r
     const valid = defaultSandboxPermissions();
     const invalids = [undefined, { version: 2, permissions: valid }, { version: 1, permissions: { main: valid.main, subagents: valid.subagents } },
         { version: 1, permissions: { ...valid, main: { ...valid.main, network: "on" } } },
+        { version: 1, permissions: { ...valid, background: { ...valid.background, network: "on" } } },
         { version: 1, permissions: { ...valid, subagentTools: { applyPatch: true, trusted: [{ name: "write", package: "npm:evil" }] } } }];
     const root = project("invalid-session-policy");
     for (const data of invalids) {
@@ -855,6 +935,9 @@ test("invalid latest session policies fail closed on start and tree navigation r
         piBetterSandbox(recorded.pi);
         const started = await startSession(recorded, root, "reload", false);
         assert.equal(recorded.published.at(-1)?.state, "failed");
+        assert.equal(recorded.published.at(-1)?.background.state, "failed");
+        assert.equal(recorded.published.at(-1)?.background.permissions?.enabled, true);
+        assert.equal(recorded.published.at(-1)?.background.permissions?.commands, false);
         assert.deepEqual(recorded.published.at(-1)?.subagentTools?.trusted, []);
         assert.equal(recorded.published.at(-1)?.subagentPermissions?.commands, false);
         assert.ok(started.notifications.some((note) => note.kind === "error" && /could not be loaded/.test(note.text)));

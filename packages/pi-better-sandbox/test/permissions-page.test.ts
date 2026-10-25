@@ -65,11 +65,11 @@ async function settle() {
 test("default table has the locked rows and independent Main/Subagents values", () => {
     const h = harness();
     const lines = table(h.page, 84).map(plain);
-    assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents/);
+    assert.match(lines[0]!, /Sandbox permissions\s+Main\s+Subagents\s+Background tasks/);
     assert.match(lines[1]!, /Sandbox\s+Off\s+On/);
     assert.match(lines[2]!, /Project files\s+-\s+Write & delete/);
-    assert.match(lines[3]!, /Outside project\s+-\s+Write\s*$/);
-    assert.match(lines[4]!, /Stored credentials\s+-\s+Write & delete\s*$/);
+    assert.match(lines[3]!, /Outside project\s+-\s+Write\s+-\s*$/);
+    assert.match(lines[4]!, /Stored credentials\s+-\s+Write & delete\s+-\s*$/);
     assert.match(lines[5]!, /Run commands & applications\s+-\s+On/);
     assert.match(lines[6]!, /Network access\s+-\s+On/);
     assert.match(lines[7]!, /Process access\s+-\s+Read/);
@@ -79,6 +79,50 @@ test("default table has the locked rows and independent Main/Subagents values", 
     assert.match(lines[11]!, /Trusted \(runs outside the file rules\)/);
     assert.match(lines[12]!, /> \[x\] @juicesharp\/rpiv-web-tools 2\/2/);
     assert.ok(!lines.some((line) => /\[x\] web_fetch/.test(line)), "tools are initially folded");
+});
+
+test("Background cells navigate, retain disabled values, and save independently of Main and Subagents", async () => {
+    const h = harness();
+    h.press(Key.right, Key.right, Key.right, Key.space);
+    await settle();
+    assert.equal(h.current.background.enabled, true, "Right clamps at Background tasks");
+    assert.deepEqual(h.current.main, h.initial.main);
+    assert.deepEqual(h.current.subagents, h.initial.subagents);
+    const selected = h.page.render(100).find((line) => line.includes("\x1b[44m"))!;
+    assert.match(selected, /\x1b\[7m[\s\S]*On/);
+    assert.match(plain(table(h.page, 100)[1]!), /Sandbox\s+Off\s+On\s+On/);
+    h.press(Key.down, Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.outsideProject, "write");
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.storedCredentials, "read-write");
+    h.press(Key.down, Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.commands, false);
+    assert.equal(h.current.background.network, false);
+    assert.equal(h.current.background.processAccess, "off");
+    h.press(...Array(6).fill(Key.up), Key.space);
+    await settle();
+    h.press(Key.down, Key.space);
+    await settle();
+    assert.equal(h.current.background.projectFiles, "read-write", "disabled details cannot change");
+    assert.match(table(h.page, 100)[2]!, /\x1b\[2m- /);
+    h.press(Key.up, Key.space);
+    await settle();
+    assert.equal(h.current.background.outsideProject, "write");
+    h.press("\x13");
+    await settle();
+    assert.deepEqual(h.saved, [h.current]);
+    h.press(Key.left, Key.left, Key.left, Key.space);
+    await settle();
+    assert.equal(h.current.main.enabled, true, "Left clamps at Main");
+    assert.deepEqual(h.current.background, h.saved[0]!.background);
+    assert.deepEqual(h.current.subagents, h.initial.subagents);
 });
 
 test("selected rows have a full-width background and bold text, with an inverse active cell", () => {
@@ -160,19 +204,19 @@ test("file rows cycle four levels and credentials remain independent under Outsi
     assert.match(hint()!, /Write: git and rename-based saves fail outside the project except in worktree folders/);
     h.press(Key.down);
     assert.match(hint()!, /Known credential files follow this row independently of Outside project/);
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "off", "Write & delete to Off tightens immediately");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Off\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Off\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "read");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Read\s+-\s*$/);
     h.press(Key.space);
     await settle();
     assert.equal(h.current.subagents.storedCredentials, "read-write", "credentials skip unsupported Write");
-    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s*$/);
+    assert.match(plain(table(h.page, 100)[4]!), /Stored credentials\s+-\s+Write & delete\s+-\s*$/);
     assert.equal(h.current.subagents.outsideProject, "write");
 });
 
