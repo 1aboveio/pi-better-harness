@@ -4,7 +4,7 @@ import type { ServerBuild } from "./startup/managed-types.ts";
 import { PROTOCOL_VERSION, type HelloCommand, type HelloData } from "./protocol.ts";
 
 /** Kept equal to package.json `version`; a test pins that. */
-export const SERVER_VERSION = "0.1.3";
+export const SERVER_VERSION = "0.2.0";
 
 export const SERVER_EXTENSION_VERSIONS: Readonly<Record<string, string>> = { "pi-better-server": SERVER_VERSION };
 
