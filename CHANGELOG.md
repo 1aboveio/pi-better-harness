@@ -4,6 +4,45 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.32.0] - 2026-10-25
+
+### Changed
+
+- Bundle Sandbox 0.13.0, Subagents 0.20.0, and Background Tasks 0.10.0. Keep Goal 0.10.1, Plan 0.9.1, and SSH 0.1.3 unchanged.
+- Fresh Main, Subagents, and Background tasks sandbox switches all start Off. Preserve saved choices and explicit opt-in.
+
+## [pi-better-sandbox@0.13.0] - 2026-10-25
+
+### Added
+
+- Add an independent Background tasks column to `/sandbox`, with separate session settings and saved defaults. Migrate older settings by copying Main's values once. (#572)
+- Admit verified first-party background tools through a versioned source-and-schema check, so Background permissions control local launches independently of Main's commands switch.
+
+### Changed
+
+- Default all fresh sandbox switches to Off without changing existing saved profiles.
+- Explain Background process diagnostics separately from Main and Subagents `process_list` permissions.
+
+## [pi-better-subagents@0.20.0] - 2026-10-25
+
+### Changed
+
+- Default standalone subagent launches to unconfined when no human profile or explicit `sandbox:true` selects confinement. Preserve enabled human profiles and reject attempts to bypass them with `sandbox:false`.
+- Report the current human sandbox profile in catalog inspection, including session changes, without claiming confinement has been applied before launch.
+
+## [pi-better-background-tasks@0.10.0] - 2026-10-25
+
+### Added
+
+- Persist launch-time sandbox provenance and report confined, unconfined, or unknown separately from current diagnostic permissions. Existing tasks keep their launch policy after settings changes and reload. (#572)
+- Add explicit, permission-gated process diagnostics to status tools. Check recorded process identity before exposing available state, CPU time, and wait evidence; report unsupported or restricted evidence without an unconfined fallback.
+- Show quiet work and suspected stalls consistently in status, navigator, and callbacks, with the last observed progress and silence duration. Silence alone never proves a hang or changes task lifecycle.
+
+### Fixed
+
+- Recover suspected-stall observations on new progress or termination, notify once per silent spell, and exclude log-retention writes from progress.
+- Keep verbose metadata pagination stable when live process samples change, and retain first-check output-omission notices within the launch budget.
+
 ## [pi-better-server@0.2.0] - 2026-10-25
 
 ### Added
