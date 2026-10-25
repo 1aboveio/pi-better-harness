@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-server@0.2.0] - 2026-10-25
+
+### Added
+
+- Connect `/remote` to the daemon on this machine with `/remote connect localhost`, skipping SSH.
+- Name each connection stage and show how long that stage and the whole attempt have taken.
+
+### Changed
+
+- The session browser uses the available terminal height instead of stopping at 10 rows.
+
+### Fixed
+
+- Show Connected once SSH succeeds, and label later server, tunnel, and daemon stages as remote progress.
+
 ## [pi-better-server@0.1.3] - 2026-10-23
 
 ### Fixed
