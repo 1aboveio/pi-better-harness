@@ -380,7 +380,7 @@ test("subagents run through the same shared mechanism", { skip }, async () => {
     { sandboxEnabled: true, explicitSandbox: false },
   );
 
-  assert.ok(command, "a default-on subagent spawn must be wrapped, never bare");
+  assert.ok(command, "a subagent with confinement enabled must be wrapped, never bare");
   assert.equal(command.file, support.executable);
   execFileSync(command.file, command.fileArgs, { cwd: projectRoot });
   assert.equal(readFileSync(inside, "utf8"), "inside\n");
