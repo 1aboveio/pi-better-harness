@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.32.1] - 2026-10-27
+
+### Changed
+
+- Bundle Subagents 0.20.1 with fullscreen agent views, an Effort list column, and settings editable directly from agent details. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.20.1] - 2026-10-27
+
+### Changed
+
+- Fill the terminal with the agents list, details, settings, and prompt views, adapting visible rows when the terminal resizes.
+- Show resolved effort beside the model in the agents list, falling back to the configured effort when resolution is unavailable.
+- Edit Model and Effort directly from agent details without pressing `e`. Preserve session-only changes, explicit Ctrl+S saving, inheritance, and prompt inspection.
+
 ## [pi-better-harness@0.32.0] - 2026-10-25
 
 ### Changed
