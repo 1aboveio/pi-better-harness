@@ -62,7 +62,7 @@ function wrapLine(text: string, width: number): string[] {
     return rows;
 }
 
-export function catalogDetailLines(entry: OperationView): string[] {
+export function catalogDetailLines(entry: OperationView, editable = false): string[] {
     const lines = [
         `${entry.identity.name || entry.id}  ·  ${entry.identity.kind ?? "unknown"}`,
         entry.id,
@@ -75,8 +75,7 @@ export function catalogDetailLines(entry: OperationView): string[] {
         "",
         "Configuration",
         ...(entry.fields ? [
-            fieldLine("Model", entry.fields.model),
-            fieldLine("Effort", entry.fields.effort),
+            ...(!editable ? [fieldLine("Model", entry.fields.model), fieldLine("Effort", entry.fields.effort)] : []),
             fieldLine("Tier", entry.fields.tier),
         ] : []),
         `Actual   ${entry.actualModel ?? "not resolved"}${entry.actualEffort ? `  ·  ${entry.actualEffort}` : ""}`,
@@ -100,7 +99,7 @@ export function createCatalogComponent(
     getHeight: () => number = () => 30,
 ) {
     let selectedId = initialId ?? catalog.entries[0]?.id;
-    let mode: "list" | "detail" | "prompt" | "settings" = initialId ? "detail" : "list";
+    let mode: "list" | "detail" | "prompt" = initialId ? "detail" : "list";
     let query = "";
     let scroll = 0;
     let settingRow = 0;
@@ -162,7 +161,7 @@ export function createCatalogComponent(
     const selected = () => filtered().find((entry) => entry.id === selectedId);
     const detailRows = (entry: OperationView, width: number) => (mode === "prompt"
         ? [`${entry.identity.name || entry.id}  ·  effective instructions`, "", ...(entry.instructions?.split("\n") ?? ["(none)"])]
-        : catalogDetailLines(entry))
+        : catalogDetailLines(entry, !!editor))
         .flatMap((text) => text ? wrapLine(text, Math.max(1, width - 2)) : [""]);
     let lastDetailWidth = 80;
 
@@ -175,7 +174,8 @@ export function createCatalogComponent(
             const footerRows = (editor && mode !== "prompt" ? 2 : 0) + (message ? 2 : 0);
             const diagnosticRows = Math.min(catalog.diagnostics.length, 3);
             const listSize = Math.max(1, height - 5 - footerRows - diagnosticRows - 1);
-            const detailSize = Math.max(1, height - 5 - footerRows);
+            const controlRows = editor && mode === "detail" ? (safeWidth < 42 ? 5 : 3) : 0;
+            const detailSize = Math.max(1, height - 5 - footerRows - controlRows);
             const fit = (lines: string[]) => {
                 const result = lines.slice(0, height).map(line);
                 while (result.length < height) result.push("");
@@ -195,8 +195,7 @@ export function createCatalogComponent(
                 ...picker.render(safeWidth),
                 ...(message ? [theme.fg(error ? "error" : "muted", message)] : []),
             ]);
-            const lines = mode === "settings" && current ? [
-                theme.fg("accent", `Agents / ${current.identity.name || current.id}`), "",
+            const controls = editor && mode === "detail" && current ? [
                 ...["Model", "Effort"].flatMap((label, index) => {
                     const key = index === 0 ? "model" : "effort";
                     const field = current.fields?.[key];
@@ -208,14 +207,17 @@ export function createCatalogComponent(
                     const text = `${settingRow === index ? "> " : "  "}${label.padEnd(18)} ${value}`;
                     if (safeWidth < 42) {
                         const title = `${settingRow === index ? "> " : "  "}${label}`;
-                        return [settingRow === index ? highlight(title, safeWidth) : title, ...wrapLine(value, Math.max(1, safeWidth - 2)).map((line) => `  ${line}`)];
+                        return [settingRow === index ? highlight(title, safeWidth) : title, `  ${truncateToWidth(value, Math.max(1, safeWidth - 2))}`];
                     }
                     return [settingRow === index ? highlight(text, safeWidth) : text];
                 }),
-            ] : mode !== "list" && current ? [
-                theme.fg("accent", mode === "prompt" ? "Agents / prompt" : "Agents / inspect"),
-                theme.fg("dim", mode === "prompt" ? "← details  ·  ↑↓ scroll  ·  Esc close" : `${editor ? "e settings  ·  " : ""}p prompt  ·  ← list  ·  ↑↓ scroll  ·  Esc close`),
                 "",
+            ] : [];
+            const lines = mode !== "list" && current ? [
+                theme.fg("accent", mode === "prompt" ? "Agents / prompt" : editor ? `Agents / ${current.identity.name || current.id}` : "Agents / inspect"),
+                theme.fg("dim", mode === "prompt" ? "← details  ·  ↑↓ scroll  ·  Esc back" : `${editor ? "Enter change  ·  " : ""}p prompt  ·  ← list  ·  ↑↓ ${editor ? "select / scroll" : "scroll"}  ·  Esc back`),
+                "",
+                ...controls,
                 ...detailLines.slice(scroll, scroll + detailSize).map((text, i) =>
                     i === 0 && scroll === 0 ? theme.fg("accent", text) : text),
                 "",
@@ -237,7 +239,7 @@ export function createCatalogComponent(
                 ...catalog.diagnostics.slice(0, 2).map((diagnostic) => theme.fg("warning", `! ${diagnostic.message}`)),
                 ...(catalog.diagnostics.length > 2 ? [theme.fg("warning", `! ${catalog.diagnostics.length - 2} more catalog diagnostics`)] : []),
             ];
-            if (editor && mode !== "prompt") lines.push("", theme.fg("dim", mode === "settings" ? "Up/Down Select · Enter Change · ctrl+s Save defaults · Esc Back" : "ctrl+s Save selected defaults"));
+            if (editor && mode !== "prompt") lines.push("", theme.fg("dim", "ctrl+s Save selected defaults"));
             if (message) lines.push("", theme.fg(error ? "error" : "muted", message));
             return fit(lines);
         },
@@ -253,25 +255,26 @@ export function createCatalogComponent(
             }
             if (editor && matchesKey(data, "ctrl+s")) { save(); return; }
             if (matchesKey(data, "escape") || matchesKey(data, "left")) {
-                if (mode === "prompt" || mode === "settings") { mode = "detail"; scroll = 0; }
+                if (mode === "prompt") { mode = "detail"; scroll = 0; }
                 else if (mode === "detail") { mode = "list"; scroll = 0; }
                 else if (query) { query = ""; selectedId = catalog.entries[0]?.id; }
                 else { close(); return; }
             } else if (matchesKey(data, "up") || matchesKey(data, "down")) {
                 const delta = matchesKey(data, "down") ? 1 : -1;
-                if (mode === "settings") settingRow = Math.max(0, Math.min(1, settingRow + delta));
+                if (mode === "detail" && editor && scroll === 0 && (delta < 0 || settingRow === 0)) settingRow = Math.max(0, Math.min(1, settingRow + delta));
                 else if (mode !== "list" && selected()) scroll = Math.max(0, Math.min(detailRows(selected()!, lastDetailWidth).length - 1, scroll + delta));
                 else if (rows.length) selectedId = rows[Math.max(0, Math.min(rows.length - 1, rows.findIndex((entry) => entry.id === selectedId) + delta))]?.id;
             } else if (matchesKey(data, "enter") && mode === "list" && selected()) {
                 mode = "detail";
+                settingRow = 0;
                 scroll = 0;
             } else if ((data === "p" || data === "P") && mode === "detail" && selected()) {
                 mode = "prompt";
                 scroll = 0;
             } else if (editor && (data === "e" || data === "E") && mode === "detail" && selected()) {
-                mode = "settings";
                 settingRow = 0;
-            } else if (mode === "settings" && (matchesKey(data, "enter") || data === " ")) {
+                scroll = 0;
+            } else if (editor && mode === "detail" && (matchesKey(data, "enter") || data === " ")) {
                 try { edit(); } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
             } else if (mode === "list" && matchesKey(data, "backspace")) {
                 query = query.slice(0, -1);
