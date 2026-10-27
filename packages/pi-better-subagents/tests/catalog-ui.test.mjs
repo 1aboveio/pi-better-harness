@@ -42,19 +42,56 @@ describe("catalog command surface", () => {
         assert.equal(closed, 1);
     });
 
-    it("aligns model, source, and state columns and keeps model at narrow widths", () => {
+    it("aligns model, effort, source, and state columns and keeps model at narrow widths", () => {
         const role = entry("role.reviewer", "Reviewer");
         const agent = entry("agent.payments", "Payments Analyst", false);
         agent.actualModel = "openai/gpt-6-astra";
+        role.fields.effort.value = "medium";
+        agent.fields.effort.value = "xhigh";
+        agent.actualEffort = "high";
         const header = catalogColumns(null, 90);
         const roleRow = catalogColumns(role, 90);
         const agentRow = catalogColumns(agent, 90);
         assert.equal(header.indexOf("MODEL"), roleRow.indexOf("xai/grok-4.5"));
         assert.equal(header.indexOf("MODEL"), agentRow.indexOf("openai/gpt-6-astra"));
+        assert.equal(header.indexOf("EFFORT"), roleRow.indexOf("medium"));
+        assert.equal(header.indexOf("EFFORT"), agentRow.indexOf("high"));
+        assert.match(catalogColumns(entry("role.unset", "Unset"), 90), /\(unset\)/);
         assert.equal(header.indexOf("SOURCE"), agentRow.indexOf("user"));
         assert.equal(header.indexOf("STATE"), agentRow.indexOf("blocked"));
         assert.match(catalogColumns(agent, 42), /openai\/gpt-6-astra/);
-        assert.ok(visibleWidth(catalogColumns(agent, 42)) <= 40);
+        assert.match(catalogColumns(agent, 42), /high/);
+        for (const width of [20, 34, 42, 60, 80, 90, 140]) {
+            assert.ok(visibleWidth(catalogColumns(agent, width)) <= width - 2);
+        }
+    });
+
+    it("fills the viewport and resizes list and prompt content with terminal height", () => {
+        const rows = Array.from({ length: 60 }, (_, i) => entry(`agent.${i}`, `Agent ${i}`));
+        rows[0].instructions = Array.from({ length: 100 }, (_, i) => `Instruction ${i}`).join("\n");
+        let height = 40;
+        const component = createCatalogComponent({ entries: rows, diagnostics: [] }, theme, () => {}, () => {}, undefined, undefined, () => height);
+        let lines = component.render(100);
+        assert.equal(lines.length, 40);
+        assert.match(lines.join("\n"), /Agent 30/);
+        height = 24;
+        lines = component.render(40);
+        assert.equal(lines.length, 24);
+        assert.doesNotMatch(lines.join("\n"), /Agent 30/);
+        for (let i = 0; i < 50; i++) component.handleInput("\x1b[B");
+        assert.match(component.render(100).join("\n"), /› Agent 50/);
+        for (let i = 0; i < 50; i++) component.handleInput("\x1b[A");
+        component.handleInput("\r");
+        assert.equal(component.render(40).length, height);
+        component.handleInput("p");
+        height = 40;
+        lines = component.render(100);
+        assert.match(lines.join("\n"), /Instruction 30/);
+        height = 24;
+        lines = component.render(40);
+        assert.equal(lines.length, height);
+        assert.doesNotMatch(lines.join("\n"), /Instruction 30/);
+        assert.ok(lines.every((line) => visibleWidth(line) <= 40));
     });
 
     it("shows the complete resolved prompt in its own scrollable view", () => {
