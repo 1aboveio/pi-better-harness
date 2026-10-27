@@ -70,7 +70,6 @@ function fixture(t, scope = "user", definition = agent()) {
 }
 
 function editModel(component, label) {
-    component.handleInput("e");
     component.handleInput("\r");
     component.handleInput(label);
     component.handleInput("\r");
@@ -81,6 +80,10 @@ describe("branch-local agent model and effort", () => {
         const fx = fixture(t);
         const original = readFileSync(fx.saved.path, "utf8");
         const { component, result } = await fx.open();
+        const initial = component.render(100).join("\n");
+        assert.match(initial, /> Model\s+openai\/alpha/);
+        assert.match(initial, /Effort\s+medium/);
+        assert.doesNotMatch(initial, /e settings/);
         editModel(component, "beta");
         component.handleInput("\x1b[B");
         component.handleInput("\r");
@@ -98,8 +101,13 @@ describe("branch-local agent model and effort", () => {
         assert.equal(row.fields.model.value, "openai/beta");
         assert.equal(row.actualModel, "openai/beta");
         assert.equal(row.actualEffort, "high");
-        component.handleInput("\x1b");
         assert.match(component.render(100).join("\n"), /Actual\s+openai\/beta\s+·\s+high/);
+        component.handleInput("p");
+        assert.match(component.render(100).join("\n"), /Role instructions/);
+        component.handleInput("\x1b");
+        assert.match(component.render(100).join("\n"), /> Effort\s+high\s+session/);
+        component.handleInput("\x1b");
+        assert.match(component.render(100).join("\n"), /Search/);
         const prepared = await prepareCatalogJob(loadLaunchSnapshot(fx.host()), { agent: "agent.worker", prompt: "Do work." }, fx.host());
         assert.equal(prepared.status, "ready", prepared.message);
         assert.equal(prepared.assign.model, "openai/beta");
@@ -188,7 +196,6 @@ describe("branch-local agent model and effort", () => {
     it("cancel discards unselected input, Inherit removes a saved agent override, and live role file changes still apply", async (t) => {
         const fx = fixture(t, "user", { ...agent({ model: "openai/beta" }), instructionMode: "replace" });
         const { component } = await fx.open();
-        component.handleInput("e");
         component.handleInput("\r");
         component.handleInput("gamma");
         component.handleInput("\x1b");

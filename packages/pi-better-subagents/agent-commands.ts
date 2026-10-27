@@ -87,7 +87,7 @@ export interface AgentCommandUi {
     editor(title: string, prefill?: string): Promise<string | undefined>;
     notify(message: string, type?: "info" | "warning" | "error"): void;
     setWidget?(key: string, content: string[] | undefined): void;
-    custom?<T>(factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: unknown, done: (value: T) => void) => unknown, options?: { overlay: boolean }): Promise<T>;
+    custom?<T>(factory: (tui: { requestRender(): void }, theme: { fg(color: string, text: string): string }, keybindings: unknown, done: (value: T) => void) => unknown, options?: { overlay: boolean; overlayOptions?: import("@earendil-works/pi-tui").OverlayOptions }): Promise<T>;
 }
 
 export interface AgentCommandHost {
@@ -724,6 +724,7 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
         const entries = catalog ?? { entries: [view!], diagnostics: commandResult.diagnostics, revision: "", text: "" };
         try {
             host.ui.setWidget?.("agents-catalog", undefined);
+            let viewportHeight = 30;
             await host.ui.custom<void>((tui, theme, _keys, done) =>
                 createCatalogComponent(entries, theme, () => tui.requestRender(), () => done(), view?.id, deps.sessionSettings ? {
                     get: () => presentCatalog(readCatalog(location(host, deps)), deps.enrich),
@@ -740,7 +741,13 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                         }
                         return { ok: saved.ok, message: saved.ok ? `Defaults saved (${saved.scope}): ${id}.` : saved.diagnostics.map((item) => item.message).join(" ") };
                     },
-                } : undefined), { overlay: true });
+                } : undefined, () => viewportHeight), {
+                    overlay: true,
+                    overlayOptions: {
+                        anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0,
+                        visible: (_width, height) => { viewportHeight = height; return true; },
+                    },
+                });
             if (deps.sessionSettings) {
                 const current = readCatalog(location(host, deps));
                 const refreshed = view ? presentCatalogEntry(current, view.id, deps.enrich) : presentCatalog(current, deps.enrich);

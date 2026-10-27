@@ -34,16 +34,18 @@ function cell(value: string, width: number): string {
 
 export function catalogColumns(entry: OperationView | null, width: number): string {
     const available = Math.max(1, width - 2);
-    const sourceWidth = available >= 70 ? 11 : 0;
-    const stateWidth = available >= 48 ? 10 : 0;
-    const gaps = (sourceWidth ? 2 : 0) + (stateWidth ? 2 : 0) + 2;
-    const modelWidth = Math.min(Math.max(1, available - gaps - 1), Math.min(28, Math.max(20, Math.floor(available * 0.3))));
-    const nameWidth = Math.max(1, available - modelWidth - sourceWidth - stateWidth - gaps);
+    const sourceWidth = available >= 82 ? 11 : 0;
+    const stateWidth = available >= 60 ? 10 : 0;
+    const effortWidth = available >= 32 ? 7 : 0;
+    const gaps = (sourceWidth ? 2 : 0) + (stateWidth ? 2 : 0) + (effortWidth ? 2 : 0) + 2;
+    const modelWidth = Math.min(Math.max(1, available - gaps - effortWidth - sourceWidth - stateWidth - 1), Math.min(28, Math.max(20, Math.floor(available * 0.3))));
+    const nameWidth = Math.max(1, available - modelWidth - effortWidth - sourceWidth - stateWidth - gaps);
     const name = entry ? entry.identity.name || entry.id : "NAME";
     const model = entry ? modelLabel(entry) : "MODEL";
     const source = entry ? entry.identity.scope ?? "unknown" : "SOURCE";
     const status = entry ? stateLabel(entry) : "STATE";
-    return [cell(name, nameWidth), cell(model, modelWidth), ...(sourceWidth ? [cell(source, sourceWidth)] : []), ...(stateWidth ? [cell(status, stateWidth)] : [])].join("  ").trimEnd();
+    const effort = entry ? entry.actualEffort ?? entry.fields?.effort.value ?? "(unset)" : "EFFORT";
+    return [cell(name, nameWidth), cell(model, modelWidth), ...(effortWidth ? [cell(effort, effortWidth)] : []), ...(sourceWidth ? [cell(source, sourceWidth)] : []), ...(stateWidth ? [cell(status, stateWidth)] : [])].join("  ").trimEnd();
 }
 
 function wrapLine(text: string, width: number): string[] {
@@ -60,7 +62,7 @@ function wrapLine(text: string, width: number): string[] {
     return rows;
 }
 
-export function catalogDetailLines(entry: OperationView): string[] {
+export function catalogDetailLines(entry: OperationView, editable = false): string[] {
     const lines = [
         `${entry.identity.name || entry.id}  ·  ${entry.identity.kind ?? "unknown"}`,
         entry.id,
@@ -73,8 +75,7 @@ export function catalogDetailLines(entry: OperationView): string[] {
         "",
         "Configuration",
         ...(entry.fields ? [
-            fieldLine("Model", entry.fields.model),
-            fieldLine("Effort", entry.fields.effort),
+            ...(!editable ? [fieldLine("Model", entry.fields.model), fieldLine("Effort", entry.fields.effort)] : []),
             fieldLine("Tier", entry.fields.tier),
         ] : []),
         `Actual   ${entry.actualModel ?? "not resolved"}${entry.actualEffort ? `  ·  ${entry.actualEffort}` : ""}`,
@@ -95,9 +96,10 @@ export function createCatalogComponent(
     close: () => void,
     initialId?: string,
     editor?: CatalogEditor,
+    getHeight: () => number = () => 30,
 ) {
     let selectedId = initialId ?? catalog.entries[0]?.id;
-    let mode: "list" | "detail" | "prompt" | "settings" = initialId ? "detail" : "list";
+    let mode: "list" | "detail" | "prompt" = initialId ? "detail" : "list";
     let query = "";
     let scroll = 0;
     let settingRow = 0;
@@ -159,7 +161,7 @@ export function createCatalogComponent(
     const selected = () => filtered().find((entry) => entry.id === selectedId);
     const detailRows = (entry: OperationView, width: number) => (mode === "prompt"
         ? [`${entry.identity.name || entry.id}  ·  effective instructions`, "", ...(entry.instructions?.split("\n") ?? ["(none)"])]
-        : catalogDetailLines(entry))
+        : catalogDetailLines(entry, !!editor))
         .flatMap((text) => text ? wrapLine(text, Math.max(1, width - 2)) : [""]);
     let lastDetailWidth = 80;
 
@@ -168,21 +170,32 @@ export function createCatalogComponent(
         set focused(value: boolean) { focused = value; search.focused = value && !!picker && pickerKey === "model"; },
         render(width: number): string[] {
             const safeWidth = Math.max(1, width);
+            const height = Math.max(1, Math.floor(getHeight()));
+            const footerRows = (editor && mode !== "prompt" ? 2 : 0) + (message ? 2 : 0);
+            const diagnosticRows = Math.min(catalog.diagnostics.length, 3);
+            const listSize = Math.max(1, height - 5 - footerRows - diagnosticRows - 1);
+            const controlRows = editor && mode === "detail" ? (safeWidth < 42 ? 5 : 3) : 0;
+            const detailSize = Math.max(1, height - 5 - footerRows - controlRows);
+            const fit = (lines: string[]) => {
+                const result = lines.slice(0, height).map(line);
+                while (result.length < height) result.push("");
+                return result;
+            };
             lastDetailWidth = safeWidth;
             const line = (text: string) => truncateToWidth(text, safeWidth);
             const rows = filtered();
             const current = selected();
             const detailLines = current ? detailRows(current, safeWidth) : [];
             const selectedIndex = rows.findIndex((entry) => entry.id === selectedId);
-            const start = Math.max(0, Math.min(selectedIndex - 6, rows.length - 14));
-            if (picker) return [
+            const start = Math.max(0, Math.min(selectedIndex - Math.floor(listSize / 2), rows.length - listSize));
+            scroll = Math.max(0, Math.min(scroll, detailLines.length - detailSize));
+            if (picker) return fit([
                 theme.fg("accent", `Agents / ${pickerKey}`), "",
                 ...(pickerKey === "model" ? search.render(safeWidth) : []),
                 ...picker.render(safeWidth),
                 ...(message ? [theme.fg(error ? "error" : "muted", message)] : []),
-            ].map(line);
-            const lines = mode === "settings" && current ? [
-                theme.fg("accent", `Agents / ${current.identity.name || current.id}`), "",
+            ]);
+            const controls = editor && mode === "detail" && current ? [
                 ...["Model", "Effort"].flatMap((label, index) => {
                     const key = index === 0 ? "model" : "effort";
                     const field = current.fields?.[key];
@@ -194,38 +207,41 @@ export function createCatalogComponent(
                     const text = `${settingRow === index ? "> " : "  "}${label.padEnd(18)} ${value}`;
                     if (safeWidth < 42) {
                         const title = `${settingRow === index ? "> " : "  "}${label}`;
-                        return [settingRow === index ? highlight(title, safeWidth) : title, ...wrapLine(value, Math.max(1, safeWidth - 2)).map((line) => `  ${line}`)];
+                        return [settingRow === index ? highlight(title, safeWidth) : title, `  ${truncateToWidth(value, Math.max(1, safeWidth - 2))}`];
                     }
                     return [settingRow === index ? highlight(text, safeWidth) : text];
                 }),
-            ] : mode !== "list" && current ? [
-                theme.fg("accent", mode === "prompt" ? "Agents / prompt" : "Agents / inspect"),
-                theme.fg("dim", mode === "prompt" ? "← details  ·  ↑↓ scroll  ·  Esc close" : `${editor ? "e settings  ·  " : ""}p prompt  ·  ← list  ·  ↑↓ scroll  ·  Esc close`),
                 "",
-                ...detailLines.slice(scroll, scroll + 22).map((text, i) =>
+            ] : [];
+            const lines = mode !== "list" && current ? [
+                theme.fg("accent", mode === "prompt" ? "Agents / prompt" : editor ? `Agents / ${current.identity.name || current.id}` : "Agents / inspect"),
+                theme.fg("dim", mode === "prompt" ? "← details  ·  ↑↓ scroll  ·  Esc back" : `${editor ? "Enter change  ·  " : ""}p prompt  ·  ← list  ·  ↑↓ ${editor ? "select / scroll" : "scroll"}  ·  Esc back`),
+                "",
+                ...controls,
+                ...detailLines.slice(scroll, scroll + detailSize).map((text, i) =>
                     i === 0 && scroll === 0 ? theme.fg("accent", text) : text),
                 "",
-                theme.fg("dim", `Showing ${scroll + 1}-${Math.min(scroll + 22, detailLines.length)} of ${detailLines.length} lines`),
+                theme.fg("dim", `Showing ${scroll + 1}-${Math.min(scroll + detailSize, detailLines.length)} of ${detailLines.length} lines`),
             ] : [
                 theme.fg("accent", `Agents  ·  ${catalog.entries.length} definitions`),
                 theme.fg("dim", "Type to filter  ·  ↑↓ select  ·  Enter inspect  ·  Esc close"),
                 `Search  ${query || "(all roles and agents)"}`,
                 "",
                 theme.fg("dim", `  ${catalogColumns(null, safeWidth)}`),
-                ...rows.slice(start, start + 14).map((entry) => {
+                ...rows.slice(start, start + listSize).map((entry) => {
                     const active = selectedId === entry.id;
                     const marker = active ? "›" : " ";
                     const text = `${marker} ${catalogColumns(entry, safeWidth)}`;
                     return active ? highlight(text, safeWidth) : text;
                 }),
                 ...(rows.length === 0 ? ["  No matching definitions"] : []),
-                ...(rows.length > 14 ? [theme.fg("dim", `  ${start + 1}-${Math.min(start + 14, rows.length)} of ${rows.length}`)] : []),
+                ...(rows.length > listSize ? [theme.fg("dim", `  ${start + 1}-${Math.min(start + listSize, rows.length)} of ${rows.length}`)] : []),
                 ...catalog.diagnostics.slice(0, 2).map((diagnostic) => theme.fg("warning", `! ${diagnostic.message}`)),
                 ...(catalog.diagnostics.length > 2 ? [theme.fg("warning", `! ${catalog.diagnostics.length - 2} more catalog diagnostics`)] : []),
             ];
-            if (editor && mode !== "prompt") lines.push("", theme.fg("dim", mode === "settings" ? "Up/Down Select · Enter Change · ctrl+s Save defaults · Esc Back" : "ctrl+s Save selected defaults"));
+            if (editor && mode !== "prompt") lines.push("", theme.fg("dim", "ctrl+s Save selected defaults"));
             if (message) lines.push("", theme.fg(error ? "error" : "muted", message));
-            return lines.map(line);
+            return fit(lines);
         },
         handleInput(data: string): void {
             const rows = filtered();
@@ -239,25 +255,26 @@ export function createCatalogComponent(
             }
             if (editor && matchesKey(data, "ctrl+s")) { save(); return; }
             if (matchesKey(data, "escape") || matchesKey(data, "left")) {
-                if (mode === "prompt" || mode === "settings") { mode = "detail"; scroll = 0; }
+                if (mode === "prompt") { mode = "detail"; scroll = 0; }
                 else if (mode === "detail") { mode = "list"; scroll = 0; }
                 else if (query) { query = ""; selectedId = catalog.entries[0]?.id; }
                 else { close(); return; }
             } else if (matchesKey(data, "up") || matchesKey(data, "down")) {
                 const delta = matchesKey(data, "down") ? 1 : -1;
-                if (mode === "settings") settingRow = Math.max(0, Math.min(1, settingRow + delta));
+                if (mode === "detail" && editor && scroll === 0 && (delta < 0 || settingRow === 0)) settingRow = Math.max(0, Math.min(1, settingRow + delta));
                 else if (mode !== "list" && selected()) scroll = Math.max(0, Math.min(detailRows(selected()!, lastDetailWidth).length - 1, scroll + delta));
                 else if (rows.length) selectedId = rows[Math.max(0, Math.min(rows.length - 1, rows.findIndex((entry) => entry.id === selectedId) + delta))]?.id;
             } else if (matchesKey(data, "enter") && mode === "list" && selected()) {
                 mode = "detail";
+                settingRow = 0;
                 scroll = 0;
             } else if ((data === "p" || data === "P") && mode === "detail" && selected()) {
                 mode = "prompt";
                 scroll = 0;
             } else if (editor && (data === "e" || data === "E") && mode === "detail" && selected()) {
-                mode = "settings";
                 settingRow = 0;
-            } else if (mode === "settings" && (matchesKey(data, "enter") || data === " ")) {
+                scroll = 0;
+            } else if (editor && mode === "detail" && (matchesKey(data, "enter") || data === " ")) {
                 try { edit(); } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
             } else if (mode === "list" && matchesKey(data, "backspace")) {
                 query = query.slice(0, -1);

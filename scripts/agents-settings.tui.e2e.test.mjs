@@ -35,12 +35,13 @@ test("agents model and effort edits persist for the session and only Ctrl+S save
     };
     const open = () => {
         literal("/agents inspect role.fixture"); wait(/\/agents inspect role.fixture/); key("Tab"); key("Enter");
-        wait(/Agents \/ inspect/); literal("e"); wait(/Agents \/ Fixture/);
+        wait(/Agents \/ Fixture/);
+        wait(/> Model/);
     };
     const close = () => {
-        key("Escape"); wait(/Agents \/ inspect/); wait(/Actual\s+openai\/gpt-4o\s/);
+        wait(/Actual\s+openai\/gpt-4o\s/);
         key("Escape"); wait(/Search/);
-        key("Escape"); wait(/^(?![\s\S]*Agents \/ inspect)(?![\s\S]*Search)/);
+        key("Escape"); wait(/^(?![\s\S]*Agents \/ Fixture)(?![\s\S]*Search)/);
     };
     try {
         tmux("new-session", "-d", "-s", "agents", "-x", "100", "-y", "40", command);
@@ -48,11 +49,18 @@ test("agents model and effort edits persist for the session and only Ctrl+S save
         literal("/harness-settings"); key("Tab"); key("Enter");
         wait(/Agents\s+\/agents/);
         key("Down"); key("Enter");
-        wait(/Agents.*definitions/);
+        const catalogScreen = wait(/Agents.*definitions/);
+        assert.match(catalogScreen.split("\n")[0], /^Agents/);
+        assert.match(catalogScreen, /MODEL\s+EFFORT/);
+        assert.match(catalogScreen, /Fixture\s+openai\/gpt-4o-mini\s+off/);
+        assert.doesNotMatch(catalogScreen, /Harness settings/, "fullscreen catalog covers the settings hub");
         assert.equal(readFileSync(rolePath, "utf8"), original, "the settings shortcut does not write catalog defaults");
         key("Escape"); wait(/Harness settings/);
         key("Escape"); wait(/^(?![\s\S]*Harness settings)/);
         open();
+        const settingsScreen = wait(/Agents \/ Fixture/);
+        assert.match(settingsScreen.split("\n")[0], /^Agents \/ Fixture/);
+        assert.doesNotMatch(settingsScreen, /Search/, "fullscreen detail covers the catalog list");
         key("Enter"); wait(/Agents \/ model/);
         literal("openai/gpt-4o"); wait(/openai\/gpt-4o/); key("Enter");
         wait(/Model\s+openai\/gpt-4o\s+session/);
