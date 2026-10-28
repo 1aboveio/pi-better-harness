@@ -7,7 +7,7 @@ import { currentProcessStartToken, readProcessStartToken } from "./process-ident
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.js";
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
 import { ensureTaskDir, logPathFor, nextTaskId, readMeta, sandboxProfilePathFor, writeMeta } from "./registry.js";
-import { confineCommandSpec, resolveForegroundSandboxPlan, sandboxProvenance } from "./sandbox.js";
+import { assertBackgroundExecutionAllowed, backgroundExecutionLimits, confineCommandSpec, isCommandTimeoutSeconds, resolveForegroundSandboxPlan, sandboxProvenance } from "./sandbox.js";
 import { takeRecoverySnapshot } from "./shared-sandbox-core.js";
 import { failurePath, readTaskIntent, recordExitFailure, recordFailure, recoverDeclaredOperation, recoverFailure, resumeFailureAttention, scheduleFailureAttention, stopFailureAttention, suspendFailureAttention, terminalFailureAttention } from "./failures.js";
 import { markFailureAttentionDelivered } from "./shared-failure-observations.js";
@@ -192,6 +192,32 @@ export interface TaskRuntimeDependencies {
   remoteRunner?: RemoteRunner;
 }
 
+/**
+ * Persist the launch-time per-command cap with the task metadata. Reload and
+ * resume go through `readMeta`, so the value travels as ordinary JSON and the
+ * task keeps the cap it launched under.
+ */
+function withCommandPolicy(meta: BackgroundTaskMeta, seconds: number | undefined): BackgroundTaskMeta {
+  return seconds === undefined ? meta : { ...meta, commandTimeoutSeconds: seconds };
+}
+
+function persistedCommandCapSeconds(meta: BackgroundTaskMeta): number | undefined {
+  const value = meta.commandTimeoutSeconds;
+  return isCommandTimeoutSeconds(value) ? value : undefined;
+}
+
+/**
+ * A cap that was persisted but is not a valid number of seconds.
+ *
+ * Metadata can be edited or written by an older build, so a present-but-invalid
+ * value must not quietly mean "unlimited": the task fails closed on resume
+ * instead of running without the cap the operator asked for.
+ */
+function invalidPersistedCommandCap(meta: BackgroundTaskMeta): string | undefined {
+  if (meta.commandTimeoutSeconds === undefined || isCommandTimeoutSeconds(meta.commandTimeoutSeconds)) return undefined;
+  return `Persisted command time limit ${JSON.stringify(meta.commandTimeoutSeconds)} is invalid; the task was not resumed with an unlimited command.`;
+}
+
 type WatchPollRunner = (timeoutMs?: number) => Promise<CommandResult>;
 
 export function spawnTask(
@@ -205,9 +231,15 @@ export function spawnTask(
   // Resolved before any task directory, log, or metadata exists so a blocked
   // launch leaves nothing behind. Structured SSH must also honor launch restrictions.
   const intent = readTaskIntent(params);
-  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params);
-  const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
+  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params);
+  // The application/shell switches apply before any task state exists, so a
+  // refused launch leaves no id, directory, or metadata behind. Structured SSH
+  // is checked here too, because its command is a remote shell command. The
+  // launch cwd is passed so a relative alias resolves where the task will run.
+  assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
+  const commandLimits = backgroundExecutionLimits(sandboxPlan);
+  const id = nextTaskId();
   const logPath = logPathFor(id);
   ensureTaskDir(id);
   const remoteTask = params.ssh
@@ -246,7 +278,7 @@ export function spawnTask(
     });
   }
   const now = Date.now();
-  const meta: BackgroundTaskMeta = {
+  const meta = withCommandPolicy({
     id,
     name: params.name,
     kind: "process",
@@ -273,7 +305,7 @@ export function spawnTask(
     ssh: remoteTask?.metadata.ssh,
     remote: remoteTask?.metadata.remote,
     ...intent,
-  };
+  }, commandLimits.commandTimeoutSeconds);
   writeMeta(meta);
   scheduleLogRetention(pi, id, getActiveSession);
   if (tmuxBacked && remoteTask) {
@@ -303,7 +335,7 @@ export function spawnTask(
       void notifyTerminal(pi, latest, getActiveSession);
     });
   }
-  if (meta.deadlineAt) scheduleProcessTimeout(pi, id, meta.deadlineAt, getActiveSession);
+  scheduleProcessKill(pi, meta, getActiveSession);
   return meta;
 }
 
@@ -417,7 +449,7 @@ async function pollRemoteSession(
     const meta = readMeta(id);
     const remoteTask = activeRemoteTasks.get(id);
     if (!meta || meta.status !== "running" || meta.remote?.session !== "tmux" || !remoteTask) return;
-    const poll = await remoteTask.pollTmuxSession(meta.remote.logOffset ?? 0, remainingDeadlineMs(meta.deadlineAt));
+    const poll = await remoteTask.pollTmuxSession(meta.remote.logOffset ?? 0, remainingDeadlineMs(processKillDeadlineMs(meta)));
     if (scheduledWorkSuspended) return;
     appendTaskOutput(meta.logPath, poll.output);
     if (poll.status === "timed_out") {
@@ -497,9 +529,11 @@ export function startWatchTask(
   }
   const blindChecks = readBlindChecks(params.blind_checks);
   const intent = readTaskIntent(params);
-  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params, "bg_task_watch");
-  const id = nextTaskId();
   const cwd = params.cwd ?? defaultCwd;
+  const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params, "bg_task_watch");
+  assertBackgroundExecutionAllowed(params, sandboxPlan, { remote: Boolean(params.ssh), cwd });
+  const commandLimits = backgroundExecutionLimits(sandboxPlan);
+  const id = nextTaskId();
   const now = Date.now();
   const timeoutSeconds = resolveWatchTimeoutSeconds(params.timeout_seconds);
   const remoteTask = params.ssh
@@ -517,7 +551,7 @@ export function startWatchTask(
   const launchSpec = remoteTask
     ? commandSpec
     : confineCommandSpec(commandSpec, sandboxPlan, sandboxProfilePathFor(id), {}, (line) => sandboxNotices.push(line), "bg_task_watch");
-  const meta: BackgroundTaskMeta = {
+  const meta = withCommandPolicy({
     id,
     name: params.name,
     kind: "command_watch",
@@ -546,7 +580,7 @@ export function startWatchTask(
     ssh: remoteTask?.metadata.ssh,
     remote: remoteTask?.metadata.remote,
     ...intent,
-  };
+  }, commandLimits.commandTimeoutSeconds);
   ensureTaskDir(id);
   appendLine(meta.logPath, `--- watch ${new Date(now).toISOString()} interval_ms=${meta.intervalMs} ---`);
   for (const line of sandboxNotices) appendLine(meta.logPath, `--- ${line} ---`);
@@ -585,6 +619,13 @@ export function resumeRunningTask(
     void notifyTerminal(pi, meta, getActiveSession);
     return meta;
   }
+  // A corrupt persisted cap must never resume as an unlimited command. Fail
+  // the task before any timer, poll, or launch is scheduled.
+  const invalidCap = invalidPersistedCommandCap(meta);
+  if (invalidCap) {
+    finalize(meta, { status: "failed", reason: invalidCap }, pi, getActiveSession);
+    return meta;
+  }
   scheduleFailureAttention(pi, meta.id, getActiveSession);
 
   // Same Pi process: an earlier (reloaded or switched-away) extension instance may
@@ -608,7 +649,7 @@ export function resumeRunningTask(
   if (meta.remote?.session === "tmux" && meta.remote.sessionStarted !== false && remoteTask) {
     activeRemoteTasks.set(meta.id, remoteTask);
     scheduleRemoteSessionPoll(pi, meta.id, 0, getActiveSession);
-    if (meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt, getActiveSession);
+    scheduleProcessKill(pi, meta, getActiveSession);
     // An earlier instance's in-flight timeout kill may still finalize it.
     if (ownedByThisProcess) scheduleHandoff(pi, meta.id, getActiveSession);
     return meta;
@@ -621,7 +662,7 @@ export function resumeRunningTask(
     markProcessLost(pi, meta, getActiveSession);
     return meta;
   }
-  if (meta.deadlineAt) scheduleProcessTimeout(pi, meta.id, meta.deadlineAt, getActiveSession);
+  scheduleProcessKill(pi, meta, getActiveSession);
   return meta;
 }
 
@@ -781,8 +822,9 @@ export async function stopTask(
       stopProcessGroup(meta.pid, meta.pgid);
     } catch (error) {
       recordStopError(meta, error instanceof Error ? error.message : String(error));
-      if (meta.deadlineAt && meta.deadlineAt > Date.now()) {
-        scheduleProcessTimeout(pi, id, meta.deadlineAt, getActiveSession);
+      const killAt = processKillDeadlineMs(meta);
+      if (killAt !== undefined && killAt > Date.now()) {
+        scheduleProcessTimeout(pi, id, killAt, getActiveSession);
       }
       return meta;
     }
@@ -849,9 +891,15 @@ async function pollWatch(
       return;
     }
     const timeoutMs = remainingDeadlineMs(meta.deadlineAt);
+    // The policy cap bounds one check, never the watch's whole lifetime. The
+    // smaller of it and the caller's remaining timeout_seconds wins, and a
+    // caller's timeout_seconds:0 cannot disable the policy cap.
+    const capMs = commandCapMs(meta);
+    const pollTimeoutMs = capMs === undefined ? timeoutMs : timeoutMs === undefined ? capMs : Math.min(timeoutMs, capMs);
+    const capBound = capMs !== undefined && (timeoutMs === undefined || capMs < timeoutMs);
     const result = runOnce
-      ? await runOnce(timeoutMs)
-      : await runCommandOnce(commandSpecFromMeta(meta), undefined, timeoutMs);
+      ? await runOnce(pollTimeoutMs)
+      : await runCommandOnce(commandSpecFromMeta(meta), undefined, pollTimeoutMs);
     checked = {
       exitCode: result.exitCode, signal: result.signal, durationMs: Math.max(0, result.endedAt - result.startedAt),
       ...(result.timedOut ? { timedOut: true } : {}), stdout: result.stdout, stderr: result.stderr,
@@ -871,7 +919,7 @@ async function pollWatch(
 
     const pollKey = result.startedAt;
     if (result.timedOut) {
-      finalize(latest, { status: "timed_out", reason: watchTimeoutReason(latest), commandResult: result }, pi, getActiveSession);
+      finalize(latest, { status: "timed_out", reason: capBound ? commandCapReason(latest) : watchTimeoutReason(latest), commandResult: result }, pi, getActiveSession);
       return;
     }
 
@@ -1062,6 +1110,52 @@ function remainingDeadlineMs(deadlineAt: number | undefined): number | undefined
   return Math.max(1, deadlineAt - Date.now());
 }
 
+/** A validated persisted per-command cap, in milliseconds. */
+function commandCapMs(meta: BackgroundTaskMeta): number | undefined {
+  const seconds = persistedCommandCapSeconds(meta);
+  if (seconds === undefined) return undefined;
+  return Math.max(1, Math.round(seconds * 1000));
+}
+
+/**
+ * When a spawned task's command hits the policy cap.
+ *
+ * A spawn task is one command, so the cap runs from the launch (`startedAt`). A
+ * resumed task keeps that same snapshot, which is why the cap is measured from
+ * the persisted start rather than from the moment of resume.
+ */
+function commandCapDeadlineMs(meta: BackgroundTaskMeta): number | undefined {
+  const capMs = commandCapMs(meta);
+  return capMs === undefined ? undefined : meta.startedAt + capMs;
+}
+
+/** The smaller of the caller's whole-task deadline and the policy cap. */
+function processKillDeadlineMs(meta: BackgroundTaskMeta): number | undefined {
+  const capDeadlineAt = commandCapDeadlineMs(meta);
+  if (capDeadlineAt === undefined) return meta.deadlineAt;
+  if (meta.deadlineAt === undefined) return capDeadlineAt;
+  return Math.min(capDeadlineAt, meta.deadlineAt);
+}
+
+/** True when the cap, not the caller's timeout_seconds, ends this command first. */
+function capEndsFirst(meta: BackgroundTaskMeta): boolean {
+  const capDeadlineAt = commandCapDeadlineMs(meta);
+  return capDeadlineAt !== undefined && (meta.deadlineAt === undefined || capDeadlineAt < meta.deadlineAt);
+}
+
+function commandCapReason(meta: BackgroundTaskMeta): string {
+  return `timeout: Background tasks command time limit of ${persistedCommandCapSeconds(meta)}s was reached`;
+}
+
+function scheduleProcessKill(
+  pi: ExtensionAPI,
+  meta: BackgroundTaskMeta,
+  getActiveSession?: ActiveSessionProvider,
+): void {
+  const killAt = processKillDeadlineMs(meta);
+  if (killAt !== undefined) scheduleProcessTimeout(pi, meta.id, killAt, getActiveSession);
+}
+
 function scheduleProcessTimeout(
   pi: ExtensionAPI,
   id: string,
@@ -1104,7 +1198,7 @@ async function finalizeProcessTimeout(
   const meta = readMeta(id);
   if (!meta || meta.status !== "running" || meta.kind !== "process") return;
 
-  let reason = "timeout";
+  let reason = capEndsFirst(meta) ? commandCapReason(meta) : "timeout";
   if (meta.remote?.session === "tmux" && meta.remote.sessionStarted !== true) {
     reason = `timeout before remote tmux session ${meta.remote.sessionName} started on ${meta.ssh?.target}`;
   } else if (meta.remote?.session === "tmux") {

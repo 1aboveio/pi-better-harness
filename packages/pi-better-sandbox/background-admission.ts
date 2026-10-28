@@ -36,7 +36,7 @@ export function isBackgroundLaunch(name: string, input: unknown): boolean {
         (name === "bg_task" && (action === "spawn" || action === "watch"));
 }
 
-export function createBackgroundAdmission(pi: ExtensionAPI) {
+export function createBackgroundAdmission(pi: ExtensionAPI, requiresExecutionControls: () => boolean = () => false) {
     const trusted = trustedBackgroundEntries();
     return (name: string, input: unknown, sourcePath?: string): BackgroundAdmission | undefined => {
         try {
@@ -44,6 +44,7 @@ export function createBackgroundAdmission(pi: ExtensionAPI) {
                 "bg_task_spawn", "bg_task_watch", "bg_task_list", "bg_task_status", "bg_task_log", "bg_task_stop",
             ].includes(name)) return;
             const launch = isBackgroundLaunch(name, input);
+            const executionControls = launch && requiresExecutionControls();
             const expected: BackgroundAdmission = launch ? "local-launch" : "registry";
             const action = (input as { action?: unknown } | null)?.action;
             if ((name === "bg_task" || name === "bg_status") && !launch &&
@@ -57,11 +58,11 @@ export function createBackgroundAdmission(pi: ExtensionAPI) {
             // The bus proves compatibility only. Source and schema identity tie the
             // reply to the owning registration, just like the shared task guard.
             pi.events.emit(REQUEST_CHANNEL, {
-                version: VERSION, name, input,
+                version: VERSION, name, input, executionControls,
                 reply(value: unknown) {
-                    const reply = value as { version?: unknown; parameters?: unknown; admission?: unknown } | null;
+                    const reply = value as { version?: unknown; parameters?: unknown; admission?: unknown; executionControls?: unknown } | null;
                     if (reply?.version === VERSION && reply.parameters === tool.parameters &&
-                        reply.admission === expected) {
+                        reply.admission === expected && (!executionControls || reply.executionControls === 1)) {
                         admission = expected;
                     }
                 },

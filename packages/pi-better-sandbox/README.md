@@ -26,7 +26,9 @@ Sandbox                           Off              Off               Off
 Project files                     -                -                 -
 Outside project                   -                -                 -
 Stored credentials                -                -                 -
-Run commands & applications       -                -                 -
+Run applications                  -                -                 -
+Shell scripts                     -                -                 -
+Command time limit                -                -                 -
 Network access                    -                -                 -
 Process access                    -                -                 -
 
@@ -160,9 +162,32 @@ defaults from any row on the first press, and the note names anything that
 loosened. Enter only folds tool groups; it never saves defaults. The focused
 row has a full-width background and bold text; the selected profile cell
 also uses inverse styling. No model
-tool can change these settings. Other rows toggle Off/On. Detail cells under an
+tool can change these settings. Space toggles switches and cycles Command time
+limit through 1 min, 5 min, 10 min, 30 min, and No limit. Detail cells under an
 Off sandbox display a dimmed `-` and cannot be changed; their values return when
-the sandbox is enabled again.
+the sandbox is enabled again. When Run applications is Off, Shell scripts and
+Command time limit are likewise dimmed and retain their values.
+
+Run applications is the master switch for task command execution. With it On,
+Shell scripts Off blocks `bash`, user-entered `!` and `!!` commands, and direct
+launches of shell interpreters, including aliases. The guarded `run_application`
+tool takes `executable: string`, `args: string[]`, and optional `timeout: number`,
+and launches directly inside the OS sandbox without a shell. Applications such
+as `pnpm` and `pytest` can still run scripts internally; this setting does not
+prevent all descendant shells or guarantee an application finishes.
+
+Direct execution requires Node.js with `process.execve` (22.15+ or 24+) so an
+unsupported executable cannot fall back to a shell. Older runtimes refuse the
+launch rather than weaken the restriction.
+
+Command time limit is a hard maximum for each command: a model cannot raise it
+or bypass it by omitting a timeout, and a smaller requested timeout wins. Cleanup
+covers ordinary process-group descendants, not deliberately daemonized processes.
+The default is Shell scripts On and No limit; all three Sandbox switches default
+Off. To use direct-only Subagents with a 10-minute limit, set Subagents → Sandbox
+On, Run applications On, Shell scripts Off, and Command time limit to 10 min,
+then press Ctrl+S to save those defaults. New subagent and background launches
+capture their policy; running work keeps its launch policy.
 
 ### Platforms
 
@@ -219,7 +244,7 @@ the task launched, independent of current diagnostic permission.
 
 The inventory helper uses a fixed system `pgrep` command under the existing
 kernel policy, without a shell or model-controlled arguments. It can work with
-Run commands & applications Off because it is a fixed read-only adapter, not
+Run applications Off because it is a fixed read-only adapter, not
 general command execution. No sandbox restrictions are relaxed. The control
 governs this adapter only: it does not make arbitrary shell process inspection
 impossible when commands are enabled. Windows has no supported inventory backend.
@@ -243,7 +268,7 @@ them; larger-file processing can use a confined command when commands are On.
 Pi is the trusted runtime. It can lock configuration/authentication files,
 connect to its provider, and persist sessions. Main and Subagents permissions
 apply to task operations. Subagents can start with task Network access or Run
-commands & applications Off. The fixed file worker remains available according
+applications Off. The fixed file worker remains available according
 to the file permissions even when task commands are Off.
 
 The task executor provides private scratch through `TMPDIR`, `TMP`, and `TEMP`.
@@ -256,7 +281,7 @@ are not writable. Credential-file and Pi control-path protections still win.
 Outside Off does not expose these host runtime directories.
 
 The currently admitted model-tool implementations are `read`, `write`, `edit`,
-and `bash`, plus, for Subagents, the guarded `apply_patch` and the trusted tools
+`bash`, and guarded `run_application`, plus, for Subagents, the guarded `apply_patch` and the trusted tools
 ticked under Subagents · Tools. User-entered `!` and `!!` commands use the same
 shell policy. Other model-callable tools require a verified execution adapter
 and are refused while that actor's sandbox is enabled; enabling network alone
@@ -533,7 +558,7 @@ an `(allow default)` profile. On the verified host, `/bin/ps` and `/usr/bin/top`
 are setuid-root binaries. A shell attempting to run `/bin/ps` reports
 `Operation not permitted` and exits 126. This is an OS-level execution
 restriction, not a harness command deny rule, a filesystem permission failure,
-or evidence that Run commands & applications is Off.
+or evidence that Run applications is Off.
 
 Read-only reproduction (verified on 2026-10-04):
 
@@ -580,16 +605,19 @@ type BackgroundSandboxPolicy = {
 ```
 
 `permissions` has the same shape as the existing foreground profile: `enabled`,
-`projectFiles`, `outsideProject`, `storedCredentials`, `commands`, `network`,
-and `processAccess`. It is present after settings load. `background`, its
+`projectFiles`, `outsideProject`, `storedCredentials`, `commands`, `shell`,
+`commandTimeoutSeconds`, `network`, and `processAccess`. The additive `shell`
+and `commandTimeoutSeconds` fields default to `true` and `null` for legacy
+profiles; the settings envelope remains version 1. It is present after settings load. `background`, its
 `denyWrite` array, and its permission object are frozen copies. Background
 checks the backend, project root, and runtime-path safety independently of Main;
 Main Off does not suppress a requested Background sandbox. `inactive` is
 published as `disabled`. Invalid loaded policy fails both profiles closed.
 
 The existing `pi-better-sandbox:policy-request` channel republishes both profiles.
-Consumers should snapshot `policy.background` at launch. Older consumers that
-only read the top-level fields continue to follow Main until upgraded.
+Consumers should snapshot `policy.background` at launch. Consumers must support the new restrictions before applying them. Incompatible
+older subagent or background consumers are rejected when a restrictive policy
+would otherwise be dropped.
 
 ```ts
 import {

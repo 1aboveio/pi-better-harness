@@ -10,7 +10,8 @@ type Request = {
   version: number;
   name: string;
   input: unknown;
-  reply(value: { version: number; parameters: object; admission: Admission }): void;
+  executionControls?: boolean;
+  reply(value: { version: number; parameters: object; admission: Admission; executionControls: 1 }): void;
 };
 
 /** The schemas belong to one registerTools invocation, never to a module singleton. */
@@ -22,7 +23,7 @@ export function advertiseBackgroundAdapter(pi: ExtensionAPI, schemas: ReadonlyMa
     const parameters = schemas.get(request.name);
     if (!parameters) return;
     const admission = classify(request.name, request.input);
-    if (admission) request.reply({ version: BACKGROUND_ADAPTER_VERSION, parameters, admission });
+    if (admission) request.reply({ version: BACKGROUND_ADAPTER_VERSION, parameters, admission, executionControls: 1 });
   });
   pi.on("session_shutdown", () => { if (typeof unsubscribe === "function") unsubscribe(); });
 }

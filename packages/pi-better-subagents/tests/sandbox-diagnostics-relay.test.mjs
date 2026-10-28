@@ -177,9 +177,11 @@ test("task guard emits collector reports through the worker JSON stream and stil
     permissions: { projectFiles: "read-write", outsideProject: "read", storedCredentials: "read", commands: false, network: false },
     denyWrite: [f.root], tools: ["write", "bash"] };
   const tools = new Map(), handlers = new Map();
+  // Run applications Off activates neither command tool, so the stand-in records what the guard sets.
+  let active = [];
   const pi = { registerTool: tool => tools.set(tool.name, { ...tool, sourceInfo: { path: "<inline:task-sandbox>" } }),
     on: (name, handler) => handlers.set(name, handler), events: { on() {}, emit() {} },
-    getAllTools: () => [...tools.values()], setActiveTools() {}, getActiveTools: () => ["write", "bash", "failure_disposition"] };
+    getAllTools: () => [...tools.values()], setActiveTools(names) { active = [...names]; }, getActiveTools: () => [...active] };
   const rows = [];
   const original = process.stdout.write;
   t.mock.method(process.stdout, "write", function(chunk, ...args) {
@@ -189,6 +191,7 @@ test("task guard emits collector reports through the worker JSON stream and stil
   });
   taskGuard(pi, policy, error => { throw error; });
   await handlers.get("session_start")({}, { cwd: project });
+  assert.equal(active.includes("bash"), false, "Run applications Off activates no command tool");
   const command = handlers.get("tool_call")({ toolName: "bash", input: { command: "true" } }, { cwd: project });
   assert.equal(command.block, true);
   assert.match(command.reason, /commands.*Off/i);

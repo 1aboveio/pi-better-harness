@@ -164,7 +164,7 @@ one.
 |---------|---------|--------------|
 | Soft deadline (`deadline_minutes`) | Off | When configured, the child gets one steering message (delivered through Pi's steer queue after its current tool call finishes): stop starting new work, commit or save what is done, and report what is complete, what is not, and where the work is. The parent gets one wake saying so. |
 | Grace (`grace_minutes`) | 5 | Grace starts when the steering message actually reaches the child, which is after its current tool call. While the message is still waiting behind a running tool call, the deadline stop is held, so a test run that began just before the deadline is not killed mid-run. If the child has not finished by the end of grace, the harness stops it; the ordinary completion callback reports `killed; stopped: deadline`. A child that completes inside grace is not stopped; its surfaces say `deadline: finished in grace`. |
-| Hard ceiling (`max_minutes`) | Off | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds everything, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
+| Hard ceiling (`max_minutes`) | Off | When configured, the run is stopped at once, without grace or a steer, and reported as `stopped: ceiling`. The ceiling bounds the run, including a tool call that never ends and an orphaned run (child gone, its process group still alive). |
 | Stuck window (`stuck_minutes`) | 10 | No progress (see below) for this long wakes the parent once (`stuck`). It never stops the run. After new progress, a later stuck spell wakes again. |
 
 `0` turns a control off. `null` or an omitted value means "inherit": on
@@ -175,10 +175,10 @@ may be fractional. A job's own number (including `0`) wins over `shared`.
 **Known limits of the deadline hold.**
 
 - `max_minutes: 0` turns the ceiling off, and the ceiling is the only control
-  that bounds a tool call that never ends. With it off, a steer stuck behind a
+  that bounds the whole run including a tool call that never ends. A separate
+  sandbox command time limit can bound individual commands. With the run ceiling off, a steer stuck behind a
   hung tool call is never delivered, the deadline stop stays held, and the run
-  is never stopped. Opt into a ceiling when a command must have a wall-clock
-  bound.
+  is never stopped by that deadline. Opt into a ceiling to bound the whole run.
 - The parent reads at most the last 32 MiB of a child log after `/reload`. If
   the log is larger and the running tool call started before that window, the
   parent cannot see the call, so the hold is lost and grace counts from when
@@ -201,8 +201,8 @@ harness remembers up to 4096 distinct calls per run as fixed-size hashes of the
 name and normalized arguments; past that the oldest is forgotten, so a call from
 long ago counts again. Time the child spends waiting on a running tool call does not count toward the
 stuck window, so a child in the middle of a 20-minute test run is waiting, not
-stuck. A command that hangs is bounded only when the caller opts into a deadline
-or ceiling.
+stuck. A hanging command can be bounded by the sandbox command time limit; the run
+ceiling separately bounds the whole run.
 The other stuck signal is the existing escalation: the same operation failing
 three times wakes the parent once as an `Action required` incident
 ([failure observations](failure-observations.md)).
@@ -300,7 +300,7 @@ an enabled human profile. Saved enabled profiles and session choices stay enable
   cache directories when Outside is Read or Read/write. Credential and control
   denials retain precedence. See the permission details below.
 - **Tool allowlist.** Confined children admit only verified read/write/edit/bash
-  implementations, the guarded `apply_patch`, and the trusted tools ticked in
+  implementations, guarded `run_application`, the guarded `apply_patch`, and the trusted tools ticked in
   `/sandbox`. The fixed `process_list` adapter is available with Process access
   set to Read. Other requested tools are reported as unavailable, with the reason.
 - **No runaway recursion.** Confined children cannot spawn nested agents.
@@ -350,7 +350,27 @@ Network Off blocks task network access while Pi's provider transport remains
 available. The confined file worker has an 8 MiB file limit and rejects larger
 files explicitly; use confined commands for larger files when commands are On.
 
-`read`, `write`, `edit`, and `bash` have verified adapters. Extension tools are
+`read`, `write`, `edit`, `bash`, and `run_application` have guarded adapters.
+With Run applications On and Shell scripts Off, a requested `bash` capability is
+replaced by `run_application`, subject to `exclude_tools`; a read-only tool
+selection does not gain application execution. Direct `run_application` takes
+`executable: string`, `args: string[]`, and optional `timeout: number` and
+spawns without a shell inside the OS sandbox. Shell scripts Off also blocks
+explicit shell-interpreter launches, including aliases. Applications such as
+`pnpm` and `pytest` can still invoke scripts internally, so this is not a ban
+on every descendant shell or a guarantee of termination.
+
+The Command time limit is an immutable maximum per command. A smaller requested
+timeout wins; omitting or increasing the request cannot bypass the cap. Cleanup
+covers ordinary process-group descendants, not deliberate daemons. This limit
+is separate from the subagent run ceiling. Shell scripts defaults On and the
+limit defaults to No limit, including for legacy profiles. To opt in, set
+Subagents → Sandbox On, Run applications On, Shell scripts Off, and Command time
+limit to 10 min in `/sandbox`, then press Ctrl+S. New launches capture the policy;
+running children keep theirs. An incompatible older consumer is rejected rather
+than silently dropping these restrictions.
+
+Extension tools are
 chosen in `/sandbox` → Subagents · Tools
 ([ADR 0009](../../../docs/adr/0009-guarded-and-trusted-subagent-tools.md)):
 

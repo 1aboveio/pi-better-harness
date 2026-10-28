@@ -43,9 +43,9 @@ test("sandbox diagnostics opt-in collects a real user-bash refusal, exports reda
     key("Space");
     wait(pane => /Sandbox\s+On\s+Off\s+Off/.test(pane));
     for (let i = 0; i < 4; i++) key("Down");
-    wait(pane => /^> Run commands & applications/m.test(pane));
+    wait(pane => /^> Run applications/m.test(pane));
     key("Space");
-    wait(pane => /Run commands & applications\s+Off\s+-\s+-/.test(pane));
+    wait(pane => /Run applications\s+Off\s+-\s+-/.test(pane));
     key("Escape");
     wait(pane => !pane.includes("Sandbox permissions"));
     send("!printf PRIVATE-COMMAND-CANARY");

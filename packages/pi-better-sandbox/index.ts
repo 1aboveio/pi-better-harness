@@ -42,6 +42,7 @@ import { readPermissionSettings, writePermissionSettings } from "./permission-se
 import { defaultSandboxPermissions, describeLoosening, type SandboxPermissionSettings } from "./permissions.ts";
 import { openPermissionsPage } from "./permissions-page.ts";
 import { appendSessionPermissions, readSessionPermissions } from "./session-permissions.ts";
+import { createSubagentExecutionAdmission, requestsSubagentSandbox } from "./subagent-admission.ts";
 
 import { ForegroundSandboxController, type ForegroundSandboxStatus } from "./state.ts";
 import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
@@ -59,7 +60,11 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
     // it is resolved lazily and re-read on every session start.
     let shellPath: string | undefined;
     const ownEntry = fileURLToPath(import.meta.url);
-    const backgroundAdmission = createBackgroundAdmission(pi);
+    const backgroundAdmission = createBackgroundAdmission(pi, () => {
+        const profile = controller.backgroundStatus().permissions;
+        return profile?.enabled === true && (profile.shell === false || profile.commandTimeoutSeconds != null);
+    });
+    const subagentExecutionAdmission = createSubagentExecutionAdmission(pi);
     const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
         admitExtensionTool: (name, input, sourcePath) => backgroundAdmission(name, input, sourcePath) !== undefined,
         processAccess: () => controller.permissionSettings()?.main.processAccess ?? "off",
@@ -78,6 +83,12 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         const name = event.toolName;
         const backgroundLaunch = isBackgroundLaunch(name, event.input);
         const admission = backgroundAdmission(name, event.input);
+        const child = status.subagentPermissions;
+        if ((name === "subagent_spawn" || name === "subagent_spawn_batch") && child?.commands &&
+            (child.enabled || requestsSubagentSandbox(name, event.input)) &&
+            (child.shell === false || child.commandTimeoutSeconds != null) && !subagentExecutionAdmission(name)) {
+            return block("Sandbox: subagent launch has no compatible application execution adapter. Update pi-better-subagents before using Shell scripts or Command time limit restrictions.", "tool-admission");
+        }
         // Main Off must not let an old consumer ignore the independent Background profile.
         if (backgroundLaunch && controller.backgroundStatus().permissions?.enabled && admission !== "local-launch") {
             return block("Sandbox: background launch has no verified compatible local adapter. Update the background extension; structured SSH is not a confined execution surface.", "tool-admission");
@@ -85,7 +96,7 @@ export default function piBetterSandbox(pi: ExtensionAPI): void {
         if (status.state === "inactive" || status.state === "disabled") return;
         const permissions = status.permissions;
         if (!permissions) return;
-        const launch = ["bash", "powershell", "remote_bash", "subagent_spawn", "subagent_spawn_batch"].includes(name) || backgroundLaunch;
+        const launch = ["bash", "run_application", "powershell", "remote_bash", "subagent_spawn", "subagent_spawn_batch"].includes(name) || backgroundLaunch;
         if (!permissions.commands && ((launch && admission !== "local-launch") || name === "grep" || name === "find")) {
             return block("Sandbox: Run commands & applications is Off. Change it in /sandbox to launch work.", "command-execution");
         }

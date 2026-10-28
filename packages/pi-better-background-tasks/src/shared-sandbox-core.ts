@@ -58,7 +58,16 @@ export type SandboxPermissions = {
     projectFiles: SandboxFileAccess;
     outsideProject: SandboxFileAccess;
     storedCredentials: "off" | "read" | "read-write";
+    /** Run applications: the master switch for command execution (bash and run_application). */
     commands: boolean;
+    /** Shell scripts inside commands; omitted (legacy) profiles keep shell execution On. */
+    shell?: boolean;
+    /**
+     * Cap for every command path, in seconds. The effective timeout is
+     * `min(requested, cap)`, and the cap applies when the caller omits a timeout.
+     * Omitted or null means no limit. Must be positive, finite and <= 2147483.
+     */
+    commandTimeoutSeconds?: number | null;
     network: boolean;
     /** Fixed process_list adapter only; omitted legacy profiles keep it Off. */
     processAccess?: "off" | "read";
@@ -102,6 +111,89 @@ export type SandboxTarget = {
     execPath: string;
     execArgs: readonly string[];
 };
+
+export const SHELL_EXECUTABLE_NAMES = Object.freeze([
+    "sh", "bash", "zsh", "dash", "ksh", "ksh93", "mksh", "pdksh", "ash", "csh", "tcsh", "fish",
+    "yash", "posh", "rbash", "busybox", "pwsh", "powershell", "cmd",
+] as const);
+
+// Fixed runtime code starts after confinement. The launch data is JSON, never
+// env/shell syntax. Native execve never falls back to a command interpreter.
+const APPLICATION_RUNNER = `
+const fs = require("node:fs");
+const path = require("node:path");
+const spec = JSON.parse(process.argv[1]);
+function resolveExecutable(executable) {
+    if (executable.includes(path.sep)) return path.resolve(executable);
+    const directories = (spec.env.PATH || spec.env.Path || "").split(path.delimiter);
+    const resolved = directories.map(directory => path.resolve(directory || ".", executable)).find(candidate => {
+            try { fs.accessSync(candidate, fs.constants.X_OK); return fs.statSync(candidate).isFile(); }
+            catch { return false; }
+        });
+    if (!resolved) throw new Error("Executable not found: " + executable);
+    return resolved;
+}
+function isShellInterpreter(interpreter) {
+    const canonical = fs.realpathSync(interpreter);
+    if (spec.shellNames.includes(path.basename(interpreter)) || spec.shellNames.includes(path.basename(canonical))) return true;
+    const target = fs.statSync(canonical, { bigint: true });
+    const directories = new Set(["/bin", "/usr/bin", ...(spec.env.PATH || spec.env.Path || "").split(path.delimiter)]);
+    for (const directory of directories) for (const name of spec.shellNames) {
+        try {
+            const known = fs.statSync(path.resolve(directory || ".", name), { bigint: true });
+            if (target.dev === known.dev && target.ino === known.ino) return true;
+        } catch { /* A shell need not exist in every executable directory. */ }
+    }
+    return false;
+}
+function verifyExecutable(executable, depth = 0) {
+    if (depth > 4) throw new Error("Too many shebang interpreters.");
+    fs.accessSync(executable, fs.constants.X_OK);
+    const fd = fs.openSync(executable, "r");
+    const header = Buffer.alloc(4096);
+    let size;
+    try { size = fs.readSync(fd, header, 0, header.length, 0); }
+    finally { fs.closeSync(fd); }
+    const magic = size >= 4 ? header.readUInt32BE(0) : 0;
+    const binary = [0x7f454c46, 0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe,
+        0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca].includes(magic);
+    const script = size >= 2 && header[0] === 35 && header[1] === 33;
+    if (!binary && !script) throw new Error("Executable has no supported binary format or shebang; shell fallback is disabled.");
+    if (!spec.shell && script) {
+        const words = header.subarray(2, size).toString("utf8").split(/\\r?\\n/, 1)[0].trim().split(/\\s+/);
+        let interpreter = resolveExecutable(words[0]);
+        if (path.basename(fs.realpathSync(interpreter)) === "env") {
+            if (words.length !== 2 || words[1].startsWith("-") || words[1].includes("=")) {
+                throw new Error("Sandbox: Shell scripts are Off; an env shebang must name one direct interpreter without options.");
+            }
+            interpreter = resolveExecutable(words[1]);
+        }
+        if (isShellInterpreter(interpreter)) {
+            throw new Error("Sandbox: Shell scripts are Off; the executable uses a shell shebang.");
+        }
+        verifyExecutable(interpreter, depth + 1);
+    }
+}
+try {
+    if (typeof process.execve !== "function") {
+        throw new Error("Direct application execution requires Node.js with process.execve (22.15+ or 24+). Update Node.js; no shell fallback was run.");
+    }
+    const executable = resolveExecutable(spec.executable);
+    verifyExecutable(executable);
+    process.execve(executable, [executable, ...spec.args], spec.env);
+} catch (error) {
+    console.error(error.code === "ENOEXEC" ? "Executable format is unsupported; shell fallback is disabled." : error.message);
+    process.exitCode = 126;
+}
+`;
+
+/** Fixed post-boundary launcher for literal argv, without env assignment or shell fallback. */
+export function directApplicationTarget(
+    executable: string, args: readonly string[], env: NodeJS.ProcessEnv, shell: boolean,
+): SandboxTarget {
+    return { execPath: canonicalizePath(process.execPath), execArgs: ["--eval", APPLICATION_RUNNER,
+        JSON.stringify({ executable, args, env, shell, shellNames: SHELL_EXECUTABLE_NAMES })] };
+}
 
 export type SandboxCommandArgs = SandboxTarget & {
     /** Where the macOS backend writes its generated SBPL profile. */

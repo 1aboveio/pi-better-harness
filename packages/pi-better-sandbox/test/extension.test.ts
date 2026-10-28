@@ -258,7 +258,7 @@ test("the extension registers the built-in overrides, user_bash routing, and the
     const recorded = record();
     piBetterSandbox(recorded.pi);
 
-    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "write"]);
+    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "run_application", "write"]);
     assert.ok(recorded.handlers.has("user_bash"));
     assert.ok(recorded.handlers.has("session_start"));
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
@@ -288,6 +288,25 @@ test("the task gate rejects unknown and replaced tools while admitting installed
     });
     recorded.tools.set("write", installed);
     assert.equal(call("write"), undefined);
+});
+
+nodeTest("Subagents execution restrictions block incompatible consumers even with Main Off", async () => {
+    for (const restriction of [{ shell: false }, { commandTimeoutSeconds: 600 }]) {
+        const settings = defaultSandboxPermissions();
+        Object.assign(settings.subagents, { enabled: true }, restriction);
+        const recorded = record([sessionEntry({ version: 1, permissions: settings })]);
+        piBetterSandbox(recorded.pi);
+        const root = project(`execution-admission-${Object.keys(restriction)[0]}`);
+        const started = await startSession(recorded, root, "resume", false);
+        const guard = recorded.toolCallHandlers.at(-1)!;
+        for (const toolName of ["subagent_spawn", "subagent_spawn_batch"]) {
+            const refusal = guard({ toolName, input: {} }, started.ctx) as { block: boolean; reason: string };
+            assert.equal(refusal.block, true);
+            assert.match(refusal.reason, /no compatible application execution adapter/);
+        }
+        assert.equal(recorded.published.at(-1)?.state, "disabled");
+        await recorded.handlers.get("session_shutdown")!({}, started.ctx);
+    }
 });
 
 test("registered file and bash overrides preserve SDK contracts and rendered output", () => {
@@ -696,7 +715,7 @@ nodeTest("Background UI edits publish, persist on the session branch, and restor
         await press("\x1b[B");
         await press("\x1b[B");
         await press(" "); // Commands off.
-        await press("\x1b[B");
+        for (let i = 0; i < 3; i++) await press("\x1b[B");
         await press(" "); // Network off.
     });
     const expected = { ...defaultSandboxPermissions().background,
@@ -771,12 +790,12 @@ test("UI edits persist both profiles and tools to session only and immediately e
         await press(" "); // Project files off.
         for (let i = 0; i < 3; i++) await press("\x1b[B");
         await press(" "); // Main commands off.
-        await press("\x1b[B");
+        for (let i = 0; i < 3; i++) await press("\x1b[B");
         await press(" "); // Main network off.
         await press("\x1b[C");
-        for (let i = 0; i < 5; i++) await press("\x1b[A");
+        for (let i = 0; i < 7; i++) await press("\x1b[A");
         await press(" "); // Subagents on.
-        for (let i = 0; i < 5; i++) await press("\x1b[B");
+        for (let i = 0; i < 7; i++) await press("\x1b[B");
         await press(" "); // Subagents network off.
         await press("\x1b[B"); // Skip the independent Process access row.
         await press("\x1b[B");
@@ -1033,7 +1052,7 @@ test("pi loads the published entry point and registers the same surface", async 
     assert.equal(result.extensions.length, 1);
     const extension = result.extensions[0];
     assert.ok(extension);
-    assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "write"]);
+    assert.deepEqual([...extension.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "run_application", "write"]);
     assert.deepEqual([...extension.commands.keys()], ["sandbox"]);
     assert.ok(extension.handlers.has("session_start"));
     assert.ok(extension.handlers.has("user_bash"));
@@ -1399,7 +1418,7 @@ test("rule management is reachable only from the slash command, never from a too
 
     // The whole registered tool surface is pi's own built-ins, overridden. There
     // is nothing here the model could call to read or change a rule.
-    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "write"]);
+    assert.deepEqual([...recorded.tools.keys()].sort(), ["bash", "edit", "process_list", "read", "run_application", "write"]);
     assert.deepEqual([...recorded.commands.keys()], ["sandbox"]);
 
     // Nor can the events contract be used to push a rule set in: publishing a

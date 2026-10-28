@@ -73,7 +73,8 @@ test('real Pi RPC startup takes runtime locks with task network and commands dis
     assert.equal(result.status, 0, result.stderr + result.stdout);
     const rows = (result.stderr + '\n' + result.stdout).split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
     assert.equal(rows.find((row) => row.id === 'startup')?.success, true, result.stdout);
-    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read', 'write', 'edit', 'bash'], result.stderr + result.stdout);
+    // Run applications Off activates no command tool: neither bash nor run_application.
+    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read', 'write', 'edit'], result.stderr + result.stdout);
     assert.doesNotMatch(result.stderr, /EPERM|EACCES|permission denied/i);
     assert.equal(readFileSync(join(f.agent, 'auth.json'), 'utf8'), '{}');
     assert.equal(existsSync(join(f.agent, 'auth.json.lock')), false);
@@ -96,7 +97,7 @@ test('the harness steer extension loads in a confined child without changing its
     assert.equal(result.status, 0, result.stderr + result.stdout);
     const rows = (result.stderr + '\n' + result.stdout).split('\n').flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
     assert.equal(rows.find((row) => row.id === 'startup')?.success, true, result.stdout);
-    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read', 'bash'], result.stderr + result.stdout);
+    assert.deepEqual(rows.find((row) => row.type === 'task_sandbox_ready')?.tools, ['read'], result.stderr + result.stdout);
     assert.doesNotMatch(result.stderr, /Extension error|Failed to load extension/i);
 });
 
@@ -174,7 +175,8 @@ test('Process access activates the fixed inventory without general commands and 
     assert.equal(details.scope, 'current-user');
     assert.ok(details.processes.some((row) => row.pid === owned.pid && row.name === name), 'the confined inventory sees its owned fixture process');
     assert.ok(details.processes.every((row) => Object.keys(row).sort().join(',') === 'name,pid'));
-    await assert.rejects(execute(session, 'bash', { command: 'true' }), /commands.*Off/i);
+    assert.equal(session.agent.state.tools.some((tool) => tool.name === 'bash'), false,
+        'Run applications Off activates neither command tool');
     f.policy.permissions.processAccess = 'off';
     const captured = await execute(session, 'process_list', { name: 'pi-no-such-inventory-process', limit: 1 });
     assert.deepEqual(JSON.parse(captured.content[0].text).processes, [], 'the captured Read policy is not changed by later edits');

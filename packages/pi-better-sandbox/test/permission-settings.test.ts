@@ -38,6 +38,57 @@ test("permission storage migrates activation and round-trips inactive values", (
     }
 });
 
+test("v1 settings add shell and command timeout without changing the storage envelope", () => {
+    const root = mkdtempSync(join(tmpdir(), "sandbox-command-settings-"));
+    const seams = { agentDir: () => root };
+    try {
+        const settings = defaultSandboxPermissions();
+        settings.main.enabled = true;
+        settings.main.shell = false;
+        settings.main.commandTimeoutSeconds = 600;
+        settings.background.commandTimeoutSeconds = 1800;
+        writePermissionSettings(settings, seams);
+        assert.deepEqual(readPermissionSettings(seams), settings);
+        const stored = JSON.parse(readFileSync(permissionSettingsPath(seams), "utf8"));
+        assert.equal(stored.piBetterHarness.sandboxPermissions.version, 1);
+        assert.equal(stored.piBetterHarness.sandboxPermissions.permissions.main.shell, false);
+        assert.equal(stored.piBetterHarness.sandboxPermissions.permissions.main.commandTimeoutSeconds, 600);
+        assert.equal(stored.piBetterHarness.sandboxPermissions.permissions.background.commandTimeoutSeconds, 1800);
+
+        // A file written before Shell scripts and Command time limit existed.
+        const legacy = defaultSandboxPermissions();
+        const strip = ({ shell: _shell, commandTimeoutSeconds: _timeout, ...profile }: typeof legacy.main) => profile;
+        writeFileSync(permissionSettingsPath(seams), JSON.stringify({ piBetterHarness: { sandboxPermissions: {
+            version: 1, permissions: { ...legacy, main: strip(legacy.main), subagents: strip(legacy.subagents),
+                background: strip(legacy.background) },
+        } } }));
+        const migrated = readPermissionSettings(seams);
+        assert.equal(migrated.main.shell, true);
+        assert.equal(migrated.main.commandTimeoutSeconds, null);
+        assert.equal(migrated.background.shell, true);
+        assert.equal(migrated.background.commandTimeoutSeconds, null);
+        writePermissionSettings(migrated, seams);
+        const normalized = JSON.parse(readFileSync(permissionSettingsPath(seams), "utf8"));
+        assert.equal(normalized.piBetterHarness.sandboxPermissions.version, 1);
+        assert.equal(normalized.piBetterHarness.sandboxPermissions.permissions.main.shell, true);
+        assert.equal(normalized.piBetterHarness.sandboxPermissions.permissions.main.commandTimeoutSeconds, null);
+
+        for (const main of [
+            { ...legacy.main, shell: "yes" },
+            { ...legacy.main, commandTimeoutSeconds: 0 },
+            { ...legacy.main, commandTimeoutSeconds: 2147484 },
+            { ...legacy.main, commandTimeoutSeconds: "60" },
+        ]) {
+            writeFileSync(permissionSettingsPath(seams), JSON.stringify({ piBetterHarness: { sandboxPermissions: {
+                version: 1, permissions: { ...legacy, main },
+            } } }));
+            assert.throws(() => readPermissionSettings(seams), /explicit permission values/);
+        }
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test("old global and legacy files migrate Background from Main and save it independently", () => {
     for (const location of ["global", "legacy"] as const) {
         const root = mkdtempSync(join(tmpdir(), "sandbox-background-migration-"));

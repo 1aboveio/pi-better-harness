@@ -15,7 +15,12 @@ export interface SandboxPermissionProfile {
     projectFiles: FileAccess;
     outsideProject: FileAccess;
     storedCredentials: CredentialAccess;
+    /** Run applications: the master switch for command execution. */
     commands: boolean;
+    /** Shell scripts inside commands. Missing (legacy) means On. */
+    shell?: boolean;
+    /** Per-command cap in seconds. Missing or null means no limit. */
+    commandTimeoutSeconds?: number | null;
     network: boolean;
     processAccess: "off" | "read";
 }
@@ -40,6 +45,8 @@ export function defaultSandboxPermissions(): SandboxPermissionSettings {
         outsideProject: "read",
         storedCredentials: "read",
         commands: true,
+        shell: true,
+        commandTimeoutSeconds: null,
         network: true,
         processAccess: "read",
     });
@@ -51,7 +58,12 @@ function isProfile(value: unknown): value is SandboxPermissionProfile {
     const p = value as Record<string, unknown>;
     const credential = (v: unknown): boolean => v === "off" || v === "read" || v === "read-write";
     const access = (v: unknown): boolean => credential(v) || v === "write";
-    return typeof p.enabled === "boolean" && typeof p.commands === "boolean" &&
+    const shell = p.shell === undefined || typeof p.shell === "boolean";
+    // Missing and null both mean no cap. A cap must fit a supported seconds value.
+    const timeout = p.commandTimeoutSeconds === undefined || p.commandTimeoutSeconds === null ||
+        (typeof p.commandTimeoutSeconds === "number" && Number.isFinite(p.commandTimeoutSeconds) &&
+            p.commandTimeoutSeconds > 0 && p.commandTimeoutSeconds <= 2147483);
+    return typeof p.enabled === "boolean" && typeof p.commands === "boolean" && shell && timeout &&
         typeof p.network === "boolean" && access(p.projectFiles) &&
         access(p.outsideProject) && credential(p.storedCredentials) &&
         (p.processAccess === undefined || p.processAccess === "off" || p.processAccess === "read");
@@ -74,9 +86,15 @@ export function describeLoosening(previous: SandboxPermissionSettings, next: San
         for (const key of ["projectFiles", "outsideProject", "storedCredentials"] as const) {
             if (FILE_RANK[b[key]] > FILE_RANK[a[key]]) changes.push(`${label}: ${key} ${a[key]} → ${b[key]}`);
         }
-        for (const key of ["commands", "network"] as const) {
-            if (b[key] && !a[key]) changes.push(`${label}: ${key} on`);
+        if (b.commands && !a.commands) changes.push(`${label}: commands on`);
+        // Missing shell means the old behavior (On); missing/null timeout means no cap.
+        if (a.shell === false && b.shell !== false) changes.push(`${label}: shell scripts on`);
+        const previousTimeout = a.commandTimeoutSeconds ?? null;
+        const nextTimeout = b.commandTimeoutSeconds ?? null;
+        if (previousTimeout !== null && (nextTimeout === null || nextTimeout > previousTimeout)) {
+            changes.push(`${label}: command time limit ${previousTimeout}s → ${nextTimeout === null ? "no limit" : `${nextTimeout}s`}`);
         }
+        if (b.network && !a.network) changes.push(`${label}: network on`);
         if (a.processAccess !== "read" && b.processAccess === "read") changes.push(`${label}: processAccess off → read`);
     }
     // A trusted tool runs outside the file rules: ticking one loosens the profile.
@@ -100,8 +118,10 @@ export function parseSandboxPermissions(value: unknown): SandboxPermissionSettin
     }
     const copy = (p: SandboxPermissionProfile): SandboxPermissionProfile => ({
         enabled: p.enabled, projectFiles: p.projectFiles, outsideProject: p.outsideProject,
-        storedCredentials: p.storedCredentials, commands: p.commands, network: p.network,
-        processAccess: p.processAccess ?? "off",
+        storedCredentials: p.storedCredentials, commands: p.commands,
+        // Legacy profiles predate Shell scripts and the command time limit.
+        shell: p.shell ?? true, commandTimeoutSeconds: p.commandTimeoutSeconds ?? null,
+        network: p.network, processAccess: p.processAccess ?? "off",
     });
     // Missing Background tasks inherits Main once, without linking the profiles.
     // Files written before the Tools section existed get the default tool set.

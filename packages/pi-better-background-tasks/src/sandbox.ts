@@ -25,21 +25,34 @@
  * tests that pin them.
  */
 
-import { mkdirSync } from "node:fs";
+import { accessSync, constants, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 
 import { commandExecution } from "./process.js";
 import { baseDir } from "./registry.js";
-import { compileWritePolicy, describeSandboxSupport, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
+import { compileWritePolicy, describeSandboxSupport, directApplicationTarget, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
 
 type SandboxPermissions = {
   /** `write` = read, create and overwrite in place; `read-write` = Write & delete. */
   projectFiles: "off" | "read" | "write" | "read-write";
   outsideProject: "off" | "read" | "write" | "read-write";
   storedCredentials: "off" | "read" | "read-write";
+  /** Master switch for command execution. */
   commands: boolean;
   network: boolean;
+  /**
+   * Optional refinement of `commands`: may a launch command be interpreted by a
+   * shell? Absent means yes (the historical behavior). Off confines a launch to
+   * a direct executable through `shell: false` argv.
+   */
+  shell?: boolean;
+  /**
+   * Optional outer cap for one launch command, in seconds. Absent or null means
+   * no cap. A value is validated here and copied into the immutable launch
+   * snapshot; it caps each actual command, never a watch's whole lifetime.
+   */
+  commandTimeoutSeconds?: number | null;
 };
 import type { CommandSpec, TaskSandboxProvenance } from "./types.js";
 import { SandboxDiagnostics, diagnosticPackageVersion, type DiagnosticResource } from "./shared-sandbox-diagnostics.js";
@@ -72,6 +85,114 @@ export const FOREGROUND_SANDBOX_POLICY_CHANNEL = "pi-better-sandbox:policy";
 
 /** Channel a consumer emits on to ask for the current policy. */
 export const FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL = "pi-better-sandbox:policy-request";
+
+/** Largest single-command cap a timer can hold: 2_147_483 seconds is 2_147_483_000 ms. */
+export const MAX_COMMAND_TIMEOUT_SECONDS = 2_147_483;
+
+/** A positive finite number of seconds no larger than {@link MAX_COMMAND_TIMEOUT_SECONDS}. */
+export function isCommandTimeoutSeconds(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= MAX_COMMAND_TIMEOUT_SECONDS;
+}
+
+/** Executables whose whole purpose is to interpret a shell command string. */
+const SHELL_EXECUTABLES = Object.freeze([
+  "sh", "bash", "zsh", "dash", "ksh", "ksh93", "mksh", "pdksh", "ash", "csh", "tcsh", "fish",
+  "yash", "posh", "rbash", "busybox", "pwsh", "powershell", "cmd",
+] as const);
+const SHELL_NAMES = new Set<string>(SHELL_EXECUTABLES);
+
+function shellExecutableName(path: string): boolean {
+  const normalized = String(path ?? "").replace(/\\/g, "/");
+  const name = normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
+  const stem = name.endsWith(".exe") ? name.slice(0, -4) : name;
+  return name.length > 0 && (SHELL_NAMES.has(name) || SHELL_NAMES.has(stem));
+}
+
+/**
+ * Resolve an executable the way spawn will: a relative or bare name against the
+ * launch cwd, and a bare name through the launch's PATH. A relative PATH entry
+ * is itself resolved against the launch cwd, because the child changes directory
+ * before it searches PATH.
+ *
+ * The candidate must be a regular file this process may execute, so a
+ * non-executable shadow earlier on PATH does not stand in for the real target.
+ */
+function resolvedExecutablePath(executable: string, env: NodeJS.ProcessEnv, cwd: string): string | undefined {
+  const value = String(executable ?? "");
+  if (value.includes("/") || (process.platform === "win32" && value.includes("\\"))) {
+    return resolve(cwd, value);
+  }
+  const path = env.PATH ?? env.Path;
+  if (!path) return undefined;
+  for (const directory of path.split(delimiter)) {
+    const candidate = resolve(cwd, directory || ".", value);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch { /* A PATH entry may vanish, or not be executable. */ }
+  }
+  return undefined;
+}
+
+let shellIdentities: { path: string | undefined; cwd: string; ids: Set<string> } | undefined;
+
+/**
+ * Device/inode identities of the known shell binaries on this launch's PATH.
+ *
+ * A hardlink to a shell can carry any name, so a name check and a symlink's
+ * canonical target cannot see it. This mirrors the confined executor's identity
+ * check (`task-sandbox/exec.ts`), resolved against the launch cwd and PATH.
+ */
+function knownShellIdentities(env: NodeJS.ProcessEnv, cwd: string): Set<string> {
+  const path = env.PATH ?? env.Path;
+  const cached = shellIdentities;
+  if (cached && cached.path === path && cached.cwd === cwd) return cached.ids;
+  const ids = new Set<string>();
+  for (const directory of (path ?? "").split(delimiter)) {
+    for (const name of SHELL_EXECUTABLES) {
+      try {
+        const info = statSync(resolve(cwd, directory || ".", name), { bigint: true });
+        if (info.isFile()) ids.add(`${info.dev}:${info.ino}`);
+      } catch { /* Not present in this directory. */ }
+    }
+  }
+  shellIdentities = { path, cwd, ids };
+  return ids;
+}
+
+/**
+ * True when `argv[0]` names a shell interpreter directly.
+ *
+ * With Shell scripts Off, a `shell: false` argv is still a way to ask a shell to
+ * run a command (`["/bin/bash", "-c", ...]`). The requested name is checked
+ * first, then the executable spawn would resolve against `cwd` and the launch's
+ * PATH, then its canonical target, so a symlink or an alternate name pointing at
+ * a shell is still refused. A hardlink to a shell is refused by inode identity.
+ * Only a direct interpreter is refused: an application that happens to launch a
+ * shell itself is a different capability from asking Pi to interpret a command.
+ */
+export function isShellExecutable(
+  executable: string,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): boolean {
+  if (shellExecutableName(executable)) return true;
+  const resolved = resolvedExecutablePath(String(executable ?? ""), env, cwd);
+  if (!resolved) return false;
+  let canonical: string;
+  try {
+    canonical = realpathSync.native(resolved);
+  } catch {
+    return false;
+  }
+  if (shellExecutableName(canonical)) return true;
+  try {
+    const info = statSync(canonical, { bigint: true });
+    if (knownShellIdentities(env, cwd).has(`${info.dev}:${info.ino}`)) return true;
+  } catch { /* A missing file fails when the launch runs it. */ }
+  return false;
+}
 
 /**
  * What the foreground sandbox is doing right now.
@@ -188,12 +309,19 @@ function readPermissions(value: unknown): ForegroundSandboxPolicy["permissions"]
   if (typeof p.enabled !== "boolean" || typeof p.commands !== "boolean" ||
       typeof p.network !== "boolean" || !access(p.projectFiles) ||
       !access(p.outsideProject) || !credential(p.storedCredentials) ||
-      (p.processAccess !== undefined && p.processAccess !== "off" && p.processAccess !== "read")) return undefined;
+      (p.processAccess !== undefined && p.processAccess !== "off" && p.processAccess !== "read") ||
+      (p.shell !== undefined && typeof p.shell !== "boolean") ||
+      (p.commandTimeoutSeconds !== undefined && p.commandTimeoutSeconds !== null &&
+        !isCommandTimeoutSeconds(p.commandTimeoutSeconds))) return undefined;
+  // Copy only what the publisher sent: absent optional settings keep their
+  // documented default meaning instead of being invented here.
   return Object.freeze({
     enabled: p.enabled, commands: p.commands, network: p.network,
     projectFiles: p.projectFiles as SandboxPermissions["projectFiles"],
     outsideProject: p.outsideProject as SandboxPermissions["outsideProject"],
     storedCredentials: p.storedCredentials as SandboxPermissions["storedCredentials"],
+    ...(p.shell === undefined ? {} : { shell: p.shell as boolean }),
+    ...(p.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: p.commandTimeoutSeconds as number | null }),
   });
 }
 
@@ -320,9 +448,83 @@ export function planFor(policy: ForegroundSandboxPolicy | undefined): Foreground
     storedCredentials: policy.permissions.storedCredentials,
     commands: policy.permissions.commands,
     network: policy.permissions.network,
+    ...(policy.permissions.shell === undefined ? {} : { shell: policy.permissions.shell }),
+    ...(policy.permissions.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: policy.permissions.commandTimeoutSeconds }),
   } : undefined;
   return { confined: true, writableRoot: policy.writableRoot, denyWrite: policy.denyWrite,
     ...(permissions ? { permissions } : {}) };
+}
+
+/**
+ * The application, shell, and time switches captured with one launch plan.
+ *
+ * The Background tasks profile is the gate: when it is off, launches keep their
+ * historical unconfined behavior. When it is on, `commands` remains the master
+ * switch (enforced by {@link planFor}); this narrows it with the optional
+ * `shell` and `commandTimeoutSeconds` fields. An absent `shell` means On, and an
+ * absent or null cap means no cap, so a publisher that predates those fields is
+ * unchanged.
+ */
+export interface BackgroundExecutionLimits {
+  /** May a launch command be interpreted by a shell? */
+  readonly shell: boolean;
+  /** Immutable outer cap for one command, in seconds; undefined means unlimited. */
+  readonly commandTimeoutSeconds?: number;
+}
+
+const UNLIMITED_EXECUTION: BackgroundExecutionLimits = Object.freeze({ shell: true });
+
+/** Read the immutable application switches captured for `plan`. */
+export function backgroundExecutionLimits(plan: ForegroundSandboxPlan): BackgroundExecutionLimits {
+  const permissions = launchPolicies.get(plan)?.permissions;
+  if (!permissions?.enabled) return UNLIMITED_EXECUTION;
+  const cap = isCommandTimeoutSeconds(permissions.commandTimeoutSeconds)
+    ? permissions.commandTimeoutSeconds
+    : undefined;
+  return Object.freeze({
+    shell: permissions.shell !== false,
+    ...(cap === undefined ? {} : { commandTimeoutSeconds: cap }),
+  });
+}
+
+/**
+ * Refuse a launch the captured Background tasks application switches forbid.
+ *
+ * Called before any task id, directory, log, or metadata exists, so a refused
+ * launch leaves nothing behind. `commands: false` is still the master refusal
+ * and is raised by {@link planFor}; this is the narrower shell rule. With Shell
+ * scripts Off, only a direct executable through `shell: false` argv is allowed.
+ * A shell command string and a direct shell interpreter in argv[0] would both
+ * reintroduce shell interpretation, and structured SSH carries a remote shell
+ * command, so all three are refused.
+ *
+ * `cwd` is the launch directory the task will actually run in. A relative
+ * executable, a relative PATH entry, and an alias found only in that directory
+ * are resolved exactly as the launch resolves them, never against Pi's own
+ * process cwd.
+ */
+export function assertBackgroundExecutionAllowed(
+  spec: CommandSpec,
+  plan: ForegroundSandboxPlan,
+  options: { remote?: boolean; cwd?: string } = {},
+): void {
+  const limits = backgroundExecutionLimits(plan);
+  if (limits.shell) return;
+  const launchCwd = options.cwd ?? spec.cwd ?? process.cwd();
+  const detail = options.remote
+    ? "Structured SSH carries a remote shell command, so it cannot run while Shell scripts is Off. Use a local shell:false argv launch, or turn Shell scripts on in /sandbox."
+    : spec.shell !== false
+      ? "Background tasks profile disables shell commands. Pass shell:false with an argv for a direct executable, or turn Shell scripts on in /sandbox."
+      : isShellExecutable(spec.argv?.[0] ?? "", { ...process.env, ...spec.env }, launchCwd)
+        ? "Background tasks profile disables shell commands. A direct shell executable is refused; launch the program itself with shell:false, or turn Shell scripts on in /sandbox."
+        : undefined;
+  if (detail === undefined) return;
+  const policy = launchPolicies.get(plan) ?? {
+    state: "failed" as const,
+    denyWrite: [],
+    reason: "The Background tasks profile disables shell commands.",
+  };
+  throw new ForegroundSandboxBlockedError(policy, detail);
 }
 
 /**
@@ -351,6 +553,10 @@ export function confineCommandSpec(
   if (!plan.confined) return spec;
 
   const { execPath, execArgs } = commandExecution(spec);
+  const directOnly = spec.shell === false && plan.permissions?.shell === false;
+  const target = directOnly
+    ? directApplicationTarget(execPath, execArgs, { ...process.env, ...spec.env }, false)
+    : { execPath, execArgs };
   // The generated profile is written here, so its directory must exist before
   // the backend builds the command.
   mkdirSync(dirname(profilePath), { recursive: true });
@@ -385,8 +591,8 @@ export function confineCommandSpec(
       {
         profilePath,
         policy,
-        execPath,
-        execArgs,
+        ...target,
+        ...(directOnly ? { internalHelperExecutable: true } : {}),
       },
       // `explicitSandbox` because the foreground state already said a sandbox
       // applies: an absent or unusable backend must throw here rather than hand
@@ -405,7 +611,8 @@ export function confineCommandSpec(
   }
   for (const line of command.notices ?? []) onNotice(line);
 
-  return { ...spec, argv: [command.file, ...command.fileArgs], shell: false };
+  return { ...spec, ...(directOnly ? { env: { PATH: "/usr/bin:/bin", HOME: homedir() } } : {}),
+    argv: [command.file, ...command.fileArgs], shell: false };
 }
 
 function blocked(plan: ForegroundSandboxPlan & { confined: true }, detail: string): Error {
