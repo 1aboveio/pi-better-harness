@@ -82,7 +82,7 @@ export function applyRushPlanUpdate(
   const original: unknown = JSON.parse(originalText);
   const current = projectRushPlan(original, runId);
   if (update.revision !== undefined && update.revision !== current.planRevision) {
-    throw new Error(`Rush plan revision mismatch: expected ${update.revision}, found ${current.planRevision}. Read the plan with get_plan and retry.`);
+    throw new Error(`Rush plan revision mismatch: expected ${update.revision}, found ${current.planRevision}. Read the plan with get_todo and retry.`);
   }
 
   const next = structuredClone(original) as Record<string, unknown>;
@@ -259,7 +259,7 @@ function applyFields(
   const set = { ...input };
   for (const field of Object.keys(set)) {
     if (target === "run" ? RUN_PROTECTED.has(field) : ROW_PROTECTED.has(field)) {
-      throw new Error(`${where}: ${field} cannot be changed through update_plan.`);
+      throw new Error(`${where}: ${field} cannot be changed through update_todo.`);
     }
   }
   checkFields(plan, target, id, set, where);
@@ -453,7 +453,7 @@ function writeTransition(file: string, originalText: string, planText: string, p
     writeWhole(temp, planText, mode);
     tempWritten = true;
     if (readFileSync(file, "utf8") !== originalText) {
-      throw new Error("task-plan.json changed while this update was being prepared; read the plan with get_plan and retry.");
+      throw new Error("task-plan.json changed while this update was being prepared; read the plan with get_todo and retry.");
     }
     mkdirSync(dirname(profilingPath), { recursive: true });
     profilingFd = openSync(profilingPath, "a");

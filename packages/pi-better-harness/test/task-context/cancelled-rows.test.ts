@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cancelledRowsClearDelay, observeCancelledRows } from "../src/cancelled-rows.js";
-import { projectRushPlan, visibleRushUnits } from "../src/workflow-plan.js";
+import { cancelledRowsClearDelay, observeCancelledRows } from "../../extensions/task-context/cancelled-rows.js";
+import { projectRushPlan, visibleRushUnits } from "../../extensions/task-context/workflow-plan.js";
 
 test("each cancellation spelling expires on its own deadline while skipped rows remain", () => {
   const plan = projectRushPlan({

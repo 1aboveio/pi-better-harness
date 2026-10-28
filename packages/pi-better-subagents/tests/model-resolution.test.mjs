@@ -26,6 +26,7 @@ const APPROVED = [
     ["role.developer", "openai/gpt-6.1-sol", "high"],
     ["role.reviewer", "openai/gpt-6-astra", "medium"],
     ["role.architect", "openai/gpt-6-astra", "high"],
+    ["role.writer", "openai/gpt-6.1-terra", "medium"],
 ];
 
 function model(provider, id, extra = {}) {
@@ -147,10 +148,11 @@ describe("T07 approved defaults", () => {
             model("openai", "gpt-6.1-sol"),
             model("openai", "gpt-6-luna"),
             model("openai", "gpt-6-astra"),
+            model("openai", "gpt-6.1-terra"),
         ]);
         try {
             const attachments = assessCatalog(snapshot, { registry, foregroundModel: "xai/grok-4.7" });
-            assert.equal(attachments.length, 6);
+            assert.equal(attachments.length, APPROVED.length);
             for (const [id, modelId, effort] of APPROVED) {
                 const attachment = attachments.find((item) => item.id === id);
                 assert.ok(attachment, id);

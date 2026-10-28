@@ -6,8 +6,33 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import extension from "../src/index.js";
-import { readRushPlan, workflowBinding } from "../src/workflow-plan.js";
+import extension from "../../extensions/task-context/index.js";
+import { readRushPlan, workflowBinding } from "../../extensions/task-context/workflow-plan.js";
+
+interface SettingControl {
+  id: string;
+  get(): string;
+  change(value: string, ctx: ExtensionContext): Promise<void>;
+}
+
+// Enabling Outcome & Todo goes through its real settings control, and every
+// write goes to a private agent directory rather than the developer's own.
+const agentDir = mkdtempSync(join(tmpdir(), "task-context-agent-"));
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = agentDir;
+process.on("exit", () => {
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  rmSync(agentDir, { recursive: true, force: true });
+});
+
+function captureSettings(events: EventEmitter): { current(): SettingControl | undefined } {
+  let control: SettingControl | undefined;
+  events.on("harness-settings:register", (candidate: SettingControl) => {
+    if (candidate?.id === "outcome-todo") control = candidate;
+  });
+  return { current: () => control };
+}
 
 for (const owner of ["rush-issues", "resolve-issues", "fixture-workflow"])
 test(`${owner} plan projects revisions and restores its owner-bound session`, async () => {
@@ -41,8 +66,10 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
       },
     },
   } as unknown as ExtensionContext;
+  const events = new EventEmitter();
+  const settings = captureSettings(events);
   const pi = {
-    events: new EventEmitter(),
+    events,
     appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
     registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
     registerCommand(name: string, command: any) { commands.set(name, command); },
@@ -53,8 +80,9 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     file(1, "in-flight");
     extension(pi);
     await handlers.get("session_start")?.({}, ctx);
-    const update = tools.get("update_plan")!;
-    await update.execute("generic", { plan: [{ step: "Old generic step", status: "in_progress" }] }, undefined, undefined, ctx);
+    await settings.current()!.change("On", ctx);
+    const update = tools.get("update_todo")!;
+    await update.execute("generic", { todo: [{ step: "Old generic step", status: "in_progress" }] }, undefined, undefined, ctx);
     entries.push({ type: "custom", customType: "pi-better-workflow", data: {
       version: 1, kind: "set", owner: { name: owner, planOwner: "workflow" },
     } });
@@ -65,25 +93,25 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     ).render(140);
     const renderWidget = () => renderWidgetLines().join("\n");
     assert.equal(renderWidget(), "", "an unsynced Rush plan stays hidden");
-    await assert.rejects(update.execute("conflict", { plan: [{ step: "Wrong", status: "pending" }] }, undefined, undefined, ctx), /owns the task plan/);
+    await assert.rejects(update.execute("conflict", { todo: [{ step: "Wrong", status: "pending" }] }, undefined, undefined, ctx), /owns the task plan/);
     const bind = (id: string, revision: number) => update.execute(id, { workflow: { path, revision } }, undefined, undefined, ctx);
     await assert.rejects(bind("stale", 2), /revision mismatch/);
     assert.doesNotMatch(renderWidget(), /Extract shared core/);
     await bind("bind", 1);
     assert.equal(renderWidgetLines()[0], "", "the Rush section is separated from the preceding widget");
-    assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>plan<\/warning><dim>  0\/2 complete/);
+    assert.match(renderWidgetLines(true)[1] ?? "", /^<warning>todo<\/warning><dim>  0\/2 complete/);
     assert.ok((renderWidgetLines(true)[2] ?? "").includes(`${owner} · rev 1`));
     assert.match(renderWidget(), /Extract shared core.*active/);
     assert.match(renderWidget(), /Add mux support/);
-    await commands.get("plan")!.handler("", ctx);
+    await commands.get("todo")!.handler("", ctx);
     assert.match(fullView, /self-review · in-flight/);
     assert.match(fullView, /after: #214/);
     assert.doesNotMatch(fullView, /Old generic step/);
-    const result = await tools.get("get_plan")!.execute("get", {}, undefined, undefined, ctx);
+    const result = await tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx);
     assert.equal((result.details as any).workflowOwner, owner);
     assert.ok(fullView.includes(`${owner} · rev 1`));
     assert.equal((result.details as any).plan.planRevision, 1);
-    await commands.get("plan")!.handler("clear", ctx);
+    await commands.get("todo")!.handler("clear", ctx);
     assert.match(notification, /workflow owns its plan/);
 
     file(2, "succeeded");
@@ -101,7 +129,7 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     } });
     await handlers.get("session_tree")?.({}, ctx);
     assert.equal(renderWidget(), "", "restore refuses a binding belonging to another owner");
-    const mismatched = await tools.get("get_plan")!.execute("mismatched", {}, undefined, undefined, ctx);
+    const mismatched = await tools.get("get_todo")!.execute("mismatched", {}, undefined, undefined, ctx);
     assert.equal((mismatched.details as any).hasPlan, false);
     await assert.rejects(update.execute("mismatched", {
       workflow: { event: "advance", changes: [{ id: "214", set: { note: "wrong owner" } }] },
@@ -115,14 +143,14 @@ test(`${owner} plan projects revisions and restores its owner-bound session`, as
     assert.equal(renderWidget(), "", "a new Rush invocation stays hidden and cannot inherit a previous run");
     await bind("new-run", 3);
     rmSync(path);
-    const missing = await tools.get("get_plan")!.execute("missing", {}, undefined, undefined, ctx);
+    const missing = await tools.get("get_todo")!.execute("missing", {}, undefined, undefined, ctx);
     assert.equal((missing.details as any).hasPlan, false);
     assert.equal(renderWidget(), "", "an unavailable persisted plan stays hidden");
 
     entries.push({ type: "custom", customType: "pi-better-workflow", data: { version: 1, kind: "clear" } });
     pi.events.emit("pi-better-workflow:changed", null);
     assert.equal(renderWidget(), "", "a missing released plan must not reveal the stale generic checklist");
-    const released = await tools.get("get_plan")!.execute("released-missing", {}, undefined, undefined, ctx);
+    const released = await tools.get("get_todo")!.execute("released-missing", {}, undefined, undefined, ctx);
     assert.equal((released.details as any).readOnly, true);
     assert.equal((released.details as any).hasPlan, false);
     assert.match((released.content[0] as { text: string }).text, /read-only handoff unavailable/);
@@ -143,6 +171,7 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
   const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> | void }>();
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
   const events = new EventEmitter();
+  const settings = captureSettings(events);
   let widgetFactory: any;
   let fullView = "";
   let fullComponent: any;
@@ -178,7 +207,10 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
   return {
     ctx,
     entries: () => entries,
-    start: () => handlers.get("session_start")!({}, ctx),
+    start: async () => {
+      await handlers.get("session_start")!({}, ctx);
+      await settings.current()!.change("On", ctx);
+    },
     shutdown: () => handlers.get("session_shutdown")!({}, ctx),
     redraws: () => redraws,
     fullRedraws: () => fullRedraws,
@@ -194,12 +226,12 @@ function workflowHarness(cwd: string, initialEntries: WorkflowSessionEntry[] = [
         : { version: 1, kind: "set", owner: { name, planOwner: "workflow" } } });
       events.emit("pi-better-workflow:changed", name === null ? null : { name });
     },
-    update: (params: unknown) => tools.get("update_plan")!.execute("update", params, undefined, undefined, ctx),
+    update: (params: unknown) => tools.get("update_todo")!.execute("update", params, undefined, undefined, ctx),
     get: async () => {
-      const result = await tools.get("get_plan")!.execute("get", {}, undefined, undefined, ctx);
+      const result = await tools.get("get_todo")!.execute("get", {}, undefined, undefined, ctx);
       return { ...result, details: result.details as { hasPlan: boolean; plan: { runId?: string; planRevision?: number } | null } };
     },
-    command: (args: string, context = ctx) => commands.get("plan")!.handler(args, context),
+    command: (args: string, context = ctx) => commands.get("todo")!.handler(args, context),
     widget: () => widgetFactory(tui, { fg: (_color: string, value: string) => value }).render(140).join("\n"),
     fullView: () => fullComponent ? fullComponent.render(140).join("\n") : fullView,
     notification: () => notification,
@@ -349,7 +381,7 @@ test("released workflow stays inspectable but cannot write; replacement and clea
   writeFileSync(profilingPath, "");
   const harness = workflowHarness(cwd);
   await harness.start();
-  await harness.update({ plan: [{ step: "Old generic", status: "in_progress" }] });
+  await harness.update({ todo: [{ step: "Old generic", status: "in_progress" }] });
   harness.owner("fixture-workflow");
   await harness.update({ workflow: { path, revision: 1 } });
   harness.owner(null);
@@ -393,9 +425,12 @@ test("released workflow stays inspectable but cannot write; replacement and clea
   assert.match(resumed.widget(), /read-only handoff/);
   assert.equal((await resumed.get()).details.plan?.planRevision, 2);
 
-  await assert.rejects(harness.update({ plan: [] }), /at least one step/);
+  await assert.rejects(harness.update({ todo: [
+    { step: "Same", status: "in_progress" },
+    { step: " same ", status: "in_progress" },
+  ] }), /duplicates an earlier step/);
   assert.match(harness.widget(), /read-only handoff/, "a rejected generic replacement preserves the handoff");
-  await harness.update({ plan: [{ step: "New generic", status: "in_progress" }] });
+  await harness.update({ todo: [{ step: "New generic", status: "in_progress" }] });
   assert.match(harness.widget(), /New generic/);
   assert.doesNotMatch(workflowText(await harness.get()), /read-only handoff/);
   await harness.navigate([...harness.entries()]);
@@ -451,7 +486,7 @@ test("hidden generic completion cleanup does not clear a released workflow hando
   const path = writeLifecyclePlan(cwd, "handoff");
   const harness = workflowHarness(cwd);
   await harness.start();
-  await harness.update({ plan: [{ step: "Old completed generic", status: "completed" }] });
+  await harness.update({ todo: [{ step: "Old completed generic", status: "completed" }] });
   harness.owner("fixture-workflow");
   await harness.update({ workflow: { path, revision: 1 } });
   harness.owner(null);

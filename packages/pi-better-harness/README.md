@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/brand/logo.png" alt="Pi Better Harness logo" width="128" height="128" />
 
-`pi-better-harness` is a Pi meta package that installs the core Pi Better Harness extensions: an opt-in foreground write sandbox, delegated subagents, durable background tasks, synchronous SSH commands, goal tracking, and structured plans.
+`pi-better-harness` is a Pi meta package that installs the core Pi Better Harness extensions: an opt-in foreground write sandbox, delegated subagents, durable background tasks, synchronous SSH commands, goal tracking, and Outcome & Todo.
 
 ## Quick Answer
 
@@ -12,10 +12,35 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 - `pi-better-subagents` for detached, sandboxed subagent runs.
 - `pi-better-background-tasks` for durable shell tasks and watchers.
 - `pi-better-ssh` for short remote commands over reusable SSH connections.
-- `pi-better-goal` for objective tracking that is aware of background work.
-- `pi-better-plan` for persistent structured plans and explicit checklist progress.
+- `pi-better-goal` for explicit triggers, pause/resume, and background-aware continuation.
+- Harness-owned Outcome & Todo for session context and checklist progress. It starts off; enable **Outcome & Todo** in `/harness-settings`.
 
 `pi-better-read-aloud` is intentionally not included yet.
+
+## Outcome & Todo
+
+In `/harness-settings`, **Outcome & Todo** starts **Off**. Turn it on to expose
+`update_todo`, `get_todo`, and the native Todo widget. `/todo` opens the full view;
+`/todo expand` and `/todo collapse` control the compact checklist.
+
+An accepted outcome can be saved without a checklist. Completing or clearing its
+Todo does not complete or remove the outcome. Write labels as short, plain actions,
+usually 3-7 words: "Add Todo toggle", "Keep session state", or "Test keyboard controls".
+Keep methods, file paths, and acceptance criteria in the outcome or supporting
+records. This is writing guidance, not a hard limit or automatic truncation;
+existing saved labels remain unchanged until deliberately updated.
+
+Use `newTask: true` with a new
+outcome for unrelated work; a correction to the current task keeps its binding.
+Harness includes a short reminder before each model call while the outcome is
+active. Disabling the feature hides its tools and display and stops reminders,
+without deleting saved state or starting a turn. `/goal` and skills never enable it.
+
+Existing Plan session histories restore as Todo. Workflow task-plan files and
+revision checks stay unchanged; skills continue using their own records when the
+optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
+
+<p><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/todo-examples/middle.png" alt="Compact Harness Todo" width="49%" /><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/todo-examples/expanded.png" alt="Expanded Harness Todo" width="49%" /></p>
 
 ## Screenshots
 
@@ -35,11 +60,20 @@ For project-local Pi settings:
 npx pi-better-harness install --local
 ```
 
-The bundled installation remains available for compatibility:
+The installer also registers Harness with filters for its own settings, minimal output, and Outcome & Todo extensions. It removes an old `pi-better-plan` registration in the selected scope. The component packages keep their separate identities. Pi's normal installation prompts and errors still apply.
+
+The single-bundle installation remains available:
 
 ```sh
 pi install npm:pi-better-harness
 ```
+
+After a normal bundle install or `pi update`, Harness masks any separately loaded
+`pi-better-plan` package before Pi registers its tools, `/plan` command, widgets,
+or prompt hooks. This applies in either load order, including when Outcome & Todo
+is off. The old registration and cached files may remain, but are inactive while
+Harness is loaded. Settings and session history are not rewritten. The explicit
+installer above removes the old registration in its selected scope instead.
 
 ## Ordinary Startup
 
@@ -100,11 +134,11 @@ all original tool details in both modes and folds them again on the next toggle.
 `/tool-output normal` restores ordinary rendering. Error result bodies are also
 hidden in minimal mode and remain available when expanded.
 
-Minimal mode also covers Harness tools: Subagents, Background Tasks, Goal, Plan,
+Minimal mode also covers Harness tools: Subagents, Background Tasks, Goal, Todo,
 catalog inspection, and SSH. Compact calls retain the run or task ID, launch name
 and task, background command, goal action, or plan summary without showing result
 bodies. Finished calls fold into the same disclosure blocks as built-in tools;
-expanding them restores their original package renderers. Goal and Plan widgets
+expanding them restores their original package renderers. Goal and Todo widgets
 and the background-work navigator are independent UI surfaces and remain visible.
 
 Normal mode is the initial default. Changing tool output saves the choice in
@@ -115,8 +149,7 @@ tested with Pi 0.82.1, 0.99.1, and the bundled Pi 1.0.4 CLI; incompatible APIs
 produce a warning and leave ordinary output enabled. Print/RPC output and
 exported transcripts are unchanged.
 
-The standalone-package installer does not install this bundled extension.
-Load the bundled harness or run it directly from a checkout:
+The installer includes this Harness-owned extension. To run it directly from a checkout:
 
 ```sh
 pi -e ./packages/pi-better-harness/extensions/minimal-output/index.ts
@@ -164,9 +197,7 @@ Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in
 this version, and makes no auxiliary model requests. The integration blocker is
 [issue #426](https://github.com/1aboveio/pi-better-harness/issues/426).
 
-The hub is TUI-only. The standalone-package installer does not install
-Harness-only extensions; load the bundle or the settings extension from the
-checkout to use the hub:
+The hub is TUI-only and is included by the installer. To load the settings extension directly from the checkout:
 
 ```sh
 pi -e ./packages/pi-better-harness/extensions/settings/index.ts
@@ -174,7 +205,7 @@ pi -e ./packages/pi-better-harness/extensions/settings/index.ts
 
 ## When To Use
 
-Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, synchronous SSH, goal tracking, or plans.
+Use the installer when you want every core extension with standalone package identities. Install an individual package instead when you only need the sandbox, subagents, shell task supervision, synchronous SSH, or goal tracking. Outcome & Todo is available through Harness.
 
 ## Compatibility
 
@@ -194,7 +225,7 @@ Remove every standalone package:
 npx pi-better-harness uninstall
 ```
 
-Add `--local` to remove them from project-local settings.
+Add `--local` to remove them from project-local settings. This also removes the filtered Harness registration in that scope.
 
 ## More Detail
 

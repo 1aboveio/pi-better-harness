@@ -15,7 +15,6 @@ const executionPolicySource = resolve(root, "packages/pi-better-harness/extensio
 const executionPolicyTargets = [
   "packages/pi-better-subagents/shared-execution-policy.ts",
   "packages/pi-better-background-tasks/src/shared-execution-policy.ts",
-  "packages/pi-better-plan/src/shared-execution-policy.ts",
 ];
 const sandboxDiagnosticsSource = resolve(root, "packages/sandbox-diagnostics/index.ts");
 const sandboxDiagnosticsTargets = [

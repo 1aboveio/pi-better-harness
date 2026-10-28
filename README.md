@@ -2,11 +2,11 @@
 
 <img src="docs/images/brand/logo.png" alt="Pi Better Harness logo" width="128" height="128" />
 
-`pi-better-harness` is a Pi extension bundle for an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, goal tracking, and structured plans.
+`pi-better-harness` combines an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, Goal continuation, and optional Outcome & Todo.
 
 ## Quick Answer
 
-Use Pi Better Harness when a Pi session needs to keep moving while related work runs elsewhere. Install every harness extension as a standalone Pi package with `npx pi-better-harness install`, or install only the individual extension you need.
+Use Pi Better Harness when a Pi session needs to keep moving while related work runs elsewhere. Install the component packages and Harness-owned runtime with `npx pi-better-harness install`, or install only an individual component. Outcome & Todo starts **Off**; enable it in `/harness-settings`.
 
 ## Install The Whole Harness
 
@@ -26,7 +26,6 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
-pi install npm:pi-better-plan
 ```
 
 The backward-compatible bundled installation remains available:
@@ -37,7 +36,7 @@ pi install npm:pi-better-harness
 
 ## Minimal Tool Output
 
-With the bundled harness (`pi install npm:pi-better-harness`), use
+With Harness installed through either route, use
 `/tool-output minimal` to keep the conversation readable. Live calls show one
 quiet, indented row with a tool-specific icon and inline arguments; result
 bodies stay hidden. The icon is accent-colored while running, muted when
@@ -65,7 +64,7 @@ adapter changes. An
 incompatible display API leaves ordinary output enabled and reports a warning.
 It does not apply to print/RPC mode or exported transcripts.
 
-The standalone-package installer does not install this bundled extension.
+The installer includes this Harness-owned extension.
 To load it directly from a checkout:
 
 ```sh
@@ -84,8 +83,8 @@ Do not use the bundle when you only need one extension; install that package dir
 - `pi-better-subagents`: detached, sandboxed subagent runs.
 - `pi-better-background-tasks`: durable shell tasks, watchers, logs, and status inspection.
 - `pi-better-ssh`: safe synchronous remote commands over reusable SSH connections.
-- `pi-better-goal`: objective tracking with background-aware continuation.
-- `pi-better-plan`: persistent structured execution plans with explicit progress.
+- `pi-better-goal`: explicit triggers, pause/resume, and background-aware continuation.
+- Harness Outcome & Todo: session context and checklist progress, off until enabled in `/harness-settings`.
 
 `pi-better-read-aloud` lives in this repo but is not published or included in the meta package yet.
 
@@ -120,5 +119,5 @@ pi -e .
 - [Background tasks details](packages/pi-better-background-tasks/docs/usage.md)
 - [SSH details](packages/pi-better-ssh/README.md)
 - [Goal details](packages/pi-better-goal/docs/usage.md)
-- [Plan details](packages/pi-better-plan/README.md)
+- [Harness details](packages/pi-better-harness/README.md)
 - [License](LICENSE)

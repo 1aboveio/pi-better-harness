@@ -17,7 +17,7 @@ import { toolVisibility } from "../packages/pi-better-harness/extensions/minimal
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import goalExtension from "../packages/pi-better-goal/src/index.ts";
-import planExtension from "../packages/pi-better-plan/src/index.ts";
+import taskContextExtension from "../packages/pi-better-harness/extensions/task-context/index.ts";
 import sshExtension from "../packages/pi-better-ssh/src/index.ts";
 
 const sdk = process.env.PI_MINIMAL_OUTPUT_TEST_SDK_DIR
@@ -284,13 +284,28 @@ test("minimal mode suppresses streaming error bodies and inline images without d
   assert.equal(component.imageComponents.length, 1);
 });
 
-test("actual Harness tools retain useful compact calls, hide results, and expand their native renderers", () => {
+test("actual Harness tools retain useful compact calls, hide results, and expand their native renderers", async () => {
   const definitions = new Map();
+  const controls = new Map();
+  const bus = events();
+  bus.on("harness-settings:register", (candidate) => {
+    if (candidate && Array.isArray(candidate.values) && typeof candidate.change === "function") {
+      controls.set(candidate.id, candidate);
+    }
+  });
   const pi = {
-    events: events(), registerTool(definition) { definitions.set(definition.name, definition); },
+    events: bus, registerTool(definition) { definitions.set(definition.name, definition); },
     registerCommand() {}, registerShortcut() {}, on() {},
   };
-  for (const extension of [subagentsExtension, backgroundTasksExtension, goalExtension, planExtension, sshExtension]) extension(pi);
+  for (const extension of [subagentsExtension, backgroundTasksExtension, goalExtension, taskContextExtension, sshExtension]) extension(pi);
+  const ctx = {
+    mode: "print", hasUI: false, cwd: process.cwd(), isIdle: () => true,
+    sessionManager: { getBranch: () => [] },
+    ui: { notify() {}, setWidget() {}, setStatus() {} },
+  };
+  const todoControl = controls.get("outcome-todo");
+  assert.ok(todoControl, "Outcome & Todo owns its native settings control");
+  await todoControl.change("On", ctx);
   const hook = install();
   hook.setEnabled(true);
   const cases = [
@@ -314,8 +329,8 @@ test("actual Harness tools retain useful compact calls, hide results, and expand
     ["goal_resume", { reason: "Continue verification" }, /Continue verification/],
     ["get_background_activity", {}, /Get background activity/],
     ["release_workflow", {}, /Release workflow/],
-    ["update_plan", { plan: [{ step: "Verify checkout", status: "in_progress" }] }, /1 steps/],
-    ["get_plan", {}, /Get plan/],
+    ["update_todo", { todo: [{ step: "Verify checkout", status: "in_progress" }], outcome: { objective: "Ship checkout" } }, /1 steps/],
+    ["get_todo", {}, /Get todo/],
     ["remote_bash", { host: "builder", command: "git status" }, /builder.*git status/],
     ["ssh_profile", { action: "use", host: "builder" }, /use.*builder/],
     ["ssh_mux", { action: "status", host: "builder" }, /status.*builder/],

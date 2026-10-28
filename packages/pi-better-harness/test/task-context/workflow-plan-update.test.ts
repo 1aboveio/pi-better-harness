@@ -6,7 +6,32 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import extension from "../src/index.js";
+import extension from "../../extensions/task-context/index.js";
+
+interface SettingControl {
+  id: string;
+  get(): string;
+  change(value: string, ctx: ExtensionContext): Promise<void>;
+}
+
+// Enabling Outcome & Todo goes through its real settings control, and every
+// write goes to a private agent directory rather than the developer's own.
+const agentDir = mkdtempSync(join(tmpdir(), "task-context-agent-"));
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = agentDir;
+process.on("exit", () => {
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  rmSync(agentDir, { recursive: true, force: true });
+});
+
+function captureSettings(events: EventEmitter): { current(): SettingControl | undefined } {
+  let control: SettingControl | undefined;
+  events.on("harness-settings:register", (candidate: SettingControl) => {
+    if (candidate?.id === "outcome-todo") control = candidate;
+  });
+  return { current: () => control };
+}
 
 interface Harness {
   cwd: string;
@@ -61,8 +86,10 @@ async function harness(options: { plan?: Record<string, unknown>; indent?: numbe
     sessionManager: { getBranch: () => entries },
     ui: { setStatus() {}, setWidget(_name: string, factory: unknown) { widgetFactory = factory; }, notify() {} },
   } as unknown as ExtensionContext;
+  const events = new EventEmitter();
+  const settings = captureSettings(events);
   const pi = {
-    events: new EventEmitter(),
+    events,
     appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
     registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
     registerCommand() {},
@@ -70,6 +97,7 @@ async function harness(options: { plan?: Record<string, unknown>; indent?: numbe
   } as unknown as ExtensionAPI;
   extension(pi);
   await handlers.get("session_start")?.({}, ctx);
+  await settings.current()!.change("On", ctx);
   return {
     cwd, runDir, path, entries, tools, ctx,
     widget: () => widgetFactory({ requestRender() {} }, { fg: (_c: string, v: string) => v }).render(160).join("\n"),
@@ -79,7 +107,7 @@ async function harness(options: { plan?: Record<string, unknown>; indent?: numbe
         : { version: 1, kind: "clear" } });
       pi.events.emit("pi-better-workflow:changed", name ? { name } : null);
     },
-    update: (params) => tools.get("update_plan")!.execute("update", params, undefined, undefined, ctx),
+    update: (params) => tools.get("update_todo")!.execute("update", params, undefined, undefined, ctx),
     plan: () => JSON.parse(readFileSync(path, "utf8")),
     cleanup: () => rmSync(cwd, { recursive: true, force: true }),
   };
@@ -93,7 +121,7 @@ async function boundHarness(options: Parameters<typeof harness>[0] = {}): Promis
   return h;
 }
 
-test("update_plan binds and reloads workflow checkpoints without rewriting them", async () => {
+test("update_todo binds and reloads workflow checkpoints without rewriting them", async () => {
   const h = await harness();
   try {
     h.own("rush-issues");
@@ -117,7 +145,7 @@ test("update_plan binds and reloads workflow checkpoints without rewriting them"
   }
 });
 
-test("update_plan can bind and save a transition in one call, without binding a rejected transition", async () => {
+test("update_todo can bind and save a transition in one call, without binding a rejected transition", async () => {
   const h = await harness();
   try {
     h.own("resolve-issues");
@@ -199,7 +227,7 @@ test("one workflow update saves every row change as one revision with a paired p
     assert.match(result.content[0].text, /Saved rush-issues rev 13 \(unit-validated\): #1201, #1202, C1, combine, run; decision d-2/);
     assert.match(h.widget(), /rush-issues · rev 13/, "the widget refreshes from the saved plan");
     assert.match(h.widget(), /✓\s+#1201\s+Fix queue stall/);
-    const got = await h.tools.get("get_plan")!.execute("get", {}, undefined, undefined, h.ctx);
+    const got = await h.tools.get("get_todo")!.execute("get", {}, undefined, undefined, h.ctx);
     assert.equal((got.details as any).plan.planRevision, 13);
     assert.deepEqual(readdirSync(h.runDir).filter((name) => name.endsWith(".tmp")), [], "no temp file is left behind");
 
@@ -438,16 +466,16 @@ test(`${owner} updates require a matching binding and leave generic plans unaffe
     const original = readFileSync(h.path, "utf8");
     const change = { workflow: { event: "x", changes: [{ id: "1201", set: { status: "succeeded" } }] } };
     await assert.rejects(h.update(change), /No workflow owns the task plan; send plan instead of workflow/);
-    await assert.rejects(h.update({}), /plan is required/);
-    const generic = await h.update({ plan: [{ step: "Generic", status: "in_progress" }] });
+    await assert.rejects(h.update({}), /Send outcome, todo, or workflow/);
+    const generic = await h.update({ todo: [{ step: "Generic", status: "in_progress" }] });
     assert.equal((generic.details as any).plan.steps[0].step, "Generic");
 
     await assert.rejects(h.update({ workflow: { path: h.path, revision: 12 } }), /No workflow owns/);
     h.own(owner);
     await assert.rejects(h.update(change), new RegExp(`No ${owner} plan is bound; send workflow.path`));
     await h.update({ workflow: { path: h.path, revision: 12 } });
-    await assert.rejects(h.update({ plan: [{ step: "Wrong", status: "pending" }] }), /Send workflow instead of plan/);
-    await assert.rejects(h.update({ ...change, plan: [{ step: "Both", status: "pending" }] }), /either plan or workflow, not both/);
+    await assert.rejects(h.update({ todo: [{ step: "Wrong", status: "pending" }] }), /Send workflow instead of todo/);
+    await assert.rejects(h.update({ ...change, todo: [{ step: "Both", status: "pending" }] }), /either todo or workflow, not both/);
     assert.equal(readFileSync(h.path, "utf8"), original);
     await h.update(change);
     assert.equal(h.plan().planRevision, 13);
@@ -460,14 +488,14 @@ test(`${owner} updates require a matching binding and leave generic plans unaffe
     } });
     assert.equal(h.widget(), "", "persisted ownership hides the previous owner's cached view even without an event");
     await assert.rejects(h.update(change), /No different-workflow plan is bound/);
-    const other = await h.tools.get("get_plan")!.execute("other", {}, undefined, undefined, h.ctx);
+    const other = await h.tools.get("get_todo")!.execute("other", {}, undefined, undefined, h.ctx);
     assert.equal((other.details as any).hasPlan, false);
     assert.equal(h.widget(), "", "reading the unmatched plan cannot revive the old widget");
     assert.equal(h.plan().planRevision, 13);
 
     h.own(null);
     await assert.rejects(h.update(change), /No workflow owns/, "releasing ownership stops workflow writes");
-    const restored = await h.tools.get("get_plan")!.execute("get", {}, undefined, undefined, h.ctx);
+    const restored = await h.tools.get("get_todo")!.execute("get", {}, undefined, undefined, h.ctx);
     assert.match((restored.content[0] as { text: string }).text, /Generic/, "the generic checklist comes back unchanged");
     assert.equal(h.plan().planRevision, 13);
   } finally {
