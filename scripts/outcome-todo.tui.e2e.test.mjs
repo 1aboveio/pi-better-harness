@@ -16,15 +16,32 @@ const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 
 // @level e2e
 // This starts the actual settings hub and task-context extension. Only the model is synthetic.
-test("Outcome & Todo is opt-in, navigable and preserved across native settings changes", { skip }, () => {
+for (const legacyFirst of [true, false]) {
+test(`Outcome & Todo masks legacy Plan loaded ${legacyFirst ? "before" : "after"} Harness and preserves native settings`, { skip }, () => {
   const dir = mkdtempSync(join(tmpdir(), "outcome-todo-tui-"));
   const agent = join(dir, "agent");
   const fixture = join(dir, "fixture.mjs");
   const ready = join(dir, "ready");
   const probe = join(dir, "tools.json");
   const callsPath = join(dir, "calls.jsonl");
-  const socket = `outcome-todo-${process.pid}`;
+  const legacy = join(dir, "legacy-plan");
+  const legacyEffects = join(dir, "legacy-effects.jsonl");
+  const socket = `outcome-todo-${process.pid}-${legacyFirst}`;
   mkdirSync(agent);
+  mkdirSync(legacy);
+  writeFileSync(join(legacy, "package.json"), JSON.stringify({ name: "pi-better-plan", version: "0.9.1", type: "module", pi: { extensions: ["index.ts"] } }));
+  writeFileSync(join(legacy, "index.ts"), `import { appendFileSync } from 'node:fs';
+import { Type } from ${JSON.stringify(import.meta.resolve("typebox"))};
+export default function(pi) {
+  const record = effect => appendFileSync(${JSON.stringify(legacyEffects)}, JSON.stringify(effect)+'\\n');
+  record('factory');
+  const stop = pi.events.on('legacy-plan:probe', () => record('listener'));
+  for (const name of ['update_plan', 'get_plan']) pi.registerTool({name,label:name,description:'Legacy Plan',parameters:Type.Object({}),execute:async()=>{record('tool');return {content:[{type:'text',text:'legacy'}]};}});
+  pi.registerCommand('plan',{description:'Legacy Plan',handler:async()=>record('command')});
+  pi.on('session_start',(_event,ctx)=>{record('startup');ctx.ui.setWidget('pi-better-plan',['LEGACY_PLAN_WIDGET']);});
+  pi.on('before_agent_start',()=>{record('prompt');return {systemPrompt:'LEGACY_PLAN_PROMPT'};});
+  pi.on('session_shutdown',(_event,ctx)=>{stop();record('shutdown');ctx.ui.setWidget('pi-better-plan',undefined);});
+}`);
   writeFileSync(join(agent, "settings.json"), JSON.stringify({ tuiMode: "fullscreen", packages: [], quietStartup: true }));
   const todo = Array.from({ length: 9 }, (_, i) => ({
     id: `step_${i + 1}`,
@@ -36,7 +53,7 @@ test("Outcome & Todo is opt-in, navigable and preserved across native settings c
 import { createAssistantMessageEventStream } from ${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai"))};
 function streamSimple(model, context) {
   const last = context.messages.findLast(message => message.role === 'toolResult' || (message.role === 'user' && /SEED_OUTCOME|OFF_PROBE/.test(JSON.stringify(message))));
-  appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({tools: context.tools?.map(t => t.name), messages: context.messages})+'\\n');
+  appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({tools: context.tools?.map(t => t.name), systemPrompt:context.systemPrompt, messages: context.messages})+'\\n');
   const seed = last?.role === 'user' && JSON.stringify(last).includes('SEED_OUTCOME_TODO');
   const outcomeOnly = last?.role === 'user' && JSON.stringify(last).includes('SEED_OUTCOME_ONLY');
   const message = {role:'assistant',api:model.api,provider:model.provider,model:model.id,
@@ -52,7 +69,7 @@ export default function(pi){
   pi.registerProvider('outcome-todo-test',{api:'outcome-todo-test-api',apiKey:'fake',baseUrl:'http://localhost:0',streamSimple,
     models:[{id:'local',name:'Local test',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:4096}]});
   pi.on('session_start',async(_event,ctx)=>{await pi.setModel(ctx.modelRegistry.find('outcome-todo-test','local'));writeFileSync(${JSON.stringify(ready)},'ready');});
-  pi.registerCommand('probe-todo-tools',{description:'Record active tools without starting a turn',handler:async()=>{writeFileSync(${JSON.stringify(probe)},JSON.stringify(pi.getActiveTools()));}});
+  pi.registerCommand('probe-todo-tools',{description:'Record active tools without starting a turn',handler:async()=>{pi.events.emit('legacy-plan:probe',{});writeFileSync(${JSON.stringify(probe)},JSON.stringify({active:pi.getActiveTools(),all:pi.getAllTools().map(t=>t.name),commands:pi.getCommands().map(c=>c.name)}));}});
 }`);
   const tmux = (...args) => execFileSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
   const screen = () => tmux("capture-pane", "-t", "test", "-p");
@@ -74,7 +91,10 @@ export default function(pi){
     rmSync(probe, { force: true });
     command("/probe-todo-tools");
     wait(() => existsSync(probe));
-    return JSON.parse(readFileSync(probe, "utf8"));
+    const result = JSON.parse(readFileSync(probe, "utf8"));
+    assert.ok(!result.all.some(name => ["update_plan", "get_plan"].includes(name)), "legacy tools must be unregistered, not just inactive");
+    assert.ok(!result.commands.includes("plan"), "legacy /plan must be absent");
+    return result.active;
   };
   const setEnabled = enabled => {
     command("/harness-settings");
@@ -88,19 +108,23 @@ export default function(pi){
   };
   try {
     assert.ok(existsSync(runtime), `Outcome & Todo runtime is missing: ${runtime}`);
+    const ordered = legacyFirst ? [join(legacy, "index.ts"), runtime] : [runtime, join(legacy, "index.ts")];
     const launch = [`cd ${quote(dir)} && exec env`, `PI_CODING_AGENT_DIR=${quote(agent)}`, "PI_OFFLINE=1", quote(cli),
-      "--approve --no-skills --no-context-files", "-e", quote(settings), "-e", quote(runtime), "-e", quote(fixture)].join(" ");
+      "--approve --no-skills --no-context-files", "-e", quote(settings), ...ordered.flatMap(path => ["-e", quote(path)]), "-e", quote(fixture)].join(" ");
     tmux("new-session", "-d", "-s", "test", "-x", "80", "-y", "40", launch);
     tmux("set-option", "-w", "-t", "test", "remain-on-exit", "on");
     wait(() => existsSync(ready));
     assert.ok(!activeTools().some(name => ["update_todo", "get_todo"].includes(name)), "fresh default must not expose todo tools");
+    assert.deepEqual(readFileSync(legacyEffects, "utf8").trim().split("\n").map(JSON.parse), ["factory", "shutdown"], "legacy factory listeners must be cleaned up before startup");
+    assert.doesNotMatch(screen(), /LEGACY_PLAN_WIDGET/);
     assert.doesNotMatch(screen(), /^\s*[▸▾]?\s*todo\s+\d+\/\d+/im);
     command("OFF_PROBE");
     wait(frame => frame.includes("Probe complete"));
     assert.equal(calls().length, 1);
     assert.ok(!calls()[0].tools?.some(name => ["update_todo", "get_todo"].includes(name)), "disabled tools must not be sent to the provider");
     setEnabled(true);
-    assert.ok(["update_todo", "get_todo"].every(name => activeTools().includes(name)));
+    const enabledTools = activeTools();
+    assert.ok(["update_todo", "get_todo"].every(name => enabledTools.includes(name)));
     command("SEED_OUTCOME_ONLY");
     wait(frame => frame.includes("Seed complete") && calls().length === 3);
     assert.equal(calls()[2].messages.findLast(message => message.role === "toolResult")?.isError, false, "an outcome alone must be accepted without a checklist");
@@ -130,10 +154,20 @@ export default function(pi){
     assert.doesNotMatch(screen(), /^\s*[▸▾]?\s*todo\s+\d+\/\d+/im);
     setEnabled(true);
     wait(frame => /todo\s+0\/9 complete/i.test(frame) && frame.includes("Journey task 1"));
-    assert.ok(["update_todo", "get_todo"].every(name => activeTools().includes(name)));
+    const restoredTools = activeTools();
+    assert.ok(["update_todo", "get_todo"].every(name => restoredTools.includes(name)));
     assert.equal(calls().length, 5, "settings, navigation and toggles must not start agent turns");
+    assert.ok(calls().every(call => !String(call.systemPrompt).includes("LEGACY_PLAN_PROMPT")), "legacy prompt hooks must never run");
+    rmSync(ready, { force: true });
+    command("/reload");
+    wait(() => existsSync(ready));
+    wait(frame => frame.includes("Reloaded keybindings") && /todo\s+0\/9 complete/i.test(frame));
+    const reloadedTools = activeTools();
+    assert.ok(["update_todo", "get_todo"].every(name => reloadedTools.includes(name)), "reload must retain the enabled Todo and its saved history");
+    assert.deepEqual(readFileSync(legacyEffects, "utf8").trim().split("\n").map(JSON.parse), ["factory", "shutdown", "factory", "shutdown"], "reload must mask Plan again without leaking listeners");
   } finally {
     spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
+}

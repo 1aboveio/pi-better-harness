@@ -31,6 +31,14 @@ The installer keeps component identities, loads only Harness-owned extensions fr
 its bundle, and removes a retired Plan registration in the selected scope.
 Alternatively, load the complete bundle with `pi install npm:pi-better-harness`.
 
+Normal bundle installs and updates mask a separately installed `pi-better-plan`
+whenever Harness is loaded, even with Outcome & Todo off. Its tools, `/plan`,
+widget, and prompt hooks are not registered with the session. Both load orders
+are covered; its factory listeners are cleaned up before Todo starts. The old
+registration and cached files can remain, but settings and saved histories are
+untouched. Removing or excluding Harness allows the standalone package to load
+again. The explicit installer removes the selected registration instead.
+
 ## Outcome & Todo
 
 In `/harness-settings`, **Outcome & Todo** defaults to **Off**. Enabling it exposes

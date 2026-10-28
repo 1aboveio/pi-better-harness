@@ -68,6 +68,13 @@ The single-bundle installation remains available:
 pi install npm:pi-better-harness
 ```
 
+After a normal bundle install or `pi update`, Harness masks any separately loaded
+`pi-better-plan` package before Pi registers its tools, `/plan` command, widgets,
+or prompt hooks. This applies in either load order, including when Outcome & Todo
+is off. The old registration and cached files may remain, but are inactive while
+Harness is loaded. Settings and session history are not rewritten. The explicit
+installer above removes the old registration in its selected scope instead.
+
 ## Ordinary Startup
 
 You keep launching Pi the way you always have:

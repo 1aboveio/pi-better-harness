@@ -90,6 +90,26 @@ of cycles. Harness consumes the public event contract and remains optional.
   journey are owned by the Harness workstream. Goal's contract is limited to the
   event above and the prompt-suppression rules recorded here.
 
+## Legacy Package Retirement
+
+The explicit installer removes `pi-better-plan` registrations in its selected
+scope. Ordinary `pi install` and `pi update` do not run that installer, so the
+Harness runtime also masks separately loaded legacy Plan extensions.
+
+The adapter filters the public `DefaultResourceLoader.getExtensions()` result
+after factories run and before Pi constructs its extension runner. A unique
+Harness tool-schema identity scopes the filter to that loader result. The
+legacy match uses the real entry file's nearest package manifest, not a tool name.
+It returns a filtered copy without changing the loader's cached result or user
+settings. No private extension-runner state is changed.
+
+The retired record's shutdown handlers run with the real session context before
+Harness restores its widget, releasing its factory listeners and timers. The
+mask works in either load order, on reload, and while Outcome & Todo is off.
+Without Harness, the old package can load normally. Missing loader APIs or an
+unexpected result shape produce a compatibility warning instead of an unsafe
+mutation. No package files or session histories are deleted or rewritten.
+
 ## Verification
 
 Focused Goal tests drive the real extension with an `EventEmitter` and the

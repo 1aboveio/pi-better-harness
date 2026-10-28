@@ -17,6 +17,7 @@ import {
 } from "./plan-state.js";
 import { createFullPlanComponent, renderCompactPlan } from "./plan-render.js";
 import { createPlanWidget } from "./plan-widget.js";
+import { installLegacyPlanMask, type LegacyPlanMask } from "./legacy-plan-mask.js";
 import { COMPACT_PLAN_ROWS } from "./plan-presentation.js";
 import {
   createRushPlanComponent, readRushPlan, renderRushPlan, workflowBinding,
@@ -532,12 +533,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     },
   });
 
+  const getTodoParameters = Type.Object({});
   pi.registerTool({
     name: "get_todo",
     label: "Get Todo",
     description: "Inspect the accepted outcome, Todo progress, and any bound workflow task plan.",
     promptSnippet: "Inspect the current outcome and Todo",
-    parameters: Type.Object({}),
+    parameters: getTodoParameters,
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       if (!enabled) throw new Error("Outcome & Todo is off. Enable it in /harness-settings.");
       const owner = workflowPlanOwner(ctx);
@@ -636,13 +638,18 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       if (status) saveOutcome({ ...outcome, status });
     }
   });
-  pi.on("session_start", async (_event, ctx) => {
+  let legacyPlanMask: LegacyPlanMask | undefined;
+  const onSessionStart = async (_event: unknown, ctx: ExtensionContext): Promise<void> => {
+    // Retire a separately installed pi-better-plan before installing our Todo widget.
+    await legacyPlanMask?.cleanup(ctx);
     try { enabled = readEnabled(readHarnessSetting("outcomeTodo")); } catch (error) { enabled = false; if (ctx.hasUI) ctx.ui.notify(String(error), "warning"); }
     syncTools();
     if (enabled) installWidget(ctx);
     restore(ctx);
     registerSettings();
-  });
+  };
+  legacyPlanMask = installLegacyPlanMask(getTodoParameters);
+  pi.on("session_start", onSessionStart);
   pi.on("session_tree", async (_event, ctx) => {
     restore(ctx);
   });
@@ -666,6 +673,8 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);
       ctx.ui.setWidget(EXTENSION_NAME, undefined);
     } catch { /* best-effort cleanup */ }
+    legacyPlanMask?.dispose();
+    legacyPlanMask = undefined;
   });
 }
 
