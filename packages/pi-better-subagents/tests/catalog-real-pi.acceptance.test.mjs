@@ -162,7 +162,7 @@ describe("catalog real Pi acceptance", { concurrency: false }, () => {
             };
             writeReport(report);
             const listText = report.phases.commands.list.join("\n");
-            for (const id of ["role.researcher", "role.explorer", "role.product-manager", "role.developer", "role.reviewer", "role.architect"]) {
+            for (const id of ["role.researcher", "role.explorer", "role.product-manager", "role.developer", "role.reviewer", "role.architect", "role.writer"]) {
                 assert.match(listText, new RegExp(id));
             }
             assert.match(report.phases.commands.create.join("\n"), /Created agent\.acceptance-dev/);
@@ -355,7 +355,7 @@ function staticUnproven() {
         "T04 second-process numeric collision",
         "T05 alias collision suffix",
         "T06 rename does not relabel an old run",
-        "T07 six preferred gpt-6 launches",
+        "T07 bundled preferred gpt-6 launches",
         "T08 model-only override matrix",
         "T11 no usable foreground",
         "T15 unavailable explicit model error",

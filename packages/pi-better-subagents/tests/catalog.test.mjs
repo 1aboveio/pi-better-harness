@@ -464,7 +464,7 @@ Custom.
 });
 
 describe("catalog discovery and inheritance", () => {
-    it("T01 discovers the six bundled roles with approved defaults", () => {
+    it("T01 discovers the bundled roles with approved defaults", () => {
         const ctx = fixture("real");
         try {
             const snapshot = load(ctx);
@@ -524,6 +524,7 @@ describe("catalog discovery and inheritance", () => {
                 ["role.product-manager", /user-visible/, /Architect/, /Developer/],
                 ["role.researcher", /evidence/, /Explorer/, /Developer/],
                 ["role.reviewer", /independent review/, /Developer/, /Product Manager/],
+                ["role.writer", /drafting/, /production code/, /Researcher/],
             ];
             for (const [id, ownership, exclusion, neighbor] of cases) {
                 const definition = roles.get(id).definition;

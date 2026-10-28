@@ -78,6 +78,7 @@ export const APPROVED_ROLE_DEFAULTS = [
     { id: "role.developer", name: "Developer", model: "openai/gpt-6.1-sol", effort: "high", tier: "balanced" },
     { id: "role.reviewer", name: "Reviewer", model: "openai/gpt-6-astra", effort: "medium", tier: "frontier" },
     { id: "role.architect", name: "Architect", model: "openai/gpt-6-astra", effort: "high", tier: "frontier" },
+    { id: "role.writer", name: "Writer", model: "openai/gpt-6.1-terra", effort: "medium", tier: undefined },
 ] as const;
 
 export const DiagnosticCodes = {
