@@ -2,7 +2,7 @@
 import { SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { canonicalizePath, describeSandboxSupport } from "./shared-sandbox-core.ts";
 import { GUARDED_TASK_TOOLS, installTaskTools, TASK_BUILTINS } from "./shared-task-sandbox.ts";
-import { parseTaskPolicy, type TaskPolicy } from "./task-policy.ts";
+import { parseTaskPolicy, RUN_APPLICATION, selectTaskTools, type TaskPolicy } from "./task-policy.ts";
 import { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } from "./permission-policy.ts";
 import { failureDispositionTool, intentBashDefinition } from "./child-incidents.ts";
 import { DISPOSITION_TOOL } from "./incident-model.ts";
@@ -82,8 +82,14 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
             currentCwd = ctx.cwd;
             boundary.register(ctx.cwd);
             const builtins: readonly string[] = policy.applyPatch ? [...TASK_BUILTINS, ...GUARDED_TASK_TOOLS] : TASK_BUILTINS;
-            const selected = policy.tools.filter((name) => builtins.includes(name) &&
-                (name !== "process_list" || policy.permissions.processAccess === "read"));
+            const known = new Set<string>(builtins);
+            // A newer shared task sandbox may install the guarded application adapter
+            // before its name reaches this vendored builtin list. Admission still runs:
+            // assertInstalled verifies the installed schema identity and source.
+            if (!known.has(RUN_APPLICATION) && pi.getAllTools().some((tool) => tool.name === RUN_APPLICATION)) {
+                known.add(RUN_APPLICATION);
+            }
+            const selected = selectTaskTools(policy, [...known]);
             boundary.assertInstalled(selected);
             const inventory = pi.getAllTools();
             const trusted: string[] = [];

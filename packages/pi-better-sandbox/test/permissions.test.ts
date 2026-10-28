@@ -26,6 +26,81 @@ test("fresh permission defaults start all sandbox switches Off with independent 
     assert.equal(defaultSandboxPermissions().main.outsideProject, "read");
 });
 
+test("fresh and legacy profiles keep shell On and no command time limit", () => {
+    const settings = defaultSandboxPermissions();
+    assert.equal(settings.main.shell, true);
+    assert.equal(settings.main.commandTimeoutSeconds, null);
+    assert.equal(settings.subagents.shell, true);
+    assert.equal(settings.background.commandTimeoutSeconds, null);
+    const { shell: _mainShell, commandTimeoutSeconds: _mainTimeout, ...main } = settings.main;
+    const { shell: _subagentShell, commandTimeoutSeconds: _subagentTimeout, ...subagents } = settings.subagents;
+    const decoded = parseSandboxPermissions({ ...settings, main, subagents });
+    assert.equal(decoded.main.shell, true);
+    assert.equal(decoded.main.commandTimeoutSeconds, null);
+    assert.equal(decoded.subagents.shell, true);
+    assert.equal(decoded.subagents.commandTimeoutSeconds, null);
+    decoded.main.shell = false;
+    assert.equal(settings.main.shell, true, "decoding copies instead of aliasing");
+});
+
+test("explicit shell and command time limits are validated and copied", () => {
+    const settings = defaultSandboxPermissions();
+    settings.main.shell = false;
+    settings.main.commandTimeoutSeconds = 600;
+    settings.background.commandTimeoutSeconds = null;
+    assert.deepEqual(parseSandboxPermissions(settings), settings);
+    assert.equal(parseSandboxPermissions({ ...settings, main: { ...settings.main, commandTimeoutSeconds: 2147483 } })
+        .main.commandTimeoutSeconds, 2147483);
+    for (const shell of [null, 0, 1, "yes"] as const) {
+        assert.throws(() => parseSandboxPermissions({ ...settings, main: { ...settings.main, shell } }),
+            /explicit permission values/);
+    }
+    for (const commandTimeoutSeconds of [0, -1, 2147484, Number.POSITIVE_INFINITY, Number.NaN, "60", true] as const) {
+        assert.throws(() => parseSandboxPermissions({
+            ...settings, main: { ...settings.main, commandTimeoutSeconds },
+        }), /explicit permission values/);
+    }
+});
+
+test("shell and command time limit loosening is reported only when access grows", () => {
+    const before = defaultSandboxPermissions();
+    before.main.enabled = true;
+    before.main.shell = false;
+    before.main.commandTimeoutSeconds = 60;
+    const looser = structuredClone(before);
+    looser.main.shell = true;
+    looser.main.commandTimeoutSeconds = 300;
+    assert.deepEqual(describeLoosening(before, looser), [
+        "Main: shell scripts on", "Main: command time limit 60s → 300s",
+    ]);
+    const uncapped = structuredClone(looser);
+    uncapped.main.commandTimeoutSeconds = null;
+    assert.deepEqual(describeLoosening(looser, uncapped), ["Main: command time limit 300s → no limit"]);
+    const tighter = structuredClone(before);
+    tighter.main.shell = false;
+    tighter.main.commandTimeoutSeconds = 30;
+    assert.deepEqual(describeLoosening(before, tighter), [], "adding or lowering a cap tightens");
+    const uncappedTighter = structuredClone(tighter);
+    uncappedTighter.main.commandTimeoutSeconds = null;
+    assert.deepEqual(describeLoosening(tighter, uncappedTighter), ["Main: command time limit 30s → no limit"]);
+});
+
+test("legacy shell and timeout values mean On and no limit for loosening", () => {
+    const legacy = defaultSandboxPermissions();
+    const { shell: _shell, commandTimeoutSeconds: _timeout, ...main } = legacy.main;
+    const { shell: _childShell, commandTimeoutSeconds: _childTimeout, ...subagents } = legacy.subagents;
+    const decoded = parseSandboxPermissions({ ...legacy, main, subagents });
+    const next = structuredClone(decoded);
+    next.main.shell = true;
+    next.main.commandTimeoutSeconds = null;
+    assert.deepEqual(describeLoosening(decoded, next), [], "absent values already mean On and no limit");
+    const narrowed = structuredClone(decoded);
+    narrowed.main.shell = false;
+    narrowed.main.commandTimeoutSeconds = 60;
+    assert.deepEqual(describeLoosening(decoded, narrowed), [], "turning shell Off and adding a cap tighten");
+    assert.deepEqual(describeLoosening(narrowed, decoded), ["Main: shell scripts on", "Main: command time limit 60s → no limit"]);
+});
+
 test("decoding preserves explicitly saved credential restrictions instead of applying new defaults", () => {
     for (const storedCredentials of ["off", "read", "read-write"] as const) {
         const settings = defaultSandboxPermissions();

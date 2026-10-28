@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.33.0] - 2026-10-29
+
+### Added
+
+- Bundle Sandbox 0.14.0, Subagents 0.21.0, and Background Tasks 0.11.0 with independent application, shell, and command time-limit controls.
+- Show direct application commands in the compact transcript.
+
+## [pi-better-sandbox@0.14.0] - 2026-10-29
+
+### Added
+
+- Split command permissions into Run applications and Shell scripts in `/sandbox`, with a separate Command time limit for Main, Subagents, and Background tasks.
+- Add guarded direct application execution without shell parsing. Enforce command time limits even when the agent omits a timeout or requests more time.
+- Refuse incompatible subagent consumers when a launch requires the new execution restrictions.
+
+### Changed
+
+- Preserve shell access and unlimited command time for existing profiles. Keep all fresh sandbox switches Off, session persistence, and Ctrl+S defaults.
+
+## [pi-better-subagents@0.21.0] - 2026-10-29
+
+### Added
+
+- Give application-only confined subagents the guarded `run_application` tool instead of `bash`, while preserving read-only tool selections and exclusions.
+- Snapshot shell permissions and command time limits at launch and enforce them inside the task executor.
+
+## [pi-better-background-tasks@0.11.0] - 2026-10-29
+
+### Added
+
+- Honor Background tasks shell permissions for direct argv launches and refuse shell commands when Shell scripts is Off.
+- Apply immutable command time limits to each spawned command and watch check, including after reload, without limiting the watch's overall lifetime.
+
 ## [pi-better-harness@0.32.1] - 2026-10-27
 
 ### Changed

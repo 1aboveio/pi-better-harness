@@ -116,6 +116,13 @@ export interface BackgroundTaskMeta {
   command?: string;
   argv?: string[];
   shell?: boolean;
+  /**
+   * Per-command cap captured from the Background tasks profile at launch, in
+   * seconds. Absent means the launch had no cap. Persisted so a resumed task
+   * keeps the cap it started under; it bounds one command (each check for a
+   * watch), never a watch's whole lifetime.
+   */
+  commandTimeoutSeconds?: number;
   cwd: string;
   env?: Record<string, string>;
   /**

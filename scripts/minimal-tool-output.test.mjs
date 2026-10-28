@@ -15,6 +15,7 @@ import { installMinimalOutputHook, loadToolPrototype, loadCompactionPrototype, l
 import { toolIdentity } from "../packages/pi-better-harness/extensions/minimal-output/tool-identity.ts";
 import { toolVisibility } from "../packages/pi-better-harness/extensions/minimal-output/tool-visibility.ts";
 import subagentsExtension from "../packages/pi-better-subagents/index.ts";
+import sandboxExtension from "../packages/pi-better-sandbox/index.ts";
 import backgroundTasksExtension from "../packages/pi-better-background-tasks/src/index.ts";
 import goalExtension from "../packages/pi-better-goal/src/index.ts";
 import taskContextExtension from "../packages/pi-better-harness/extensions/task-context/index.ts";
@@ -297,7 +298,7 @@ test("actual Harness tools retain useful compact calls, hide results, and expand
     events: bus, registerTool(definition) { definitions.set(definition.name, definition); },
     registerCommand() {}, registerShortcut() {}, on() {},
   };
-  for (const extension of [subagentsExtension, backgroundTasksExtension, goalExtension, taskContextExtension, sshExtension]) extension(pi);
+  for (const extension of [sandboxExtension, subagentsExtension, backgroundTasksExtension, goalExtension, taskContextExtension, sshExtension]) extension(pi);
   const ctx = {
     mode: "print", hasUI: false, cwd: process.cwd(), isIdle: () => true,
     sessionManager: { getBranch: () => [] },
@@ -317,6 +318,7 @@ test("actual Harness tools retain useful compact calls, hide results, and expand
     ["subagent_list", { status: ["running"], all: true }, /running.*all/],
     ["agents_catalog", { action: "inspect", id: "role.developer" }, /inspect.*role.developer/],
     ["bg_task_spawn", { command: "npm test", name: "unit-tests" }, /unit-tests.*npm test/],
+    ["run_application", { executable: "pnpm", args: ["test", "literal; argument"] }, /pnpm.*test.*literal; argument/],
     ["bg_task_watch", { command: "deploy status", ssh: { user: "ops", host: "builder" } }, /ops@builder.*deploy status/],
     ["bg_task_status", { id: "bg-tests" }, /bg-tests/],
     ["bg_task_log", { id: "bg-tests" }, /bg-tests/],

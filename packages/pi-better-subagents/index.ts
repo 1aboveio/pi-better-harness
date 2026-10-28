@@ -57,11 +57,13 @@ import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { appendExecutionPolicy } from "./shared-execution-policy.ts";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
-import { prepareTaskRuntime } from "./task-policy.ts";
+import { prepareTaskRuntime, applyDirectApplicationLoadout, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.ts";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
 import { TASK_BUILTINS } from "./shared-task-sandbox.ts";
 import { APPLY_PATCH, describeTaskTools, planTaskTools } from "./subagent-tools.ts";
-import { observeSandboxPermissions, resolveSubagentPermissions } from "./permission-policy.ts";
+import {
+    announceExecutionAdapter, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions,
+} from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
 import { join } from "node:path";
 import {
@@ -1559,6 +1561,17 @@ export default function (pi: ExtensionAPI) {
     ensureSubagentProvider();
     registerSubagentsGoalProvider(pi);
     observeSandboxPermissions(pi);
+    // Record admission identities during registration: inventory actions are not
+    // available while extensions load. A later replacement must fail the identity check.
+    const registeredSpawnSchemas = new Map<string, object>();
+    const registerSpawnTool: ExtensionAPI["registerTool"] = (definition) => {
+        registeredSpawnSchemas.set(definition.name, definition.parameters);
+        pi.registerTool(definition);
+    };
+    announceExecutionAdapter(pi, {
+        parametersFor: (name) => registeredSpawnSchemas.get(name),
+        runApplication: (TASK_BUILTINS as readonly string[]).includes(RUN_APPLICATION),
+    });
     let acceptanceResultToolRef: { execute: (toolCallId: string, params: { id: string }) => Promise<unknown> } | undefined;
     function publishAcceptanceHooks(tool?: NonNullable<typeof acceptanceResultToolRef>): void {
         if (process.env.PI_CATALOG_ACCEPTANCE_PROBE !== "1") return;
@@ -1746,6 +1759,16 @@ export default function (pi: ExtensionAPI) {
         if (sandboxEnabled && p.tools === undefined && permissionPlan.permissions?.processAccess === "read") {
             allow = [...new Set([...allow.split(","), "process_list"])].join(",");
         }
+        // Shell Off confines the child to directly launched applications: a requested bash
+        // becomes the guarded run_application builtin. Exclusions stay exclusions (an excluded
+        // run_application leaves bash out rather than restoring it), and a read-only loadout
+        // keeps no command capability at all.
+        const commandSettings = resolveCommandSettings(permissionPlan.permissions);
+        if (sandboxEnabled && !commandSettings.shell) {
+            allow = applyDirectApplicationLoadout(allow.split(",").filter(Boolean), {
+                shell: false, excluded: requestedExcludes,
+            }).tools.join(",");
+        }
         const taskTools = sandboxEnabled ? planTaskTools({
             requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name)),
             settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
@@ -1754,8 +1777,9 @@ export default function (pi: ExtensionAPI) {
             toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
         }) : undefined;
         const resolution = resolveExtensions({
-            // process_list is installed by the mandatory task guard, not an SDK builtin or extension mapping.
-            tools: sandboxEnabled ? allow.split(",").filter((name) => name !== "process_list" && (TASK_BUILTINS as readonly string[]).includes(name)).join(",") : allow,
+            // Only SDK builtins reach `--tools` and extension resolution: process_list and run_application
+            // are task builtins that the mandatory guard installs and activates itself.
+            tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
             model, clean, allowNested: sandboxEnabled ? false : p.allow_nested, config: cfg,
         });
         const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
@@ -1803,7 +1827,8 @@ export default function (pi: ExtensionAPI) {
         }
         const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
             root: requestedSandboxDir, controlDir: join(runDir(id), "control"), piBin,
-            tools: selectedTools, permissions: permissionPlan.permissions,
+            tools: selectedTools,
+            permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
             applyPatch: taskTools?.applyPatch === true,
             extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => tool) ?? [],
             extensionPaths: extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]!] : []),
@@ -1999,10 +2024,10 @@ export default function (pi: ExtensionAPI) {
         },
     };
     acceptanceSpawnToolRef = acceptanceSpawnTool;
-    pi.registerTool(acceptanceSpawnTool);
+    registerSpawnTool(acceptanceSpawnTool);
 
     // ---- subagent_spawn_batch -------------------------------------------
-    pi.registerTool({
+    registerSpawnTool({
         name: "subagent_spawn_batch",
         label: "Spawn Subagent Batch",
         description:

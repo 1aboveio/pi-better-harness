@@ -32,13 +32,21 @@ const rows = [
     { label: "Project files", key: "projectFiles" },
     { label: "Outside project", key: "outsideProject" },
     { label: "Stored credentials", key: "storedCredentials" },
-    { label: "Run commands & applications", key: "commands" },
+    { label: "Run applications", key: "commands" },
+    { label: "Shell scripts", key: "shell" },
+    { label: "Command time limit", key: "commandTimeoutSeconds" },
     { label: "Network access", key: "network" },
     { label: "Process access", key: "processAccess" },
 ] as const;
 const fileValues: readonly FileAccess[] = ["off", "read", "write", "read-write"];
 const credentialValues: readonly CredentialAccess[] = ["off", "read", "read-write"];
 const FILE_LABELS: Record<FileAccess, string> = { off: "Off", read: "Read", write: "Write", "read-write": "Write & delete" };
+const TIMEOUT_VALUES = [60, 300, 600, 1800, null] as const;
+
+function timeoutLabel(seconds: number | null | undefined): string {
+    if (seconds == null) return "No limit";
+    return seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds}s`;
+}
 
 /** The context line for the highlighted cell, or undefined. */
 function cellHint(key: string, profile: PermissionProfile | undefined, column?: string): string | undefined {
@@ -50,6 +58,9 @@ function cellHint(key: string, profile: PermissionProfile | undefined, column?: 
             : "Always deletable: temp, hidden ~/.directories and worktree folders (.worktrees/, *-worktrees/).";
     }
     if (key === "storedCredentials") return "Known credential files follow this row independently of Outside project.";
+    if (key === "commands") return "Run applications is the master switch for command execution, including Shell scripts.";
+    if (key === "shell") return "Shell scripts run inside the sandbox. Requires Run applications.";
+    if (key === "commandTimeoutSeconds") return "Commands stop after this long. No limit lets them run until they finish.";
     if (key === "processAccess") return column === "background"
         ? "Task status diagnostics: requires Read here and in Main. No process control; shell access is unchanged."
         : "process_list: current-user PIDs and names. Main also gates task diagnostics. No process control.";
@@ -160,8 +171,16 @@ export function createPermissionsPage(
         const key = rows[row]!.key;
         const profile = columns[column]!;
         if (key !== "enabled" && !settings[profile].enabled) return;
+        // Shell scripts and the time limit only apply while Run applications is On.
+        if ((key === "shell" || key === "commandTimeoutSeconds") && !settings[profile].commands) return;
         if (key === "enabled" || key === "commands" || key === "network") {
             next[profile][key] = !next[profile][key];
+        } else if (key === "shell") {
+            next[profile].shell = next[profile].shell === false;
+        } else if (key === "commandTimeoutSeconds") {
+            const current = next[profile].commandTimeoutSeconds ?? null;
+            const index = TIMEOUT_VALUES.findIndex((value) => value === current);
+            next[profile].commandTimeoutSeconds = TIMEOUT_VALUES[(index + 1) % TIMEOUT_VALUES.length]!;
         } else if (key === "processAccess") {
             next[profile][key] = next[profile][key] === "off" ? "read" : "off";
         } else if (key === "storedCredentials") {
@@ -283,11 +302,20 @@ export function createPermissionsPage(
                 const entry = rows[i]!;
                 const value = (profile: PermissionProfile): string => {
                     if (entry.key !== "enabled" && !profile.enabled) return "-";
-                    const current = profile[entry.key];
-                    return typeof current === "boolean" ? (current ? "On" : "Off") : FILE_LABELS[current];
+                    if (entry.key === "enabled") return profile.enabled ? "On" : "Off";
+                    if (entry.key === "commands") return profile.commands ? "On" : "Off";
+                    if (entry.key === "shell") return !profile.commands ? "-" : profile.shell === false ? "Off" : "On";
+                    if (entry.key === "commandTimeoutSeconds") {
+                        if (!profile.commands) return "-";
+                        return timeoutLabel(profile.commandTimeoutSeconds);
+                    }
+                    if (entry.key === "network") return profile.network ? "On" : "Off";
+                    if (entry.key === "processAccess") return profile.processAccess === "read" ? "Read" : "Off";
+                    return FILE_LABELS[profile[entry.key]];
                 };
                 output.push(line(entry.label, columns.map((profile) => settings ? value(settings[profile]) : "-"),
-                    row === i, columns.map((profile) => !settings || (i > 0 && !settings[profile].enabled))));
+                    row === i, columns.map((profile) => !settings || (i > 0 && !settings[profile].enabled) ||
+                        ((entry.key === "shell" || entry.key === "commandTimeoutSeconds") && !settings[profile].commands))));
                 if (i === 0) output.push("");
             }
             // Subagents · Tools: which extension tools a confined subagent may use.

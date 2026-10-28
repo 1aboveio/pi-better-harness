@@ -93,6 +93,7 @@ const HOOK = Symbol.for("pi-better-harness.minimal-output-hook");
 const emptyResult = () => ({ render: () => [] as string[], invalidate() {} });
 const TOOL_ICONS: Record<string, string> = {
   bash: "\u2318",
+  run_application: "\u2318",
   read: "\u25a4",
   write: "\u2710",
   edit: "\u270e",
@@ -123,6 +124,8 @@ function harnessCallDetail(name: string, input: unknown): string | undefined {
     return text(ssh.host) ? `${text(ssh.user) ? `${text(ssh.user)}@` : ""}${text(ssh.host)}` : "";
   };
   switch (name) {
+    case "run_application":
+      return joinDetails(args.executable, Array.isArray(args.args) ? args.args.map((arg) => JSON.stringify(arg)).join(" ") : undefined);
     case "subagent_spawn":
       return joinDetails(args.agent ?? args.role, args.alias ?? args.name, args.prompt);
     case "subagent_spawn_batch":

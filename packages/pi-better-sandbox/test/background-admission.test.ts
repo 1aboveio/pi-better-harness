@@ -212,6 +212,30 @@ test("schema and canonical source must belong to the current registration, inclu
     events.clear();
 });
 
+test("restricted Background execution requires controls support on the current schema", () => {
+    const events = createEventBus();
+    const tools = new Map<string, ToolDefinition>();
+    const oldParameters = { type: "object", properties: {} } as ToolDefinition["parameters"];
+    tools.set("bg_task_spawn", { name: "bg_task_spawn", label: "Old spawn", description: "Old spawn",
+        parameters: oldParameters, async execute() { throw new Error("not executed"); } });
+    const pi = { events, on() {}, registerTool(tool: ToolDefinition) { tools.set(tool.name, tool); },
+        getAllTools: () => [...tools.values()].map((tool) => ({ name: tool.name, description: tool.description,
+            parameters: tool.parameters, sourceInfo: { path: backgroundEntry } })) } as unknown as ExtensionAPI;
+    const legacy = events.on(BACKGROUND_ADAPTER_REQUEST, (input) => (input as { reply(value: unknown): void }).reply({
+        version: 1, parameters: oldParameters, admission: "local-launch",
+    }));
+    assert.equal(createBackgroundAdmission(pi)("bg_task_spawn", {}), "local-launch");
+    const restricted = createBackgroundAdmission(pi, () => true);
+    assert.equal(restricted("bg_task_spawn", {}), undefined, "an old adapter cannot ignore a shell/time restriction");
+    legacy();
+    registerTools(pi);
+    assert.equal(restricted("bg_task_spawn", {}), "local-launch", "the new adapter proves controls support with its exact schema");
+    const current = tools.get("bg_task_spawn")!;
+    tools.set("bg_task_spawn", { ...current, parameters: { ...current.parameters } });
+    assert.equal(restricted("bg_task_spawn", {}), undefined);
+    events.clear();
+});
+
 test("all handlers block replaced/spoofed registrations before their bodies execute", { skip: backendSkip }, async () => {
     const h = await harness(settings(true, true));
     try {

@@ -27,7 +27,16 @@ is installed, local tasks follow the independent **Background tasks** column in
 `/sandbox`. Its Sandbox switch starts Off for fresh settings. When enabled,
 commands run under macOS Seatbelt or Linux Bubblewrap with that column's project,
 outside-project, credential-file, command and network permissions. Protected
-paths remain denied.
+paths remain denied. Run applications is the master execution switch. With it
+On and Shell scripts Off, direct launches using `shell:false` and `argv` are
+allowed; shell commands and explicit shell-interpreter launches, including
+aliases, are refused. Applications may still invoke scripts or shells internally.
+
+Command time limit caps each actual process or watch check, not the whole watch
+duration. A smaller requested timeout wins; omitting or increasing it cannot
+bypass the policy cap. Cleanup covers ordinary process-group descendants, not
+deliberately daemonized processes. Shell scripts defaults On and the limit defaults
+to No limit, including for legacy settings.
 
 The policy is captured once at launch. Later settings changes affect only new
 tasks. An existing process, including a watcher resumed in a later Pi session,
@@ -136,7 +145,9 @@ are excluded from task progress.
 that column at launch; subsequent changes do not alter an existing process or
 its future watch polls. Older saved settings copy Main into Background tasks
 once so the migration preserves behavior. Older sandbox publishers without the
-Background field retain their Main-policy behavior.
+Background field retain their Main-policy behavior. A restrictive application
+policy rejects an incompatible older background consumer instead of silently
+dropping the restriction.
 
 Launch and status show `confined`, `unconfined`, or `unknown`, plus the backend
 when known and the policy source. `verbose:true` includes the persisted policy

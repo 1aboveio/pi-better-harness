@@ -16,7 +16,7 @@ function selectedRow(text) {
 }
 
 function permissionRows(text) {
-    return text.split("\n").filter((line) => /^(?:> |  )(?:Sandbox\s+(?:Off|On)|Project files\s|Outside project\s|Stored credentials\s|Run commands & applications\s|Network access\s|Process access\s|  (?:[>v] )?\[[ x-]\]|      \[[ x]\])/.test(line))
+    return text.split("\n").filter((line) => /^(?:> |  )(?:Sandbox\s+(?:Off|On)|Project files\s|Outside project\s|Stored credentials\s|Run applications\s|Shell scripts\s|Command time limit\s|Network access\s|Process access\s|  (?:[>v] )?\[[ x-]\]|      \[[ x]\])/.test(line))
         .map((line) => line.slice(2).trimEnd());
 }
 
@@ -160,6 +160,9 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         assert.match(focused, /\x1b\[(?:\d+;)*7(?:;\d+)*m/, "active cell has inverse styling");
         assert.match(text, /Project files\s+-\s+-\s+-/);
         assert.match(text, /Stored credentials\s+-\s+-\s+-/);
+        assert.match(text, /Run applications\s+-\s+-\s+-/);
+        assert.match(text, /Shell scripts\s+-\s+-\s+-/);
+        assert.match(text, /Command time limit\s+-\s+-\s+-/);
         key("Right"); key("Space"); wait(/Sandbox\s+Off\s+On\s+Off/);
         key("Left");
         wait(/Project files\s+-\s+Write & delete/);
@@ -176,14 +179,14 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         wait(/rename-based saves fail outside the project/);
         key("Space");
         wait(/Outside project\s+-\s+Write & delete/);
-        for (let i = 0; i < 4; i++) key("Down");
+        for (let i = 0; i < 6; i++) key("Down");
         wait(/Process access\s+-\s+Read/);
         key("Space"); wait(/Process access\s+-\s+Off/);
         key("Space"); wait(/Process access\s+-\s+Read/);
-        for (let i = 0; i < 4; i++) key("Up");
+        for (let i = 0; i < 6; i++) key("Up");
         key("Right"); key("Up"); key("Up");
         key("Space"); wait(/Sandbox\s+Off\s+On\s+On/);
-        for (let i = 0; i < 5; i++) key("Down");
+        for (let i = 0; i < 7; i++) key("Down");
         key("Space"); wait(/Network access\s+-\s+On\s+Off/);
         // The guarded adapter stays a direct row; trusted tools start folded by package.
         wait(/Subagents · Tools[\s\S]*\[x\] apply_patch\s+harness adapter[\s\S]*Trusted \(runs outside the file rules\)[\s\S]*\[x\].*@juicesharp\/rpiv-web-tools\s+2\/2/);
@@ -210,6 +213,8 @@ test("sandbox edits restore before Ctrl+S and only Ctrl+S saves defaults in the 
         assert.equal(saved.permissions.subagents.storedCredentials, "read-write");
         assert.equal(saved.permissions.subagents.processAccess, "read");
         assert.equal(saved.permissions.main.processAccess, "read");
+        assert.equal(saved.permissions.main.shell, true);
+        assert.equal(saved.permissions.main.commandTimeoutSeconds, null);
         assert.equal(saved.permissions.background.enabled, true);
         assert.equal(saved.permissions.background.network, false);
         assert.equal(saved.permissions.background.outsideProject, "read");
