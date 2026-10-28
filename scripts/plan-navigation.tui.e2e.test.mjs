@@ -7,54 +7,64 @@ import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const piBin = process.env.PI_PLAN_TUI_CLI ?? join(repoRoot, "node_modules", ".bin", "pi");
-const extensionPath = join(repoRoot, "packages", "pi-better-plan", "src", "index.ts");
-const fixtures = mkdtempSync(join(tmpdir(), "pi-plan-navigation-"));
-const probePath = join(fixtures, "seed-plan.mjs");
+const piBin = process.env.PI_TODO_TUI_CLI ?? process.env.PI_PLAN_TUI_CLI ?? join(repoRoot, "node_modules", ".bin", "pi");
+const extensionPath = join(repoRoot, "packages", "pi-better-harness", "extensions", "task-context", "index.ts");
+const fixtures = mkdtempSync(join(tmpdir(), "pi-todo-navigation-"));
+const probePath = join(fixtures, "seed-todo.mjs");
 const readyPath = join(fixtures, "ready");
 const seededPath = join(fixtures, "seeded");
-const session = `pi-plan-navigation-${process.pid}`;
+const session = `pi-todo-navigation-${process.pid}`;
+
+// The real runtime is opt-in, so this private fixture enables it explicitly.
+const agentDir = join(fixtures, "agent");
+mkdirSync(agentDir, { recursive: true });
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+  tuiMode: "fullscreen",
+  packages: [],
+  quietStartup: true,
+  piBetterHarness: { outcomeTodo: { version: 1, enabled: true } },
+}));
 
 after(() => {
   spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
   rmSync(fixtures, { recursive: true, force: true });
 });
 
-// @covers plan.passive-widget
+// @covers todo.passive-widget
 // @level e2e
-test("golden path: the plan stays passive and right arrow remains editor input", () => {
-  assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0, "real TUI plan rendering requires tmux");
-  writeFileSync(probePath, seedPlanExtension(readyPath));
+test("golden path: the todo stays passive and right arrow remains editor input", () => {
+  assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0, "real TUI todo rendering requires tmux");
+  writeFileSync(probePath, seedTodoExtension(readyPath));
   startPiSession();
   waitForFile(readyPath);
 
-  sendLiteral("/seed-plan");
+  sendLiteral("/seed-todo");
   sendKey("Enter");
-  const initial = waitForScreen((screen) => screen.includes("plan  1/3 complete"));
-  assertBlankRowBefore(initial, /^plan  1\/3 complete/, "generic plan section");
-  assert.match(initial, /●\s+2\s+Implement plan navigation\s+active/);
-  assert.doesNotMatch(initial, /^› /m, "the plan starts visible but unfocused");
-  assert.doesNotMatch(initial, /→ plan/, "the footer does not advertise plan navigation");
+  const initial = waitForScreen((screen) => /^todo  1\/3 complete/im.test(screen));
+  assertBlankRowBefore(initial, /^todo  1\/3 complete/im, "generic todo section");
+  assert.match(initial, /●\s+2\s+Implement todo navigation\s+active/);
+  assert.doesNotMatch(initial, /^› /m, "the todo starts visible but unfocused");
+  assert.doesNotMatch(initial, /→ (plan|todo)/, "the footer does not advertise todo navigation");
 
   sendKey("Right");
   const unchanged = assertScreenNeverMatches(/^› /m, 500);
-  assert.doesNotMatch(unchanged, /→ plan/);
+  assert.doesNotMatch(unchanged, /→ (plan|todo)/);
   sendLiteral("draft");
   waitForScreen((screen) => screen.includes("draft"));
-  assert.doesNotMatch(captureScreen(), /^› /m, "typing does not focus the plan");
+  assert.doesNotMatch(captureScreen(), /^› /m, "typing does not focus the todo");
   sendKey("C-u");
-  sendLiteral("/plan");
+  sendLiteral("/todo");
   sendKey("Enter");
-  waitForScreen((screen) => /^› ●\s+2\s+Implement plan navigation/m.test(screen));
+  waitForScreen((screen) => /^› ●\s+step_2\s+Implement todo navigation/m.test(screen));
   sendKey("Up");
-  waitForScreen((screen) => /^› ✓\s+1\s+Inspect the navigator/m.test(screen));
+  waitForScreen((screen) => /^› ✓\s+step_1\s+Inspect the navigator/m.test(screen));
   sendKey("Escape");
-  waitForScreen((screen) => screen.includes("plan  1/3 complete") && !/^› /m.test(screen));
+  waitForScreen((screen) => /^todo  1\/3 complete/im.test(screen) && !/^› /m.test(screen));
 });
 
-// @covers plan.workflow-projection
+// @covers todo.workflow-projection
 // @level e2e
-test("golden path: Rush-owned units appear in the real plan widget", () => {
+test("golden path: Rush-owned units appear in the real todo widget", () => {
   assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0);
   const runDir = join(fixtures, ".resolve-issues", "rush", "e2e-run");
   mkdirSync(runDir, { recursive: true });
@@ -67,18 +77,18 @@ test("golden path: Rush-owned units appear in the real plan widget", () => {
     ],
   }));
   rmSync(readyPath, { force: true });
-  writeFileSync(probePath, seedPlanExtension(readyPath));
+  writeFileSync(probePath, seedTodoExtension(readyPath));
   spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
   startPiSession();
   waitForFile(readyPath);
   sendLiteral("/seed-rush");
   sendKey("Enter");
   const widget = waitForScreen((screen) => screen.includes("Reloaded keybindings") && screen.includes("rush-issues · rev 7") && screen.includes("Extract shared core"));
-  assertBlankRowBefore(widget, /^plan  0\/2 complete/, "Rush plan section");
+  assertBlankRowBefore(widget, /^todo  0\/2 complete/i, "Rush todo section");
   assert.match(widget, /●\s+#214\s+Extract shared core\s+active/);
   assert.match(widget, /Add mux support/);
   assert.doesNotMatch(widget, /Old generic step/);
-  sendLiteral("/plan");
+  sendLiteral("/todo");
   sendKey("Enter");
   const full = waitForScreen((screen) => screen.includes("after: #214") && /^› ●\s+#214/m.test(screen));
   assert.match(full, /self-review · in-flight/);
@@ -88,35 +98,35 @@ test("golden path: Rush-owned units appear in the real plan widget", () => {
   waitForScreen((screen) => screen.includes("rush-issues · rev 7") && !/^› /m.test(screen));
 });
 
-// @covers plan.compact-folding
+// @covers todo.compact-folding
 // @level e2e
-test("long plans fold through commands, survive reload, and accept fullscreen mouse clicks", () => {
+test("long todos fold through commands, survive reload, and accept fullscreen mouse clicks", () => {
   assert.equal(spawnSync("tmux", ["-V"], { stdio: "ignore" }).status, 0);
   rmSync(readyPath, { force: true });
-  writeFileSync(probePath, seedPlanExtension(readyPath));
+  writeFileSync(probePath, seedTodoExtension(readyPath));
   spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
   startPiSession();
   waitForFile(readyPath);
-  sendLiteral("/seed-long-plan");
+  sendLiteral("/seed-long-todo");
   sendKey("Enter");
   waitForFile(seededPath);
   let screen = waitForScreen((value) => value.includes("... 4 more steps"));
   assert.doesNotMatch(screen, /Long task 9/);
-  sendLiteral("\x1b[200~/plan expand\x1b[201~");
+  sendLiteral("\x1b[200~/todo expand\x1b[201~");
   sendKey("Enter");
   waitForScreen((value) => /○\s+9\s+Long task 9/.test(value));
   sendLiteral("/reload");
   sendKey("Enter");
   waitForScreen((value) => value.includes("Reloaded") && /○\s+9\s+Long task 9/.test(value));
-  sendLiteral("\x1b[200~/plan collapse\x1b[201~");
+  sendLiteral("\x1b[200~/todo collapse\x1b[201~");
   sendKey("Enter");
   screen = waitForScreen((value) => value.includes("... 4 more steps") && !/○\s+9\s+Long task 9/.test(value));
-  if (process.env.PI_PLAN_TUI_MOUSE === "1") {
+  if (process.env.PI_TODO_TUI_MOUSE === "1" || process.env.PI_PLAN_TUI_MOUSE === "1") {
     const clickHeading = (value) => {
       const rows = value.split("\n");
-      const y = rows.findIndex((line) => /[▸▾] plan\s+0\/9/.test(line));
-      assert.ok(y >= 0, `plan heading missing:\n${value}`);
-      const x = rows[y].indexOf("plan");
+      const y = rows.findIndex((line) => /[▸▾] todo\s+0\/9/i.test(line));
+      assert.ok(y >= 0, `todo heading missing:\n${value}`);
+      const x = rows[y].toLowerCase().indexOf("todo");
       sendLiteral(`\x1b[<0;${x + 1};${y + 1}M\x1b[<0;${x + 1};${y + 1}m`);
     };
     clickHeading(screen);
@@ -134,7 +144,7 @@ function startPiSession() {
     "&& exec env",
     `PI_CODING_AGENT_DIR=${shellQuote(join(fixtures, "agent"))}`,
     "PI_OFFLINE=1",
-    "OPENAI_API_KEY=sk-plan-e2e-placeholder",
+    "OPENAI_API_KEY=sk-todo-e2e-placeholder",
     shellQuote(piBin),
     `-e ${shellQuote(extensionPath)}`,
     `-e ${shellQuote(probePath)}`,
@@ -142,20 +152,20 @@ function startPiSession() {
     "--no-skills",
     "--no-context-files",
     `--session-dir ${shellQuote(join(fixtures, "sessions"))}`,
-    "--name plan-navigation-e2e",
+    "--name todo-navigation-e2e",
     "--model openai/gpt-4o-mini",
   ].join(" ");
   execFileSync("tmux", ["new-session", "-d", "-s", session, "-x", "100", "-y", "32", command]);
 }
 
-function seedPlanExtension(path) {
+function seedTodoExtension(path) {
   return `export default function(pi) {
   pi.on("session_start", async () => {
     const fs = await import("node:fs");
     fs.writeFileSync(${JSON.stringify(path)}, "ready");
   });
-  pi.registerCommand("seed-plan", {
-    description: "Seed plan navigation fixture",
+  pi.registerCommand("seed-todo", {
+    description: "Seed todo navigation fixture",
     handler: async (_args, ctx) => {
       const now = Math.floor(Date.now() / 1000);
       pi.appendEntry("pi-better-plan", {
@@ -168,7 +178,7 @@ function seedPlanExtension(path) {
           revision: 1,
           steps: [
             { id: "step_1", step: "Inspect the navigator", status: "completed" },
-            { id: "step_2", step: "Implement plan navigation", status: "in_progress" },
+            { id: "step_2", step: "Implement todo navigation", status: "in_progress" },
             { id: "step_3", step: "Verify the terminal journey", status: "pending" }
           ],
           createdAt: now,
@@ -194,8 +204,8 @@ function seedPlanExtension(path) {
       await ctx.reload();
     }
   });
-  pi.registerCommand("seed-long-plan", {
-    description: "Seed a compact plan fixture",
+  pi.registerCommand("seed-long-todo", {
+    description: "Seed a compact todo fixture",
     handler: async (_args, ctx) => {
       const fs = await import("node:fs");
       pi.appendEntry("pi-better-plan", { version: 1, kind: "set", at: Date.now(), plan: {
@@ -241,7 +251,7 @@ function waitForScreen(matches, timeoutMs = 10_000) {
     if (matches(screen)) return screen;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
-  throw new Error(`Timed out waiting for plan navigation. Current screen:\n${screen}`);
+  throw new Error(`Timed out waiting for todo navigation. Current screen:\n${screen}`);
 }
 
 function assertScreenNeverMatches(pattern, durationMs) {

@@ -107,6 +107,8 @@ const TOOL_ICONS: Record<string, string> = {
   update_goal: "\u25ce",
   get_goal: "\u25ce",
   goal_resume: "\u25ce",
+  update_todo: "\u2261",
+  get_todo: "\u2261",
   update_plan: "\u2261",
   get_plan: "\u2261",
   remote_bash: "\u2318",
@@ -140,7 +142,7 @@ function harnessCallDetail(name: string, input: unknown): string | undefined {
       return text(args.status);
     case "goal_resume":
       return text(args.reason);
-    case "get_goal": case "get_background_activity": case "release_workflow": case "get_plan":
+    case "get_goal": case "get_background_activity": case "release_workflow": case "get_plan": case "get_todo":
       return "";
     case "remote_bash":
       return joinDetails(host(), args.command);

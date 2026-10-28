@@ -1,17 +1,16 @@
 {
   "name": "pi-better-plan",
   "version": "0.9.1",
-  "description": "Structured execution plans with persistent progress for Pi.",
+  "private": true,
+  "description": "Retired archive of pi-better-plan; Outcome & Todo is part of pi-better-harness.",
   "license": "MIT",
   "type": "module",
-  "main": "src/index.ts",
   "files": [
     "src",
     "README.md",
     "REFERENCE.md"
   ],
   "keywords": [
-    "pi-package",
     "pi",
     "pi-extension",
     "plan",
@@ -26,20 +25,6 @@
     "url": "https://github.com/1aboveio/pi-better-harness/issues"
   },
   "homepage": "https://github.com/1aboveio/pi-better-harness/tree/main/packages/pi-better-plan#readme",
-  "publishConfig": {
-    "access": "public"
-  },
-  "pi": {
-    "extensions": [
-      "./src/index.ts"
-    ],
-    "image": "https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/pi-better-plan.png"
-  },
-  "scripts": {
-    "test": "node --import tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit",
-    "verify": "npm run typecheck && npm test"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

@@ -17,6 +17,24 @@ It ships one extension that:
 
 Goal state is stored as `pi-better-goal` custom entries in the Pi session. Existing `pi-codex-goal` entries are read for compatibility, but new state is written by this package.
 
+## Optional Harness-Owned Outcome & Todo
+
+An installed `pi-better-harness` may own the session's structured outcome and
+checklist through its optional **Outcome & Todo** runtime. Goal continues to own
+its trigger, clocks, pause and permission holds, workflow gates, background
+wakes, and continuation policy. It bridges Goal lifecycle changes to Harness
+with synchronous `pi-better-harness:task-context` requests. While a Harness
+runtime is present, Goal suppresses its own active-objective prompt text so the
+same business outcome is not stated twice; workflow, permission, held-state, and
+background-completion guidance remain. Standalone Goal behavior is unchanged when
+Harness is absent.
+
+`/goal` does not install, enable, or configure Outcome & Todo, and enabling the
+Harness runtime does not enable it. Install Harness and enable **Outcome & Todo**
+in `/harness-settings`. The Goal snapshot keeps the raw original trigger so
+`/goal resume` can re-enter a bound command or skill; that trigger is not the
+authoritative business outcome when Harness owns one.
+
 ## Commands And Tools
 
 ```text
@@ -360,6 +378,19 @@ The extension emits these events on `pi.events`:
 - `pi-better-goal:ready` with `{ version }`
 - `pi-better-goal:activity` with an `ActivitySnapshot`
 - `pi-better-goal:terminal-attention` when terminal or unhealthy background work needs attention
+- `pi-better-harness:task-context` with a synchronous mutable request
+
+`pi-better-harness:task-context` carries
+`{ action: "inspect" | "start" | "pause" | "resume" | "complete", goalId?, objective? }`.
+Goal emits it after persisting a Goal set or before clearing a Goal: a new goal id
+starts, a completed or paused goal reports that state, a non-active to active
+transition resumes, and `clear` pauses the current outcome rather than deleting or
+completing it. `objective` is present only on `start` and is the raw original
+Goal trigger. A Harness runtime that owns task context sets `request.enabled` to a
+boolean whenever it is installed, even when Outcome & Todo is off. Goal then
+omits its duplicated active-objective text. Without Harness, `enabled` remains
+undefined and standalone Goal prompts are unchanged. `inspect` is sent before a
+turn's prompt is assembled so Goal can detect that runtime.
 
 Other extensions can register providers by emitting `pi-better-goal:register-provider` with:
 

@@ -13,7 +13,7 @@ core extensions:
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-ssh` | Run short synchronous remote commands over reusable SSH connections. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
-| `pi-better-plan` | Keep structured execution plans and explicit checklist progress visible. |
+| Harness Outcome & Todo | Track session context and checklist progress; disabled until enabled in `/harness-settings`. |
 
 `pi-better-read-aloud` lives in this repo but is intentionally not part of the
 meta package.
@@ -34,7 +34,6 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
-pi install npm:pi-better-plan
 ```
 
 For a temporary one-off run without changing Pi settings:
@@ -56,16 +55,14 @@ The package workspaces are:
 | `packages/pi-better-sandbox` | `pi-better-sandbox` | yes | yes |
 | `packages/pi-better-ssh` | `pi-better-ssh` | yes | yes |
 | `packages/pi-better-goal` | `pi-better-goal` | yes | yes |
-| `packages/pi-better-plan` | `pi-better-plan` | yes | yes |
+| `packages/pi-better-plan` | retired private archive | no | no |
 | `packages/pi-better-server` | `pi-better-server` | yes | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
 | `packages/sandbox-diagnostics` | internal workspace, vendored into sandbox consumers | no | no |
 
-All publish-configured packages carry the `pi-package` npm keyword. The bundle is
-the recommended install for most users, and the component packages remain
-available for people who want only one extension.
+All publish-configured packages carry the `pi-package` npm keyword. Use `npx pi-better-harness install` to keep component identities while loading the filtered Harness-owned extensions, or install the bundle directly. The installer removes an old Plan registration only in the selected scope.
 
 ## Development
 
@@ -279,7 +276,6 @@ pi install ./packages/pi-better-subagents
 pi install ./packages/pi-better-background-tasks
 pi install ./packages/pi-better-ssh
 pi install ./packages/pi-better-goal
-pi install ./packages/pi-better-plan
 ```
 
 ## Release Checklist

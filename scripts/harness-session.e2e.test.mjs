@@ -79,6 +79,7 @@ function defaultExtensionEntries() {
 }
 
 const tools = new Map();
+const activeTools = new Set();
 const commands = new Map();
 const sessionStartHandlers = [];
 const userBashHandlers = [];
@@ -116,7 +117,12 @@ const pi = {
       return () => events.off(channel, handler);
     },
   },
-  registerTool: (tool) => tools.set(tool.name, tool),
+  registerTool: (tool) => { tools.set(tool.name, tool); activeTools.add(tool.name); },
+  getActiveTools: () => [...activeTools],
+  setActiveTools: (names) => {
+    activeTools.clear();
+    for (const name of names) activeTools.add(name);
+  },
   registerCommand: (name, command) => commands.set(name, command),
   on: (event, handler) => {
     if (event === "session_start") sessionStartHandlers.push(handler);
@@ -167,7 +173,7 @@ async function runTool(name, params) {
 
 // @covers harness.default-capability
 // @level e2e
-test("the harness loads the sandbox alongside every other default extension", { skip }, () => {
+test("the harness loads every default extension with Outcome & Todo off", { skip }, () => {
   for (const name of [
     "bash",
     "write",
@@ -177,15 +183,18 @@ test("the harness loads the sandbox alongside every other default extension", { 
     "remote_bash",
     "ssh_profile",
     "ssh_mux",
-    "update_plan",
-    "get_plan",
-    "get_goal",
     "update_goal",
+    "get_goal",
   ]) {
     assert.ok(tools.has(name), `a harness session must have the ${name} tool`);
+    assert.ok(activeTools.has(name), `a harness session must expose the ${name} tool`);
   }
   assert.ok(commands.has("sandbox"), "the human-only /sandbox command must be registered");
-  assert.ok(commands.has("plan"), "the human-owned /plan command must be registered");
+  assert.ok(commands.has("todo"), "the human-owned /todo command must be registered");
+  assert.ok(!commands.has("plan"), "the retired /plan command must not be registered");
+  assert.ok(tools.has("update_todo") && tools.has("get_todo"), "Outcome & Todo registers its tools behind the toggle");
+  assert.ok(!["update_todo", "get_todo"].some((name) => activeTools.has(name)), "a fresh harness session must start with Todo tools off");
+  assert.ok(!tools.has("update_plan") && !tools.has("get_plan"), "the retired Plan tool names must not be registered");
 });
 
 // @covers harness.default-capability

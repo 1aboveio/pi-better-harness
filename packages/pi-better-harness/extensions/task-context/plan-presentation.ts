@@ -77,7 +77,7 @@ export function renderPlanPresentation(
     if (count(status)) summary.push(`${count(status)} ${label}`);
   }
   if (count("pending") && summary.length === 1) summary.push(`${count("pending")} pending`);
-  const lines = [theme.fg("warning", "plan") + theme.fg("dim", `  ${summary.join(" · ")}`)];
+  const lines = [theme.fg("warning", "todo") + theme.fg("dim", `  ${summary.join(" · ")}`)];
   for (const metadata of plan.metadata ?? []) {
     const content = metadata.map((part) => theme.fg(part.color, planText(part.text))).join("");
     for (const line of wrapTextWithAnsi(content, Math.max(1, size - 2))) lines.push(`  ${line}`);

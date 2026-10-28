@@ -1,6 +1,6 @@
 # pi-better-harness
 
-Meta package for the core Pi Better Harness extensions.
+Harness-owned task context and Todo, alongside the core Pi Better Harness extensions.
 
 Use it to manage the tools used most often in Pi:
 
@@ -8,14 +8,14 @@ Use it to manage the tools used most often in Pi:
 - `pi-better-subagents` for detached subagent runs and completion callbacks
 - `pi-better-background-tasks` for durable shell tasks and command watchers
 - `pi-better-ssh` for safe synchronous remote commands over reusable SSH connections
-- `pi-better-goal` for current-goal tracking and background-aware continuation
-- `pi-better-plan` for persistent structured plans and explicit checklist progress
+- `pi-better-goal` for explicit triggers and background-aware continuation
+- Harness Outcome & Todo for persistent outcomes, optional checklists, and context reminders
 
 `pi-better-read-aloud` is intentionally not included yet.
 
 ## Install
 
-Install every harness extension as a standalone Pi package:
+Install the component packages and the Harness-owned runtime:
 
 ```sh
 npx pi-better-harness install
@@ -27,7 +27,30 @@ Use project-local Pi settings:
 npx pi-better-harness install --local
 ```
 
-For backward-compatible bundled loading, use `pi install npm:pi-better-harness`.
+The installer keeps component identities, loads only Harness-owned extensions from
+its bundle, and removes a retired Plan registration in the selected scope.
+Alternatively, load the complete bundle with `pi install npm:pi-better-harness`.
+
+## Outcome & Todo
+
+In `/harness-settings`, **Outcome & Todo** defaults to **Off**. Enabling it exposes
+`update_todo`, `get_todo`, and the Todo widget. `/todo` opens the full view;
+`/todo expand`, `/todo collapse`, `/todo hide`, and `/todo show` control its display.
+An outcome can exist without a checklist. A finished or cleared checklist does not
+complete or remove the outcome.
+
+Harness registers its context hook when loaded. While enabled and a task is active,
+it includes a short outcome reminder and current Todo focus before each model call.
+No hook file or postinstall setup is required. Disabling the feature hides the tools
+and widget and stops reminders without deleting saved state. Enabling it never
+starts or resumes work. `/goal` and skills cannot enable it on their own.
+
+Skills use this optional interface only when its tools are available. Workflow task
+plans retain their own schema, revision checks, and source requirements. When the
+interface is off, workflows continue using their own records and text display.
+Use `newTask: true` with an outcome when switching to unrelated work; omit it for
+corrections to the current task. Session state follows the active branch and survives
+compaction and reload. Existing Plan histories remain readable as Todo.
 
 ## Ordinary Startup
 
@@ -54,13 +77,13 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
 | `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
-| `pi-better-plan` | `update_plan`, `get_plan` |
+| Harness Outcome & Todo (when enabled) | `update_todo`, `get_todo` |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 
 ## Coordinated Execution
 
-For substantial work, use `pi-better-plan` as the foreground coordinator's milestone ledger. Identify ready, authorized independent units, including separate per-host migrations, and start them concurrently within resource constraints before waiting. Serialize only for real dependencies, shared writes, resource or capacity limits, or explicit rollout or availability requirements; record the reason.
+For substantial work, an enabled Harness Todo can serve as the foreground coordinator's milestone ledger. It is optional: when disabled, use the workflow's own records or ordinary task tracking. Identify ready, authorized independent units, including separate per-host migrations, and start them concurrently within resource constraints before waiting. Serialize only for real dependencies, shared writes, resource or capacity limits, or explicit rollout or availability requirements; record the reason.
 
 Use foreground tools for small, tightly coupled, or interactive work. Use `subagent_spawn` or `subagent_spawn_batch` only as permitted by the active `manual`, `adaptive`, or `coordinator` delegation mode. Manual forbids proactive subagents, not parallel foreground or background execution; an explicit user request or active workflow requirement may still authorize delegation. Use `bg_task_spawn` or `bg_task_watch` for independent long-running commands or waits. Continue unblocked foreground work after launch instead of polling workers.
 
@@ -102,7 +125,6 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
-pi install npm:pi-better-plan
 ```
 
 ## Update Or Remove

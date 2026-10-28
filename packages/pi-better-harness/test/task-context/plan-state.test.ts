@@ -10,8 +10,8 @@ import {
   reconstructPlanState,
   replacePlan,
   validatePlanInput,
-} from "../src/plan-state.js";
-import { EXTENSION_NAME } from "../src/types.js";
+} from "../../extensions/task-context/plan-state.js";
+import { EXTENSION_NAME } from "../../extensions/task-context/types.js";
 
 test("replaces a plan atomically and preserves identities for unchanged steps", () => {
   const initial = replacePlan(null, [

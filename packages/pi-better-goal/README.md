@@ -21,6 +21,12 @@ Use `pi-better-goal` when a Pi session should keep an explicit objective visible
 - A progress-aware follow-up loop with ten identical no-progress retries and linear backoff (60s through 600s by default), followed by a sticky hold recoverable with `/goal resume` or `alt+g`. Conversation, changed callback results, and background drains do not reopen an exhausted hold. Delays saturate at Node's timer limit, and observed background drains reset non-held progress before callback turns can cancel the wake. Pi's network retry policy remains independent.
 - An observable-progress stall state for active goals.
 
+## Optional Harness-Owned Outcome & Todo
+
+When `pi-better-harness` is installed, its optional **Outcome & Todo** runtime owns the session's structured outcome and checklist. Goal keeps its own objective, clocks, pause and permission holds, workflow gates, background wake behavior, and continuation policy; it also sends lifecycle requests to the Harness runtime so a bound outcome starts, pauses, resumes, and completes with the Goal. When the runtime is present, Goal stops adding its own active-objective text to avoid duplicating the Harness-owned outcome, whether Outcome & Todo is enabled or off.
+
+`/goal` does not install, enable, or configure Outcome & Todo. Install Harness and enable **Outcome & Todo** in `/harness-settings` if you want that shared outcome and checklist. Without Harness, this package keeps its standalone prompts and behavior unchanged. The stored Goal objective remains the raw original trigger (for example, a bound command invocation) so `/goal resume` can re-enter the work; it is not the authoritative business outcome when Harness owns one.
+
 ## Settings Storage
 
 Goal preferences are saved only in Pi's global `~/.pi/agent/settings.json` under

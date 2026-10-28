@@ -42,6 +42,7 @@ import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import { completionGate, pauseGate, schedulerWaitUntil } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
+import { requestTaskContext } from "./task-context.js";
 import {
   EVENT_ACTIVITY,
   EVENT_READY,
@@ -103,11 +104,11 @@ export function pausedGoalStatus(goal: GoalSnapshot, conversationalResume = true
   return agentResumable(goal, conversationalResume) ? 'goal paused · say "go" or /goal resume' : "goal paused · /goal resume";
 }
 
-function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean): string {
+function pausedGoalPrompt(goal: GoalSnapshot, conversationalResume: boolean, includeObjective = true): string {
   return [
     goal.pauseReason === "handback"
-      ? `Pi Better Goal is paused because its workflow handed back unfinished work for the user's answer. Goal: ${goal.objective}`
-      : `Pi Better Goal is paused because the user pressed escape. Goal: ${goal.objective}`,
+      ? `Pi Better Goal is paused because its workflow handed back unfinished work for the user's answer.${includeObjective ? ` Goal: ${goal.objective}` : ""}`
+      : `Pi Better Goal is paused because the user pressed escape.${includeObjective ? ` Goal: ${goal.objective}` : ""}`,
     "Treat the user's messages as ordinary conversation: answer them, but do not continue the goal's work until it is resumed.",
     conversationalResume ? GOAL_RESUME_RULE : "Only the user can resume this goal, with /goal resume or alt+g. A conversational go-ahead does not resume it.",
   ].join("\n");
@@ -407,6 +408,17 @@ export default function (pi: ExtensionAPI): void {
     const previous = getGoal(ctx);
     const wasVisible = previous !== null && isGoalClockVisible(previous);
     pi.appendEntry(EXTENSION_NAME, goalSetEntry(goal, source));
+    // Bridge lifecycle after the raw Goal entry is durable. Harness may own the
+    // structured outcome, but Goal still owns its trigger, clocks, pauses, and wakes.
+    if (!previous || previous.goalId !== goal.goalId) {
+      requestTaskContext(pi, "start", goal);
+    } else if (goal.status === "complete") {
+      requestTaskContext(pi, "complete", goal);
+    } else if (goal.status === "paused" || goal.status === "budgetLimited") {
+      requestTaskContext(pi, "pause", goal);
+    } else if (goal.status === "active" && previous.status !== "active") {
+      requestTaskContext(pi, "resume", goal);
+    }
     continuationQueuedFor = null;
     backgroundDrainTracker = null;
     clearIdleContinuation();
@@ -422,6 +434,8 @@ export default function (pi: ExtensionAPI): void {
     lastAgentEvidence = null;
     const current = getGoal(ctx);
     const wasVisible = current !== null && isGoalClockVisible(current);
+    // Clearing pauses a Harness-bound outcome; it never deletes or completes it.
+    if (current) requestTaskContext(pi, "pause", current);
     pi.appendEntry(EXTENSION_NAME, goalClearEntry(current?.goalId ?? null, source));
     if (getWorkflow(ctx)) recordWorkflow(null);
     continuationQueuedFor = null;
@@ -1318,6 +1332,9 @@ export default function (pi: ExtensionAPI): void {
     currentCtx = ctx;
     const goal = currentGoalSnapshot(ctx);
     const owner = getWorkflow(ctx);
+    // A defined `enabled` means a Harness runtime is present, even when
+    // Outcome & Todo is off. Then Harness owns the structured outcome text.
+    const harnessPresent = requestTaskContext(pi, "inspect", goal).enabled !== undefined;
     const snapshot = await publishSnapshot(ctx);
     if (!snapshot) return;
     const permissions = goal ? currentPermissionHold(ctx, goal.goalId) : null;
@@ -1330,7 +1347,7 @@ export default function (pi: ExtensionAPI): void {
       return { systemPrompt: `${event.systemPrompt}\n\n${permissionPrompt}` };
     }
     const pausedInstruction = permissionPrompt || (goal?.status === "paused" && (goal.pauseReason === "interrupt" || goal.pauseReason === "handback")
-      ? pausedGoalPrompt(goal, preferences.conversationalResume) : "");
+      ? pausedGoalPrompt(goal, preferences.conversationalResume, !harnessPresent) : "");
     if (!isPokeable(goal) && !owner) {
       return pausedInstruction ? { systemPrompt: `${event.systemPrompt}\n\n${pausedInstruction}` } : undefined;
     }
@@ -1363,7 +1380,11 @@ export default function (pi: ExtensionAPI): void {
               : "While the goal is paused, this overrides the workflow instructions below: do not advance the workflow until the goal is resumed.\n\n")
             : "") +
           `Active workflow: ${owner.name} (${owner.path}). Its task plan owns planning and the parent is a coordinator, not a product-code implementer. Follow the workflow instructions below, including on resumed turns:\n\n${instructions}` +
-          (isPokeable(goal) ? `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.` : "") +
+          (isPokeable(goal)
+            ? harnessPresent
+              ? "\n\nComplete the goal only after the workflow completion audit."
+              : `\n\nActive objective: ${goal.objective}. Complete it only after the workflow completion audit.`
+            : "") +
           (questionInstruction ? `\n\n${questionInstruction.trim()}` : "") +
           (heldInstruction ? `\n\n${heldInstruction}` : ""),
       };
@@ -1373,6 +1394,15 @@ export default function (pi: ExtensionAPI): void {
     const backgroundInstruction = snapshot.backgroundRunning
       ? ` The goal still has delegated background work running (${summarizeActiveBackground(snapshot)}). Foreground idleness alone is not goal completion; keep any structured plan current and do not mark verification, the plan, or the goal complete until every relevant delegated task reaches a terminal state and its result or failure has been inspected and integrated.`
       : "";
+    if (harnessPresent) {
+      // Harness owns the outcome text. Retain only the Goal-specific guidance
+      // that the Outcome & Todo prompt cannot replace.
+      const retained = [heldInstruction, backgroundInstruction.trim(), questionInstruction.trim(), permissionPrompt]
+        .filter((part) => part.length > 0);
+      return retained.length > 0
+        ? { systemPrompt: `${event.systemPrompt}\n\n${retained.join("\n\n")}` }
+        : undefined;
+    }
     return {
       systemPrompt:
         `${event.systemPrompt}\n\n` +

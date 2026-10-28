@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-import { replacePlan } from "../src/plan-state.js";
-import { renderCompactPlan, renderFullPlan, createFullPlanComponent } from "../src/plan-render.js";
-import { renderRushPlan, createRushPlanComponent, projectRushPlan, type RushPlan } from "../src/workflow-plan.js";
+import { replacePlan } from "../../extensions/task-context/plan-state.js";
+import { renderCompactPlan, renderFullPlan, createFullPlanComponent } from "../../extensions/task-context/plan-render.js";
+import { renderRushPlan, createRushPlanComponent, projectRushPlan, type RushPlan } from "../../extensions/task-context/workflow-plan.js";
 
 const theme = { fg: (_color: string, value: string) => value };
 
@@ -18,7 +18,7 @@ test("compact plan keeps a short checklist visible", () => {
   ], undefined, 100);
 
   const lines = renderCompactPlan(plan, 80, theme);
-  assert.equal(lines[0], "plan  2/5 complete · 1 in progress");
+  assert.equal(lines[0], "todo  2/5 complete · 1 in progress");
   assert.deepEqual(lines.slice(1).map((line) => line.trim().replace(/ +/g, " ")), [
     "✓ 1 One",
     "✓ 2 Two",
@@ -112,6 +112,56 @@ test("compact and full plan rendering name blocked state and obey width", () => 
   assert.ok(compact.some((line) => line.includes("blocked")));
   assert.ok(compact.every((line) => !line.startsWith("›")));
   assert.ok([...compact, ...renderFullPlan(plan, 28, theme, 1)].every((line) => visibleWidth(line) <= 28));
+});
+
+test("every user-facing todo view heads the checklist as todo", () => {
+  const native = replacePlan(null, [
+    { step: "Done", status: "completed" },
+    { step: "Working", status: "in_progress" },
+  ], undefined, 100);
+  const views = [
+    renderCompactPlan(native, 80, theme),
+    renderCompactPlan(native, 80, theme, true),
+    renderFullPlan(native, 80, theme),
+    createFullPlanComponent(native, theme, () => {}).render(80),
+  ];
+  for (const lines of views) {
+    assert.equal(lines[0], "todo  1/2 complete · 1 in progress");
+    assert.doesNotMatch(lines.join("\n"), /\bplan\b/i, "the relocated runtime must not leak the old heading");
+  }
+  const workflow = rushFixture();
+  assert.match(renderRushPlan(workflow, 80)[0]!, /^todo  \d+\/\d+ complete/);
+  assert.equal(renderRushPlan(workflow, 80, true)[0], renderRushPlan(workflow, 80)[0]);
+});
+
+test("the full view names steps by id and shows prerequisite edges inside the width", () => {
+  const plan = replacePlan(null, [
+    { id: "step_1", step: "Inspect the terminal", status: "completed" },
+    { id: "step_2", step: "中文任务验证长标签不会重叠并保持完整内容ABCDEFGHIJKLMN", status: "in_progress", dependsOn: ["step_1"] },
+    { id: "step_3", step: "Verify the terminal journey", status: "pending", dependsOn: ["step_1", "step_2"] },
+  ], undefined, 100);
+
+  const compact = renderCompactPlan(plan, 80, theme).join("\n");
+  assert.match(compact, /●\s+2\s+(?=中文)/, "the compact widget keeps its stable ordinals");
+  assert.doesNotMatch(compact, /after:/, "edges stay out of the folded widget");
+
+  const full = renderFullPlan(plan, 80, theme, 1).join("\n");
+  assert.match(full, /^\u203a ●\s+step_2/m);
+  assert.match(full, /after: step_1$/m);
+  assert.match(full, /after: step_1, step_2/);
+  assert.ok(full.replace(/\s/g, "").includes("中文任务验证长标签不会重叠并保持完整内容ABCDEFGHIJKLMN"), "long CJK titles keep their content");
+
+  const component = createFullPlanComponent(plan, theme, () => {}).render(80).join("\n");
+  assert.match(component, /^\u203a ●\s+step_2/m, "the fullscreen view starts on the active step id");
+  assert.match(component, /after: step_1/);
+
+  for (const width of [1, 2, 8, 16, 28, 40, 80]) {
+    const lines = [
+      ...renderCompactPlan(plan, width, theme), ...renderCompactPlan(plan, width, theme, true),
+      ...renderFullPlan(plan, width, theme, 0), ...createFullPlanComponent(plan, theme, () => {}).render(width),
+    ];
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `overflow at ${width}`);
+  }
 });
 
 function rushFixture(): RushPlan {
@@ -228,14 +278,14 @@ test("all-canceled workflow plans show zero eligible items without counting canc
 test("workflow summaries handle concurrent activity, idle, complete and empty plans", () => {
   const workflow = rushFixture();
   workflow.issues[2]!.status = "diagnosing";
-  assert.equal(renderRushPlan(workflow, 100)[0], "plan  1/4 complete · 2 in progress · 1 blocked");
+  assert.equal(renderRushPlan(workflow, 100)[0], "todo  1/4 complete · 2 in progress · 1 blocked");
   assert.match(renderRushPlan(workflow, 100, true).join("\n"), /pending · diagnosing/);
   for (const unit of workflow.issues) unit.status = "pending";
-  assert.equal(renderRushPlan(workflow, 100)[0], "plan  0/4 complete · 4 pending");
+  assert.equal(renderRushPlan(workflow, 100)[0], "todo  0/4 complete · 4 pending");
   for (const unit of workflow.issues) unit.status = "succeeded";
-  assert.equal(renderRushPlan(workflow, 100)[0], "plan  4/4 complete");
+  assert.equal(renderRushPlan(workflow, 100)[0], "todo  4/4 complete");
   workflow.issues = [];
-  assert.equal(renderRushPlan(workflow, 100)[0], "plan  0/0 complete");
+  assert.equal(renderRushPlan(workflow, 100)[0], "todo  0/0 complete");
 });
 
 test("issue rows show implemented, review passed and delivered as distinct states", () => {
@@ -248,7 +298,7 @@ test("issue rows show implemented, review passed and delivered as distinct state
     { id: "5", title: "Pushed", stage: "done", status: "succeeded", dependsOn: [] },
   ];
   const rendered = renderRushPlan(workflow, 100).join("\n");
-  assert.equal(renderRushPlan(workflow, 100)[0], "plan  2/5 complete · 1 in progress · 1 implemented · 1 review passed");
+  assert.equal(renderRushPlan(workflow, 100)[0], "todo  2/5 complete · 1 in progress · 1 implemented · 1 review passed");
   assert.match(rendered, /●\s+#1\s+Building\s+active/);
   assert.match(rendered, /◐\s+#2\s+Implemented\s+implemented/);
   assert.match(rendered, /◑\s+#3\s+Reviewed\s+review passed/);
@@ -263,7 +313,7 @@ test("a code-done unit without a HEAD keeps the plain in-progress state", () => 
     units: [{ id: "1", title: "Older plan", stage: "done", status: "in-flight" }],
   }, "r");
   assert.match(renderRushPlan(unit, 100).join("\n"), /●\s+#1\s+Older plan\s+active/);
-  assert.equal(renderRushPlan(unit, 100)[0], "plan  0/1 complete · 1 in progress");
+  assert.equal(renderRushPlan(unit, 100)[0], "todo  0/1 complete · 1 in progress");
 });
 
 test("both full components use the same selection and return keys", () => {
