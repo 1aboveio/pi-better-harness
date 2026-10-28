@@ -33,7 +33,7 @@ import {
 
 const PlanStepSchema = Type.Object({
   id: Type.Optional(Type.String({ description: "Stable step id used by dependsOn (letters, digits, underscore, hyphen; max 64 characters)." })),
-  step: Type.String({ description: "A concise, verifiable execution step." }),
+  step: Type.String({ description: "Short, plain-language action label, usually 3-7 words, such as 'Add Todo toggle'. Keep methods and acceptance criteria outside the label." }),
   status: StringEnum(["pending", "in_progress", "completed", "blocked"] as const),
   dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Ids of prerequisite steps in this plan. All must be completed before this step starts." })),
 });
@@ -43,11 +43,11 @@ const WorkflowRowChangeSchema = Type.Object({
   target: Type.Optional(StringEnum(["unit", "component", "fleet", "run"] as const, { description: "Required with add. Otherwise only needed when the same id names two kinds of row." })),
   set: Type.Optional(Type.Object({}, {
     additionalProperties: true,
-    description: "Fields to set on that row, e.g. status, stage, attempt, retries, diagnoses, worker, clock, note, headSha, pr. Each value replaces the old one; null clears it.",
+    description: "Fields to set on that row, e.g. status, stage, attempt, retries, diagnoses, worker, clock, note, headSha, pr. Each value replaces the old one; null clears it. Keep title a short, plain-language action label, usually 3-7 words.",
   })),
   add: Type.Optional(Type.Object({}, {
     additionalProperties: true,
-    description: "A new unit or component row for a scope change, with target unit or component. A unit needs id, title, stage, status; a component needs id and status. Send set or add, not both.",
+    description: "A new unit or component row for a scope change, with target unit or component. A unit needs id, title, stage, status; a component needs id and status. Use a short, plain-language action for title, usually 3-7 words. Send set or add, not both.",
   })),
 });
 
@@ -415,6 +415,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
       "Capture the accepted outcome before substantive implementation, delegation, or investigation. An outcome-only update is valid; do not invent a checklist or acceptance criteria.",
       "Use newTask:true with its outcome when the user switches to unrelated work. Omit newTask for a correction or refinement of the same task. Mark the outcome complete explicitly; checklist completion alone is not delivery.",
       "Use a Todo checklist when several meaningful milestones help track delivery; update it when work completes, is blocked, or changes scope.",
+      "Write each Todo label as a short action in plain language, usually 3-7 English words or a similarly short phrase in the task's language. For example: 'Add Todo toggle' or 'Test keyboard controls'. Put methods, file paths, rationale, and acceptance criteria in the outcome, explanation, or workflow records, not the label. Apply this to workflow titles too; do not copy long issue headings.",
       "For generic plans only, mark distinct milestones in_progress when work is actually underway. Do not mark a delegated step completed until its result or failure has been inspected and integrated.",
       "For generic plans with prerequisites, give steps stable ids and dependsOn edges for actual dependencies, not list order. Start ready independent steps concurrently under the Harness execution policy; subagent delegation mode controls subagents, not background-command concurrency.",
       "For generic plans, follow the active delegation mode for subagents. Manual forbids proactive subagent delegation even in plan mode; adaptive favors substantial independent work; coordinator delegates nontrivial role-owned tasks after agents_catalog discovery.",

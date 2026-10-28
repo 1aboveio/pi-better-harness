@@ -24,7 +24,13 @@ In `/harness-settings`, **Outcome & Todo** starts **Off**. Turn it on to expose
 `/todo expand` and `/todo collapse` control the compact checklist.
 
 An accepted outcome can be saved without a checklist. Completing or clearing its
-Todo does not complete or remove the outcome. Use `newTask: true` with a new
+Todo does not complete or remove the outcome. Write labels as short, plain actions,
+usually 3-7 words: "Add Todo toggle", "Keep session state", or "Test keyboard controls".
+Keep methods, file paths, and acceptance criteria in the outcome or supporting
+records. This is writing guidance, not a hard limit or automatic truncation;
+existing saved labels remain unchanged until deliberately updated.
+
+Use `newTask: true` with a new
 outcome for unrelated work; a correction to the current task keeps its binding.
 Harness includes a short reminder before each model call while the outcome is
 active. Disabling the feature hides its tools and display and stops reminders,
