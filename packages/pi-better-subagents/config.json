@@ -1,7 +1,7 @@
 {
   "defaultModel": null,
   "defaultTools": "read, bash, edit, write, web_search, web_fetch",
-  "maxConcurrent": 4,
+  "maxConcurrent": 6,
   "delegationMode": "adaptive",
 
   "toolExtensions": {

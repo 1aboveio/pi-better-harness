@@ -2298,7 +2298,7 @@ export default function (pi: ExtensionAPI) {
     });
     const openSettings = async (ctx: ExtensionCommandContext): Promise<void> => {
         if (ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui.custom === "function") {
-            await ctx.ui.custom<void>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
+            const next = await ctx.ui.custom<"agents" | undefined>((tui, theme, _kb, done) => createSubagentSettingsPage(theme, {
                 get: () => {
                     const settings = effectiveSettings();
                     return {
@@ -2310,7 +2310,10 @@ export default function (pi: ExtensionAPI) {
                     };
                 },
                 changeMode, changeCap, save: saveSettings, reset: resetSettings,
-            }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done()));
+                // Close this page first; the catalog opens after ui.custom resolves.
+                openAgents: () => done("agents"),
+            }, () => { refreshBackgroundWorkNavigator(ctx); tui.requestRender(); }, () => done(undefined)));
+            if (next === "agents") await agentOperations.openCatalog(ctx);
         } else {
             ctx.ui.notify(`Delegation mode: ${activeDelegationMode()}. Concurrent subagents: ${activeConcurrencyCap()}. Use /subagents mode <mode> or /subagents cap <number>; /subagents save persists both.`, "info");
         }

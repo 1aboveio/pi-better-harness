@@ -328,6 +328,8 @@ describe("subagent_spawn_batch end-to-end", () => {
         clearRuns();
         capacity._resetSharedCapacityGateForTests();
         config.setConfigForTests(undefined);
+        // Capacity scenarios use four slots; fallback tests override this fixture.
+        config.setConfigForTests({ ...config.loadConfig(), maxConcurrent: 4 });
     });
 
     after(async () => {
@@ -571,7 +573,7 @@ describe("subagent_spawn_batch end-to-end", () => {
     });
 
     for (const configuredCap of [2, undefined]) {
-        const expectedCap = configuredCap ?? 4;
+        const expectedCap = configuredCap ?? 6;
         it(`reset restores configured mode and ${configuredCap === undefined ? "fallback" : "configured"} cap ${expectedCap} for both tools`, async () => {
             config.setConfigForTests({ delegationMode: "manual", maxConcurrent: configuredCap });
             const h = sessionHarness(mod);

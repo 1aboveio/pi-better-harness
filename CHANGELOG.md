@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.33.1] - 2026-10-29
+
+### Changed
+
+- Bundle Subagents 0.21.1 with the updated Researcher model, six-slot concurrency default, and an Agents shortcut in the Subagents settings menu. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.21.1] - 2026-10-29
+
+### Added
+
+- Open the Agents catalog directly from the `/subagents` settings menu, closing the settings pane before opening the catalog.
+
+### Changed
+
+- Default the bundled Researcher role to `openai/gpt-6.1-terra` with medium reasoning effort.
+- Raise the shipped concurrency cap and its fallback from four to six. Preserve saved defaults and session overrides.
+
 ## [pi-better-harness@0.33.0] - 2026-10-29
 
 ### Added

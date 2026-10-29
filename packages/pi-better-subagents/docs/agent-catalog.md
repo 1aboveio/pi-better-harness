@@ -100,7 +100,7 @@ Model availability, same-tier fallback, and nearest-effort adjustment are not de
 
 | Role | Stored id | Name | Model | Effort | Tier |
 | --- | --- | --- | --- | --- | --- |
-| `researcher` | `role.researcher` | Researcher | `openai/gpt-6.1-sol` | medium | balanced |
+| `researcher` | `role.researcher` | Researcher | `openai/gpt-6.1-terra` | medium | balanced |
 | `explorer` | `role.explorer` | Explorer | `openai/gpt-6-luna` | medium | efficient |
 | `product-manager` | `role.product-manager` | Product Manager | `openai/gpt-6.1-sol` | medium | balanced |
 | `developer` | `role.developer` | Developer | `openai/gpt-6.1-sol` | high | balanced |

@@ -81,7 +81,7 @@ test("migration and later global edits are visible without manually clearing the
     });
     mkdirSync(join(root, "extensions"));
     const baseline = loadConfig().maxConcurrent;
-    assert.equal(baseline, 4);
+    assert.equal(baseline, 6);
     writeFileSync(join(root, "extensions/pi-better-subagents-config.json"), '{"maxConcurrent":6,"defaultTools":"read"}');
     assert.equal(loadConfig().maxConcurrent, 6);
     const path = join(root, "settings.json");

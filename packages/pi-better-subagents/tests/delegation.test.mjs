@@ -179,7 +179,7 @@ test("settings save refuses corrupt config without discarding session choices", 
         assert.equal(loadConfig().maxConcurrent, 5);
         assert.equal(normalizeConcurrencyCap(5), 5);
         for (const value of [undefined, null, 0, -1, 1.5, "8", NaN, Infinity]) {
-            assert.equal(normalizeConcurrencyCap(value), 4);
+            assert.equal(normalizeConcurrencyCap(value), 6);
         }
     } finally {
         setConfigPathForTests(undefined);
@@ -258,7 +258,7 @@ test("/subagents reports config, changes only this session, rejects invalid args
         const command = h.commands.get("subagents");
         assert.ok(command);
         await command.handler("", h.ctx);
-        assert.match(h.notifications.at(-1).message, /^Delegation mode: manual\. Concurrent subagents: 4\./);
+        assert.match(h.notifications.at(-1).message, /^Delegation mode: manual\. Concurrent subagents: 6\./);
         assert.match(h.prompt(), /Delegation mode: manual/);
         await command.handler("mode coordinator", h.ctx);
         assert.equal(h.mode(), "coordinator");
