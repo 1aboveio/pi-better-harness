@@ -1,4 +1,4 @@
-import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { OperationList, OperationView } from "./agent-inspection.ts";
 import { EFFORT_LEVELS } from "./catalog-schema.ts";
 import type { AgentSessionOverrides, AgentSettingKey } from "./agent-session-settings.ts";
@@ -46,6 +46,7 @@ export function catalogColumns(entry: OperationView | null, width: number): stri
 }
 
 function wrapLine(text: string, width: number): string[] {
+    if (text.includes("\x1b")) return wrapTextWithAnsi(text, width);
     const rows: string[] = [];
     let row = "";
     for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
@@ -59,18 +60,22 @@ function wrapLine(text: string, width: number): string[] {
     return rows;
 }
 
-function settingLines(label: string, value: string, origin: string, width: number, marker = "  "): string[] {
-    if (width < 54) return [`${marker}${label}`, ...wrapLine(`${value}  ${origin}`, Math.max(1, width - 4)).map((row) => `    ${row}`)];
+function settingLines(label: string, value: string, origin: string, width: number, marker = "  ", theme?: Theme): string[] {
+    const title = (text: string) => theme?.fg(marker === "> " ? "accent" : "muted", text) ?? text;
+    const source = (text: string) => theme?.fg("dim", text) ?? text;
+    if (width < 54) return [title(`${marker}${label}`), ...wrapLine(`${value}  ${source(origin)}`, Math.max(1, width - 4)).map((row) => `    ${row}`)];
     const valueWidth = Math.max(1, width - 34);
     return wrapLine(value, valueWidth).map((row, index) =>
-        `${index === 0 ? marker + label.padEnd(10) : " ".repeat(12)}${cell(row, valueWidth)}  ${index === 0 ? origin : ""}`.trimEnd());
+        `${index === 0 ? title(marker + label.padEnd(10)) : " ".repeat(12)}${cell(row, valueWidth)}  ${index === 0 ? source(origin) : ""}`.trimEnd());
 }
 
-export function catalogDetailLines(entry: OperationView, editable = false, width = 80, controls: string[] = []): string[] {
+export function catalogDetailLines(entry: OperationView, editable = false, width = 80, controls: string[] = [], theme?: Theme): string[] {
+    const label = (text: string) => theme?.fg("muted", text) ?? text;
+    const heading = (text: string) => label(theme?.bold?.(text) ?? text);
     const contentWidth = Math.max(1, width - 4);
     const columnWidth = width >= 90 ? Math.floor((contentWidth - 4) / 2) : contentWidth;
-    const fact = (label: string, value: string) => wrapLine(value, Math.max(1, columnWidth - 12))
-        .map((text, index) => `${index === 0 ? label.padEnd(12) : " ".repeat(12)}${text}`);
+    const fact = (title: string, value: string) => wrapLine(value, Math.max(1, columnWidth - 13))
+        .map((text, index) => `${index === 0 ? label(title.padEnd(13)) : " ".repeat(13)}${text}`);
     const identity = [
         ...fact("ID", entry.id),
         ...fact("Kind", entry.identity.kind ?? "unknown"),
@@ -86,34 +91,34 @@ export function catalogDetailLines(entry: OperationView, editable = false, width
             `${cell(identity[i] ?? "", columnWidth)}    ${state[i] ?? ""}`.trimEnd())
         : [...identity, ...state];
     const lines = [
-        `${entry.identity.name || entry.id}  ·  ${entry.identity.kind ?? "unknown"}`,
+        theme?.fg("accent", `${entry.identity.name || entry.id}  ·  ${entry.identity.kind ?? "unknown"}`) ?? `${entry.identity.name || entry.id}  ·  ${entry.identity.kind ?? "unknown"}`,
         ...(entry.identity.description ? wrapLine(entry.identity.description, contentWidth) : []),
         "",
         ...overview,
         "",
-        "Configuration",
-        ...(contentWidth >= 54 ? [settingLines("SETTING", "VALUE", "ORIGIN", contentWidth)[0]] : []),
+        heading("Configuration"),
+        ...(contentWidth >= 54 ? [label(settingLines("SETTING", "VALUE", "ORIGIN", contentWidth)[0])] : []),
         ...controls,
         ...(entry.fields ? [
             ...(!editable ? ["model", "effort"].flatMap((key) => {
                 const field = entry.fields![key as "model" | "effort"];
-                return settingLines(key === "model" ? "Model" : "Effort", field.value ?? "(unset)", field.inherited || field.source === "role-default" ? "inherited" : field.source === "agent-override" ? "override" : "absent", contentWidth);
+                return settingLines(key === "model" ? "Model" : "Effort", field.value ?? "(unset)", field.inherited || field.source === "role-default" ? "inherited" : field.source === "agent-override" ? "override" : "absent", contentWidth, "  ", theme);
             }) : []),
-            ...settingLines("Tier", entry.fields.tier.value ?? "(unset)", entry.fields.tier.source === "role-default" ? "inherited" : entry.fields.tier.source === "agent-override" ? "override" : "absent", contentWidth),
+            ...settingLines("Tier", entry.fields.tier.value ?? "(unset)", entry.fields.tier.source === "role-default" ? "inherited" : entry.fields.tier.source === "agent-override" ? "override" : "absent", contentWidth, "  ", theme),
         ] : []),
-        `Actual   ${entry.actualModel ?? "not resolved"}${entry.actualEffort ? `  ·  ${entry.actualEffort}` : ""}`,
+        `${label("Actual")}   ${entry.actualModel ?? "not resolved"}${entry.actualEffort ? `  ·  ${entry.actualEffort}` : ""}`,
         "",
-        "Effective prompt",
+        heading("Effective prompt"),
         ...(entry.instructions?.trim() ? entry.instructions.split(/\r\n|\r|\n/) : ["(No resolved instructions)"]),
         "",
-        "Launch resolution",
+        heading("Launch resolution"),
         entry.launchabilityReason,
         "",
-        "Definition source",
+        heading("Definition source"),
         entry.identity.path ?? "(none)",
-        ...(entry.validation.length ? ["", "Diagnostics", ...entry.validation.map((item) => `${item.blocking ? "!" : "·"} ${item.message}`)] : []),
-        ...(entry.shadowed.length ? ["", "Shadowed sources", ...entry.shadowed.map((source) => `${source.scope}  ${source.path}`)] : []),
-        ...(entry.restrictions.length ? ["", "Execution restrictions", ...entry.restrictions.map((item) => `${item.honored ? "honored" : "not honored"}  ${item.name}`)] : []),
+        ...(entry.validation.length ? ["", heading("Diagnostics"), ...entry.validation.map((item) => `${item.blocking ? "!" : "·"} ${item.message}`)] : []),
+        ...(entry.shadowed.length ? ["", heading("Shadowed sources"), ...entry.shadowed.map((source) => `${source.scope}  ${source.path}`)] : []),
+        ...(entry.restrictions.length ? ["", heading("Execution restrictions"), ...entry.restrictions.map((item) => `${item.honored ? "honored" : "not honored"}  ${item.name}`)] : []),
     ];
     return lines.flatMap((text) => text ? wrapLine(text, contentWidth).map((row) => `  ${row}`) : [""]);
 }
@@ -190,7 +195,7 @@ export function createCatalogComponent(
     const selected = () => filtered().find((entry) => entry.id === selectedId);
     const detailRows = (entry: OperationView, width: number, controls: string[] = []) => (mode === "prompt"
         ? [`${entry.identity.name || entry.id}  ·  effective instructions`, "", ...(entry.instructions?.split("\n") ?? ["(none)"])]
-        : catalogDetailLines(entry, !!editor, width, controls))
+        : catalogDetailLines(entry, !!editor, width, controls, theme))
         .flatMap((text) => text ? wrapLine(text, Math.max(1, width - 2)) : [""]);
 
 
@@ -231,8 +236,7 @@ export function createCatalogComponent(
                     const ownSession = Object.hasOwn(own ?? {}, key);
                     const roleSession = field?.inherited && Object.hasOwn(editor?.settings()[current.role?.id ?? ""] ?? {}, key);
                     const origin = ownSession && own?.[key] === null ? "inherit / session" : ownSession ? "session" : roleSession ? "inherited / session" : field?.inherited ? "inherited" : "catalog";
-                    return settingLines(label, field?.value ?? "(unset)", origin, Math.max(1, safeWidth - 4), settingRow === index ? "> " : "  ")
-                        .map((text) => settingRow === index ? theme.fg("accent", text) : text);
+                    return settingLines(label, field?.value ?? "(unset)", origin, Math.max(1, safeWidth - 4), settingRow === index ? "> " : "  ", theme);
                 }),
             ] : [];
             const detailLines = current ? detailRows(current, safeWidth, controls) : [];
@@ -244,8 +248,7 @@ export function createCatalogComponent(
 
                 ...detailLines.slice(scroll, scroll + detailSize).map((text, i) =>
                     i === 0 && scroll === 0 ? theme.fg("accent", text)
-                        : mode === "detail" && ["Configuration", "Effective prompt", "Launch resolution", "Definition source", "Diagnostics", "Shadowed sources", "Execution restrictions"].includes(text.trim())
-                            ? theme.fg("muted", theme.bold?.(text) ?? text) : text),
+                        : text),
                 "",
                 theme.fg("dim", `Showing ${scroll + 1}-${Math.min(scroll + detailSize, detailLines.length)} of ${detailLines.length} lines`),
             ] : [

@@ -18,6 +18,25 @@ const entry = (id, name, status = null) => ({
 });
 
 describe("catalog command surface", () => {
+    it("colors labels separately from values without changing content or column widths", () => {
+        const agent = entry("agent.payments", "Payments Analyst");
+        agent.instructionMode = "add";
+        const colors = { muted: "\x1b[90m", dim: "\x1b[2m", accent: "\x1b[36m" };
+        const coloredTheme = { fg: (color, text) => `${colors[color] ?? ""}${text}\x1b[0m` };
+        for (const width of [24, 42, 90, 120]) {
+            const plain = catalogDetailLines(agent, false, width);
+            const colored = catalogDetailLines(agent, false, width, [], coloredTheme);
+            const strip = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
+            assert.equal(colored.map(strip).join("").replace(/\s+/g, ""), plain.join("").replace(/\s+/g, ""));
+            assert.ok(colored.every((row) => visibleWidth(row) <= width));
+            assert.ok(colored.some((row) => /\x1b\[90mID\s+\x1b\[0magent/.test(row)));
+        }
+        const wide = catalogDetailLines(agent, false, 120, [], coloredTheme).join("\n");
+        assert.match(wide, /\x1b\[90mInstructions\s+\x1b\[0madd/);
+        assert.match(wide, /\x1b\[90m  Model\s+\x1b\[0mxai\/grok/);
+        assert.match(wide, /\x1b\[2minherited\x1b\[0m/);
+    });
+
     it("shows the resolved prompt inline and keeps long definition details readable across widths", () => {
         const agent = entry(`agent.${"long-identity-".repeat(6)}`, "Payments Analyst");
         agent.instructions = "Role instructions.\n\nNamed agent instructions.";
