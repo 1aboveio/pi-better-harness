@@ -692,7 +692,7 @@ describe("shared background work navigator", () => {
       assert.ok(component, "Enter on main opens its detail sheet");
       const sheet = component.render(100).join("\n");
       assert.match(sheet, /main/);
-      assert.match(sheet, /← back/);
+      assert.match(sheet, /← main \(Esc\)/);
       component.handleInput("x");
       assert.match(component.render(100).join("\n"), /main/, "x does not stop or dismiss the main sheet");
 
@@ -2031,7 +2031,7 @@ describe("shared background work navigator", () => {
     }
   });
 
-  it("opens each clicked row's own detail in the shared overlay and leaves the editor passive", () => {
+  it("highlights clickable rows and returns from clicked details without taking editor input", () => {
     const unregisterSubagents = registerBackgroundWorkProvider({
       id: "subagents",
       label: "Subagents",
@@ -2105,7 +2105,9 @@ describe("shared background work navigator", () => {
         matchKey: (data, key) => data === key,
         truncate: (value, width) => value.slice(0, width),
       });
-      const widget = (widgets.at(-1) as any)({ requestRender() {} }, ui.theme);
+      const hoverTheme = { ...ui.theme, bg: (_color: string, value: string) => `\x1b[7m${value}\x1b[27m` };
+      ui.theme = hoverTheme;
+      const widget = (widgets.at(-1) as any)({ requestRender() {} }, hoverTheme);
       assert.equal(widget.handleInput, undefined, "the widget adds no keyboard path");
 
       const titles = ["main detail", "alpha detail", "beta detail", "task-one detail"];
@@ -2118,19 +2120,44 @@ describe("shared background work navigator", () => {
         const y = lines.findIndex((line: string) => line.includes(target.name));
         assert.ok(y > 0, `${target.name} is a rendered row`);
         assert.equal(mounted.length, 0, `${target.name} starts with no overlay`);
+        const move = { type: "move", button: "none", x: 3, y, width: 120 };
+        assert.deepEqual(widget.handleMouse(move), { handled: true, render: true });
+        const hoveredLines = widget.render(120);
+        assert.match(hoveredLines[y], /\x1b\[7m/, "hover highlights the clickable row");
+        assert.equal(visibleWidth(hoveredLines[y]), 120, "highlight stays within the row width");
+        assert.doesNotMatch(hoveredLines.join("\n"), /› /, "hover does not take keyboard selection");
+        assert.equal(mounted.length, 0, "hover does not open detail");
+        assert.deepEqual(widget.handleMouse(move), { handled: true, render: false }, "unchanged hover does not redraw");
+        assert.deepEqual(widget.handleMouse({ ...move, y: 0 }), { handled: true, render: true });
+        assert.doesNotMatch(widget.render(120)[y], /\x1b\[7m/, "moving into a blank clears hover");
         assert.deepEqual(widget.handleMouse({ type: "press", button: "left", x: 3, y, width: 120 }),
           { handled: true, render: false }, "the press claims the row without rendering");
         assert.equal(mounted.length, 0, "a press alone opens nothing");
         assert.deepEqual(widget.handleMouse({ type: "click", button: "left", x: 3, y, width: 120 }),
           { handled: true, render: true });
         assert.equal(mounted.length, 1, `${target.name} opens the single shared overlay`);
-        const sheet = mounted[0].render(100).join("\n");
+        const overlay = mounted[0];
+        const sheetLines = overlay.render(100);
+        const sheet = sheetLines.join("\n");
         assert.match(sheet, new RegExp(target.title), `${target.name} opens its own detail`);
         for (const other of titles.filter((title) => title !== target.title)) {
           assert.doesNotMatch(sheet, new RegExp(other), `${target.name} does not show ${other}`);
         }
-        mounted[0].handleInput("escape");
-        assert.equal(mounted.length, 0, `${target.name} closes with the existing Esc path`);
+        const backY = sheetLines.findIndex((line: string) => line.includes("← main (Esc)"));
+        assert.ok(backY >= 0, "the back control is visible");
+        const backEvent = { type: "move", button: "none", x: 4, y: backY, width: 100 };
+        assert.deepEqual(overlay.handleMouse(backEvent), { handled: true, render: true });
+        assert.match(overlay.render(100)[backY], /\x1b\[7m/, "back control highlights on hover");
+        assert.ok(overlay.render(100).every((line: string) => visibleWidth(line) <= 100));
+        assert.deepEqual(overlay.handleMouse({ ...backEvent, type: "leave" }), { handled: true, render: true });
+        assert.doesNotMatch(overlay.render(100)[backY], /\x1b\[7m/, "leaving clears the highlight");
+        if (target.name === "main") overlay.handleInput("escape");
+        else {
+          assert.deepEqual(overlay.handleMouse({ ...backEvent, type: "press", button: "left" }), { handled: true, render: false });
+          assert.equal(mounted.length, 1, "press alone does not dismiss detail");
+          assert.deepEqual(overlay.handleMouse({ ...backEvent, type: "click", button: "left" }), { handled: true, render: true });
+        }
+        assert.equal(mounted.length, 0, `${target.name} returns to the main view`);
       }
 
       assert.deepEqual(typed, [], "pointer navigation never types into the editor");
@@ -2232,7 +2259,7 @@ describe("shared background work navigator", () => {
 
       for (const extra of [
         { button: "right" }, { button: "middle" }, { button: "none" },
-        { type: "wheel" }, { type: "drag" }, { type: "move" }, { type: "release" },
+        { type: "wheel" }, { type: "drag" }, { type: "release" },
         { shift: true }, { alt: true }, { ctrl: true },
         { x: -1 }, { x: 120 },
         { y: 0 }, { y: yHeader }, { y: yBlank }, { y: yShortcut }, { y: lines.length },
