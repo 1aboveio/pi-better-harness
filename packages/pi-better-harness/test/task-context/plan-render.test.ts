@@ -27,6 +27,17 @@ test("compact plan keeps a short checklist visible", () => {
     "○ 5 Five",
   ]);
   assert.notEqual(lines.at(-1), "", "the next widget owns its leading section gap");
+  assert.match(lines[1]!, /^  ✓ 1 One/, "single-digit labels have one space before the title");
+});
+
+test("multi-digit item labels keep one fitted column and a single trailing separator", () => {
+  const plan = replacePlan(null, Array.from({ length: 12 }, (_, index) => ({
+    step: `Task ${index + 1}`, status: "pending" as const,
+  })), undefined, 100);
+  const rows = renderCompactPlan(plan, 80, theme, true);
+  assert.match(rows[1]!, /^  ○ 1  Task 1$/);
+  assert.match(rows[12]!, /^  ○ 12 Task 12$/);
+  assert.equal(rows[1]!.indexOf("Task"), rows[12]!.indexOf("Task"));
 });
 
 test("compact plan follows progress from head to tail and expansion reveals omitted rows", () => {
@@ -177,7 +188,7 @@ function rushFixture(): RushPlan {
   };
 }
 
-test("native and workflow plans share summary, colors, glyphs and title columns", () => {
+test("native and workflow plans share summary, colors and glyphs with fitted label columns", () => {
   const workflow = rushFixture();
   const native = replacePlan(null, [
     { step: "Completed", status: "completed" },
@@ -193,8 +204,9 @@ test("native and workflow plans share summary, colors, glyphs and title columns"
   for (const title of ["Completed", "Implement", "Pending", "Policy"]) {
     const left = a.find((line) => line.includes(title))!;
     const right = b.find((line) => line.includes(title))!;
-    assert.equal(strip(left).indexOf(title), strip(right).indexOf(title));
-    assert.equal(strip(right).replace(/#\d+/g, (id) => String(workflow.issues.findIndex((unit) => `#${unit.id}` === id) + 1).padEnd(4)), strip(left));
+    assert.equal(strip(left).indexOf(title), 6, "one-digit native labels do not reserve unused columns");
+    assert.equal(strip(right).indexOf(title), 9, "four-character issue labels have one trailing space");
+    assert.equal(strip(right).trim().replace(/#\d+/g, (id) => String(workflow.issues.findIndex((unit) => `#${unit.id}` === id) + 1)).replace(/ +/g, " "), strip(left).trim().replace(/ +/g, " "));
     assert.equal(right.slice(0, right.indexOf(" ", 3)), left.slice(0, left.indexOf(" ", 3)));
   }
   assert.match(b.join("\n"), /explore ✓/);

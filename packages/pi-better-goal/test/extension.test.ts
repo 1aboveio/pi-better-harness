@@ -258,10 +258,10 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.equal((result.details as { goal: { objective: string } }).goal.objective, "Ship slash-only goals");
 
   const rendered = component.render(80);
-  assert.equal(rendered.length, 2);
-  const [line, sectionGap] = rendered;
+  assert.equal(rendered.length, 1, "Goal leaves separation to the next widget's leading gap");
+  const [line] = rendered;
   assert.match(line ?? "", /goal active \d+:\d{2} Ship slash-only goals/);
-  assert.equal(sectionGap, "", "goal keeps the same one-row gap used between navigator sections");
+
 
   t.mock.timers.tick(9_999);
   assert.equal(renderRequests, 1, "active clock does not repaint every second");

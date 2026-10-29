@@ -381,7 +381,7 @@ test("Goal's clock line depends on display ownership, never on hooks authority",
     if (scenario.suppressed) {
       assert.deepEqual(rendered, [], `${scenario.label}: the combined header owns the clock`);
     } else {
-      assert.equal(rendered.length, 2, `${scenario.label}: Goal keeps its standalone clock`);
+      assert.equal(rendered.length, 1, `${scenario.label}: Goal keeps its standalone clock`);
       assert.match(rendered[0] ?? "", /goal active \d+:\d{2} watch the build/);
     }
     await harness.shutdown();
@@ -399,7 +399,7 @@ test("a header showing a different goal leaves the standalone Goal clock in plac
   await harness.goal("watch the build");
   const rendered = goalWidget(harness).render(80);
 
-  assert.equal(rendered.length, 2, "an unmatched goalId is not display ownership");
+  assert.equal(rendered.length, 1, "an unmatched goalId is not display ownership");
   assert.match(rendered[0] ?? "", /goal active \d+:\d{2} watch the build/);
   await harness.shutdown();
 });

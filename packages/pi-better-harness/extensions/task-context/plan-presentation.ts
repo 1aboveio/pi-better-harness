@@ -86,7 +86,7 @@ export function renderPlanPresentation(
     for (const line of wrapTextWithAnsi(content, Math.max(1, size - 2))) lines.push(`  ${line}`);
   }
 
-  const labelWidth = Math.min(12, Math.max(4, ...plan.rows.map((row) => visibleWidth(planText(row.label)))));
+  const labelWidth = Math.min(12, Math.max(1, ...plan.rows.map((row) => visibleWidth(planText(row.label)))));
   const statusWidth = Math.min(24, Math.max(0, ...plan.rows.map((row) =>
     visibleWidth(planText(row.statusLabel ?? statusStyle(row.status).label)))));
   const indices = full || expanded ? plan.rows.map((_, index) => index) : compactRowIndices(plan.rows);
@@ -102,7 +102,7 @@ export function renderPlanPresentation(
     const label = truncateToWidth(planText(row.label), labelWidth);
     const prefix = (index === selectedIndex ? theme.fg("accent", "› ") : "  ") +
       theme.fg(style.color, style.glyph) + " " + theme.fg("dim", label) +
-      " ".repeat(Math.max(0, labelWidth - visibleWidth(label)) + 2);
+      " ".repeat(Math.max(0, labelWidth - visibleWidth(label)) + 1);
     const titleColor = row.status === "blocked" ? "warning" : row.status === "failed" ? "error" :
       row.status === "in_progress" || row.status === "implemented" || row.status === "reviewed" ? "text" : "muted";
     const badge = planText(row.statusLabel ?? style.label);
