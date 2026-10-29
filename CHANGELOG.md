@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.34.2] - 2026-10-29
+
+### Changed
+
+- Bundle Subagents 0.22.2 and Background Tasks 0.12.1 with clickable detail-view return controls and hover highlights. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.22.2] - 2026-10-29
+
+### Added
+
+- Highlight clickable work rows and the detail header's return control on mouse hover without changing keyboard selection.
+- Return to the main editor by clicking the detail header's main control or pressing Esc or Left, without stopping the run. Keep work rows clickable inside the detail overlay.
+
+### Fixed
+
+- Keep CI and pull-request monitoring with the coordinator instead of delegated implementation workers.
+
+## [pi-better-background-tasks@0.12.1] - 2026-10-29
+
+### Added
+
+- Highlight clickable work rows and the detail header's return control on mouse hover, and support clicking work rows inside the detail overlay.
+- Return from task details to the main editor by clicking the main control or pressing Esc or Left, without stopping the task.
+
 ## [pi-better-harness@0.34.1] - 2026-10-29
 
 ### Changed

@@ -1,6 +1,6 @@
 {
   "name": "pi-better-harness",
-  "version": "0.34.1",
+  "version": "0.34.2",
   "description": "Pi extension bundle for a write sandbox, subagents, background tasks, SSH, goals, and Outcome & Todo.",
   "license": "MIT",
   "type": "module",
@@ -53,11 +53,11 @@
     "test": "node --import tsx --import ../../scripts/isolate-registry.mjs --test test/*.test.mjs test/task-context/*.test.ts"
   },
   "dependencies": {
-    "pi-better-background-tasks": "0.12.0",
+    "pi-better-background-tasks": "0.12.1",
     "pi-better-goal": "0.10.3",
     "pi-better-sandbox": "0.14.0",
     "pi-better-ssh": "0.1.3",
-    "pi-better-subagents": "0.22.1",
+    "pi-better-subagents": "0.22.2",
     "proper-lockfile": "^4.1.2",
     "shell-quote": "1.12.0",
     "smol-toml": "1.9.0",
