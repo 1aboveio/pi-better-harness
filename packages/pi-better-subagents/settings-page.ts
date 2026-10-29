@@ -18,9 +18,11 @@ export interface SubagentSettingsHandlers {
     changeCap(cap: number): void;
     save(): { ok: boolean; message: string };
     reset(): void;
+    /** Opens the same catalog as `/agents`. The caller closes this page first. */
+    openAgents?(): void;
 }
 
-const labels = ["Delegation mode", "Concurrent subagents", "Reset to defaults"];
+const labels = ["Delegation mode", "Concurrent subagents", "Agents", "Reset to defaults"];
 
 function cell(text: string, width: number): string {
     const clipped = Tui.truncateToWidth(text, width, "");
@@ -57,6 +59,8 @@ export function createSubagentSettingsPage(
                 input.handleInput("\x05");
                 input.focused = focused;
                 report("");
+            } else if (row === 2) {
+                handlers.openAgents?.();
             } else {
                 handlers.reset();
                 report("Session settings reset to saved defaults.");
@@ -118,7 +122,7 @@ export function createSubagentSettingsPage(
             const lines: string[] = [theme.fg("accent", theme.bold("  Subagent settings")), ""];
             labels.forEach((label, index) => {
                 const selected = index === row;
-                if (index === 2) lines.push("");
+                if (index === labels.length - 1) lines.push("");
                 const title = theme.fg(selected ? "accent" : "text", marker(selected) + label);
                 if (index >= 2) {
                     lines.push(highlight(title, selected));

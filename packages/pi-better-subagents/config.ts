@@ -73,7 +73,7 @@ export interface SubagentConfig extends TimingSettings {
 }
 
 /** Concurrency cap when config.json sets none. */
-export const DEFAULT_MAX_CONCURRENT = 4;
+export const DEFAULT_MAX_CONCURRENT = 6;
 
 export function isConcurrencyCap(value: unknown): value is number {
     return typeof value === "number" && Number.isSafeInteger(value) && value > 0;

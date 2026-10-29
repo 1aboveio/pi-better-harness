@@ -9,7 +9,7 @@ import test from "node:test";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
-test("subagent settings edit mode and cap, validate, save, reset, and survive reload in the real TUI", { skip: !hasTmux }, () => {
+test("subagent settings edit mode and cap, validate, save, reset, survive reload, and open Agents in the real TUI", { skip: !hasTmux }, () => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-subagent-settings-"));
     const config = join(fixture, "settings.json");
     const wrapper = join(fixture, "settings-extension.ts");
@@ -63,7 +63,7 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         wait(/Concurrent subagents\s+2/);
         key("Down"); key("Down"); key("Enter");
         wait(/Concurrent subagents\s+7/);
-        key("Up"); key("Enter"); key("C-u"); literal("6"); key("Enter");
+        key("Up"); key("Up"); key("Enter"); key("C-u"); literal("6"); key("Enter");
         wait(/Concurrent subagents\s+6/);
         key("Escape"); wait(/^(?![\s\S]*Subagent settings)/);
         literal("/reload"); key("Enter"); wait(/Reloaded/);
@@ -73,7 +73,11 @@ export default function (pi) { setConfigPathForTests(${JSON.stringify(config)});
         assert.equal(JSON.parse(readFileSync(config, "utf8")).piBetterHarness.subagents.maxConcurrent, 7, "an unsaved cap survives reload without changing defaults");
         tmux("resize-window", "-t", "settings", "-x", "40", "-y", "24");
         wait(/Concurrent subagents\s+6/);
+        key("Down"); key("Down"); key("Enter");
+        const catalog = wait(/Agents\s+.*definitions/);
+        assert.doesNotMatch(catalog, /Subagent settings/, "the settings pane closes before opening Agents");
         key("Escape");
+        wait(/^(?![\s\S]*Agents\s+.*definitions)/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
         rmSync(fixture, { recursive: true, force: true });

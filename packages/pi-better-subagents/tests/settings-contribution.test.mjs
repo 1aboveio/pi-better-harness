@@ -51,7 +51,9 @@ test("subagents contributes the standalone settings opener with shared session a
     assert.deepEqual(later, [contribution, agents, contribution, agents]);
 
     const pages = [];
+    const uiEvents = [];
     let keys = [];
+    const keyBatches = [];
     let closed = 0;
     const notices = [];
     const ctx = {
@@ -59,11 +61,24 @@ test("subagents contributes the standalone settings opener with shared session a
         sessionManager: { getBranch: () => entries },
         ui: {
             notify(message) { notices.push(message); }, setWidget() {}, setStatus() {},
-            async custom(factory) {
-                const page = factory({ requestRender() {} }, theme, {}, () => { closed++; });
-                pages.push(page.render(100).join("\n"));
-                for (const key of keys) page.handleInput(key);
-                page.handleInput("\x1b");
+            custom(factory) {
+                return new Promise((resolve) => {
+                    const call = pages.length;
+                    uiEvents.push(`open:${call}`);
+                    let settled = false;
+                    const done = (value) => {
+                        if (settled) return;
+                        settled = true;
+                        closed++;
+                        uiEvents.push(`close:${call}`);
+                        resolve(value);
+                    };
+                    const page = factory({ requestRender() {} }, theme, {}, done);
+                    pages.push(page.render(100).join("\n"));
+                    const batch = keyBatches.length > 0 ? keyBatches.shift() : keys;
+                    for (const key of batch) page.handleInput(key);
+                    if (!settled) page.handleInput("\x1b");
+                });
             },
         },
     };
@@ -97,6 +112,20 @@ test("subagents contributes the standalone settings opener with shared session a
     await commands.get("agents").handler("", ctx);
     assert.equal(pages.at(-1), hubCatalog, "the hub opens the same catalog as /agents");
     assert.equal(entries.length, beforeCatalog, "opening the catalog does not change saved session settings");
+
+    const beforeAgents = entries.length;
+    const openedBefore = pages.length;
+    const eventsBefore = uiEvents.length;
+    keyBatches.push(["\x1b[B", "\x1b[B", "\r"]); // settings menu: two rows down from Delegation mode lands on Agents
+    await contribution.open(ctx);
+    assert.match(pages.at(-2), /Agents/);
+    assert.match(pages.at(-2), /Reset to defaults/);
+    assert.deepEqual(uiEvents.slice(eventsBefore), [
+        `open:${openedBefore}`, `close:${openedBefore}`,
+        `open:${openedBefore + 1}`, `close:${openedBefore + 1}`,
+    ], "the settings page closes before the catalog opens, and the catalog closes on its own");
+    assert.equal(pages.at(-1), hubCatalog, "the settings Agents action opens the same catalog as /agents");
+    assert.equal(entries.length, beforeAgents, "opening the catalog from settings changes no saved session settings");
 
     ctx.mode = "rpc";
     const opened = pages.length;

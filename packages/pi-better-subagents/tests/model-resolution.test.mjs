@@ -20,7 +20,7 @@ import {
 } from "../model-resolution.ts";
 
 const APPROVED = [
-    ["role.researcher", "openai/gpt-6.1-sol", "medium"],
+    ["role.researcher", "openai/gpt-6.1-terra", "medium"],
     ["role.explorer", "openai/gpt-6-luna", "medium"],
     ["role.product-manager", "openai/gpt-6.1-sol", "medium"],
     ["role.developer", "openai/gpt-6.1-sol", "high"],

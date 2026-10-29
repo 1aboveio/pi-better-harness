@@ -19,7 +19,8 @@ Set `delegationMode` in the user config described under
 `coordinator` (default `adaptive`). This controls foreground delegation guidance,
 not child permissions or catalog definitions. `/subagents settings` (or simply
 `/subagents`) opens the terminal settings page with mode and concurrent-subagent
-cap controls and Reset to defaults. The page uses the same selected-row and
+cap controls, an Agents shortcut to `/agents`, and Reset to defaults.
+The page uses the same selected-row and
 active-cell styling as `/sandbox`, with one editable value column.
 Edits automatically persist for this session, including across reloads; Escape
 closes the page without undoing them.
@@ -35,7 +36,7 @@ Command equivalents also work outside the terminal UI:
 /subagents reset
 ```
 
-The cap defaults to 4 and applies to both single and batch launches. Lowering it
+The cap defaults to 6 and applies to both single and batch launches. Lowering it
 below the running count leaves existing work untouched and blocks new admissions
 until capacity becomes available. Slots already reserved by an in-flight launch
 remain admitted. Settings apply to this parent Pi process, not
@@ -481,7 +482,7 @@ The effective config also sets:
 - `delegationMode` — foreground policy (`manual`, `adaptive`, or `coordinator`;
   default `adaptive`). `/subagents mode ...` changes only the current session.
   `/subagents save` saves mode and cap together as config defaults.
-- `maxConcurrent` — positive whole-number concurrency cap (**default 4**).
+- `maxConcurrent` — positive whole-number concurrency cap (**default 6**).
   `/subagents cap <number>` overrides it for this session. Both single and batch
   admissions respect the cap; existing runs are never stopped by a cap change.
   Use `/subagents settings` to edit both controls or `/subagents reset` to return
