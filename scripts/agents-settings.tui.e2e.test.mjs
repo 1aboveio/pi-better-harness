@@ -61,6 +61,12 @@ test("agents model and effort edits persist for the session and only Ctrl+S save
         const settingsScreen = wait(/Agents \/ Fixture/);
         assert.match(settingsScreen.split("\n")[0], /^Agents \/ Fixture/);
         assert.doesNotMatch(settingsScreen, /Search/, "fullscreen detail covers the catalog list");
+        assert.match(settingsScreen, /Effective prompt\s*\n\s*Inspect the fixture\./, "the resolved prompt is readable without opening another view");
+        assert.match(settingsScreen, /SETTING\s+VALUE\s+ORIGIN/, "configuration uses aligned columns");
+        key("p");
+        const promptScreen = wait(/Agents \/ prompt/);
+        assert.match(promptScreen, /Inspect the fixture\./);
+        key("Escape"); wait(/Agents \/ Fixture/);
         key("Enter"); wait(/Agents \/ model/);
         literal("openai/gpt-4o"); wait(/openai\/gpt-4o/); key("Enter");
         wait(/Model\s+openai\/gpt-4o\s+session/);

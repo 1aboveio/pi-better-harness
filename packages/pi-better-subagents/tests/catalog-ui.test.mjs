@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { createCatalogComponent, catalogColumns } from "../catalog-ui.ts";
+import { createCatalogComponent, catalogColumns, catalogDetailLines } from "../catalog-ui.ts";
 
 const theme = { fg: (_color, text) => text };
 const entry = (id, name, status = null) => ({
@@ -18,6 +18,50 @@ const entry = (id, name, status = null) => ({
 });
 
 describe("catalog command surface", () => {
+    it("colors labels separately from values without changing content or column widths", () => {
+        const agent = entry("agent.payments", "Payments Analyst");
+        agent.instructionMode = "add";
+        const colors = { muted: "\x1b[90m", dim: "\x1b[2m", accent: "\x1b[36m" };
+        const coloredTheme = { fg: (color, text) => `${colors[color] ?? ""}${text}\x1b[0m` };
+        for (const width of [24, 42, 90, 120]) {
+            const plain = catalogDetailLines(agent, false, width);
+            const colored = catalogDetailLines(agent, false, width, [], coloredTheme);
+            const strip = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
+            assert.equal(colored.map(strip).join("").replace(/\s+/g, ""), plain.join("").replace(/\s+/g, ""));
+            assert.ok(colored.every((row) => visibleWidth(row) <= width));
+            assert.ok(colored.some((row) => /\x1b\[90mID\s+\x1b\[0magent/.test(row)));
+        }
+        const wide = catalogDetailLines(agent, false, 120, [], coloredTheme).join("\n");
+        assert.match(wide, /\x1b\[90mInstructions\s+\x1b\[0madd/);
+        assert.match(wide, /\x1b\[90m  Model\s+\x1b\[0mxai\/grok/);
+        assert.match(wide, /\x1b\[2minherited\x1b\[0m/);
+    });
+
+    it("shows the resolved prompt inline and keeps long definition details readable across widths", () => {
+        const agent = entry(`agent.${"long-identity-".repeat(6)}`, "Payments Analyst");
+        agent.instructions = "Role instructions.\n\nNamed agent instructions.";
+        agent.identity.path = `/tmp/${"long-directory/".repeat(10)}agent.md`;
+        for (const width of [24, 42, 90, 120]) {
+            const lines = catalogDetailLines(agent, false, width);
+            assert.ok(lines.every((line) => visibleWidth(line) <= width));
+            const compact = lines.join("").replace(/\s+/g, "");
+            const identityRows = lines.slice(lines.findIndex((row) => /ID\s+agent/.test(row)), lines.findIndex((row) => /Kind\s+agent/.test(row)));
+            const identity = identityRows.map((row) => width >= 90 ? row.slice(2, 2 + Math.floor((width - 8) / 2)) : row)
+                .join("").replace(/^\s*ID\s+/, "").replace(/\s+/g, "");
+            assert.equal(identity, agent.id, `complete identity at ${width} columns`);
+            assert.ok(compact.includes(agent.identity.path), `complete source path at ${width} columns`);
+            assert.ok(compact.includes(agent.instructions.replace(/\s+/g, "")), `resolved prompt at ${width} columns`);
+        }
+        const component = createCatalogComponent({ entries: [agent], diagnostics: [] }, theme, () => {}, () => {}, agent.id, undefined, () => 40);
+        assert.match(component.render(100).join("\n"), /Role instructions/);
+        const wide = catalogDetailLines(agent, false, 120);
+        assert.match(wide.find((row) => /Status/.test(row)), /ID\s+agent\..*Status\s+unresolved/);
+        const model = wide.find((row) => /Model\s+xai/.test(row));
+        const effort = wide.find((row) => /Effort\s+\(unset\)/.test(row));
+        assert.equal(model.indexOf("xai"), effort.indexOf("(unset)"));
+        assert.equal(model.indexOf("inherited"), effort.indexOf("absent"));
+    });
+
     it("filters by name or role, inspects, scrolls, and returns without closing", () => {
         const rows = [entry("role.reviewer", "Reviewer"), entry("agent.payments", "Payments Analyst", false)];
         let closed = 0;
@@ -40,6 +84,44 @@ describe("catalog command surface", () => {
         assert.match(component.render(60).join("\n"), /Reviewer/);
         component.handleInput("\x1b");
         assert.equal(closed, 1);
+    });
+
+    it("reaches the last detail rows after editable settings wrap in a short terminal", () => {
+        const agent = entry("agent.payments", "Payments Analyst");
+        agent.fields.model.value = "provider/" + "long-model-name".repeat(8);
+        agent.restrictions = [{ honored: false, name: "final-restriction" }];
+        const catalog = { entries: [agent], diagnostics: [] };
+        const editor = { get: () => catalog, models: () => [], settings: () => ({}), change() {}, save: () => ({ ok: true, message: "saved" }) };
+        const component = createCatalogComponent(catalog, theme, () => {}, () => {}, agent.id, editor, () => 12);
+        for (let i = 0; i < 250; i++) {
+            component.handleInput("\x1b[B");
+            component.render(42);
+        }
+        assert.match(component.render(42).join("\n"), /final-restriction/);
+        component.handleInput("e");
+        assert.match(component.render(100).join("\n"), /Payments Analyst/);
+    });
+
+    it("reveals and selects both editable fields in a short terminal", () => {
+        const agent = entry("agent.payments", "Payments Analyst");
+        agent.definitionValid = true;
+        const catalog = { entries: [agent], diagnostics: [] };
+        const editor = { get: () => catalog, models: () => [], settings: () => ({}), change() {}, save: () => ({ ok: true, message: "saved" }) };
+        const component = createCatalogComponent(catalog, theme, () => {}, () => {}, agent.id, editor, () => 12);
+        component.render(42);
+        component.handleInput("\x1b[B");
+        assert.match(component.render(42).join("\n"), /> Effort/);
+        component.handleInput("\r");
+        assert.match(component.render(42).join("\n"), /Agents \/ effort/);
+        component.handleInput("\x1b");
+        component.render(42);
+        component.handleInput("\x1b[A");
+        assert.match(component.render(42).join("\n"), /> Model/);
+        component.handleInput("\r");
+        assert.match(component.render(42).join("\n"), /Agents \/ model/);
+        component.handleInput("\x1b");
+        component.handleInput("e");
+        assert.match(component.render(42).join("\n"), /> Model/);
     });
 
     it("aligns model, effort, source, and state columns and keeps model at narrow widths", () => {
