@@ -19,6 +19,12 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 - Live background-work navigator for active runs.
 - Harness-owned run timing: every run gets a no-progress wake (10 min), while wall-clock soft deadlines and hard ceilings are opt-in so productive agents are not stopped solely for taking a long time. Configure per spawn with `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`, or globally in `config.json` / `PI_SUBAGENT_*_MINUTES`. See [usage notes](docs/usage.md#run-timing-deadline-ceiling-stuck).
 
+Every single or batch launch automatically joins one shared supervision watcher in the
+foreground Pi process. The last active run's exit or stop tears it down; a later
+launch starts it again. No separate background task or coordinator heartbeat is
+needed. Completion delivery retries use the callback batcher's own timer. Lost-run
+alerts retain supervision until their handoff is handled, so lost work is not silent.
+
 ## Install
 
 ```sh

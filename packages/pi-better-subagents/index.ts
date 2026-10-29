@@ -879,7 +879,7 @@ function reconcileHealth(): void {
         if (meta && meta.completionCallbackPendingAt !== undefined && meta.completionCallbackSentAt === undefined && meta.completionCallbackSuppressedAt === undefined) enqueueCompletionCallback(pi!, meta.id);
     }
     pruneProgressCache();
-    if (!needsMonitoring(listMetasForParent(process.pid)) && !hasPendingFailureCallbacks()) stopHealthTicker();
+    syncHealthTicker();
 }
 
 /** Release progress state for runs that are no longer live (lost, stopped, or finished by any path). */
@@ -948,10 +948,10 @@ function reconcileAbandonedRuns(now: number = Date.now()): number {
     return adopted;
 }
 
-function hasPendingFailureCallbacks(): boolean {
-    return listMetasForParent(process.pid).some((m) => ownedByThisParent(m) && m.callback !== false &&
-        m.completionCallbackPendingAt !== undefined && m.completionCallbackSentAt === undefined && m.completionCallbackSuppressedAt === undefined &&
-        !callbackSuppressionReason(m));
+/** Completion batches own their retry timer; only supervision keeps this one alive. */
+function syncHealthTicker(): void {
+    if (needsMonitoring(listMetasForParent(process.pid))) ensureHealthTicker();
+    else stopHealthTicker();
 }
 
 /** Start the reconciliation loop if it isn't already running. */
@@ -1099,6 +1099,7 @@ function navigatorCloseRun(id: string) {
     healthLogCache.delete(id);
     resetChildEventLogCursor(id);
     resetParseRunCursor(id);
+    syncHealthTicker();
     return outcome;
 }
 
@@ -1451,14 +1452,14 @@ function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: 
     // Host-facing wrapper around first-party finalizer (finalization.ts).
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation; finalization.ts enforces canExitFinalize + lifecycle authority.
-    const result = finalizeRunCore(id, code, {
+    finalizeRunCore(id, code, {
         renderWidget,
         notify: (message, level) => {
             try { ctx.ui.notify(message, level); } catch { /* ignore */ }
         },
         sendMessage: () => enqueueCompletionCallback(pi, id),
     });
-    if (result.applied && hasPendingFailureCallbacks()) ensureHealthTicker();
+    syncHealthTicker();
 }
 
 function timingSchemaFields() {
@@ -1938,7 +1939,7 @@ export default function (pi: ExtensionAPI) {
             "The tools param is both the tool allowlist AND what determines which extensions load in the child (e.g. tools='read,bash,web_fetch' loads only the web-tools package). Ask for the tools the task needs and nothing more; clean:true gives a built-ins-only child. Without an agent or role, pick a model with the model param (e.g. 'xai/grok-4.5@high'); providerless model patterns are resolved by Pi, while provider/model is deterministic and loads mapped provider extensions.",
             ...CATALOG_GUIDELINES,
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
-            "Every run has harness-owned stall detection: no progress for stuck_minutes (default 10) wakes you once without stopping the run. Elapsed-time limits are opt-in: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
+            "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. No progress for stuck_minutes (default 10) wakes you once without stopping the run. Elapsed-time limits are opt-in: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
         ],
         parameters: Type.Object({
@@ -2263,7 +2264,10 @@ export default function (pi: ExtensionAPI) {
     const acceptanceResultTool = subagentResultTool(Type, toolSession);
     pi.registerTool(acceptanceResultTool);
     publishAcceptanceHooks(acceptanceResultTool);
-    const acceptanceStopTool = subagentStopTool(Type, { onStopped: renderWidget });
+    const acceptanceStopTool = subagentStopTool(Type, { onStopped: () => {
+        renderWidget();
+        syncHealthTicker();
+    } });
     acceptanceStopToolRef = acceptanceStopTool;
     pi.registerTool(acceptanceStopTool);
     publishAcceptanceHooks();
@@ -2475,10 +2479,8 @@ export default function (pi: ExtensionAPI) {
         // Clear the retired legacy widget so the shared navigator is the only
         // list surface for running/orphaned subagents.
         renderWidget();
-        // Resume supervision reconciliation + durable health-callback recovery
-        // across /reload while current-parent work still needs the ticker
-        // (running/orphaned, or unmarked lost); it stops itself when idle.
-        if (needsMonitoring(listMetasForParent(process.pid)) || hasPendingFailureCallbacks()) ensureHealthTicker();
+        // Reattach one watcher after reload; ordinary completion retries belong to the batcher.
+        syncHealthTicker();
     });
 
     pi.on("session_before_switch", () => {
