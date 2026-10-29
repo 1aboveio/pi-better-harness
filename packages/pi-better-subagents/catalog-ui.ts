@@ -137,6 +137,8 @@ export function createCatalogComponent(
     let query = "";
     let scroll = 0;
     let settingRow = 0;
+    let settingPositions: number[] = [];
+    let revealSetting = false;
     let picker: SelectList | undefined;
     let filterPicker: ((filter: string) => void) | undefined;
     let pickerKey: AgentSettingKey | undefined;
@@ -240,6 +242,16 @@ export function createCatalogComponent(
                 }),
             ] : [];
             const detailLines = current ? detailRows(current, safeWidth, controls) : [];
+            if (editor && mode === "detail") {
+                settingPositions = ["Model", "Effort"].map((label) => detailLines.findIndex((text) =>
+                    new RegExp(`^  [> ] ${label}(?:\\s|$)`).test(text.replace(/\x1b\[[0-9;]*m/g, ""))));
+                if (revealSetting && settingPositions[settingRow] >= 0) {
+                    const position = settingPositions[settingRow];
+                    if (position < scroll) scroll = position;
+                    else if (position >= scroll + detailSize) scroll = position - detailSize + 1;
+                }
+                revealSetting = false;
+            }
             scroll = Math.max(0, Math.min(scroll, detailLines.length - detailSize));
             const lines = mode !== "list" && current ? [
                 theme.fg("accent", mode === "prompt" ? "Agents / prompt" : editor ? `Agents / ${current.identity.name || current.id}` : "Agents / inspect"),
@@ -290,7 +302,11 @@ export function createCatalogComponent(
                 else { close(); return; }
             } else if (matchesKey(data, "up") || matchesKey(data, "down")) {
                 const delta = matchesKey(data, "down") ? 1 : -1;
-                if (mode === "detail" && editor && scroll === 0 && (delta < 0 || settingRow === 0)) settingRow = Math.max(0, Math.min(1, settingRow + delta));
+                if (mode === "detail" && editor && scroll <= (settingPositions[1] ?? 0)
+                    && ((delta > 0 && settingRow === 0) || (delta < 0 && settingRow === 1))) {
+                    settingRow += delta;
+                    revealSetting = true;
+                }
                 else if (mode !== "list" && selected()) scroll = Math.max(0, scroll + delta);
                 else if (rows.length) selectedId = rows[Math.max(0, Math.min(rows.length - 1, rows.findIndex((entry) => entry.id === selectedId) + delta))]?.id;
             } else if (matchesKey(data, "enter") && mode === "list" && selected()) {
@@ -303,6 +319,7 @@ export function createCatalogComponent(
             } else if (editor && (data === "e" || data === "E") && mode === "detail" && selected()) {
                 settingRow = 0;
                 scroll = 0;
+                revealSetting = true;
             } else if (editor && mode === "detail" && (matchesKey(data, "enter") || data === " ")) {
                 try { edit(); } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
             } else if (mode === "list" && matchesKey(data, "backspace")) {

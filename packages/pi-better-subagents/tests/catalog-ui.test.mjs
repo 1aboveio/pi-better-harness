@@ -102,6 +102,28 @@ describe("catalog command surface", () => {
         assert.match(component.render(100).join("\n"), /Payments Analyst/);
     });
 
+    it("reveals and selects both editable fields in a short terminal", () => {
+        const agent = entry("agent.payments", "Payments Analyst");
+        agent.definitionValid = true;
+        const catalog = { entries: [agent], diagnostics: [] };
+        const editor = { get: () => catalog, models: () => [], settings: () => ({}), change() {}, save: () => ({ ok: true, message: "saved" }) };
+        const component = createCatalogComponent(catalog, theme, () => {}, () => {}, agent.id, editor, () => 12);
+        component.render(42);
+        component.handleInput("\x1b[B");
+        assert.match(component.render(42).join("\n"), /> Effort/);
+        component.handleInput("\r");
+        assert.match(component.render(42).join("\n"), /Agents \/ effort/);
+        component.handleInput("\x1b");
+        component.render(42);
+        component.handleInput("\x1b[A");
+        assert.match(component.render(42).join("\n"), /> Model/);
+        component.handleInput("\r");
+        assert.match(component.render(42).join("\n"), /Agents \/ model/);
+        component.handleInput("\x1b");
+        component.handleInput("e");
+        assert.match(component.render(42).join("\n"), /> Model/);
+    });
+
     it("aligns model, effort, source, and state columns and keeps model at narrow widths", () => {
         const role = entry("role.reviewer", "Reviewer");
         const agent = entry("agent.payments", "Payments Analyst", false);
