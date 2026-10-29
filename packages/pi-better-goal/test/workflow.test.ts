@@ -202,7 +202,7 @@ test("an alias declaring workflow-alias-of binds its coordinator for goal handba
   } as unknown as ExtensionAPI);
 
   // The standalone Plan package is retired; the Harness Outcome & Todo runtime
-  // owns the workflow plan bridge. Its control starts Off and is switched on
+  // owns the workflow plan bridge. Its hooks control starts Off and is switched on
   // through the real setting, so this test never touches personal settings.
   let todoControl: { get(): string; change(value: string, ctx: ExtensionContext): Promise<void> } | undefined;
   shared.events.on("harness-settings:register", (candidate: { id?: string }) => {
@@ -220,10 +220,10 @@ test("an alias declaring workflow-alias-of binds its coordinator for goal handba
     setActiveTools: (next: string[]) => { harnessActiveTools = next; },
   } as unknown as ExtensionAPI);
   await harnessHandlers.get("session_start")?.({ reason: "startup" }, ctx);
-  assert.equal(todoControl?.get(), "Off", "Outcome & Todo defaults off");
+  assert.equal(todoControl?.get(), "Off", "Outcome & Todo hooks default off");
   await assert.rejects(
     harnessTools.get("update_todo")!.execute("off", { outcome: { objective: "x" } }, undefined, undefined, toolContext(ctx)),
-    /Outcome & Todo is off/,
+    /Outcome & Todo hooks are off/,
   );
   await todoControl!.change("On", ctx);
   assert.deepEqual(harnessActiveTools, ["read", "update_todo", "get_todo"]);

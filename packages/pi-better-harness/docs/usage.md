@@ -32,7 +32,7 @@ its bundle, and removes a retired Plan registration in the selected scope.
 Alternatively, load the complete bundle with `pi install npm:pi-better-harness`.
 
 Normal bundle installs and updates mask a separately installed `pi-better-plan`
-whenever Harness is loaded, even with Outcome & Todo off. Its tools, `/plan`,
+whenever Harness is loaded, even with Outcome & Todo hooks off. Its tools, `/plan`,
 widget, and prompt hooks are not registered with the session. Both load orders
 are covered; its factory listeners are cleaned up before Todo starts. The old
 registration and cached files can remain, but settings and saved histories are
@@ -41,17 +41,34 @@ again. The explicit installer removes the selected registration instead.
 
 ## Outcome & Todo
 
-In `/harness-settings`, **Outcome & Todo** defaults to **Off**. Enabling it exposes
-`update_todo`, `get_todo`, and the Todo widget. `/todo` opens the full view;
-`/todo expand`, `/todo collapse`, `/todo hide`, and `/todo show` control its display.
-An outcome can exist without a checklist. A finished or cleared checklist does not
-complete or remove the outcome.
+In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
+defaults to **On**, independently of **Outcome & Todo hooks** (legacy id
+`outcome-todo`), which defaults to **Off**. Saved outcomes and checklists render
+with hooks off. If state is missing, Harness creates no placeholder, state, or
+settings. Turning display off leaves hooks active. Saved v1 `enabled` remains
+the hooks authority; the new optional display preference defaults to true.
 
-Harness registers its context hook when loaded. While enabled and a task is active,
-it includes a short outcome reminder and current Todo focus before each model call.
-No hook file or postinstall setup is required. Disabling the feature hides the tools
-and widget and stops reminders without deleting saved state. Enabling it never
-starts or resumes work. `/goal` and skills cannot enable it on their own.
+The compact widget has one Todo heading, a caret after Todo, and the completion
+count on the left. Matching Goal status and its existing active-time clock appear
+on the right. The outcome appears as a single muted, truncated subtitle. The
+collapsed view shows up to five relevant rows; the expanded view shows all rows.
+Click to toggle. `/todo` shows the full objective, acceptance criteria, boundaries,
+and plan; `/todo expand`, `/todo collapse`, `/todo hide`, and `/todo show` control
+its display. These commands remain available with hooks off for explicit user
+control. An outcome can exist without a checklist. A finished or cleared checklist
+does not complete or remove the outcome.
+
+Hooks enable `update_todo`, `get_todo`, capture, matching Goal lifecycle bridge
+writes, reminders, and automated cleanup. While hooks are enabled and a task is
+active, Harness includes a short outcome reminder and current Todo focus before
+each model call. No hook file or postinstall setup is required. Turning hooks off
+does not delete saved state. Enabling hooks never starts or resumes work. `/goal`
+and skills cannot enable them on their own.
+
+Click a subagent or background-task row to open its existing navigator details.
+Enter and keyboard controls remain available, and editor input stays passive.
+No permanent status bar is added; existing critical permission and paused notices
+remain unchanged.
 
 Skills use this optional interface only when its tools are available. Workflow task
 plans retain their own schema, revision checks, and source requirements. When the
@@ -85,7 +102,7 @@ After installation, Pi can use these model-callable tools:
 | `pi-better-background-tasks` | `bg_task_spawn`, `bg_task_watch`, `bg_task_list`, `bg_task_status`, `bg_task_log`, `bg_task_stop`, `bg_task`, `bg_status` |
 | `pi-better-ssh` | `remote_bash`, `ssh_profile`, `ssh_mux` |
 | `pi-better-goal` | `get_goal`, `update_goal`, `get_background_activity` |
-| Harness Outcome & Todo (when enabled) | `update_todo`, `get_todo` |
+| Harness Outcome & Todo (when hooks are enabled) | `update_todo`, `get_todo` |
 
 The goal extension also provides the `/goal` and `/better-activity` commands.
 

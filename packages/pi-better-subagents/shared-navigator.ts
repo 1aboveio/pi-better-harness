@@ -328,28 +328,92 @@ function themeFgFromTheme(theme: unknown): (color: string, value: string) => str
   return (color, value) => maybeTheme?.fg ? maybeTheme.fg(color, value) : value;
 }
 
-function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps): Component & { dispose?(): void } {
+// Structural typing keeps keyboard-only Pi hosts (no mouse API) loading this widget unchanged.
+type WidgetMouseEvent = {
+  type: string;
+  button: string;
+  /** Coordinates local to this component, zero-based. */
+  x: number;
+  y: number;
+  width: number;
+  shift?: boolean;
+  alt?: boolean;
+  ctrl?: boolean;
+};
+
+type WidgetMouseResult = { handled: true; render: boolean };
+
+type MainListWidget = Component & {
+  dispose?(): void;
+  handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined;
+};
+
+function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, deps: HostDeps): MainListWidget {
   const requestRender = () => tui.requestRender?.();
   state().mainListRequestRender = requestRender;
+  // navigatorId per rendered line, so a pointer row resolves by structure, never by row text.
+  let lineOwners: Array<string | undefined> = [];
+  let lineWidth = MAIN_LIST_FALLBACK_WIDTH;
+  // Pi synthesizes a click only for the component that handled the initial press.
+  let pressedRow: { navigatorId: string; y: number } | undefined;
+  const rowAt = (event: WidgetMouseEvent): string | undefined => {
+    const width = Number.isFinite(event.width) && event.width > 0 ? Math.floor(event.width) : lineWidth;
+    if (!Number.isFinite(event.x) || event.x < 0 || event.x >= width) return undefined;
+    if (!Number.isInteger(event.y) || event.y < 0 || event.y >= lineOwners.length) return undefined;
+    return lineOwners[event.y];
+  };
   return {
     render(width: number): string[] {
       const rows = listRows();
       syncMainListSelection(rows);
       if (!rows.length) {
         state().lastMainListLines = undefined;
+        lineOwners = [];
+        pressedRow = undefined;
         return [];
       }
-      const lines = ["", ...buildMainListLines(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
+      const layout = buildMainListLayout(rows, renderWidth(width), deps.truncate, themeFgFromTheme(theme), {
         selectedId: state().mainListFocused ? state().mainListSelectedId : undefined,
         focused: state().mainListFocused === true,
-      })];
+      });
+      lineWidth = renderWidth(width);
+      // The leading gap line belongs to the widget too, so its slot stays ownerless.
+      lineOwners = [undefined, ...layout.owners];
+      const lines = ["", ...layout.lines];
       state().lastMainListLines = lines;
       return lines;
     },
-    invalidate() { state().lastMainListLines = undefined; },
+    handleMouse(event: WidgetMouseEvent): WidgetMouseResult | undefined {
+      // Only an unmodified left press is ours; every other gesture reaches the host untouched.
+      if (event.button !== "left" || event.shift === true || event.alt === true || event.ctrl === true) {
+        pressedRow = undefined;
+        return undefined;
+      }
+      if (event.type === "press") {
+        pressedRow = undefined;
+        const navigatorId = rowAt(event);
+        if (!navigatorId || !listRows().some((row) => row.navigatorId === navigatorId)) return undefined;
+        pressedRow = { navigatorId, y: event.y };
+        return { handled: true, render: false };
+      }
+      if (event.type !== "click") return undefined;
+      const pressed = pressedRow;
+      pressedRow = undefined;
+      // A click after another component's press, or after the layout moved, is not the row we claimed.
+      if (!pressed || pressed.y !== event.y || rowAt(event) !== pressed.navigatorId) return undefined;
+      if (!openNavigatorRow(pressed.navigatorId)) return undefined;
+      return { handled: true, render: true };
+    },
+    invalidate() {
+      state().lastMainListLines = undefined;
+      lineOwners = [];
+      pressedRow = undefined;
+    },
     dispose() {
       const s = state();
       if (s.mainListRequestRender === requestRender) s.mainListRequestRender = undefined;
+      lineOwners = [];
+      pressedRow = undefined;
     },
   };
 }
@@ -454,7 +518,26 @@ function buildMainListLines(
   fg: (color: string, value: string) => string,
   options: { selectedId?: string; focused?: boolean } = {},
 ): string[] {
+  return buildMainListLayout(rows, width, truncate, fg, options).lines;
+}
+
+/**
+ * The list's lines plus the navigatorId each line shows, so pointer input maps a rendered row to its
+ * stable row identity. Headers, separators and the shortcut line keep an undefined owner.
+ */
+function buildMainListLayout(
+  rows: InternalRow[],
+  width: number,
+  truncate: (s: string, width: number) => string,
+  fg: (color: string, value: string) => string,
+  options: { selectedId?: string; focused?: boolean } = {},
+): { lines: string[]; owners: Array<string | undefined> } {
   const lines: string[] = [];
+  const owners: Array<string | undefined> = [];
+  const push = (line: string, owner?: string) => {
+    lines.push(line);
+    owners.push(owner);
+  };
   const grouped = new Map<string, InternalRow[]>();
   for (const row of rows) {
     const existing = grouped.get(row.providerLabel) ?? [];
@@ -466,16 +549,16 @@ function buildMainListLines(
   for (let i = 0; i < orderedLabels.length; i += 1) {
     const label = orderedLabels[i]!;
     const group = grouped.get(label)!;
-    if (i > 0) lines.push("");
-    lines.push(providerGroupLabel(label, fg));
+    if (i > 0) push("");
+    push(providerGroupLabel(label, fg));
     for (const row of group) {
       const selected = options.focused && row.navigatorId === options.selectedId;
-      lines.push(formatMainListRow(row, selected === true, fg, width));
+      push(formatMainListRow(row, selected === true, fg, width), row.navigatorId);
     }
   }
-  lines.push("");
-  lines.push(shortcutsLine(options.focused === true, fg));
-  return lines.map((line) => safeTruncate(line, width, truncate));
+  push("");
+  push(shortcutsLine(options.focused === true, fg));
+  return { lines: lines.map((line) => safeTruncate(line, width, truncate)), owners };
 }
 
 function shortcutsLine(focused: boolean, fg: (color: string, value: string) => string): string {
@@ -764,6 +847,20 @@ function handleMainListCloseKey(): void {
   }, CLOSE_ARM_MS);
   s.mainListCloseArmTimer.unref?.();
   refreshMainListWidget();
+}
+
+/**
+ * Open the shared detail overlay on the row a pointer chose. Setting the selection first keeps the
+ * keyboard path identical: Enter, x and the overlay's own keys then act on the clicked row.
+ */
+function openNavigatorRow(navigatorId: string): boolean {
+  const rows = listRows();
+  if (!rows.some((row) => row.navigatorId === navigatorId)) return false;
+  clearMainListCloseArm();
+  state().mainListSelectedId = navigatorId;
+  refreshMainListWidget();
+  openNavigator();
+  return true;
 }
 
 function openNavigator(): void {

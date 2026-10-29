@@ -2030,4 +2030,255 @@ describe("shared background work navigator", () => {
       unregister();
     }
   });
+
+  it("opens each clicked row's own detail in the shared overlay and leaves the editor passive", () => {
+    const unregisterSubagents = registerBackgroundWorkProvider({
+      id: "subagents",
+      label: "Subagents",
+      priority: 10,
+      visibleCount: () => 4,
+      listRows: () => ["alpha", "beta", "gamma"].map((id, index) => ({
+        providerId: "subagents",
+        id,
+        name: id,
+        status: "running",
+        statusTone: "running" as const,
+        kind: "subagent",
+        elapsed: "1s",
+        primary: `${id} work`,
+        sortStartedAt: 300 - index,
+      })),
+      parentRow: () => ({
+        providerId: "subagents", id: "main", name: "main", status: "running", statusTone: "running",
+        kind: "main agent", elapsed: "1m", primary: "foreground", sortStartedAt: 400,
+      }),
+      detail: (id) => ({
+        providerId: "subagents", id, title: `${id} detail`, status: "running", statusTone: "running",
+        metadata: [], evidence: { label: "output", text: `${id} content` },
+      }),
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "subagents", id }),
+    });
+    const unregisterTasks = registerBackgroundWorkProvider({
+      id: "background-tasks",
+      label: "Background Tasks",
+      priority: 20,
+      visibleCount: () => 1,
+      listRows: () => [{
+        providerId: "background-tasks", id: "task-one", name: "task-one", status: "running",
+        statusTone: "running" as const, kind: "process", elapsed: "2s", primary: "npm test", sortStartedAt: 100,
+      }],
+      detail: (id) => ({
+        providerId: "background-tasks", id, title: `${id} detail`, status: "running", statusTone: "running",
+        metadata: [], evidence: { label: "log", text: `${id} content` },
+      }),
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "background-tasks", id }),
+    });
+
+    const widgets: unknown[] = [];
+    const mounted: any[] = [];
+    const typed: string[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any, options: any) {
+        let component: any;
+        component = factory({ requestRender() {} }, this.theme, {}, () => {
+          mounted.splice(mounted.indexOf(component), 1);
+        });
+        mounted.push(component);
+        options?.onHandle?.({ focus() {}, unfocus() {} });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput(data: string) { typed.push(data); } }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const widget = (widgets.at(-1) as any)({ requestRender() {} }, ui.theme);
+      assert.equal(widget.handleInput, undefined, "the widget adds no keyboard path");
+
+      const titles = ["main detail", "alpha detail", "beta detail", "task-one detail"];
+      for (const target of [
+        { name: "beta", title: "beta detail" },
+        { name: "main", title: "main detail" },
+        { name: "task-one", title: "task-one detail" },
+      ]) {
+        const lines = widget.render(120);
+        const y = lines.findIndex((line: string) => line.includes(target.name));
+        assert.ok(y > 0, `${target.name} is a rendered row`);
+        assert.equal(mounted.length, 0, `${target.name} starts with no overlay`);
+        assert.deepEqual(widget.handleMouse({ type: "press", button: "left", x: 3, y, width: 120 }),
+          { handled: true, render: false }, "the press claims the row without rendering");
+        assert.equal(mounted.length, 0, "a press alone opens nothing");
+        assert.deepEqual(widget.handleMouse({ type: "click", button: "left", x: 3, y, width: 120 }),
+          { handled: true, render: true });
+        assert.equal(mounted.length, 1, `${target.name} opens the single shared overlay`);
+        const sheet = mounted[0].render(100).join("\n");
+        assert.match(sheet, new RegExp(target.title), `${target.name} opens its own detail`);
+        for (const other of titles.filter((title) => title !== target.title)) {
+          assert.doesNotMatch(sheet, new RegExp(other), `${target.name} does not show ${other}`);
+        }
+        mounted[0].handleInput("escape");
+        assert.equal(mounted.length, 0, `${target.name} closes with the existing Esc path`);
+      }
+
+      assert.deepEqual(typed, [], "pointer navigation never types into the editor");
+      assert.doesNotMatch(widget.render(120).join("\n"), /› /, "a click does not take the list's keyboard focus");
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("a");
+      assert.deepEqual(typed, ["a"], "the editor keeps receiving keys after a click");
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregisterSubagents();
+      unregisterTasks();
+    }
+  });
+
+  it("ignores pointer gestures that are not a plain left press and click on one unchanged row", () => {
+    const live = new Set(["alpha", "beta"]);
+    let folded = false;
+    const unregisterSubagents = registerBackgroundWorkProvider({
+      id: "subagents",
+      label: "Subagents",
+      priority: 10,
+      visibleCount: () => 3,
+      showSection: () => !folded,
+      listRows: () => ["alpha", "beta"].filter((id) => live.has(id)).map((id, index) => ({
+        providerId: "subagents", id, name: id, status: "running", statusTone: "running" as const,
+        kind: "subagent", elapsed: "1s", primary: `${id} work`, sortStartedAt: 300 - index,
+      })),
+      parentRow: () => ({
+        providerId: "subagents", id: "main", name: "main", status: "running", statusTone: "running",
+        kind: "main agent", elapsed: "1m", primary: "foreground", sortStartedAt: 400,
+      }),
+      detail: (id) => ({
+        providerId: "subagents", id, title: `${id} detail`, status: "running", statusTone: "running",
+        metadata: [], evidence: { label: "output", text: `${id} content` },
+      }),
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "subagents", id }),
+    });
+    const unregisterTasks = registerBackgroundWorkProvider({
+      id: "background-tasks",
+      label: "Background Tasks",
+      priority: 20,
+      visibleCount: () => 1,
+      listRows: () => [{
+        providerId: "background-tasks", id: "task-one", name: "task-one", status: "running",
+        statusTone: "running" as const, kind: "process", elapsed: "2s", primary: "npm test", sortStartedAt: 100,
+      }],
+      detail: (id) => ({
+        providerId: "background-tasks", id, title: `${id} detail`, status: "running", statusTone: "running",
+        metadata: [], evidence: { label: "log", text: `${id} content` },
+      }),
+      armCloseLabel: () => "x again to stop",
+      close: (id) => ({ action: "stopped", providerId: "background-tasks", id }),
+    });
+
+    const widgets: unknown[] = [];
+    const mounted: any[] = [];
+    const ui = {
+      factory: undefined as any,
+      theme: { fg: (_color: string, value: string) => value },
+      setStatus() {},
+      setWidget(_key: string, value: unknown) { widgets.push(value); },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+      custom(factory: any, options: any) {
+        let component: any;
+        component = factory({ requestRender() {} }, this.theme, {}, () => {
+          mounted.splice(mounted.indexOf(component), 1);
+        });
+        mounted.push(component);
+        options?.onHandle?.({ focus() {}, unfocus() {} });
+        return new Promise(() => undefined);
+      },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const widget = (widgets.at(-1) as any)({ requestRender() {} }, ui.theme);
+      const pressAt = (y: number, extra: Record<string, unknown> = {}) =>
+        widget.handleMouse({ type: "press", button: "left", x: 3, y, width: 120, ...extra });
+      const clickAt = (y: number, extra: Record<string, unknown> = {}) =>
+        widget.handleMouse({ type: "click", button: "left", x: 3, y, width: 120, ...extra });
+
+      let lines = widget.render(120);
+      const yAlpha = lines.findIndex((line: string) => line.includes("alpha"));
+      const yBeta = lines.findIndex((line: string) => line.includes("beta"));
+      const yHeader = lines.indexOf("subagents");
+      const yBlank = lines.findIndex((line: string, index: number) => index > 0 && line === "");
+      const yShortcut = lines.findIndex((line: string) => line.includes("work navigator"));
+      for (const [label, y] of Object.entries({ yAlpha, yBeta, yHeader, yBlank, yShortcut })) {
+        assert.ok(y > 0, `${label} is rendered`);
+      }
+
+      for (const extra of [
+        { button: "right" }, { button: "middle" }, { button: "none" },
+        { type: "wheel" }, { type: "drag" }, { type: "move" }, { type: "release" },
+        { shift: true }, { alt: true }, { ctrl: true },
+        { x: -1 }, { x: 120 },
+        { y: 0 }, { y: yHeader }, { y: yBlank }, { y: yShortcut }, { y: lines.length },
+      ]) {
+        assert.equal(pressAt(yAlpha, extra), undefined, `ignored press: ${JSON.stringify(extra)}`);
+      }
+      assert.equal(clickAt(yAlpha), undefined, "a click without a claimed press is ignored");
+      assert.equal(mounted.length, 0, "no rejected gesture opened the overlay");
+
+      assert.deepEqual(pressAt(yAlpha), { handled: true, render: false });
+      assert.equal(clickAt(yBeta), undefined, "a click on a different row than the pressed one is ignored");
+      assert.equal(mounted.length, 0);
+
+      assert.deepEqual(pressAt(yBeta), { handled: true, render: false });
+      assert.equal(clickAt(yBeta, { ctrl: true }), undefined, "a modified click is ignored");
+      assert.equal(mounted.length, 0);
+
+      assert.deepEqual(pressAt(yBeta), { handled: true, render: false });
+      widget.invalidate();
+      assert.equal(clickAt(yBeta), undefined, "a press claim does not survive invalidation");
+      assert.equal(mounted.length, 0);
+      assert.equal(pressAt(yBeta), undefined, "an invalidated widget has no clickable geometry");
+      assert.equal(clickAt(yBeta), undefined);
+      assert.equal(mounted.length, 0);
+
+      widget.render(120);
+      assert.deepEqual(pressAt(yAlpha), { handled: true, render: false });
+      live.delete("alpha");
+      assert.equal(clickAt(yAlpha), undefined, "a row that disappeared between press and click is not opened");
+      assert.equal(mounted.length, 0);
+
+      folded = true;
+      lines = widget.render(120);
+      assert.doesNotMatch(lines.join("\n"), /alpha|beta/, "a folded provider's rows are not rendered");
+      const yTask = lines.findIndex((line: string) => line.includes("task-one"));
+      assert.ok(yTask > 0, "the remaining provider still renders its row");
+      assert.deepEqual(pressAt(yTask), { handled: true, render: false });
+      assert.deepEqual(clickAt(yTask), { handled: true, render: true });
+      assert.equal(mounted.length, 1);
+      const sheet = mounted[0].render(100).join("\n");
+      assert.match(sheet, /task-one detail/, "the visible row still opens its own detail beside a folded provider");
+      assert.doesNotMatch(sheet, /alpha detail|beta detail/);
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregisterSubagents();
+      unregisterTasks();
+    }
+  });
 });

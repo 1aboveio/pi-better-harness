@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.34.0] - 2026-10-29
+
+### Added
+
+- Separate Outcome & Todo display and hooks controls. Display saved state by default, while leaving task-memory hooks Off until explicitly enabled. Preserve saved hook choices and unrelated settings.
+
+### Changed
+
+- Show the accepted outcome as a single muted subtitle beneath Todo. Combine a matching Goal's status and active-time clock with the Todo header, retain click expansion, and keep full outcome details in `/todo`.
+- Bundle Goal 0.10.2, Subagents 0.22.0, and Background Tasks 0.12.0 with shared clock ownership and clickable work details.
+
+## [pi-better-goal@0.10.2] - 2026-10-29
+
+### Fixed
+
+- Hand clock display to a matching Harness Todo header without changing Goal's stored trigger, continuation, pauses, or completion. Keep standalone display when the header is hidden, unrelated, or too narrow, and keep the shared clock ticking.
+
+## [pi-better-subagents@0.22.0] - 2026-10-29
+
+### Added
+
+- Open a work row's existing navigator details with a plain left click. Preserve keyboard navigation and editor input, and ignore headers, modified clicks, and stale or missing rows.
+
+## [pi-better-background-tasks@0.12.0] - 2026-10-29
+
+### Added
+
+- Open a background-task row's existing navigator details with a plain left click, using the same guarded mouse navigation as Subagents.
+
 ## [pi-better-harness@0.33.1] - 2026-10-29
 
 ### Changed

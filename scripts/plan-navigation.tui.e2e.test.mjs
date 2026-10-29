@@ -43,6 +43,8 @@ test("golden path: the todo stays passive and right arrow remains editor input",
   const initial = waitForScreen((screen) => /^todo  1\/3 complete/im.test(screen));
   assertBlankRowBefore(initial, /^todo  1\/3 complete/im, "generic todo section");
   assert.match(initial, /●\s+2\s+Implement todo navigation\s+active/);
+  const initialHeader = initial.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
+  assert.equal(initialHeader, "todo  1/3 complete", "a short Todo has no fold caret and keeps n/total on the left");
   assert.doesNotMatch(initial, /^› /m, "the todo starts visible but unfocused");
   assert.doesNotMatch(initial, /→ (plan|todo)/, "the footer does not advertise todo navigation");
 
@@ -85,6 +87,8 @@ test("golden path: Rush-owned units appear in the real todo widget", () => {
   sendKey("Enter");
   const widget = waitForScreen((screen) => screen.includes("Reloaded keybindings") && screen.includes("rush-issues · rev 7") && screen.includes("Extract shared core"));
   assertBlankRowBefore(widget, /^todo  0\/2 complete/i, "Rush todo section");
+  const rushHeader = widget.split("\n").find((line) => /^todo(?:\s|$)/.test(line));
+  assert.equal(rushHeader, "todo  0/2 complete", "a short Rush Todo also has no caret");
   assert.match(widget, /●\s+#214\s+Extract shared core\s+active/);
   assert.match(widget, /Add mux support/);
   assert.doesNotMatch(widget, /Old generic step/);
@@ -112,19 +116,34 @@ test("long todos fold through commands, survive reload, and accept fullscreen mo
   waitForFile(seededPath);
   let screen = waitForScreen((value) => value.includes("... 4 more steps"));
   assert.doesNotMatch(screen, /Long task 9/);
+  assert.equal(todoHeader(screen), "todo ▸  0/9 complete", "the fold caret follows the Todo title at the compact width");
   sendLiteral("\x1b[200~/todo expand\x1b[201~");
   sendKey("Enter");
-  waitForScreen((value) => /○\s+9\s+Long task 9/.test(value));
+  screen = waitForScreen((value) => /○\s+9\s+Long task 9/.test(value));
+  assert.equal(todoHeader(screen), "todo ▾  0/9 complete");
   sendLiteral("/reload");
   sendKey("Enter");
-  waitForScreen((value) => value.includes("Reloaded") && /○\s+9\s+Long task 9/.test(value));
+  screen = waitForScreen((value) => value.includes("Reloaded") && /○\s+9\s+Long task 9/.test(value));
+  assert.equal(todoHeader(screen), "todo ▾  0/9 complete", "reload keeps the expanded Todo and its caret state");
   sendLiteral("\x1b[200~/todo collapse\x1b[201~");
   sendKey("Enter");
   screen = waitForScreen((value) => value.includes("... 4 more steps") && !/○\s+9\s+Long task 9/.test(value));
+  assert.equal(todoHeader(screen), "todo ▸  0/9 complete");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "40", "-y", "32"]);
+  screen = waitForScreen((value) => todoHeader(value) === "todo ▸  0/9 complete" && value.includes("... 4 more steps"));
+  assert.ok(Math.max(...screen.split("\n").map((line) => line.trimEnd().length)) <= 40, "the terminal is actually 40 columns");
+  assert.ok(todoHeader(screen).length <= 40, "the compact header fits a 40-column terminal");
+  assert.equal(screen.split("\n").filter((line) => /^todo(?:\s|$)/.test(line)).length, 1, "the header never wraps into two rows");
+  sendLiteral("narrow-editor-draft");
+  screen = waitForScreen((value) => value.includes("narrow-editor-draft"));
+  assert.ok(!screen.split("\n").some((line) => line.includes("narrow-editor-draft") && /todo/.test(line)), "the Todo widget stays out of the editor row at 40 columns");
+  sendKey("C-u");
+  execFileSync("tmux", ["resize-window", "-t", session, "-x", "100", "-y", "32"]);
+  screen = waitForScreen((value) => Math.max(...value.split("\n").map((line) => line.trimEnd().length)) > 40 && !value.includes("narrow-editor-draft"));
   if (process.env.PI_TODO_TUI_MOUSE === "1" || process.env.PI_PLAN_TUI_MOUSE === "1") {
     const clickHeading = (value) => {
       const rows = value.split("\n");
-      const y = rows.findIndex((line) => /[▸▾] todo\s+0\/9/i.test(line));
+      const y = rows.findIndex((line) => /^todo\s+[▸▾]\s{2}0\/9/i.test(line));
       assert.ok(y >= 0, `todo heading missing:\n${value}`);
       const x = rows[y].toLowerCase().indexOf("todo");
       sendLiteral(`\x1b[<0;${x + 1};${y + 1}M\x1b[<0;${x + 1};${y + 1}m`);
@@ -156,6 +175,10 @@ function startPiSession() {
     "--model openai/gpt-4o-mini",
   ].join(" ");
   execFileSync("tmux", ["new-session", "-d", "-s", session, "-x", "100", "-y", "32", command]);
+}
+
+function todoHeader(screen) {
+  return screen.split(/\r?\n/).map((line) => line.trimEnd()).find((line) => /^todo(?:\s|$)/.test(line));
 }
 
 function seedTodoExtension(path) {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -10,13 +11,15 @@ import { writeMeta as writeSubagentMeta } from "../packages/pi-better-subagents/
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const extensionRoot = resolve(process.env.PI_HARNESS_E2E_PACKAGE_ROOT ?? repoRoot);
-const piBin = join(repoRoot, "node_modules", ".bin", "pi");
+const piBin = process.env.PI_NAVIGATOR_CLI ?? join(repoRoot, "node_modules", ".bin", "pi");
+const mouseRouting = existsSync(join(dirname(createRequire(realpathSync(piBin)).resolve("@earendil-works/pi-tui")), "tui-alt-screen.js"));
 const goldenSession = `pi-navigator-e2e-${process.pid}`;
 const closeSession = `pi-navigator-close-e2e-${process.pid}`;
 const refocusSession = `pi-navigator-refocus-e2e-${process.pid}`;
 const replaceSession = `pi-navigator-replace-e2e-${process.pid}`;
 const wrapSession = `pi-navigator-wrap-e2e-${process.pid}`;
 const diagnosticSession = `pi-navigator-diagnostic-e2e-${process.pid}`;
+const clickSession = `pi-navigator-click-e2e-${process.pid}`;
 // Each test drives its own private tmux server; these point at the active one.
 let session = goldenSession;
 let tmuxArgs = ["-L", session];
@@ -32,9 +35,14 @@ const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 const skip = hasTmux || process.env.CI || process.env.PI_NAVIGATOR_REQUIRE_TMUX
   ? false
   : "requires tmux for a real terminal session (test:golden requires it)";
+// Fullscreen mouse exists only on newer Pi hosts. A keyboard-only SDK is not a
+// passing mouse run, so the pointer journey skips unless one is supplied.
+const mouseSkip = skip || (mouseRouting || process.env.PI_NAVIGATOR_MOUSE === "1"
+  ? false
+  : "requires a fullscreen mouse-capable Pi host; set PI_NAVIGATOR_MOUSE=1 and PI_NAVIGATOR_CLI to one");
 
 after(() => {
-  for (const name of [goldenSession, closeSession, refocusSession, replaceSession, wrapSession, diagnosticSession]) spawnSync("tmux", ["-L", name, "kill-server"], { stdio: "ignore" });
+  for (const name of [goldenSession, closeSession, refocusSession, replaceSession, wrapSession, diagnosticSession, clickSession]) spawnSync("tmux", ["-L", name, "kill-server"], { stdio: "ignore" });
   for (const worker of dummyWorkers) {
     try { process.kill(-worker.pid, "SIGKILL"); } catch { /* already stopped */ }
   }
@@ -111,6 +119,8 @@ test("golden path: navigate both providers and read complete Unicode logs withou
       execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-x", String(width), "-y", "40"]);
       const taskPage = waitForScreen((screen) => screen.includes("provider Background Tasks")
         && screen.includes("中文") && screen.includes("GOLDEN_LOG_BEGIN")
+        // On fullscreen hosts the pane border can resize one frame before the title.
+        && /\.\.\.\s*$/.test(screen.split("\n")[0] ?? "") && hasSettledInputFrame(screen)
         && screen.split(/\r?\n/).some((line) => line.trimEnd() === "─".repeat(width)));
       saveScreen(`background-detail-${width}`, taskPage);
       assertSingleInputFrame(taskPage, `background-task detail at ${width} columns`);
@@ -134,6 +144,97 @@ test("golden path: navigate both providers and read complete Unicode logs withou
     writeResult("fail", String(error));
     throw error;
   }
+});
+
+// @covers navigator.pointer-detail
+// @level e2e
+test("plain left clicks open each provider's own detail while headers, blanks and modifiers stay inert", { skip: mouseSkip }, () => {
+  assertPrivateRegistry();
+  assert.ok(hasTmux, "the pointer journey needs a real terminal");
+  assert.ok(mouseRouting, "the pointer journey needs a fullscreen mouse-capable Pi host");
+  mkdirSync(evidenceDir, { recursive: true });
+  // Only the pointer journey opts into fullscreen; the keyboard journeys keep
+  // the host's own TUI mode and its existing layout expectations.
+  mkdirSync(join(fixtures, "agent"), { recursive: true });
+  writeFileSync(join(fixtures, "agent", "settings.json"), JSON.stringify({ tuiMode: "fullscreen", packages: [], quietStartup: true }));
+  const { state, piPid } = launchPi(clickSession);
+  seedNavigatorState({
+    cwd: state.cwd, sessionId: state.sessionId, piPid,
+    subagentId: `sa_navigator_click_${process.pid}`, taskId: `bg_navigator_click_${process.pid}`,
+  });
+  const press = (y, button = 0) => sendLiteral(`\x1b[<${button};5;${y + 1}M`);
+  const release = (y, button = 0) => sendLiteral(`\x1b[<${button};5;${y + 1}m`);
+  const click = (y, button = 0) => { press(y, button); release(y, button); };
+  const rowY = (needle) => {
+    const y = captureScreen().split(/\r?\n/).findIndex((line) => line.includes(needle));
+    assert.ok(y >= 0, `row ${needle} must be visible before clicking:\n${captureScreen()}`);
+    return y;
+  };
+  const assertNoDetail = (durationMs = 400) => {
+    const deadline = Date.now() + durationMs;
+    while (Date.now() < deadline) {
+      assert.doesNotMatch(captureScreen(), /provider (?:Subagents|Background Tasks)/, "a rejected pointer gesture must not open detail");
+      sleep(40);
+    }
+  };
+
+  // The rail mounts its rows when first focused; unfocusing leaves the same
+  // rows visible with no keyboard selection, so the next gesture is a plain
+  // pointer click rather than the navigator's Left-key path.
+  sendKey("Left");
+  waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("background golden path") && /^› /m.test(screen));
+  sendKey("Left");
+  waitForScreen((screen) => screen.includes("subagent golden path") && screen.includes("background golden path") && screen.includes("← work navigator") && !/^› /m.test(screen));
+  const subagentY = rowY("subagent golden path");
+  const taskY = rowY("background golden path");
+  const headerY = rowY("subagents");
+  const shortcutY = rowY("work navigator");
+  const blankY = captureScreen().split(/\r?\n/).findIndex((line, index) => index > 1 && line === "");
+  assert.ok(blankY > 0, "the list has a blank separator row to reject");
+
+  // A plain press claims the row without opening anything; Pi synthesizes the
+  // click only from the release on that same row, the way a real terminal does.
+  press(subagentY);
+  assertNoDetail(500);
+  release(subagentY);
+  const subagentDetail = waitForScreen((screen) => screen.includes("provider Subagents") && screen.includes("subagent golden path"));
+  assert.match(subagentDetail, /^━━ subagent golden path/m, "the clicked row's own detail is the one that opens");
+  assert.match(subagentDetail, new RegExp(`id\\s+sa_navigator_click_${process.pid}`));
+  assert.doesNotMatch(subagentDetail, /provider Background Tasks/, "the other provider's detail must not open");
+  assertSingleInputFrame(subagentDetail, "clicked subagent detail");
+  saveScreen("click-subagent-detail", subagentDetail);
+  sendKey("Escape");
+  waitForScreen((screen) => !screen.includes("provider ") && screen.includes("← work navigator"));
+
+  // Headers, the separator blank row and the shortcut line have no click target.
+  for (const y of [headerY, blankY, shortcutY]) {
+    click(y);
+    assertNoDetail(300);
+  }
+  // A modified left click is not a plain click and must not open detail either.
+  click(subagentY, 4 /* SGR shift+left */);
+  assertNoDetail(400);
+
+  // Resize narrow, then click the other provider's row: the pointer resolves
+  // the row by structure rather than by untruncated text.
+  execFileSync("tmux", [...tmuxArgs, "resize-window", "-t", session, "-x", "80", "-y", "40"]);
+  waitForScreen((screen) => { const max = Math.max(...screen.split(/\r?\n/).map((line) => line.trimEnd().length)); return max <= 80 && screen.includes("background golden path"); });
+  const narrowTaskY = rowY("background golden path");
+  click(narrowTaskY);
+  const taskDetail = waitForScreen((screen) => screen.includes("provider Background Tasks") && hasSettledInputFrame(screen));
+  assert.match(taskDetail, /^━━ background golden path/m, "the second provider opens its own detail");
+  assert.doesNotMatch(taskDetail, /provider Subagents/, "the previous row's detail must not stay mounted");
+  assertSingleInputFrame(taskDetail, "clicked background-task detail at 80 columns");
+  saveScreen("click-background-detail-80", taskDetail);
+  sendKey("Escape");
+  waitForScreen((screen) => !screen.includes("provider ") && screen.includes("← work navigator"));
+
+  // The pointer journey never takes over the editor: typing after Esc lands in
+  // the live input and no list focus marker is left behind.
+  execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", "click-editor-alive"]);
+  const typed = waitForScreen((screen) => screen.includes("click-editor-alive") && !screen.includes("provider "));
+  assert.doesNotMatch(typed, /^› /m, "a click does not leave the list's keyboard focus");
+  saveScreen("click-editor-alive", typed);
 });
 
 // @covers navigator.detail-overlay
@@ -512,6 +613,10 @@ function assertBlankRowBefore(screen, heading, sectionName) {
 
 function sendKey(key) {
   execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, key]);
+}
+
+function sendLiteral(value) {
+  execFileSync("tmux", [...tmuxArgs, "send-keys", "-t", session, "-l", value]);
 }
 
 function captureScreen() {

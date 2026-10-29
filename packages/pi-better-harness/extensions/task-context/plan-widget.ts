@@ -1,5 +1,5 @@
 import type { Component } from "@earendil-works/pi-tui";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+
 
 // Structural typing keeps keyboard-only Pi versions compatible with the fullscreen mouse API.
 interface PlanMouseEvent {
@@ -14,7 +14,7 @@ interface PlanMouseEvent {
 }
 
 export function createPlanWidget(
-  render: (width: number) => string[],
+  render: (width: number, disclosure?: string) => string[],
   isFoldable: () => boolean,
   isExpanded: () => boolean,
   toggle: () => void,
@@ -22,10 +22,7 @@ export function createPlanWidget(
   let lines: string[] = [];
   return {
     render(width) {
-      lines = render(width);
-      if (lines.length && isFoldable()) {
-        lines = [truncateToWidth(`${isExpanded() ? "▾" : "▸"} ${lines[0]}`, width), ...lines.slice(1)];
-      }
+      lines = render(width, isFoldable() ? isExpanded() ? "▾" : "▸" : undefined);
       return lines.length ? ["", ...lines] : [];
     },
     handleMouse(event) {

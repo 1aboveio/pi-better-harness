@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { Component } from "@earendil-works/pi-tui";
+import type { CompactTaskHeader } from "./compact-task-header.js";
 import {
   createPlanPresentationComponent, plainPlanTheme, planText, renderPlanPresentation, statusStyle,
   type DisplayStatus, type PlanPresentation,
@@ -191,9 +192,10 @@ export function renderRushPlan(
   owner = "rush-issues",
   readOnly = false,
   expanded = false,
+  header?: CompactTaskHeader,
 ): string[] {
   const theme = fg ? { fg } : plainPlanTheme;
-  return renderPlanPresentation(presentRushPlan(plan, owner, readOnly), width, theme, full, -1, expanded);
+  return renderPlanPresentation(presentRushPlan(plan, owner, readOnly), width, theme, full, -1, expanded, header);
 }
 
 export function createRushPlanComponent(

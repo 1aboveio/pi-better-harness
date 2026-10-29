@@ -4,6 +4,7 @@ import {
   type PlanPresentation, type PlanRenderTheme,
 } from "./plan-presentation.js";
 import type { PlanSnapshot } from "./types.js";
+import type { CompactTaskHeader } from "./compact-task-header.js";
 
 export type { PlanRenderTheme } from "./plan-presentation.js";
 
@@ -20,8 +21,8 @@ function presentPlan(plan: PlanSnapshot, showIds = false): PlanPresentation {
   };
 }
 
-export function renderCompactPlan(plan: PlanSnapshot, width: number, theme: PlanRenderTheme, expanded = false): string[] {
-  return renderPlanPresentation(presentPlan(plan), width, theme, false, -1, expanded);
+export function renderCompactPlan(plan: PlanSnapshot, width: number, theme: PlanRenderTheme, expanded = false, header?: CompactTaskHeader): string[] {
+  return renderPlanPresentation(presentPlan(plan), width, theme, false, -1, expanded, header);
 }
 
 export function renderFullPlan(plan: PlanSnapshot, width: number, theme: PlanRenderTheme, selectedIndex = -1): string[] {
