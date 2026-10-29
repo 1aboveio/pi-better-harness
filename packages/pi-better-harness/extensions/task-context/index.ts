@@ -4,7 +4,11 @@ import { Text, matchesKey, type AutocompleteItem } from "@earendil-works/pi-tui"
 import { Type } from "typebox";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.js";
 import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
+import { formatClockDuration, goalTiming } from "pi-better-goal/src/goal-clock.ts";
 import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outcome, type OutcomeInput } from "./outcome-state.js";
+import { changeOutcomeTodoPreference, parseOutcomeTodoPreferences } from "./preferences.js";
+import { canRenderTaskRuntime, renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
+import type { GoalSnapshot } from "pi-better-goal/src/types.ts";
 
 import {
   completedPlanClearDelay,
@@ -87,6 +91,7 @@ const UpdatePlanSchema = Type.Object({
 type WorkflowPlanInput = Omit<RushPlanUpdate, "event"> & { path?: string; event?: string };
 
 const LEGACY_PLAN_NAV_STATUS_KEY = "pi-better-plan-nav";
+const goalHeaderRuntime = (goal: GoalSnapshot) => ({ status: goal.status, clock: formatClockDuration(goalTiming(goal).activeSeconds) });
 const PLAN_ACTIONS: readonly AutocompleteItem[] = [
   { value: "clear", label: "clear", description: "Remove the current Todo without changing its outcome" },
   { value: "hide", label: "hide", description: "Hide the Todo widget" },
@@ -120,12 +125,9 @@ function workflowPlanOwner(ctx: ExtensionContext): string | null {
 
 export default function taskContextExtension(pi: ExtensionAPI): void {
   let enabled = false;
+  let display = true;
+  let widgetContext: ExtensionContext | undefined;
   let outcome: Outcome | null = null;
-  const readEnabled = (value: unknown): boolean => {
-    if (value === undefined) return false;
-    if (!value || typeof value !== "object" || Array.isArray(value) || (value as any).version !== 1 || typeof (value as any).enabled !== "boolean") throw new Error("Invalid outcomeTodo setting.");
-    return (value as { enabled: boolean }).enabled;
-  };
   const syncTools = (): void => {
     if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
     const active = pi.getActiveTools().filter(name => name !== "update_todo" && name !== "get_todo");
@@ -153,7 +155,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   };
   const scheduleCancelledRowsClear = (): void => {
     cancelCancelledRowsTimer();
-    if (!rushPlan) return;
+    if (!enabled || !rushPlan) return;
     const delay = cancelledRowsClearDelay(rushPlan);
     if (delay === null) return;
     const timer = setTimeout(() => {
@@ -166,12 +168,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     timer.unref?.();
   };
   const observeCancellations = (plan: RushPlan, binding: WorkflowPlanBinding, ctx: ExtensionContext): void => {
+    if (!enabled) return;
     observeCancelledRows(plan, binding, ctx.sessionManager.getBranch(), (type, data) => pi.appendEntry(type, data));
   };
   const unsubscribeWorkflow = pi.events.on("pi-better-workflow:changed", (owner) => {
     displayedWorkflowOwner = owner && typeof owner === "object" && "name" in owner && typeof owner.name === "string"
       ? owner.name : null;
-    if (!enabled) return;
+    if (!enabled && !display) return;
     if (displayedWorkflowOwner) {
       cancelCancelledRowsTimer();
       rushBinding = null;
@@ -283,7 +286,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     rushBinding = binding && (!displayedWorkflowOwner || binding.owner === displayedWorkflowOwner) ? binding : null;
     rushPlan = null;
     rushError = null;
-    if (enabled && rushBinding) loadRushPlan(ctx);
+    if ((enabled || display) && rushBinding) loadRushPlan(ctx);
     displayMode = state.displayMode;
     expanded = state.expanded;
     if (ctx.hasUI) ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);
@@ -313,24 +316,32 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
 
   const installWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
+    widgetContext = ctx;
     ctx.ui.setWidget(
       EXTENSION_NAME,
       (tui, theme) => {
         const localRefresh = (force = false): void => tui.requestRender(force);
         refreshWidget = localRefresh;
         const widget = createPlanWidget(
-          (width: number): string[] => {
-            if (!enabled || displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
-            const heading = outcome ? new Text(`Outcome (${outcome.status}): ${outcome.objective}`, 0, 0).render(width).slice(0, 2) : [];
+          (width: number, disclosure?: string): string[] => {
+            if (!display || displayMode === "hidden" || displayedWorkflowOwner !== workflowPlanOwner(ctx)) return [];
+            const goal = reconstructGoalSnapshot(ctx.sessionManager.getBranch());
+            const boundGoal = goal && outcome?.goalId === goal.goalId ? goal : null;
+            const header: CompactTaskHeader = {
+              subtitle: outcome?.objective, disclosure,
+              runtime: boundGoal ? goalHeaderRuntime(boundGoal)
+                : outcome ? { status: outcome.status } : undefined,
+            };
+            const heading = outcome ? renderCompactTaskHeader(undefined, width, theme as never, header) : [];
             if (displayedWorkflowOwner || rushBinding) {
               if (!rushBinding || (displayedWorkflowOwner && rushBinding.owner !== displayedWorkflowOwner) ||
                   !workflowBinding(ctx.sessionManager.getBranch())) return heading;
               const fg = typeof theme?.fg === "function"
                 ? (color: string, value: string) => theme.fg(color as never, value)
                 : undefined;
-              return [...heading, ...(rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded) : [])];
+              return rushPlan ? renderRushPlan(rushPlan, width, false, fg, rushBinding.owner, !displayedWorkflowOwner, expanded, header) : heading;
             }
-            return [...heading, ...(currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded) : [])];
+            return currentPlan ? renderCompactPlan(currentPlan, width, theme as never, expanded, header) : heading;
           },
           () => (rushBinding && rushPlan ? visibleRushUnits(rushPlan).length : currentPlan?.steps.length ?? 0) > COMPACT_PLAN_ROWS,
           () => expanded,
@@ -368,7 +379,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
             ? (color: string, value: string) => theme.fg(color as never, value)
             : undefined;
           const component = createRushPlanComponent(() => rushPlan ?? { ...plan, issues: [] }, () => done(), fg, planOwner, !owner);
-          return { render: (width) => [...(outcome ? new Text(formatOutcome(outcome, true), 0, 0).render(width).slice(0, 6) : []), ...component.render(width)], handleInput(data) {
+          return { render: (width) => [...(outcome ? new Text(formatOutcome(outcome), 0, 0).render(width) : []), ...component.render(width)], handleInput(data) {
             component.handleInput?.(data);
             tui.requestRender();
           }, invalidate: () => component.invalidate() };
@@ -396,7 +407,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
       const component = createFullPlanComponent(snapshot, theme as never, () => done());
       return {
-        render: (width) => [...(outcome ? new Text(formatOutcome(outcome, true), 0, 0).render(width).slice(0, 6) : []), ...component.render(width)],
+        render: (width) => [...(outcome ? new Text(formatOutcome(outcome), 0, 0).render(width) : []), ...component.render(width)],
         handleInput(data) {
           component.handleInput?.(data);
           tui.requestRender();
@@ -426,7 +437,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     ],
     parameters: UpdatePlanSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (!enabled) throw new Error("Outcome & Todo is off. Enable it in /harness-settings.");
+      if (!enabled) throw new Error("Outcome & Todo hooks are off. Enable them in /harness-settings.");
       const owner = workflowPlanOwner(ctx);
       const input = params as { explanation?: string; newTask?: boolean; todo?: PlanStepInput[]; outcome?: OutcomeInput; workflow?: WorkflowPlanInput };
       if (!input.outcome && input.todo === undefined && !input.workflow) throw new Error("Send outcome, todo, or workflow.");
@@ -541,7 +552,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     promptSnippet: "Inspect the current outcome and Todo",
     parameters: getTodoParameters,
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      if (!enabled) throw new Error("Outcome & Todo is off. Enable it in /harness-settings.");
+      if (!enabled) throw new Error("Outcome & Todo hooks are off. Enable them in /harness-settings.");
       const owner = workflowPlanOwner(ctx);
       const binding = workflowBinding(ctx.sessionManager.getBranch());
       if (owner || binding) {
@@ -573,7 +584,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     description: "Inspect, show, hide, or clear the current Todo and inspect its outcome",
     getArgumentCompletions: planArgumentCompletions,
     handler: async (args, ctx) => {
-      if (!enabled) { ctx.ui.notify("Enable Outcome & Todo in /harness-settings.", "info"); return; }
       const input = args.trim().toLowerCase();
       if (!input) return showFullPlan(ctx);
       if (input === "clear") {
@@ -608,25 +618,35 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     },
   });
 
-  const setting = {
-    id: "outcome-todo", label: "Outcome & Todo", values: ["Off", "On"],
-    get: () => enabled ? "On" : "Off",
+  const setting = (key: "enabled" | "display") => ({
+    id: key === "enabled" ? "outcome-todo" : "outcome-todo-display",
+    label: key === "enabled" ? "Outcome & Todo hooks" : "Outcome & Todo display", values: ["Off", "On"],
+    get: () => (key === "enabled" ? enabled : display) ? "On" : "Off",
     async change(value: string, ctx: ExtensionContext) {
       if (value !== "On" && value !== "Off") throw new Error("Invalid Outcome & Todo mode.");
-      updateHarnessSetting("outcomeTodo", current => { readEnabled(current); return { version: 1, enabled: value === "On" }; });
-      enabled = value === "On";
+      const preferences = updateHarnessSetting("outcomeTodo", current => changeOutcomeTodoPreference(current, key, value === "On"));
+      enabled = preferences.enabled;
+      display = preferences.display;
       syncTools();
-      if (enabled) { installWidget(ctx); restore(ctx); }
-      else { cancelCompletedPlanClear(); cancelCancelledRowsTimer(); if (ctx.hasUI) ctx.ui.setWidget(EXTENSION_NAME, undefined); refreshWidget = undefined; }
+      if (!enabled) { cancelCompletedPlanClear(); cancelCancelledRowsTimer(); }
+      installWidget(ctx);
+      restore(ctx);
     },
-  };
-  const registerSettings = () => pi.events.emit("harness-settings:register", setting);
+  });
+  const controls = [setting("display"), setting("enabled")];
+  const registerSettings = () => controls.forEach(control => pi.events.emit("harness-settings:register", control));
   const unsubscribeSettings = pi.events.on("harness-settings:request", registerSettings);
   registerSettings();
   const unsubscribeTask = pi.events.on("pi-better-harness:task-context", (event: unknown) => {
     if (!event || typeof event !== "object") return;
-    const request = event as { action: string; goalId?: string; objective?: string; enabled?: boolean };
+    const request = event as { action: string; goalId?: string; width?: number; objective?: string; enabled?: boolean; display?: boolean };
     request.enabled = enabled;
+    if (request.action === "inspect") {
+      const goal = widgetContext ? reconstructGoalSnapshot(widgetContext.sessionManager.getBranch()) : null;
+      request.display = !!(typeof request.goalId === "string" && widgetContext && display && displayMode !== "hidden" &&
+        outcome && request.goalId === outcome.goalId && goal?.goalId === request.goalId && typeof request.width === "number" &&
+        canRenderTaskRuntime(request.width, goalHeaderRuntime(goal)) && displayedWorkflowOwner === workflowPlanOwner(widgetContext));
+    }
     if (!enabled || request.action === "inspect") return;
     if (request.action === "start" && request.goalId && request.objective?.trim()) {
       if (outcome?.goalId === request.goalId) return;
@@ -642,9 +662,13 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   const onSessionStart = async (_event: unknown, ctx: ExtensionContext): Promise<void> => {
     // Retire a separately installed pi-better-plan before installing our Todo widget.
     await legacyPlanMask?.cleanup(ctx);
-    try { enabled = readEnabled(readHarnessSetting("outcomeTodo")); } catch (error) { enabled = false; if (ctx.hasUI) ctx.ui.notify(String(error), "warning"); }
+    try {
+      const preferences = parseOutcomeTodoPreferences(readHarnessSetting("outcomeTodo"));
+      enabled = preferences.enabled;
+      display = preferences.display;
+    } catch (error) { enabled = false; display = true; if (ctx.hasUI) ctx.ui.notify(String(error), "warning"); }
     syncTools();
-    if (enabled) installWidget(ctx);
+    installWidget(ctx);
     restore(ctx);
     registerSettings();
   };
@@ -669,6 +693,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if (typeof unsubscribeSettings === "function") unsubscribeSettings();
     if (typeof unsubscribeTask === "function") unsubscribeTask();
     refreshWidget = undefined;
+    widgetContext = undefined;
     try {
       ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);
       ctx.ui.setWidget(EXTENSION_NAME, undefined);

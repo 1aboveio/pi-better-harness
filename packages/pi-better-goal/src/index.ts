@@ -882,6 +882,11 @@ export default function (pi: ExtensionAPI): void {
             }
             const nextRenderDelay = goalClockRefreshDelayMs(goal);
             if (nextRenderDelay !== null) scheduler.schedule(nextRenderDelay);
+            // Schedule before handing visual ownership to Harness so its header
+            // keeps ticking. An absent display response preserves standalone Goal.
+            if (requestTaskContext(pi, "inspect", goal, width).display === true) {
+              return [];
+            }
             const fg = typeof theme?.fg === "function"
               ? (color: string, value: string) => theme.fg(color as never, value)
               : undefined;

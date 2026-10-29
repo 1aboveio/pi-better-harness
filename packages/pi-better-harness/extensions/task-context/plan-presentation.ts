@@ -1,5 +1,6 @@
 import type { Component } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { renderCompactTaskHeader, type CompactTaskHeader } from "./compact-task-header.js";
 
 export interface PlanRenderTheme {
   fg(color: string, value: string): string;
@@ -64,6 +65,7 @@ export function planText(value: string): string {
 export function renderPlanPresentation(
   plan: PlanPresentation, width: number, theme: PlanRenderTheme,
   full = false, selectedIndex = -1, expanded = false,
+  header?: CompactTaskHeader,
 ): string[] {
   const size = Math.max(1, Math.floor(width));
   const count = (status: DisplayStatus) => plan.rows.filter((row) => row.status === status).length;
@@ -77,7 +79,8 @@ export function renderPlanPresentation(
     if (count(status)) summary.push(`${count(status)} ${label}`);
   }
   if (count("pending") && summary.length === 1) summary.push(`${count("pending")} pending`);
-  const lines = [theme.fg("warning", "todo") + theme.fg("dim", `  ${summary.join(" · ")}`)];
+  const lines = !full && header ? renderCompactTaskHeader(summary[0], size, theme, header)
+    : [theme.fg("warning", "todo") + theme.fg("dim", `  ${summary.join(" · ")}`)];
   for (const metadata of plan.metadata ?? []) {
     const content = metadata.map((part) => theme.fg(part.color, planText(part.text))).join("");
     for (const line of wrapTextWithAnsi(content, Math.max(1, size - 2))) lines.push(`  ${line}`);

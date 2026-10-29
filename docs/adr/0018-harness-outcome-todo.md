@@ -10,11 +10,14 @@ depend on `pi-better-harness`.
 
 ## Decision
 
-`pi-better-harness` absorbs Plan as its **Outcome & Todo** runtime. The runtime
-is off by default and enabled only through the human-controlled
-`/harness-settings` toggle. Installation and first load do not write session
-state, settings, or outcome/todo records; they register the runtime hook but
-leave it off until the human enables it.
+`pi-better-harness` absorbs Plan as its **Outcome & Todo** runtime. The original
+accepted decision made the runtime off by default behind one human-controlled
+`/harness-settings` toggle. The human has since accepted separate display and
+hook controls: **Outcome & Todo display** (`outcome-todo-display`) defaults On,
+while **Outcome & Todo hooks** (legacy id `outcome-todo`) defaults Off. Saved v1
+`enabled` remains the hooks authority; the new optional display preference
+defaults to true. Installation and first load do not write session state,
+settings, or outcome/todo records. Missing state produces no placeholder.
 
 Harness owns the session's structured outcome and checklist. Canonical workflow
 records remain unchanged: coordinator skills, `workflow-role: coordinator`,
@@ -48,8 +51,10 @@ Goal communicates through the synchronous, mutable event
 {
   action: "inspect" | "start" | "pause" | "resume" | "complete";
   goalId?: string;
+  width?: number; // Current widget width for visual ownership inspection.
   objective?: string;
   enabled?: boolean;
+  display?: boolean;
 }
 ```
 
@@ -61,9 +66,15 @@ Goal communicates through the synchronous, mutable event
   `resume`.
 - Clearing a goal emits `pause` for the current goal before the clear entry. It
   never deletes or completes the Harness outcome.
-- A Harness runtime sets `request.enabled` to a boolean whenever it is present,
-  even when Outcome & Todo is off. Harness writes outcome state only when
-  enabled, and lifecycle changes only for the matching bound `goalId`.
+- A Harness runtime sets `request.enabled` to a boolean whenever it is present.
+  This remains the hook and prompt authority. Hooks enable capture, matching
+  lifecycle bridge writes, reminders, and automated cleanup; Harness writes
+  lifecycle changes only for the matching bound `goalId`.
+- On `inspect`, the optional response `display: true` means Harness actually
+  displays the requested `goalId` and its runtime fits the requested widget width.
+  Only then is the standalone Goal clock suppressed.
+  Standalone Goal and hidden or unmatched fallback remain available; display and
+  hooks are independent.
 - With Harness present, regardless of `enabled`, Goal suppresses its duplicated
   business-outcome prompt text (`Pi Better Goal active objective...` and the
   workflow `Active objective...` line). Workflow instructions, permission and
@@ -84,8 +95,17 @@ of cycles. Harness consumes the public event contract and remains optional.
 - There is a short period where Goal's prompt and the Harness outcome may both
   describe the same work if a third party also injects objective text; Goal
   avoids its own duplication but does not rewrite other extensions' prompts.
-- `/goal` does not enable Outcome & Todo, and installing Harness does not turn
-  it on. A human must enable it in `/harness-settings`.
+- `/goal` does not enable Outcome & Todo hooks. A human must enable hooks in
+  `/harness-settings`; saved outcomes and checklists display by default even with
+  hooks off. Display off does not stop active hooks. `/todo` commands remain
+  available with hooks off for explicit user control.
+- The compact surface uses one Todo heading with its caret after Todo and the
+  completion count on the left. Matching Goal status and its existing active-time
+  clock appear on the right; outcome text is one muted, truncated subtitle. The
+  collapsed view shows up to five relevant rows and the expanded view all rows;
+  clicks toggle them. `/todo` shows the full objective, acceptance criteria,
+  boundaries, and plan. No permanent status bar is added, and existing critical
+  permission and paused notices remain unchanged.
 - Runtime implementation, settings wiring, installation manifests, and the TUI
   journey are owned by the Harness workstream. Goal's contract is limited to the
   event above and the prompt-suppression rules recorded here.
@@ -105,7 +125,7 @@ settings. No private extension-runner state is changed.
 
 The retired record's shutdown handlers run with the real session context before
 Harness restores its widget, releasing its factory listeners and timers. The
-mask works in either load order, on reload, and while Outcome & Todo is off.
+mask works in either load order, on reload, and while Outcome & Todo hooks are off.
 Without Harness, the old package can load normally. Missing loader APIs or an
 unexpected result shape produce a compatibility warning instead of an unsafe
 mutation. No package files or session histories are deleted or rewritten.

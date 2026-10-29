@@ -13,15 +13,26 @@ Use `pi-better-harness` when you want the full working set for Pi. It manages:
 - `pi-better-background-tasks` for durable shell tasks and watchers.
 - `pi-better-ssh` for short remote commands over reusable SSH connections.
 - `pi-better-goal` for explicit triggers, pause/resume, and background-aware continuation.
-- Harness-owned Outcome & Todo for session context and checklist progress. It starts off; enable **Outcome & Todo** in `/harness-settings`.
+- Harness-owned Outcome & Todo for session context and checklist progress. Saved state displays by default; its hooks start off.
 
 `pi-better-read-aloud` is intentionally not included yet.
 
 ## Outcome & Todo
 
-In `/harness-settings`, **Outcome & Todo** starts **Off**. Turn it on to expose
-`update_todo`, `get_todo`, and the native Todo widget. `/todo` opens the full view;
-`/todo expand` and `/todo collapse` control the compact checklist.
+In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
+defaults to **On**, and **Outcome & Todo hooks** (`outcome-todo`) defaults to
+**Off**. Saved outcomes and checklists display even when hooks are off; missing
+state creates no placeholder, state, or settings. Turning display off does not
+disable hooks. Saved v1 `enabled` remains the hooks authority; the new optional
+display preference defaults to true.
+
+The compact widget has one Todo heading, with a caret after Todo and the completion
+count on the left. A matching Goal's status and existing active-time clock appear
+on the right. The outcome is one muted, truncated subtitle. The collapsed view
+shows up to five relevant rows; the expanded view shows all rows. Click to toggle.
+`/todo` shows the full objective, acceptance criteria, boundaries, and plan;
+`/todo expand` and `/todo collapse` also control the compact checklist. Todo
+commands remain available with hooks off for explicit user control.
 
 An accepted outcome can be saved without a checklist. Completing or clearing its
 Todo does not complete or remove the outcome. Write labels as short, plain actions,
@@ -32,15 +43,20 @@ existing saved labels remain unchanged until deliberately updated.
 
 Use `newTask: true` with a new
 outcome for unrelated work; a correction to the current task keeps its binding.
-Harness includes a short reminder before each model call while the outcome is
-active. Disabling the feature hides its tools and display and stops reminders,
-without deleting saved state or starting a turn. `/goal` and skills never enable it.
+Hooks enable `update_todo`, `get_todo`, capture, matching Goal lifecycle bridge
+writes, reminders, and automated cleanup. While hooks are enabled and the outcome is active, Harness
+includes a short reminder before each model call. Turning hooks off stops those
+hooks without deleting saved state or starting a turn. `/goal` and skills never
+enable them.
 
 Existing Plan session histories restore as Todo. Workflow task-plan files and
 revision checks stay unchanged; skills continue using their own records when the
 optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
 
-<p><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/todo-examples/middle.png" alt="Compact Harness Todo" width="49%" /><img src="https://raw.githubusercontent.com/1aboveio/pi-better-harness/main/docs/images/package-gallery/todo-examples/expanded.png" alt="Expanded Harness Todo" width="49%" /></p>
+Subagent and background-task rows can be clicked to open their existing navigator
+details. Enter and keyboard controls remain available, and editor input stays
+passive. No permanent status bar is added; existing critical permission and
+paused notices remain unchanged.
 
 ## Screenshots
 
@@ -71,7 +87,7 @@ pi install npm:pi-better-harness
 After a normal bundle install or `pi update`, Harness masks any separately loaded
 `pi-better-plan` package before Pi registers its tools, `/plan` command, widgets,
 or prompt hooks. This applies in either load order, including when Outcome & Todo
-is off. The old registration and cached files may remain, but are inactive while
+hooks are off. The old registration and cached files may remain, but are inactive while
 Harness is loaded. Settings and session history are not rewritten. The explicit
 installer above removes the old registration in its selected scope instead.
 

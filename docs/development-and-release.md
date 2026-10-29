@@ -13,7 +13,7 @@ core extensions:
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-ssh` | Run short synchronous remote commands over reusable SSH connections. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
-| Harness Outcome & Todo | Track session context and checklist progress; disabled until enabled in `/harness-settings`. |
+| Harness Outcome & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
 
 `pi-better-read-aloud` lives in this repo but is intentionally not part of the
 meta package.
@@ -94,6 +94,32 @@ PI_MINIMAL_OUTPUT_HOST_CLI=/absolute/path/to/pi-coding-agent/dist/bundle/cli.js 
 ```
 
 The bundled-host case reports a skip when the selected SDK has no bundled CLI.
+
+### Outcome & Todo release contract
+
+In `/harness-settings`, **Outcome & Todo display** (`outcome-todo-display`)
+defaults On; **Outcome & Todo hooks** (legacy id `outcome-todo`) defaults Off.
+Saved v1 `enabled` remains the hooks authority, and the new optional display
+preference defaults to true. Saved state renders with hooks off; missing state
+creates no placeholder, state, or settings. Display off leaves hooks active.
+Hooks control the Todo tools, capture, matching Goal lifecycle bridge writes,
+reminders, and automated cleanup; `/todo` commands remain available for explicit
+user control with hooks off.
+
+The compact widget has one Todo heading with the caret after Todo, the completion
+count on the left, and matching Goal status and its existing active-time clock on
+the right. Its outcome is one muted, truncated subtitle. Collapsed view shows up
+to five relevant rows, expanded view all rows, and clicks toggle the view. `/todo`
+shows the full objective, acceptance criteria, boundaries, and plan. Subagent and
+background-task rows open their existing navigator details on click; Enter and
+keyboard controls remain, and editor input stays passive. No permanent status bar
+is added; existing critical permission and paused notices remain untouched.
+
+Goal retains its raw trigger and separate lifecycle. On bridge `inspect`, optional
+`display: true` means Harness actually displays the requested `goalId`; only then
+is the standalone Goal clock suppressed. `enabled` remains the hook and prompt
+authority. Standalone Goal and hidden or unmatched fallback remain available. See
+[ADR 0018](adr/0018-harness-outcome-todo.md) for the contract and history.
 
 ### Harness settings verification
 

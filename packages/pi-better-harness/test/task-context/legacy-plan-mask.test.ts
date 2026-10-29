@@ -367,7 +367,7 @@ test("the real task-context factory awaits the retired plugin's shutdown before 
     assert.deepEqual(loader.getExtensions().extensions, [harnessRecord], "the retired record is filtered out");
 
     await sessionStart({}, ctx);
-    assert.deepEqual(order, ["legacy-shutdown", "harness-body"], "legacy cleanup runs before this session's body");
+    assert.deepEqual(order, ["legacy-shutdown", "harness-body", "harness-body"], "legacy cleanup runs before registering either display or hooks control");
     assert.deepEqual(widgetCalls.map(call => call.key), [EXTENSION_NAME, EXTENSION_NAME]);
     assert.equal(widgetCalls[0]!.content, undefined, "the retired widget is cleared first");
     assert.equal(typeof widgetCalls[1]!.content, "function", "the Harness Todo widget is installed after");
