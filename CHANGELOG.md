@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.34.1] - 2026-10-29
+
+### Changed
+
+- Reduce the gap between Todo item numbers and text while preserving alignment for multi-digit numbers and workflow issue IDs.
+- Bundle Goal 0.10.3 and Subagents 0.22.1 with tighter Goal spacing and clearer agent details. Keep all other component versions unchanged.
+
+## [pi-better-goal@0.10.3] - 2026-10-29
+
+### Fixed
+
+- Remove the standalone Goal clock's trailing blank row so the next widget's leading row provides one separator instead of two.
+
+## [pi-better-subagents@0.22.1] - 2026-10-29
+
+### Changed
+
+- Organize agent catalog details into a spaced overview and aligned setting, value, and origin columns. Stack the overview in narrow terminals and distinguish labels from values with the active theme.
+- Show the resolved instruction prompt inline while retaining its full-screen reader.
+
+### Fixed
+
+- Keep Model and Effort visible and selectable when agent details scroll in short terminals. Preserve session edits, explicit saving, and complete wrapped IDs and paths.
+- Stop the shared supervision watcher when the last active subagent exits or stops. Leave completion retries to the callback batcher and retain supervision for pending lost-run alerts.
+
 ## [pi-better-harness@0.34.0] - 2026-10-29
 
 ### Added
