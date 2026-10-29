@@ -1786,9 +1786,10 @@ export default function (pi: ExtensionAPI) {
         const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
         const trustedExtArgs = [...new Set(taskTools?.trusted.map((tool) => tool.loadPath) ?? [])]
             .filter((path) => !resolvedExtArgs.includes(path)).flatMap((path) => ["--extension", path]);
-        // The harness's own child control extension (no tools, no command I/O) rides along in every
-        // mode, including clean: it is how a soft-deadline steer reaches the child session.
-        const extArgs = [...resolvedExtArgs, ...trustedExtArgs, "--extension", childSteerExtensionPath()]
+        // Harness child controls ride along in every mode, including clean and unsandboxed runs.
+        // They deliver deadline steers and keep external monitoring with the coordinator.
+        const extArgs = [...resolvedExtArgs, ...trustedExtArgs,
+            "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
             .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
         if (sandboxEnabled && resolution.mode === "inherit") {
             throw new Error("Task confinement requires explicit extensions; inheritExtensions is unsupported while sandboxing is enabled.");

@@ -25,6 +25,23 @@ launch starts it again. No separate background task or coordinator heartbeat is
 needed. Completion delivery retries use the callback batcher's own timer. Lost-run
 alerts retain supervision until their handoff is handled, so lost work is not silent.
 
+## Worker Ownership
+
+Every child launch, including clean, batch and unsandboxed launches, loads a Pi
+hook that keeps external CI/PR monitoring with its coordinator. Workers finish
+their assigned implementation or diagnosis, run focused checks, push only when
+authorized, write the result, and return. Pending CI is a valid handoff, not a pass.
+
+The hook refuses recognized `gh run watch`, `gh pr checks --watch`, and bundled
+delivery-watcher commands through `bash` and `run_application`. Short status reads,
+failed-log retrieval, and legitimate long local tests and builds remain allowed.
+If background tools are explicitly available to a child, recognized watcher
+commands are refused there too. Coordinator sessions are unaffected.
+
+This is an operational ownership guard, not a security boundary or a classifier
+for arbitrary programs. Indirect scripts and custom polling implementations still
+rely on the worker handoff contract. Command permissions and timeouts are unchanged.
+
 ## Install
 
 ```sh
