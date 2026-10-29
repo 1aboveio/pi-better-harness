@@ -88,6 +88,7 @@ export class CustomEditor {}
 export const Key = { left: "left" };
 export class Input {}
 export class SelectList {}
+export function wrapTextWithAnsi(text) { return [text]; }
 export function matchesKey() { return false; }
 export function visibleWidth(s) { return String(s ?? "").length; }
 export function truncateToWidth(s) { return s; }
