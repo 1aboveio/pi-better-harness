@@ -1,0 +1,6 @@
+Revision history for #585:
+
+rev 2 (rebase) 2026-10-29 15:17 UTC
+rev 1 (initial) 2026-10-29 15:17 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":585,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2387130dc735b1ed31aae3c2e3f52263e2024c56","timestamp_iso":"2026-10-29T15:17:14Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"2387130dc735b1ed31aae3c2e3f52263e2024c56","new_sha":"99570b638ef5fa1fd33fe978d3750b936599837d","timestamp_iso":"2026-10-29T15:17:14Z","reason":"","replay_sha":null,"compare_url":"https://github.com/1aboveio/pi-better-harness/compare/2387130dc735b1ed31aae3c2e3f52263e2024c56...99570b638ef5fa1fd33fe978d3750b936599837d"}]} -->
