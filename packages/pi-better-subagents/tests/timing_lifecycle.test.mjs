@@ -23,7 +23,7 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-timing-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
 
-const { default: betterSubagents, progressCacheIdsForTests } = await import("../index.ts");
+const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, runDir } = await import("../registry.ts");
 const { killProcessTree } = await import("../spawn.ts");
@@ -209,6 +209,93 @@ describe("harness timing: launch", () => {
             assert.equal(two.timing.graceMs, 60_000);
             for (const meta of metas) await reap({ id: meta.id, pid: meta.pid });
         } finally { h.shutdown(); }
+    });
+});
+
+describe("shared supervision watcher", () => {
+    const WAIT_SCRIPT = "#!/bin/sh\nd=$(dirname \"$PI_SUBAGENT_STEER_FILE\")\necho launched --extension\nwhile [ ! -f \"$d/done\" ]; do sleep 0.05; done\necho '{\"type\":\"agent_end\"}'\nexit 0\n";
+    const finish = async (run) => {
+        writeFileSync(join(runDir(run.id), "done"), "");
+        assert.equal(await waitFor(() => readMeta(run.id)?.status === "completed"), true);
+    };
+
+    it("shares one timer across sequential launches and reload, stops on the last exit, and restarts for later work", async () => {
+        await withFakeClock(async () => {
+            writeFakePi(WAIT_SCRIPT);
+            const intervals = mock.method(globalThis, "setInterval");
+            const watcherStarts = () => intervals.mock.calls.filter((call) => call.arguments[1] === HEALTH_TICK_MS).length;
+            const h = makeHarness();
+            h.ctx.isIdle = () => true;
+            const runs = [];
+            try {
+                assert.equal(isHealthTickerActive(), false);
+                const first = await spawnRun(h);
+                runs.push(first);
+                const second = await spawnRun(h);
+                runs.push(second);
+                await h.handlers.get("session_start")({}, h.ctx);
+                assert.equal(watcherStarts(), 1, "overlapping launches and reattachment must reuse the timer");
+                await finish(first);
+                assert.equal(isHealthTickerActive(), true, "the remaining worker still needs supervision");
+                await finish(second);
+                assert.equal(isHealthTickerActive(), false, "the final exit stops supervision without another tick");
+                assert.ok(readMeta(second.id).completionCallbackPendingAt, "callback delivery is independent of supervision");
+                assert.equal(await getCallbackBatcher(h.pi).flush(), true);
+                assert.ok(readMeta(second.id).completionCallbackSentAt);
+                await h.handlers.get("session_start")({}, h.ctx);
+                assert.equal(isHealthTickerActive(), false, "terminal history must not restart the watcher");
+                const later = await spawnRun(h);
+                runs.push(later);
+                assert.equal(watcherStarts(), 2, "a later launch starts a new watcher");
+                await h.tools.get("subagent_stop").execute("stop", { id: later.id }, undefined, undefined, h.ctx);
+                assert.equal(isHealthTickerActive(), false, "stopping the last worker also stops supervision immediately");
+            } finally {
+                for (const run of runs) await reap(run);
+                h.shutdown();
+                intervals.mock.restore();
+                writeFakePi(IDLE_SCRIPT);
+            }
+        });
+    });
+
+    it("shares the watcher with batch launches and preserves it across a partial launch failure", async () => {
+        await withFakeClock(async () => {
+            writeFakePi(WAIT_SCRIPT);
+            const intervals = mock.method(globalThis, "setInterval");
+            const h = makeHarness();
+            const runs = [];
+            try {
+                const first = await spawnRun(h, { callback: false });
+                runs.push(first);
+                const result = await h.tools.get("subagent_spawn_batch").execute("batch", {
+                    shared: { clean: true, sandbox: false, callback: false, tools: "read,bash", cwd: tmpdir() },
+                    jobs: [{ prompt: "batch worker" }, { prompt: "failed worker", cwd: join(binDir, "missing-directory") }],
+                }, undefined, undefined, h.ctx);
+                const ids = [...new Set([...result.content[0].text.matchAll(/(sa_[a-z0-9]+_[a-z0-9]+)/g)].map((m) => m[1]))];
+                const launched = ids.map((id) => readMeta(id)).filter(Boolean);
+                for (const meta of launched) {
+                    const run = { id: meta.id, pid: meta.pid };
+                    runs.push(run);
+                    liveRuns.push(run);
+                }
+                assert.equal(launched.length, 1, "one batch worker launches despite the other spawn failing");
+                assert.match(result.content[0].text, /Failed/i);
+                assert.equal(intervals.mock.calls.filter((call) => call.arguments[1] === HEALTH_TICK_MS).length, 1);
+                await finish(first);
+                assert.equal(isHealthTickerActive(), true, "the batch worker retains the shared watcher");
+                await finish(runs[1]);
+                assert.equal(isHealthTickerActive(), false);
+                await assert.rejects(() => h.tools.get("subagent_spawn").execute("failed", {
+                    prompt: "no launch", clean: true, sandbox: false, cwd: join(binDir, "missing-directory"),
+                }, undefined, undefined, h.ctx), /Failed to spawn/);
+                assert.equal(isHealthTickerActive(), false, "a failed launch must not create a watcher");
+            } finally {
+                for (const run of runs) await reap(run);
+                h.shutdown();
+                intervals.mock.restore();
+                writeFakePi(IDLE_SCRIPT);
+            }
+        });
     });
 });
 
