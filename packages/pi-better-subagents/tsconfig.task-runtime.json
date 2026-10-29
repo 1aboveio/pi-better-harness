@@ -1,4 +1,4 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["task-policy.ts", "task-guard.ts"]
+  "include": ["task-policy.ts", "task-guard.ts", "child-ownership.ts"]
 }

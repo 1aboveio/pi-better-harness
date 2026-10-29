@@ -13,6 +13,7 @@ import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { describeSandboxSupport } from '../shared-sandbox-core.ts';
 import { createTaskBashOperations } from '../shared-task-sandbox.ts';
 import taskGuard, { trustedToolRefusal } from '../task-guard.ts';
+import childOwnership from '../child-ownership.ts';
 import { parseTaskPolicy, prepareTaskRuntime } from '../task-policy.ts';
 import { planTaskTools } from '../subagent-tools.ts';
 
@@ -81,7 +82,7 @@ test('real Pi RPC startup takes runtime locks with task network and commands dis
 });
 
 // @covers subagent.timing
-test('the harness steer extension loads in a confined child without changing its guarded tool set', { skip: !supported }, (t) => {
+test('the harness child controls load in a confined child without changing its guarded tool set', { skip: !supported }, (t) => {
     const f = fixture(t, { commands: false, network: false, storedCredentials: 'off' });
     const prepared = prepareTaskRuntime({ root: f.project, controlDir: f.control,
         tools: ['read', 'bash'], permissions: f.policy.permissions,
@@ -89,6 +90,7 @@ test('the harness steer extension loads in a confined child without changing its
     t.after(() => rmSync(prepared.policy.scratch, { recursive: true, force: true }));
     const result = spawnSync(prepared.file, [...prepared.fileArgs,
         '--mode', 'rpc', '--offline', '--no-session', '--no-extensions', '--extension', fileURLToPath(new URL('../child-steer.ts', import.meta.url)),
+        '--extension', fileURLToPath(new URL('../child-ownership.ts', import.meta.url)),
         '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve', '--no-builtin-tools'], {
         cwd: f.project, encoding: 'utf8', timeout: 30000,
         input: '{"type":"get_state","id":"startup"}\n',
@@ -134,6 +136,20 @@ async function execute(session, name, params) {
     if (decision?.block) throw new Error(decision.reason);
     return tool.execute('boundary-test', params, new AbortController().signal);
 }
+
+test('worker ownership blocks CI watches before SDK command execution without restricting local checks', { skip: !supported }, async (t) => {
+    const f = fixture(t);
+    f.policy.tools = ['read', 'bash', 'run_application'];
+    const session = await sessionFixture(t, f, [(pi) => childOwnership(pi, { PI_SUBAGENT_STEER_FILE: join(f.control, 'steer.json') })]);
+    for (const [name, params] of [
+        ['bash', { command: 'gh run watch 40880423328 --exit-status --interval 30' }],
+        ['run_application', { executable: 'gh', args: ['pr', 'checks', '149', '--watch'], timeout: 900 }],
+    ]) await assert.rejects(execute(session, name, params), /monitoring belongs to the coordinator/);
+    const local = await execute(session, 'run_application', { executable: process.execPath, args: ['-e', 'console.log("local-check-passed")'] });
+    assert.match(local.content[0].text, /local-check-passed/);
+    const shell = await execute(session, 'bash', { command: 'printf local-shell-check' });
+    assert.match(shell.content[0].text, /local-shell-check/);
+});
 
 test('SDK-loaded guarded tools confine writes and reject unclassified extension execution', { skip: !supported }, async (t) => {
     const f = fixture(t, { commands: false, storedCredentials: 'off', outsideProject: 'off' });

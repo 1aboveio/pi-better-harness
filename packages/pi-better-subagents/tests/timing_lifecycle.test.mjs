@@ -172,6 +172,7 @@ describe("harness timing: launch", () => {
             });
             assert.ok(log, "the fake child recorded its arguments");
             assert.match(log, /--extension \S*child-steer\.ts/);
+            assert.match(log, /--extension \S*child-ownership\.ts/, "single clean launches carry ownership enforcement");
             assert.ok(log.includes(`"steerFile":"${steerPath(run.id)}"`), "the child learns where its steer requests appear");
             await reap(run);
         } finally { h.shutdown(); }
@@ -207,7 +208,10 @@ describe("harness timing: launch", () => {
             assert.equal(one.timing.ceilingAt, undefined, "max_minutes 0 disables the ceiling");
             assert.equal(two.timing.deadlineAt - two.startedAt, 3 * 60_000);
             assert.equal(two.timing.graceMs, 60_000);
-            for (const meta of metas) await reap({ id: meta.id, pid: meta.pid });
+            for (const meta of metas) {
+                assert.ok(await waitFor(() => readFileSync(meta.logPath, "utf8").includes("child-ownership.ts")), "each batch launch carries ownership enforcement");
+                await reap({ id: meta.id, pid: meta.pid });
+            }
         } finally { h.shutdown(); }
     });
 });
