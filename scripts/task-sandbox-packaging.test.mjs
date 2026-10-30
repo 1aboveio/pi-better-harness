@@ -22,7 +22,7 @@ test('standalone consumers include the task executor and mandatory child launche
     for (const path of ['shared-task-sandbox.ts', 'shared-task-files.ts', 'shared-task-apply-patch.ts', 'shared-task-tools.ts', 'shared-task-process-list.ts', 'shared-task-exec.ts', 'shared-task-application.ts', 'shared-sandbox-diagnostics.ts']) assert.ok(files.has(path), `${name} missing ${path}`);
     if (name === 'pi-better-sandbox') assert.ok(files.has('diagnostics-command.ts'));
     if (name === 'pi-better-subagents') {
-      for (const path of ['task-runtime.mjs', 'task-guard.ts', 'task-policy.ts']) assert.ok(files.has(path), `${name} missing ${path}`);
+      for (const path of ['task-runtime.mjs', 'task-guard.ts', 'task-tool-owner.ts', 'task-policy.ts']) assert.ok(files.has(path), `${name} missing ${path}`);
     }
   }
 });

@@ -7,6 +7,8 @@ import { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } from "./permis
 import { failureDispositionTool, intentBashDefinition } from "./child-incidents.ts";
 import { DISPOSITION_TOOL } from "./incident-model.ts";
 import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
+import { fileURLToPath } from "node:url";
+import { claimTaskToolOwner } from "./task-tool-owner.ts";
 
 const TRUSTED_INLINE_SOURCE = "<inline:task-sandbox>";
 
@@ -31,7 +33,7 @@ export function trustedToolRefusal(policy: TaskPolicy, name: string, sourcePath:
     return undefined;
 }
 
-export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (error: unknown) => never): void {
+export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (error: unknown) => never, ownedTools = false): void {
     const policy = parseTaskPolicy(input);
     const support = describeSandboxSupport();
     if (!support.supported) throw new Error(`Task sandbox unavailable: ${support.reason}`);
@@ -54,9 +56,10 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
             diagnosticsWarned = true;
         },
     });
-    const boundary = installTaskTools(pi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
+    const toolApi = ownedTools ? { ...pi, registerTool: claimTaskToolOwner(pi) } : pi;
+    const installBoundary = () => installTaskTools(toolApi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
         diagnostics,
-        trustedSources: [TRUSTED_INLINE_SOURCE],
+        trustedSources: [ownedTools ? fileURLToPath(new URL("./task-tool-owner.ts", import.meta.url)) : TRUSTED_INLINE_SOURCE],
         // Structured command intent (#315): validated before the confined command runs.
         bashDefinition: (cwd, operations) => intentBashDefinition(cwd, operations) as any,
         applyPatch: policy.applyPatch,
@@ -66,6 +69,9 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
         admitExtensionTool: (name, _input, sourcePath) => (name === DISPOSITION_TOOL && sourcePath === TRUSTED_INLINE_SOURCE) ||
             trustedToolRefusal(policy, name, sourcePath) === undefined,
     });
+    // Defer owned registrations until after SDK duplicate-name diagnostics.
+    // The final session_start handler still installs and verifies them before activation.
+    let boundary = ownedTools ? undefined : installBoundary();
     pi.registerTool(failureDispositionTool(() => currentCwd) as any);
     const profile = Object.freeze({ enabled: true, ...policy.permissions });
     const status = Object.freeze({
@@ -80,6 +86,7 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
         try {
             shellPath = SettingsManager.create(ctx.cwd, policy.agentDir, { projectTrusted: false }).getShellPath();
             currentCwd = ctx.cwd;
+            boundary ??= installBoundary();
             boundary.register(ctx.cwd);
             const builtins: readonly string[] = policy.applyPatch ? [...TASK_BUILTINS, ...GUARDED_TASK_TOOLS] : TASK_BUILTINS;
             const known = new Set<string>(builtins);
