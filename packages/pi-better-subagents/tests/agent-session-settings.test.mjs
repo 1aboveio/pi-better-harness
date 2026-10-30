@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createAgentSessionSettings, saveAgentSessionDefaults } from "../agent-session-settings.ts";
-import { executeAgentsCommand } from "../agent-commands.ts";
+import { executeAgentsCommand, executeAgentsCommandContext } from "../agent-commands.ts";
 import { agentsCatalogTool } from "../agents-catalog-tool.ts";
 import { createLaunchEnricher, loadLaunchSnapshot, noteCatalogHost, prepareCatalogJob } from "../catalog-runtime.ts";
 import { loadCatalog, saveDefinition } from "../catalog-store.ts";
@@ -18,7 +18,7 @@ const Type = { Object: (x) => x, String: (x) => x, Optional: (x) => x };
 const role = (defaults = {}) => ({ schema: "pi-agent/v1", kind: "role", id: "role.work", name: "Worker", defaults: { model: "openai/alpha", effort: "medium", tier: "balanced", ...defaults }, executionRestrictions: [], body: "Role instructions." });
 const agent = (overrides = {}) => ({ schema: "pi-agent/v1", kind: "agent", id: "agent.worker", name: "Named Worker", roleId: "role.work", instructionMode: "add", overrides, executionRestrictions: [], provenance: { origin: "imported", format: "codex-toml", sourceRef: "source.toml" }, body: "Named instructions." });
 
-function fixture(t, scope = "user", definition = agent()) {
+function fixture(t, scope = "user", definition = agent(), options = {}) {
     const root = mkdtempSync(join(tmpdir(), "agent-session-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const loc = { cwd: join(root, "project"), userRoot: join(root, "user"), bundledRoot: join(root, "bundled"), projectTrusted: true };
@@ -45,7 +45,7 @@ function fixture(t, scope = "user", definition = agent()) {
         select: async () => undefined, confirm: async () => false, input: async () => undefined, editor: async () => undefined, notify() {},
         custom: async (factory) => { component = factory({ requestRender() {} }, theme, {}, () => {}); },
     };
-    const commandHost = { cwd: loc.cwd, hasUI: true, mode: "tui", isProjectTrusted: () => loc.projectTrusted, ui };
+    const commandHost = { cwd: loc.cwd, hasUI: true, mode: "tui", isProjectTrusted: () => loc.projectTrusted, scopedModels: options.scopedModels, ui };
     const deps = () => ({ ...loc, sessionSettings: settings, editableModels: () => registry.getAvailable().map((m) => `${m.provider}/${m.id}`), enrich: createLaunchEnricher() });
     return {
         loc, bundledPath, saved, base, pi, restore, host, registry,
@@ -56,6 +56,15 @@ function fixture(t, scope = "user", definition = agent()) {
         async open(id = definition.id) {
             noteCatalogHost(host());
             const result = await executeAgentsCommand(`show ${id}`, commandHost, deps());
+            return { result, component };
+        },
+        /** Open through the slash-command entry point so `ctx.scopedModels` is read. */
+        async openFromContext(id = definition.id, context = {}) {
+            noteCatalogHost(host());
+            const result = await executeAgentsCommandContext(`show ${id}`, {
+                cwd: loc.cwd, hasUI: true, mode: "tui", isProjectTrusted: () => loc.projectTrusted, ui,
+                ...context,
+            }, deps());
             return { result, component };
         },
         async command(args, headless = false) {
@@ -303,5 +312,57 @@ describe("branch-local agent model and effort", () => {
         settings.restore({ sessionManager: fx.session });
         assert.throws(() => settings.change("agent.worker", "effort", "high"), /session write failed/);
         assert.equal(settings.snapshot()["agent.worker"].effort, "low");
+    });
+
+    it("offers only session-scoped models in the picker, preserving saved values and empty-scope fallback", async (t) => {
+        const scoped = [{ model: { provider: "openai", id: "beta" } }];
+        const fx = fixture(t, "user", agent(), { scopedModels: scoped });
+        const original = readFileSync(fx.saved.path, "utf8");
+        // Scope affects the picker only: the saved out-of-scope default still launches.
+        const beforeEdit = await prepareCatalogJob(loadLaunchSnapshot(fx.host()), { agent: "agent.worker", prompt: "Work" }, fx.host());
+        assert.equal(beforeEdit.status, "ready", beforeEdit.message);
+        assert.equal(beforeEdit.assign.model, "openai/alpha");
+        const { component, result } = await fx.open();
+        component.handleInput("\r");
+        const picker = component.render(100).join("\n");
+        assert.match(picker, /Agents \/ model/);
+        assert.match(picker, /Session model scope · 1 model · saved value is outside this scope/);
+        assert.match(picker, /openai\/beta/);
+        assert.doesNotMatch(picker, /openai\/gamma/);
+        assert.doesNotMatch(picker, /openai\/alpha/, "the out-of-scope saved value is not offered");
+        component.handleInput("gamma");
+        assert.match(component.render(100).join("\n"), /No matching commands/);
+        component.handleInput("\x1b");
+        assert.match(component.render(100).join("\n"), /Model\s+openai\/alpha\s+inherited/);
+        // A scoped choice is a normal session preference: resolution is unchanged.
+        editModel(component, "beta");
+        assert.deepEqual(fx.settings.snapshot()["agent.worker"], { model: "openai/beta" });
+        assert.equal(readFileSync(fx.saved.path, "utf8"), original);
+        assert.equal(result.wrote, false);
+        const prepared = await prepareCatalogJob(loadLaunchSnapshot(fx.host()), { agent: "agent.worker", prompt: "Work" }, fx.host());
+        assert.equal(prepared.status, "ready", prepared.message);
+        assert.equal(prepared.assign.model, "openai/beta");
+
+        const unscoped = fixture(t, "user", agent());
+        const fallback = await unscoped.open();
+        fallback.component.handleInput("\r");
+        const fallbackPicker = fallback.component.render(100).join("\n");
+        assert.match(fallbackPicker, /All available models · no session scope/);
+        assert.match(fallbackPicker, /openai\/gamma/);
+    });
+
+    it("reads the session scope from the command context and tolerates hosts without it", async (t) => {
+        const fx = fixture(t);
+        const scoped = await fx.openFromContext("agent.worker", { scopedModels: [{ model: { provider: "openai", id: "gamma" } }] });
+        scoped.component.handleInput("\r");
+        const picker = scoped.component.render(100).join("\n");
+        assert.match(picker, /Session model scope · 1 model/);
+        assert.match(picker, /openai\/gamma/);
+        assert.doesNotMatch(picker, /openai\/beta/);
+        const unscoped = await fx.openFromContext("agent.worker");
+        unscoped.component.handleInput("\r");
+        const fallbackPicker = unscoped.component.render(100).join("\n");
+        assert.match(fallbackPicker, /All available models · no session scope/);
+        assert.match(fallbackPicker, /openai\/beta/);
     });
 });

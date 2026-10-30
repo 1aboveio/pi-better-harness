@@ -51,7 +51,9 @@ new sessions start from catalog defaults.
 The catalog host supplies a live `getSessionSettings` getter so inspection
 reflects edits made while the overlay is open. `loadLaunchSnapshot` reads that
 getter once and freezes the overlay for each batch. Later edits cannot alter
-already-admitted jobs. Model choices come from the current Pi model registry.
+already-admitted jobs. Model choices come from the session's Pi model scope
+(`ctx.scopedModels`); an empty scope is no restriction, so they fall back to the
+current Pi model registry's available models.
 
 Ctrl+S saves only the selected definition's own preferences, never flattened
 inherited settings. Bundled roles are copied to user scope; existing user and

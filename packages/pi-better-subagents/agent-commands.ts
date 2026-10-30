@@ -11,6 +11,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { presentCatalog, presentCatalogEntry, type LaunchEnricher, type OperationView } from "./agent-inspection.ts";
 import { createCatalogComponent } from "./catalog-ui.ts";
+import type { ScopedModelLike } from "./catalog-editor.ts";
 import {
     CATALOG_SCHEMA_VERSION,
     DiagnosticCodes,
@@ -95,6 +96,11 @@ export interface AgentCommandHost {
     hasUI: boolean;
     mode?: "tui" | "rpc" | "json" | "print";
     isProjectTrusted(): boolean;
+    /**
+     * Session model scope from `ctx.scopedModels`. Empty or absent means no
+     * scope, which Pi treats as "all available models are usable".
+     */
+    scopedModels?: readonly ScopedModelLike[];
     ui: AgentCommandUi;
 }
 
@@ -150,8 +156,18 @@ export function executeAgentsCommandContext(args: string, ctx: ExtensionCommandC
         hasUI: ctx.hasUI,
         mode: ctx.mode,
         isProjectTrusted: () => ctx.isProjectTrusted(),
+        scopedModels: scopedModelsFromContext(ctx),
         ui: ctx.ui,
     }, deps);
+}
+
+/**
+ * Older Pi versions do not expose `ctx.scopedModels`, so they retain the
+ * unscoped picker. Current hosts use an empty array when no scope is configured.
+ */
+function scopedModelsFromContext(ctx: ExtensionCommandContext): readonly ScopedModelLike[] {
+    const scoped = (ctx as unknown as { scopedModels?: unknown }).scopedModels;
+    return Array.isArray(scoped) ? scoped as readonly ScopedModelLike[] : [];
 }
 
 export async function executeAgentsCommand(args: string, host: AgentCommandHost, deps: AgentCommandDeps = {}): Promise<AgentCommandResult> {
@@ -729,6 +745,7 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                 createCatalogComponent(entries, theme, () => tui.requestRender(), () => done(), view?.id, deps.sessionSettings ? {
                     get: () => presentCatalog(readCatalog(location(host, deps)), deps.enrich),
                     models: () => deps.editableModels?.() ?? [],
+                    scopedModels: () => host.scopedModels ?? [],
                     settings: () => deps.sessionSettings!.snapshot(),
                     change: (id, key, value) => deps.sessionSettings!.change(id, key, value),
                     save(id) {

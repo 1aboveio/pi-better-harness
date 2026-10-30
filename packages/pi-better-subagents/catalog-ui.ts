@@ -1,13 +1,17 @@
 import { Input, SelectList, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { OperationList, OperationView } from "./agent-inspection.ts";
 import { EFFORT_LEVELS } from "./catalog-schema.ts";
+import { catalogModelChoices, catalogModelOptionLabel, catalogModelScopeLabel, type ScopedModelLike } from "./catalog-editor.ts";
 import type { AgentSessionOverrides, AgentSettingKey } from "./agent-session-settings.ts";
 
 type Theme = { fg(color: string, text: string): string; bg?(color: string, text: string): string; bold?(text: string): string; inverse?(text: string): string };
 
 export interface CatalogEditor {
     get(): OperationList;
+    /** Available foreground models, used only when the session scope is empty. */
     models(): readonly string[];
+    /** Session model scope (`ctx.scopedModels`). Empty or absent means no scope. */
+    scopedModels?(): readonly ScopedModelLike[];
     settings(): AgentSessionOverrides;
     change(id: string, key: AgentSettingKey, value: string | null): void;
     save(id: string): { ok: boolean; message: string };
@@ -142,6 +146,7 @@ export function createCatalogComponent(
     let picker: SelectList | undefined;
     let filterPicker: ((filter: string) => void) | undefined;
     let pickerKey: AgentSettingKey | undefined;
+    let modelScopeNote: string | undefined;
     const search = new Input();
     let focused = false;
     let message = "";
@@ -162,8 +167,15 @@ export function createCatalogComponent(
         if (!current || !editor) return;
         if (!current.definitionValid) { report("Repair the catalog definition before editing.", true); return; }
         const key: AgentSettingKey = settingRow === 0 ? "model" : "effort";
-        const values = key === "model" ? [...new Set([...(editor.models()), ...(current.fields?.model.value ? [current.fields.model.value] : [])])].sort() : [...EFFORT_LEVELS];
-        const items = [{ value: "", label: "Inherit" }, ...values.map((value) => ({ value, label: value }))];
+        // Pi treats an empty scope as unrestricted. Scoped choices never include
+        // an out-of-scope saved value; the detail view still displays it.
+        const choices = key === "model"
+            ? catalogModelChoices({ scoped: editor.scopedModels?.(), available: editor.models(), current: current.fields?.model.value })
+            : undefined;
+        modelScopeNote = choices ? catalogModelScopeLabel(choices) : undefined;
+        const items = [{ value: "", label: "Inherit" }, ...(choices
+            ? choices.values.map((value) => ({ value, label: catalogModelOptionLabel(choices, value) }))
+            : EFFORT_LEVELS.map((value) => ({ value, label: value })))];
         pickerKey = key;
         search.setValue("");
         search.focused = focused && key === "model";
@@ -189,7 +201,11 @@ export function createCatalogComponent(
             picker.onSelect = onSelect;
         };
         filterPicker("");
-        picker!.setSelectedIndex(Math.max(0, items.findIndex((item) => item.value === current.fields?.[key].value)));
+        // A saved value the scope does not offer is not in the list. Highlight
+        // the first offered model instead of "Inherit" so Enter does not clear
+        // the saved preference by accident.
+        const currentIndex = items.findIndex((item) => item.value === current.fields?.[key].value);
+        picker!.setSelectedIndex(Math.max(0, currentIndex >= 0 ? currentIndex : choices && choices.scope === "scoped" ? 1 : 0));
     }
     const filtered = () => catalog.entries.filter((entry) =>
         [entry.id, entry.identity.name, entry.identity.description, entry.role?.id]
@@ -226,6 +242,7 @@ export function createCatalogComponent(
 
             if (picker) return fit([
                 theme.fg("accent", `Agents / ${pickerKey}`), "",
+                ...(pickerKey === "model" && modelScopeNote ? [theme.fg("dim", modelScopeNote), ""] : []),
                 ...(pickerKey === "model" ? search.render(safeWidth) : []),
                 ...picker.render(safeWidth),
                 ...(message ? [theme.fg(error ? "error" : "muted", message)] : []),
