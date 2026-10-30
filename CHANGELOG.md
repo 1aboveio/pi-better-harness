@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.35.1] - 2026-10-30
+
+### Fixed
+
+- Bundle Subagents 0.23.1 so trusted packages that also register `apply_patch` no longer prevent sandboxed workers from starting. Keep all other component versions unchanged. (#590)
+
+## [pi-better-subagents@0.23.1] - 2026-10-30
+
+### Fixed
+
+- Retain harness ownership of guarded tools when a trusted extension registers the same name at startup or later. Preserve trusted package tools and sandbox source/schema verification without admitting the package's unguarded `apply_patch`. (#590)
+
+### Tests
+
+- Validate linked-worktree Git operations under Outside project = Write and Write & delete with real kernel confinement. Permission defaults are unchanged; Write still denies the metadata rename/removal that Git needs outside the project root. (#591)
+
 ## [pi-better-harness@0.35.0] - 2026-10-30
 
 ### Added
