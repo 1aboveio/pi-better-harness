@@ -93,7 +93,7 @@ A profile sets defaults for later `remote_bash` calls. `use` accepts a configure
 }
 ```
 
-Call `ssh_profile` with `status` to inspect the active profile or `clear` to remove it. A footer chip shows the active target, workdir, and whether its mux is up or down. An explicit `host`, `workdir`, or environment entry on `remote_bash` takes precedence over the corresponding profile default.
+Call `ssh_profile` with `status` to inspect the active profile or `clear` to remove it. An explicit `host`, `workdir`, or environment entry on `remote_bash` takes precedence over the corresponding profile default.
 
 ## ControlMaster
 

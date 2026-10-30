@@ -1156,6 +1156,8 @@ export class RemoteClientSession {
     }
   }
   private present(request: SessionEvent): void {
+    // Preserve status events on the wire, but never write them to the local footer.
+    if (request.method === "setStatus") return;
     if (["select", "confirm", "input", "editor"].includes(request.method)) {
       this.dialogs.set(request.id, request);
       this.presentDialogs();
@@ -1165,7 +1167,6 @@ export class RemoteClientSession {
     const ui = this.uiContext;
     switch (request.method) {
       case "notify": ui.notify(request.message, request.notifyType); break;
-      case "setStatus": ui.setStatus(request.statusKey, request.statusText); break;
       case "setWidget":
         if (request.widgetLines !== undefined && (!Array.isArray(request.widgetLines) || !request.widgetLines.every((line: unknown) => typeof line === "string"))) {
           throw new Error("Remote custom widget components are not supported; only text lines are supported");

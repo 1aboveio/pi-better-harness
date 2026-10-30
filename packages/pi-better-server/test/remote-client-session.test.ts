@@ -492,10 +492,16 @@ function untilEvent(session: RemoteClientSession, type: string, accept: (event: 
   });
 }
 
-test("real daemon: remote UI notifications, statuses and text widgets reach native presentation methods", { timeout: 30_000 }, async t => {
+test("real daemon: status events remain on the wire but do not reach the native footer", { timeout: 30_000 }, async t => {
   const f = await hosted(t);
   const session = await f.attach();
   const received: unknown[] = [];
+  const statusEvents: any[] = [];
+  const unsubscribe = f.owner.onEvent(message => {
+    const event = message.event as any;
+    if (event?.type === "extension_ui_request" && event.method === "setStatus") statusEvents.push(event);
+  });
+  t.after(unsubscribe);
   await session.bindExtensions({ uiContext: {
     notify: (message: string, type: string) => received.push(["notify", message, type]),
     setStatus: (key: string, text: string | undefined) => received.push(["status", key, text]),
@@ -504,13 +510,13 @@ test("real daemon: remote UI notifications, statuses and text widgets reach nati
   const remoteUi = f.daemon.registry.get(f.sessionId)!.session.extensionRunner.getUIContext();
   remoteUi.notify("Remote notice", "warning");
   remoteUi.setStatus("remote-task", "Running");
-  remoteUi.setWidget("remote-widget", ["Remote progress"], { placement: "belowEditor" });
   remoteUi.setStatus("remote-task", undefined);
-  await waitFor("four forwarded UI calls", () => received.length === 4);
+  remoteUi.setWidget("remote-widget", ["Remote progress"], { placement: "belowEditor" });
+  await waitFor("forwarded widget and status events", () => received.length >= 2 && statusEvents.length === 2);
   assert.deepEqual(received, [
-    ["notify", "Remote notice", "warning"], ["status", "remote-task", "Running"],
-    ["widget", "remote-widget", ["Remote progress"], { placement: "belowEditor" }], ["status", "remote-task", undefined],
+    ["notify", "Remote notice", "warning"], ["widget", "remote-widget", ["Remote progress"], { placement: "belowEditor" }],
   ]);
+  assert.deepEqual(statusEvents.map(event => [event.statusKey, event.statusText]), [["remote-task", "Running"], ["remote-task", undefined]]);
 });
 
 test("real daemon: a changed hosted generation replaces the cache and resumes a contiguous event subscription", { timeout: 30_000 }, async t => {

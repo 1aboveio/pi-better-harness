@@ -9,10 +9,16 @@ import { DaemonClient } from "../src/client.ts";
 import type { Pi12Bridge } from "../src/remote-client/pi-1.2-bridge.ts";
 import { gate, makeEnv, spawnDaemon, waitFor } from "./helpers.ts";
 
-async function fixture(t: TestContext, cancelCheck = false) {
+async function fixture(t: TestContext, cancelCheck = false, attachSession = false) {
   const previous = { ...process.env };
   const remote = makeEnv();
   const daemon = await spawnDaemon(remote);
+  let sessionId: string | undefined;
+  if (attachSession) {
+    const client = await DaemonClient.connect(daemon.socketPath);
+    try { sessionId = (await client.call({ type: "create_session", cwd: remote.cwd })).sessionId; }
+    finally { client.close(); }
+  }
   const local = makeEnv();
   Object.assign(process.env, local.vars);
   const installed = join(local.agentDir, "npm", "node_modules", "fixture-tools");
@@ -45,12 +51,16 @@ async function fixture(t: TestContext, cancelCheck = false) {
       } catch (error) { active?.dispose?.(); active = undefined; reject(error); }
     });
   });
-  const ui = { custom, setStatus() {}, notify() {}, confirm: async () => { events.push("extension-confirm"); return false; } } as unknown as ExtensionUIContext;
+  const ui = { custom, setStatus() { events.push("status-write"); }, notify() {}, confirm: async () => { events.push("extension-confirm"); return false; } } as unknown as ExtensionUIContext;
   const bridge = {
     beginBrowse: () => { events.push("clean-screen"); return () => { events.push("restore-screen"); }; },
-    attach: async () => assert.fail("Cancelling the browser must not attach"), disconnect: async () => {},
+    attach: async (session: { dispose(): void }) => {
+      assert.ok(attachSession, "Cancelling the browser must not attach");
+      events.push("attached");
+      session.dispose();
+    }, disconnect: async () => {},
   } as unknown as Pi12Bridge;
-  const run = () => connectHost({ host: "fixture-host", cwd: undefined, sessionId: undefined, remoteDir: remote.serverDir }, {
+  const run = () => connectHost({ host: "fixture-host", cwd: undefined, sessionId, remoteDir: remote.serverDir }, {
     ui, cwd: local.cwd, bridge,
     dependencies: { resolveTarget: async () => {
       events.push("connected");
@@ -71,6 +81,7 @@ test("connect cleans the screen and completes the extension decision before open
   assert.ok(f.events.indexOf("clean-screen") < f.events.indexOf("extension-check"));
   assert.ok(f.events.indexOf("extension-confirm") < f.events.indexOf("browser"));
   assert.ok(f.events.indexOf("browser") < f.events.indexOf("restore-screen"));
+  assert.ok(!f.events.includes("status-write"));
 });
 
 test("cancelling the pre-browser extension check restores the local screen without mounting the browser", async t => {
@@ -81,6 +92,14 @@ test("cancelling the pre-browser extension check restores the local screen witho
   assert.ok(f.events.includes("transport-closed"));
   assert.ok(!f.events.includes("browser"));
   assert.ok(!f.events.includes("extension-confirm"));
+  assert.ok(!f.events.includes("status-write"));
+});
+
+test("attaching a remote session does not write connection status to the footer", async t => {
+  const f = await fixture(t, false, true);
+  await f.run();
+  assert.ok(f.events.includes("attached"));
+  assert.ok(!f.events.includes("status-write"));
 });
 
 test("legacy daemons without host-level sync keep their sessions available without attempting package mutation", async t => {

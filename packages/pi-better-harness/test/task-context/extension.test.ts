@@ -140,7 +140,7 @@ test("todo tools persist progress without taking over editor navigation", async 
     ],
   }, undefined, undefined, ctx);
 
-  assert.equal(statuses.get("pi-better-plan-nav"), undefined);
+  assert.equal(statuses.size, 0, "Todo must not write to the status bar");
   assert.equal(editorInstallations, 0, "the plan leaves the editor component unchanged");
   const widgetFactory = widgets.get("pi-better-plan")?.content;
   assert.equal(typeof widgetFactory, "function");
@@ -159,6 +159,8 @@ test("todo tools persist progress without taking over editor navigation", async 
   const result = await getTodo.execute("get", {}, undefined, undefined, ctx);
   assert.equal((result.details as any).progress.completed, 1);
   assert.equal((result.details as any).plan.steps[1].status, "in_progress");
+  await handlers.get("session_shutdown")?.({}, ctx);
+  assert.equal(statuses.size, 0, "Todo shutdown must not write to the status bar");
 });
 
 test("todo progress is independent of the subagents delegation mode", async () => {

@@ -112,8 +112,10 @@ the right. Its outcome is one muted, truncated subtitle. Collapsed view shows up
 to five relevant rows, expanded view all rows, and clicks toggle the view. `/todo`
 shows the full objective, acceptance criteria, boundaries, and plan. Subagent and
 background-task rows open their existing navigator details on click; Enter and
-keyboard controls remain, and editor input stays passive. No permanent status bar
-is added; existing critical permission and paused notices remain untouched.
+keyboard controls remain, and editor input stays passive. Harness packages do not
+write to Pi's status bar, including Goal holds, SSH profiles, navigator hints, and
+remote connection state. Commands and widgets retain their state displays;
+permission checks and pause/resume rules are unchanged.
 
 Goal retains its raw trigger and separate lifecycle. On bridge `inspect`, optional
 `display: true` means Harness actually displays the requested `goalId`; only then

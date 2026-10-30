@@ -374,7 +374,7 @@ export default function (pi: ExtensionAPI): void {
    * Chat `notify` appends lines above the Working/bash status region. While the
    * agent is streaming, that height change desyncs Pi main-screen differential
    * rendering and stacks "Working..." / "Elapsed Xs" into scrollback. Keep
-   * mid-stream feedback out of the transcript; use the footer status instead.
+   * mid-stream non-error feedback out of the transcript.
    */
   const notifyGoal = (
     ctx: ExtensionContext,
@@ -385,11 +385,6 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
     if (isForegroundBusy(ctx) && type !== "error") {
-      try {
-        ctx.ui.setStatus(EXTENSION_NAME, message);
-      } catch {
-        // Footer status is best-effort only.
-      }
       return;
     }
     ctx.ui.notify(message, type);
@@ -424,7 +419,6 @@ export default function (pi: ExtensionAPI): void {
     clearIdleContinuation();
     syncPollingState();
     syncResumeTool(goal);
-    applyStatus(ctx);
     // Force a full redraw when the dock height changes (absent ↔ visible clock).
     refreshGoalWidget?.(!wasVisible || !isGoalClockVisible(goal));
   };
@@ -443,7 +437,6 @@ export default function (pi: ExtensionAPI): void {
     clearIdleContinuation();
     syncPollingState();
     syncResumeTool(null);
-    applyStatus(ctx);
     refreshGoalWidget?.(wasVisible);
   };
 
@@ -726,40 +719,8 @@ export default function (pi: ExtensionAPI): void {
       pi.events.emit(EVENT_TERMINAL_ATTENTION, snapshot);
       if (execution !== executionGeneration) return null;
     }
-    applyStatus(ctx);
-
     return snapshot;
   };
-
-  /** Footer status from the goal state and the latest activity snapshot. */
-  const statusText = (ctx: ExtensionContext, snapshot: ActivitySnapshot | null): string | undefined => {
-    const goal = getGoal(ctx);
-    let waitingOnAnswer = 0;
-    if (snapshot) {
-      for (const activeAtStart of pendingQuestions.values()) {
-        waitingOnAnswer += finishedSinceQuestion(activeAtStart, snapshot).length;
-      }
-    }
-    if (waitingOnAnswer > 0) return `${waitingOnAnswer} background done; waiting on your answer`;
-    if (goal?.status === "paused") return pausedGoalStatus(goal, preferences.conversationalResume);
-    if (snapshot?.backgroundRunning) return undefined;
-    const continuation = goal ? currentContinuationState(ctx, goal.goalId) : null;
-    if (continuation?.blocked) return "waiting: no progress";
-    const goalStall = observeGoalStall(goal, continuation, {
-      foregroundRunning,
-      backgroundRunning: snapshot?.backgroundRunning ?? false,
-    });
-    return goalStall?.state === "stalled" ? "goal stalled" : undefined;
-  };
-
-  function applyStatus(ctx: ExtensionContext): void {
-    if (!ctx.hasUI) return;
-    try {
-      ctx.ui.setStatus(EXTENSION_NAME, statusText(ctx, latestSnapshot));
-    } catch {
-      // UI status is best-effort only.
-    }
-  }
 
   /**
    * `goal_resume` is in the model's tool list only while an escape-paused goal
@@ -918,7 +879,6 @@ export default function (pi: ExtensionAPI): void {
     preferences = writeGoalPreference(key, enabled);
     if (previous.autoContinue !== preferences.autoContinue) clearIdleContinuation();
     syncResumeTool(getGoal(ctx));
-    applyStatus(ctx);
     if (!previous.autoContinue && preferences.autoContinue) {
       const snapshot = await publishSnapshot(ctx);
       const goal = getGoal(ctx);
@@ -1578,7 +1538,6 @@ export default function (pi: ExtensionAPI): void {
     if (blocked) {
       refreshGoalWidget?.();
       if (ctx.hasUI) {
-        ctx.ui.setStatus(EXTENSION_NAME, "waiting: no progress");
         ctx.ui.notify(
           `Goal automatic continuation is waiting after ${noProgressRetries} identical retries (${evidence.summary}). Use /goal resume or alt+g to resume it.`,
           "warning",
@@ -1630,7 +1589,6 @@ export default function (pi: ExtensionAPI): void {
     latestSnapshot = null;
     collectionPending = false;
     try {
-      ctx.ui.setStatus(EXTENSION_NAME, undefined);
       ctx.ui.setWidget(EXTENSION_NAME, undefined);
     } catch {
       // Best-effort cleanup.

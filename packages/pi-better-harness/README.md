@@ -55,8 +55,8 @@ optional interface is off. See the [usage guide](docs/usage.md#outcome--todo).
 
 Subagent and background-task rows can be clicked to open their existing navigator
 details. Enter and keyboard controls remain available, and editor input stays
-passive. No permanent status bar is added; existing critical permission and
-paused notices remain unchanged.
+passive. Harness packages do not write to Pi's status bar. Goal holds and resume
+instructions remain available through `/goal`; permission checks are unchanged.
 
 ## Screenshots
 

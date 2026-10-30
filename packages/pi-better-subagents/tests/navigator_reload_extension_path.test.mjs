@@ -381,7 +381,7 @@ describe("registered extension path: session_start reload cleanup", () => {
 
         await nav.start();
 
-        assert.equal(nav.lastStatus("background-work-nav"), undefined, "terminal-only runs clear the footer hint");
+        assert.deepEqual(nav.statusCalls, []);
         assert.equal(
             nav.widgetCalls.some((c) => c[0] === "subagents" && Array.isArray(c[1]) && c[1].some((line) => line.includes("← background work"))),
             false,
@@ -413,9 +413,8 @@ describe("registered extension path: session_start reload cleanup", () => {
         await nav.start();
         assert.equal(nav.setEditorCount, 1, "first session_start installs editor once");
         assert.equal(nav.ui.factory?.__piBetterHarnessNavigatorFactory, true, "factory is marked");
-        const footerAfterStart = nav.lastStatus("background-work-nav");
         const widgetAfterStart = nav.lastWidget("subagents");
-        assert.equal(footerAfterStart, undefined, "running work must not publish a persistent count footer");
+        assert.deepEqual(nav.statusCalls, []);
         assert.equal(widgetAfterStart, undefined, "running session_start clears the retired legacy subagent widget");
         assert.ok(
             nav.widgetCalls.some((c) => c[0] === "subagents" && c[1] === undefined),
@@ -433,15 +432,9 @@ describe("registered extension path: session_start reload cleanup", () => {
         nav.press("x");
         assert.equal(timerSpies.pendingIntervals(), 1, "health is the only live interval");
         assert.equal(timerSpies.pendingTimeouts(), 2, "detail refresh and close-arm deadlines are live");
-        const confirmAfterArm = nav.lastStatus("background-work-close");
-        assert.equal(
-            typeof confirmAfterArm,
-            "string",
-            "arm publishes close-confirm status",
-        );
-        assert.match(String(confirmAfterArm), /reload-job|x again/i);
+        assert.match(component.render(120).join("\n"), /x again to stop reload-job/);
+        assert.deepEqual(nav.statusCalls, []);
 
-        const statusLenBeforeReload = nav.statusCalls.length;
         const widgetLenBeforeReload = nav.widgetCalls.length;
         const editorBefore = nav.ui.factory;
 
@@ -449,15 +442,10 @@ describe("registered extension path: session_start reload cleanup", () => {
         await nav.reload();
 
         // 5a) Prior overlay timers + confirmation cleared by the registered
-        // session_start path (disposeBackgroundWorkNavigator + CLOSE_CONFIRM clear).
+        // session_start path (disposeBackgroundWorkNavigator).
         assert.equal(timerSpies.pendingIntervals(), 1, "reload keeps only the domain health interval");
         assert.equal(timerSpies.pendingTimeouts(), 0, "reload clears detail refresh and close-arm deadlines");
-        const confirmAfterReload = nav.lastStatus("background-work-close");
-        assert.equal(confirmAfterReload, undefined, "reload clears CLOSE_CONFIRM_STATUS_KEY");
-        assert.ok(
-            nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "background-work-close" && c[1] === undefined),
-            "reload path must invoke setStatus(close-confirm, undefined)",
-        );
+        assert.deepEqual(nav.statusCalls, []);
         // Dispose clears arm/detail state; the host would drop the focused
         // overlay on session switch. We only assert the production cleanup
         // side effects above (timers + confirm), not host focus teardown.
@@ -468,15 +456,10 @@ describe("registered extension path: session_start reload cleanup", () => {
         assert.equal(nav.ui.factory, editorBefore, "same marked factory remains installed");
         assert.equal(nav.ui.factory?.__piBetterHarnessNavigatorFactory, true);
 
-        // 5c) Reload clears any stale footer badge without republishing a count.
-        const footerAfterReload = nav.lastStatus("background-work-nav");
+        // 5c) Reload keeps the retired widget cleared without status writes.
         const widgetAfterReload = nav.lastWidget("subagents");
-        assert.equal(footerAfterReload, undefined, "reload keeps the persistent navigator footer clear");
+        assert.deepEqual(nav.statusCalls, []);
         assert.equal(widgetAfterReload, undefined, "reload keeps the retired legacy subagent widget cleared");
-        assert.ok(
-            nav.statusCalls.slice(statusLenBeforeReload).some((c) => c[0] === "background-work-nav" && c[1] === undefined),
-            "reload path must clear stale navigator footer state",
-        );
         assert.ok(
             nav.widgetCalls.slice(widgetLenBeforeReload).some((c) => c[0] === "subagents" && c[1] === undefined),
             "reload path must clear the retired legacy subagent widget instead of repainting it",

@@ -85,7 +85,7 @@ describe("shared background work navigator", () => {
         truncate: (value, width) => value.slice(0, width),
       });
 
-      assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, undefined]);
+      assert.deepEqual(statuses, []);
 
       let list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
       assert.doesNotMatch(list, /background work/);
@@ -102,13 +102,20 @@ describe("shared background work navigator", () => {
       list = renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n");
       assert.match(list, /↑↓ switch · Enter detail · x stop · Esc unfocus/);
 
+      editor.handleInput("x");
+      assert.match(renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n"), /x again to stop Subagents row/);
+      assert.deepEqual(closed, []);
+      editor.handleInput("down");
+      editor.handleInput("up");
+      assert.doesNotMatch(renderWidget(widgets.at(-1)?.[1], 120, ui.theme).join("\n"), /x again to stop/);
+
       editor.handleInput("enter");
       const detail = component.render(100).join("\n");
       assert.match(detail, /Subagents detail/);
 
       component.handleInput("x");
-      assert.equal(statuses.at(-1)?.[0], CLOSE_CONFIRM_STATUS_KEY);
-      assert.equal(statuses.at(-1)?.[1], "x again to stop Subagents row");
+      assert.match(component.render(100).join("\n"), /x again to stop Subagents row/);
+      assert.deepEqual(statuses, []);
       assert.deepEqual(closed, []);
 
       component.handleInput("x");
@@ -120,12 +127,13 @@ describe("shared background work navigator", () => {
       assert.deepEqual(closed, ["subagents:subagents-1"]);
       component.handleInput("x");
       assert.deepEqual(closed, ["subagents:subagents-1", "tasks:background-tasks-1"]);
-      assert.ok(statuses.filter(([key]) => key === NAVIGATOR_STATUS_KEY).every(([, value]) => value === undefined));
+      assert.deepEqual(statuses, []);
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregisterSubagents();
       unregisterTasks();
     }
+    assert.deepEqual(statuses, []);
   });
 
   it("refreshes the stored TUI navigator when a tool call has a non-TUI context", () => {
@@ -160,7 +168,7 @@ describe("shared background work navigator", () => {
       for (const nextCount of [1, 3, 0]) {
         count = nextCount;
         refreshBackgroundWorkNavigator(toolCtx);
-        assert.deepEqual(statuses.at(-1), [NAVIGATOR_STATUS_KEY, undefined]);
+        assert.deepEqual(statuses, []);
         const list = renderWidget(widgets.at(-1), 120).join("\n");
         if (count > 0) assert.match(list, /Background Tasks row/);
         else assert.doesNotMatch(list, /Background Tasks row/);
@@ -169,6 +177,7 @@ describe("shared background work navigator", () => {
       disposeBackgroundWorkNavigator(tuiCtx);
       unregister();
     }
+    assert.deepEqual(statuses, []);
   });
 
   it("survives a retained stale context and releases it during disposal", () => {
@@ -272,6 +281,48 @@ describe("shared background work navigator", () => {
       notifyVisibleChanged?.();
       assert.equal(renders, 1, "material provider state changes render immediately");
       component.dispose?.();
+    } finally {
+      disposeBackgroundWorkNavigator(ctx);
+      unregister();
+    }
+  });
+
+  it("repaints main-list close confirmation when armed and expired without status writes", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+    const statuses: unknown[] = [];
+    const closed: string[] = [];
+    const unregister = registerBackgroundWorkProvider(provider("subagents", "Subagents", 10, 200, (id) => closed.push(id)));
+    let widgetFactory: any;
+    let renders = 0;
+    const ui = {
+      factory: undefined as any,
+      setStatus(...args: unknown[]) { statuses.push(args); },
+      setWidget(_key: string, value: unknown) { if (typeof value === "function") widgetFactory = value; },
+      getEditorComponent() { return this.factory; },
+      setEditorComponent(factory: any) { this.factory = factory; },
+    };
+    const ctx = { mode: "tui", hasUI: true, ui } as any;
+    try {
+      ensureBackgroundWorkNavigator(ctx, {
+        createDefaultEditor: () => ({ getText: () => "", handleInput() {} }),
+        isOpenTrigger: (data) => data === "left",
+        matchKey: (data, key) => data === key,
+        truncate: (value, width) => value.slice(0, width),
+      });
+      const widget = widgetFactory({ requestRender: () => { renders += 1; } }, {});
+      const editor = ui.factory({}, {}, {});
+      editor.handleInput("left");
+      renders = 0;
+      editor.handleInput("x");
+      assert.ok(renders > 0, "arming must request a redraw without provider changes");
+      assert.match(widget.render(100).join("\n"), /x again to stop Subagents row/);
+      renders = 0;
+      t.mock.timers.tick(3000);
+      assert.ok(renders > 0, "expiry must request a redraw without provider changes");
+      assert.doesNotMatch(widget.render(100).join("\n"), /x again to stop/);
+      assert.deepEqual(closed, [], "expiry must not close the run");
+      assert.deepEqual(statuses, []);
+      widget.dispose?.();
     } finally {
       disposeBackgroundWorkNavigator(ctx);
       unregister();

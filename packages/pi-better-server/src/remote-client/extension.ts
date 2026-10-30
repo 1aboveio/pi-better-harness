@@ -241,8 +241,6 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
         : `Server update staged. The current daemon cannot perform a verified automatic handoff and was left running. ${deferredUpgrade}`, safe ? "info" : "warning");
     }
     let connection = client;
-    const targetLabel = isLocalHost(options.host) ? "local daemon" : `SSH: ${options.host}`;
-    ui.setStatus("pi-remote", `${targetLabel} (sessions)`);
     if (!await syncPackages(connection, local, undefined, { scope: "global", host: options.host, onNotice: message => notices.push(message) })) return;
     let choice: Exclude<RemoteSessionChoice, { action: "transfer" }> | undefined;
     for (;;) {
@@ -274,10 +272,7 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
           connection = replacement;
           void closeInitialTransport().catch(error => ui.notify(`Remote tunnel cleanup: ${String(error)}`, "warning"));
         },
-        onUpgradeStatus: phase => ui.setStatus("pi-remote", phase === "ready"
-          ? targetLabel : `${targetLabel} (${phase === "restarting" ? "server restarting" : "reconnecting"})`),
         onDisconnect: () => {
-          ui.setStatus("pi-remote", `${targetLabel} (disconnected)`);
           ui.notify(`Disconnected from ${options.host}. Remote work has not been aborted. Use /remote disconnect to return locally, then reconnect.`, "warning");
         },
         localCommandCompletions: (prefix) => argumentCompletions(prefix, true),
@@ -312,11 +307,10 @@ export async function connectHost(options: RemoteOptions, local: LocalFrontend):
     await bridge.attach(remote);
     endBrowse = undefined;
     attached = true;
-    ui.setStatus("pi-remote", targetLabel);
     ui.notify(`Attached to ${options.host}:${cwd}. /remote opens the server's sessions; /remote disconnect returns locally.`, "info");
   } finally {
     try { endBrowse?.(); }
-    finally { if (!attached) { await closeInitialTransport(); ui.setStatus("pi-remote", undefined); } }
+    finally { if (!attached) await closeInitialTransport(); }
   }
 }
 

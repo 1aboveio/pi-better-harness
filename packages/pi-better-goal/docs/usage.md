@@ -92,9 +92,6 @@ A paused goal stays paused while you talk. Your messages are ordinary
 conversation: the agent answers questions and discusses options, but the
 goal's work loop does not restart. Anything else that aborts the running turn,
 such as `/compact` while streaming or switching sessions, pauses the same way.
-With conversational resume enabled, the status line shows
-`goal paused · say "go" or /goal resume`; when disabled it shows
-`goal paused · /goal resume`.
 
 To resume an `escape` pause, say so plainly ("go", "continue", "ok do it",
 "approved, proceed"), or answer a decision the agent explicitly asked you for.
@@ -106,8 +103,7 @@ about...", "let me think", or discussion. `goal_resume` resumes exactly as
 instead; use `/goal resume` there.
 
 To stop the loop until you say otherwise, use `/goal pause`. Only you can undo
-it, with `/goal resume` or `alt+g`: the agent's `goal_resume` refuses it, and
-its status line reads `goal paused · /goal resume`. A goal paused because its
+it, with `/goal resume` or `alt+g`: the agent's `goal_resume` refuses it. A goal paused because its
 bound command or workflow is unavailable follows the same rule. A later
 `escape` never softens an explicit pause. Pi's built-in commands (`/settings`, `/model`, `/session`,
 and so on) and extension commands never change goal state; note that Pi only
@@ -139,7 +135,7 @@ Use `on` to enable any control again.
 - `conversational-resume` controls the model's `goal_resume` after an Escape
   pause. Turning it off removes the tool from the active tool list, refuses
   stale/direct calls, and removes the conversational resume invitation from
-  the prompt and status. The agent can still answer ordinary conversation,
+  the prompt. The agent can still answer ordinary conversation,
   but a message such as "go" cannot resume the goal. Turning it on offers the
   tool again for an Escape-paused goal; it does not resume it by itself and
   never makes an explicit `/goal pause` agent-resumable.
@@ -190,8 +186,7 @@ callback batches are follow-ups that wait for the entire run. When a question
 that started while background work was running is answered, the extension
 steers one hidden message into the same turn listing the work that finished
 while the question was pending, so the agent harvests it together with the
-answer instead of after the rest of the run. While the question is open the
-status area shows `N background done; waiting on your answer`. When background
+answer instead of after the rest of the run. When background
 work is running at the start of a turn, the prompt context also tells the
 agent to harvest finished results before asking and to ask only when the
 answer is needed.
@@ -219,8 +214,8 @@ Goal.
 
 Setting or clearing a goal while the agent is streaming avoids chat `notify`
 lines and confirm dialogs (both reflow the main-screen dock and can stack
-`Working...` / bash `Elapsed` frames into scrollback). Mid-stream feedback goes
-to the footer status instead, and height transitions force a full TUI redraw so
+`Working...` / bash `Elapsed` frames into scrollback). Mid-stream non-error feedback
+is suppressed, and height transitions force a full TUI redraw so
 differential paints stay aligned.
 
 Use `/goal settings auto-continue off` to disable automatic wakes persistently,
@@ -246,8 +241,8 @@ counts as a no-progress retry. By default, the original turn plus ten
 identical retries are allowed. Retries back off linearly: each identical
 outcome waits one more grace period than the last (60s, 120s, 180s, and so on
 with the default grace period). The next identical outcome keeps the goal
-active but holds further automatic continuations and reports `waiting: no
-progress` in the status area. It never marks the goal complete.
+active but holds further automatic continuations and sends a warning notification.
+It never marks the goal complete.
 
 Any changed result, an interactive user input, `/goal resume`, or a
 background active-to-idle transition resets the retry ledger **before the

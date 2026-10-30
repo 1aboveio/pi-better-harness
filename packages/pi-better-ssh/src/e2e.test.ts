@@ -120,7 +120,7 @@ describe("pi-better-ssh extension", () => {
         customType: "pi-better-ssh-profile",
         data: { version: 1, active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } } },
       });
-      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+      expect(harness.statuses).toEqual([]);
 
       const status = await harness.execute("ssh_profile", { action: "status" });
       expect(status.details).toMatchObject({
@@ -140,14 +140,14 @@ describe("pi-better-ssh extension", () => {
       });
       expect(runner.runCalls[5]?.command).toContain("APP_ENV");
       expect(runner.runCalls[5]?.command).toContain("staging");
-      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux up)"]);
+      expect(harness.statuses).toEqual([]);
 
       const stopped = await harness.execute("ssh_mux", { action: "stop" });
       expect(stopped.details).toMatchObject({
         scope: "target",
         masters: [{ target: "deploy", state: "stopped" }],
       });
-      expect(harness.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+      expect(harness.statuses).toEqual([]);
 
       const reloadRunner = new FakeRemoteRunner([
         failedResult(255, "Control socket missing"),
@@ -165,14 +165,14 @@ describe("pi-better-ssh extension", () => {
       expect(restored.details).toMatchObject({
         active: { host: "deploy", workdir: "/srv/app", env: { APP_ENV: "staging" } },
       });
-      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", "SSH: deploy:/srv/app (mux down)"]);
+      expect(reloaded.statuses).toEqual([]);
       await reloaded.shutdown();
-      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", undefined]);
+      expect(reloaded.statuses).toEqual([]);
 
       const cleared = await reloaded.execute("ssh_profile", { action: "clear" });
       expect(cleared.details).toEqual({ action: "clear", active: null });
       expect(entries.at(-1)?.data).toEqual({ version: 1, active: null });
-      expect(reloaded.statuses.at(-1)).toEqual(["pi-better-ssh", undefined]);
+      expect(reloaded.statuses).toEqual([]);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
