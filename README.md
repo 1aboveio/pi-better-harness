@@ -96,6 +96,20 @@ Do not use the bundle when you only need one extension; install that package dir
 | Install method | `pi install npm:...` |
 | Development runtime | Node.js 22+ |
 
+## Agent Catalog Subscription
+
+External consumers can discover the shared role definitions through
+[`agent-catalog.yaml`](agent-catalog.yaml). Subscribe to
+`1aboveio/pi-better-harness` on `main`, resolve each update to a commit SHA,
+and read the manifest and definitions from that same commit. Definition updates
+do not require an npm release. The catalog currently contains roles only.
+
+Run `npm run catalog:check` to validate the published catalog. See the
+[repository subscription contract](packages/pi-better-subagents/docs/catalog-subscription.md)
+for discovery, revision handling, and consumer requirements. This repo publishes
+the source contract; [Agentier #2639](https://github.com/1aboveio/agentier/issues/2639)
+tracks the subscriber implementation.
+
 ## Development
 
 Use Node.js 22 or newer.
@@ -116,6 +130,7 @@ pi -e .
 - [Development and release notes](docs/development-and-release.md)
 - [Write sandbox details](packages/pi-better-sandbox/README.md)
 - [Subagents details](packages/pi-better-subagents/docs/usage.md)
+- [Agent catalog subscription](packages/pi-better-subagents/docs/catalog-subscription.md)
 - [Background tasks details](packages/pi-better-background-tasks/docs/usage.md)
 - [SSH details](packages/pi-better-ssh/README.md)
 - [Goal details](packages/pi-better-goal/docs/usage.md)

@@ -74,6 +74,10 @@ Credential-like keys (`token`, `apiKey`, `password`, `connectionString`, and sim
 
 ## Sources
 
+For external consumers, the repo-root `agent-catalog.yaml` publishes the shared
+definitions through a [Git subscription contract](catalog-subscription.md).
+This publication mechanism does not change local source precedence below.
+
 Precedence is project, then personal, then bundled. The higher source replaces the whole definition. Omitted agent fields inherit from the effective role, not from the shadowed agent.
 
 | Scope | Path |
