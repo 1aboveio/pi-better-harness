@@ -67,8 +67,8 @@ and skills cannot enable them on their own.
 
 Click a subagent or background-task row to open its existing navigator details.
 Enter and keyboard controls remain available, and editor input stays passive.
-No permanent status bar is added; existing critical permission and paused notices
-remain unchanged.
+Harness packages do not write to Pi's status bar. Goal holds and resume
+instructions remain available through `/goal`; permission checks are unchanged.
 
 Skills use this optional interface only when its tools are available. Workflow task
 plans retain their own schema, revision checks, and source requirements. When the

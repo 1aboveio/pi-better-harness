@@ -20,8 +20,6 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import {
-    CLOSE_CONFIRM_STATUS_KEY,
-    NAVIGATOR_STATUS_KEY,
     disposeBackgroundWorkNavigator,
     ensureBackgroundWorkNavigator,
     isNavigatorUiAvailable,
@@ -986,13 +984,11 @@ export function setIdentityProbeForTests(probe: ProcessProbe | undefined): void 
 //
 // Human-facing TUI surface. Glue points, all gated on isNavigatorUiAvailable so
 // print/RPC sessions never see any of it:
-//   1. footer hint `← subagents · N` via the DEFAULT footer status mechanism
-//      (setStatus — the full footer is never replaced);
-//   2. an editor wrapper that intercepts bare ← only when the editor is empty
+//   1. an editor wrapper that intercepts bare ← only when the editor is empty
 //      and at least one non-dismissed current-parent run is running,
 //      delegating everything else to the wrapped
 //      editor (composition via navigator.mjs, tested with fakes);
-//   3. a focused overlay (ctx.ui.custom(..., { overlay: true })) listing the
+//   2. a focused overlay (ctx.ui.custom(..., { overlay: true })) listing the
 //      #44 navigatorVisibleRuns newest first, with Enter → live detail view
 //      that refreshes once per second (#46) and two-press `x` Close (#47).
 //      Detail + close-arm timers dispose on back, Escape, overlay close,
@@ -1101,14 +1097,6 @@ function navigatorCloseRun(id: string) {
     resetParseRunCursor(id);
     syncHealthTicker();
     return outcome;
-}
-
-/** Publish/clear the Close confirmation footer hint (TUI only). */
-function publishCloseConfirmHint(ctx: ExtensionContext, hint: string | null): void {
-    if (!isNavigatorUiAvailable(ctx)) return;
-    try {
-        ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, hint ?? undefined);
-    } catch { /* ignore */ }
 }
 
 function statusTone(status: string): BackgroundWorkRow["statusTone"] {
@@ -1409,7 +1397,7 @@ function openNavigator(ctx: ExtensionContext, initialDetailId?: string): void {
     ensureNavigator(ctx);
 }
 
-/** Publish/clear the running-only `← subagents · N` footer hint (dirty-checked). */
+/** Refresh the shared navigator after run changes. */
 function updateNavigatorFooter(ctx: ExtensionContext | undefined): void {
     refreshBackgroundWorkNavigator(ctx);
 }
@@ -2460,8 +2448,6 @@ export default function (pi: ExtensionAPI) {
         // - Drop any leftover overlay timers/confirm state from a prior session
         //   (defensive if the host skipped session_shutdown before re-start).
         // - Reinstall the editor wrapper without stacking (marked factory).
-        // - Clear + republish footer statuses (pi clears extension statuses on
-        //   session switch/reload; dirty-check only dedupes within a session).
         // - Repaint the widget even if its last in-memory lines match; the host
         //   may have dropped extension UI during reload/session replacement.
         ensureSubagentProvider();
@@ -2471,9 +2457,6 @@ export default function (pi: ExtensionAPI) {
         disposeBackgroundWorkNavigator(ctx);
         widgetNavActive = false;
         widgetNavSelectedId = undefined;
-        if (isNavigatorUiAvailable(ctx)) {
-            try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
-        }
         ensureNavigator(ctx);
         publishAcceptanceHooks();
         updateNavigatorFooter(ctx);
@@ -2522,14 +2505,7 @@ export default function (pi: ExtensionAPI) {
         // Always dispose navigator detail timers (no UI call — just clearInterval).
         // Safe in every mode; the dispose hook is only set when a TUI overlay opened.
         disposeBackgroundWorkNavigator(ctx);
-        // Widget clear is intentional in every mode that exposes ui (incl. RPC
-        // — pi docs: setWidget works in both TUI and RPC). Navigator cleanup
-        // is TUI-only: the footer hint is never published outside TUI, so
-        // clearing it in RPC would be a pure UI leak (setStatus subagents-nav).
+        // Widget clear is intentional in every mode that exposes ui, including RPC.
         try { ctx.ui.setWidget("subagents", WIDGET_CLEAR); } catch { /* ignore */ }
-        if (isNavigatorUiAvailable(ctx)) {
-            try { ctx.ui.setStatus(NAVIGATOR_STATUS_KEY, undefined); } catch { /* ignore */ }
-            try { ctx.ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, undefined); } catch { /* ignore */ }
-        }
     });
 }

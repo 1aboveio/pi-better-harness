@@ -348,10 +348,7 @@ test("setting a goal while the agent is streaming avoids chat notify and confirm
 
   assert.equal(confirms, 0, "mid-stream goal replace must not open a confirm dialog");
   assert.equal(notifications.length, 0, "mid-stream goal feedback must not append chat status lines");
-  assert.ok(
-    statuses.some((entry) => entry.key === "pi-better-goal" && entry.value?.includes("second objective")),
-    "mid-stream feedback goes to the footer status instead",
-  );
+  assert.deepEqual(statuses, [], "mid-stream feedback does not write a status");
   assert.equal(latestGoal(entries)?.objective, "second objective");
 });
 
@@ -441,8 +438,7 @@ for (const unhealthy of [false, true]) {
       const snapshot = await activity();
       assert.equal(snapshot.activeBackgroundCount, 1, "activity inspection retains running work");
       assert.equal(snapshot.unhealthyBackgroundCount, unhealthy ? 1 : 0);
-      assert.ok(h.statuses.length > 0);
-      assert.ok(h.statuses.every((value) => value === undefined), "no-goal activity must not publish a count footer");
+      assert.deepEqual(h.statuses, [], "no-goal activity must not write a status");
 
       await h.commands.get("goal")?.handler("keep watching", h.ctx);
       h.statuses.length = 0;
@@ -450,25 +446,25 @@ for (const unhealthy of [false, true]) {
       await h.handlers.get("agent_settled")?.({}, h.ctx);
       t.mock.timers.tick(60_000);
       await flushPromises();
-      assert.ok(h.statuses.every((value) => value === undefined), "active goal activity must not publish a count footer");
+      assert.deepEqual(h.statuses, [], "active goal activity must not write a status");
       assert.equal(h.messages.length, 0, "background work still suppresses autonomous continuation");
 
       await h.commands.get("goal")?.handler("pause", h.ctx);
       await activity();
-      assert.equal(h.statuses.at(-1), "goal paused · /goal resume", "pause guidance remains without a bg suffix");
+      assert.deepEqual(h.statuses, []);
       await h.handlers.get("session_start")?.({}, h.ctx);
-      assert.equal(h.statuses.at(-1), "goal paused · /goal resume", "reload must not restore the count badge");
+      assert.deepEqual(h.statuses, []);
 
       active = false;
       assert.equal((await activity()).activeBackgroundCount, 0);
-      assert.equal(h.statuses.at(-1), "goal paused · /goal resume");
+      assert.deepEqual(h.statuses, []);
       await h.commands.get("goal")?.handler("clear", h.ctx);
       await activity();
-      assert.equal(h.statuses.at(-1), undefined);
+      assert.deepEqual(h.statuses, []);
     } finally {
       await h.handlers.get("session_shutdown")?.({}, h.ctx);
     }
-    assert.equal(h.statuses.at(-1), undefined, "shutdown clears footer state");
+    assert.deepEqual(h.statuses, [], "shutdown does not write a status");
   });
 }
 
@@ -606,10 +602,11 @@ test("identical autonomous outcomes hold continuation across conversation until 
 
 test("/goal resume reopens an active no-progress hold without replacing the goal", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
-  const h = createContinuationHarness();
+  const h = createContinuationHarness(undefined, { hasUI: true });
   await h.handlers.get("session_start")?.({}, h.ctx);
   await h.commands.get("goal")?.handler("wait for network recovery", h.ctx);
   await exhaustNoProgressRetries(h, t);
+  assert.deepEqual(h.statuses, [], "the no-progress hold does not write a status");
   assert.equal(latestContinuationState(h.entries)?.blocked, true);
   const before = h.messages.length;
 
@@ -660,7 +657,7 @@ test("interrupting held conversation cannot enable conversational resume, but th
 
 test("issue #415: unchanged permission blockers hold autonomous continuation despite assistant rephrasing", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setInterval", "setTimeout"], now: 1_000_000 });
-  const h = createContinuationHarness();
+  const h = createContinuationHarness(undefined, { hasUI: true });
   t.after(() => h.handlers.get("session_shutdown")?.({}, h.ctx));
   await h.handlers.get("session_start")?.({}, h.ctx);
   await h.commands.get("goal")?.handler("verify fixture access before completing the goal", h.ctx);
@@ -698,6 +695,7 @@ test("issue #415: unchanged permission blockers hold autonomous continuation des
   })}`);
   assert.equal(h.messages.length, beforeHold, "unchanged permission blockers must not queue another autonomous turn just because the assistant rephrased them");
   assert.equal(latestGoal(h.entries)?.pauseReason, "permission-blocker");
+  assert.deepEqual(h.statuses, [], "permission holds do not write a status");
 });
 
 test("issue #415: persisted permission-blocked continuation is not rearmed by unrelated activity", async (t) => {
@@ -2060,7 +2058,7 @@ test("the resume hotkey resumes any paused goal", async (t) => {
   assert.equal(messages.length, 1);
 });
 
-test("the status line shows a paused goal and how to resume it", async (t) => {
+test("interrupt and manual pause transitions do not write a status", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const { commands, handlers, ctx, statuses } = createContinuationHarness(undefined, { hasUI: true });
   await handlers.get("session_start")?.({}, ctx);
@@ -2068,16 +2066,16 @@ test("the status line shows a paused goal and how to resume it", async (t) => {
   await handlers.get("agent_start")?.({}, ctx);
   await handlers.get("agent_end")?.(abortedOutcome, ctx);
   await handlers.get("agent_settled")?.({}, ctx);
-  assert.equal(statuses.at(-1), 'goal paused · say "go" or /goal resume');
+  assert.deepEqual(statuses, []);
 
   await commands.get("goal")?.handler("resume", ctx);
   await commands.get("goal")?.handler("pause", ctx);
   await handlers.get("agent_settled")?.({}, ctx);
-  assert.equal(statuses.at(-1), "goal paused · /goal resume", "an explicit pause names only /goal resume");
+  assert.deepEqual(statuses, []);
 
   await commands.get("goal")?.handler("resume", ctx);
   await handlers.get("agent_settled")?.({}, ctx);
-  assert.equal(statuses.at(-1), undefined, "a running goal clears the paused status");
+  assert.deepEqual(statuses, []);
 });
 
 test("an escape-paused goal tells the agent to converse and when it may resume", async (t) => {
@@ -2204,9 +2202,9 @@ test("background work that finishes during a pending question is harvested right
   await handlers.get("tool_execution_start")?.({ toolCallId: "q1", toolName: "ask_user_question", args: {} }, ctx);
   workerStatus = "completed";
   await tools.get("get_background_activity")!.execute("inspect", {}, undefined, undefined, toolContext(ctx));
-  assert.equal(statuses.at(-1), "1 background done; waiting on your answer", "question feedback remains visible while other work runs");
+  assert.deepEqual(statuses, [], "a pending question does not write a status");
   await handlers.get("tool_execution_end")?.({ toolCallId: "q1", toolName: "ask_user_question", result: {}, isError: false }, ctx);
-  assert.equal(statuses.at(-1), undefined, "answer clears the feedback without restoring the persistent bg count");
+  assert.deepEqual(statuses, [], "answering does not write a status");
 
   assert.equal(messages.length, 1, "one harvest message follows the answer");
   const harvest = messages[0] as { content: string; details: { kind: string; finished: Array<{ id: string }> } };
@@ -2398,7 +2396,7 @@ test("conversational resume off withdraws and refuses the tool while retaining p
   assert.ok(h.activeTools().includes("goal_resume"));
   await h.commands.get("goal")?.handler("settings conversational-resume off", h.ctx);
   assert.deepEqual(h.activeTools(), otherTools, "the control changes only the resume tool");
-  assert.equal(h.statuses.at(-1), "goal paused · /goal resume");
+  assert.deepEqual(h.statuses, []);
   const before = h.messages.length;
   await h.handlers.get("input")?.({ source: "interactive", text: "go" }, h.ctx);
   const refused = await h.tools.get("goal_resume")!.execute("stale-call", { reason: "user said go" }, undefined, undefined, toolContext(h.ctx));

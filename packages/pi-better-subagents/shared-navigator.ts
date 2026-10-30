@@ -175,18 +175,15 @@ export function isNavigatorUiAvailable(ctx: ExtensionContext | undefined): boole
 }
 
 export function navigatorFooterHint(_count: number): string | null {
-  // Retain the compatibility helper so refresh/reload clears any old badge.
+  // Retain the compatibility helper without publishing a badge.
   return null;
 }
 
 export function applyNavigatorFooter(ui: { setStatus(key: string, value: string | undefined): void }, count: number): string | null {
-  const hint = navigatorFooterHint(count);
-  ui.setStatus(NAVIGATOR_STATUS_KEY, hint ?? undefined);
-  return hint;
+  return navigatorFooterHint(count);
 }
 
 export function applyCloseConfirmFooter(ui: { setStatus(key: string, value: string | undefined): void }, hint: string | null | undefined): string | null {
-  ui.setStatus(CLOSE_CONFIRM_STATUS_KEY, hint ?? undefined);
   return hint ?? null;
 }
 
@@ -219,8 +216,6 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   s.uiCtx = undefined;
   if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
     const ui = activeCtx.ui;
-    try { applyNavigatorFooter(ui as any, 0); } catch { /* ignore */ }
-    try { applyCloseConfirmFooter(ui as any, null); } catch { /* ignore */ }
     try { (ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   }
   s.lastHint = undefined;
@@ -241,12 +236,6 @@ export function refreshBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   const activeCtx = isNavigatorUiAvailable(ctx) ? ctx : s.uiCtx;
   if (!isNavigatorUiAvailable(activeCtx)) return;
   try {
-    const count = visibleCount();
-    const hint = navigatorFooterHint(count);
-    if (hint !== s.lastHint) {
-      applyNavigatorFooter(activeCtx!.ui as any, count);
-      s.lastHint = hint;
-    }
     refreshMainListWidget();
   } catch { /* ignore */ }
 }
@@ -271,7 +260,6 @@ function clearMainListCloseArm(): void {
   s.mainListCloseArmTimer = undefined;
   if (!s.mainListCloseArm) return;
   s.mainListCloseArm = undefined;
-  try { applyCloseConfirmFooter((s.uiCtx as any).ui, null); } catch { /* ignore */ }
 }
 
 function refreshMainListWidget(): void {
@@ -293,6 +281,7 @@ function refreshMainListWidget(): void {
   const nextSignature = rows.length ? mainListSignature(rows, {
     selectedId: s.mainListFocused ? s.mainListSelectedId : undefined,
     focused: s.mainListFocused === true,
+    closeHint: closeHintFor(rows.find((row) => row.navigatorId === s.mainListCloseArm?.id)),
   }) : undefined;
   const changed = nextSignature !== s.lastMainListSignature;
   s.lastMainListSignature = nextSignature;
@@ -416,6 +405,9 @@ function createMainListWidget(tui: { requestRender?(): void }, theme: unknown, d
         selectedId: state().mainListFocused ? state().mainListSelectedId : undefined,
         focused: state().mainListFocused === true,
       });
+      const armedRow = rows.find((row) => row.navigatorId === state().mainListCloseArm?.id);
+      const hint = closeHintFor(armedRow);
+      if (hint) { layout.lines.push(deps.truncate(`   ${hint}`, renderWidth(width))); layout.owners.push(undefined); }
       lineWidth = renderWidth(width);
       // The leading gap line belongs to the widget too, so its slot stays ownerless.
       lineOwners = [undefined, ...layout.owners];
@@ -630,9 +622,10 @@ function statusIndicator(row: InternalRow, now = Date.now()): { glyph: string; c
   return { glyph: RUNNING_DOT_GLYPH, color: "accent" };
 }
 
-function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean } = {}): string {
+function mainListSignature(rows: InternalRow[], options: { selectedId?: string; focused?: boolean; closeHint?: string | null } = {}): string {
   return JSON.stringify({
     focused: options.focused === true,
+    closeHint: options.closeHint ?? null,
     selectedId: options.focused === true ? options.selectedId ?? null : null,
     rows: rows.map((row) => ({
       navigatorId: row.navigatorId,
@@ -863,7 +856,6 @@ function handleMainListCloseKey(): void {
   }
   clearMainListCloseArm();
   s.mainListCloseArm = { id: row.navigatorId, armedAt: now };
-  try { applyCloseConfirmFooter((s.uiCtx as any).ui, closeHintFor(row)); } catch { /* ignore */ }
   s.mainListCloseArmTimer = setTimeout(() => {
     clearMainListCloseArm();
     refreshMainListWidget();
@@ -1034,7 +1026,6 @@ function createOverlayComponent(
     closeArmTimer = undefined;
     if (closeArm) {
       closeArm = undefined;
-      try { applyCloseConfirmFooter((state().uiCtx as any).ui, null); } catch { /* ignore */ }
     }
   }
 
@@ -1108,11 +1099,9 @@ function createOverlayComponent(
     }
     clearCloseArm();
     closeArm = { id: row.navigatorId, armedAt: now };
-    try { applyCloseConfirmFooter((state().uiCtx as any).ui, closeHintFor(row)); } catch { /* ignore */ }
     closeArmTimer = setTimeout(() => {
       closeArmTimer = undefined;
       closeArm = undefined;
-      try { applyCloseConfirmFooter((state().uiCtx as any).ui, null); } catch { /* ignore */ }
       requestRender();
     }, CLOSE_ARM_MS);
     closeArmTimer.unref?.();
@@ -1149,6 +1138,9 @@ function createOverlayComponent(
         selectedId: selectedRow()?.navigatorId,
         focused: true,
       });
+      const armedRow = overlayState.rows.find((row) => row.navigatorId === closeArm?.id);
+      const hint = closeHintFor(armedRow);
+      if (hint) { rail.lines.push(deps.truncate(`   ${hint}`, renderWidth(width))); rail.owners.push(undefined); }
       const railLines = rail.lines;
       const editorLines = renderEditorLines(width);
       const bottomLines = [...railLines, ...editorLines];

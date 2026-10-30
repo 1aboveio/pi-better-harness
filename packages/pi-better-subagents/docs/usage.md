@@ -615,10 +615,8 @@ is unchanged in every mode.
   still running, press `←` to focus the main-window subagent list above the
   input line.
 - If the editor contains text, `←` keeps normal cursor-left behavior.
-- While running runs exist, the default footer shows `← subagents · N`. The
-  live widget also includes a secondary `← to navigate` hint on its title line
-  for terminals that do not render the default footer status. The hint clears
-  when no non-dismissed current-parent run is still running.
+- The work list shows a navigation hint while running work is visible. The
+  subagent navigator does not write to the status bar.
 - While the main-window list is focused, the title hint changes to
   `Enter to view · x to stop`; the selected row is marked with `›`. Press
   `↓` from the bottom row to return to the input line.
@@ -660,7 +658,7 @@ is unchanged in every mode.
 ### Two-press `x` stop/dismiss
 
 - First `x` on the selected (list) or viewed (detail) run arms the action for three
-  seconds and shows a footer hint: `x again to stop <name>` while running, or
+  seconds and shows a hint in the navigator: `x again to stop <name>` while running, or
   `x again to dismiss <name>` when terminal.
 - Second `x` within the window, on the **same** run, acts:
   - **Running** — stop the process group (shared `subagent_stop` semantics),
@@ -671,7 +669,7 @@ is unchanged in every mode.
 
 ### Dismissal is navigator-only
 
-Dismissed runs leave the navigator list and footer count. Logs, prompt, session
+Dismissed runs leave the navigator list. Logs, prompt, session
 data, metadata, and id-based tool access stay intact. `subagent_list`,
 `subagent_output`, `subagent_result`, and `subagent_stop` still resolve dismissed
 run ids. Dismissal survives `/reload` as dismissed in the navigator.
@@ -679,9 +677,8 @@ run ids. Dismissal survives `/reload` as dismissed in the navigator.
 ### Reload and teardown
 
 `/reload` and session restart reinstall the empty-editor wrapper without stacking
-duplicate handlers, republish the footer count, and clear any leftover overlay
-timers or close-confirm state. Session shutdown disposes open navigator timers
-and clears navigator footer statuses (TUI only).
+duplicate handlers and clear any leftover overlay timers or close-confirm
+state. Session shutdown disposes open navigator timers.
 
 ## Design notes
 

@@ -90,7 +90,6 @@ const UpdatePlanSchema = Type.Object({
 
 type WorkflowPlanInput = Omit<RushPlanUpdate, "event"> & { path?: string; event?: string };
 
-const LEGACY_PLAN_NAV_STATUS_KEY = "pi-better-plan-nav";
 const goalHeaderRuntime = (goal: GoalSnapshot) => ({ status: goal.status, clock: formatClockDuration(goalTiming(goal).activeSeconds) });
 const PLAN_ACTIONS: readonly AutocompleteItem[] = [
   { value: "clear", label: "clear", description: "Remove the current Todo without changing its outcome" },
@@ -289,7 +288,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     if ((enabled || display) && rushBinding) loadRushPlan(ctx);
     displayMode = state.displayMode;
     expanded = state.expanded;
-    if (ctx.hasUI) ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);
     refresh(true);
     if (enabled) scheduleCompletedPlanClear();
   };
@@ -695,7 +693,6 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     refreshWidget = undefined;
     widgetContext = undefined;
     try {
-      ctx.ui.setStatus(LEGACY_PLAN_NAV_STATUS_KEY, undefined);
       ctx.ui.setWidget(EXTENSION_NAME, undefined);
     } catch { /* best-effort cleanup */ }
     legacyPlanMask?.dispose();

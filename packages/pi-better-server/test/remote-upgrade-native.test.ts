@@ -196,7 +196,7 @@ test("two native sessions survive a busy managed upgrade, then pull and disconne
     const sessionFile = remote.sessionFile!;
     await reply(remote, `history-${label}`);
     await remote.prompt(`/native-ui before-${label}`);
-    await waitFor("original UI binding", () => uiEvents.length === 2);
+    await waitFor("original UI binding", () => uiEvents.length >= 1);
     return { label, remote, original, sessionId, sessionFile, generation, identity, listener, unsubscribe, bindings, events, notices, phases, uiEvents, errors,
       get current() { return current; },
       counts: () => ({ oldCloses, replacementCloses, targetDisposals, reconnects, disconnected }) };
@@ -282,9 +282,9 @@ test("two native sessions survive a busy managed upgrade, then pull and disconne
     await reply(view.remote, `first-after-ready-${view.label}`);
     assert.equal(view.events.filter(event => event.type === "message_end" && event.message.role === "assistant" && text(event.message) === `echo:first-after-ready-${view.label}`).length, 1);
     await view.remote.prompt(`/native-ui after-${view.label}`);
-    await waitFor("retained UI callbacks receive successor events", () => view.uiEvents.length === 4);
-    assert.deepEqual(view.uiEvents, [["status", "native-proof", `before-${view.label}`], ["notify", `native:before-${view.label}`, "info"],
-      ["status", "native-proof", `after-${view.label}`], ["notify", `native:after-${view.label}`, "info"]]);
+    await waitFor("retained UI callbacks receive successor events", () => view.uiEvents.length >= 2);
+    assert.deepEqual(view.uiEvents, [["notify", `native:before-${view.label}`, "info"],
+      ["notify", `native:after-${view.label}`, "info"]]);
     assert.deepEqual(view.errors, []);
   }
   assert.equal(a.remote.getLastAssistantText(), "echo:first-after-ready-a");
