@@ -110,13 +110,18 @@ line says so, for example
 
 ## When To Use
 
+Skills can use the same role definitions on Pi and Codex through the standalone
+`pi-agent-catalog` JSON CLI, without starting Pi. The CLI checks supplied host
+capabilities and returns a worker plan; it never launches workers or substitutes
+prompt text for model selection. See [shared worker catalog](docs/worker-catalog.md).
+
 Use this package for independent coding, review, research, or verification work that can finish later. Do not use it for steps that need immediate foreground interaction or user clarification.
 
 ## Compatibility
 
 | Requirement | Support |
 |-------------|---------|
-| Pi | Required |
+| Pi | Required for worker execution through this extension; not for standalone catalog planning |
 | Install method | `pi install npm:pi-better-subagents` |
 | macOS sandboxing | Supported when enabled |
 | Linux sandboxing | Requires usable `bubblewrap` when enabled |
