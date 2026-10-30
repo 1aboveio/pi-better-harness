@@ -1,6 +1,6 @@
 # Native agent catalog (`pi-agent/v1`)
 
-Portable role and named-agent definitions for `pi-better-subagents`. This is the local contract for DEV-23 / GitHub #289. It is not an Agentier importer, a Codex runtime, or a second launch path.
+Portable role and named-agent definitions for `pi-better-subagents`. This is the local contract for DEV-23 / GitHub #289. It is not an Agentier importer or a second launch path. The [shared worker catalog](worker-catalog.md) exposes these definitions to skills on Pi and Codex through host-specific planning, without launching workers itself.
 
 Normative behavior is DEV-23 and the accepted ADR `docs/adr/0003-native-agent-catalog-live-inheritance.md`. Field names below are the engineering schema those decisions require.
 
