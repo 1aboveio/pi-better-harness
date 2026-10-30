@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.35.0] - 2026-10-30
+
+### Added
+
+- Ship a `pi-agent-catalog` executable that runs the shared worker catalog planning from the bundled Subagents package, so Pi and Codex plan agents from one catalog.
+
+### Changed
+
+- Bundle Subagents 0.23.0 with shared worker catalog planning and the Developer role's failure reporting. Keep all other component versions unchanged.
+
+## [pi-better-subagents@0.23.0] - 2026-10-30
+
+### Added
+
+- Export the worker catalog, catalog store, catalog resolver, and model resolution modules, and ship a `pi-agent-catalog` executable shared with the Harness bundle.
+
+### Changed
+
+- Require the Developer role to report a failed check's failing step, error, and evidence location, keep the first failure separate from cleanup errors, and keep long output in files instead of reporting an exit code alone.
+
 ## [pi-better-harness@0.34.2] - 2026-10-29
 
 ### Changed
