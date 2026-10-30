@@ -93,9 +93,10 @@ jobs:
       - name: pi-better-server suite on supported native Pi 1.2
         run: bash packages/pi-better-server/scripts/test-on-pi.sh 1.2.0 "$RUNNER_TEMP/pi-compat"
 
-  ci:
-    name: ci
+  workspace-ci:
+    name: workspace-ci
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -131,10 +132,13 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
+      - name: Root script tests
         env:
           PI_NAVIGATOR_EVIDENCE_DIR: ${{ runner.temp }}/navigator-golden
-        run: npm test
+        run: node --import tsx --import ./scripts/isolate-registry.mjs --test --test-concurrency=1 scripts/*.test.mjs
+
+      - name: Workspace tests (Server runs in isolated shards)
+        run: node scripts/test-ci-workspaces.mjs
 
       - name: Upload navigator golden-path evidence
         if: always()
@@ -209,6 +213,71 @@ jobs:
           npm install --no-save --package-lock=false --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org/ @earendil-works/pi-coding-agent@0.99.1 @earendil-works/pi-ai@0.99.1 @earendil-works/pi-tui@0.99.1
           node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test packages/pi-better-subagents/tests/codemode_batch.test.mjs
           node --import tsx --import ./scripts/isolate-registry.mjs --test scripts/goal-retry-runtime.test.mjs
+
+  server-tests:
+    name: server-tests (${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Provision private runtime test Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - name: Export private runtime test Node
+        run: node -e 'require("node:fs").appendFileSync(process.env.GITHUB_ENV, "PI_TEST_PRIVATE_RUNTIME_NODE=" + process.execPath + "\n")'
+
+      - name: Restore host Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install TUI and sandbox test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes tmux bubblewrap
+          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / -- /bin/true
+          npm install --global @openai/codex@0.159.2
+          test "$(codex --version)" = "codex-cli 0.159.2"
+
+      - name: Synchronize Server test dependencies
+        run: npm run pretest -w packages/pi-better-server
+
+      - name: Server test shard
+        working-directory: packages/pi-better-server
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+        run: node --import tsx --import ../../scripts/isolate-registry.mjs --test --test-concurrency=4 --test-shard="$TEST_SHARD/2" test/*.test.ts
+
+  # Keep the existing required check name, and fail on failed, cancelled, or skipped lanes.
+  ci:
+    name: ci
+    if: always()
+    needs: [workspace-ci, server-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every test lane
+        env:
+          WORKSPACE_RESULT: ${{ needs.workspace-ci.result }}
+          SERVER_RESULT: ${{ needs.server-tests.result }}
+        run: |
+          test "$WORKSPACE_RESULT" = success
+          test "$SERVER_RESULT" = success
 
   macos-sandbox:
     name: macos-sandbox
