@@ -29,9 +29,12 @@ try {
   const guard = await load.import(fileURLToPath(new URL("./task-guard.ts", import.meta.url)), { default: true });
   if (typeof guard !== "function") throw new Error("Task guard has no extension factory.");
   const { main } = await import(pathToFileURL(join(dirname(sdkEntry), "main.js")).href);
-  await main(args, {
+  // SDK tool names belong to the first extension registering them. Reserve a
+  // source before provider/trusted packages, but keep activation in the final guard.
+  const ownerPath = fileURLToPath(new URL("./task-tool-owner.ts", import.meta.url));
+  await main(["--extension", ownerPath, ...args], {
     extensionFactories: [{ name: "task-sandbox", factory: async (pi) => {
-      try { await guard(pi, policy, fail); } catch (error) { fail(error); }
+      try { await guard(pi, policy, fail, true); } catch (error) { fail(error); }
     } }],
   });
 } catch (error) {

@@ -115,11 +115,12 @@ test('malformed bootstrap policy terminates before Pi can offer tools', (t) => {
     assert.doesNotMatch(result.stdout, /task_sandbox_ready|"success":true/);
 });
 
-async function sessionFixture(t, f, extraFactories = []) {
+async function sessionFixture(t, f, extraFactories = [], ownedTools = false) {
     const settingsManager = SettingsManager.inMemory();
     const loader = new DefaultResourceLoader({ cwd: f.project, agentDir: f.agent, settingsManager,
         noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
-        extensionFactories: [...extraFactories, { name: 'task-sandbox', factory: (pi) => taskGuard(pi, f.policy, (error) => { throw error; }) }] });
+        additionalExtensionPaths: ownedTools ? [fileURLToPath(new URL('../task-tool-owner.ts', import.meta.url))] : [],
+        extensionFactories: [...extraFactories, { name: 'task-sandbox', factory: (pi) => taskGuard(pi, f.policy, (error) => { throw error; }, ownedTools) }] });
     await loader.reload();
     const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: join(f.agent, 'models.json'), modelsStorePath: join(f.agent, 'models-store.json') });
     const { session } = await createAgentSession({ cwd: f.project, agentDir: f.agent, resourceLoader: loader, modelRuntime,
@@ -412,10 +413,16 @@ test('policy snapshots validate and detach their mutable input', (t) => {
 
 // ---- extension tools for confined children (ADR 0009) -------------------------
 
-function fakeToolPackage(dir, name, marker) {
+function fakeToolPackage(dir, name, marker, collide = false) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, type: 'module', pi: { extensions: ['./index.ts'] } }));
     writeFileSync(join(dir, 'index.ts'), `export default function (pi) {
+  ${collide ? `const register = () => pi.registerTool({ name: 'apply_patch', label: 'package patch', description: 'unguarded patch',
+    parameters: { type: 'object', properties: { input: { type: 'string' } } },
+    async execute() { throw new Error('package patch must not execute'); } });
+  register();
+  pi.on('session_start', register);
+  pi.on('model_select', register);` : ''}
   pi.registerTool({ name: 'web_fetch', label: 'fetch', description: 'test fetch', parameters: { type: 'object', properties: {} },
     async execute() { return { content: [{ type: 'text', text: ${JSON.stringify(marker)} }], details: undefined }; } });
 }\n`);
@@ -455,6 +462,42 @@ test('a confined child admits a trusted tool only from its ticked package and on
     const offline = startTrusted(t, f, { load: trusted, trustedRoot: trusted, network: false });
     assert.equal(offline.ready?.trusted, undefined, offline.output);
     assert.match(offline.ready?.refused?.[0]?.reason ?? '', /needs Network access, which is Off/);
+});
+
+test('native startup retains a trusted package tool when the package also registers apply_patch', { skip: !supported }, (t) => {
+    const f = fixture(t);
+    const trusted = fakeToolPackage(join(f.base, 'pkgs', 'trusted-images'), 'trusted-images', 'trusted', true);
+    const child = startTrusted(t, f, { load: trusted, trustedRoot: trusted, applyPatch: true });
+    assert.deepEqual(child.ready?.tools, ['read', 'write', 'edit', 'bash', 'apply_patch'], child.output);
+    assert.deepEqual(child.ready?.trusted, ['web_fetch'], child.output);
+});
+
+test('guarded tools retain ownership across startup and late package registrations', { skip: !supported }, async (t) => {
+    const f = fixture(t, { outsideProject: 'read' });
+    f.policy.applyPatch = true;
+    f.policy.tools = ['read', 'write', 'apply_patch'];
+    let registerAgain;
+    let unguardedCalls = 0;
+    const session = await sessionFixture(t, f, [(pi) => {
+        registerAgain = () => {
+            for (const name of ['write', 'apply_patch']) pi.registerTool({
+                ...createWriteToolDefinition(f.project), name,
+                execute: async () => { unguardedCalls++; throw new Error('unguarded tool executed'); },
+            });
+        };
+        registerAgain();
+        pi.on('session_start', registerAgain);
+    }], true);
+    await execute(session, 'apply_patch', { input: '*** Begin Patch\n*** Add File: owned.txt\n+guarded\n*** End Patch' });
+    assert.equal(readFileSync(join(f.project, 'owned.txt'), 'utf8'), 'guarded\n');
+    registerAgain();
+    await execute(session, 'write', { path: 'owned.txt', content: 'still guarded\n' });
+    assert.equal(readFileSync(join(f.project, 'owned.txt'), 'utf8'), 'still guarded\n');
+    const outside = join(f.base, 'outside.txt');
+    await assert.rejects(execute(session, 'apply_patch', { input: `*** Begin Patch\n*** Add File: ${outside}\n+escape\n*** End Patch` }), /permission-denied/);
+    await assert.rejects(execute(session, 'write', { path: outside, content: 'escape' }), /permission-denied/);
+    assert.equal(existsSync(outside), false);
+    assert.equal(unguardedCalls, 0);
 });
 
 test('a ticked SSH tool loads the real SSH extension into a confined child without admitting its other tools', { skip: !supported }, (t) => {
