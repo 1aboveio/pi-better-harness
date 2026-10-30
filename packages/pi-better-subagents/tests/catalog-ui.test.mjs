@@ -195,4 +195,70 @@ describe("catalog command surface", () => {
         component.handleInput("\r");
         assert.ok(component.render(42).every((line) => visibleWidth(line) <= 42));
     });
+
+    it("offers only session-scoped models and leaves an out-of-scope saved value in the detail", () => {
+        const agent = entry("agent.payments", "Payments Analyst");
+        agent.definitionValid = true;
+        agent.fields.model.value = "openai/alpha";
+        const catalog = { entries: [agent], diagnostics: [] };
+        const changes = [];
+        const editor = {
+            get: () => catalog,
+            models: () => ["openai/alpha", "openai/beta", "openai/gamma"],
+            scopedModels: () => [{ model: { provider: "openai", id: "beta" } }, { model: { provider: "anthropic", id: "claude-9" } }],
+            settings: () => ({}),
+            change: (id, key, value) => { changes.push([id, key, value]); },
+            save: () => ({ ok: true, message: "saved" }),
+        };
+        const component = createCatalogComponent(catalog, theme, () => {}, () => {}, agent.id, editor, () => 40);
+        component.render(90);
+        component.handleInput("\r");
+        const picker = component.render(90).join("\n");
+        assert.match(picker, /Agents \/ model/);
+        assert.match(picker, /Session model scope · 2 models · saved value is outside this scope/);
+        assert.match(picker, /openai\/beta/);
+        assert.match(picker, /anthropic\/claude-9/);
+        assert.doesNotMatch(picker, /openai\/gamma/);
+        assert.doesNotMatch(picker, /openai\/alpha/, "the out-of-scope saved value is not offered");
+        assert.match(picker, /→ openai\/beta/, "the first scoped model starts selected, not Inherit");
+        component.handleInput("beta");
+        assert.doesNotMatch(component.render(90).join("\n"), /anthropic\/claude-9/);
+        component.handleInput("\r");
+        assert.deepEqual(changes, [["agent.payments", "model", "openai/beta"]]);
+        assert.match(component.render(90).join("\n"), /Session settings updated/);
+        // The saved value stays on the definition and in the detail view.
+        assert.equal(agent.fields.model.value, "openai/alpha");
+        assert.match(component.render(90).join("\n"), /Model\s+openai\/alpha/);
+    });
+
+    it("falls back to available models when the session has no model scope", () => {
+        const agent = entry("agent.payments", "Payments Analyst");
+        agent.definitionValid = true;
+        const catalog = { entries: [agent], diagnostics: [] };
+        const editor = (scopedModels) => ({
+            get: () => catalog,
+            models: () => ["openai/alpha", "openai/gamma"],
+            ...(scopedModels ? { scopedModels } : {}),
+            settings: () => ({}),
+            change() {},
+            save: () => ({ ok: true, message: "saved" }),
+        });
+        for (const candidate of [editor(() => []), editor(undefined)]) {
+            const component = createCatalogComponent(catalog, theme, () => {}, () => {}, agent.id, candidate, () => 40);
+            component.render(90);
+            component.handleInput("\r");
+            const picker = component.render(90).join("\n");
+            assert.match(picker, /All available models · no session scope/);
+            assert.match(picker, /openai\/alpha/);
+            assert.match(picker, /openai\/gamma/);
+            component.handleInput("\x1b");
+            assert.doesNotMatch(component.render(90).join("\n"), /All available models/);
+            // Effort stays a local list and never shows a model scope note.
+            component.handleInput("\x1b[B");
+            component.handleInput("\r");
+            const effort = component.render(90).join("\n");
+            assert.match(effort, /Agents \/ effort/);
+            assert.doesNotMatch(effort, /session scope/);
+        }
+    });
 });

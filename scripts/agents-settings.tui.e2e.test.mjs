@@ -10,16 +10,23 @@ import { parse } from "yaml";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 
-test("agents model and effort edits persist for the session and only Ctrl+S saves catalog defaults in the real TUI", { skip: !hasTmux }, () => {
+test("agents model and effort edits persist for the session and only Ctrl+S saves catalog defaults in the real TUI", { skip: !hasTmux }, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), "pi-agents-settings-"));
     const agent = join(fixture, "agent");
     const rolePath = join(agent, "agents/roles/role.fixture.md");
     mkdirSync(dirname(rolePath), { recursive: true });
     const original = "---\nschema: pi-agent/v1\nkind: role\nid: role.fixture\nname: Fixture\ndefaults:\n  model: openai/gpt-4o-mini\n  effort: medium\n---\nInspect the fixture.\n";
     writeFileSync(rolePath, original);
+    const scopePath = join(fixture, "scope.json");
+    const probePath = join(fixture, "scope-probe.mjs");
+    writeFileSync(probePath, `import { writeFileSync } from "node:fs";
+export default function(pi) {
+    pi.on("session_start", (_event, ctx) => writeFileSync(${JSON.stringify(scopePath)}, JSON.stringify(ctx.scopedModels ?? null)));
+}`);
     const args = ["-L", `pi-agents-settings-${process.pid}`];
     const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
-    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(agent)} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(join(root, "node_modules/.bin/pi"))} -e ${q(join(root, "packages/pi-better-subagents/index.ts"))} -e ${q(join(root, "packages/pi-better-harness/extensions/settings/index.ts"))} --no-skills --no-context-files --approve --model openai/gpt-4o-mini`;
+    const piBin = process.env.PI_AGENTS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
+    const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(agent)} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(piBin)} -e ${q(join(root, "packages/pi-better-subagents/index.ts"))} -e ${q(join(root, "packages/pi-better-harness/extensions/settings/index.ts"))} -e ${q(probePath)} --no-skills --no-context-files --approve --model openai/gpt-4o-mini --models openai/gpt-4o`;
     const tmux = (...more) => execFileSync("tmux", [...args, ...more], { encoding: "utf8" });
     const key = (value) => tmux("send-keys", "-t", "agents", value);
     const literal = (value) => tmux("send-keys", "-t", "agents", "-l", value);
@@ -67,7 +74,14 @@ test("agents model and effort edits persist for the session and only Ctrl+S save
         const promptScreen = wait(/Agents \/ prompt/);
         assert.match(promptScreen, /Inspect the fixture\./);
         key("Escape"); wait(/Agents \/ Fixture/);
-        key("Enter"); wait(/Agents \/ model/);
+        key("Enter");
+        const modelPicker = wait(/Agents \/ model/);
+        assert.match(modelPicker, /openai\/gpt-4o/);
+        const scope = JSON.parse(readFileSync(scopePath, "utf8"));
+        if (Array.isArray(scope)) {
+            assert.ok(scope.length > 0, "the host must resolve the configured model scope");
+            assert.doesNotMatch(modelPicker, /openai\/gpt-4o-mini/, "a saved out-of-scope model stays in the details, not the picker");
+        } else t.diagnostic("This host does not expose scopedModels; scope filtering requires PI_AGENTS_SETTINGS_CLI pointing to a newer Pi.");
         literal("openai/gpt-4o"); wait(/openai\/gpt-4o/); key("Enter");
         wait(/Model\s+openai\/gpt-4o\s+session/);
         key("Down"); key("Enter"); wait(/Agents \/ effort/);
