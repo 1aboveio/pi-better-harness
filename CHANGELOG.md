@@ -4,6 +4,44 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.35.2] - 2026-10-30
+
+### Fixed
+
+- Keep Harness packages off Pi's bottom status row while preserving the native footer, widgets, and permission controls.
+- Bundle Subagents 0.23.2, Background Tasks 0.12.2, Goal 0.10.4, and SSH 0.1.4.
+
+## [pi-better-subagents@0.23.2] - 2026-10-30
+
+### Fixed
+
+- Remove navigator status-row writes and show close confirmation inside the navigator, including immediate redraws when confirmation starts or expires.
+- Restrict the agent model picker to session-scoped models when available. Preserve saved out-of-scope defaults without offering them as picker choices; keep the unscoped fallback for older hosts.
+
+## [pi-better-background-tasks@0.12.2] - 2026-10-30
+
+### Fixed
+
+- Remove shared navigator status-row writes while preserving two-press stop and dismiss actions with confirmation inside the navigator.
+
+## [pi-better-goal@0.10.4] - 2026-10-30
+
+### Fixed
+
+- Stop writing Goal holds, pause guidance, progress warnings, and background completion notices to Pi's bottom status row. Preserve widgets, commands, permission holds, and pause/resume rules.
+
+## [pi-better-ssh@0.1.4] - 2026-10-30
+
+### Fixed
+
+- Remove the active SSH profile's footer chip while retaining profile inspection, remote execution, and mux management.
+
+## [pi-better-server@0.2.1] - 2026-10-30
+
+### Fixed
+
+- Remove remote connection, upgrade, and disconnect status-row writes. Suppress forwarded status text in the native client while preserving wire events, notifications, widgets, and dialogs.
+
 ## [pi-better-harness@0.35.1] - 2026-10-30
 
 ### Fixed
