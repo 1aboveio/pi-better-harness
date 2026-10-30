@@ -862,6 +862,45 @@ describe("broad-write profile (real kernel)", { skip: !macKernel && !linuxKernel
         assert.equal(existsSync(join(worktrees, "feature", "h")), true);
     }));
 
+    it("requires outside removal permission to commit from a linked worktree (#591)", () => fixture((paths) => {
+        const git = (args: string[]) => {
+            const result = spawnSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.test",
+                "-c", "commit.gpgsign=false", ...args], {
+                cwd: paths.sibling, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: paths.home },
+            });
+            assert.equal(result.status, 0, output(result));
+            return result.stdout.trim();
+        };
+        git(["init", "-q"]);
+        git(["add", "README.md"]);
+        git(["commit", "-qm", "initial"]);
+        mkdirSync(join(paths.home, ".cache"));
+        const worktree = join(paths.home, "projects", "repo-worktrees", "feature");
+        git(["worktree", "add", "-q", "-b", "feature", worktree]);
+        const worktreePaths = { ...paths, project: worktree };
+        const metadata = join(paths.sibling, ".git", "worktrees", "feature");
+        const initial = git(["rev-parse", "feature"]);
+        writeFileSync(join(worktree, "change.txt"), "change\n");
+        // Keep the independent credential row identical in both kernel profiles.
+        const permissions: SandboxPermissions = { ...broad, storedCredentials: "read-write" };
+        const denied = run(worktreePaths, "git add change.txt", permissions);
+        assert.notEqual(denied.status, 0, output(denied));
+        assert.match(output(denied), /Operation not permitted|Permission denied|Read-only file system|unable to write new index/i);
+        assert.equal(git(["rev-parse", "feature"]), initial);
+        if (macKernel) {
+            assert.equal(existsSync(join(metadata, "index.lock")), true, "Write denies even lock cleanup");
+        }
+        // Remove only this fixture's stranded lock before testing the broader permission.
+        rmSync(join(metadata, "index.lock"), { force: true });
+        const allowed = run(worktreePaths,
+            "git add change.txt && git -c user.name=test -c user.email=test@example.test -c commit.gpgsign=false commit -qm changed",
+            { ...permissions, outsideProject: "read-write" });
+        assert.equal(allowed.status, 0, output(allowed));
+        assert.notEqual(git(["rev-parse", "feature"]), initial);
+        assert.equal(git(["show", "feature:change.txt"]), "change");
+        assert.equal(existsSync(join(metadata, "index.lock")), false);
+    }));
+
     it("restores removal wherever writes are allowed with Write & delete", () => fixture((paths) => {
         // Stored credentials Read / write: the Linux Write & delete mount cannot mask credentials.
         const result = run(paths, `rm -rf '${paths.sibling}'`, { ...broad, outsideProject: "read-write", storedCredentials: "read-write" });
