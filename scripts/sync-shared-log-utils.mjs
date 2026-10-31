@@ -29,6 +29,7 @@ const harnessSettingsTargets = [
   "packages/pi-better-goal/src/shared-harness-settings.ts",
   "packages/pi-better-sandbox/shared-harness-settings.ts",
   "packages/pi-better-harness/extensions/shared-harness-settings.ts",
+  "packages/navigator/shared-harness-settings.ts",
 ];
 const banner = "// Generated from packages/log-utils/index.ts. Do not edit directly.\n";
 const logUtilsTargets = [
@@ -38,6 +39,13 @@ const logUtilsTargets = [
 const navigatorTargets = [
   resolve(root, "packages/pi-better-background-tasks/src/shared-navigator.ts"),
   resolve(root, "packages/pi-better-subagents/shared-navigator.ts"),
+];
+const navigatorPanelTargets = [
+  "packages/navigator/shared-navigator-panels.ts",
+  "packages/pi-better-background-tasks/src/shared-navigator-panels.ts",
+  "packages/pi-better-subagents/shared-navigator-panels.ts",
+  "packages/pi-better-goal/src/shared-navigator-panels.ts",
+  "packages/pi-better-harness/extensions/shared-navigator-panels.ts",
 ];
 const renderSchedulerTargets = [
   resolve(root, "packages/navigator/shared-render-scheduler.ts"),
@@ -91,6 +99,10 @@ for (const target of logUtilsTargets) {
 
 for (const target of navigatorTargets) {
   writeFileAtomically(target, navigatorContent);
+}
+
+for (const target of navigatorPanelTargets) {
+  writeFileAtomically(resolve(root, target), `// Generated from packages/navigator/panels.ts. Do not edit directly.\n${readFileSync(resolve(root, "packages/navigator/panels.ts"), "utf8")}`);
 }
 
 for (const target of renderSchedulerTargets) {

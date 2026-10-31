@@ -17,6 +17,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
 import { matchesKey, Key, truncateToWidth, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@earendil-works/pi-ai";
 import {
@@ -1465,6 +1466,7 @@ function catalogRoleSchema(purpose: string) {
 }
 
 export default function (pi: ExtensionAPI) {
+    initializeNavigatorPanels(pi);
     const agentSessionSettings = createAgentSessionSettings(pi);
     let catalogModelRegistry: ExtensionContext["modelRegistry"] | undefined;
     let delegationOverride: DelegationMode | undefined;
