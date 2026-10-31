@@ -52,6 +52,7 @@ const firstChatRow = chatRow(1);
 const secondChatRow = chatRow(2);
 const afterReloadRow = chatRow(3);
 const lastScrollRow = chatRow(27); // rows 4..27 scroll the navigator away
+const reloadStatusLine = "Reloaded keybindings";
 
 test("real TUI: Sticky navigator pins the shared host, moves it into chat when Off, and restores the saved choice", { skip }, () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-navigator-sticky-"));
@@ -120,10 +121,19 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
     key("Escape");
     wait((pane) => !pane.includes("Harness settings"), "the harness settings hub to close");
   };
-  const reload = () => {
+  const reload = (trigger = "/reload", below) => {
     rmSync(ready, { force: true });
-    command("/reload");
+    command(trigger);
     wait(() => existsSync(ready), "the reloaded session");
+    // session_start runs before Pi finishes restoring its editor. Starting the
+    // next custom UI before that restoration can dismiss it during reload.
+    wait((pane) => {
+      const status = rowsContaining(pane, reloadStatusLine);
+      if (status.length === 0) return false;
+      if (below === undefined) return true;
+      const anchor = rowsContaining(pane, below);
+      return anchor.length > 0 && status.at(-1) > anchor.at(-1);
+    }, `${trigger} and the reload tail to finish`);
   };
 
   try {
@@ -145,9 +155,7 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
     wait(() => existsSync(ready), "Pi to start the session");
 
     // 1. Sticky is On by default and the host is pinned between transcript and input.
-    rmSync(ready, { force: true });
-    command("/seed-todo");
-    wait(() => existsSync(ready), "the seeded Todo to reload the session");
+    reload("/seed-todo");
     command("/chat-rows 1 1");
     const pinned = wait((pane) => pane.includes(todoStep) && pane.includes(firstChatRow), "the pinned navigator");
     assertPinned(pinned, "Sticky On (default)", firstChatRow);
@@ -172,7 +180,7 @@ test("real TUI: Sticky navigator pins the shared host, moves it into chat when O
 
     // 4. Reload rebuilds the transcript from session entries: the saved Off choice
     //    survives and the host is reconstructed inside the conversation again.
-    reload();
+    reload("/reload", secondChatRow);
     const restored = wait((pane) => pane.includes(todoStep) && pane.includes(secondChatRow) && !pane.includes("Harness settings"),
       "the reloaded transcript navigator");
     assert.ok(restored.includes(todoStep), `the navigator entry must be rebuilt in the transcript after reload:\n${restored}`);
