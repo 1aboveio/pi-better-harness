@@ -38,6 +38,17 @@ export const BUILTIN_TOOLS = ["read", "bash", "edit", "write"];
 /** Marker spec meaning "this extension's own package" (for allow_nested). */
 export const SELF_SPEC = "self";
 
+/**
+ * Provider packages Pi does not ship itself. A provider's models exist in a
+ * child only when the package registering them is loaded; without this map, a
+ * role that resolves e.g. `ollama-cloud/...` in the foreground fails in its
+ * isolated child with "model not found". User `providerExtensions` entries
+ * replace these per provider (an empty list disables the built-in entry).
+ */
+export const BUILTIN_PROVIDER_EXTENSIONS = {
+    "ollama-cloud": "npm:pi-ollama-cloud",
+};
+
 /** Split "xai/grok-4.5" -> "xai". Returns undefined when there is no provider. */
 export function providerOf(model) {
     if (typeof model !== "string") return undefined;
@@ -116,10 +127,13 @@ export function resolveExtensions(a = {}) {
     }
 
     // Model auth is not tool-shaped: xai/grok needs pi-xai-oauth loaded or the
-    // child cannot authenticate at all, whatever tools it was granted.
+    // child cannot authenticate at all, whatever tools it was granted. A user
+    // entry for a provider wins over the built-in one, including an empty list
+    // that opts out of loading the provider's package.
+    const providerMap = { ...BUILTIN_PROVIDER_EXTENSIONS, ...(cfg.providerExtensions ?? {}) };
     const provider = providerOf(a.model);
     if (provider) {
-        for (const spec of toSpecList((cfg.providerExtensions ?? {})[provider])) {
+        for (const spec of toSpecList(providerMap[provider])) {
             add(spec, `provider:${provider}`);
         }
     }
