@@ -78,7 +78,9 @@ For external consumers, the repo-root `agent-catalog.yaml` publishes the shared
 definitions through a [Git subscription contract](catalog-subscription.md).
 This publication mechanism does not change local source precedence below.
 
-Precedence is project, then personal, then bundled. The higher source replaces the whole definition. Omitted agent fields inherit from the effective role, not from the shadowed agent.
+Markdown definition precedence is project, then personal, then bundled. The higher source replaces the whole definition. Omitted agent fields inherit from the effective role, not from the shadowed agent.
+
+Model and effort choices saved through `/agents` live separately in the catalog's `settings.json` (`version: 1`, with a `defaults` map keyed by role/agent id). They override only those fields, without shadowing the Markdown prompt. Branch edits win over saved preferences; trusted project preferences win over user preferences. User preferences do not override project-owned definitions. Existing Markdown overrides stay whole definitions until explicitly archived through **Reset to bundled** in Instructions. See [catalog operations](agent-catalog-operations.md#model-and-effort-edits).
 
 | Scope | Path |
 | --- | --- |
@@ -94,7 +96,7 @@ Role references use the same precedence. A missing or unusable role leaves the a
 
 ## Snapshots
 
-`loadCatalog` / `refreshCatalog` read the disk every time and return a new frozen snapshot. `digest` / `revision` is a sha256 of the canonical entries, unused sources, and snapshot diagnostics. `loadedAt` is not part of the digest. Callers must reuse one snapshot for every job in a batch. Later file edits do not mutate a snapshot already taken. `/agents reload` is an inspection operation owned by the operations unit; it is not required for the next `loadCatalog` to see edits.
+`loadCatalog` / `refreshCatalog` read the disk every time and return a new frozen snapshot. `digest` / `revision` is a sha256 of the canonical entries, unused sources, saved preferences and their sources, and snapshot diagnostics. `loadedAt` is not part of the digest. Callers must reuse one snapshot for every job in a batch. Later file edits do not mutate a snapshot already taken. `/agents reload` is an inspection operation owned by the operations unit; it is not required for the next `loadCatalog` to see edits.
 
 File diagnostics for an id live on that catalog entry. `snapshot.diagnostics` carries directory, trust, duplicate, and no-id failures. `resolveSelection`, `listCatalog`, and `inspectCatalog` are the launchability view; `schemaLaunchable` does not yet know whether an agent's role exists.
 

@@ -212,8 +212,13 @@ Updates preserve Pi's own settings and other packages' choices. SSH profiles,
 plans, run records, and role/agent definitions remain in their existing stores:
 they are session data or reusable definitions, not global UI defaults.
 In `/agents`, model and effort edits are session-local until Ctrl+S saves them
-to the user or project catalog definition. Saved catalog defaults also survive
-sessions and upgrades; they are not duplicated in global `settings.json`.
+to the user or trusted project's `agents/settings.json`. Markdown definitions
+remain unchanged, so bundled prompt updates keep applying. The Settings,
+Instructions, and Files tabs keep configuration separate from prompts.
+**Reset to bundled** in Settings restores model/effort without changing the
+prompt; in Instructions, it restores the prompt while preserving model/effort.
+A user Markdown override is archived when its prompt is reset. Saved defaults
+survive sessions and upgrades.
 
 Next-prompt inference is deferred pending safe public auth/header resolution in
 Pi's SDK. It is not loaded by the bundle, has no toggle or preference store in

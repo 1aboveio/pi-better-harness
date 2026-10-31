@@ -55,11 +55,20 @@ already-admitted jobs. Model choices come from the session's Pi model scope
 (`ctx.scopedModels`); an empty scope is no restriction, so they fall back to the
 current Pi model registry's available models.
 
-Ctrl+S saves only the selected definition's own preferences, never flattened
-inherited settings. Bundled roles are copied to user scope; existing user and
-project definitions are saved in their own scope with the store's trust,
-validation, and atomic-write checks. Plain `loadCatalog` remains disk-only so
-saving selects the current winning definition rather than a stale overlay.
+Ctrl+S saves only the selected definition's model/effort edits in catalog
+`settings.json`, preserving other saved fields without copying Markdown or
+flattening inherited defaults. `loadCatalog` reads definition files and saved
+preferences from disk; the branch overlay stays separate. User preferences apply
+to user and bundled definitions; trusted project preferences take precedence.
+Project-owned definitions do not consume user preferences.
+
+Settings, Instructions, and Files have separate TUI tabs; Ctrl+S is the only
+save control. **Reset to bundled** in Settings restores model/effort preferences
+and clears branch-local edits without changing Markdown. The same action in
+Instructions restores the bundled prompt while preserving model/effort choices;
+a user Markdown override is archived. Session reset entries replay on reload and
+branch navigation. Existing launch snapshots remain unchanged. Project-owned
+definitions are excluded; runtime reset also excludes active project config.
 
 Headless callers can inject a session controller or immutable
 `CatalogHost.sessionSettings`. Hosts without these hooks retain inspection-only

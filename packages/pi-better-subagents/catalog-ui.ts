@@ -15,6 +15,8 @@ export interface CatalogEditor {
     settings(): AgentSessionOverrides;
     change(id: string, key: AgentSettingKey, value: string | null): void;
     save(id: string): { ok: boolean; message: string };
+    resetToBundled?(entry: OperationView): { ok: boolean; message: string };
+    resetDefinition?(entry: OperationView): { ok: boolean; message: string };
 }
 
 function stateLabel(entry: OperationView): string {
@@ -137,11 +139,15 @@ export function createCatalogComponent(
     getHeight: () => number = () => 30,
 ) {
     let selectedId = initialId ?? catalog.entries[0]?.id;
-    let mode: "list" | "detail" | "prompt" = initialId ? "detail" : "list";
+    let mode: "list" | "detail" | "prompt" | "files" = initialId ? "detail" : "list";
     let query = "";
     let scroll = 0;
     let settingRow = 0;
     let settingPositions: number[] = [];
+    let resetPointerRows: number[] = [];
+    let resetPointerEntry: OperationView | undefined;
+    let pressedReset: OperationView | undefined;
+    let pressedResetMode: "detail" | "prompt" | undefined;
     let revealSetting = false;
     let picker: SelectList | undefined;
     let filterPicker: ((filter: string) => void) | undefined;
@@ -162,9 +168,30 @@ export function createCatalogComponent(
             report(result.message, !result.ok);
         } catch (cause) { report(String(cause instanceof Error ? cause.message : cause), true); }
     }
+    function canReset(entry: OperationView | undefined): boolean {
+        return !!editor?.resetToBundled && !!entry && !Object.values(entry.preferenceSources ?? {}).some(source => source.scope === "project")
+            && (entry.identity.scope === "bundled" || entry.identity.scope === "user" && entry.shadowed.some(source => source.scope === "bundled"));
+    }
+    function canResetDefinition(entry: OperationView | undefined): boolean {
+        return !!editor?.resetDefinition && !!entry && (entry.identity.scope === "bundled"
+            || entry.identity.scope === "user" && entry.shadowed.some(source => source.scope === "bundled"));
+    }
+    function reset(entry = selected(), definition = false) {
+        if (!entry || !(definition ? canResetDefinition(entry) : canReset(entry))) return;
+        try {
+            const result = definition ? editor!.resetDefinition!(entry) : editor!.resetToBundled!(entry);
+            refresh();
+            settingRow = 0;
+            scroll = 0;
+            resetPointerRows = [];
+            resetPointerEntry = undefined;
+            report(result.message, !result.ok);
+        } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
+    }
     function edit() {
         const current = selected();
         if (!current || !editor) return;
+        if (settingRow === 2) { reset(current); return; }
         if (!current.definitionValid) { report("Repair the catalog definition before editing.", true); return; }
         const key: AgentSettingKey = settingRow === 0 ? "model" : "effort";
         // Pi treats an empty scope as unrestricted. Scoped choices never include
@@ -211,22 +238,47 @@ export function createCatalogComponent(
         [entry.id, entry.identity.name, entry.identity.description, entry.role?.id]
             .some((value) => value?.toLowerCase().includes(query.toLowerCase())));
     const selected = () => filtered().find((entry) => entry.id === selectedId);
-    const detailRows = (entry: OperationView, width: number, controls: string[] = []) => (mode === "prompt"
-        ? [`${entry.identity.name || entry.id}  ·  effective instructions`, "", ...(entry.instructions?.split("\n") ?? ["(none)"])]
-        : catalogDetailLines(entry, !!editor, width, controls, theme))
-        .flatMap((text) => text ? wrapLine(text, Math.max(1, width - 2)) : [""]);
+    const detailRows = (entry: OperationView, width: number, controls: string[] = []) => {
+        let lines: string[];
+        if (mode === "prompt") lines = [
+            ...(canResetDefinition(entry) ? [theme.fg("accent", "> Reset to bundled"), theme.fg("dim", "  Restores the prompt; keeps model/effort choices."), ""] : []),
+            theme.fg("muted", `Source: ${entry.identity.scope ?? "unknown"} definition`), "", ...(entry.instructions?.split("\n") ?? ["(No resolved instructions)"]),
+        ];
+        else if (mode === "files") lines = [
+            theme.fg("muted", "Definition"), entry.identity.path ?? "(none)", "",
+            theme.fg("muted", "Saved preferences"),
+            ...([...new Set(Object.values(entry.preferenceSources ?? {}).map(source => `${source.scope}: ${source.path}`))].length
+                ? [...new Set(Object.values(entry.preferenceSources ?? {}).map(source => `${source.scope}: ${source.path}`))] : ["No saved preferences for this definition."]),
+            "", theme.fg("muted", "Session edits"), ...JSON.stringify(editor?.settings()[entry.id] ?? {}, null, 2).split("\n"),
+            ...(entry.shadowed.length ? ["", theme.fg("muted", "Shadowed definitions"), ...entry.shadowed.map(source => `${source.scope}: ${source.path}`)] : []),
+        ];
+        else lines = [
+            ...(editor ? controls : (["model", "effort"] as const).flatMap(key => settingLines(key === "model" ? "Model" : "Effort", entry.fields?.[key].value ?? "(unset)", entry.fields?.[key].inherited || entry.fields?.[key].source === "role-default" ? "inherited" : "catalog", Math.max(1, width - 4), "  ", theme))),
+            "", theme.fg("dim", "Model and effort save separately from instructions."), "",
+            `ID       ${entry.id}`, `Scope    ${entry.identity.scope ?? "unknown"}`,
+            ...(entry.role?.id && entry.identity.kind === "agent" ? [`Role     ${entry.role.id}`] : []),
+            `Tier     ${entry.fields?.tier.value ?? "(unset)"}`,
+            `Actual   ${entry.actualModel ?? "not resolved"}${entry.actualEffort ? ` · ${entry.actualEffort}` : ""}`,
+            "", theme.fg("muted", "Launch resolution"), entry.launchabilityReason,
+            ...(entry.validation.length ? ["", theme.fg("muted", "Diagnostics"), ...entry.validation.map(item => `${item.blocking ? "!" : "·"} ${item.message}`)] : []),
+            ...(entry.restrictions.length ? ["", theme.fg("muted", "Execution restrictions"), ...entry.restrictions.map(item => `${item.honored ? "honored" : "not honored"}  ${item.name}`)] : []),
+        ];
+        return lines.flatMap(text => text ? wrapLine(text, Math.max(1, width - 4)).map(row => `  ${row}`) : [""]);
+    };
 
 
     return {
         get focused() { return focused; },
         set focused(value: boolean) { focused = value; search.focused = value && !!picker && pickerKey === "model"; },
         render(width: number): string[] {
+            resetPointerRows = [];
+            resetPointerEntry = undefined;
             const safeWidth = Math.max(1, width);
             const height = Math.max(1, Math.floor(getHeight()));
-            const footerRows = (editor && mode !== "prompt" ? 2 : 0) + (message ? 2 : 0);
+            const footerRows = (editor ? 2 : 0) + (message ? 2 : 0);
             const diagnosticRows = Math.min(catalog.diagnostics.length, 3);
             const listSize = Math.max(1, height - 5 - footerRows - diagnosticRows - 1);
-            const detailSize = Math.max(1, height - 5 - footerRows);
+            const detailSize = Math.max(1, height - 6 - footerRows);
             const fit = (lines: string[]) => {
                 const result = lines.slice(0, height).map(line);
                 while (result.length < height) result.push("");
@@ -254,13 +306,18 @@ export function createCatalogComponent(
                     const own = editor?.settings()[current.id];
                     const ownSession = Object.hasOwn(own ?? {}, key);
                     const roleSession = field?.inherited && Object.hasOwn(editor?.settings()[current.role?.id ?? ""] ?? {}, key);
-                    const origin = ownSession && own?.[key] === null ? "inherit / session" : ownSession ? "session" : roleSession ? "inherited / session" : field?.inherited ? "inherited" : "catalog";
+                    const saved = current.preferenceSources?.[key];
+                    const inherited = current.identity.kind === "agent" && field?.inherited;
+                    const origin = ownSession && own?.[key] === null ? "inherit / session" : ownSession ? "session" : roleSession ? "inherited / session"
+                        : saved?.bundled ? "bundled" : saved ? `${inherited ? "inherited / " : ""}${saved.scope} config`
+                            : current.identity.scope === "bundled" && !inherited ? "bundled" : field?.inherited ? "inherited" : "catalog";
                     return settingLines(label, field?.value ?? "(unset)", origin, Math.max(1, safeWidth - 4), settingRow === index ? "> " : "  ", theme);
                 }),
+                ...(canReset(current) ? [theme.fg(settingRow === 2 ? "accent" : "muted", `${settingRow === 2 ? "> " : "  "}Reset to bundled`), theme.fg("dim", "  Restores model/effort; keeps the role prompt.")] : []),
             ] : [];
             const detailLines = current ? detailRows(current, safeWidth, controls) : [];
             if (editor && mode === "detail") {
-                settingPositions = ["Model", "Effort"].map((label) => detailLines.findIndex((text) =>
+                settingPositions = ["Model", "Effort", ...(canReset(current) ? ["Reset to bundled"] : [])].map((label) => detailLines.findIndex((text) =>
                     new RegExp(`^  [> ] ${label}(?:\\s|$)`).test(text.replace(/\x1b\[[0-9;]*m/g, ""))));
                 if (revealSetting && settingPositions[settingRow] >= 0) {
                     const position = settingPositions[settingRow];
@@ -270,9 +327,21 @@ export function createCatalogComponent(
                 revealSetting = false;
             }
             scroll = Math.max(0, Math.min(scroll, detailLines.length - detailSize));
+            if (mode === "detail" && current && canReset(current)) {
+                const position = settingPositions[2];
+                if (position >= scroll && position < scroll + detailSize) {
+                    resetPointerRows = [4 + position - scroll];
+                    resetPointerEntry = current;
+                }
+            }
+            if (mode === "prompt" && current && canResetDefinition(current) && scroll === 0) {
+                resetPointerRows = [4];
+                resetPointerEntry = current;
+            }
             const lines = mode !== "list" && current ? [
-                theme.fg("accent", mode === "prompt" ? "Agents / prompt" : editor ? `Agents / ${current.identity.name || current.id}` : "Agents / inspect"),
-                theme.fg("dim", mode === "prompt" ? "← details  ·  ↑↓ scroll  ·  Esc back" : `${editor ? "Enter change  ·  " : ""}p prompt  ·  ← list  ·  ↑↓ ${editor ? "select / scroll" : "scroll"}  ·  Esc back`),
+                theme.fg("accent", `Agents / ${current.identity.name || current.id}`),
+                ([['detail', 'Settings'], ['prompt', 'Instructions'], ['files', 'Files']] as const).map(([tab, label]) => theme.fg(mode === tab ? "accent" : "dim", mode === tab ? `[${label}]` : label)).join("   "),
+                theme.fg("dim", safeWidth < 60 ? "Tab switch · ↑↓ move · Enter · Esc" : `Tab / Shift+Tab switch  ·  ↑↓ ${mode === "detail" && editor ? "select / scroll  ·  Enter change" : mode === "prompt" && canResetDefinition(current) ? "scroll  ·  Enter reset at top" : "scroll"}  ·  Esc list`),
                 "",
 
                 ...detailLines.slice(scroll, scroll + detailSize).map((text, i) =>
@@ -297,7 +366,7 @@ export function createCatalogComponent(
                 ...catalog.diagnostics.slice(0, 2).map((diagnostic) => theme.fg("warning", `! ${diagnostic.message}`)),
                 ...(catalog.diagnostics.length > 2 ? [theme.fg("warning", `! ${catalog.diagnostics.length - 2} more catalog diagnostics`)] : []),
             ];
-            if (editor && mode !== "prompt") lines.push("", theme.fg("dim", "ctrl+s Save selected defaults"));
+            if (editor) lines.push("", theme.fg("dim", "Ctrl+S Save defaults"));
             if (message) lines.push("", theme.fg(error ? "error" : "muted", message));
             return fit(lines);
         },
@@ -312,15 +381,25 @@ export function createCatalogComponent(
                 return;
             }
             if (editor && matchesKey(data, "ctrl+s")) { save(); return; }
+            if (mode !== "list" && (matchesKey(data, "tab") || matchesKey(data, "shift+tab"))) {
+                const tabs = ["detail", "prompt", "files"] as const;
+                const index = tabs.indexOf(mode);
+                mode = tabs[(index + (matchesKey(data, "shift+tab") ? 2 : 1)) % 3];
+                scroll = 0;
+                revealSetting = mode === "detail";
+                pressedReset = undefined;
+                requestRender();
+                return;
+            }
             if (matchesKey(data, "escape") || matchesKey(data, "left")) {
-                if (mode === "prompt") { mode = "detail"; scroll = 0; }
+                if (mode === "prompt" || mode === "files") { mode = "detail"; scroll = 0; revealSetting = true; }
                 else if (mode === "detail") { mode = "list"; scroll = 0; }
                 else if (query) { query = ""; selectedId = catalog.entries[0]?.id; }
                 else { close(); return; }
             } else if (matchesKey(data, "up") || matchesKey(data, "down")) {
                 const delta = matchesKey(data, "down") ? 1 : -1;
-                if (mode === "detail" && editor && scroll <= (settingPositions[1] ?? 0)
-                    && ((delta > 0 && settingRow === 0) || (delta < 0 && settingRow === 1))) {
+                if (mode === "detail" && editor && scroll <= (settingPositions.at(-1) ?? 0)
+                    && ((delta > 0 && settingRow < settingPositions.length - 1) || (delta < 0 && settingRow > 0))) {
                     settingRow += delta;
                     revealSetting = true;
                 }
@@ -339,6 +418,8 @@ export function createCatalogComponent(
                 revealSetting = true;
             } else if (editor && mode === "detail" && (matchesKey(data, "enter") || data === " ")) {
                 try { edit(); } catch (cause) { report(cause instanceof Error ? cause.message : String(cause), true); }
+            } else if (editor && mode === "prompt" && scroll === 0 && (matchesKey(data, "enter") || data === " ")) {
+                reset(selected(), true);
             } else if (mode === "list" && matchesKey(data, "backspace")) {
                 query = query.slice(0, -1);
                 selectedId = filtered()[0]?.id;
@@ -347,6 +428,22 @@ export function createCatalogComponent(
                 selectedId = filtered()[0]?.id;
             }
             requestRender();
+        },
+        handleMouse(event: { type: string; button: string; x: number; y: number; width: number; shift?: boolean; alt?: boolean; ctrl?: boolean }) {
+            const entry = resetPointerEntry;
+            const hit = !picker && (mode === "detail" || mode === "prompt") && entry && event.button === "left" && !event.shift && !event.alt && !event.ctrl
+                && event.x >= 0 && event.x < event.width && resetPointerRows.includes(event.y);
+            if (event.type === "press") {
+                pressedReset = hit ? entry : undefined;
+                pressedResetMode = hit ? mode as "detail" | "prompt" : undefined;
+                return hit ? { handled: true as const, render: false } : undefined;
+            }
+            if (event.type !== "click") return undefined;
+            const pressed = pressedReset;
+            pressedReset = undefined;
+            if (!hit || !pressed || pressedResetMode !== mode || pressed.id !== entry.id || pressed.winningSource?.contentDigest !== entry.winningSource?.contentDigest) return undefined;
+            reset(pressed, mode === "prompt");
+            return { handled: true as const, render: true };
         },
         invalidate() { picker?.invalidate(); search.invalidate(); },
     };

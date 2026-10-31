@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createAgentSessionSettings, saveAgentSessionDefaults } from "../agent-session-settings.ts";
@@ -12,6 +13,7 @@ import { createLaunchEnricher, loadLaunchSnapshot, noteCatalogHost, prepareCatal
 import { loadCatalog, saveDefinition } from "../catalog-store.ts";
 import { inspectCatalog } from "../catalog-resolver.ts";
 import { parseDefinition, serializeDefinition } from "../catalog-schema.ts";
+import { readCatalogPreferences, writeCatalogPreferences } from "../catalog-preferences.ts";
 
 const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, inverse: (text) => text };
 const Type = { Object: (x) => x, String: (x) => x, Optional: (x) => x };
@@ -85,6 +87,181 @@ function editModel(component, label) {
 }
 
 describe("branch-local agent model and effort", () => {
+    it("a model-only save preserves an effort update that arrives while acquiring the lock", async t => {
+        const fx = fixture(t, "bundled", role());
+        mkdirSync(fx.loc.userRoot, { recursive: true });
+        const root = join(fx.loc.userRoot, "agents");
+        writeCatalogPreferences(root, "role.work", { effort: "low" });
+        fx.settings.change("role.work", "model", "openai/beta");
+        const { component } = await fx.open("role.work");
+        const lockfile = createRequire(import.meta.url)("proper-lockfile");
+        const original = lockfile.lockSync;
+        let intercepted = false;
+        lockfile.lockSync = (...args) => {
+            if (!intercepted) {
+                intercepted = true;
+                writeCatalogPreferences(root, "role.work", current => ({ ...current, effort: "max" }));
+            }
+            return original(...args);
+        };
+        try {
+            component.handleInput("\x13");
+            assert.deepEqual(readCatalogPreferences(root).settings["role.work"], { model: "openai/beta", effort: "max" });
+        } finally { lockfile.lockSync = original; }
+    });
+
+    it("Settings reset restores bundled model/effort without changing the role prompt", async t => {
+        const fx = fixture(t, "user", { ...role({ model: "openai/gamma", effort: "high" }), body: "My custom role prompt." });
+        const original = readFileSync(fx.saved.path, "utf8");
+        fx.settings.change("role.work", "model", "openai/beta");
+        fx.settings.change("role.work", "effort", "max");
+        const { component } = await fx.open("role.work");
+        component.render(80);
+        component.handleInput("\x1b[B"); component.render(80);
+        component.handleInput("\x1b[B"); component.render(80);
+        component.handleInput("\r");
+        assert.equal(readFileSync(fx.saved.path, "utf8"), original);
+        assert.equal(fx.settings.snapshot()["role.work"], undefined);
+        const inspected = inspectCatalog(loadCatalog(fx.loc), "role.work");
+        assert.equal(inspected.fields.model.value, "openai/alpha");
+        assert.equal(inspected.fields.effort.value, "medium");
+        assert.equal(inspected.instructions.trim(), "My custom role prompt.");
+        const settings = component.render(100).join("\n");
+        assert.match(settings, /Model\s+openai\/alpha\s+bundled/);
+        assert.match(settings, /Effort\s+medium\s+bundled/);
+        assert.doesNotMatch(settings, /user config/);
+        writeFileSync(fx.bundledPath, serializeDefinition(role({ model: "openai/beta", effort: "low" })).markdown);
+        const next = inspectCatalog(loadCatalog(fx.loc), "role.work");
+        assert.equal(next.fields.model.value, "openai/beta", "reset follows a later bundled model update");
+        assert.equal(next.fields.effort.value, "low");
+        assert.equal(next.instructions.trim(), "My custom role prompt.");
+        component.handleInput("\t");
+        const instructions = component.render(80).join("\n");
+        assert.match(instructions, /\[Instructions\]/);
+        assert.match(instructions, /Reset to bundled/);
+        assert.match(instructions, /My custom role prompt/);
+    });
+
+    it("an explicit model choice after reset stays user config while effort follows bundled updates", async t => {
+        const fx = fixture(t, "user", { ...role({ model: "openai/gamma" }), body: "Custom prompt." });
+        const root = join(fx.loc.userRoot, "agents");
+        writeCatalogPreferences(root, "role.work", { bundled: true });
+        fx.settings.change("role.work", "model", "openai/alpha");
+        const { component } = await fx.open("role.work");
+        component.handleInput("\x13");
+        assert.deepEqual(readCatalogPreferences(root).settings["role.work"], { bundled: true, model: "openai/alpha" });
+        fx.settings.clear();
+        writeFileSync(fx.bundledPath, serializeDefinition(role({ model: "openai/beta", effort: "low" })).markdown);
+        const fresh = await fx.open("role.work");
+        const screen = fresh.component.render(100).join("\n");
+        assert.match(screen, /Model\s+openai\/alpha\s+user config/);
+        assert.match(screen, /Effort\s+low\s+bundled/);
+        assert.equal(inspectCatalog(loadCatalog(fx.loc), "role.work").instructions.trim(), "Custom prompt.");
+    });
+
+    it("a failed session reset reports the saved write and refreshes the still-active session choice", async t => {
+        const fx = fixture(t, "user", role());
+        const root = join(fx.loc.userRoot, "agents");
+        writeCatalogPreferences(root, "role.work", { model: "openai/gamma", effort: "high" });
+        fx.settings.change("role.work", "model", "openai/beta");
+        const { component, result } = await fx.open("role.work");
+        const append = fx.pi.appendEntry;
+        fx.pi.appendEntry = () => { throw new Error("session append denied"); };
+        try {
+            component.render(100);
+            component.handleInput("\x1b[B"); component.render(100);
+            component.handleInput("\x1b[B"); component.render(100);
+            component.handleInput("\r");
+            assert.equal(result.wrote, true, "the saved config did change even though session reset failed");
+            assert.deepEqual(readCatalogPreferences(root).settings["role.work"], { bundled: true });
+            assert.equal(fx.settings.snapshot()["role.work"].model, "openai/beta");
+            const screen = component.render(180).join("\n");
+            assert.match(screen, /Saved defaults reset.*current-session overrides remain active/);
+            assert.match(screen, /Model\s+openai\/beta\s+session/);
+            assert.match(screen, /session append denied/);
+        } finally { fx.pi.appendEntry = append; }
+    });
+
+    it("Instructions reset preserves absent runtime choices instead of exposing bundled defaults", async t => {
+        const fx = fixture(t, "user", { ...role(), defaults: {}, body: "Custom instructions." });
+        const before = inspectCatalog(loadCatalog(fx.loc), "role.work");
+        assert.equal(before.fields.model.value, null);
+        assert.equal(before.fields.effort.value, null);
+        const { component } = await fx.open("role.work");
+        component.handleInput("\t"); component.render(100);
+        component.handleInput("\r");
+        const after = inspectCatalog(loadCatalog(fx.loc), "role.work");
+        assert.equal(after.instructions.trim(), "Role instructions.");
+        assert.equal(after.fields.model.value, null);
+        assert.equal(after.fields.effort.value, null);
+    });
+
+    it("Instructions reset restores the bundled prompt while preserving model and effort choices", async t => {
+        const custom = { ...role({ model: "openai/gamma", effort: "high" }), body: "Old user instructions." };
+        const fx = fixture(t, "user", custom);
+        const original = readFileSync(fx.saved.path, "utf8");
+        fx.settings.change("role.work", "effort", "low");
+        const { component, result } = await fx.open("role.work");
+        component.handleInput("\t");
+        const lines = component.render(100);
+        const y = lines.findIndex(line => line.includes("Reset to bundled"));
+        assert.ok(y >= 0, lines.join("\n"));
+        const pointer = { button: "left", type: "press", x: 4, y, width: 100 };
+        assert.equal(component.handleMouse(pointer)?.handled, true);
+        assert.equal(existsSync(fx.saved.path), true, "press alone cannot reset a definition");
+        assert.equal(component.handleMouse({ ...pointer, type: "click" })?.handled, true);
+        assert.equal(result.wrote, true);
+        assert.equal(existsSync(fx.saved.path), false);
+        const backup = readdirSync(join(fx.loc.userRoot, "agents", "roles")).find(name => name.endsWith(".backup"));
+        assert.ok(backup);
+        assert.equal(readFileSync(join(fx.loc.userRoot, "agents", "roles", backup), "utf8"), original);
+        const catalog = loadCatalog(fx.loc);
+        assert.equal(catalog.roles.get("role.work").scope, "bundled");
+        assert.deepEqual(catalog.savedSettings["role.work"], { model: "openai/gamma", effort: "high" });
+        assert.equal(inspectCatalog(catalog, "role.work").instructions.trim(), "Role instructions.");
+        assert.deepEqual(fx.settings.snapshot()["role.work"], { effort: "low" });
+        const instructions = component.render(100).join("\n");
+        assert.match(instructions, /\[Instructions\]/);
+        assert.doesNotMatch(instructions, /Old user instructions/);
+        component.handleInput("\x1b");
+        const refreshed = component.render(100).join("\n");
+        assert.match(refreshed, /Model\s+openai\/gamma\s+user config/);
+        assert.match(refreshed, /Effort\s+low\s+session/);
+        const launch = await prepareCatalogJob(loadLaunchSnapshot(fx.host()), { role: "work", prompt: "Implement." }, fx.host());
+        assert.equal(launch.status, "ready", launch.message);
+        assert.equal(launch.assign.model, "openai/gamma");
+        assert.equal(launch.assign.thinking, "low");
+        assert.equal(launch.assign.prompt, "Role instructions.\n\n---\n\nImplement.");
+    });
+
+    it("reset is keyboard accessible and refuses a stale displayed definition", async t => {
+        const fx = fixture(t, "user", { ...role(), body: "Custom prompt." });
+        const { component } = await fx.open("role.work");
+        component.handleInput("\t");
+        assert.match(component.render(42).join("\n"), /> Reset to bundled/);
+        const changed = readFileSync(fx.saved.path, "utf8").replace("Custom prompt.", "Externally changed prompt.");
+        writeFileSync(fx.saved.path, changed);
+        component.handleInput("\r");
+        assert.equal(readFileSync(fx.saved.path, "utf8"), changed);
+        assert.equal(existsSync(join(fx.loc.userRoot, "agents", "settings.json")), false);
+        assert.match(component.render(140).join("\n"), /changed since this screen/);
+        // A fresh screen may reset the same definition without a confirmation step.
+        const fresh = (await fx.open("role.work")).component;
+        fresh.handleInput("\t"); fresh.render(80);
+        fresh.handleInput("\r");
+        assert.equal(loadCatalog(fx.loc).roles.get("role.work").scope, "bundled");
+    });
+
+    it("does not offer cleanup for project definitions or user definitions without a bundled fallback", async t => {
+        for (const [scope, definition] of [["project", role()], ["user", agent()]]) {
+            const fx = fixture(t, scope, definition);
+            const original = readFileSync(fx.saved.path, "utf8");
+            const { component } = await fx.open(definition.id);
+            assert.doesNotMatch(component.render(100).join("\n"), /Reset to bundled/);
+            assert.equal(readFileSync(fx.saved.path, "utf8"), original);
+        }
+    });
+
     it("UI edits persist to the session, not catalog files; discovery and launches use effective settings", async (t) => {
         const fx = fixture(t);
         const original = readFileSync(fx.saved.path, "utf8");
@@ -188,8 +365,9 @@ describe("branch-local agent model and effort", () => {
         assert.equal(explicit.assign.thinking, "medium");
         const saved = saveAgentSessionDefaults(loadCatalog(fx.loc), "agent.worker", fx.settings.snapshot(), fx.loc);
         assert.equal(saved.ok, true);
-        const definition = parseDefinition(readFileSync(saved.path, "utf8")).definition;
-        assert.deepEqual(definition.overrides, {});
+        const definition = parseDefinition(readFileSync(fx.saved.path, "utf8")).definition;
+        assert.deepEqual(definition.overrides, { model: "openai/alpha", effort: "high" }, "saving preferences never rewrites the definition");
+        assert.deepEqual(JSON.parse(readFileSync(saved.path, "utf8")).defaults["agent.worker"], { model: null, effort: null });
         assert.equal(definition.roleId, "role.work");
         assert.equal(definition.body.trim(), "Named instructions.");
         assert.deepEqual(definition.provenance, agent().provenance);
@@ -251,10 +429,11 @@ describe("branch-local agent model and effort", () => {
         assert.equal(loaded.agents.get("agent.worker").definition.executionRestrictions[0].value, "read-only");
     });
 
-    for (const scope of ["user", "project", "bundled"]) it(`Ctrl+S saves only the selected ${scope} definition, never the bundled source`, async (t) => {
+    for (const scope of ["user", "project", "bundled"]) it(`Ctrl+S saves selected ${scope} preferences without copying definition files`, async (t) => {
         const definition = scope === "bundled" ? role() : agent();
         const fx = fixture(t, scope, definition);
         const bundled = readFileSync(fx.bundledPath, "utf8");
+        const original = fx.saved ? readFileSync(fx.saved.path, "utf8") : undefined;
         fx.settings.change("role.work", "effort", "low");
         const { component, result } = await fx.open(definition.id);
         editModel(component, "beta");
@@ -264,12 +443,21 @@ describe("branch-local agent model and effort", () => {
         assert.equal(result.scope, scope === "project" ? "project" : "user");
         const fresh = loadCatalog(fx.loc);
         const entry = definition.kind === "role" ? fresh.roles.get(definition.id) : fresh.agents.get(definition.id);
-        const preferences = definition.kind === "role" ? entry.definition.defaults : entry.definition.overrides;
+        const preferences = fresh.savedSettings[definition.id];
         assert.equal(preferences.model, "openai/beta");
         assert.equal(preferences.effort, definition.kind === "role" ? "low" : undefined);
         assert.equal(readFileSync(fx.bundledPath, "utf8"), bundled);
+        if (fx.saved) assert.equal(readFileSync(fx.saved.path, "utf8"), original);
+        assert.equal(inspectCatalog(fresh, definition.id).fields.model.value, "openai/beta");
         if (scope !== "bundled") assert.equal(inspectCatalog(fresh, "agent.worker").fields.effort.value, "medium");
-        if (scope === "bundled") assert.ok(existsSync(join(fx.loc.userRoot, "agents", "roles", "role.work.md")));
+        if (scope === "bundled") {
+            assert.equal(entry.scope, "bundled");
+            assert.equal(existsSync(join(fx.loc.userRoot, "agents", "roles", "role.work.md")), false);
+            writeFileSync(fx.bundledPath, bundled.replace("Role instructions.", "Updated bundled instructions."));
+            const updated = inspectCatalog(loadCatalog(fx.loc), definition.id);
+            assert.equal(updated.instructions.trim(), "Updated bundled instructions.");
+            assert.equal(updated.fields.model.value, "openai/beta");
+        }
     });
 
     it("save failures leave branch edits intact and trust and validation still block launches", async (t) => {
@@ -291,7 +479,7 @@ describe("branch-local agent model and effort", () => {
         writeFileSync(join(fx.loc.userRoot, "agents"), "not a directory");
         const failed = saveAgentSessionDefaults(loadCatalog(fx.loc), "role.work", fx.settings.snapshot(), fx.loc);
         assert.equal(failed.ok, false);
-        assert.equal(failed.diagnostics.some((item) => item.code === "io-error"), true);
+        assert.equal(failed.diagnostics.some((item) => item.code === "agents-save"), true);
         fx.reload();
         assert.equal(fx.settings.snapshot()["agent.worker"].model, "openai/beta");
         writeFileSync(fx.saved.path, original.replace("kind: agent", "kind: wrong"));

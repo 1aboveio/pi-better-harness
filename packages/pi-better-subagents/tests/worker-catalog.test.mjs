@@ -143,13 +143,13 @@ test('standalone CLI resolves shared roles without any Pi runtime installed', (t
     const { request, root } = fixture(t);
     const portable = join(root, 'portable');
     mkdirSync(portable);
-    for (const name of ['agent-catalog.mjs', 'worker-catalog.ts', 'model-resolution-core.ts', 'catalog-schema.ts', 'catalog-store.ts', 'catalog-resolver.ts', 'agent-session-settings.ts', 'thinking.ts', 'tier-policy.ts', 'roles']) {
+    for (const name of ['agent-catalog.mjs', 'worker-catalog.ts', 'model-resolution-core.ts', 'catalog-schema.ts', 'catalog-store.ts', 'catalog-resolver.ts', 'catalog-preferences.ts', 'agent-session-settings.ts', 'thinking.ts', 'tier-policy.ts', 'roles']) {
         cpSync(join(packageRoot, name), join(portable, name), { recursive: true });
     }
     writeFileSync(join(portable, 'package.json'), '{"type":"module"}');
     mkdirSync(join(portable, 'node_modules'));
     const repoRoot = resolve(packageRoot, '../..');
-    for (const name of ['tsx', 'yaml']) {
+    for (const name of ['tsx', 'yaml', 'proper-lockfile']) {
         symlinkSync(join(repoRoot, 'node_modules', name), join(portable, 'node_modules', name), 'dir');
     }
     const result = spawnSync(process.execPath, [join(portable, 'agent-catalog.mjs')], { input: JSON.stringify(request), encoding: 'utf8', cwd: root });

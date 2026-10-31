@@ -18,6 +18,45 @@ const entry = (id, name, status = null) => ({
 });
 
 describe("catalog command surface", () => {
+    it("separates Settings, Instructions, and Files while Ctrl+S remains the only save control", () => {
+        const role = entry("role.developer", "Developer");
+        role.identity.scope = "bundled";
+        role.definitionValid = true;
+        role.instructions = "Prepare and test metadata. The coordinator owns delivery.";
+        role.preferenceSources = { model: { scope: "user", path: "/sample/agents/settings.json" } };
+        const catalog = { entries: [role], diagnostics: [] };
+        let saves = 0, resets = 0;
+        const editor = { get: () => catalog, models: () => [], settings: () => ({ "role.developer": { model: "openai/alpha", effort: "high" } }), change() {},
+            save() { saves++; return { ok: true, message: "Defaults saved." }; },
+            resetToBundled() { resets++; return { ok: true, message: "Reset to bundled." }; } };
+        const component = createCatalogComponent(catalog, theme, () => {}, () => {}, role.id, editor, () => 24);
+        const settings = component.render(80).join("\n");
+        assert.match(settings, /\[Settings\].*Instructions.*Files/);
+        assert.match(settings, /Reset to bundled/);
+        assert.match(settings, /Ctrl\+S Save defaults/);
+        assert.doesNotMatch(settings, /> Save|Prepare and test metadata|\/sample/);
+        component.handleInput("\t");
+        const instructions = component.render(80).join("\n");
+        assert.match(instructions, /\[Instructions\]/);
+        assert.match(instructions, /Prepare and test metadata/);
+        assert.doesNotMatch(instructions, /Reset to bundled/);
+        component.handleInput("\x13");
+        assert.equal(saves, 1, "Ctrl+S also works outside the Settings tab");
+        component.handleInput("\t");
+        assert.match(component.render(80).join("\n"), /\[Files\]/);
+        assert.match(component.render(80).join("\n"), /\/sample\/agents\/settings.json/);
+        assert.ok(component.render(80).every(line => !/[\r\n]/.test(line)), "multiline session JSON renders as separate terminal rows");
+        component.handleInput("\x1b[Z");
+        assert.match(component.render(80).join("\n"), /\[Instructions\]/);
+        component.handleInput("\t"); component.handleInput("\t");
+        component.render(80);
+        component.handleInput("\x1b[B"); component.render(80);
+        component.handleInput("\x1b[B"); component.render(80);
+        component.handleInput("\r");
+        assert.equal(resets, 1);
+        assert.equal(saves, 1, "Reset does not activate an implicit save row");
+    });
+
     it("colors labels separately from values without changing content or column widths", () => {
         const agent = entry("agent.payments", "Payments Analyst");
         agent.instructionMode = "add";
@@ -53,6 +92,9 @@ describe("catalog command surface", () => {
             assert.ok(compact.includes(agent.instructions.replace(/\s+/g, "")), `resolved prompt at ${width} columns`);
         }
         const component = createCatalogComponent({ entries: [agent], diagnostics: [] }, theme, () => {}, () => {}, agent.id, undefined, () => 40);
+        assert.doesNotMatch(component.render(100).join("\n"), /Role instructions/);
+        component.handleInput("\t");
+        assert.match(component.render(100).join("\n"), /\[Instructions\]/);
         assert.match(component.render(100).join("\n"), /Role instructions/);
         const wide = catalogDetailLines(agent, false, 120);
         assert.match(wide.find((row) => /Status/.test(row)), /ID\s+agent\..*Status\s+unresolved/);
@@ -70,13 +112,13 @@ describe("catalog command surface", () => {
         assert.match(component.render(60).join("\n"), /Payments Analyst/);
         assert.doesNotMatch(component.render(60).join("\n"), /› Reviewer/);
         component.handleInput("\r");
-        assert.match(component.render(60).join("\n"), /blocked/);
+        assert.match(component.render(60).join("\n"), /\[Settings\]/);
         assert.match(component.render(60).join("\n"), /inherited/);
         component.handleInput("p");
-        assert.match(component.render(60).join("\n"), /Agents \/ prompt/);
+        assert.match(component.render(60).join("\n"), /\[Instructions\]/);
         assert.match(component.render(60).join("\n"), /Long instructions/);
         component.handleInput("\x1b");
-        assert.match(component.render(60).join("\n"), /Agents \/ inspect/);
+        assert.match(component.render(60).join("\n"), /\[Settings\]/);
         component.handleInput("\x1b[B");
         component.handleInput("\x1b");
         assert.match(component.render(60).join("\n"), /Search  P/);
@@ -122,6 +164,25 @@ describe("catalog command surface", () => {
         component.handleInput("\x1b");
         component.handleInput("e");
         assert.match(component.render(42).join("\n"), /> Model/);
+    });
+
+    it("reveals the selected reset when returning from another tab in a short terminal", () => {
+        const role = entry("role.developer", "Developer");
+        role.identity.scope = "bundled";
+        role.fields.model.value = "provider/" + "long-model-name".repeat(8);
+        const catalog = { entries: [role], diagnostics: [] };
+        let resets = 0;
+        const editor = { get: () => catalog, models: () => [], settings: () => ({}), change() {}, save: () => ({ ok: true, message: "saved" }),
+            resetToBundled() { resets++; return { ok: true, message: "reset" }; } };
+        const component = createCatalogComponent(catalog, theme, () => {}, () => {}, role.id, editor, () => 12);
+        component.render(42);
+        component.handleInput("\x1b[B"); component.render(42);
+        component.handleInput("\x1b[B");
+        assert.match(component.render(42).join("\n"), /> Reset to bundled/);
+        component.handleInput("\t"); component.render(42);
+        component.handleInput("\x1b[Z");
+        assert.match(component.render(42).join("\n"), /> Reset to bundled/, "Enter cannot act on a hidden selection");
+        assert.equal(resets, 0);
     });
 
     it("aligns model, effort, source, and state columns and keeps model at narrow widths", () => {
@@ -180,7 +241,7 @@ describe("catalog command surface", () => {
         const agent = entry("agent.payments", "Payments Analyst");
         agent.instructions = `Role instruction.\n\n${"Agent instruction. ".repeat(100)}`;
         const component = createCatalogComponent({ entries: [agent], diagnostics: [], revision: "", text: "" }, theme, () => {}, () => {}, agent.id);
-        assert.match(component.render(60).join("\n"), /p prompt/);
+        assert.match(component.render(60).join("\n"), /Settings.*Instructions.*Files/);
         component.handleInput("p");
         assert.match(component.render(60).join("\n"), /Role instruction/);
         for (let i = 0; i < 23; i++) component.handleInput("\x1b[B");

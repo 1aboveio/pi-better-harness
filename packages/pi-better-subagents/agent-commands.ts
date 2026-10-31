@@ -31,6 +31,8 @@ import {
     loadCatalog,
     projectCatalogPaths,
     refreshCatalog,
+    resetRuntimeToBundled,
+    resetUserDefinition,
     saveDefinition,
     userCatalogPaths,
     type CatalogSnapshot,
@@ -757,6 +759,37 @@ async function finishInspection(host: AgentCommandHost, commandResult: AgentComm
                             commandResult.scope = saved.scope;
                         }
                         return { ok: saved.ok, message: saved.ok ? `Defaults saved (${saved.scope}): ${id}.` : saved.diagnostics.map((item) => item.message).join(" ") };
+                    },
+                    resetToBundled(entry) {
+                        const source = entry.winningSource;
+                        if (!source) return { ok: false, message: "The definition source is unavailable. Reopen its settings." };
+                        const reset = resetRuntimeToBundled({ ...location(host, deps), id: entry.id, expectedPath: source.path, expectedDigest: source.contentDigest });
+                        if (reset.ok) {
+                            commandResult.wrote = true;
+                            commandResult.path = reset.path;
+                            commandResult.scope = "user";
+                            try { deps.sessionSettings!.reset(entry.id); }
+                            catch (error) {
+                                return { ok: false, message: `Saved defaults reset for ${entry.id}, but current-session overrides remain active: ${error instanceof Error ? error.message : String(error)}. Retry Reset to bundled to clear them.` };
+                            }
+                        }
+                        return { ok: reset.ok, message: reset.ok
+                            ? `Bundled model/effort restored: ${entry.id}. Role instructions unchanged.`
+                            : reset.diagnostics.map(item => item.message).join(" ") };
+                    },
+                    resetDefinition(entry) {
+                        if (entry.identity.scope === "bundled") return { ok: true, message: `Already using bundled instructions: ${entry.id}. Model/effort unchanged.` };
+                        const source = entry.winningSource;
+                        if (!source) return { ok: false, message: "The definition source is unavailable. Reopen its settings." };
+                        const reset = resetUserDefinition({ ...location(host, deps), id: entry.id, expectedPath: source.path, expectedDigest: source.contentDigest });
+                        if (reset.ok) {
+                            commandResult.wrote = true;
+                            commandResult.path = reset.path;
+                            commandResult.scope = "user";
+                        }
+                        return { ok: reset.ok, message: reset.ok
+                            ? `Bundled instructions restored: ${entry.id}. Model/effort kept. Backup: ${reset.backupPath}.`
+                            : reset.diagnostics.map(item => item.message).join(" ") };
                     },
                 } : undefined, () => viewportHeight), {
                     overlay: true,
