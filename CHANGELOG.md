@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.35.3] - 2026-10-31
+
+### Fixed
+
+- Bundle Subagents 0.23.3 so a role that resolves an `ollama-cloud` model starts in its isolated child with the provider's auth extension loaded.
+
+## [pi-better-subagents@0.23.3] - 2026-10-31
+
+### Fixed
+
+- Load the built-in `pi-ollama-cloud` provider extension for `ollama-cloud` models in isolated children, so a role that resolves that provider starts with its model auth instead of failing as an unknown model. A `providerExtensions` entry still replaces the built-in entry per provider, and an empty list opts out. (#604)
+
 ## [pi-better-harness@0.35.2] - 2026-10-30
 
 ### Fixed
