@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.36.0] - 2026-10-31
+
+### Changed
+
+- Bundle Subagents 0.24.0, Background Tasks 0.13.0, and Goal 0.11.0. Sandbox 0.14.0 and SSH 0.1.4 are unchanged.
+- Share the sticky navigator across Goal, Outcome & Todo, Subagents, and Background Tasks rows. **Sticky navigator** in `/harness-settings` defaults On and saves `piBetterHarness.navigator`; Off moves the navigator into the conversation. (#606)
+
+## [pi-better-subagents@0.24.0] - 2026-10-31
+
+### Added
+
+- Use shared navigator panels, with the standalone package shipping its own copy, for the same sticky navigator setting as Goal, Outcome & Todo, and Background Tasks. (#606)
+- Add native Settings, Instructions, and Files pages to `/agents`; Files shows definition and saved-config sources plus the current session edits. (#607)
+
+### Changed
+
+- Save model and effort with Ctrl+S to `agents/settings.json` instead of rewriting Markdown definitions, preserving prompts and other saved fields. Ctrl+S is the only save control. (#607)
+- Add independent **Reset to bundled** actions: Settings restores model/effort without changing the prompt, while Instructions restores the prompt while keeping model/effort. (#607)
+- Label saved values that inherit the current bundled defaults as `bundled`, so later bundle updates keep applying. (#607)
+- Give the Developer role release metadata preparation while leaving delivery and publishing to the coordinator. (#607)
+
+## [pi-better-background-tasks@0.13.0] - 2026-10-31
+
+### Changed
+
+- Use the shared navigator panels, with a standalone copy, so the Background Tasks row follows the shared Sticky navigator setting. (#606)
+
+## [pi-better-goal@0.11.0] - 2026-10-31
+
+### Changed
+
+- Use the shared navigator panels, with a standalone copy, so Goal rows follow the shared Sticky navigator setting. (#606)
+
 ## [pi-better-harness@0.35.3] - 2026-10-31
 
 ### Fixed
