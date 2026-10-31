@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Text, matchesKey, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { readHarnessSetting, updateHarnessSetting } from "../shared-harness-settings.js";
+import { initializeNavigatorPanels, setNavigatorPanel } from "../shared-navigator-panels.ts";
 import { reconstructGoalSnapshot } from "pi-better-goal/src/goal-state.ts";
 import { formatClockDuration, goalTiming } from "pi-better-goal/src/goal-clock.ts";
 import { OUTCOME_ENTRY, prepareOutcome, restoreOutcome, formatOutcome, type Outcome, type OutcomeInput } from "./outcome-state.js";
@@ -123,6 +124,7 @@ function workflowPlanOwner(ctx: ExtensionContext): string | null {
 }
 
 export default function taskContextExtension(pi: ExtensionAPI): void {
+  initializeNavigatorPanels(pi);
   let enabled = false;
   let display = true;
   let widgetContext: ExtensionContext | undefined;
@@ -315,7 +317,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
   const installWidget = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
     widgetContext = ctx;
-    ctx.ui.setWidget(
+    setNavigatorPanel(ctx,
       EXTENSION_NAME,
       (tui, theme) => {
         const localRefresh = (force = false): void => tui.requestRender(force);
@@ -693,7 +695,7 @@ export default function taskContextExtension(pi: ExtensionAPI): void {
     refreshWidget = undefined;
     widgetContext = undefined;
     try {
-      ctx.ui.setWidget(EXTENSION_NAME, undefined);
+      setNavigatorPanel(ctx, EXTENSION_NAME, undefined);
     } catch { /* best-effort cleanup */ }
     legacyPlanMask?.dispose();
     legacyPlanMask = undefined;

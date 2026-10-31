@@ -61,6 +61,7 @@ function createTaskContextHarness(options: {
   const messages: unknown[] = [];
   const userMessages: Array<{ content: string; options: unknown }> = [];
   const ctx = {
+    mode: "tui",
     hasUI: options.hasUI === true,
     isIdle: () => true,
     cwd: "/tmp/project",
@@ -327,7 +328,7 @@ test("Harness presence suppresses Goal's workflow objective line but retains wor
 });
 
 function goalWidget(harness: ReturnType<typeof createTaskContextHarness>) {
-  const installed = harness.widgets.get("pi-better-goal");
+  const installed = harness.widgets.get("background-work-list");
   assert.ok(installed, "expected Goal to install its clock widget");
   return installed.factory(harness.tui, { fg: (_color: string, value: string) => value });
 }

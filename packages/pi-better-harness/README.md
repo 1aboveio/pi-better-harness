@@ -180,6 +180,13 @@ to the `/agents` catalog. `/sandbox`, `/subagents settings`, `/agents`, and
 `/goal settings` remain available in standalone installations.
 Packages without a settings screen are not listed. Pi's `/settings` is unchanged.
 
+**Sticky navigator** controls the shared navigator used by Goal, Outcome & Todo,
+Subagents, and Background Tasks. **On** (the default) keeps it above the input;
+**Off** places it in the conversation so it scrolls with chat. Changes apply
+immediately and save under `piBetterHarness.navigator` for future sessions.
+Package controls and detail views remain available in either mode. Standalone
+packages use the same shared navigator and saved preference.
+
 The hub includes **Tool output** and **Tool animation** when the bundled renderer
 extension is loaded. Changes apply immediately and save the default for future
 sessions. The animation preference is stored in `piBetterHarness.toolAnimation`;

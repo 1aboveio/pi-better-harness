@@ -2,6 +2,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth as piTruncateToWidth, visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import { createRenderScheduler, type RenderScheduler } from "./shared-render-scheduler.ts";
+import { setNavigatorPanel } from "./shared-navigator-panels.ts";
 
 export default function navigatorExtension(): void {
   // Internal shared package. Pi may scan its symlink in the extension directory
@@ -195,7 +196,7 @@ export function ensureBackgroundWorkNavigator(ctx: ExtensionContext, deps: HostD
     ...deps,
     createTranscriptComponent: deps.createTranscriptComponent ?? s.deps?.createTranscriptComponent,
   };
-  try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+  try { setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   s.mainListWidgetInstalled = false;
   s.mainListRequestRender = undefined;
   s.mainListDeadlineScheduler?.dispose();
@@ -215,8 +216,7 @@ export function disposeBackgroundWorkNavigator(ctx?: ExtensionContext): void {
   const activeCtx = ctx ?? s.uiCtx;
   s.uiCtx = undefined;
   if (activeCtx && isNavigatorUiAvailable(activeCtx)) {
-    const ui = activeCtx.ui;
-    try { (ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+    try { setNavigatorPanel(activeCtx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
   }
   s.lastHint = undefined;
   s.lastMainListLines = undefined;
@@ -291,7 +291,7 @@ function refreshMainListWidget(): void {
   })] : undefined;
   if (!rows.length) {
     if (!s.mainListWidgetInstalled) return;
-    try { (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
+    try { setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, undefined); } catch { /* ignore */ }
     s.mainListWidgetInstalled = false;
     s.mainListRequestRender = undefined;
     s.lastMainListSignature = undefined;
@@ -299,7 +299,7 @@ function refreshMainListWidget(): void {
   }
   if (!s.mainListWidgetInstalled) {
     try {
-      (ctx.ui as any).setWidget?.(MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown) => createMainListWidget(tui, theme, deps), { placement: "aboveEditor" });
+      setNavigatorPanel(ctx, MAIN_LIST_WIDGET_KEY, (tui: { requestRender?(): void }, theme: unknown) => createMainListWidget(tui, theme, deps), { placement: "aboveEditor" });
       s.mainListWidgetInstalled = true;
     } catch { /* ignore */ }
   }

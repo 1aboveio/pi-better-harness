@@ -9,6 +9,7 @@ import { createGoalSnapshot, goalSetEntry } from "pi-better-goal/src/goal-state.
 import goalExtension from "../../../pi-better-goal/src/index.js";
 import extension from "../../extensions/task-context/index.js";
 import { planSetEntry, replacePlan } from "../../extensions/task-context/plan-state.js";
+import { disposeBackgroundWorkNavigator, ensureBackgroundWorkNavigator, registerBackgroundWorkProvider } from "../../../navigator/index.ts";
 
 async function fixture(t: TestContext, preferences?: { enabled: boolean; display: boolean }, withState = true) {
   const dir = mkdtempSync(join(tmpdir(), "todo-display-hooks-"));
@@ -55,7 +56,7 @@ async function fixture(t: TestContext, preferences?: { enabled: boolean; display
   });
   await hooks.get("session_start")({}, ctx);
   return { dir, settingsPath, ctx, entries, goal, outcome, events, settings, tools, commands, hooks, pi, widgets,
-    active: () => active, render: (width = 80) => widgets.get("pi-better-plan").render(width), fullView: () => fullView };
+    active: () => active, render: (width = 80) => widgets.get("background-work-list").render(width), fullView: () => fullView };
 }
 
 test("saved task display defaults on without enabling hooks or writing configuration or session entries", async t => {
@@ -140,22 +141,44 @@ test("both real extensions hand the clock back across narrow resize boundaries",
   const goalHooks = new Map<string, any>();
   goalExtension({ ...f.pi, on(name: string, handler: any) { goalHooks.set(name, handler); } });
   t.after(async () => {
-    f.widgets.get("pi-better-goal")?.dispose?.();
+    f.widgets.get("background-work-list")?.dispose?.();
     await goalHooks.get("session_shutdown")({}, f.ctx);
   });
   await goalHooks.get("session_start")({}, f.ctx);
-  const widget = f.widgets.get("pi-better-goal");
   for (const width of [40, 17, 40]) {
-    const standalone = widget.render(width).join("\n");
     const combined = f.render(width).join("\n");
     if (width === 17) {
-      assert.match(standalone, /^goal active \d+:\d\d/);
-      assert.doesNotMatch(combined, /\d+:\d\d/);
+      assert.match(combined, /^goal active \d+:\d\d/m);
     } else {
-      assert.equal(standalone, "");
+      assert.doesNotMatch(combined, /^goal /m);
       assert.match(combined, /active\s+\d+:\d\d/);
     }
+    assert.equal((combined.match(/\d+:\d\d/g) ?? []).length, 1, "one shared surface owns the clock at every width");
   }
+});
+
+test("Goal, Todo, and background work reuse one native navigator", async t => {
+  const f = await fixture(t, { display: true, enabled: false });
+  let editorFactory: any;
+  f.ctx.ui.getEditorComponent = () => editorFactory;
+  f.ctx.ui.setEditorComponent = (factory: any) => { editorFactory = factory; };
+  const unregister = registerBackgroundWorkProvider({
+    id: "combined-test", label: "Background Tasks", priority: 20,
+    visibleCount: () => 1,
+    listRows: () => [{ providerId: "combined-test", id: "task-one", name: "Verify shared rendering", status: "running", statusTone: "running", kind: "process", elapsed: "1s", primary: "test", sortStartedAt: 1 }],
+    detail: () => null, armCloseLabel: () => "stop", close: id => ({ action: "stopped", providerId: "combined-test", id }),
+  });
+  t.after(() => { disposeBackgroundWorkNavigator(f.ctx); unregister(); });
+  ensureBackgroundWorkNavigator(f.ctx, {
+    createDefaultEditor: () => ({ getText: () => "", handleInput() {}, render: () => [], invalidate() {} }),
+    isOpenTrigger: data => data === "left", matchKey: (data, key) => data === key,
+    truncate: (text, width) => text.slice(0, width),
+  });
+  const text = f.render().join("\n");
+  assert.deepEqual([...f.widgets.keys()], ["background-work-list"], "all panels mount through the shared navigator");
+  assert.match(text, /Customers can finish checkout/);
+  assert.match(text, /Verify checkout/);
+  assert.match(text, /Verify shared rendering/);
 });
 
 test("the full view retains long outcomes and all acceptance criteria beyond the compact subtitle", async t => {

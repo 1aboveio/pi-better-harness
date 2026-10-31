@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { disposeBackgroundWorkNavigator } from "./shared-navigator.ts";
+import { initializeNavigatorPanels } from "./shared-navigator-panels.ts";
 import { registerBackgroundTasksGoalProvider } from "./goal-provider.js";
 import { clearBackgroundTasksNavigatorSession, ensureBackgroundTasksNavigator, ensureBackgroundTasksNavigatorProvider } from "./navigator-provider.js";
 import { resumeScheduledWork, suspendScheduledWork } from "./runtime.js";
@@ -8,6 +9,7 @@ import { registerTools } from "./tools.js";
 import { appendExecutionPolicy } from "./shared-execution-policy.js";
 
 export default function backgroundTasksExtension(pi: ExtensionAPI): void {
+  initializeNavigatorPanels(pi);
   pi.on("before_agent_start", (event) => ({ systemPrompt: appendExecutionPolicy(event.systemPrompt) }));
   registerBackgroundTasksGoalProvider(pi);
   ensureBackgroundTasksNavigatorProvider(pi);

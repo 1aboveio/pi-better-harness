@@ -142,7 +142,7 @@ test("todo tools persist progress without taking over editor navigation", async 
 
   assert.equal(statuses.size, 0, "Todo must not write to the status bar");
   assert.equal(editorInstallations, 0, "the plan leaves the editor component unchanged");
-  const widgetFactory = widgets.get("pi-better-plan")?.content;
+  const widgetFactory = widgets.get("background-work-list")?.content;
   assert.equal(typeof widgetFactory, "function");
   const widget = widgetFactory({ requestRender: () => undefined }, { fg: (_color: string, value: string) => value });
   assert.ok(widget.render(80).every((line: string) => !line.startsWith("›")));

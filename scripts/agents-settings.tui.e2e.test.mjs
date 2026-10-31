@@ -55,7 +55,7 @@ export default function(pi) {
         wait(/pi-better-subagents/);
         literal("/harness-settings"); key("Tab"); key("Enter");
         wait(/Agents\s+\/agents/);
-        key("Down"); key("Enter");
+        key("Down"); key("Down"); key("Enter");
         const catalogScreen = wait(/Agents.*definitions/);
         assert.match(catalogScreen.split("\n")[0], /^Agents/);
         assert.match(catalogScreen, /MODEL\s+EFFORT/);

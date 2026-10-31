@@ -424,6 +424,8 @@ test("released workflow stays inspectable but cannot write; replacement and clea
   await resumed.start();
   assert.match(resumed.widget(), /read-only handoff/);
   assert.equal((await resumed.get()).details.plan?.planRevision, 2);
+  await resumed.shutdown();
+  await harness.start();
 
   await assert.rejects(harness.update({ todo: [
     { step: "Same", status: "in_progress" },

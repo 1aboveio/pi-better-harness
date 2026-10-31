@@ -30,17 +30,21 @@ test("subagents contributes the standalone settings opener with shared session a
         events,
         registerTool() {},
         registerCommand(name, command) { commands.set(name, command); },
-        on(name, handler) { handlers.set(name, handler); },
+        on(name, handler) {
+            const prior = handlers.get(name);
+            handlers.set(name, async (...args) => { await prior?.(...args); return handler(...args); });
+        },
         appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
         sendMessage() { assert.fail("settings must not send messages"); },
         sendUserMessage() { assert.fail("settings must not send user messages"); },
     });
-    assert.equal(registrations.length, 2);
-    const contribution = registrations[0];
+    const packageLinks = registrations.filter(item => item.command);
+    assert.equal(packageLinks.length, 2);
+    const contribution = packageLinks[0];
     assert.equal(contribution.id, "subagents");
     assert.equal(contribution.label, "Subagents");
     assert.equal(contribution.command, "/subagents settings");
-    const agents = registrations[1];
+    const agents = packageLinks[1];
     assert.equal(agents.id, "agents");
     assert.equal(agents.label, "Agents");
     assert.equal(agents.command, "/agents");
@@ -48,7 +52,8 @@ test("subagents contributes the standalone settings opener with shared session a
     events.on("harness-settings:register", (data) => later.push(data));
     events.emit("harness-settings:request");
     events.emit("harness-settings:request");
-    assert.deepEqual(later, [contribution, agents, contribution, agents]);
+    assert.deepEqual(later.filter(item => item.command), [contribution, agents, contribution, agents]);
+    assert.equal(later.filter(item => item.id === "navigator-sticky").length, 2, "the shared navigator contributes its setting on each discovery");
 
     const pages = [];
     const uiEvents = [];

@@ -38,6 +38,7 @@ import {
   renderGoalClockLine,
 } from "./goal-clock.js";
 import { createRenderScheduler } from "./shared-render-scheduler.js";
+import { initializeNavigatorPanels, setNavigatorPanel } from "./shared-navigator-panels.js";
 import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
 import { completionGate, pauseGate, schedulerWaitUntil } from "./workflow-gates.js";
@@ -301,6 +302,7 @@ function formatSnapshot(snapshot: ActivitySnapshot): string {
 }
 
 export default function (pi: ExtensionAPI): void {
+  initializeNavigatorPanels(pi);
   const providers = new Map<string, BackgroundActivityProvider>();
   const providerUnsubscribers = new Map<string, () => void>();
   providers.set("subagents", {
@@ -793,7 +795,8 @@ export default function (pi: ExtensionAPI): void {
     if (!ctx.hasUI) {
       return;
     }
-    ctx.ui.setWidget(
+    setNavigatorPanel(
+      ctx,
       EXTENSION_NAME,
       (tui, theme) => {
         const inputIsEditor = (): boolean => {
@@ -1589,7 +1592,7 @@ export default function (pi: ExtensionAPI): void {
     latestSnapshot = null;
     collectionPending = false;
     try {
-      ctx.ui.setWidget(EXTENSION_NAME, undefined);
+      setNavigatorPanel(ctx, EXTENSION_NAME, undefined);
     } catch {
       // Best-effort cleanup.
     }

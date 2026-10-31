@@ -180,6 +180,7 @@ test("only the slash command creates a goal and installs an observability-safe w
   const widgets = new Map<string, WidgetRecord>();
 
   const ctx = {
+    mode: "tui",
     hasUI: true,
     isIdle: () => true,
     sessionManager: { getBranch: () => entries },
@@ -223,7 +224,7 @@ test("only the slash command creates a goal and installs an observability-safe w
   assert.ok(sessionStart);
   await sessionStart({ reason: "startup" }, ctx);
 
-  const widget = widgets.get("pi-better-goal");
+  const widget = widgets.get("background-work-list");
   assert.equal(widget?.options?.placement, "aboveEditor");
   assert.equal(typeof widget?.content, "function");
 
