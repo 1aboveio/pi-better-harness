@@ -29,6 +29,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentSessionOverrides } from "./agent-session-settings.ts";
+import { readCatalogPreferences, writeCatalogPreferences } from "./catalog-preferences.ts";
 import {
     CATALOG_SCHEMA_VERSION,
     DiagnosticCodes,
@@ -40,6 +41,7 @@ import {
     type CatalogScope,
     type Diagnostic,
     type ParseResult,
+    type ThinkingLevel,
 } from "./catalog-schema.ts";
 
 export type { CatalogScope, CatalogKind, CatalogDefinition, Diagnostic, ParseResult };
@@ -111,6 +113,8 @@ export interface CatalogSnapshot {
     diagnostics: readonly Diagnostic[];
     /** Immutable, branch-local preferences; never written by loadCatalog. */
     sessionSettings?: AgentSessionOverrides;
+    savedSettings?: AgentSessionOverrides;
+    preferenceSources?: Readonly<Record<string, Readonly<Partial<Record<"model" | "effort", { scope: "user" | "project"; path: string; bundled?: boolean }>>>>>;
 }
 
 export interface SaveResult {
@@ -226,7 +230,65 @@ export function loadCatalog(input: LoadCatalogInput): CatalogSnapshot {
     }
 
     const { entries, blocked } = selectIdentities(groups, diagnostics);
-    return finishSnapshot(entries, blocked, diagnostics, loadedAt);
+    const savedSettings: Record<string, { model?: string | null; effort?: ThinkingLevel | null }> = {};
+    const preferenceSources: Record<string, Partial<Record<"model" | "effort", { scope: "user" | "project"; path: string; bundled?: boolean }>>> = {};
+    const preferenceDigests: string[] = [];
+    const scopes = [
+        { scope: "user" as const, root: user.root },
+        ...(input.projectTrusted ? [{ scope: "project" as const, root: projectCatalogPaths(input.cwd, configDirName).root }] : []),
+    ];
+    for (const { scope, root } of scopes) {
+        try {
+            const preferences = readCatalogPreferences(root);
+            preferenceDigests.push(preferences.digest);
+            for (const entry of entries) {
+                if (scope === "user" && entry.scope === "project") continue;
+                const own = preferences.settings[entry.id];
+                if (!own) continue;
+                const resolved: { model?: string | null; effort?: ThinkingLevel | null } = {};
+                if (own.bundled) {
+                    const fallbacks = entry.scope === "bundled" ? [entry] : entry.unused.filter(source => source.scope === "bundled");
+                    const fallback = fallbacks.length === 1 ? fallbacks[0] : undefined;
+                    const raw = fallback ? readFileSync(fallback.path, "utf8") : undefined;
+                    const parsed = raw === undefined ? undefined : parseDefinition(raw, fallback!.path);
+                    if (!fallback || !parsed?.ok || parsed.definition?.id !== entry.id || parsed.diagnostics.some(item => item.blocking)
+                        || contentDigest(raw!) !== fallback.contentDigest) {
+                        const failure = diagnostic("catalog-preferences", `Cannot inherit bundled runtime defaults for ${entry.id}: a single valid bundled definition is required.`, {
+                            scope, path: join(root, "settings.json"), id: entry.id, blocking: true, structural: false,
+                        });
+                        entry.diagnostics = [...entry.diagnostics, failure];
+                        entry.schemaLaunchable = false;
+                        diagnostics.push(failure);
+                        continue;
+                    }
+                    const bundled = parsed.definition.kind === "role" ? parsed.definition.defaults : parsed.definition.overrides;
+                    resolved.model = bundled.model ?? null;
+                    resolved.effort = bundled.effort ?? null;
+                }
+                for (const key of ["model", "effort"] as const) {
+                    if (Object.hasOwn(own, key)) Object.assign(resolved, { [key]: own[key] });
+                }
+                savedSettings[entry.id] = { ...savedSettings[entry.id], ...resolved };
+                const sources = preferenceSources[entry.id] ??= {};
+                for (const key of ["model", "effort"] as const) {
+                    if (Object.hasOwn(resolved, key)) sources[key] = { scope, path: join(root, "settings.json"), ...(own.bundled && !Object.hasOwn(own, key) ? { bundled: true } : {}) };
+                }
+            }
+        } catch (error) {
+            const failure = diagnostic("catalog-preferences", error instanceof Error ? error.message : String(error), {
+                scope, path: join(root, "settings.json"), blocking: true, structural: false,
+            });
+            diagnostics.push(failure);
+            for (const entry of entries) {
+                if (scope === "user" && entry.scope === "project") continue;
+                entry.diagnostics = [...entry.diagnostics, failure];
+                entry.schemaLaunchable = false;
+            }
+        }
+    }
+    const snapshot = finishSnapshot(entries, blocked, diagnostics, loadedAt);
+    const digest = contentDigest(JSON.stringify([snapshot.digest, preferenceDigests, savedSettings, preferenceSources]));
+    return deepFreeze({ ...snapshot, digest, revision: digest, savedSettings, preferenceSources });
 }
 
 export function refreshCatalog(input: LoadCatalogInput): CatalogSnapshot {
@@ -235,6 +297,130 @@ export function refreshCatalog(input: LoadCatalogInput): CatalogSnapshot {
 
 export function createDefinition(input: SaveDefinitionInput): SaveResult {
     return saveDefinition({ ...input, replace: input.replace ?? false });
+}
+
+type ResetDefinitionInput = LoadCatalogInput & {
+    id: string;
+    expectedPath: string;
+    expectedDigest: string;
+};
+
+/** Archive one displayed user override, preserving its model and effort preferences. */
+export function resetUserDefinition(input: ResetDefinitionInput): SaveResult & { backupPath?: string } {
+    return resetDefinition(input, false);
+}
+
+/** Restore bundled defaults, archiving a user definition and clearing only this id's user preferences. */
+export function resetToBundled(input: ResetDefinitionInput): SaveResult & { backupPath?: string } {
+    return resetDefinition(input, true);
+}
+
+/** Restore bundled model and effort while keeping every Markdown definition intact. */
+export function resetRuntimeToBundled(input: ResetDefinitionInput): SaveResult {
+    return resetDefinition(input, true, true);
+}
+
+function assertNoProjectPreferences(snapshot: CatalogSnapshot, id: string): void {
+    if (Object.values(snapshot.preferenceSources?.[id] ?? {}).some(source => source.scope === "project")) {
+        throw new Error("Project preferences are active for this id. Reset to bundled cannot clear project preferences. Nothing was archived.");
+    }
+}
+
+function resetDefinition(input: ResetDefinitionInput, clearPreferences: boolean, runtimeOnly = false): SaveResult & { backupPath?: string } {
+    try {
+        const snapshot = loadCatalog(input);
+        const entry = snapshot.roles.get(input.id) ?? snapshot.agents.get(input.id);
+        if (!entry || (entry.scope !== "user" && !(clearPreferences && entry.scope === "bundled")) || entry.duplicate || entry.paths.length !== 1) {
+            throw new Error(clearPreferences
+                ? "Only a single user or bundled definition can be reset. Project definitions are unchanged."
+                : "Only a single user override can be reset. Project and bundled definitions are unchanged.");
+        }
+        if (clearPreferences) assertNoProjectPreferences(snapshot, input.id);
+        if (entry.path !== input.expectedPath || entry.contentDigest !== input.expectedDigest) {
+            throw new Error("The user definition changed since this screen was opened. Reopen its settings before resetting.");
+        }
+        const fallbacks = entry.scope === "bundled" ? [entry] : entry.unused.filter(source => source.scope === "bundled");
+        if (fallbacks.length !== 1) throw new Error("Exactly one bundled definition must be available for this id. Nothing was changed.");
+        const fallback = fallbacks[0]!;
+        const bundledRoot = entry.kind === "role" ? input.bundledRoot ?? bundledRolesRoot() : input.bundledAgentsRoot;
+        if (!bundledRoot || lstatSync(bundledRoot).isSymbolicLink()) throw new Error("The bundled catalog is unavailable or symlinked.");
+        assertInside(bundledRoot, fallback.path);
+        assertNoSymlinkWalk(bundledRoot, fallback.path);
+        const bundledRaw = readFileSync(fallback.path, "utf8");
+        const bundled = parseDefinition(bundledRaw, fallback.path);
+        if (!bundled.ok || bundled.diagnostics.some(item => item.blocking) || bundled.definition?.id !== input.id || contentDigest(bundledRaw) !== fallback.contentDigest) {
+            throw new Error("The bundled definition is invalid. Nothing was changed.");
+        }
+        const root = userCatalogPaths(input.userRoot).root;
+        const directory = join(root, entry.kind === "role" ? "roles" : "agents");
+        const definitionRoot = entry.scope === "user" ? input.userRoot : bundledRoot;
+        if (entry.scope === "user" && resolve(dirname(entry.path)) !== resolve(directory)) throw new Error("The user definition is outside its catalog directory.");
+        assertInside(definitionRoot, entry.path);
+        assertNoSymlinkWalk(definitionRoot, entry.path);
+        const stats = lstatSync(entry.path);
+        const raw = readFileSync(entry.path);
+        const text = raw.toString("utf8");
+        if (!stats.isFile() || stats.isSymbolicLink() || !Buffer.from(text).equals(raw) || contentDigest(text) !== input.expectedDigest) {
+            throw new Error("The user definition changed before reset. Nothing was changed.");
+        }
+        let previous: NonNullable<AgentSessionOverrides[string]> = {};
+        const legacy = entry.definition?.kind === "role" ? entry.definition.defaults : entry.definition?.overrides;
+        const bundledPreferences = bundled.definition?.kind === "role" ? bundled.definition.defaults : bundled.definition?.overrides;
+        const legacyPreferences = {
+            ...(legacy?.model !== undefined ? { model: legacy.model } : bundledPreferences?.model !== undefined ? { model: null } : {}),
+            ...(legacy?.effort !== undefined ? { effort: legacy.effort } : bundledPreferences?.effort !== undefined ? { effort: null } : {}),
+        };
+        // Clearing JSON alone would reveal legacy runtime choices in user Markdown.
+        const runtimePreferences = entry.scope === "user" ? { bundled: true as const } : {};
+        const assertBundledUnchanged = () => {
+            if (lstatSync(bundledRoot).isSymbolicLink()) throw new Error("The bundled catalog is unavailable or symlinked.");
+            assertInside(bundledRoot, fallback.path);
+            assertNoSymlinkWalk(bundledRoot, fallback.path);
+            if (readFileSync(fallback.path, "utf8") !== bundledRaw) {
+                throw new Error("The bundled fallback changed while saving preferences. Nothing was archived. Reopen its settings.");
+            }
+        };
+        const saved = writeCatalogPreferences(root, input.id, current => {
+            if (runtimeOnly) assertBundledUnchanged();
+            previous = current;
+            return runtimeOnly ? runtimePreferences : clearPreferences ? {} : current.bundled ? current : { ...legacyPreferences, ...current };
+        });
+        // Discovery skips hidden files. Keep the original bytes for manual recovery.
+        const backupPath = entry.scope === "user" && !runtimeOnly
+            ? join(directory, `.${basename(entry.path)}.${randomBytes(12).toString("hex")}.backup`)
+            : undefined;
+        try {
+            const refreshed = loadCatalog(input);
+            const current = refreshed.roles.get(input.id) ?? refreshed.agents.get(input.id);
+            if (clearPreferences) assertNoProjectPreferences(refreshed, input.id);
+            const currentFallbacks = current?.scope === "bundled" ? [current] : current?.unused.filter(source => source.scope === "bundled") ?? [];
+            if (current?.scope !== entry.scope || current.duplicate || current.path !== entry.path || current.contentDigest !== input.expectedDigest
+                || currentFallbacks.length !== 1 || currentFallbacks[0]?.path !== fallback.path || currentFallbacks[0]?.contentDigest !== fallback.contentDigest) {
+                throw new Error("The definition or bundled fallback changed while saving preferences. Nothing was archived. Reopen its settings.");
+            }
+            assertBundledUnchanged();
+            assertNoSymlinkWalk(definitionRoot, entry.path);
+            const latest = readFileSync(entry.path);
+            if (!latest.equals(raw) || !lstatSync(entry.path).isFile()) {
+                throw new Error("The user definition changed while saving preferences. Nothing was archived. Reopen its settings.");
+            }
+            if (backupPath) renameSync(entry.path, backupPath);
+        }
+        catch (error) {
+            // Compare and roll back under the same lock; preserve any later edit.
+            try {
+                writeCatalogPreferences(root, input.id, current => JSON.stringify(current) === JSON.stringify(saved.settings[input.id] ?? {}) ? previous : current);
+            } catch (rollback) {
+                throw new Error(`${error instanceof Error ? error.message : String(error)} Preference rollback also failed: ${rollback instanceof Error ? rollback.message : String(rollback)}`);
+            }
+            throw error;
+        }
+        return { ok: true, path: backupPath ? entry.path : saved.path, backupPath, scope: "user", diagnostics: [] };
+    } catch (error) {
+        return { ok: false, diagnostics: [diagnostic("agents-reset", error instanceof Error ? error.message : String(error), {
+            scope: "user", id: input.id, blocking: true, structural: false,
+        })] };
+    }
 }
 
 export function saveDefinition(input: SaveDefinitionInput): SaveResult {

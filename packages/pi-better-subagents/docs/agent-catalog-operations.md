@@ -6,7 +6,7 @@ Commands, the read-only discovery tool, and the Codex importer for `pi-agent/v1`
 
 `/agents` is one Pi command. Dialogs use `ctx.ui.select`, `confirm`, `input`, and `editor`. `ctx.hasUI` is false in print and JSON mode. When a choice or confirmation is required there, the command returns `clarification-needed` and writes nothing.
 
-In an interactive TUI, `/agents`, `/agents list`, and `/agents show` open a focused catalog view instead of leaving the listing in a persistent widget. Rows align name, effective model, source, and launch state; narrow terminals retain name and model. The model is the resolved actual model when available, otherwise the requested or inherited preference, or `not resolved`. Type to filter by id, name, description, or base role; use Up/Down and Enter to inspect. The detail view puts launchability and its reason first, then source, inherited/overridden settings, and diagnostics. Press `p` in detail to read the complete effective instructions (role plus agent in add mode, agent text in replace mode); this is not the task-specific launch prompt. Up/Down scrolls detail or prompt; Left or Escape returns to detail, then list, clears the filter, then closes. `/agents show <id>` opens that definition directly. Print/JSON callers still receive the complete text and structured result; bare `/agents` still returns help outside the custom TUI.
+In an interactive TUI, `/agents`, `/agents list`, and `/agents show` open a focused catalog view instead of leaving the listing in a persistent widget. Rows align name, effective model, source, and launch state; narrow terminals retain name and model. The model is the resolved actual model when available, otherwise the requested or inherited preference, or `not resolved`. Type to filter by id, name, description, or base role; use Up/Down and Enter to inspect. The detail view opens **Settings**, with Model, Effort, launch resolution, and diagnostics. **Instructions** contains the complete effective prompt (role plus agent in add mode, agent text in replace mode); this is not the task-specific launch prompt. **Files** shows definition and saved-config sources plus current session edits. Tab and Shift+Tab cycle between these pages; `p` opens Instructions. Up/Down selects settings or scrolls the current page. Left or Escape returns to Settings, then list, clears the filter, then closes. `/agents show <id>` opens that definition directly. Print/JSON callers still receive the complete text and structured result; bare `/agents` still returns help outside the custom TUI.
 
 ### Model and effort edits
 
@@ -16,7 +16,27 @@ The scope affects only the picker. Launch and runtime model resolution keep read
 
 A selected value immediately appends a custom entry to the current session branch. It does not write a catalog file. Reloading the extension or session restores the active branch's edits. Branches share their common ancestor settings but subsequent edits do not cross to siblings. Role edits flow into named agents that inherit that field. Choosing `Inherit` removes the selected definition's own value, including a saved agent override, instead of storing an explicit null preference. For a role with no parent, that removes its default. Later role/file edits remain live.
 
-Ctrl+S in list, detail, or settings (or Enter on Save as defaults) explicitly saves the selected definition's own model and effort changes. It never copies inherited role fields into an agent. Existing personal/project definitions stay in their winning scope; a bundled definition becomes a personal whole-definition shadow copy, leaving the package file untouched. Project trust, duplicate/invalid-definition checks, validation, and atomic catalog writes still apply. Both successful and failed saves leave branch edits intact. A failed save reports the error without changing the catalog defaults.
+Ctrl+S saves the selected definition's model and effort edits to `agents/settings.json` in user scope, or the corresponding trusted project catalog. It never copies or rewrites a Markdown definition, so changing a bundled role's model does not freeze its prompt or its untouched defaults. Existing saved preferences for other definitions are preserved. Writes validate the config and use a lock plus atomic replacement; malformed config is not overwritten. Both successful and failed saves leave branch edits intact.
+
+The dedicated config has this shape:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "role.developer": { "model": "openai/gpt-6.1-sol", "effort": "high" }
+  }
+}
+```
+
+Saved fields override definition defaults one field at a time; branch edits override saved fields. A record with `bundled: true` takes model/effort defaults from the current bundled definition before applying any explicit fields in that record. Trusted project config wins over user config. User config does not override a project-owned Markdown definition. The detail view labels saved fields as `user config` or `project config`.
+
+Both Settings and Instructions offer **Reset to bundled**, with independent effects:
+
+- **Settings:** follows the current bundled model and effort, clears that id's current-session choices, and leaves its Markdown prompt unchanged. A user definition records `{ "bundled": true }` instead of copied default values; the UI shows `bundled`, and later bundle updates apply automatically. An explicit model/effort choice can override one field while the other keeps following the bundle. Project-owned definitions and active project config are excluded.
+- **Instructions:** archives a user Markdown override in a hidden `.backup` file beside the original and reveals the bundled role prompt. Its model/effort choices move to the config where needed, and session choices remain unchanged. An already-bundled prompt needs no change. Project definitions are excluded.
+
+Click the action once, or select it in Settings and press Enter. In Instructions, Enter activates the reset when scrolled to the top. The action requires a valid bundled fallback and refuses stale selections, duplicates, and symlink redirects. Other definitions stay unchanged. Saving remains **Ctrl+S** only; there is no Save button or selectable save row. Existing overrides remain intact until explicitly reset.
 
 New launches and `agents_catalog` discovery use the same session overlay. Explicit per-run model/effort choices still win, a batch retains one immutable snapshot, and active/completed runs do not change. Role effort remains an inherited default with the existing nearest-supported adjustment; named-agent effort remains explicit and blocks when unsupported. The lifecycle wiring required to enable this surface is in [agent-catalog-lifecycle.md](./agent-catalog-lifecycle.md#session-settings-integration).
 

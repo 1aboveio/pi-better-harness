@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { parse } from "yaml";
+
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const hasTmux = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
@@ -15,8 +15,13 @@ test("agents model and effort edits persist for the session and only Ctrl+S save
     const agent = join(fixture, "agent");
     const rolePath = join(agent, "agents/roles/role.fixture.md");
     mkdirSync(dirname(rolePath), { recursive: true });
+    writeFileSync(join(agent, "settings.json"), JSON.stringify({ tuiMode: "fullscreen" }));
     const original = "---\nschema: pi-agent/v1\nkind: role\nid: role.fixture\nname: Fixture\ndefaults:\n  model: openai/gpt-4o-mini\n  effort: medium\n---\nInspect the fixture.\n";
     writeFileSync(rolePath, original);
+    const developerPath = join(dirname(rolePath), "role.developer.md");
+    const developerOriginal = original.replaceAll("role.fixture", "role.developer").replace("name: Fixture", "name: Developer").replace("Inspect the fixture.", "Legacy developer instructions.");
+    writeFileSync(developerPath, developerOriginal);
+    const preferencesPath = join(agent, "agents", "settings.json");
     const scopePath = join(fixture, "scope.json");
     const probePath = join(fixture, "scope-probe.mjs");
     writeFileSync(probePath, `import { writeFileSync } from "node:fs";
@@ -26,6 +31,7 @@ export default function(pi) {
     const args = ["-L", `pi-agents-settings-${process.pid}`];
     const q = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
     const piBin = process.env.PI_AGENTS_SETTINGS_CLI ?? join(root, "node_modules/.bin/pi");
+    const mouse = process.env.PI_AGENTS_SETTINGS_MOUSE === "1";
     const command = `cd ${q(fixture)} && exec env PI_CODING_AGENT_DIR=${q(agent)} PI_OFFLINE=1 OPENAI_API_KEY=placeholder ${q(piBin)} -e ${q(join(root, "packages/pi-better-subagents/index.ts"))} -e ${q(join(root, "packages/pi-better-harness/extensions/settings/index.ts"))} -e ${q(probePath)} --no-skills --no-context-files --approve --model openai/gpt-4o-mini --models openai/gpt-4o`;
     const tmux = (...more) => execFileSync("tmux", [...args, ...more], { encoding: "utf8" });
     const key = (value) => tmux("send-keys", "-t", "agents", value);
@@ -68,12 +74,15 @@ export default function(pi) {
         const settingsScreen = wait(/Agents \/ Fixture/);
         assert.match(settingsScreen.split("\n")[0], /^Agents \/ Fixture/);
         assert.doesNotMatch(settingsScreen, /Search/, "fullscreen detail covers the catalog list");
-        assert.match(settingsScreen, /Effective prompt\s*\n\s*Inspect the fixture\./, "the resolved prompt is readable without opening another view");
-        assert.match(settingsScreen, /SETTING\s+VALUE\s+ORIGIN/, "configuration uses aligned columns");
-        key("p");
-        const promptScreen = wait(/Agents \/ prompt/);
+        assert.match(settingsScreen, /\[Settings\].*Instructions.*Files/, "detail opens the Settings tab");
+        assert.doesNotMatch(settingsScreen, /Inspect the fixture\./, "instructions stay in their own tab");
+        assert.doesNotMatch(settingsScreen, /> Save defaults/, "saving has no selectable row");
+        key("Tab");
+        const promptScreen = wait(/\[Instructions\]/);
         assert.match(promptScreen, /Inspect the fixture\./);
-        key("Escape"); wait(/Agents \/ Fixture/);
+        key("Tab"); wait(/\[Files\]/);
+        wait(/Definition/);
+        key("Tab"); wait(/\[Settings\]/);
         key("Enter");
         const modelPicker = wait(/Agents \/ model/);
         assert.match(modelPicker, /openai\/gpt-4o/);
@@ -91,18 +100,53 @@ export default function(pi) {
         open(); wait(/Effort\s+low\s+session/); wait(/Model\s+openai\/gpt-4o\s+session/);
         assert.equal(readFileSync(rolePath, "utf8"), original);
         key("C-s"); wait(/saved/i);
-        const frontmatter = readFileSync(rolePath, "utf8").split("---")[1];
-        assert.equal(parse(frontmatter).defaults.effort, "low");
-        assert.equal(parse(frontmatter).defaults.model, "openai/gpt-4o");
+        const saved = JSON.parse(readFileSync(preferencesPath, "utf8")).defaults["role.fixture"];
+        assert.equal(saved.effort, "low");
+        assert.equal(saved.model, "openai/gpt-4o");
+        assert.equal(readFileSync(rolePath, "utf8"), original, "Ctrl+S writes config without copying or rewriting the Markdown prompt");
         tmux("resize-window", "-t", "agents", "-x", "40", "-y", "24");
         wait(/Agents \/ Fixture/);
         tmux("new-window", "-t", "agents", "-n", "fresh-defaults", command);
         tmux("resize-window", "-t", "agents", "-x", "100", "-y", "40");
         wait(/pi-better-subagents/);
         open();
-        wait(/Model\s+openai\/gpt-4o\s+(?:catalog|inherited)/);
-        const freshSettings = wait(/Effort\s+low\s+(?:catalog|inherited)/);
+        wait(/Model\s+openai\/gpt-4o\s+user config/);
+        const freshSettings = wait(/Effort\s+low\s+user config/);
         assert.doesNotMatch(freshSettings, /(?:Model|Effort)[^\n]*session/, "fresh settings come from durable catalog defaults");
+        close();
+        literal("/agents inspect role.developer"); key("Tab"); key("Enter");
+        wait(/Agents \/ Developer/);
+        const actionable = wait(/Reset to bundled/);
+        if (mouse) {
+            const row = actionable.split("\n").findIndex(line => line.includes("Reset to bundled"));
+            literal(`\x1b[<0;5;${row + 1}M`);
+            literal(`\x1b[<0;5;${row + 1}m`);
+        } else {
+            key("Down"); key("Down");
+            wait(/> Reset to bundled/);
+            key("Enter");
+            t.diagnostic("Keyboard reset verified; native one-click routing requires a fullscreen mouse-capable Pi host.");
+        }
+        wait(/Bundled model\/effort restored/);
+        assert.equal(readFileSync(developerPath, "utf8"), developerOriginal, "runtime reset keeps the role prompt");
+        assert.deepEqual(JSON.parse(readFileSync(preferencesPath, "utf8")).defaults["role.developer"], { bundled: true });
+        wait(/Model\s+openai\/gpt-6.1-sol\s+bundled/);
+        wait(/Effort\s+high\s+bundled/);
+        key("Tab");
+        const instructionTab = wait(/\[Instructions\]/);
+        assert.match(instructionTab, /Legacy developer instructions/);
+        if (mouse) {
+            const row = instructionTab.split("\n").findIndex(line => line.includes("Reset to bundled"));
+            literal(`\x1b[<0;5;${row + 1}M`);
+            literal(`\x1b[<0;5;${row + 1}m`);
+        } else key("Enter");
+        const reset = wait(/Source:\s+bundled/);
+        assert.doesNotMatch(reset, /Legacy developer instructions/);
+        assert.equal(existsSync(developerPath), false);
+        const backup = readdirSync(dirname(developerPath)).find(name => name.startsWith(".role.developer.md.") && name.endsWith(".backup"));
+        assert.equal(readFileSync(join(dirname(developerPath), backup), "utf8"), developerOriginal);
+        assert.deepEqual(JSON.parse(readFileSync(preferencesPath, "utf8")).defaults["role.developer"], { bundled: true }, "prompt reset keeps bundled runtime inheritance");
+        wait(/Delivery and publishing belong to the coordinator/);
     } finally {
         spawnSync("tmux", [...args, "kill-server"], { stdio: "ignore" });
         rmSync(fixture, { recursive: true, force: true });

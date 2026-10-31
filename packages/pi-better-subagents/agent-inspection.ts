@@ -130,6 +130,7 @@ export interface OperationView {
     winningSource?: { scope: string; path: string; contentDigest: string; id: string };
     shadowed: { scope: string; path: string; contentDigest: string; reason: string }[];
     instructionMode?: string;
+    preferenceSources?: Partial<Record<"model" | "effort", { scope: "user" | "project"; path: string; bundled?: boolean }>>;
     instructions?: string;
     fields?: { model: OperationField; effort: OperationField; tier: OperationField };
     /** The definition's own default model and effort (role default, or the agent's override or inherited value). Null when neither is set. */
@@ -332,6 +333,11 @@ export function presentCatalogEntry(snapshot: CatalogSnapshot, id: string, enric
         winningSource: inspection.winningSource,
         shadowed: inspection.shadowed.map((item) => ({ ...item })),
         instructionMode: inspection.instructionMode,
+        preferenceSources: Object.fromEntries((["model", "effort"] as const).flatMap(key => {
+            const owner = inspection.kind === "agent" && fields?.[key].inherited ? inspection.roleId : id;
+            const source = owner ? snapshot.preferenceSources?.[owner]?.[key] : undefined;
+            return source ? [[key, source]] : [];
+        })),
         instructions: inspection.instructions,
         fields,
         defaults: definitionDefaults(fields),

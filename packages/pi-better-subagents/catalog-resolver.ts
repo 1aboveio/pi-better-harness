@@ -224,7 +224,7 @@ function resolveRole(snapshot: CatalogSnapshot, roleId: string): Resolution {
         return blockedEntry(snapshot, entry, entry.diagnostics);
     }
     const definition = entry.definition;
-    const preferences = sessionPreferences(definition, snapshot.sessionSettings);
+    const preferences = sessionPreferences(definition, snapshot.sessionSettings, snapshot.savedSettings);
     const launchable = entry.schemaLaunchable;
     const diagnostics = launchable
         ? [...entry.diagnostics]
@@ -334,8 +334,8 @@ function baseEffective(
     } | undefined,
 ): EffectiveDefinition {
     const mode = agent.instructionMode;
-    const overrides = sessionPreferences(agent, snapshot.sessionSettings);
-    const defaults = inheritance ? sessionPreferences(inheritance.role, snapshot.sessionSettings) : {};
+    const overrides = sessionPreferences(agent, snapshot.sessionSettings, snapshot.savedSettings);
+    const defaults = inheritance ? sessionPreferences(inheritance.role, snapshot.sessionSettings, snapshot.savedSettings) : {};
     const instructions = inheritance
         ? combineInstructions(inheritance.role.body, agent.body, mode)
         : agent.body;
