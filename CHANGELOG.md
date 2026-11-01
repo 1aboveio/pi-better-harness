@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.37.0] - 2026-11-01
+
+### Changed
+
+- Bundle Subagents 0.25.0. Background Tasks 0.13.0, Goal 0.11.0, Sandbox 0.14.0, and SSH 0.1.4 are unchanged.
+
+## [pi-better-subagents@0.25.0] - 2026-11-01
+
+### Added
+
+- Continue a completed subagent in its own saved conversation with `subagent_resume`. The new attempt keeps the native session, its history, and the frozen launch recipe, and gets its own run id, log, result, timing record, and capacity slot with `resumedFrom`/`rootRunId` lineage. Single and batch launches both resume. (#610)
+- Protect a completed conversation and its workspace from ordinary cleanup with `retain_session` on `subagent_spawn`, and drop that protection with `subagent_release`. Retention is optional: resume needs no flag, and release deletes nothing, leaving logs, results, and completed metadata intact. (#610)
+
+### Changed
+
+- Admit one writer per conversation with a cross-process lease held from admission through the child lifetime and finalization, so a duplicate request is refused and a lease left by a dead process is recovered conservatively. Retained launches and continuation need a runtime that provides `node:sqlite`; ordinary one-shot launches remain available without it. (#610)
+- Re-apply current mandatory human permissions on every continuation, keep the saved recipe's tools and confinement, and refuse instead of silently changing them: a profile that would alter confinement refuses, and so does current tool or provider configuration that would replace a recorded extension implementation. A missing, ambiguous, or mismatched saved history or workspace refuses rather than starting a replacement conversation. (#610)
+
 ## [pi-better-harness@0.36.0] - 2026-10-31
 
 ### Changed
