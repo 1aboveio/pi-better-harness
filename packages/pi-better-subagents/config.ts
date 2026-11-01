@@ -85,7 +85,7 @@ export function normalizeConcurrencyCap(value: unknown): number {
 }
 
 /** Built-in default tool set when config.json sets nothing. */
-export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch";
+export const SAFE_DEFAULT_TOOLS = "read, bash, edit, write, web_search, web_fetch, codemode";
 /** Safe default for a hermetic (clean) child where extension tools don't exist. */
 export const SAFE_CLEAN_TOOLS = "read, bash";
 
