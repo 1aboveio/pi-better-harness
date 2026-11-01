@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.38.0] - 2026-11-01
+
+### Changed
+
+- Bundle Subagents 0.26.0 with durable saved conversations, continuation through spawn, and local/global session discovery. (#614)
+
+## [pi-better-subagents@0.26.0] - 2026-11-01
+
+### Changed
+
+- Continue a saved native Pi conversation with `subagent_spawn({ session_id, prompt })`, or use `session_name` for an exact, unambiguous name in the current folder and its descendants. Batch jobs support the same per-job selectors. Each continuation gets a new attempt id while keeping its saved history, workspace, and worker configuration. (#614)
+- Let another foreground session continue saved work and receive its callback, with current mandatory permissions and the single-writer lease still enforced. (#614)
+- Make `subagent_list()` search the current folder and descendants across foreground sessions, show `session_id` on each row, and use `all: true` for global discovery. Duplicate names report matching session ids instead of guessing. (#614)
+
+### Fixed
+
+- Save new native sessions and compact attempt recipes in the Pi agent directory by default, independently of temporary event-log cleanup. Keep history through repeated sweeps, retry failed recipe publication before reclaiming the last copy, and expose storage failures through the existing incident journal. (#614)
+- Refuse missing history or workspaces and prevent an older archived completion from hiding a newer failed attempt. Legacy recipes keep their original paths and require those original files to exist. (#614)
+
+### Removed
+
+- Remove `subagent_resume`, `subagent_release`, and the `retain_session` launch flag. Use spawn with a session selector to continue work; saved native history no longer needs an explicit retention lifecycle. (#614)
+
 ## [pi-better-harness@0.37.1] - 2026-11-01
 
 ### Fixed
