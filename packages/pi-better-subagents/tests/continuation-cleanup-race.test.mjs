@@ -256,8 +256,9 @@ function writeReleasedRoot(root, workspace, overrides = {}) {
 
 /** The saved native conversation a continuation reopens. */
 function writeSavedSession(root, workspace, mtimeMs = OLD) {
-    mkdirSync(sessionsDir(), { recursive: true });
-    const path = join(sessionsDir(), `2026-01-01T00-00-00-000Z_${root}.jsonl`);
+    const legacySessionDir = join(baseDir(), "sessions");
+    mkdirSync(legacySessionDir, { recursive: true });
+    const path = join(legacySessionDir, `2026-01-01T00-00-00-000Z_${root}.jsonl`);
     writeFileSync(
         path,
         `${JSON.stringify({ type: "session", version: 1, id: root, timestamp: "2026-01-01T00:00:00.000Z", cwd: workspace })}\n`,
@@ -416,7 +417,7 @@ describe("a continuation re-proves its native history under the writer lease", (
         resetRegistry();
         const h = makeHarness();
         const spawned = idOf(await h.tools.get("subagent_spawn").execute("tc", {
-            prompt: "INITIAL TASK", clean: true, sandbox: false, cwd: WORKSPACE, retain_session: true,
+            prompt: "INITIAL TASK", clean: true, sandbox: false, cwd: WORKSPACE,
         }, undefined, undefined, h.ctx));
         await waitTerminal(spawned);
         // The saved conversation a continuation reopens, written where Pi writes it.
@@ -466,7 +467,9 @@ fs.rmSync(target, { force: true });
         syncBuiltinESMExports();
         try {
             await assert.rejects(
-                h.tools.get("subagent_resume").execute("tc", { id: spawned, prompt: "FOLLOWUP" }, undefined, undefined, h.ctx),
+                h.tools.get("subagent_spawn").execute("tc", {
+                    session_id: readMeta(spawned).sessionId, prompt: "FOLLOWUP",
+                }, undefined, undefined, h.ctx),
                 /saved conversation is gone/,
                 "a history removed after validation must refuse explicitly",
             );

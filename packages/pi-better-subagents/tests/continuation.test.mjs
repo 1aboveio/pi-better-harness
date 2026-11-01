@@ -10,20 +10,26 @@
  * evidence the registry/parse/finalization path consumes.
  *
  * Covered contract:
- * - `retain_session:true` keeps a completed conversation and workspace and
- *   leaves ordinary one-shot launches unchanged;
- * - `subagent_resume` allocates a NEW attempt/run id, keeps the SAME native
+ * - every launch saves its native conversation durably, and `subagent_spawn`
+ *   with `session_id` continues the LATEST attempt of that saved conversation;
+ * - a continuation allocates a NEW attempt/run id, keeps the SAME native
  *   session id and history, records `resumedFrom` lineage, and leaves the old
  *   log/result/callback/timing evidence immutable;
- * - a parked owner occupies zero capacity slots and a resumed attempt occupies
- *   one;
+ * - a parked conversation occupies zero capacity slots and a continued attempt
+ *   occupies one;
  * - one conversation admits one writer (admission refusal + cross-process lease
  *   with conservative stale recovery);
- * - cleanup protects retained conversations/workspaces until `subagent_release`
- *   and reclaims them afterwards without deleting at release time;
- * - only the owning foreground session may continue or release;
- * - missing history/workspace and a stricter current human permission profile
- *   refuse continuation instead of silently changing it.
+ * - cleanup keeps durable saved history and its owned workspace, while legacy
+ *   retention records remain honored by cleanup until they are released;
+ * - a different foreground session may continue a saved conversation
+ *   (foreground ownership is provenance, not an admission gate); the continued
+ *   attempt's callback origin moves to the invoking foreground and the
+ *   single-writer lease still admits exactly one writer;
+ * - a missing session id, missing history/workspace, a conflicting launch-only
+ *   option, and a stricter current human permission profile all refuse instead
+ *   of silently changing or recreating the conversation;
+ * - single launches and batch jobs both expose the saved session id, and a
+ *   batch may mix fresh jobs with continuation jobs independently.
  *
  * @covers subagent.continuation
  * @level integration
@@ -83,6 +89,7 @@ const {
     conversationLeaseDir,
     findSavedConversation,
     markRetentionReleased,
+    ownedByOrigin,
     planContinuation,
     readConversationLease,
     readRetention,
@@ -231,11 +238,27 @@ async function spawnRun(h, params) {
 }
 
 async function resumeRun(h, params) {
-    return h.tools.get("subagent_resume").execute("tc", params, undefined, undefined, h.ctx);
+    // Public continuation API: the saved conversation's exact native session id,
+    // never the prior run id (which only names that attempt's own evidence).
+    const { id, ...rest } = params;
+    const prior = readMeta(id);
+    assert.ok(prior, `no saved attempt ${id} to continue`);
+    return h.tools.get("subagent_spawn").execute(
+        "tc", { ...rest, session_id: prior.sessionId }, undefined, undefined, h.ctx,
+    );
 }
 
 async function resultText(h, id) {
     return (await h.tools.get("subagent_result").execute("tc", { id }, undefined, undefined, h.ctx)).content[0].text;
+}
+
+/**
+ * Result bytes read with `all:true`, so the scope key is not derived from which
+ * foreground happens to be active. Used to compare prior evidence before and
+ * after another foreground session touched the run.
+ */
+async function evidenceResultText(h, id) {
+    return (await h.tools.get("subagent_result").execute("tc", { id, all: true }, undefined, undefined, h.ctx)).content[0].text;
 }
 
 async function runningCount(h) {
@@ -261,6 +284,12 @@ function sessionMessages(path) {
 
 function sessionHeader(path) {
     return JSON.parse(readFileSync(path, "utf-8").split("\n")[0]);
+}
+
+/** Completion callbacks a harness received that mention one run id. */
+function completionCallbacks(h, id) {
+    return h.sent.filter((entry) => entry.message?.customType === "background-completion-batch"
+        && String(entry.message.content ?? "").includes(id));
 }
 
 async function reap(ids) {
@@ -292,7 +321,7 @@ describe("completed-subagent continuation", () => {
         let rootId;
         let resumedId;
         try {
-            rootId = await spawnRun(h, { retain_session: true });
+            rootId = await spawnRun(h, {});
             const root = await waitTerminal(rootId);
             assert.equal(root.status, "completed");
             assert.equal(root.sessionId, rootId, "a fresh launch uses the attempt id as its native session id");
@@ -383,7 +412,7 @@ describe("completed-subagent continuation", () => {
         let rootId;
         let resumedId;
         try {
-            rootId = await spawnRun(h, { retain_session: true });
+            rootId = await spawnRun(h, {});
             await waitTerminal(rootId);
             assert.equal(await runningCount(h), 0, "a parked completed owner holds no slot");
 
@@ -409,7 +438,7 @@ describe("completed-subagent continuation", () => {
         let resumedId;
         let holder;
         try {
-            rootId = await spawnRun(h, { retain_session: true });
+            rootId = await spawnRun(h, {});
             await waitTerminal(rootId);
 
             process.env.PI_CONTINUATION_SLEEP_MS = "2500";
@@ -419,7 +448,7 @@ describe("completed-subagent continuation", () => {
                 // before anything else can touch the conversation.
                 await assert.rejects(
                     resumeRun(h, { id: rootId, prompt: "SECOND WRITER" }),
-                    /still active in the same conversation|already being written/,
+                    /still active in the same conversation|already being written|only a completed run can be continued/,
                 );
             } finally {
                 delete process.env.PI_CONTINUATION_SLEEP_MS;
@@ -540,7 +569,7 @@ describe("completed-subagent continuation", () => {
         }
     });
 
-    it("protects retained history and workspace from cleanup until release, then reclaims them", async () => {
+    it("honors legacy retention records for cleanup until they are released, then reclaims them", async () => {
         const now = Date.UTC(2026, 6, 30, 12, 0, 0);
         const old = now - 20 * DAY_MS;
         const retainedId = nextRunId();
@@ -560,8 +589,9 @@ describe("completed-subagent continuation", () => {
         writeFileSync(logPathFor(retainedId), "retained log\n");
         writeMeta(meta(plainId));
         writeFileSync(logPathFor(plainId), "plain log\n");
-        mkdirSync(sessionsDir(), { recursive: true });
-        const retainedSession = join(sessionsDir(), `2026-01-01T00-00-00-000Z_${retainedId}.jsonl`);
+        const legacySessionDir = join(baseDir(), "sessions");
+        mkdirSync(legacySessionDir, { recursive: true });
+        const retainedSession = join(legacySessionDir, `2026-01-01T00-00-00-000Z_${retainedId}.jsonl`);
         writeFileSync(retainedSession, `${JSON.stringify({ type: "session", version: 1, id: retainedId, timestamp: "2026-01-01T00:00:00.000Z", cwd: workspace })}\n`);
         const seconds = old / 1000;
         utimesSync(retainedSession, seconds, seconds);
@@ -605,42 +635,203 @@ describe("completed-subagent continuation", () => {
         }
     });
 
-    it("lets only the owning foreground session continue or release a conversation", async () => {
+    it("lets a different foreground session continue without retention and moves the callback to it", async () => {
         const owner = makeHarness();
-        const stranger = makeHarness({ sessionId: "another-session" });
+        const successor = makeHarness({ sessionId: "another-session" });
         let rootId;
+        let resumedId;
         try {
-            rootId = await spawnRun(owner, { retain_session: true });
-            await waitTerminal(rootId);
+            rootId = await spawnRun(owner, { name: "cross-session-worker" });
+            const root = await waitTerminal(rootId);
+            // Let the owner's own handoff settle first, so the only handoff this
+            // test can observe moving later is the continuation's.
+            await waitFor(() => readMeta(rootId)?.completionCallbackSentAt !== undefined, { timeoutMs: 6000 });
+            const rootSnapshot = readMeta(rootId);
+            assert.equal(typeof rootSnapshot.completionCallbackSentAt, "number", "the owner received the root completion");
+            assert.equal(completionCallbacks(owner, rootId).length, 1);
+            const rootLog = readFileSync(logPathFor(rootId), "utf-8");
+            const rootResult = await evidenceResultText(owner, rootId);
+            assert.equal(readRetention(rootId), undefined, "resume needs no explicit retention");
+            const rootSession = findSavedConversation({
+                sessionDir: root.recipe.sessionDir, sessionId: root.sessionId, expectedCwd: root.cwd,
+            });
+            assert.equal(rootSession.kind, "ok");
+            const sessionPath = rootSession.conversation.path;
 
-            await assert.rejects(
-                resumeRun(stranger, { id: rootId, prompt: "HIJACK" }),
-                /only its owning foreground session may continue it/,
-            );
-            await assert.rejects(
-                stranger.tools.get("subagent_release").execute("tc", { id: rootId }, undefined, undefined, stranger.ctx),
-                /only its owning foreground session may change retention/,
-            );
-            // No readable foreground identity is a refusal, never a cwd-wide grant.
+            resumedId = idOf(await successor.tools.get("subagent_spawn").execute("tc", {
+                session_name: "cross-session-worker", prompt: "PICK UP THE WORK",
+            }, undefined, undefined, successor.ctx));
+            const resumed = await waitTerminal(resumedId);
+            assert.equal(resumed.status, "completed");
+            assert.equal(resumed.sessionId, root.sessionId, "the successor continued the SAME saved conversation");
+            assert.equal(resumed.rootRunId, rootId);
+            assert.equal(resumed.resumedFrom, rootId);
+            // The new attempt is attributed to the INVOKING foreground, and the
+            // prior attempt keeps its own origin.
+            assert.deepEqual(resumed.callbackOrigin, { cwd: WORKSPACE, sessionId: "another-session" });
+            assert.deepEqual(readMeta(rootId).callbackOrigin, rootSnapshot.callbackOrigin);
+            // `ownedByOrigin` remains a pure provenance label: it describes which
+            // foreground launched an attempt and never gates continuation.
+            assert.equal(ownedByOrigin(readMeta(rootId), { cwd: WORKSPACE, sessionId: "owner-session" }), true);
+            assert.equal(ownedByOrigin(readMeta(rootId), { cwd: WORKSPACE, sessionId: "another-session" }), false);
+            assert.equal(ownedByOrigin(resumed, { cwd: WORKSPACE, sessionId: "another-session" }), true);
+
+            // Callback origin transferred: the successor collects the new attempt,
+            // the original owner is not asked to collect it a second time.
+            await waitFor(() => readMeta(resumedId)?.completionCallbackSentAt !== undefined, { timeoutMs: 6000 });
+            assert.equal(typeof readMeta(resumedId).completionCallbackSentAt, "number");
+            assert.equal(completionCallbacks(successor, resumedId).length, 1, "the invoking foreground was notified");
+            assert.equal(completionCallbacks(owner, resumedId).length, 0, "the original owner was not notified again");
+
+            // Full history retained: the prior two messages are still in the same
+            // file and the follow-up was appended to it.
+            assert.equal(sessionHeader(sessionPath).id, rootId);
+            assert.deepEqual(sessionMessages(sessionPath), [
+                { role: "user", text: "INITIAL TASK" },
+                { role: "assistant", text: "INITIAL ANSWER" },
+                { role: "user", text: "PICK UP THE WORK" },
+                { role: "assistant", text: "FOLLOWUP:PICK UP THE WORK" },
+            ]);
+            const child = childRecord(resumed.pid);
+            assert.equal(child.argv[child.argv.indexOf("--session") + 1], sessionPath,
+                "the successor's child reopened the retained session file");
+            assert.equal(child.before, 2, "the successor's child loaded the prior history before appending");
+
+            // Prior evidence is untouched by a cross-foreground continuation.
+            assert.equal(readFileSync(logPathFor(rootId), "utf-8"), rootLog);
+            assert.equal(await evidenceResultText(successor, rootId), rootResult);
+            const rootAfter = readMeta(rootId);
+            for (const field of ["status", "sessionId", "endedAt", "exitCode", "logPath", "recipe", "callbackOrigin",
+                "completionCallbackSentAt", "completionCallbackSuppressedAt"]) {
+                assert.deepEqual(rootAfter[field], rootSnapshot[field], `root ${field} must not change on continuation`);
+            }
+            assert.equal(readRetention(rootId), undefined, "cross-session resume does not add a retention flag");
+
+            // No readable foreground identity is still a refusal, never a cwd-wide
+            // grant: the invoking session is what the callback routes to.
             assert.throws(
                 () => planContinuation({ id: rootId, prior: readMeta(rootId), origin: undefined, others: listMetas() }),
                 /foreground session identity is unavailable/,
             );
-            assert.equal(readRetention(rootId)?.releasedAt, undefined, "a refused release leaves retention intact");
-            assert.equal(listMetas().filter((meta) => meta.sessionId === rootId).length, 1, "no hijack attempt launched");
         } finally {
-            await reap([rootId].filter(Boolean));
+            await reap([rootId, resumedId].filter(Boolean));
             owner.shutdown();
-            stranger.shutdown();
+            successor.shutdown();
         }
     });
 
-    it("refuses missing history, a missing workspace, and a stricter current permission profile", async () => {
+    it("resolves names locally and refuses duplicate local conversation names", async () => {
         const h = makeHarness();
         const ids = [];
+        const elsewhere = join(RUNTIME, "elsewhere");
+        mkdirSync(elsewhere, { recursive: true });
+        try {
+            const foreign = await spawnRun(h, { name: "same-name", cwd: elsewhere });
+            ids.push(foreign);
+            await waitTerminal(foreign);
+            const local = await spawnRun(h, { name: "same-name" });
+            ids.push(local);
+            await waitTerminal(local);
+            const followup = idOf(await h.tools.get("subagent_spawn").execute("tc", {
+                session_name: "same-name", prompt: "LOCAL FOLLOW-UP",
+            }, undefined, undefined, h.ctx));
+            ids.push(followup);
+            const continued = await waitTerminal(followup);
+            assert.equal(continued.sessionId, readMeta(local).sessionId);
+            assert.notEqual(continued.sessionId, readMeta(foreign).sessionId);
+            const duplicate = await spawnRun(h, { name: "same-name" });
+            ids.push(duplicate);
+            await waitTerminal(duplicate);
+            const before = listMetas().length;
+            await assert.rejects(h.tools.get("subagent_spawn").execute("tc", {
+                session_name: "same-name", prompt: "AMBIGUOUS",
+            }, undefined, undefined, h.ctx), /Ambiguous session_name.*session_id=/);
+            await assert.rejects(h.tools.get("subagent_spawn").execute("tc", {
+                session_name: "same-name", session_id: local, prompt: "BOTH",
+            }, undefined, undefined, h.ctx), /either session_id or session_name/);
+            assert.equal(listMetas().length, before, "refused selectors launch no replacement attempt");
+        } finally {
+            await reap(ids);
+            h.shutdown();
+        }
+    });
+
+    it("keeps one writer per conversation when a different foreground session continues it", async () => {
+        const owner = makeHarness();
+        const successor = makeHarness({ sessionId: "another-session" });
+        let rootId;
+        let resumedId;
+        let holder;
+        try {
+            rootId = await spawnRun(owner, {});
+            const root = await waitTerminal(rootId);
+
+            process.env.PI_CONTINUATION_SLEEP_MS = "2500";
+            try {
+                resumedId = idOf(await resumeRun(successor, { id: rootId, prompt: "SUCCESSOR WRITER" }));
+                // A live attempt blocks a second writer even from the original
+                // owner: dropping the ownership restriction widens who may
+                // continue, never how many may write.
+                await assert.rejects(
+                    resumeRun(owner, { id: rootId, prompt: "ORIGINAL OWNER RETRY" }),
+                    /still active in the same conversation|already being written|only a completed run can be continued/,
+                );
+            } finally {
+                delete process.env.PI_CONTINUATION_SLEEP_MS;
+            }
+            const resumed = await waitTerminal(resumedId);
+            assert.equal(resumed.sessionId, rootId);
+            assert.equal(listMetas().filter((meta) => meta.sessionId === rootId).length, 2, "the refused admission launched nothing");
+
+            // A foreign LIVE lease holder is authoritative across foregrounds too.
+            const foreignHolder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { detached: true, stdio: "ignore" });
+            holder = foreignHolder;
+            mkdirSync(conversationLeaseDir(), { recursive: true });
+            writeFileSync(join(conversationLeaseDir(), `${rootId}.lock`), JSON.stringify({
+                pid: holder.pid,
+                start: processStartToken(holder.pid),
+                token: "foreign-holder",
+                sessionId: rootId,
+                attemptId: rootId,
+                at: Date.now(),
+            }));
+            await assert.rejects(
+                resumeRun(successor, { id: rootId, prompt: "FOURTH WRITER" }),
+                /already being written by another attempt/,
+            );
+            assert.equal(listMetas().filter((meta) => meta.sessionId === rootId).length, 2, "no attempt was launched");
+            killProcessTree(holder.pid, "SIGKILL");
+            await once(foreignHolder, "exit");
+            holder = undefined;
+            rmSync(join(conversationLeaseDir(), `${rootId}.lock`), { force: true });
+
+            // Verification still gates a different foreground: the saved
+            // conversation is the thing being continued, so a missing one refuses.
+            const saved = findSavedConversation({
+                sessionDir: root.recipe.sessionDir, sessionId: root.sessionId, expectedCwd: root.cwd,
+            });
+            assert.equal(saved.kind, "ok");
+            rmSync(saved.conversation.path, { force: true });
+            await assert.rejects(
+                resumeRun(successor, { id: rootId, prompt: "NO HISTORY" }),
+                /saved conversation is gone/,
+            );
+            assert.equal(listMetas().filter((meta) => meta.sessionId === rootId).length, 2, "no attempt was launched");
+        } finally {
+            if (holder?.pid) killProcessTree(holder.pid, "SIGKILL");
+            await reap([rootId, resumedId].filter(Boolean));
+            owner.shutdown();
+            successor.shutdown();
+        }
+    });
+
+    it("refuses missing history, a missing workspace, and a stricter successor permission profile", async () => {
+        const h = makeHarness();
+        const ids = [];
+        let successor;
         try {
             // Missing saved conversation.
-            const goneId = await spawnRun(h, { retain_session: true });
+            const goneId = await spawnRun(h, {});
             ids.push(goneId);
             const gone = await waitTerminal(goneId);
             const found = findSavedConversation({
@@ -656,7 +847,7 @@ describe("completed-subagent continuation", () => {
             // Missing workspace.
             const lostWorkspace = join(RUNTIME, "lost-workspace");
             mkdirSync(lostWorkspace, { recursive: true });
-            const workspaceId = await spawnRun(h, { cwd: lostWorkspace, retain_session: true });
+            const workspaceId = await spawnRun(h, { cwd: lostWorkspace });
             ids.push(workspaceId);
             await waitTerminal(workspaceId);
             rmSync(lostWorkspace, { recursive: true, force: true });
@@ -667,66 +858,186 @@ describe("completed-subagent continuation", () => {
 
             // A human profile that now enforces confinement cannot be bypassed by
             // continuing an unsandboxed conversation.
-            const confinedId = await spawnRun(h, { retain_session: true });
+            const confinedId = await spawnRun(h, {});
             ids.push(confinedId);
             await waitTerminal(confinedId);
-            h.publishPolicy({ state: "enabled", permissions: { ...policyMain, enabled: true }, subagentPermissions: policyChildEnforced });
+            successor = makeHarness({ sessionId: "stricter-successor", policy: {
+                state: "enabled", permissions: { ...policyMain, enabled: true }, subagentPermissions: policyChildEnforced,
+            } });
             await assert.rejects(
-                resumeRun(h, { id: confinedId, prompt: "SANDWICH" }),
+                resumeRun(successor, { id: confinedId, prompt: "SANDWICH" }),
                 /cannot bypass it|would change its confinement/,
             );
             assert.equal(listMetas().filter((meta) => meta.sessionId === confinedId).length, 1, "no attempt launched under refused policy");
         } finally {
             await reap(ids);
             h.shutdown();
+            successor?.shutdown();
         }
     });
 
-    it("releases retention without deleting or rewriting completed evidence, and never revives it", async () => {
+    it("exposes the saved session id and continues the LATEST attempt, not an older completed sibling", async () => {
         const h = makeHarness();
         let rootId;
         let resumedId;
+        let secondId;
         try {
-            rootId = await spawnRun(h, { retain_session: true });
+            const launch = await h.tools.get("subagent_spawn").execute("tc", {
+                prompt: "INITIAL TASK", clean: true, sandbox: false, cwd: WORKSPACE,
+            }, undefined, undefined, h.ctx);
+            rootId = idOf(launch);
+            assert.equal(launch.details.sessionId, rootId, "the launch receipt carries the saved session id");
+            assert.match(launch.content[0].text, new RegExp(`Session: ${rootId}`));
             await waitTerminal(rootId);
-            const logBefore = readFileSync(logPathFor(rootId), "utf-8");
-            const resultBefore = await resultText(h, rootId);
-            const metaBefore = readMeta(rootId);
 
-            const released = await h.tools.get("subagent_release").execute("tc", { id: rootId }, undefined, undefined, h.ctx);
-            assert.equal(released.details.status, "released");
-            assert.ok(existsSync(runDir(rootId)), "release deletes nothing");
-            assert.equal(readFileSync(logPathFor(rootId), "utf-8"), logBefore);
-            assert.equal(await resultText(h, rootId), resultBefore);
-            for (const field of ["status", "endedAt", "exitCode", "sessionId", "recipe", "completionCallbackPendingAt"]) {
-                assert.deepEqual(readMeta(rootId)[field], metaBefore[field]);
-            }
-            const releasedAt = readRetention(rootId)?.releasedAt;
-            assert.equal(typeof releasedAt, "number");
-
+            // The public surface no longer registers resume/release: continuation is
+            // subagent_spawn with session_id.
+            assert.equal(h.tools.has("subagent_resume"), false);
+            assert.equal(h.tools.has("subagent_release"), false);
             await assert.rejects(
-                h.tools.get("subagent_release").execute("tc", { id: rootId }, undefined, undefined, h.ctx),
-                /already released/,
+                h.tools.get("subagent_spawn").execute("tc", {
+                    prompt: "LEGACY", clean: true, sandbox: false, cwd: WORKSPACE, retain_session: true,
+                }, undefined, undefined, h.ctx),
+                /retain_session was removed/,
             );
 
-            // Artifacts still exist, so continuation remains possible while they
-            // do — but it must not silently re-retain the released conversation.
-            resumedId = idOf(await resumeRun(h, { id: rootId, prompt: "AFTER RELEASE" }));
-            await waitTerminal(resumedId);
-            assert.equal(readRetention(rootId)?.releasedAt, releasedAt, "a released conversation is not retained again");
+            resumedId = idOf(await resumeRun(h, { id: rootId, prompt: "FIRST FOLLOW-UP" }));
+            const first = await waitTerminal(resumedId);
+            assert.equal(first.resumedFrom, rootId);
+            assert.equal(first.sessionId, rootId);
 
-            // A continuation of a continuation keeps one lineage root and the same
-            // conversation, so repeated review rounds never fork history.
-            const secondGeneration = idOf(await resumeRun(h, { id: resumedId, prompt: "SECOND GENERATION" }));
-            const second = await waitTerminal(secondGeneration);
+            // Continuing by session id always takes the latest attempt: a second
+            // follow-up branches from the first continuation, never from the root.
+            secondId = idOf(await h.tools.get("subagent_spawn").execute("tc", {
+                session_id: rootId, prompt: "SECOND FOLLOW-UP",
+            }, undefined, undefined, h.ctx));
+            const second = await waitTerminal(secondId);
             assert.equal(second.sessionId, rootId);
             assert.equal(second.rootRunId, rootId);
-            assert.equal(second.resumedFrom, resumedId);
-            await reap([secondGeneration]);
-            removeRun(secondGeneration);
+            assert.equal(second.resumedFrom, resumedId, "the LATEST attempt owns the conversation");
+            assert.equal(readRetention(rootId), undefined, "no retention record is created or needed");
+
+            // A session id nobody saved refuses clearly and launches nothing.
+            const before = listMetas().length;
+            await assert.rejects(
+                h.tools.get("subagent_spawn").execute("tc", { session_id: "sa_never_saved", prompt: "ANYONE" },
+                    undefined, undefined, h.ctx),
+                /no saved subagent conversation has that native session id/,
+            );
+            assert.equal(listMetas().length, before, "a missing session launches nothing");
         } finally {
-            await reap([rootId, resumedId].filter(Boolean));
+            await reap([rootId, resumedId, secondId].filter(Boolean));
             h.shutdown();
         }
     });
+
+    it("refuses launch-only options that conflict with the saved recipe and accepts matching ones", async () => {
+        const h = makeHarness();
+        let rootId;
+        let matchingId;
+        try {
+            rootId = await spawnRun(h, {});
+            await waitTerminal(rootId);
+            const before = listMetas().filter((meta) => meta.sessionId === rootId).length;
+
+            for (const conflicting of [
+                { clean: false },
+                { sandbox: true },
+                { cwd: join(RUNTIME, "elsewhere") },
+                { tools: "read,write" },
+                { allow_nested: true },
+            ]) {
+                await assert.rejects(
+                    resumeRun(h, { id: rootId, prompt: "CONFLICT", ...conflicting }),
+                    /conflicts? with the saved launch recipe/,
+                    `launch-only option ${Object.keys(conflicting)[0]} must not be silently dropped`,
+                );
+            }
+            assert.equal(listMetas().filter((meta) => meta.sessionId === rootId).length, before,
+                "every refused continuation launched nothing");
+
+            // Repeating the saved recipe's own values is compatible, and an explicit
+            // model is the allowed per-attempt escalation (same as the saved recipe).
+            matchingId = idOf(await resumeRun(h, {
+                id: rootId, prompt: "COMPATIBLE", clean: true, cwd: WORKSPACE, model: "test/escalated",
+            }));
+            const matching = await waitTerminal(matchingId);
+            assert.equal(matching.sessionId, rootId);
+            assert.equal(matching.recipe.clean, true);
+            assert.equal(matching.recipe.model, "test/escalated", "an explicit model escalates this attempt only");
+            assert.equal(readMeta(rootId).recipe.model, "test/model", "the prior attempt keeps its frozen model");
+        } finally {
+            await reap([rootId, matchingId].filter(Boolean));
+            h.shutdown();
+        }
+    });
+
+    it("continues per-job session ids in a batch alongside fresh jobs without sharing one writer", async () => {
+        const h = makeHarness();
+        let rootId;
+        let freshId;
+        let continuedId;
+        try {
+            rootId = await spawnRun(h, { name: "batch-session-owner", tools: "read,bash" });
+            const root = await waitTerminal(rootId);
+
+            // session_id is per job: a shared value would point every job at one writer.
+            await assert.rejects(
+                h.tools.get("subagent_spawn_batch").execute("tc", {
+                    shared: { session_id: rootId }, jobs: [{ prompt: "SHARED SESSION" }],
+                }, undefined, undefined, h.ctx),
+                /session_id is per job/,
+            );
+
+            const receipt = await h.tools.get("subagent_spawn_batch").execute("tc", {
+                batchName: "mixed",
+                shared: { clean: true, sandbox: false, cwd: WORKSPACE, tools: "read,bash" },
+                jobs: [
+                    { prompt: "FRESH BATCH JOB" },
+                    { session_name: "batch-session-owner", prompt: "BATCH FOLLOW-UP" },
+                ],
+            }, undefined, undefined, h.ctx);
+            assert.equal(receipt.details.status, "launched", JSON.stringify(receipt.details));
+            assert.equal(receipt.details.launched.length, 2, JSON.stringify(receipt.details));
+            freshId = receipt.details.launched[0].id;
+            continuedId = receipt.details.launched[1].id;
+            assert.notEqual(freshId, continuedId);
+            assert.equal(receipt.details.launched[0].sessionId, freshId,
+                "a fresh job's attempt id is its new session id");
+            assert.equal(receipt.details.launched[1].sessionId, rootId, "the continuation keeps the saved session id");
+            assert.equal(receipt.details.launched[1].continuedFrom, rootId);
+
+            const [fresh, continued] = await Promise.all([waitTerminal(freshId), waitTerminal(continuedId)]);
+            assert.equal(fresh.status, "completed");
+            assert.notEqual(fresh.sessionId, rootId, "the fresh job never joined the saved conversation");
+            assert.equal(continued.status, "completed");
+            assert.equal(continued.sessionId, rootId);
+            const child = childRecord(continued.pid);
+            assert.equal(child.before, 2, "the batch continuation reopened the saved history");
+            assert.equal(child.sessionId, null, "a continuation reopens --session, not a new session id");
+            assert.equal(readMeta(rootId).status, "completed", "the prior attempt is unchanged");
+
+            // A conflicting per-job launch option is a normal per-job failure, and
+            // the other job still launches.
+            const partial = await h.tools.get("subagent_spawn_batch").execute("tc", {
+                batchName: "conflict",
+                onCapacity: "launch-available",
+                shared: { clean: true, sandbox: false, cwd: WORKSPACE, tools: "read,bash" },
+                jobs: [
+                    { session_id: rootId, prompt: "CONFLICTING", clean: false },
+                    { prompt: "STILL FRESH" },
+                ],
+            }, undefined, undefined, h.ctx);
+            assert.equal(partial.details.status, "partial");
+            assert.equal(partial.details.launched.length, 1, JSON.stringify(partial.details));
+            assert.equal(partial.details.launched[0].job, 2);
+            assert.match(partial.details.failed[0].reason, /conflicts? with the saved launch recipe/);
+            await reap([partial.details.launched[0].id]);
+            removeRun(partial.details.launched[0].id);
+        } finally {
+            await reap([rootId, freshId, continuedId].filter(Boolean));
+            h.shutdown();
+        }
+    });
+
 });

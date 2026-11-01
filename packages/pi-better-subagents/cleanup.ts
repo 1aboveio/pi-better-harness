@@ -11,6 +11,7 @@ import { join, relative, sep } from "node:path";
 import {
     baseDir,
     listMetas,
+    observeArchivePublication,
     ownedByThisParent,
     orphanedTaskRuntimeProvenance,
     processStartToken,
@@ -35,6 +36,7 @@ import {
     withConversationMutation,
 } from "./continuation.ts";
 import { processExists } from "./spawn.ts";
+import { archiveCompletedAttempt, archivePublicationPending, listArchivedAttempts } from "./session-store.ts";
 
 export const DEFAULT_CLEANUP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -346,6 +348,70 @@ function planCleanupOccupancy(
 interface CleanupScope {
     occupancy: CleanupOccupancy;
     runIdsBySession: Map<string, string[]>;
+    /**
+     * Conversations whose saved session and launch recipe live in durable
+     * storage. Their history and owned clone workspace never age out; only the
+     * volatile log, metadata, and task scratch are reclaimed.
+     */
+    persistent: ReadonlySet<string>;
+    /**
+     * Completed attempts whose compact durable record is still unpublished. The
+     * volatile run directory holds the only copy of the recipe, so both bounds
+     * retain the whole run until a sweep can publish it.
+     */
+    archivePending: ReadonlySet<string>;
+}
+
+/**
+ * Conversations with a durable continuation record: a completed attempt saved
+ * its compact metadata and frozen recipe under the Pi agent directory. Their
+ * saved history and owned clone workspace are kept indefinitely; only the
+ * volatile log, metadata, and task scratch are reclaimed.
+ *
+ * A completed durable-layout attempt whose compact record could not be published
+ * belongs here too: it is not resumable yet, but its recipe, saved history, and
+ * clone are the only copy of that conversation.
+ *
+ * Legacy attempts (recipes pointing at the old temporary session directory, or
+ * fixtures without a recipe) never publish that record and keep the existing
+ * reclaimable behavior. A conversation that only ever failed is not resumable,
+ * so its artifacts stay ordinary aged history and do not pin a clone forever.
+ */
+function persistentSessionIds(
+    metas: readonly RunMeta[],
+    archivePending: ReadonlySet<string>,
+): Set<string> {
+    const sessions = new Set(listArchivedAttempts().map((meta) => meta.sessionId));
+    for (const meta of metas) {
+        if (archivePending.has(meta.id)) sessions.add(meta.sessionId);
+    }
+    return sessions;
+}
+
+/**
+ * Retry publication of every completed attempt whose compact durable record is
+ * missing, BEFORE either bound decides what to delete.
+ *
+ * The volatile run directory is the only place a completed attempt's recipe
+ * lives until that record is published, so this pass is what makes the age and
+ * size bounds safe: while it keeps failing, the runs it names are retained (see
+ * `CleanupScope.archivePending`), and once it succeeds they are ordinary
+ * persistent conversations whose raw logs may be reclaimed.
+ *
+ * Returns the run ids still unpublished.
+ */
+function retryPendingArchives(metas: readonly RunMeta[]): Set<string> {
+    const pending = new Set<string>();
+    for (const meta of metas) {
+        if (!archivePublicationPending(meta)) continue;
+        try {
+            if (archiveCompletedAttempt(meta)) observeArchivePublication(meta.id);
+        } catch (error) {
+            observeArchivePublication(meta.id, error);
+        }
+        if (archivePublicationPending(meta)) pending.add(meta.id);
+    }
+    return pending;
 }
 
 function runIdsBySession(metas: readonly RunMeta[]): Map<string, string[]> {
@@ -457,7 +523,7 @@ function cleanRunDirs(cutoff: number, scope: CleanupScope, errors: string[]): nu
         const dir = runDir(id);
         const meta = readMeta(id);
         if (meta) {
-            if (!ageSweepEligible(meta, cutoff, retained, scope.occupancy)) continue;
+            if (!ageSweepEligible(meta, cutoff, retained, scope)) continue;
             if (removeAgedRunArtifacts(meta, cutoff, retained, scope, errors)) removed += 1;
             continue;
         }
@@ -480,13 +546,15 @@ function ageSweepEligible(
     meta: RunMeta,
     cutoff: number,
     retained: ReadonlySet<string>,
-    occupancy: CleanupOccupancy,
+    scope: CleanupScope,
 ): boolean {
     if (!TERMINAL_CLEANUP_STATUSES.has(meta.status)) return false;
     if (retained.has(meta.sessionId)) return false;
+    // The run directory still holds the only copy of this conversation's recipe.
+    if (scope.archivePending.has(meta.id)) return false;
     // A released conversation can still be in use: a later attempt may run
     // inside this root's clone, or a stop/kill may not have landed.
-    if (occupancy.runIds.has(meta.id)) return false;
+    if (scope.occupancy.runIds.has(meta.id)) return false;
     return terminalTimestamp(meta) < cutoff;
 }
 
@@ -515,8 +583,8 @@ function removeAgedRunArtifacts(
     return withConversationSerialization(meta.sessionId, () => {
         if (!conversationQuiescentUnderLock(meta.sessionId, runIds)) return false;
         const fresh = readMeta(meta.id) ?? meta;
-        if (!ageSweepEligible(fresh, cutoff, retained, scope.occupancy)) return false;
-        if (removeMetaArtifacts(fresh)) return true;
+        if (!ageSweepEligible(fresh, cutoff, retained, scope)) return false;
+        if (removeMetaArtifacts(fresh, { keepWorkspace: scope.persistent.has(fresh.sessionId) })) return true;
         errors.push(`${runDir(meta.id)}: could not remove run artifacts`);
         return false;
     }, () => false);
@@ -528,8 +596,8 @@ function removeAgedRunArtifacts(
  * `<timestamp>_<sessionId>.jsonl` name, or the bare conversation name. History
  * that resolves to nothing this sweep knows stays on the ordinary path.
  */
-function sessionIdForPath(path: string, serialized: ReadonlySet<string>): string | undefined {
-    const rel = relative(sessionsDir(), path);
+function sessionIdForPath(root: string, path: string, serialized: ReadonlySet<string>): string | undefined {
+    const rel = relative(root, path);
     if (!rel || rel.startsWith("..")) return undefined;
     const known = [...new Set(pathNameCandidates(rel.split(sep)))].filter((candidate) => serialized.has(candidate));
     // Two different tracked conversations in one path is not a layout this
@@ -553,12 +621,13 @@ function* pathNameCandidates(parts: readonly string[]): Generator<string> {
  * when this sweep tracks that conversation.
  */
 function removeSessionPath(
+    root: string,
     path: string,
     serialized: ReadonlySet<string>,
     scope: CleanupScope,
     errors: string[],
 ): boolean {
-    const sessionId = sessionIdForPath(path, serialized);
+    const sessionId = sessionIdForPath(root, path, serialized);
     if (!sessionId) return removePath(path, errors);
     const runIds = scope.runIdsBySession.get(sessionId) ?? [];
     return withConversationSerialization(sessionId, () => {
@@ -567,7 +636,7 @@ function removeSessionPath(
     }, () => false);
 }
 
-function activeSessionIds(metas: RunMeta[], occupancy: CleanupOccupancy): Set<string> {
+function activeSessionIds(metas: RunMeta[], occupancy: CleanupOccupancy, persistent: ReadonlySet<string>): Set<string> {
     const active = new Set<string>(occupancy.sessions);
     for (const meta of metas) {
         if (meta.status === "running" || meta.status === "orphaned") active.add(meta.sessionId);
@@ -575,12 +644,14 @@ function activeSessionIds(metas: RunMeta[], occupancy: CleanupOccupancy): Set<st
     // A retained completed conversation is not active work, but its saved
     // session file is the history a continuation reopens.
     for (const sessionId of retainedSessionIds()) active.add(sessionId);
+    // Durable conversations never expire with the volatile sweeps either.
+    for (const sessionId of persistent) active.add(sessionId);
     return active;
 }
 
-function pathMentionsActiveSession(path: string, active: Set<string>): boolean {
+function pathMentionsActiveSession(root: string, path: string, active: Set<string>): boolean {
     if (active.size === 0) return false;
-    const rel = relative(sessionsDir(), path);
+    const rel = relative(root, path);
     for (const sessionId of active) {
         if (sessionId && rel.includes(sessionId)) return true;
     }
@@ -588,6 +659,7 @@ function pathMentionsActiveSession(path: string, active: Set<string>): boolean {
 }
 
 function cleanSessionTree(
+    root: string,
     cutoff: number,
     active: Set<string>,
     protectedPaths: readonly string[],
@@ -595,7 +667,6 @@ function cleanSessionTree(
     serialized: ReadonlySet<string>,
     errors: string[],
 ): number {
-    const root = sessionsDir();
     if (!existsSync(root)) return 0;
     let removed = 0;
 
@@ -614,10 +685,10 @@ function cleanSessionTree(
             if (entry.isDirectory()) {
                 const childEmpty = visit(path);
                 if (childEmpty
-                    && !pathMentionsActiveSession(path, active)
+                    && !pathMentionsActiveSession(root, path, active)
                     && !pathOverlapsProtected(path, protectedPaths)) {
                     const mtimeMs = safeStatMtime(path);
-                    if (mtimeMs !== undefined && mtimeMs < cutoff && removeSessionPath(path, serialized, scope, errors)) {
+                    if (mtimeMs !== undefined && mtimeMs < cutoff && removeSessionPath(root, path, serialized, scope, errors)) {
                         removed += 1;
                         continue;
                     }
@@ -626,12 +697,12 @@ function cleanSessionTree(
                 continue;
             }
 
-            if (pathMentionsActiveSession(path, active) || pathOverlapsProtected(path, protectedPaths)) {
+            if (pathMentionsActiveSession(root, path, active) || pathOverlapsProtected(path, protectedPaths)) {
                 empty = false;
                 continue;
             }
             const mtimeMs = safeStatMtime(path);
-            if (mtimeMs !== undefined && mtimeMs < cutoff && removeSessionPath(path, serialized, scope, errors)) {
+            if (mtimeMs !== undefined && mtimeMs < cutoff && removeSessionPath(root, path, serialized, scope, errors)) {
                 removed += 1;
                 continue;
             }
@@ -656,19 +727,33 @@ export function runDailyCleanupOnce(options: DailyCleanupOptions = {}): DailyCle
     const terminalRetention = retentionMs(options.terminalRunRetentionMs, options.config?.cleanupTerminalRunRetentionMs);
     const sessionRetention = retentionMs(options.sessionRetentionMs, options.config?.cleanupSessionRetentionMs);
     const metas = listMetas();
+    // Publish any outstanding compact record before this sweep reclaims the only
+    // copy of a completed attempt's recipe.
+    const archivePending = retryPendingArchives(metas);
+    const persistent = persistentSessionIds(metas, archivePending);
     const scope: CleanupScope = {
         occupancy: planCleanupOccupancy(metas, options.protect),
         runIdsBySession: runIdsBySession(metas),
+        persistent,
+        archivePending,
     };
     const removedRunDirs = cleanRunDirs(now - terminalRetention, scope, errors);
-    const removedSessionPaths = cleanSessionTree(
-        now - sessionRetention,
-        activeSessionIds(metas, scope.occupancy),
-        scope.occupancy.paths,
-        scope,
-        serializedConversations(metas),
-        errors,
-    );
+    // Native saved history is durable regardless of the latest attempt status.
+    // Sweep only legacy temporary sessions; eligibility to resume must never
+    // determine whether a durable native conversation is kept.
+    const sessionRoots = [join(baseDir(), "sessions")];
+    let removedSessionPaths = 0;
+    for (const root of sessionRoots) {
+        removedSessionPaths += cleanSessionTree(
+            root,
+            now - sessionRetention,
+            activeSessionIds(metas, scope.occupancy, persistent),
+            scope.occupancy.paths,
+            scope,
+            serializedConversations(metas),
+            errors,
+        );
+    }
 
     try {
         writeCleanupState({ lastLocalDate: dateKey, lastRunAt: now });
@@ -767,6 +852,10 @@ export function enforceRegistrySizeCapOnce(options: SizeCapOptions = {}): SizeCa
         ?? (Number.isFinite(configured) && configured! > 0 ? configured! : DEFAULT_MAX_REGISTRY_BYTES);
 
     const errors: string[] = [];
+    // Same ordering as the age sweep: retry archival first, so a run whose
+    // recipe only exists in its volatile directory is never a removal candidate.
+    const metas = listMetas();
+    const archivePending = retryPendingArchives(metas);
     const entries = collectSizeCapEntries();
     // Retained conversations and their workspaces are exempt from the byte
     // bound until the owner releases them; a size sweep must not delete the
@@ -776,17 +865,20 @@ export function enforceRegistrySizeCapOnce(options: SizeCapOptions = {}): SizeCa
     // Occupancy costs a metadata scan and lease reads, so it is only computed
     // when this sweep would actually remove something.
     const totalBytes = entries.reduce((sum, entry) => sum + entry.bytes, 0);
-    const metas = listMetas();
     const occupancy = totalBytes > maxBytes ? planCleanupOccupancy(metas, options.protect) : undefined;
     const protectedIds = new Set([
         ...(options.protectedIds ?? ownRunIds(metas)),
         ...retainedRunIds(metas),
         ...(occupancy?.runIds ?? []),
+        // An unpublished compact record is the recipe's only copy.
+        ...archivePending,
     ]);
     const plan = planRegistrySizeCap(entries, { maxBytes, protectedIds });
     const scope: CleanupScope = {
         occupancy: occupancy ?? { sessions: new Set(), runIds: new Set(), paths: [] },
         runIdsBySession: runIdsBySession(metas),
+        persistent: persistentSessionIds(metas, archivePending),
+        archivePending,
     };
     const bytesById = new Map(entries.map((entry) => [entry.id, entry.bytes]));
     const removed: string[] = [];
@@ -830,7 +922,7 @@ function removeSizeCappedRun(
         const fresh = readMeta(id) ?? meta;
         if (!TERMINAL_CLEANUP_STATUSES.has(fresh.status)) return "retained";
         if (scope.occupancy.runIds.has(fresh.id)) return "retained";
-        if (removeMetaArtifacts(fresh)) return "removed";
+        if (removeMetaArtifacts(fresh, { keepWorkspace: scope.persistent.has(fresh.sessionId) })) return "removed";
         errors.push(`${runDir(id)}: could not remove run artifacts`);
         return "failed";
     }, () => "retained");

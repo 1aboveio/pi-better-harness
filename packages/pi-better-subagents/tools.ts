@@ -15,7 +15,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunMeta, type RunStatus } from "./registry.ts";
+import { readMeta, listRunRecords, effectiveStatus, isFinalResultStatus, type RunCallbackOrigin, type RunMeta, type RunStatus } from "./registry.ts";
 import { buildSubagentResultPayload } from "./finalization.ts";
 import { stopRun } from "./stop.ts";
 import {
@@ -24,6 +24,7 @@ import {
     SUBAGENT_LIST_STATUSES,
     collectSubagentList,
     formatSubagentListRow,
+    listFolderScopeKey,
 } from "./list.ts";
 import {
     assembleOrphanedResult,
@@ -34,11 +35,9 @@ import {
     listIncidentCount,
     formatIncidentLabel,
     listRevisions,
-    listScopeKey,
     requestScopeKey,
     resolveActiveOrigin,
     resolveRunAccess,
-    runInListScope,
     unknownRunError,
     type SubagentToolSession,
 } from "./output-payload.ts";
@@ -292,18 +291,31 @@ function forCall(session: SubagentToolSession, ctx: unknown): SubagentToolSessio
     return { getActiveOrigin: () => provider(ctx) };
 }
 
+/**
+ * Folder this list call runs in. `ctx.cwd` is the foreground's live workspace
+ * and wins; a readable origin is the fallback for hosts that omit it. Listing
+ * by folder never needs a foreground session id, so an unavailable origin does
+ * not narrow the default scope.
+ */
+function listCwd(ctx: unknown, origin: RunCallbackOrigin | undefined): string {
+    const ctxCwd = (ctx as { cwd?: unknown } | undefined)?.cwd;
+    if (typeof ctxCwd === "string" && ctxCwd !== "") return ctxCwd;
+    return origin?.cwd ?? process.cwd();
+}
+
 export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSession = {}): ToolDefinition {
     return {
         name: "subagent_list",
         label: "List Subagents",
         description:
             `List background subagent runs with compact status rows. Non-blocking. ` +
-            `Default: current session, newest first, limit ${SUBAGENT_LIST_DEFAULT_LIMIT} (1 KiB page). ` +
+            `Default: current folder and its descendants across foreground sessions, newest first, ` +
+            `limit ${SUBAGENT_LIST_DEFAULT_LIMIT} (1 KiB page). ` +
             `Pass all:true for machine-global; limit is clamped to max ${SUBAGENT_LIST_MAX_LIMIT}. ` +
             `Pass cursor to continue. Incident counts are compact; full failure text lives on subagent_result/output.`,
         promptSnippet: "List background subagent runs and their status",
         parameters: Type.Object({
-            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = current session only." })),
+            all: Type.Optional(Type.Boolean({ description: "If true, list every run on this machine. Default false = current folder and its descendants, regardless of foreground session." })),
             limit: Type.Optional(Type.Number({ description: `Maximum rows to display (default ${SUBAGENT_LIST_DEFAULT_LIMIT}, max ${SUBAGENT_LIST_MAX_LIMIT}; larger values are clamped).` })),
             status: Type.Optional(Type.Array(Type.String(), { description: `Effective statuses to include: ${SUBAGENT_LIST_STATUSES.join(", ")}.` })),
             cursor: Type.Optional(Type.String({ description: "Caller-owned page or status cursor from a previous list response." })),
@@ -318,15 +330,11 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
             const now = Date.now();
             const index = listRunRecords();
             const metas = index.metas;
-            const parentPid = process.pid;
             const resolved = resolveActiveOrigin(session);
-            const origin = resolved.origin;
-            const sessionAvailable = !(resolved.wired && !resolved.available);
-            const scopeKey = listScopeKey(p.all === true, origin, parentPid, sessionAvailable);
-            let sessionWarning: string | undefined;
-            if (p.all !== true && !sessionAvailable) {
-                sessionWarning = `Session identity unavailable; ownership of ${metas.length} run(s) cannot be verified, so none are listed. Pass all:true for machine-global.`;
-            }
+            // List scope is a folder, not a session: peers in the same folder
+            // are listed even when they were spawned by another foreground.
+            const cwd = listCwd(ctx, resolved.origin);
+            const scopeKey = listFolderScopeKey(p.all === true, cwd);
             const healthCache = new Map<string, HealthObservation>();
             const healthById = (id: string) => {
                 const hit = healthCache.get(id);
@@ -337,21 +345,13 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 healthCache.set(id, obs);
                 return obs;
             };
-            const inScope = (meta: RunMeta) => runInListScope(
-                meta,
-                { all: p.all === true },
-                origin,
-                parentPid,
-                sessionAvailable,
-            );
             const collected = collectSubagentList({
                 metas,
                 params: p,
-                parentPid,
+                cwd,
                 now,
                 statusOf: effectiveStatus,
                 healthById,
-                inScope,
             });
             const items = collected.items as Array<{ meta: RunMeta; status: string }>;
             const incidents = new Map(items.map((row) => [row.meta.id, listIncidentCount(
@@ -384,7 +384,6 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 failureRevision: revisions.failureRevision,
                 scopeKey,
                 statusesKey,
-                sessionWarning,
                 unreadable: index.unreadable,
                 indexError: index.indexError,
                 incidentRuns,

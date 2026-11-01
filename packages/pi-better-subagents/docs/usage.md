@@ -96,66 +96,77 @@ thresholds continue to take precedence for subagent health.
 
 | Tool | Blocks? | What it does |
 |------|---------|--------------|
-| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, `retain_session` (keep the completed conversation and workspace available for `subagent_resume`), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
-| `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; launch options follow the declared batch schema, which omits `retain_session`), `onCapacity` (`reject` or `launch-available`). |
-| `subagent_resume` | never | Continue a completed run in its own saved conversation. Params: `id` (the completed attempt), `prompt` (the next user turn — do not restate the task or role), optional `model`/`thinking` (explicit escalation only; otherwise the saved recipe wins), `callback`, and the timing overrides. Returns a NEW run id with the same native session id and `resumedFrom` lineage. See [continuing a completed subagent](#continuing-a-completed-subagent). |
-| `subagent_release` | never | Release `retain_session` protection for a completed conversation and its workspace. Nothing is deleted now and no completed result is rewritten; ordinary cleanup may reclaim the artifacts afterwards. Only the owning foreground session may release. |
+| `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
+| `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; optional per-job `session_id` or `session_name` continues a saved conversation), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, per-setting `sources` (`session` or `config`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
-| `subagent_list` | never | Compact current-session list (default 10 rows / 1 KiB page). Params: `all` (machine-global / foreign session), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
+| `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
 | `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
 | `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
 | `subagent_stop` | never | SIGTERM a running run's process group. |
 
-## Continuing a completed subagent
+## Finding a saved conversation
 
-A finished subagent can be given more work in **its own conversation** instead
-of starting a fresh worker that has lost the context. Both single and batch
-launches save sessions normally; `subagent_resume` needs no retention flag.
-`retain_session` only protects saved artifacts from ordinary cleanup. Releasing
-that protection does not prevent resume while the history and workspace still exist:
+`subagent_list()` searches the current folder and its descendants, including runs
+from other foreground sessions. Use `subagent_list({ all: true })` for a global
+search. Each row shows both the attempt id and `session_id`; use the session id
+when continuing work. A continuation keeps that session id while receiving a new
+attempt id.
 
-| Step | What happens |
-|------|--------------|
-| `subagent_spawn` with `retain_session: true` | Marks the conversation and its workspace as retained while follow-up may be needed. The child still ends normally and a parked owner occupies **no** concurrency slot. Ordinary one-shot runs omit it and are unchanged. |
-| `subagent_resume({ id, prompt, … })` | Starts a NEW attempt: new run id, log, result, timing record, and capacity slot. The native session id, the exact saved conversation, and the frozen launch recipe stay the same, and the new attempt records `resumedFrom`/`rootRunId` lineage. `prompt` is the next user turn; the original task and role instructions already live in the history. |
-| `subagent_release({ id })` | Releases retention without deleting anything. Logs, results, and completed metadata stay intact; ordinary cleanup may reclaim the conversation and workspace afterwards. |
+```javascript
+subagent_list()
+subagent_list({ all: true })
+```
 
-Continuation rules:
+Local name lookup follows the same folder scope. A duplicate name is not resolved
+by choosing the newest conversation; use one of the reported session ids instead.
 
-- Only a `completed` attempt can be continued. A running or orphaned attempt
-  must be stopped first; `failed`, `killed`, and `lost` attempts are not
-  continuation targets.
-- Only the foreground session that launched the run may continue or release it.
-- The saved conversation must still exist and must name the same native session
-  id and workspace. A missing, ambiguous, or mismatched history refuses instead
-  of starting a replacement conversation, and a missing workspace refuses too.
-  Continuation passes the exact validated `--session` path; Pi's create-if-missing
-  fallbacks are never used.
-- The attempt keeps the recipe's effective tools, exclusions, clean/nesting and
-  approval intent, confinement, and model/effort. Pass `model`/`thinking` only to
-  escalate explicitly for that attempt. Current mandatory human permissions are
-  re-applied every time; a profile that would change confinement refuses instead
-  of silently running the conversation under different rules.
-- Resolved extension implementations are recorded too. If current tool/provider
-  configuration would silently replace one, continuation refuses; an explicit model
-  escalation can select its required provider without changing tool implementations.
-- A continuation never prepares another Git clone. It reuses the recorded
-  workspace, including uncommitted work. Age/size cleanup protects all attempts that
-  own shared conversation resources while a continuation or pending admission uses them.
-- Retain the implementation owner through review fixes. Resume an independent reviewer
-  only to finish an unfinished review on the same HEAD/scope; after a completed round,
-  start a fresh reviewer with the retained findings and existing selected review scope.
-- One conversation admits one writer. A cross-process lease is held from
-  admission through child lifetime and finalization; duplicate requests are
-  refused, and a lease left behind by a dead process (or by an already
-  finalized attempt) is recovered conservatively. Lease/retention mutations use a
-  short kernel-owned SQLite transaction; retained launches and continuation require
-  a runtime with `node:sqlite` (Node 24 recommended). Ordinary one-shot launches
-  remain available without it. A dead coordinator with no published child metadata
-  is ambiguous and cannot authorize another writer.
-- Retention uses the existing temporary runtime storage. It is a bounded
-  availability promise, not permanent storage: if system temp is reaped, the
-  history is gone and continuation refuses with a clear error.
+## Continuing a saved conversation
+
+Use the same spawn tool for new work and follow-up work:
+
+```javascript
+subagent_spawn({ name: "implementation", prompt: "Implement the change." })
+subagent_spawn({ session_id: "<saved-session-id>", prompt: "Fix the review findings." })
+subagent_spawn({ session_name: "implementation", prompt: "Fix the review findings." })
+```
+
+A launch without a session selector starts a new conversation. With a selector,
+`prompt` is the next user turn; the original task and role are already saved.
+Each attempt gets a new run id, log, timing record, and capacity slot while the
+native session id and history stay the same. The launch recipe preserves the
+worker's role, tools, model, and workspace, including uncommitted changes.
+
+`session_name` is an exact display-name match within the current folder and its
+descendants. Several attempts of the same conversation count once. If several
+conversations share the name, spawn reports matching session ids and refuses to
+guess. Use `subagent_list({ all: true })` to find conversations elsewhere and
+pass `session_id`. `name` remains a new-launch label.
+
+Single and batch launches save native Pi sessions and completed launch recipes
+durably in the Pi agent directory. No retention flag or release tool is needed.
+Temporary event logs can be cleaned up independently. Missing or manually deleted
+history is never recreated by continuation. Older recipes pointing at temporary
+session files remain usable only while those original files exist.
+
+A different foreground session may continue a conversation. The new attempt's
+callback goes to its caller; previous attempts keep their original evidence.
+Only a completed conversation with an existing workspace and verified saved
+history can continue. One conversation admits one writer: active or orphaned
+attempts and live writer leases refuse competing launches. Continuation requires
+a runtime with `node:sqlite` (Node 24 recommended).
+
+Current mandatory human permissions apply on every attempt. A change that would
+alter confinement or replace recorded tool implementations refuses continuation.
+Only explicit model/effort escalation changes the saved model choice; a continued
+worker does not silently inherit the caller's model or re-resolve its role.
+
+Use per-job `session_id` or `session_name` in `subagent_spawn_batch`. A batch may
+mix fresh and continued jobs. Keep one job per conversation; the writer lease
+rejects competing jobs.
+
+If new parameters are missing after an npm upgrade, run `/reload` in Pi.
+Updating files on disk does not replace extension code already loaded in a live
+session.
 
 ## Codemode batch launches
 
@@ -748,10 +759,12 @@ state. Session shutdown disposes open navigator timers.
 
 ## Design notes
 
-- Runtime lives outside any repo, under `$TMPDIR/pi-better-subagents/`
-  (`runs/<id>/` holds `output.log`, `prompt.md`, `meta.json`; `sessions/` holds
-  child session state). The `meta.json` sidecar is authoritative, so `list` /
-  `output` / `result` survive turns, `/reload`, and pi restarts.
+- Temporary run evidence lives outside any repo under `$TMPDIR/pi-better-subagents/`
+  (`runs/<id>/` holds `output.log`, `prompt.md`, and `meta.json`). Native child
+  sessions and compact completed-attempt recipes persist under the Pi agent
+  directory in `subagents/sessions` and `subagents/attempts`. Event-log cleanup
+  does not remove the saved conversation or recipe. Existing legacy recipes keep
+  their original session paths.
 - The child runs `--mode json`; `subagent_result` / `subagent_output` **parse**
   the event stream and return just the bounded final answer (no tool-name history).
   Non-JSON banner/warning lines fail to parse and are dropped, so the result is
@@ -763,7 +776,7 @@ state. Session shutdown disposes open navigator timers.
 
 ## Parent-process scoping
 
-The live widget, default `subagent_list`, concurrency cap, and `session_start` ticker only include runs this pi process spawned (`spawnPid === process.pid`). The on-disk registry stays machine-global for durability. Default `subagent_list` is current-session, newest first, 10 compact rows / 1 KiB. Pass `limit:N` (max 100) or `max_bytes` (max 4 KiB) for an explicit larger page. Pass `all:true` for a global / foreign-session view. Pass `status:[...]` to filter by effective status: `running`, `completed`, `failed`, `killed`, transient `exited`, or durable `orphaned` / `lost`. Id-based `subagent_result` / `subagent_output` default to the current session; pass `all:true` to read a foreign-session id. Unknown ownership is a gap, not “not found”; when the current session identity cannot be read, no run's ownership is treated as verified and `all:true` is required. List pages are reached with the returned `nextCursor` (every run is reachable, not only the first 100). Runs whose metadata is missing or corrupt are reported as gaps and counted on lists, never as nonexistent.
+The live widget, concurrency cap, and supervision ticker track this Pi process's runs. `subagent_list` searches the current folder and its descendants across foreground sessions; `all:true` searches globally. Rows show the attempt id and the native `session_id`, so a listed conversation can be continued explicitly. Results are newest first, with 10 rows / 1 KiB by default. Use `limit` (max 100), `max_bytes` (max 4 KiB), and `status` filters as needed. Cursors are bound to the local folder or global scope and cannot be replayed from a different folder. Id-based `subagent_result` and `subagent_output` keep their current-session scope; use `all:true` to read another session's run evidence. Unknown ownership remains an explicit gap for those evidence tools. Saved conversation discovery and continuation do not require the original foreground session to exist.
 
 ## Supervision health (`orphaned` / `lost`)
 

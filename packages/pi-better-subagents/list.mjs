@@ -1,6 +1,7 @@
 import { describeTiming } from "./timing.ts";
 import { fmtElapsed } from "./widget.mjs";
 import { formatListHealthSuffix } from "./health-surface.mjs";
+import { isWithinWorkspace, normalizeWorkspacePath } from "./workspace-scope.ts";
 
 export const SUBAGENT_LIST_DEFAULT_LIMIT = 10;
 export const SUBAGENT_LIST_MAX_LIMIT = 100;
@@ -66,6 +67,19 @@ export function normalizeSubagentListOptions(params = {}) {
     };
 }
 
+/**
+ * Cursor scope for one list call.
+ *
+ * Machine-global lists keep the existing `all` key. Folder lists use the
+ * canonical folder path, so a cursor cannot replay another folder's page while
+ * two foreground sessions in the same folder intentionally share one scope.
+ */
+export function listFolderScopeKey(all, cwd) {
+    if (all) return "all";
+    const folder = typeof cwd === "string" && cwd !== "" ? cwd : process.cwd();
+    return `folder:${normalizeWorkspacePath(folder)}`;
+}
+
 function bounded(value, max) {
     const single = String(value ?? "").replace(/\s+/g, " ").trim();
     return single.length <= max ? single : `${single.slice(0, Math.max(0, max - 1))}…`;
@@ -87,17 +101,19 @@ export function formatSubagentListRow(meta, p) {
     const batch = meta.batchId
         ? `  [batch: ${meta.batchName ? `${bounded(meta.batchName, 40)} ` : ""}${bounded(meta.batchId, 60)}]`
         : "";
-    return `• ${name}${meta.id}  [${status}]  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${timing}${batch}${failure}\n    ${promptPreview(meta)}`;
+    return `• ${name}${meta.id}  [${status}]  session_id=${meta.sessionId ?? "unavailable"}  ${bounded(meta.model ?? "?", 60)}  ${elapsed}${health}${timing}${batch}${failure}\n    ${promptPreview(meta)}`;
 }
 
 export function collectSubagentList(p) {
     const options = normalizeSubagentListOptions(p.params ?? {});
     const now = p.now ?? Date.now();
-    const parentPid = p.parentPid ?? process.pid;
+    // Folder scope, not spawn ownership: every foreground session working in
+    // this folder (or one of its descendants) contributes to the default list.
+    const cwd = typeof p.cwd === "string" && p.cwd !== "" ? p.cwd : process.cwd();
     const statusOf = p.statusOf ?? ((meta) => meta.status);
     const healthById = p.healthById ?? (() => undefined);
     const failureById = p.failureById ?? (() => "");
-    const inScope = p.inScope ?? ((meta) => options.all || meta.spawnPid === parentPid);
+    const inScope = p.inScope ?? ((meta) => options.all || isWithinWorkspace(meta.cwd, cwd));
     const offset = Math.max(0, Math.floor(Number(p.offset) || 0));
 
     const scoped = (p.metas ?? [])

@@ -222,12 +222,16 @@ export async function clarifyCatalogRequest(
     const normalized = jobs.map((job, index) => ({
         job: { ...job, catalogJobIndex: index },
         index,
-        agent: agentIdOf(job),
-        roles: roleIdsOf(job),
+        continuation: job.session_id !== undefined || job.session_name !== undefined,
+        agent: job.session_id !== undefined || job.session_name !== undefined ? undefined : agentIdOf(job),
+        roles: job.session_id !== undefined || job.session_name !== undefined ? [] : roleIdsOf(job),
     }));
     const clean: CatalogJobFields[] = [];
     const pending: { job: CatalogJobFields; index: number; agent?: string; roles: string[] }[] = [];
     for (const item of normalized) {
+        // Saved conversations keep their launch recipe. Repeated selectors are
+        // checked against that recipe at admission, never clarified or expanded.
+        if (item.continuation) { clean.push(item.job); continue; }
         if (item.roles.length > 1 || (item.agent && item.roles.length > 0)) pending.push(item);
         else clean.push(withSelector(item.job, { agent: item.agent, role: item.roles[0] }));
     }

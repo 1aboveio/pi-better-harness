@@ -234,6 +234,24 @@ Edited instructions.
         assert.deepEqual(distinct.jobs.map((job) => job.role), ["role.developer", "role.reviewer"]);
     });
 
+    it("keeps saved conversation selectors out of catalog clarification and expansion", async () => {
+        const continued = { prompt: "Follow up.", session_id: "saved-native-session",
+            agent: "agent.payments", role: ["role.developer", "role.reviewer"] };
+        const named = { prompt: "Named follow up.", session_name: "worker", role: ["role.reviewer", "role.explorer"] };
+        const result = await clarifyCatalogRequest([
+            continued,
+            { prompt: "Fresh work.", role: "role.developer" },
+            named,
+        ], { hasUI: false });
+        assert.equal(result.status, "resolved");
+        assert.equal(result.jobs.length, 3);
+        assert.deepEqual(result.jobs[0].role, continued.role);
+        assert.equal(result.jobs[0].agent, continued.agent);
+        assert.equal(result.jobs[0].session_id, continued.session_id);
+        assert.equal(result.jobs[2].session_name, named.session_name);
+        assert.deepEqual(result.jobs[2].role, named.role);
+    });
+
     it("splits one ambiguous run into single-role jobs and keeps the other job", async () => {
         const result = await clarifyCatalogRequest([
             { prompt: "Both.", role: ["role.developer", "role.reviewer"] },
@@ -485,7 +503,9 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
-base=$(dirname "$sess")
+// Native sessions now live in the durable Pi agent directory, so the fake child
+// is told the volatile registry root explicitly instead of deriving it.
+base="$PI_SUBAGENTS_TEST_REGISTRY"
 mkdir -p "$base/runs/$id"
 printf '%s\\n' "\${args[@]}" > "$base/runs/$id/argv.txt"
 printf '%s\\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}' > "$base/runs/$id/output.log"
@@ -495,6 +515,7 @@ fi
 `);
         chmodSync(piPath, 0o755);
         process.env.PATH = `${binDir}:${process.env.PATH}`;
+        process.env.PI_SUBAGENTS_TEST_REGISTRY = baseDir();
         process.env.PI_CODING_AGENT_DIR = fx.userRoot;
         writeAgent(fx.userRoot, "agent.payments", "role.developer", "Look at payments.");
         const extension = await import(`../index.ts?catalog-lifecycle=${Date.now()}`);

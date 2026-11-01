@@ -3,6 +3,7 @@ export {
     SUBAGENT_LIST_MAX_LIMIT,
     SUBAGENT_LIST_STATUSES,
     normalizeSubagentListOptions,
+    listFolderScopeKey,
     formatSubagentListRow,
     collectSubagentList,
     buildSubagentList,

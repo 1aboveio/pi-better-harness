@@ -141,6 +141,28 @@ describe("mergeJobOptions", () => {
     });
 });
 
+describe("continuation jobs in a batch", () => {
+    it("keeps session_id per job and never inherits it from shared", () => {
+        const merged = mergeJobOptions({ model: "shared/model" }, { prompt: "x", session_id: "sa_conv" });
+        assert.equal(merged.session_id, "sa_conv");
+        assert.equal(merged.model, "shared/model", "a continuation job still inherits other shared defaults");
+
+        assert.equal(mergeJobOptions({}, { prompt: "x" }).session_id, undefined);
+        assert.equal(
+            mergeJobOptions({ session_id: "sa_shared_conv" }, { prompt: "x" }).session_id,
+            undefined,
+            "shared.session_id is never copied onto a job: one shared conversation would serialize the whole batch",
+        );
+    });
+
+    it("rejects a blank per-job session_id", () => {
+        assert.throws(
+            () => validateBatchPlan({ jobs: [{ prompt: "x", session_id: "   " }] }),
+            /session_id must be a non-empty native session id/,
+        );
+    });
+});
+
 describe("validateBatchPlan", () => {
     it("accepts a valid one-job batch", () => {
         assert.doesNotThrow(() =>
