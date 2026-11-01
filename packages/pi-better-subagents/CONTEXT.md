@@ -56,16 +56,19 @@ attempt id as its conversation id. A continuation keeps the prior conversation
 id and its saved history, and records `resumedFrom` plus a stable `rootRunId`
 lineage. The launch recipe captured at the first attempt (tools, exclusions,
 clean/nesting and approval intent, confinement, effective model and effort,
-workspace) describes how that conversation is reconstructed.
+workspace) describes how that conversation is reconstructed. New conversations
+and their completed launch recipes are saved durably in the Pi agent directory,
+independent of temporary event logs and the foreground session that launched them.
+A later foreground session may continue the same conversation; the new attempt's
+callback belongs to that caller.
 
-### Retained Conversation
+### Saved Conversation
 
-A completed conversation and its workspace that `retain_session` keeps out of
-age and size cleanup until the owning foreground session releases them. Retention
-is a bounded availability promise inside the existing temporary runtime storage,
-not permanent storage: when the saved history is gone, continuation refuses and
-never creates a replacement conversation. A parked retained owner occupies no
-concurrency slot; only a live attempt does.
+A native Pi conversation and its completed launch recipe persisted for later
+follow-up. Its session id stays the same across attempts. Spawn can select it
+by session id or by an unambiguous name in the current folder, independently of
+the foreground session that launched it. A saved conversation keeps no process
+alive and occupies no concurrency slot.
 
 ### Run Alias
 

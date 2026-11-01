@@ -18,9 +18,19 @@
  *    clean/nesting/approval intent, confinement, model, effort, role identity,
  *    workspace intent) on run metadata.
  * 3. **Explicit retention.** `retain_session` records a bounded promise that a
- *    completed conversation and its workspace stay out of cleanup until the
- *    owner releases it. Retention lives in the existing runtime storage, so
- *    system-temp reaping can still remove it; a missing conversation refuses.
+ *    completed conversation and its workspace stay out of cleanup until a
+ *    foreground session releases it. Retention lives in the existing runtime
+ *    storage, so system-temp reaping can still remove it; a missing
+ *    conversation refuses.
+ *
+ * Foreground-session ownership is provenance, not an authorization boundary:
+ * Pi sessions are ordinary files on disk, so any foreground session that can
+ * name a completed attempt with a verifiable saved conversation, workspace, and
+ * launch recipe may continue it (or release its optional retention). The new
+ * attempt records the INVOKING foreground as its callback origin and its
+ * permission admission is re-resolved from the current profile, so continuing
+ * transfers the run to the caller instead of borrowing the original owner's
+ * authority.
  * 4. **Conversation writer lease.** A cross-process token lease held from
  *    admission through child lifetime and finalization. Duplicate continuations
  *    of one conversation admit exactly one writer. Lease-path and retention
@@ -66,6 +76,7 @@ import {
     type RunStatus,
 } from "./registry.ts";
 import { processExists } from "./spawn.ts";
+import { durableSubagentRoot } from "./session-store.ts";
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -231,7 +242,11 @@ export interface RetentionRecord {
     ownerRunId: string;
     /** Canonical workspace kept available for continuation. */
     workspace: string;
-    /** Foreground session that may continue or release this conversation. */
+    /**
+     * Foreground session that first retained this conversation. Provenance for
+     * diagnostics only: retention is optional convenience, not a tenancy
+     * boundary, so any foreground session may release it.
+     */
     ownerOrigin: RunCallbackOrigin;
     retainedAt: number;
     lastAttemptId: string;
@@ -398,7 +413,14 @@ export function markRetentionReleased(
 
 // ---- ownership and continuation plan ------------------------------------
 
-/** True when `origin` is the foreground session recorded on the run. */
+/**
+ * True when `origin` is the foreground session recorded on the run.
+ *
+ * This is a provenance/labelling helper, deliberately NOT an admission gate: a
+ * different foreground session may continue a completed attempt (see the
+ * module header). Callers that need to route a notification use it to decide
+ * which foreground a run belongs to, not to deny an operation.
+ */
 export function ownedByOrigin(meta: RunMeta, origin: RunCallbackOrigin | undefined): boolean {
     const recorded = meta.callbackOrigin;
     if (!origin?.sessionId || typeof origin.cwd !== "string") return false;
@@ -441,8 +463,12 @@ export function planContinuation(options: {
 }): ContinuationPlan {
     const { id, prior, origin, others } = options;
     if (!prior) throw refusal(id, "no such run id.");
+    // The invoking foreground is still required, because the new attempt's
+    // completion callback and navigator entry are routed to it. It is not
+    // required to be the attempt's original owner: the saved session, workspace,
+    // and recipe are the thing being continued, and Pi sessions are shared
+    // on-disk state rather than a per-foreground boundary.
     if (!origin?.sessionId) throw refusal(id, "the active foreground session identity is unavailable.");
-    if (!ownedByOrigin(prior, origin)) throw refusal(id, "only its owning foreground session may continue it.");
     if (prior.status !== "completed") {
         throw refusal(id, `its status is ${prior.status}; only a completed run can be continued. Stop or launch a new run instead.`);
     }
@@ -490,13 +516,13 @@ export function planRetentionRelease(options: {
 }): RetentionRecord {
     const { id, prior, origin, others } = options;
     if (!prior) throw new ContinuationError(`Cannot release ${id}: no such run id.`);
+    // Release is the same on-disk convenience promise as continuation: any
+    // foreground that can name the attempt may drop optional retention. The
+    // invoking identity is still required, because the record keeps `releasedBy`
+    // and the decision must be attributable to a real foreground session.
     if (!origin?.sessionId) throw new ContinuationError(`Cannot release ${id}: the active foreground session identity is unavailable.`);
-    if (!ownedByOrigin(prior, origin)) throw new ContinuationError(`Cannot release ${id}: only its owning foreground session may change retention.`);
     const record = readRetention(prior.sessionId);
     if (!record) throw new ContinuationError(`Cannot release ${id}: it was not launched with retain_session, so it has no retained conversation.`);
-    if (!record.ownerOrigin.sessionId || record.ownerOrigin.sessionId !== origin.sessionId || record.ownerOrigin.cwd !== origin.cwd) {
-        throw new ContinuationError(`Cannot release ${id}: only the foreground session that retained this conversation may release it.`);
-    }
     if (record.releasedAt !== undefined) {
         throw new ContinuationError(`Cannot release ${id}: its retention was already released at ${new Date(record.releasedAt).toISOString()}.`);
     }
@@ -541,8 +567,14 @@ const ADMISSION_LOCK_WAIT_MS = 0;
 const RELEASE_LOCK_WAIT_MS = 1_000;
 const RETENTION_LOCK_WAIT_MS = 1_000;
 
+/**
+ * Stable writer-lease root, independent of TMPDIR: a conversation is ordinary
+ * on-disk Pi state, so a foreground that restarts under a different temp root
+ * must still see the one writer slot. Retention records stay in the volatile
+ * registry as before.
+ */
 export function conversationLeaseDir(): string {
-    return join(baseDir(), "conversation-leases");
+    return join(durableSubagentRoot(), "conversation-leases");
 }
 
 function leasePathFor(sessionId: string): string {

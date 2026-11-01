@@ -685,7 +685,7 @@ describe("tool compatibility after navigator close-dismiss", () => {
             result: subagentResultTool(TypeStub),
             stop: subagentStopTool(TypeStub, { onStopped: () => {} }),
         };
-        assert.ok(resultText(await tools.list.execute("tc", {})).includes(id));
+        assert.ok(resultText(await tools.list.execute("tc", {}, undefined, undefined, { cwd: "/tmp" })).includes(id));
         assert.ok(resultText(await tools.output.execute("tc", { id })).includes(id));
         assert.ok(resultText(await tools.result.execute("tc", { id })).includes(id));
         assert.equal(isDismissed(readMeta(id)), true);

@@ -231,7 +231,7 @@ describe("dismissed-run model-facing tool compatibility", () => {
         writeMeta(meta({ id }));
         dismissRun(id);
         const tools = registeredTools();
-        const out = resultText(await tools.list.execute("tc", {}));
+        const out = resultText(await tools.list.execute("tc", {}, undefined, undefined, { cwd: "/tmp" }));
         assert.ok(out.includes(id), `subagent_list output must include the dismissed run; got:\n${out}`);
     });
 

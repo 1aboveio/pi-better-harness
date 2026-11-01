@@ -132,8 +132,9 @@ function writeReleasedRoot(root, workspace, overrides = {}) {
 
 /** The saved native conversation a continuation reopens. */
 function writeSavedSession(root, workspace, mtimeMs = OLD) {
-    mkdirSync(sessionsDir(), { recursive: true });
-    const path = join(sessionsDir(), `2026-01-01T00-00-00-000Z_${root}.jsonl`);
+    const legacySessionDir = join(baseDir(), "sessions");
+    mkdirSync(legacySessionDir, { recursive: true });
+    const path = join(legacySessionDir, `2026-01-01T00-00-00-000Z_${root}.jsonl`);
     writeFileSync(
         path,
         `${JSON.stringify({ type: "session", version: 1, id: root, timestamp: "2026-01-01T00:00:00.000Z", cwd: workspace })}\n`,

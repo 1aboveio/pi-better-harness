@@ -154,6 +154,12 @@ function assertCheckoutNodeModulesUntouched() {
 function clearRuns() {
     const registryDir = join(RUNTIME, "pi-better-subagents");
     rmSync(registryDir, { recursive: true, force: true });
+    // Completed attempts also publish a durable record under the isolated
+    // PI_SUBAGENT_DURABLE_DIR; clear it with the volatile registry so one test's
+    // archived records do not leak into the next test's run counts.
+    if (process.env.PI_SUBAGENT_DURABLE_DIR) {
+        rmSync(process.env.PI_SUBAGENT_DURABLE_DIR, { recursive: true, force: true });
+    }
 }
 
 function writeRunningMeta({ writeMeta, nextRunId }, name) {
@@ -197,7 +203,10 @@ if [[ "$sess" == */"$id" ]]; then
   printf '%s\\n' '{"type":"agent_settled"}' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}'
   exit 0
 fi
-base=$(dirname "$sess")
+// The fake child reports into the VOLATILE registry, which is no longer derived
+// from the session dir: native sessions now live in the durable Pi agent
+// directory. The test hands the child the registry root explicitly.
+base="$PI_SUBAGENTS_TEST_REGISTRY"
 log="$base/runs/$id/output.log"
 mkdir -p "$(dirname "$log")"
 printf '%s\\n' "\${original_args[@]}" > "$base/runs/$id/argv.txt"
@@ -315,6 +324,7 @@ describe("subagent_spawn_batch end-to-end", () => {
         process.env.PATH = `${binDir}:${origPath}`;
         mod = await import("../index.ts");
         registry = await import("../registry.ts");
+        process.env.PI_SUBAGENTS_TEST_REGISTRY = registry.baseDir();
         capacity = await import("../capacity.mjs");
         config = await import("../config.ts");
         assertCheckoutNodeModulesUntouched();

@@ -21,6 +21,14 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { processExists } from "./spawn.ts";
 import type { LifecycleClassification } from "./lifecycle.ts";
+import {
+    archiveCompletedAttempt,
+    durableSessionsDir,
+    listArchivedAttempts,
+    readArchivedAttempt,
+    recordArchiveStatusTombstone,
+} from "./session-store.ts";
+import { failureIdentity, observeFailures, readFailureState } from "./shared-failure-observations.ts";
 
 /**
  * Terminal + live statuses as recorded on disk. `orphaned` is durable and
@@ -246,12 +254,19 @@ export interface RunMeta {
     timing?: RunTiming;
 }
 
-/** Root runtime dir, deliberately OUTSIDE any repo. */
+/** Root of the VOLATILE runtime registry, deliberately OUTSIDE any repo. */
 export function baseDir(): string {
     return join(realpathSync(tmpdir()), "pi-better-subagents");
 }
+/**
+ * `--session-dir` for NEW child launches: the durable Pi agent directory
+ * (`<agent dir>/subagents/sessions`), not the volatile registry. Saved
+ * conversations are ordinary Pi session files, so changing TMPDIR or a restart
+ * must not move them. Recipes recorded before this layout keep pointing at the
+ * old temporary directory and are read exactly as recorded.
+ */
 export function sessionsDir(): string {
-    return join(baseDir(), "sessions");
+    return durableSessionsDir();
 }
 export function taskWorkspaceDir(id: string): string {
     if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) throw new Error("Invalid task workspace run ID.");
@@ -942,6 +957,54 @@ export function nextRunId(): string {
     return `sa_${Date.now().toString(36)}_${seq}`;
 }
 
+/** Failure-journal operation for durable archive publication. */
+const ARCHIVE_OPERATION = "durable-archive";
+
+/**
+ * Journal the outcome of publishing one attempt's compact durable record in the
+ * run's existing failures journal (`failures.jsonl`, read by the output and
+ * result payloads). `undefined` reports a verified recovery.
+ *
+ * While publication keeps failing, the volatile run directory still holds the
+ * only copy of the recipe, so both sweeps retain it; this incident is what makes
+ * that state visible instead of silent. Best-effort: journaling never throws
+ * into finalization or a sweep, and an untouched run keeps no journal.
+ */
+export function observeArchivePublication(id: string, error?: unknown): void {
+    try {
+        if (!/^[A-Za-z0-9_-]+$/.test(id)) return;
+        const path = join(runDir(id), "failures.jsonl");
+        const key = failureIdentity(ARCHIVE_OPERATION);
+        const open = readFailureState(path).observations[key];
+        const at = Date.now();
+        if (error === undefined) {
+            if (!open || open.status !== "unresolved") return;
+            observeFailures(path, [{
+                id: `archive-published:${id}:${at}`,
+                operation: ARCHIVE_OPERATION,
+                kind: "recovered",
+                at,
+                incidents: [open.id],
+                summary: "the compact durable continuation record was published",
+            }]);
+            return;
+        }
+        // One open incident per run: repeated sweeps retry the same publication and
+        // must not fill the journal with the same failure.
+        if (open && open.status === "unresolved") return;
+        const detail = error instanceof Error ? error.message : String(error);
+        observeFailures(path, [{
+            id: `archive-failed:${id}:${at}`,
+            operation: ARCHIVE_OPERATION,
+            kind: "failure",
+            at,
+            category: "storage",
+            summary: `durable continuation record could not be published (${detail}); this attempt's log and recipe are retained until it is`,
+            evidence: `compact record for ${id}`,
+        }]);
+    } catch { /* the journal is best-effort; retaining the run is the safety net */ }
+}
+
 export function writeMeta(meta: RunMeta): void {
     mkdirSync(runDir(meta.id), { recursive: true });
     withRunMetaLock(meta.id, (owns) => {
@@ -950,6 +1013,18 @@ export function writeMeta(meta: RunMeta): void {
         writeMetaFile(meta);
         metaCache.set(meta.id, meta);
         indexMeta(meta);
+        // Publish the compact durable continuation record in the same critical
+        // section, so a completed attempt is never visible only in volatile
+        // storage. Best-effort: a durable write failure must not break a launch
+        // or finalization (the volatile record still exists). It is journaled
+        // instead, and both sweeps retain the run until publication succeeds.
+        if (meta.status === "completed") {
+            try {
+                if (archiveCompletedAttempt(meta)) observeArchivePublication(meta.id);
+            } catch (error) {
+                observeArchivePublication(meta.id, error);
+            }
+        }
         owns();
     });
     for (const listener of metaChangedListeners) {
@@ -968,9 +1043,15 @@ export function readMeta(id: string): RunMeta | undefined {
         const meta = JSON.parse(readFileSync(metaPathFor(id), "utf-8")) as RunMeta;
         metaCache.set(id, meta);
         return meta;
-    } catch {
+    } catch (error) {
         metaCache.delete(id);
-        return undefined;
+        // Only a MISSING volatile record falls back to the durable copy. An
+        // unreadable or corrupt `meta.json` stays authoritative and is reported
+        // as absent: a possibly stale archive must never replace it.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+        const archived = readArchivedAttempt(id);
+        if (archived) metaCache.set(id, archived);
+        return archived;
     }
 }
 
@@ -982,10 +1063,27 @@ export function readMeta(id: string): RunMeta | undefined {
  * in place, so a purged run does not free its display label for reuse.
  * Deleting the whole registry root is what clears them.
  */
-export function removeMetaArtifacts(meta: RunMeta): boolean {
+export interface RemoveMetaArtifactsOptions {
+    /**
+     * Keep the run's owned clone workspace. A conversation whose saved session
+     * and recipe are durable still needs the workspace later attempts run in;
+     * only its volatile log, metadata, and task scratch are reclaimed.
+     */
+    keepWorkspace?: boolean;
+}
+
+export function removeMetaArtifacts(meta: RunMeta, options: RemoveMetaArtifactsOptions = {}): boolean {
     try {
+        // A newer failed/killed attempt's volatile record is about to be the only
+        // evidence that the conversation's newest attempt did not complete. Leave
+        // a durable marker first, or an older completed archive would become the
+        // conversation's visible last word and could be continued as if this
+        // attempt had never happened. A marker that cannot be published retains
+        // the run (the throw below): the unsafe direction is deleting both.
+        recordArchiveStatusTombstone(meta);
         removeRunDirectory(meta.id);
-        if (meta.taskRuntime && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(meta.id) && meta.cwd === taskWorkspaceDir(meta.id)) {
+        if (!options.keepWorkspace
+            && meta.taskRuntime && /^sa_[a-z0-9]+_[a-z0-9]+$/i.test(meta.id) && meta.cwd === taskWorkspaceDir(meta.id)) {
             rmSync(taskWorkspaceDir(meta.id), { recursive: true, force: true });
         }
         if (meta.taskRuntime && meta.taskScratch && dirname(meta.taskScratch) === realpathSync(tmpdir()) && /^pi-task-scratch-[a-z0-9]{6}$/i.test(basename(meta.taskScratch))) {
@@ -1004,19 +1102,33 @@ export function removeMetaArtifacts(meta: RunMeta): boolean {
     }
 }
 
-/** All runs, newest first. */
+/**
+ * All runs, newest first: the volatile registry plus durable archived attempts
+ * whose raw log/run directory was already reclaimed. The volatile record wins
+ * whenever both exist, so a reclaimed log never hides the live one.
+ */
 export function listMetas(): RunMeta[] {
-    let ids: string[];
+    let ids: string[] = [];
     try {
         registryIo.fullDirectoryReads += 1;
         ids = readdirSync(join(baseDir(), "runs"));
     } catch {
-        return [];
+        ids = [];
     }
-    return ids
-        .map(readMetaForSweep)
-        .filter((m): m is RunMeta => m !== undefined)
-        .sort((a, b) => b.startedAt - a.startedAt);
+    const seen = new Set<string>();
+    const metas: RunMeta[] = [];
+    for (const id of ids) {
+        seen.add(id); // A corrupt volatile record must not be hidden by an older archive.
+        const meta = readMetaForSweep(id);
+        if (!meta) continue;
+        metas.push(meta);
+    }
+    for (const meta of listArchivedAttempts()) {
+        if (seen.has(meta.id)) continue;
+        seen.add(meta.id);
+        metas.push(meta);
+    }
+    return metas.sort((a, b) => b.startedAt - a.startedAt);
 }
 
 export interface RunRecordIndex {
@@ -1054,7 +1166,8 @@ export function inspectRunMeta(id: string): { kind: "ok"; meta: RunMeta } | { ki
                 statSync(runDir(id));
                 return { kind: "unreadable", detail: "metadata file is missing; the run directory and its evidence are retained" };
             } catch {
-                return { kind: "missing" };
+                const archived = readArchivedAttempt(id);
+                return archived ? { kind: "ok", meta: archived } : { kind: "missing" };
             }
         }
         return { kind: "unreadable", detail: error instanceof Error ? error.message : String(error) };
@@ -1077,14 +1190,13 @@ export function inspectRunMeta(id: string): { kind: "ok"; meta: RunMeta } | { ki
 
 /** Every run directory, counting unreadable records instead of dropping them. */
 export function listRunRecords(): RunRecordIndex {
-    let ids: string[];
+    let ids: string[] = [];
     try {
         registryIo.fullDirectoryReads += 1;
         ids = readdirSync(join(baseDir(), "runs"));
     } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ENOENT") return { metas: [], unreadable: [] };
-        return { metas: [], unreadable: [], indexError: error instanceof Error ? error.message : String(error) };
+        if (code !== "ENOENT") return { metas: [], unreadable: [], indexError: error instanceof Error ? error.message : String(error) };
     }
     const metas: RunMeta[] = [];
     const unreadable: Array<{ id: string; detail: string }> = [];
@@ -1097,6 +1209,10 @@ export function listRunRecords(): RunRecordIndex {
         const inspected = inspectRunMeta(id);
         if (inspected.kind === "ok") metas.push(inspected.meta);
         else if (inspected.kind === "unreadable") unreadable.push({ id, detail: inspected.detail });
+    }
+    const volatileIds = new Set(ids);
+    for (const archived of listArchivedAttempts()) {
+        if (!volatileIds.has(archived.id)) metas.push(archived);
     }
     metas.sort((a, b) => b.startedAt - a.startedAt);
     return { metas, unreadable };

@@ -111,7 +111,7 @@ const listOut = buildSubagentList({
         },
     ],
     params: {},
-    parentPid: process.pid,
+    cwd: "/",
     now: NOW,
     statusOf: (m) => m.status,
     usageById: () => undefined,

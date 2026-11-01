@@ -65,11 +65,11 @@ try {
     try {
       setConfigForTests({ toolExtensions: { custom_tool: a } });
       const first = idOf(await f.execute('subagent_spawn', { prompt: 'initial', cwd: f.workspace,
-        model: 'test/model', tools: 'read,custom_tool', sandbox: false, callback: false, retain_session: true }));
+        model: 'test/model', tools: 'read,custom_tool', sandbox: false, callback: false }));
       const meta = await terminal(first); assert.equal(meta.status, 'completed');
       const original = JSON.stringify(meta), count = listMetas().length;
       setConfigForTests({ toolExtensions: { custom_tool: b } });
-      await assert.rejects(f.execute('subagent_resume', { id: first, prompt: 'continue' }),
+      await assert.rejects(f.execute('subagent_spawn', { session_id: readMeta(first).sessionId, prompt: 'continue' }),
         /resolved extension implementations changed/);
       assert.equal(listMetas().length, count, 'no differently configured child was launched');
       assert.equal(JSON.stringify(readMeta(first)), original);
@@ -80,7 +80,7 @@ try {
     const f = fixture('identity-owner');
     try {
       const first = idOf(await f.execute('subagent_spawn', { prompt: 'initial', cwd: f.workspace,
-        model: 'test/model', tools: 'read', clean: true, sandbox: false, callback: false, retain_session: true }));
+        model: 'test/model', tools: 'read', clean: true, sandbox: false, callback: false }));
       const meta = await terminal(first); assert.equal(meta.status, 'completed');
       // Seed a catalog-shaped recorded recipe without calling a model/catalog service.
       const identity = { agent: 'agent.payments', role: 'developer', alias: 'checkout' };
@@ -88,7 +88,7 @@ try {
       const previous = JSON.stringify(readMeta(first));
       let prior = first;
       for (const prompt of ['first feedback', 'second feedback']) {
-        const next = idOf(await f.execute('subagent_resume', { id: prior, prompt }));
+        const next = idOf(await f.execute('subagent_spawn', { session_id: readMeta(prior).sessionId, prompt }));
         const continued = await terminal(next); assert.equal(continued.status, 'completed');
         for (const [key, value] of Object.entries(identity)) assert.equal(continued.recipe[key], value);
         assert.equal(continued.sessionId, meta.sessionId);
@@ -98,19 +98,20 @@ try {
     } finally { f.shutdown(); }
   });
 
-  await test('resume cannot retire its validated conversation before the child opens it', async () => {
+  await test('a continuation revalidates the saved conversation after the volatile artifacts are swept', async () => {
     const f = fixture('history-owner');
     try {
       const first = idOf(await f.execute('subagent_spawn', { prompt: 'old context', cwd: f.workspace,
-        model: 'test/model', tools: 'read', clean: true, sandbox: false, callback: false, retain_session: true }));
+        model: 'test/model', tools: 'read', clean: true, sandbox: false, callback: false }));
       const meta = await terminal(first); assert.equal(meta.status, 'completed');
       const saved = findSavedConversation({sessionDir:meta.recipe.sessionDir,sessionId:meta.sessionId,expectedCwd:f.workspace});
       assert.equal(saved.kind, 'ok');
-      await f.execute('subagent_release', { id: first });
+      // Saved sessions are durable, so the sweep no longer needs a release to
+      // keep this conversation; it only reclaims the volatile attempt artifacts.
       const old = new Date(Date.now() - 10 * 86400000);
       utimesSync(saved.conversation.path, old, old); utimesSync(runDir(first), old, old);
       writeFileSync(join(baseDir(), 'cleanup-state.json'), JSON.stringify({lastLocalDate:'1970-01-01'}));
-      const next = idOf(await f.execute('subagent_resume', { id: first, prompt: 'new feedback' }));
+      const next = idOf(await f.execute('subagent_spawn', { session_id: readMeta(first).sessionId, prompt: 'new feedback' }));
       const continued = await terminal(next); assert.equal(continued.status, 'completed');
       const child = JSON.parse(readFileSync(join(root, `child-${continued.pid}.json`), 'utf8'));
       assert.equal(child.before, 2, 'the real SDK must load both old messages rather than create empty history');

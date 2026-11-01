@@ -978,7 +978,9 @@ describe("AC7/AC8 — subagent_result and default list outcomes for orphaned/los
             spawnPid: process.pid,
             cwd: tmpdir(),
             promptPreview: `${status} fixture`,
-            startedAt: Date.now() - 60_000,
+            // Newer than every earlier fixture in this file so the folder-scoped
+            // default page leads with the run under test.
+            startedAt: Date.now() + 60_000,
             logPath,
             sessionId: id,
             // Real launches record the foreground origin; tools default to it.
@@ -1110,7 +1112,12 @@ describe("registered tools fail closed on unverifiable ownership (#312)", () => 
             const ownText = toolText(await h.tools.get("subagent_result").execute("tc", { id: own }, undefined, undefined, sessionless));
             assert.match(ownText, /OWN_SESSIONLESS_EVIDENCE/);
             const listed = toolText(await h.tools.get("subagent_list").execute("tc", { limit: 100, maxBytes: 4096 }, undefined, undefined, sessionless));
-            assert.doesNotMatch(listed, new RegExp(legacy));
+            // List is folder-scoped: the legacy run is discoverable without a
+            // session identity, but only as a row. Reading its evidence still
+            // needs verified ownership (asserted above).
+            assert.match(listed, new RegExp(legacy));
+            assert.doesNotMatch(listed, /LEGACY_EVIDENCE/);
+            assert.doesNotMatch(listed, /OWN_SESSIONLESS_EVIDENCE/);
         } finally {
             h.shutdown();
         }

@@ -34,6 +34,8 @@ import {
 import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
 import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
+import { selectSessionByName } from "./session-selection.ts";
+import { isWithinWorkspace } from "./workspace-scope.ts";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
 import { createSubagentSettingsPage } from "./settings-page.ts";
 import { effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
@@ -152,11 +154,7 @@ import {
     acquireConversationLease,
     assertContinuationExtensions,
     buildLaunchRecipe,
-    markRetentionReleased,
     planContinuation,
-    planRetentionRelease,
-    refreshRetentionForAttempt,
-    retainConversation,
     type ContinuationPlan,
     type ConversationLease,
 } from "./continuation.ts";
@@ -201,8 +199,6 @@ export function subagentsArgumentCompletions(argumentPrefix: string): Autocomple
 const SUBAGENT_TOOLS = [
     "subagent_spawn",
     "subagent_spawn_batch",
-    "subagent_resume",
-    "subagent_release",
     "subagent_list",
     "subagent_settings",
     "subagent_output",
@@ -1486,7 +1482,7 @@ function revalidateContinuationUnderLease(
     if (!current) {
         throw new ContinuationError(
             `Cannot continue ${plan.prior.id}: its run record was removed while this launch was being prepared. ` +
-            `Retained history lives in temporary storage and can be removed; launch a new run instead.`,
+            `Its saved history is missing; restore the original history or launch a new run instead.`,
         );
     }
     const fresh = planContinuation({
@@ -1501,6 +1497,131 @@ function revalidateContinuationUnderLease(
             `(${plan.conversation.path} -> ${fresh.conversation.path}). Launch a new run instead.`,
         );
     }
+}
+
+/**
+ * The removed launch flag, reported by name so an older caller is told what to
+ * do instead of having its request silently dropped.
+ */
+const RETAIN_SESSION_REMOVED =
+    "retain_session was removed: every saved conversation persists automatically. " +
+    "Omit it, and pass session_id to continue a saved conversation.";
+
+function assertNoRetiredLaunchOptions(value: object | undefined, label = ""): void {
+    if (value && (value as { retain_session?: unknown }).retain_session !== undefined) {
+        throw new Error(`${label}${RETAIN_SESSION_REMOVED}`);
+    }
+}
+
+function sameLaunchPath(left: unknown, right: string | undefined): boolean {
+    if (typeof left !== "string" || right === undefined) return false;
+    if (left === right) return true;
+    try { return canonicalizePath(left) === canonicalizePath(right); } catch { return false; }
+}
+
+function sameLaunchTools(left: unknown, right: string): boolean {
+    return typeof left === "string" && normalizeTools(left) === normalizeTools(right);
+}
+
+function sameLaunchRoles(left: unknown, right: string | readonly string[] | undefined): boolean {
+    if (typeof left === "string") return left === right;
+    if (Array.isArray(left) && Array.isArray(right)) {
+        return left.length === right.length && left.every((value, index) => value === right[index]);
+    }
+    return false;
+}
+
+function continuationLaunchConflicts(
+    job: Record<string, unknown>,
+    recipe: ContinuationPlan["recipe"],
+    options: { includeName: boolean },
+): string[] {
+    const conflicts: string[] = [];
+    const check = (key: string, same: (value: unknown) => boolean) => {
+        const value = job[key];
+        if (value !== undefined && !same(value)) conflicts.push(key);
+    };
+    if (options.includeName) check("name", (value) => value === recipe.name);
+    check("agent", (value) => value === recipe.agent);
+    check("role", (value) => sameLaunchRoles(value, recipe.role));
+    check("alias", (value) => value === recipe.alias);
+    check("tools", (value) => sameLaunchTools(value, recipe.tools));
+    check("exclude_tools", (value) => typeof value === "string" && normalizeTools(value) === normalizeTools(recipe.excludeTools ?? ""));
+    check("clean", (value) => value === recipe.clean);
+    check("sandbox", (value) => value === recipe.sandbox);
+    check("sandbox_dir", (value) => sameLaunchPath(value, recipe.sandboxDir));
+    check("cwd", (value) => sameLaunchPath(value, recipe.cwd));
+    check("git_clone_workspace", (value) => value === recipe.gitCloneWorkspace);
+    check("approve", (value) => value === recipe.approve);
+    check("allow_nested", (value) => value === recipe.allowNested);
+    return conflicts;
+}
+
+/**
+ * Refuse any launch-only option that does not reproduce the saved recipe.
+ * Matching values are allowed (a caller that repeats its original launch call is
+ * provably asking for the same thing); a missing option just keeps the recipe.
+ */
+function assertContinuationLaunchOptions(
+    job: Record<string, unknown>,
+    recipe: ContinuationPlan["recipe"],
+    label: string,
+    options: { includeName: boolean } = { includeName: true },
+): void {
+    if (job.retain_session !== undefined) throw new ContinuationError(`${label}${RETAIN_SESSION_REMOVED}`);
+    const conflicts = continuationLaunchConflicts(job, recipe, options);
+    if (conflicts.length === 0) return;
+    const named = conflicts.map((key) => `\`${key}\``).join(", ");
+    const prefix = label || "Cannot continue this saved conversation: ";
+    throw new ContinuationError(
+        `${prefix}${named} ${conflicts.length === 1 ? "conflicts" : "conflict"} with the saved launch recipe. ` +
+        `A continued conversation keeps the recipe it was launched with; omit ${conflicts.length === 1 ? "it" : "them"}. ` +
+        `A continuation accepts prompt, session_id, and optional model, thinking, callback, and timing overrides.`,
+    );
+}
+
+/**
+ * The attempt that currently owns a saved conversation: the LATEST attempt by
+ * `startedAt` (then id, so ties stay deterministic). Never pick an older
+ * completed sibling: that would branch history from a superseded attempt.
+ */
+function latestConversationAttempt(sessionId: string, metas: readonly RunMeta[]): RunMeta | undefined {
+    let latest: RunMeta | undefined;
+    for (const meta of metas) {
+        if (meta.sessionId !== sessionId) continue;
+        if (!latest || meta.startedAt > latest.startedAt
+            || (meta.startedAt === latest.startedAt && meta.id > latest.id)) latest = meta;
+    }
+    return latest;
+}
+
+/**
+ * Select a saved conversation by its exact native session id and validate it for
+ * one more attempt. `planContinuation` owns the refusals (a running/orphaned
+ * latest attempt, missing history or workspace, unsupported recipe), so a
+ * missing session is the only error added here. Nothing is ever recreated.
+ */
+function requestedSessionId(job: { session_id?: string; session_name?: string }, cwd: string): string | undefined {
+    if (job.session_id !== undefined && job.session_name !== undefined) {
+        throw new Error("Pass either session_id or session_name, not both.");
+    }
+    if (job.session_name !== undefined) {
+        if (typeof job.session_name !== "string") throw new Error("session_name must be a non-empty name.");
+        return selectSessionByName(listMetas(), job.session_name, (workspace) => isWithinWorkspace(workspace, cwd));
+    }
+    return job.session_id;
+}
+
+function continuationPlanFor(sessionId: string, origin: RunCallbackOrigin | undefined): ContinuationPlan {
+    const others = listMetas();
+    const latest = latestConversationAttempt(sessionId, others);
+    if (!latest) {
+        throw new ContinuationError(
+            `Cannot continue session ${sessionId}: no saved subagent conversation has that native session id. ` +
+            `Check the session id reported by the launching attempt, or omit session_id to start a new conversation.`,
+        );
+    }
+    return planContinuation({ id: latest.id, prior: latest, origin, others });
 }
 
 function timingSchemaFields() {
@@ -1698,8 +1819,13 @@ export default function (pi: ExtensionAPI) {
         git_clone_workspace?: boolean; approve?: boolean; allow_nested?: boolean;
         agent?: string; role?: string | readonly string[]; alias?: string;
         catalog?: CatalogRunRecord; catalogResolved?: boolean;
-        /** Keep the completed conversation and workspace out of cleanup for continuation. */
-        retain_session?: boolean;
+        /**
+         * Native session id of a saved conversation to continue. Omit for a
+         * brand-new conversation; an attempt's own id is its session id only on
+         * a fresh launch, so follow-ups use the session id the launch reported.
+         */
+        session_id?: string;
+        session_name?: string;
     } & TimingParams;
 
     /**
@@ -1983,8 +2109,10 @@ export default function (pi: ExtensionAPI) {
             }
             // One writer per conversation, held across admission, child lifetime,
             // and finalization. A live duplicate continuation is refused instead of
-            // letting two processes rewrite one session file.
-            if (resume || p.retain_session === true) {
+            // letting two processes rewrite one session file. A fresh launch has a
+            // brand-new native session id, so it cannot contend with anyone and
+            // needs no lease; every continuation does.
+            if (resume) {
                 lease = acquireConversationLease({ sessionId, attemptId: id });
             }
             // The lease is the first moment no other process can retire this
@@ -2058,7 +2186,7 @@ export default function (pi: ExtensionAPI) {
             timing: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt }),
         };
         // Register exit supervision before any fallible post-spawn publication.
-        // A failed retention write must not strand a running child without a close
+        // A failed metadata write must not strand a running child without a close
         // handler; the lease stays held until that child has actually exited.
         void spawned.exit.then((code) => {
             try { finalizeRun(pi, ctx, id, code); }
@@ -2066,13 +2194,6 @@ export default function (pi: ExtensionAPI) {
         });
         try {
             writeMeta(meta);
-            // Publish retention only after the attempt is discoverable. Later
-            // attempts refresh an existing promise without reviving a release.
-            if (resume) {
-                refreshRetentionForAttempt({ sessionId, attemptId: id });
-            } else if (p.retain_session === true) {
-                retainConversation({ sessionId, ownerRunId: rootRunId, workspace: cwd, ownerOrigin: callbackOrigin, attemptId: id });
-            }
         } catch (error) {
             killProcessTree(spawned.pid, "SIGKILL");
             throw error;
@@ -2104,6 +2225,15 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ---- subagent_spawn -------------------------------------------------
+    //
+    // One tool launches both fresh work and a continuation of saved work. A
+    // continuation is an ORDINARY attempt of the SAME saved conversation: a new
+    // run id, the prior native session id, the exact saved session file, and the
+    // frozen launch recipe. Old logs/results/callbacks/timing stay under their
+    // own attempt id. Nothing stays alive between attempts, so a parked
+    // conversation occupies zero capacity slots. `session_id` (not the run id)
+    // selects the conversation, and the latest attempt is always the one that
+    // owns it.
     const acceptanceSpawnTool = {
         name: "subagent_spawn",
         label: "Spawn Subagent",
@@ -2122,10 +2252,14 @@ export default function (pi: ExtensionAPI) {
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. No progress for stuck_minutes (default 10) wakes you once without stopping the run. Elapsed-time limits are opt-in: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
-            "Set retain_session:true only when the run is expected to need follow-up: it keeps the completed conversation and workspace available for subagent_resume. It does not keep the child process alive and does not occupy a capacity slot. Release it with subagent_release when no more feedback is expected. Ordinary one-shot runs leave it off.",
+            "Saved conversations persist automatically. To continue a completed worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
+            "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
+            "Do not restate the original task or role when continuing: they already live in the saved conversation. A running or orphaned latest attempt blocks continuation until it stops, and missing saved history is refused rather than recreated.",
         ],
         parameters: Type.Object({
-            prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained." }),
+            prompt: Type.String({ description: "The task for the subagent. This is the only context it gets — be self-contained. On a continuation this is the next user turn; the original task and role stay in saved history." }),
+            session_name: Type.Optional(Type.String({ description: "Exact name of one saved conversation in the current folder and descendants. Alternative to session_id. Duplicate names report matching session ids instead of choosing a conversation." })),
+            session_id: Type.Optional(Type.String({ description: "Native session id of a saved conversation to continue (reported for every launch and attempt). Omit to start a new conversation. A continuation gets a new run id but keeps this session id, history, workspace, and frozen launch recipe." })),
             name: Type.Optional(Type.String({ description: "Short label for the run (e.g. 'reviewer'). Ignored when agent or role is set, except as the direct-role alias when alias is omitted." })),
             agent: Type.Optional(Type.String({ description: "Named agent id (agent.<slug>). Mutually exclusive with role. The navigator shows the defined agent name." })),
             role: catalogRoleSchema("direct role launch"),
@@ -2142,13 +2276,20 @@ export default function (pi: ExtensionAPI) {
             git_clone_workspace: Type.Optional(Type.Boolean({ description: "Prepare a disposable Git clone workspace for sandboxed Git-mutating subagents. The clone has a real .git/ directory inside the sandbox writable root and is self-contained after setup." })),
             approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in the child (default: false; headless runs cannot prompt for trust)." })),
             allow_nested: Type.Optional(Type.Boolean({ description: "Allow the child to spawn its own subagents (default: false). Loads this extension in the child and allowlists its tools." })),
-            retain_session: Type.Optional(Type.Boolean({ description: "Keep this completed conversation and its workspace available for subagent_resume until subagent_release. Default false: ordinary one-shot behavior. Retention uses existing temporary runtime storage, so it is bounded, not permanent." })),
             ...timingSchemaFields(),
         }),
 
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            const p = params as SpawnParams;
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<{
+            content: { type: "text"; text: string }[];
+            details: Record<string, unknown>;
+        }> {
+            const p = { ...params } as SpawnParams;
+            p.session_id = requestedSessionId(p, ctx.cwd);
             if (p.prompt.trim() === "") throw new Error("prompt is empty.");
+            if (p.session_id !== undefined && (typeof p.session_id !== "string" || p.session_id.trim() === "")) {
+                throw new Error("session_id must be a non-empty native session id.");
+            }
+            assertNoRetiredLaunchOptions(p as { retain_session?: unknown });
             // A present-but-blank role or agent is a mistake, not a request for a catalog-free child.
             const blankSelector = blankCatalogSelector(p);
             if (blankSelector) throw new Error(blankSelector);
@@ -2163,11 +2304,55 @@ export default function (pi: ExtensionAPI) {
 
             let reserved = 1;
             try {
+                if (p.session_id !== undefined) {
+                    // Continue a saved conversation. The same capacity, permission,
+                    // lease, callback, and finalization path runs as for a fresh
+                    // launch; only the conversation and recipe are inherited. The
+                    // catalog is never re-resolved for a saved conversation.
+                    const plan = continuationPlanFor(p.session_id, verifiedOriginFromContext(ctx) ?? activeCallbackOrigin);
+                    assertContinuationLaunchOptions(p as unknown as Record<string, unknown>, plan.recipe, "");
+                    const continuation: SpawnParams = {
+                        prompt: p.prompt,
+                        model: p.model,
+                        thinking: p.thinking,
+                        callback: p.callback,
+                        deadline_minutes: p.deadline_minutes,
+                        grace_minutes: p.grace_minutes,
+                        max_minutes: p.max_minutes,
+                        stuck_minutes: p.stuck_minutes,
+                    };
+                    const { id, spawned, runtime, warn, sandboxDir, modelNote } = await spawnSubagentRun(
+                        ctx, continuation, undefined, plan,
+                    );
+                    gate.commit(1);
+                    reserved = 0;
+                    return {
+                        content: [{ type: "text" as const, text:
+                            `Subagent continued: ${plan.recipe.name ? `${plan.recipe.name} ` : ""}id=${id} (pid ${spawned.pid}) from ${plan.prior.id}.\n` +
+                            `Conversation: session ${plan.conversation.sessionId} — pass session_id=${plan.conversation.sessionId} for the next follow-up.\n` +
+                            (modelNote ? `${modelNote[0]!.toUpperCase()}${modelNote.slice(1)}.\n` : "") +
+                            (continuation.callback === false
+                                ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
+                                : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
+                            (sandboxDir ? `Sandboxed: project root ${sandboxDir}; current launch permissions apply.\n` : "") +
+                            runtime + warn +
+                            `Log: ${logPathFor(id)}`,
+                        }],
+                        details: {
+                            status: "continued" as const,
+                            launched: true,
+                            priorId: plan.prior.id,
+                            runId: id,
+                            sessionId: plan.conversation.sessionId,
+                            rootRunId: plan.rootRunId,
+                        },
+                    };
+                }
                 const catalog = await admitCatalog(ctx, [p]);
                 if (catalog.status === "clarification-needed") {
                     gate.release(1);
                     reserved = 0;
-                    return catalogResult(catalog) as ReturnType<typeof text>;
+                    return catalogResult(catalog);
                 }
                 if (catalog.jobs.length > 1) {
                     const extra = catalog.jobs.length - 1;
@@ -2184,22 +2369,29 @@ export default function (pi: ExtensionAPI) {
                         reserved -= 1;
                         launched.push({ name: job.name, id, modelNote });
                     }
-                    return text(launched.map((item) => `Subagent launched: ${item.name ? `${item.name} ` : ""}id=${item.id}.${item.modelNote ? ` ${item.modelNote}.` : ""}`).join("\n"));
+                    return {
+                        content: [{ type: "text" as const, text: launched.map((item) => `Subagent launched: ${item.name ? `${item.name} ` : ""}id=${item.id} (session ${item.id}).${item.modelNote ? ` ${item.modelNote}.` : ""}`).join("\n") }],
+                        details: { status: "launched" as const, launched: true, runIds: launched.map((item) => item.id) },
+                    };
                 }
                 Object.assign(p, catalog.jobs[0]);
-                const { id, spawned, runtime, warn, sandboxDir, modelNote } = await spawnSubagentRun(ctx, p);
+                const { id, meta, spawned, runtime, warn, sandboxDir, modelNote } = await spawnSubagentRun(ctx, p);
                 gate.commit(1);
                 reserved = 0;
-                return text(
-                    `Subagent launched: ${p.name ? `${p.name} ` : ""}id=${id} (pid ${spawned.pid}).\n` +
-                    (modelNote ? `${modelNote[0]!.toUpperCase()}${modelNote.slice(1)}.\n` : "") +
-                    (p.callback === false
-                        ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
-                        : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
-                    (sandboxDir ? `Sandboxed: project root ${sandboxDir}; launch permissions apply.\n` : "") +
-                    runtime + warn +
-                    `Log: ${logPathFor(id)}`,
-                );
+                return {
+                    content: [{ type: "text" as const, text:
+                        `Subagent launched: ${p.name ? `${p.name} ` : ""}id=${id} (pid ${spawned.pid}).\n` +
+                        `Session: ${meta.sessionId} — pass it as session_id to continue this conversation.\n` +
+                        (modelNote ? `${modelNote[0]!.toUpperCase()}${modelNote.slice(1)}.\n` : "") +
+                        (p.callback === false
+                            ? `Running in the background; the foreground is free. It will finish quietly — read the result with subagent_result id=${id}.\n`
+                            : `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n`) +
+                        (sandboxDir ? `Sandboxed: project root ${sandboxDir}; launch permissions apply.\n` : "") +
+                        runtime + warn +
+                        `Log: ${logPathFor(id)}`,
+                    }],
+                    details: { status: "launched" as const, launched: true, runId: id, sessionId: meta.sessionId },
+                };
             } catch (err) {
                 if (reserved === 1) gate.release(1);
                 else if (reserved > 0) gate.release(reserved);
@@ -2253,9 +2445,11 @@ export default function (pi: ExtensionAPI) {
                 approve: Type.Optional(Type.Boolean({ description: "Trust project-local files in children." })),
                 allow_nested: Type.Optional(Type.Boolean({ description: "Allow children to spawn their own subagents." })),
                 ...timingSchemaFields(),
-            }, { description: "Options applied to every job; per-job values override these." })),
+            }, { description: "Options applied to every job; per-job values override these. session_id is per job and is never inherited from shared, because one shared conversation would make every job compete for the same writer." })),
             jobs: Type.Array(Type.Object({
-                prompt: Type.String({ description: "The task for this job." }),
+                prompt: Type.String({ description: "The task for this job. On a continuation this is the next user turn." }),
+                session_name: Type.Optional(Type.String({ description: "Exact saved conversation name in the current folder and descendants. Per job only; alternative to session_id. Ambiguous names refuse with matching session ids." })),
+                session_id: Type.Optional(Type.String({ description: "Native session id of a saved conversation this JOB continues. Per job only, never shared. Omit for a new conversation. A continuation keeps its saved history, workspace, and frozen recipe, and accepts only model/thinking/callback/timing overrides." })),
                 name: Type.Optional(Type.String({ description: "Short label for this job. Direct-role alias when alias is omitted." })),
                 agent: Type.Optional(Type.String({ description: "Named agent id for this job. Overrides shared agent and role." })),
                 role: catalogRoleSchema("batch job"),
@@ -2294,6 +2488,15 @@ export default function (pi: ExtensionAPI) {
             // concurrent single spawn cannot take a slot the batch already admitted.
             const gate = getSharedCapacityGate(countRunning);
 
+            // session_id selects one saved conversation, so it is per job: a shared
+            // value would point every job at the same conversation writer.
+            if (p.shared?.session_name !== undefined) throw new Error("session_name is per job, never shared.");
+            if (p.shared?.session_id !== undefined) {
+                throw new Error("session_id is per job: set jobs[i].session_id for the jobs that continue a saved conversation; shared has no session_id.");
+            }
+            assertNoRetiredLaunchOptions(p.shared, "shared: ");
+            p.jobs.forEach((job, index) => assertNoRetiredLaunchOptions(job, `jobs[${index}]: `));
+
             validateBatchPlan({ shared: p.shared, jobs: p.jobs, onCapacity: p.onCapacity, config: cfg });
             // A present-but-blank role or agent rejects the whole batch before any launch.
             const blankSelector = blankCatalogSelector(p.shared, "shared")
@@ -2302,7 +2505,9 @@ export default function (pi: ExtensionAPI) {
 
             let catalogSnapshot: CatalogSnapshot | undefined;
             let catalogHost: CatalogHost | undefined;
-            if (hasCatalogSelector(p.shared) || p.jobs.some((job) => hasCatalogSelector(job))) {
+            const needsCatalog = p.jobs.some((job) => job.session_id === undefined && job.session_name === undefined
+                && hasCatalogSelector(mergeJobOptions(p.shared, job)));
+            if (needsCatalog) {
                 catalogHost = catalogHostFrom(ctx);
                 noteCatalogHost(catalogHost);
                 catalogSnapshot = loadLaunchSnapshot(catalogHost);
@@ -2351,7 +2556,7 @@ export default function (pi: ExtensionAPI) {
 
             const names = assignBatchJobNames(p.jobs);
             const batchId = nextBatchId();
-            const launched: { job: number; name: string; id: string; modelNote?: string }[] = [];
+            const launched: { job: number; name: string; id: string; sessionId: string; continuedFrom?: string; modelNote?: string }[] = [];
             const failed: { job: number; name: string; reason: string }[] = [];
             const skipped: { job: number; name: string }[] = [];
             // How many reject-mode reserved slots are still held (not yet committed/released).
@@ -2363,6 +2568,13 @@ export default function (pi: ExtensionAPI) {
                 const job = p.jobs[i];
                 let name = names[i];
                 const merged = mergeJobOptions(p.shared, job);
+                const isContinuation = job.session_id !== undefined || job.session_name !== undefined;
+                // A continuation keeps its own frozen model and effort. shared.model
+                // is a default for NEW conversations, so only a per-job value is an
+                // explicit escalation of the saved recipe.
+                const launch: Partial<SpawnParams> & { prompt: string; name: string } = !isContinuation
+                    ? { ...merged, name }
+                    : { ...merged, name, model: job.model, thinking: job.thinking };
 
                 if (launchAvailable) {
                     if (!gate.tryReserve(1, activeConcurrencyCap())) {
@@ -2374,7 +2586,9 @@ export default function (pi: ExtensionAPI) {
                 }
 
                 try {
-                    if (catalogSnapshot && catalogHost && hasCatalogSelector(merged)) {
+                    const sessionId = requestedSessionId(job, ctx.cwd);
+                    // A saved conversation is never re-resolved against the catalog.
+                    if (sessionId === undefined && catalogSnapshot && catalogHost && hasCatalogSelector(merged)) {
                         const explicitName = typeof job.name === "string" && job.name.trim() !== "" ? job.name : undefined;
                         const prepared = await prepareCatalogJob(catalogSnapshot, {
                             ...merged,
@@ -2383,16 +2597,27 @@ export default function (pi: ExtensionAPI) {
                         }, catalogHost);
                         if (prepared.status === "blocked") throw new Error(prepared.message);
                         if (prepared.status === "ready") {
-                            Object.assign(merged, prepared.assign);
-                            if (prepared.assign.model === undefined) delete merged.model;
-                            if (prepared.assign.thinking === undefined) delete merged.thinking;
+                            Object.assign(launch, prepared.assign);
+                            if (prepared.assign.model === undefined) delete launch.model;
+                            if (prepared.assign.thinking === undefined) delete launch.thinking;
                             name = prepared.assign.name;
                         }
                     }
-                    const { id, modelNote } = await spawnSubagentRun(ctx, { ...merged, name }, { batchId, batchName: p.batchName });
+                    let plan: ContinuationPlan | undefined;
+                    if (sessionId !== undefined) {
+                        plan = continuationPlanFor(sessionId, verifiedOriginFromContext(ctx) ?? activeCallbackOrigin);
+                        assertContinuationLaunchOptions(
+                            launch as unknown as Record<string, unknown>, plan.recipe, `Job ${i + 1}: `, { includeName: false },
+                        );
+                    }
+                    const { id, meta, modelNote } = await spawnSubagentRun(ctx, { ...launch, name }, { batchId, batchName: p.batchName }, plan);
                     gate.commit(1);
                     if (!launchAvailable) reservedRemaining -= 1;
-                    launched.push({ job: i + 1, name, id, ...(modelNote ? { modelNote } : {}) });
+                    launched.push({
+                        job: i + 1, name, id, sessionId: meta.sessionId,
+                        ...(plan ? { continuedFrom: plan.prior.id } : {}),
+                        ...(modelNote ? { modelNote } : {}),
+                    });
                 } catch (err) {
                     gate.release(1);
                     if (!launchAvailable) reservedRemaining -= 1;
@@ -2430,143 +2655,6 @@ export default function (pi: ExtensionAPI) {
             return batchLaunchResult({ batchId, batchName: p.batchName, launched, skipped, failed });
         },
     });
-
-    // ---- subagent_resume / subagent_release ------------------------------
-    //
-    // A continuation is an ORDINARY attempt of the SAME saved conversation:
-    // a new run id, the prior native session id, the exact saved session file,
-    // and the frozen launch recipe. Old logs/results/callbacks/timing stay
-    // under their own attempt id. Nothing stays alive between attempts, so a
-    // parked owner occupies zero capacity slots.
-    type ResumeParams = {
-        id: string; prompt: string; model?: string; thinking?: ThinkingLevel; callback?: boolean;
-    } & TimingParams;
-
-    const acceptanceResumeTool = {
-        name: "subagent_resume",
-        label: "Resume Subagent",
-        description:
-            "Continue a COMPLETED background subagent in its own saved conversation and return " +
-            "IMMEDIATELY with a new run id. The attempt is new (new log, result, timing, and " +
-            "capacity slot) while the native session and its full history stay the same. The " +
-            "foreground session stays free; completion is reported later, never polled.",
-        promptSnippet: "Send feedback to a completed subagent and continue its conversation",
-        promptGuidelines: [
-            "For repair work or feedback within the same assignment, subagent_resume continues the completed worker's conversation with the same role, workspace, and prior context.",
-            "subagent_resume takes the PRIOR run id and the new feedback as its prompt. Do not restate the original task or role instructions; they are already in the saved conversation.",
-            "Only a completed run owned by this foreground session can be resumed. A running or orphaned run must be stopped first, and a conversation whose saved history or workspace is gone cannot be resumed.",
-            "The prior attempt's result and logs are preserved under its own run id. The resumed attempt reports back like any other run and uses one capacity slot while it runs.",
-            "Preserve the original model and effort unless an explicit escalation is required for this attempt; pass model or thinking only for that reason.",
-            "Keep the implementation owner through repairs. For independent review, resume only an unfinished review on the same HEAD and scope; after a completed review use a fresh session for the next required round, carrying structured findings as evidence. Release retention once no further feedback is expected.",
-            ...SUBAGENT_ORCHESTRATION_GUIDELINES,
-        ],
-        parameters: Type.Object({
-            id: Type.String({ description: "Completed run id to continue (from subagent_spawn or a prior subagent_resume)." }),
-            prompt: Type.String({ description: "The new feedback for the existing conversation. This is the next user turn; the original task and role stay in saved history." }),
-            model: Type.Optional(Type.String({ description: "Explicit model for this attempt only (provider/id, optionally @effort). Omit to keep the saved launch recipe's model." })),
-            thinking: Type.Optional(Type.String({ description: "Explicit reasoning effort for this attempt only. Omit to keep the saved launch recipe's effort." })),
-            callback: Type.Optional(Type.Boolean({ description: "Default: the retained run's callback setting. Set false to finish this attempt quietly." })),
-            ...timingSchemaFields(),
-        }),
-
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            const p = params as ResumeParams;
-            if (typeof p.id !== "string" || p.id.trim() === "") throw new Error("id is required.");
-            if (typeof p.prompt !== "string" || p.prompt.trim() === "") throw new Error("prompt is empty.");
-            // The owner is the calling foreground session; an unreadable session
-            // identity stays unavailable instead of widening to the whole cwd.
-            const origin = verifiedOriginFromContext(ctx) ?? activeCallbackOrigin;
-            const maxConcurrent = activeConcurrencyCap();
-            const gate = getSharedCapacityGate(countRunning);
-            if (!gate.tryReserve(1, maxConcurrent)) {
-                throw new Error(`Max concurrent subagents (${maxConcurrent}) reached. Stop or let some finish first.`);
-            }
-            // Only the contract's fields cross into the launch path: the prior id
-            // selects the conversation, never a new run identity.
-            const job: SpawnParams = {
-                prompt: p.prompt,
-                model: p.model,
-                thinking: p.thinking,
-                callback: p.callback,
-                deadline_minutes: p.deadline_minutes,
-                grace_minutes: p.grace_minutes,
-                max_minutes: p.max_minutes,
-                stuck_minutes: p.stuck_minutes,
-            };
-            let reserved = 1;
-            try {
-                // Validation is synchronous and side-effect free: nothing is
-                // spawned and no history is created or replaced on a refusal.
-                const plan = planContinuation({ id: p.id, prior: readMeta(p.id), origin, others: listMetas() });
-                const { id, spawned, runtime, warn, sandboxDir, modelNote } = await spawnSubagentRun(
-                    ctx, job, undefined, plan,
-                );
-                gate.commit(1);
-                reserved = 0;
-                const body =
-                    `Subagent resumed: ${plan.recipe.name ? `${plan.recipe.name} ` : ""}id=${id} (pid ${spawned.pid}) from ${p.id}.\n` +
-                    `Same conversation: session ${plan.conversation.sessionId}. The prior attempt ${p.id} is unchanged.\n` +
-                    (modelNote ? `${modelNote[0]!.toUpperCase()}${modelNote.slice(1)}.\n` : "") +
-                    `Running in the background; the foreground is free. Its result will be posted back here when it finishes.\n` +
-                    (sandboxDir ? `Sandboxed: project root ${sandboxDir}; current launch permissions apply.\n` : "") +
-                    runtime + warn +
-                    `Log: ${logPathFor(id)}`;
-                return {
-                    content: [{ type: "text" as const, text: body }],
-                    details: {
-                        status: "resumed",
-                        launched: true,
-                        priorId: p.id,
-                        runId: id,
-                        sessionId: plan.conversation.sessionId,
-                        rootRunId: plan.rootRunId,
-                    },
-                };
-            } catch (err) {
-                if (reserved) gate.release(reserved);
-                throw err;
-            }
-        },
-    } as Parameters<ExtensionAPI["registerTool"]>[0];
-    registerSpawnTool(acceptanceResumeTool);
-
-    const acceptanceReleaseTool = {
-        name: "subagent_release",
-        label: "Release Subagent Retention",
-        description:
-            "Release explicit retain_session protection for a completed subagent conversation and its " +
-            "workspace. Nothing is deleted now and no completed result is rewritten; ordinary " +
-            "cleanup may remove the artifacts afterwards. Only the owning foreground session may release.",
-        promptSnippet: "Release a retained subagent conversation and workspace",
-        promptGuidelines: [
-            "Call subagent_release when no more subagent_resume feedback is expected, so retained temporary history and workspace can be reclaimed by normal cleanup.",
-            "Release does not delete anything immediately and does not change the run's result; the conversation becomes unavailable for a later resume once cleanup removes it.",
-        ],
-        parameters: Type.Object({
-            id: Type.String({ description: "Run id whose retained conversation should be released." }),
-        }),
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            const p = params as { id: string };
-            if (typeof p.id !== "string" || p.id.trim() === "") throw new Error("id is required.");
-            const origin = verifiedOriginFromContext(ctx) ?? activeCallbackOrigin;
-            if (!origin?.sessionId) throw new Error(`Cannot release ${p.id}: the active foreground session identity is unavailable.`);
-            const record = planRetentionRelease({ id: p.id, prior: readMeta(p.id), origin, others: listMetas() });
-            const released = markRetentionReleased(record, origin);
-            return {
-                content: [{ type: "text" as const, text:
-                    `Released retention for ${p.id}: session ${record.sessionId} and workspace ${record.workspace} ` +
-                    `are no longer protected. Logs, results, and completed metadata are unchanged; normal cleanup may remove them later.`,
-                }],
-                details: {
-                    status: "released",
-                    id: p.id,
-                    sessionId: record.sessionId,
-                    releasedAt: released.releasedAt,
-                },
-            };
-        },
-    } as Parameters<ExtensionAPI["registerTool"]>[0];
-    pi.registerTool(acceptanceReleaseTool);
 
     // ---- model-facing read/stop tools -----------------------------------
     // The definitions live in tools.ts; registration uses the exact objects
