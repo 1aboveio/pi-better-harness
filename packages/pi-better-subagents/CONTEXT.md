@@ -42,6 +42,31 @@ One execution of a task, with its own identity and the effective configuration
 selected when it started. Repeated executions of the same named agent are separate
 runs.
 
+### Attempt
+
+A run's identity as one detached execution. A continuation allocates a new
+attempt (new run id, log, result, callback markers, timing record, and capacity
+slot) while keeping the conversation it continues. Attempt identity and
+conversation identity are separate throughout the registry and cleanup.
+
+### Conversation
+
+The native Pi session a run's child process writes. A fresh launch uses the
+attempt id as its conversation id. A continuation keeps the prior conversation
+id and its saved history, and records `resumedFrom` plus a stable `rootRunId`
+lineage. The launch recipe captured at the first attempt (tools, exclusions,
+clean/nesting and approval intent, confinement, effective model and effort,
+workspace) describes how that conversation is reconstructed.
+
+### Retained Conversation
+
+A completed conversation and its workspace that `retain_session` keeps out of
+age and size cleanup until the owning foreground session releases them. Retention
+is a bounded availability promise inside the existing temporary runtime storage,
+not permanent storage: when the saved history is gone, continuation refuses and
+never creates a replacement conversation. A parked retained owner occupies no
+concurrency slot; only a live attempt does.
+
 ### Run Alias
 
 A user-supplied label for an individual run, rather than a reusable agent

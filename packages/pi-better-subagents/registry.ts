@@ -75,6 +75,53 @@ export function canExitFinalize(status: RunStatus): boolean {
     return status === "running" || status === "orphaned" || status === "lost";
 }
 
+/**
+ * Effective launch recipe captured at spawn, sufficient to reconstruct a
+ * continuation attempt. Attempt identity and conversation identity are
+ * separate: `attemptId` is this record's run id, `sessionId` is the native
+ * conversation shared by every attempt of the same owner.
+ *
+ * The recipe freezes what was actually launched (resolved tools, exclusions,
+ * clean/nesting/approval intent, confinement, effective model and effort), not
+ * the configuration that happened to be set later. A continuation re-applies
+ * current mandatory human permissions and never re-resolves the catalog.
+ */
+export interface LaunchRecipe {
+    version: 1;
+    /** Attempt that first recorded this recipe. */
+    attemptId: string;
+    /** Native conversation identity shared by every continuation attempt. */
+    sessionId: string;
+    /** Directory holding the saved conversation JSONL. */
+    sessionDir: string;
+    /** Canonical workspace the attempt ran in. */
+    cwd: string;
+    model?: string;
+    effort?: string;
+    /** Effective tool allowlist (already adjusted for confinement). */
+    tools: string;
+    excludeTools?: string;
+    clean: boolean;
+    allowNested: boolean;
+    approve: boolean;
+    sandbox: boolean;
+    /** Confinement root when the attempt was sandboxed. */
+    sandboxDir?: string;
+    gitCloneWorkspace: boolean;
+    callback: boolean;
+    name?: string;
+    agent?: string;
+    role?: string | readonly string[];
+    alias?: string;
+    catalog?: CatalogLaunchSnapshot;
+    /** Resolved extension arguments; a changed implementation requires explicit replacement. */
+    extensionArgs?: string[];
+    /** Provider/tool runtime arguments, excluding permission-dependent trusted tools. */
+    baseExtensionArgs?: string[];
+    /** Initial trusted implementations survive revocation so re-grants cannot replace them. */
+    trustedExtensions?: { name: string; package: string; loadPath: string }[];
+}
+
 export interface RunMeta {
     id: string;
     name?: string;
@@ -135,8 +182,23 @@ export interface RunMeta {
     /** Named lifecycle quality from exit/stream validation. */
     lifecycleClassification?: LifecycleClassification;
     logPath: string;
-    /** Child subagent session id. */
+    /**
+     * Native child conversation id. A fresh launch uses the attempt id; a
+     * continuation keeps the prior run's session id, so attempt identity
+     * (`id`) and conversation identity diverge. Retention and session cleanup
+     * protect conversations by this field, not by run id.
+     */
     sessionId: string;
+    /**
+     * First attempt of this conversation's lineage. Every attempt records it,
+     * so retention, cleanup protection, and ownership resolve one owner even
+     * after the attempt that created the conversation is gone.
+     */
+    rootRunId?: string;
+    /** Attempt this run continued, when it was launched by subagent_resume. */
+    resumedFrom?: string;
+    /** Effective launch recipe, frozen at launch for continuation. */
+    recipe?: LaunchRecipe;
     /** Foreground session that is allowed to receive unsolicited callbacks. */
     callbackOrigin?: RunCallbackOrigin;
     /** Durable ordinary-completion callback recovery and successful-handoff markers. */
@@ -475,7 +537,7 @@ let ownStartCache: string | undefined;
 const foreignStartCache = new Map<number, { token: string | undefined; at: number }>();
 
 /** Best-effort process start identity. Unavailable does not prove the pid is dead. */
-function readStartToken(pid: number): string | undefined {
+export function processStartToken(pid: number): string | undefined {
     if (process.platform === "linux") {
         try {
             const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
@@ -503,7 +565,7 @@ function readStartToken(pid: number): string | undefined {
 
 function ownStartToken(): string | undefined {
     if (ownStartKnown) return ownStartCache;
-    ownStartCache = readStartToken(process.pid);
+    ownStartCache = processStartToken(process.pid);
     ownStartKnown = true;
     return ownStartCache;
 }
@@ -512,7 +574,7 @@ function cachedStartToken(pid: number): string | undefined {
     const now = Date.now();
     const hit = foreignStartCache.get(pid);
     if (hit && now - hit.at < 200) return hit.token;
-    const token = readStartToken(pid);
+    const token = processStartToken(pid);
     foreignStartCache.set(pid, { token, at: now });
     return token;
 }
