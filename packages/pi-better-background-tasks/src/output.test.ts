@@ -140,15 +140,22 @@ describe("progress observations and launch provenance (#572)", () => {
     expect(cursorOf(recovered)).not.toBe(staleCursor);
   });
 
-  it("refreshes the last observed time on a completed watch poll without new log output", () => {
+  it("keeps a completed watch poll visible without letting it hide silence", () => {
     const task = running({ kind: "command_watch" });
     vi.setSystemTime(startedAt + 300_000);
     const stale = formatStatus(task);
     task.lastCheckedAt = startedAt + 300_000;
-    const recovered = formatStatus(task, { cursor: cursorOf(stale) });
-    expect(recovered).not.toContain("No new evidence since cursor");
-    expect(recovered).not.toContain("suspected stall");
-    expect(recovered).toContain("last check: 0s ago");
+    const polled = formatStatus(task, { cursor: cursorOf(stale) });
+    // The poll is activity the reader can see, but it is not progress: the
+    // suspected stall still stands until the observed outcome changes.
+    expect(polled).not.toContain("No new evidence since cursor");
+    expect(polled).toContain("last check: 0s ago");
+    expect(polled).toContain("suspected stall; no observed progress for 5m00s");
+
+    task.lastProgressAt = startedAt + 300_000;
+    const advanced = formatStatus(task);
+    expect(advanced).not.toContain("suspected stall");
+    expect(advanced).not.toContain("no observed progress");
   });
 
   it.each(["succeeded", "failed", "cancelled", "timed_out"] as const)("does not turn an old %s task into a suspected stall", (status) => {

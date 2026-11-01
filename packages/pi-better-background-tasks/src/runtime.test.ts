@@ -1,10 +1,13 @@
 import { readFileSync, rmSync, statSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { failurePath } from "./failures.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { readMeta, taskDir, writeMeta } from "./registry.js";
-import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
+import { resumeRunningTask, resumeScheduledWork, spawnTask, startWatchTask, stopTask, suspendScheduledWork } from "./runtime.js";
+import { actionableFailures, readFailureState } from "./shared-failure-observations.js";
 import { formatLaunch } from "./tools.js";
+import type { CommandResult } from "./types.js";
 import { failedResult, FakeRemoteRunner, successfulResult } from "./test-support/fake-remote-runner.js";
 
 const fakePi = {
@@ -1087,6 +1090,235 @@ describe("runtime", () => {
     expect(terminal?.callbackSentAt).toBeUndefined();
     expect(terminal?.callbackSuppressedAt).toBeTypeOf("number");
     expect(terminal?.callbackSuppressedReason).toContain("cancelled");
+  });
+});
+
+const watchStartedAt = Date.parse("2026-11-02T00:00:00Z");
+const WATCH_POLL_MS = 30_000;
+
+/**
+ * Progress evidence for command watchers. A completed poll is activity; only a
+ * changed observed outcome is progress, so a watch that reports the same thing
+ * forever becomes quiet and then a suspected stall while it keeps polling.
+ */
+describe("command watch progress evidence", () => {
+  let ids: string[] = [];
+
+  afterEach(() => {
+    suspendScheduledWork();
+    resumeScheduledWork();
+    vi.useRealTimers();
+    for (const id of ids) rmSync(taskDir(id), { recursive: true, force: true });
+    ids = [];
+  });
+
+  type ScriptedOutcome = Partial<CommandResult> | (() => Partial<CommandResult>);
+
+  function scriptedWatch(outcomes: ScriptedOutcome[]) {
+    let calls = 0;
+    const runner = async (): Promise<CommandResult> => {
+      const next = outcomes[Math.min(calls, outcomes.length - 1)]!;
+      calls += 1;
+      const now = Date.now();
+      return { exitCode: 0, signal: null, stdout: "", stderr: "", startedAt: now, endedAt: now,
+        ...(typeof next === "function" ? next() : next) };
+    };
+    return { runner, calls: () => calls };
+  }
+
+  function startScriptedWatch(
+    outcomes: ScriptedOutcome[],
+    params: { success_when?: { type: "json_path_equals"; path: string; value: unknown } } = {},
+  ) {
+    const scripted = scriptedWatch(outcomes);
+    const meta = startWatchTask(fakePi, {
+      name: "progress evidence watcher",
+      command: "check deployment",
+      interval_seconds: WATCH_POLL_MS / 1000,
+      timeout_seconds: 0,
+      callback: false,
+      success_when: params.success_when ?? { type: "json_path_equals", path: "$.status", value: "done" },
+    }, process.cwd(), undefined, undefined, { watchPollRunner: scripted.runner });
+    ids.push(meta.id);
+    return { meta, ...scripted };
+  }
+
+  async function advance(ms: number): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms);
+  }
+
+  function incidents(id: string) {
+    return actionableFailures(readFailureState(failurePath(id)));
+  }
+
+  it("holds the state clock while polls keep reporting the same outcome", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    const watch = startScriptedWatch([{ stdout: '{"status":"pending"}\n' }]);
+
+    await advance(0);
+    expect(watch.calls()).toBe(1);
+    await advance(11 * WATCH_POLL_MS);
+
+    const stalled = readMeta(watch.meta.id)!;
+    expect(stalled.status).toBe("running");
+    expect(stalled.lastProgressAt).toBe(watchStartedAt);
+    expect(stalled.lastCheckedAt).toBe(watchStartedAt + 11 * WATCH_POLL_MS);
+    expect(incidents(watch.meta.id)).toHaveLength(1);
+
+    // Polls keep running, and the same silent spell stays a single observation.
+    const journal = readFileSync(failurePath(watch.meta.id), "utf8");
+    const pollsSoFar = watch.calls();
+    await advance(10 * WATCH_POLL_MS);
+    expect(watch.calls()).toBeGreaterThan(pollsSoFar);
+    expect(readMeta(watch.meta.id)!.lastProgressAt).toBe(watchStartedAt);
+    expect(readFileSync(failurePath(watch.meta.id), "utf8")).toBe(journal);
+    expect(incidents(watch.meta.id)).toHaveLength(1);
+  });
+
+  it("recovers on a real state change and alerts again in a later stationary phase", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    let state = "pending";
+    const watch = startScriptedWatch([() => ({ stdout: `${JSON.stringify({ status: state })}\n` })]);
+
+    await advance(0);
+    await advance(11 * WATCH_POLL_MS);
+    const firstSpell = incidents(watch.meta.id);
+    expect(firstSpell).toHaveLength(1);
+
+    state = "halfway";
+    await advance(WATCH_POLL_MS + 1_000);
+    const recovered = readMeta(watch.meta.id)!;
+    expect(recovered.status).toBe("running");
+    expect(recovered.lastProgressAt).toBe(watchStartedAt + 12 * WATCH_POLL_MS);
+    expect(incidents(watch.meta.id)).toHaveLength(0);
+
+    await advance(12 * WATCH_POLL_MS);
+    const secondSpell = incidents(watch.meta.id);
+    expect(secondSpell).toHaveLength(1);
+    expect(secondSpell[0]!.id).not.toBe(firstSpell[0]!.id);
+    expect(readMeta(watch.meta.id)!.status).toBe("running");
+  });
+
+  it("ignores JSON key order, whitespace, and poll metadata when fingerprinting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    let call = 0;
+    const watch = startScriptedWatch([() => {
+      call += 1;
+      const stdout = call % 2 === 0
+        ? '{"detail":{"a":1,"b":2},"status":"pending"}\n'
+        : '{"status":"pending","detail":{"b":2,"a":1}}';
+      const startedAt = Date.now();
+      return { stdout, startedAt, endedAt: startedAt + call * 1_000 };
+    }]);
+
+    await advance(0);
+    await advance(11 * WATCH_POLL_MS);
+
+    const meta = readMeta(watch.meta.id)!;
+    expect(meta.lastCheckedAt).toBe(watchStartedAt + 11 * WATCH_POLL_MS);
+    expect(meta.lastProgressAt).toBe(watchStartedAt);
+    expect(incidents(watch.meta.id)).toHaveLength(1);
+  });
+
+  it("ignores redraw-only stderr churn but counts a substantive stderr change", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    let stderr = "\u001b[2Kstep 1\r\u001b[2Kstep 1\rstep 1\n";
+    const watch = startScriptedWatch([() => ({ stdout: '{"status":"pending"}\n', stderr })]);
+
+    await advance(0);
+    await advance(11 * WATCH_POLL_MS);
+    expect(readMeta(watch.meta.id)!.lastProgressAt).toBe(watchStartedAt);
+
+    stderr = "latest error: bucket is not empty\n";
+    await advance(WATCH_POLL_MS + 1_000);
+    expect(readMeta(watch.meta.id)!.lastProgressAt).toBe(watchStartedAt + 12 * WATCH_POLL_MS);
+  });
+
+  it("keeps the state clock still while every poll fails condition evaluation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    const watch = startScriptedWatch(
+      [{ stdout: '{"status":"pending"}\n' }],
+      { success_when: { type: "json_path_equals", path: "$.missing", value: true } },
+    );
+
+    await advance(0);
+    await advance(11 * WATCH_POLL_MS);
+
+    const meta = readMeta(watch.meta.id)!;
+    expect(meta.status).toBe("running");
+    expect(meta.error).toContain("JSON path not found");
+    expect(meta.lastProgressAt).toBe(watchStartedAt);
+  });
+
+  it("preserves the fingerprint and state clock across a resume", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    const watch = startScriptedWatch([{ stdout: '{"status":"pending"}\n' }]);
+
+    await advance(0);
+    await advance(2 * WATCH_POLL_MS);
+    const persisted = readMeta(watch.meta.id)!;
+    expect(persisted.watchFingerprint).toMatch(/^v1:/);
+    expect(persisted.lastProgressAt).toBe(watchStartedAt);
+    expect(persisted.lastCheckedAt).toBe(watchStartedAt + 2 * WATCH_POLL_MS);
+
+    suspendScheduledWork();
+    resumeScheduledWork();
+    resumeRunningTask(fakePi, persisted, undefined, { watchPollRunner: watch.runner });
+    await advance(WATCH_POLL_MS);
+
+    const resumed = readMeta(watch.meta.id)!;
+    expect(resumed.watchFingerprint).toBe(persisted.watchFingerprint);
+    expect(resumed.lastProgressAt).toBe(watchStartedAt);
+    expect(resumed.lastCheckedAt).toBe(watchStartedAt + 3 * WATCH_POLL_MS);
+
+    // A record written before the fingerprint existed adopts one without
+    // resetting its clock, so reloads cannot keep hiding a stationary watch.
+    writeMeta({ ...readMeta(watch.meta.id)!, watchFingerprint: undefined });
+    await advance(WATCH_POLL_MS);
+    const adopted = readMeta(watch.meta.id)!;
+    expect(adopted.watchFingerprint).toMatch(/^v1:/);
+    expect(adopted.lastProgressAt).toBe(watchStartedAt);
+  });
+
+  it.each([undefined, "v0:legacy"])("keeps a restored watch's launch fallback without a saved progress clock (%s)", async (fingerprint) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    const watch = startScriptedWatch([{ stdout: '{"status":"pending"}\n' }]);
+    await advance(0);
+    suspendScheduledWork();
+    const legacy = { ...readMeta(watch.meta.id)!, lastProgressAt: undefined, watchFingerprint: fingerprint };
+    writeMeta(legacy);
+    vi.setSystemTime(watchStartedAt + 600_000);
+    resumeScheduledWork();
+    resumeRunningTask(fakePi, legacy, undefined, { watchPollRunner: watch.runner });
+    await advance(WATCH_POLL_MS);
+    const adopted = readMeta(watch.meta.id)!;
+    expect(adopted.watchFingerprint).toMatch(/^v1:/);
+    expect(adopted.lastProgressAt).toBe(watchStartedAt);
+    expect(adopted.lastCheckedAt).toBeGreaterThanOrEqual(watchStartedAt + 600_000);
+  });
+
+  it("still finishes on the poll that observes the terminal outcome", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(watchStartedAt);
+    const watch = startScriptedWatch([
+      { stdout: '{"status":"pending"}\n' },
+      { stdout: '{"status":"done"}\n' },
+    ]);
+
+    await advance(0);
+    await advance(WATCH_POLL_MS + 1_000);
+
+    const terminal = readMeta(watch.meta.id)!;
+    expect(watch.calls()).toBe(2);
+    expect(terminal.status).toBe("succeeded");
+    expect(terminal.result).toMatchObject({ reason: "success condition matched" });
   });
 });
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
@@ -190,6 +191,12 @@ export interface WatchTaskParams extends CommandSpec, TaskIntentParams {
 
 export interface TaskRuntimeDependencies {
   remoteRunner?: RemoteRunner;
+  /**
+   * Embedding/test seam for a local watch's poll command. Production polls run
+   * the persisted command through `runCommandOnce`; a remote watch keeps using
+   * its SSH runner instead.
+   */
+  watchPollRunner?: WatchPollRunner;
 }
 
 /**
@@ -591,7 +598,7 @@ export function startWatchTask(
   firstCheckWaiters.set(id, { promise: firstCheck, resolve: resolveFirst });
   scheduleWatch(pi, id, 0, getActiveSession, remoteTask
     ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
-    : undefined);
+    : dependencies.watchPollRunner);
   return meta;
 }
 
@@ -642,7 +649,7 @@ export function resumeRunningTask(
   if (meta.kind === "command_watch") {
     scheduleWatch(pi, meta.id, 0, getActiveSession, remoteTask
       ? (timeoutMs) => remoteTask.runOnce(undefined, timeoutMs)
-      : undefined);
+      : dependencies.watchPollRunner);
     return meta;
   }
 
@@ -912,10 +919,10 @@ async function pollWatch(
     applyCaptureOverflow(latest, result);
     enforceLogRetention(latest);
     latest.lastCheckedAt = Date.now();
-    latest.lastProgressAt = latest.lastCheckedAt;
     latest.lastExitCode = result.exitCode;
     latest.lastSignal = result.signal;
     latest.lastState = extractLastState(result);
+    observeWatchOutcome(latest, result);
 
     const pollKey = result.startedAt;
     if (result.timedOut) {
@@ -1386,7 +1393,10 @@ function enforceLogRetention(meta: BackgroundTaskMeta): void {
     const log = statSync(meta.logPath);
     const mtimeMs = Math.trunc(log.mtimeMs);
     const maintenance = meta.logMaintenance?.mtimeMs === mtimeMs && meta.logMaintenance.size === log.size;
-    if (!maintenance && mtimeMs > (meta.lastProgressAt ?? meta.startedAt)) {
+    // A watch's log only records its own polls, so its mtime is poll activity and
+    // never evidence that the watch's observed outcome moved. Spawned processes
+    // keep taking real log writes as progress.
+    if (meta.kind !== "command_watch" && !maintenance && mtimeMs > (meta.lastProgressAt ?? meta.startedAt)) {
       meta.lastProgressAt = mtimeMs;
       writeMeta(meta);
     }
@@ -1428,4 +1438,91 @@ function extractLastState(result: { stdout: string }): unknown {
   } catch {
     return result.stdout.slice(0, 4000);
   }
+}
+
+/** Version tag of the watch outcome fingerprint. A value from another version is adopted, never compared. */
+const WATCH_FINGERPRINT_VERSION = "v1";
+/** OSC and CSI control sequences are display markup, not content. */
+const TERMINAL_ESCAPE = /\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]/g;
+
+/**
+ * Text as the terminal would settle it. Redraw frames and control sequences are
+ * display churn: repainting the same visible line is not a new observation.
+ */
+function settledTerminalText(text: string): string {
+  return text
+    .replace(TERMINAL_ESCAPE, "")
+    .split("\n")
+    .map((line) => {
+      // A CR immediately before LF ends the line; any other CR overwrites it in place.
+      const body = line.endsWith("\r") ? line.slice(0, -1) : line;
+      return (body.split("\r").at(-1) ?? "").replace(/[ \t]+$/, "");
+    })
+    .join("\n")
+    .replace(/\n+$/, "");
+}
+
+/** Objects compare by content regardless of key order, so reordered keys are not progress. */
+function canonicalJsonText(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJsonText).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record).sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJsonText(record[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** stdout compares as JSON content when it parses, and as settled text otherwise. */
+function canonicalWatchStdout(stdout: string): string {
+  const settled = settledTerminalText(stdout);
+  try {
+    return `json:${canonicalJsonText(JSON.parse(settled))}`;
+  } catch {
+    return `text:${settled}`;
+  }
+}
+
+/**
+ * What a poll observed, independent of when it ran. Exit status, signal, error,
+ * stdout content, and stderr content are included; poll metadata (start time,
+ * end time, duration, check count) is deliberately not, so it can never hide a
+ * watch that reports the same outcome forever. Watch stdout may carry its own
+ * timestamps: projecting meaningful fields is the caller's job, not this
+ * fingerprint's guess.
+ */
+function watchOutcomeFingerprint(result: CommandResult): string {
+  // A runner may report why the check itself could not run; that is part of the
+  // observed outcome, not poll metadata.
+  const reported = (result as CommandResult & { error?: unknown }).error;
+  const error = typeof reported === "string" ? settledTerminalText(reported) : null;
+  const payload = JSON.stringify([
+    result.exitCode,
+    result.signal ?? null,
+    result.timedOut === true,
+    error,
+    canonicalWatchStdout(result.stdout),
+    settledTerminalText(result.stderr),
+  ]);
+  return `${WATCH_FINGERPRINT_VERSION}:${createHash("sha256").update(payload).digest("hex")}`;
+}
+
+/**
+ * A watch's state clock advances only when its observed outcome changes. The
+ * poll itself is activity (`lastCheckedAt`), not progress, so a stationary
+ * watch still becomes quiet and then a suspected stall while it keeps polling.
+ * A record with no current fingerprint is adopted without moving the clock, so
+ * an upgrade or reload cannot keep resetting that silence.
+ */
+function observeWatchOutcome(meta: BackgroundTaskMeta, result: CommandResult): void {
+  const fingerprint = watchOutcomeFingerprint(result);
+  const prior = meta.watchFingerprint;
+  meta.watchFingerprint = fingerprint;
+  const comparable = typeof prior === "string" && prior.startsWith(`${WATCH_FINGERPRINT_VERSION}:`);
+  if (!comparable) {
+    if (meta.lastProgressAt === undefined) meta.lastProgressAt = meta.startedAt;
+    return;
+  }
+  if (prior !== fingerprint) meta.lastProgressAt = meta.lastCheckedAt ?? Date.now();
 }

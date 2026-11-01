@@ -72,11 +72,15 @@ describe("background task stall observation", () => {
     expect(observeBackgroundTaskStall(task).state).toBe("healthy");
   });
 
-  it("uses completed watcher polls, not watcher log writes, as progress", () => {
-    const task = meta({ kind: "command_watch" });
-    outputAt(task, startedAt + 300_000);
-    expect(observeBackgroundTaskStall(task).state).toBe("stalled");
-    task.lastCheckedAt = startedAt + 250_000;
+  it("does not treat a watch's completed polls or its own log writes as progress", () => {
+    const task = meta({ kind: "command_watch", lastCheckedAt: startedAt + 290_000 });
+    outputAt(task, startedAt + 250_000);
+    expect(backgroundTaskProgressAt(task)).toBe(startedAt);
+    expect(observeBackgroundTaskStall(task)).toMatchObject({ state: "stalled", observedAt: startedAt, ageMs: 300_000 });
+  });
+
+  it("advances a watch once its observed state changes", () => {
+    const task = meta({ kind: "command_watch", lastCheckedAt: startedAt + 290_000, lastProgressAt: startedAt + 250_000 });
     expect(observeBackgroundTaskStall(task)).toMatchObject({ state: "healthy", observedAt: startedAt + 250_000, ageMs: 50_000 });
   });
 
