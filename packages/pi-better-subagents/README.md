@@ -12,6 +12,7 @@ Use `pi-better-subagents` when you want Pi to launch independent agent work with
 
 ## Core Features
 - Non-blocking subagent launches, with an optional role and named-agent catalog (`docs/agent-catalog.md`, `docs/agent-catalog-lifecycle.md`).
+- Completed-subagent continuation: `subagent_resume` continues a saved single or batch conversation under a new attempt id. Retention is optional cleanup protection: `retain_session` pins artifacts, and `subagent_release` removes that protection without invalidating history that still exists. See [continuing a completed subagent](docs/usage.md#continuing-a-completed-subagent).
 - Typed foreground `subagent_spawn_batch` launch receipts for native Pi codemode (Pi 0.99.1+), preserving direct tool calls, per-run callbacks, and batch capacity/catalog guarantees. See [codemode batch launches](docs/usage.md#codemode-batch-launches).
 - Opt-in OS task sandboxing on macOS and Linux.
 - Explicit tool allowlists for child sessions.
