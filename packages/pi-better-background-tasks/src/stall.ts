@@ -19,9 +19,12 @@ export function backgroundTaskStallThresholds(): Partial<StallThresholds> {
 
 /**
  * Process logs are the only external progress evidence available for detached
- * commands. Watchers instead advance after a completed poll command.
+ * commands. Watches instead advance only when a poll observes a changed
+ * outcome: poll scheduling and a watch's own poll log writes are activity, not
+ * progress, so a watch that reports the same thing can still go quiet.
  */
 export function backgroundTaskProgressAt(meta: BackgroundTaskMeta): number | undefined {
+  if (meta.kind === "command_watch") return meta.lastProgressAt ?? meta.startedAt;
   const recorded = Math.max(meta.lastProgressAt ?? 0, meta.lastCheckedAt ?? 0, meta.startedAt);
   if (meta.kind !== "process") return recorded;
   try {

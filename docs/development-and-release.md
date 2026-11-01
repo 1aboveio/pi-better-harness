@@ -356,6 +356,19 @@ The workflow reads the version from that package's manifest, publishes only its
 workspace, and creates a package-scoped tag and GitHub release such as
 `pi-better-goal@0.1.15`.
 
+Monitor a dispatched GitHub run with the state-based helper in a background task:
+
+```sh
+node scripts/watch-github-run.mjs --repo 1aboveio/pi-better-harness --run <run-id>
+```
+
+It emits the active steps only when provider state changes, keeps polling while
+that state stays the same, and exits with an error for failed runs or unreadable
+provider state. It omits terminal redraws and display clocks, so repeated status
+refreshes cannot keep resetting the background task's progress clock. The normal
+quiet and suspected-stall observations remain available while a phase is unchanged.
+A suspected stall is an observation to inspect, not proof that CI is hung.
+
 Confirm that package is visible:
 
 ```sh

@@ -184,7 +184,7 @@ describe("suspected-stall attention", () => {
     expect(task.status).toBe("running");
   });
 
-  it("uses completed watch polls as recovery, not watch log writes", () => {
+  it("recovers a watch only on a changed outcome, not on its polls or log writes", () => {
     task.kind = "command_watch";
     at(300_000);
     expect(observeTaskStallAttention(task)).toBe(true);
@@ -193,7 +193,12 @@ describe("suspected-stall attention", () => {
     outputAt(310_000);
     expect(observeTaskStallAttention(task)).toBe(false);
     expect(actionableFailures(state())[0].id).toBe(first.id);
+    // Poll activity is not progress: it neither recovers nor hides the spell.
     task.lastCheckedAt = startedAt + 310_000;
+    expect(observeTaskStallAttention(task)).toBe(false);
+    expect(actionableFailures(state())[0].id).toBe(first.id);
+    // A changed observed outcome moves the state clock and closes the spell.
+    task.lastProgressAt = startedAt + 310_000;
     expect(observeTaskStallAttention(task)).toBe(false);
     expect(actionableFailures(state())).toEqual([]);
     at(610_000);

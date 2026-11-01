@@ -116,16 +116,32 @@ new Pi process, a task whose process is gone is marked lost.
 
 A task can remain `running` without recent progress evidence. Compact status and
 navigator use the same observation. Process tasks use recorded progress and the
-log's modification time. Watches use recorded progress and completed polls. Before
-any progress, the task's launch time anchors the silence duration. This does not
-measure CPU activity, network waits, or useful application work.
+log's modification time. A watch advances only when a poll observes a changed
+outcome: running a poll, appending its result to the watch log, or polling on
+schedule is activity, not progress. Before any progress, the task's launch time
+anchors the silence duration. This does not measure CPU activity, network waits,
+or useful application work.
 
 At 60 seconds without observed progress, work is `quiet`. At 5 minutes, it has a
 `suspected stall`. Both thresholds are inclusive. Set `PI_BETTER_STALL_QUIET_MS`
 and `PI_BETTER_STALL_MS` to positive millisecond durations to override them.
 Compact status shows the last observed time, silence duration, and a warning:
 silence alone does not prove the task is hung. Terminal tasks are not reported as
-suspected stalls. New output or a completed watch poll refreshes the observation.
+suspected stalls. New process output or a changed watch outcome refreshes the
+observation, so a watch that keeps reporting the same thing becomes quiet and
+then a suspected stall while it keeps polling on schedule.
+
+A watch's outcome is compared by content, not by when it ran. JSON stdout is
+compared with sorted keys and without insignificant whitespace, terminal control
+sequences and carriage-return redraws are ignored, and the poll's start time, end
+time, duration, and check count are never compared. Exit status, signal, error,
+stdout, and stderr content are compared. A watch whose output carries its own
+changing timestamps or elapsed durations will therefore read as progress: project
+the fields that matter into stdout JSON (for example with `jq`) instead of
+printing a whole status page. The comparison is stored with the task, so it
+survives `/reload` and session resume; a watch restored from an older record
+adopts a comparison without resetting its silence, so reloads cannot hide a
+stationary watch.
 
 A status cursor changes when the observation crosses either threshold, even if
 metadata and log bytes have not changed. Within the same observation state,

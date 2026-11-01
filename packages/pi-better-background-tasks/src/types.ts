@@ -100,8 +100,19 @@ export interface BackgroundTaskMeta {
   deadlineAt?: number;
   intervalMs?: number;
   lastCheckedAt?: number;
-  /** Latest command completion or observed process log output. */
+  /**
+   * Latest meaningful progress. A process advances it on output; a watch only
+   * when its observed outcome changes state (never on the poll itself).
+   */
   lastProgressAt?: number;
+  /**
+   * Watch only: canonical fingerprint of the last observed poll outcome
+   * (stdout content, stderr content, exit code, signal, error). A poll that
+   * reports the same outcome is activity, not progress. Versioned; a value from
+   * another version, or a record without one, is adopted without moving the
+   * state clock so an upgrade or reload can never keep resetting silence.
+   */
+  watchFingerprint?: string;
   lastExitCode?: number | null;
   lastSignal?: NodeJS.Signals | null;
   lastState?: unknown;
