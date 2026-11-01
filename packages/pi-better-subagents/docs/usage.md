@@ -162,8 +162,8 @@ Continuation rules:
 On Pi 0.99.1 or newer, enable native codemode alongside the existing direct
 tools with `defaultTools: ["+codemode"]` and `codemode.mode: "on"`. SDK sessions
 must also load Pi's `createCodemodeExtension()`. This support is for the
-foreground coordinator; it does not enable codemode in confined children or
-change sandbox admission.
+foreground coordinator. Child codemode is enabled separately by the default
+tool set and preserves sandbox tool admission.
 
 `subagent_spawn_batch` returns the same readable text to direct callers and a
 structured launch receipt to codemode scripts. No text parsing is needed:
@@ -514,9 +514,16 @@ the task boundary.
 ## Tool scoping (allowlist)
 
 Precedence, highest first: the per-call `tools` param → `config.json`
-`defaultTools` → a built-in default (`read, bash, edit, write, web_search,
+`defaultTools` → a built-in default (`read, bash, edit, write, codemode, web_search,
 web_fetch`; just `read, bash` in a `clean` child). `exclude_tools` subtracts on
 top.
+
+On Pi 0.99.1 or newer, default children explicitly load native `codemode` even
+with extension discovery disabled. Custom tool lists must include `codemode`;
+`exclude_tools: "codemode"` removes it. Older SDKs keep their existing tools.
+In confined children, nested tool calls pass through the task guard. Direct
+classifier and image-model globals are disabled there because they bypass tool
+hooks. Unconfined children retain native model globals.
 
 User configuration lives in
 `~/.pi/agent/settings.json` under `piBetterHarness.subagents` (under

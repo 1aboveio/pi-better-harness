@@ -33,7 +33,8 @@
  *   pi -p --no-extensions "list your tools" -> read, bash, edit, write
  * A builtin needs no extension, so it never counts as unmapped.
  */
-export const BUILTIN_TOOLS = ["read", "bash", "edit", "write"];
+// codemode is supplied by the harness child adapter, not a discovered package.
+export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "codemode"];
 
 /** Marker spec meaning "this extension's own package" (for allow_nested). */
 export const SELF_SPEC = "self";

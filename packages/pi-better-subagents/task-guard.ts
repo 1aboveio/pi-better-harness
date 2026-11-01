@@ -9,6 +9,7 @@ import { DISPOSITION_TOOL } from "./incident-model.ts";
 import { SandboxDiagnostics, diagnosticPackageVersion } from "./shared-sandbox-diagnostics.ts";
 import { fileURLToPath } from "node:url";
 import { claimTaskToolOwner } from "./task-tool-owner.ts";
+import { installChildCodemode } from "./child-codemode.ts";
 
 const TRUSTED_INLINE_SOURCE = "<inline:task-sandbox>";
 
@@ -56,6 +57,7 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
             diagnosticsWarned = true;
         },
     });
+    const codemode = policy.tools.includes("codemode") && installChildCodemode(pi, true);
     const toolApi = ownedTools ? { ...pi, registerTool: claimTaskToolOwner(pi) } : pi;
     const installBoundary = () => installTaskTools(toolApi, { controller, cwd: process.cwd(), shellPath: () => shellPath,
         diagnostics,
@@ -66,7 +68,7 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
         processAccess: () => policy.permissions.processAccess ?? "off",
         // The disposition tool performs no file or command I/O; only this inline registration is admitted.
         // Trusted tools are admitted by name and package (ADR 0009).
-        admitExtensionTool: (name, _input, sourcePath) => (name === DISPOSITION_TOOL && sourcePath === TRUSTED_INLINE_SOURCE) ||
+        admitExtensionTool: (name, _input, sourcePath) => ((name === DISPOSITION_TOOL || (name === "codemode" && codemode)) && sourcePath === TRUSTED_INLINE_SOURCE) ||
             trustedToolRefusal(policy, name, sourcePath) === undefined,
     });
     // Defer owned registrations until after SDK duplicate-name diagnostics.
@@ -107,7 +109,8 @@ export default function taskGuard(pi: ExtensionAPI, input: unknown, fatal: (erro
                 const reason = registered ? trustedToolRefusal(policy, name, registered.sourceInfo?.path) : `${name} was not registered by its package`;
                 if (reason) refused.push({ name, reason }); else trusted.push(name);
             }
-            const activated = selected.length || trusted.length ? [...selected, ...trusted, DISPOSITION_TOOL] : selected;
+            const activated = selected.length || trusted.length || codemode
+                ? [...selected, ...trusted, ...(codemode ? ["codemode"] : []), DISPOSITION_TOOL] : selected;
             pi.setActiveTools(activated);
             const active = new Set(pi.getActiveTools());
             if (active.size !== activated.length || activated.some((name) => !active.has(name))) {

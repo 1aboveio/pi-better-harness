@@ -1868,7 +1868,7 @@ export default function (pi: ExtensionAPI) {
             requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name)),
             settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
             processAccess: permissionPlan.permissions?.processAccess ?? "off",
-            builtins: TASK_BUILTINS, registered: pi.getAllTools?.() ?? [],
+            builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
             toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
         }) : undefined;
         const resolution = resolveExtensions({
@@ -1882,10 +1882,12 @@ export default function (pi: ExtensionAPI) {
             .filter((path) => !resolvedExtArgs.includes(path)).flatMap((path) => ["--extension", path]);
         // Harness child controls ride along in every mode, including clean and unsandboxed runs.
         // They deliver deadline steers and keep external monitoring with the coordinator.
-        const extArgs = [...resolvedExtArgs, ...trustedExtArgs,
+        const codemodeArgs = !sandboxEnabled && allow.split(",").includes("codemode") && !requestedExcludes.has("codemode")
+            ? ["--extension", join(selfDir(), "child-codemode.ts")] : [];
+        const extArgs = [...resolvedExtArgs, ...trustedExtArgs, ...codemodeArgs,
             "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
             .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
-        const baseExtensionArgs = [...resolvedExtArgs,
+        const baseExtensionArgs = [...resolvedExtArgs, ...codemodeArgs,
             "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
             .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
         if (resume?.recipe.extensionArgs) {
@@ -1895,7 +1897,7 @@ export default function (pi: ExtensionAPI) {
                 tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
                 model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
             });
-            const referenceArgs = [...extensionArgs(reference, resolveExtensionPath).args,
+            const referenceArgs = [...extensionArgs(reference, resolveExtensionPath).args, ...codemodeArgs,
                 ...(!resume.recipe.baseExtensionArgs ? trustedExtArgs : []),
                 "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
                 .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);

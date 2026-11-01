@@ -12,6 +12,7 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import { InMemoryCredentialStore } from '@earendil-works/pi-ai';
 import { describeSandboxSupport } from '../shared-sandbox-core.ts';
 import { createTaskBashOperations } from '../shared-task-sandbox.ts';
+import * as SDK from '@earendil-works/pi-coding-agent';
 import taskGuard, { trustedToolRefusal } from '../task-guard.ts';
 import childOwnership from '../child-ownership.ts';
 import { parseTaskPolicy, prepareTaskRuntime } from '../task-policy.ts';
@@ -137,6 +138,61 @@ async function execute(session, name, params) {
     if (decision?.block) throw new Error(decision.reason);
     return tool.execute('boundary-test', params, new AbortController().signal);
 }
+
+test('isolated children load native codemode explicitly with extension discovery disabled', {
+    skip: typeof SDK.createCodemodeExtension !== 'function',
+}, async (t) => {
+    const f = fixture(t);
+    writeFileSync(join(f.project, 'input.txt'), 'native-child-read');
+    const settingsManager = SettingsManager.inMemory();
+    const loader = new DefaultResourceLoader({ cwd: f.project, agentDir: f.agent, settingsManager,
+        noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+        additionalExtensionPaths: [fileURLToPath(new URL('../child-codemode.ts', import.meta.url))] });
+    await loader.reload();
+    const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(),
+        modelsPath: join(f.agent, 'models.json'), modelsStorePath: join(f.agent, 'models-store.json') });
+    const { session } = await createAgentSession({ cwd: f.project, agentDir: f.agent, resourceLoader: loader,
+        settingsManager, modelRuntime, sessionManager: SessionManager.inMemory(f.project) });
+    t.after(() => session.dispose());
+    await session.bindExtensions({});
+    session.setActiveToolsByName(['read', 'codemode']);
+    session.agent.state.messages.push({ role: 'assistant', content: [
+        { type: 'toolCall', id: 'boundary-test', name: 'codemode', arguments: { code: '' } }],
+        api: 'test', provider: 'test', model: 'test', stopReason: 'toolUse', timestamp: Date.now(),
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    const result = await execute(session, 'codemode', { code: 'text(await tools.read({path: "input.txt"}));' });
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    assert.match(result.content.map(item => item.text ?? '').join('\n'), /native-child-read/);
+});
+
+test('native codemode dispatches guarded tools and cannot bypass child file rules', {
+    skip: !supported || typeof SDK.createCodemodeExtension !== 'function',
+}, async (t) => {
+    const f = fixture(t, { commands: false, outsideProject: 'off', storedCredentials: 'off' });
+    f.policy.tools = ['read', 'write', 'codemode'];
+    const session = await sessionFixture(t, f, [], true);
+    session.agent.state.messages.push({ role: 'assistant', content: [
+        { type: 'toolCall', id: 'boundary-test', name: 'codemode', arguments: { code: '' } }],
+        api: 'test', provider: 'test', model: 'test', stopReason: 'toolUse', timestamp: Date.now(),
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    const result = await execute(session, 'codemode', { code: `
+        await tools.write({path: "inside.txt", content: "written through codemode"});
+        const outcomes = await Promise.allSettled([
+            tools.read({path: ${JSON.stringify(join(f.agent, 'auth.json'))}}),
+            tools.write({path: ${JSON.stringify(join(f.base, 'outside.txt'))}, content: "escape"})
+        ]);
+        text(outcomes.map(outcome => outcome.status));
+        text(typeof models);
+    ` });
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    assert.equal(readFileSync(join(f.project, 'inside.txt'), 'utf8'), 'written through codemode');
+    assert.equal(existsSync(join(f.base, 'outside.txt')), false);
+    const output = result.content.map(item => item.text ?? '').join('\n');
+    assert.match(output, /"rejected","rejected"/);
+    assert.match(output, /undefined/);
+});
 
 test('worker ownership blocks CI watches before SDK command execution without restricting local checks', { skip: !supported }, async (t) => {
     const f = fixture(t);
