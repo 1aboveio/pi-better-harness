@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.37.1] - 2026-11-01
+
+### Fixed
+
+- Bundle Subagents 0.25.1 so default subagents can use native Pi codemode. (#612)
+
+## [pi-better-subagents@0.25.1] - 2026-11-01
+
+### Fixed
+
+- Include native codemode in the default subagent tools on Pi 0.99.1 or newer, explicitly loading it when extension discovery is disabled. Custom tool lists and exclusions still control activation; older SDKs retain their existing tools. (#612)
+- Enforce sandbox permissions on nested codemode tool calls and disable direct classifier/image-model globals in confined children. (#612)
+
 ## [pi-better-harness@0.37.0] - 2026-11-01
 
 ### Changed
