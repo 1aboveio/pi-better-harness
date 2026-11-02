@@ -43,7 +43,7 @@ export function resolveCandidates(models: readonly CatalogModel[], config: Route
     const peak = { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead, ...override?.peak };
     const offPeak = { input: peak.input / 2, output: peak.output / 2, cacheRead: peak.cacheRead / 2, ...override?.offPeak };
     if (![...Object.values(peak), ...Object.values(offPeak)].every(n => Number.isFinite(n) && n >= 0) ||
-        (!Object.keys(override?.peak ?? {}).length && peak.input + peak.output === 0)) {
+        (["input", "output"] as const).some(field => peak[field] === 0 && override?.peak?.[field] === undefined)) {
       throw new Error(`Model router: ${model.provider}/${model.id} needs nonzero catalog pricing. Set cost in Pi's models.json.`);
     }
     return [{ provider: model.provider, model: model.id, peak,

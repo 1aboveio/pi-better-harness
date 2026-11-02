@@ -86,7 +86,7 @@ The router resolves authenticated physical models from Pi's available catalog on
 - DeepSeek: `deepseek-flash`, with `deepseek-v4-flash` as a legacy fallback.
 - Ollama Cloud: `deepseek-v4.1-flash:cloud`, then `deepseek-v4.1-flash`, then an available version-tagged `deepseek-v4.1-flash:…` entry.
 
-It uses the catalog's input, output, and cached-input cost metadata, including `models.json` overrides, then applies any policy price overrides. Models with missing, invalid, or zero input/output pricing produce an error rather than being treated as free, unless peak rates are explicitly supplied by the policy. Explicit zero-rate overrides are allowed.
+It uses the catalog's input, output, and cached-input cost metadata, including `models.json` overrides, then applies any policy price overrides. Models with missing, invalid, or zero input/output pricing produce an error rather than being treated as free, unless each zero input or output rate is explicitly supplied by the policy. Explicit zero-rate overrides are allowed.
 
 By default, the bundled schedule treats catalog rates as **peak rates** and applies a 50% discount off-peak:
 
