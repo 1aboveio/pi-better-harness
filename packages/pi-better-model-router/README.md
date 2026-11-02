@@ -1,6 +1,6 @@
 # pi-better-model-router
 
-Select `router/deepseek-flash-auto` once. Pi chooses DeepSeek or Ollama Cloud by the current price at the start of each user turn.
+Select `router/deepseek-flash-auto` once. Pi chooses DeepSeek or Ollama Cloud by price at the start of each user turn. DeepSeek is the default preferred provider.
 
 ## Requirements and setup
 
@@ -18,14 +18,61 @@ For a temporary run:
 pi -e ./packages/pi-better-model-router
 ```
 
-Authenticate DeepSeek through `/login`. Install and authenticate `pi-ollama-cloud` to enable the other route. Open `/model`, confirm both physical model IDs, then select **DeepSeek Flash Auto**. One authenticated candidate is enough; no available candidates produces an actionable error.
+Authenticate DeepSeek through `/login`. Install and authenticate `pi-ollama-cloud` to enable the other route. Open `/model`, then select **DeepSeek Flash Auto**. One authenticated candidate is enough; no eligible candidates produces an actionable error.
 
-The router reuses provider authentication and streaming. It does not store keys or start a proxy. It does not select itself as the session default.
+The router reuses Pi's physical models, authentication, streaming, and model settings. Define custom endpoints, credentials, capabilities, and price overrides in Pi's normal provider configuration or `models.json`. No physical model needs to be defined again for the router.
 
-## Routing policy
+## Policy configuration
 
-- Compare estimated uncached input and output cost using each provider's current schedule.
-- Keep the previous provider when costs tie; otherwise prefer `preferredProvider`, then candidate order.
+No configuration file is needed for the default policy. To override it, use `<Pi agent directory>/model-router.json` (normally `~/.pi/agent/model-router.json`) or `<project>/.pi/model-router.json`. Project fields override user fields. Changes apply before the next request.
+
+The complete policy schema is:
+
+```json
+{
+  "preferredProvider": "deepseek",
+  "estimatedInputTokens": 10000,
+  "estimatedOutputTokens": 2000
+}
+```
+
+- `preferredProvider` is either `deepseek` or `ollama-cloud`. It wins when prices tie at the start of a user turn.
+- The positive token estimates weight input versus output cost. They do not limit actual tokens or predict usage.
+
+A minimal explicit configuration is:
+
+```json
+{
+  "preferredProvider": "deepseek"
+}
+```
+
+Model IDs, endpoints, prices, capabilities, and schedules are not accepted in this policy file. Unknown fields report an error. Older configurations containing `candidates` must remove that field; move physical model overrides into `models.json`.
+
+## Model discovery and prices
+
+The router resolves authenticated physical models from Pi's available catalog on each request:
+
+- DeepSeek: `deepseek-flash`, with `deepseek-v4-flash` as a legacy fallback.
+- Ollama Cloud: `deepseek-v4.1-flash:cloud`, then `deepseek-v4.1-flash`, then an available version-tagged `deepseek-v4.1-flash:…` entry.
+
+It uses the catalog's input, output, and cached-input cost metadata, including `models.json` overrides. Models with missing, invalid, or zero input/output pricing produce an error rather than being treated as free.
+
+The bundled schedule treats catalog rates as **peak rates** and applies a 50% discount off-peak:
+
+| Provider | Weekday peak windows, UTC |
+| --- | --- |
+| DeepSeek | 01:00–04:00 and 06:00–10:00 |
+| Ollama Cloud | 12:00–18:00 |
+
+Windows include the start and exclude the end. Weekends are off-peak. The schedule is a bundled integration rule, not a live pricing feed.
+
+DeepSeek also excludes Chinese public holidays. The bundled holiday list is currently empty, so the router conservatively treats those weekdays as ordinary weekdays. It can choose Ollama unnecessarily during those exceptions. Holiday-calendar support is not exposed as model configuration.
+
+## Routing behavior
+
+- Compare estimated uncached input and output cost using catalog rates and the bundled schedule.
+- On equal cost, prefer DeepSeek by default. If the preferred provider is unavailable, preserve the previous eligible model, then use candidate order.
 - Keep tool follow-ups on the chosen provider, even across a price boundary.
 - On a transient retry (rate limit, overload, timeout, or selected network/server errors), exclude the failed provider for the rest of that user turn.
 - Preserve the failed model on other retries, including context overflow.
@@ -34,45 +81,9 @@ The router reuses provider authentication and streaming. It does not store keys 
 
 Pi records the physical provider and model on responses and displays its native routed-model indicator. Pi clamps the selected thinking level to the physical model's supported levels.
 
-## Configuration
+The router does not assume that a provider has a warm cache. Choosing a cheaper rate, or returning to the preferred provider on a tie, can lose cache savings. Cached-input prices are not used to compare routes because cache hits cannot be predicted reliably.
 
-The router reads `<Pi agent directory>/model-router.json` (normally `~/.pi/agent/model-router.json`), then `<project>/.pi/model-router.json`. Project fields override user fields. Arrays replace whole arrays. Configuration is read before each request; malformed or unreadable files report their path.
-
-Example with the default rates and schedules:
-
-```json
-{
-  "preferredProvider": "deepseek",
-  "estimatedInputTokens": 10000,
-  "estimatedOutputTokens": 2000,
-  "candidates": [
-    {
-      "provider": "deepseek",
-      "model": "deepseek-flash",
-      "peak": { "input": 0.30, "cacheRead": 0.006, "output": 1.20 },
-      "offPeak": { "input": 0.15, "cacheRead": 0.003, "output": 0.60 },
-      "peakWindows": [[60, 240], [360, 600]],
-      "offPeakDates": []
-    },
-    {
-      "provider": "ollama-cloud",
-      "model": "deepseek-v4.1-flash:cloud",
-      "peak": { "input": 0.30, "cacheRead": 0.006, "output": 1.20 },
-      "offPeak": { "input": 0.15, "cacheRead": 0.003, "output": 0.60 },
-      "peakWindows": [[720, 1080]],
-      "offPeakDates": []
-    }
-  ]
-}
-```
-
-Prices are USD per million tokens. Windows use minutes after UTC midnight, include their start, and exclude their end. They apply Monday through Friday; weekends are always off-peak. Split windows at midnight. Model IDs must match the physical catalog exactly; override the Ollama ID if your catalog uses another tag.
-
-**DeepSeek excludes Chinese public holidays from peak pricing. Add those UTC calendar dates to its `offPeakDates`.** The default date list is empty; the router does not download a holiday calendar. Rates and schedules are a configurable snapshot, not a live pricing feed.
-
-The token estimates are routing weights, not a prediction of actual usage. The router does not assume that a provider has a warm cache. It may switch to a cheaper rate even when rebuilding the cache costs more. Staying on the previous provider when rates tie reduces unnecessary cache loss.
-
-`cacheRead` records the published rate for configuration completeness; it is not used in the comparison because cache hits cannot be predicted reliably. Routing does not rewrite provider cost metadata. Pi's displayed costs remain provider estimates; Ollama Cloud does not report cached-token usage through its completion API. Subscription credits are not treated as free tokens.
+Routing does not rewrite provider cost metadata. Pi's displayed costs remain provider estimates; Ollama Cloud does not report cached-token usage through its completion API. Subscription credits are not treated as free tokens.
 
 ## Development
 

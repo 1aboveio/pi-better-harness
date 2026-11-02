@@ -1,7 +1,7 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { loadConfig } from "./config.ts";
-import { chooseCandidate, isTransient } from "./routing.ts";
+import { chooseCandidate, isTransient, resolveCandidates } from "./routing.ts";
 
 // Structural contract keeps this standalone package buildable alongside the
 // monorepo's older SDK. Pi 1.4's native virtual-model API is required at runtime.
@@ -22,7 +22,7 @@ export interface VirtualDefinition {
 export function route(request: RouteRequest, ctx: ExtensionContext, now = new Date()): RouteResult {
   const config = loadConfig(getAgentDir(), ctx.cwd);
   const models = ctx.modelRegistry.getAvailable();
-  const available = config.candidates.filter(c => models.some(m => m.provider === c.provider && m.id === c.model && m.api !== "pi-virtual"));
+  const available = resolveCandidates(models);
   const find = (physical?: Physical) => physical && available.find(c =>
     c.provider === physical.model.provider && c.model === physical.model.id);
   let failedProviders = request.reason === "user" || request.reason === "direct"

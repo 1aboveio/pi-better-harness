@@ -8,7 +8,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
-- Standalone `pi-better-model-router` extension with the `router/deepseek-flash-auto` virtual model, configurable UTC peak/off-peak rates, provider availability checks, stable tool follow-ups, and bounded transient retry fallback. Requires Pi's native virtual-model API; tested with Pi 1.4.0. Not included in the Harness bundle.
+- Standalone `pi-better-model-router` extension with the `router/deepseek-flash-auto` virtual model, policy-only configuration, catalog model and price discovery, bundled UTC peak/off-peak schedules, DeepSeek preference on equal prices, stable tool follow-ups, and bounded transient retry fallback. Requires Pi's native virtual-model API; tested with Pi 1.4.0. Not included in the Harness bundle.
 
 ## [pi-better-harness@0.38.1] - 2026-11-02
 
