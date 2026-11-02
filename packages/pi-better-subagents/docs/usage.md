@@ -102,7 +102,7 @@ thresholds continue to take precedence for subagent health.
 | `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
 | `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
 | `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
-| `subagent_stop` | never | SIGTERM a running run's process group. |
+| `subagent_stop` | never | SIGTERM a running run's process group. The run is terminal, so its completion callback (one per run id) reports `killed`. |
 
 ## Finding a saved conversation
 
@@ -334,6 +334,14 @@ given.
   pending records retryable, and `/reload` recovers records explicitly marked
   pending. `callback:false` sends no model message; read the durable result later
   with `subagent_result`.
+- **One completion per run.** A run's ordinary notification is identified by
+  its run id, so a terminal run is reported once even if its status wording
+  changes (failure notes, observation gaps) between queueing and delivery.
+  Stopped runs are terminal too: `subagent_stop`, a navigator Close, the reload
+  drain, or cleanup that finalizes an orphaned run from its log records the same
+  pending completion, so the caller receives one `killed`/`completed`/`failed`
+  row instead of discovering the outcome by polling `subagent_list()`. A run
+  stopped while the session is shutting down is recovered by the next session.
 - **Optional busy steering.** In `/harness-settings`, set **Completions while
   busy** to **Steer active run** to receive ordinary completions during
   foreground work. Changes autosave to the current session branch and apply
