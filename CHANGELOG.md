@@ -4,6 +4,56 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.38.1] - 2026-11-02
+
+### Changed
+
+- Bundle Subagents 0.26.1, which keeps delegated work alive across a reload, recovers interrupted runs, and reports exactly one completion per terminal run, and Background Tasks 0.13.1, which adds an opt-in step gate and treats only a changed watch outcome as progress. Goal 0.11.0, Sandbox 0.14.0, and SSH 0.1.4 are unchanged.
+
+## [pi-better-subagents@0.26.1] - 2026-11-02
+
+### Added
+
+- Continue an attempt stopped with `subagent_stop` (status `killed`) through `subagent_spawn({ session_id, prompt })`, keeping its saved conversation, workspace, and frozen recipe while the stopped attempt's status, log, and result stay unchanged. A run that ended `failed` or `lost` is still refused. (#626)
+- Start a raw page from the newest retained bytes with `tail: true` on `subagent_output` and `subagent_result` in `mode=raw`, then page toward the oldest byte; the final step hands back an append-ready cursor. (#618)
+
+### Changed
+
+- Keep a live subagent child running when the session reloads or quits instead of killing delegated work: shutdown records a durable interruption and warns, and the replacing session re-adopts the record, finalizing an already-finished run from the child's own log. (#625)
+- Report an abandoned launch record — a run directory with a prompt but no metadata or log — separately in `subagent_list` instead of as an unknown-ownership gap, and reclaim it after one hour or immediately with `subagent_stop <id>`. (#623)
+
+### Fixed
+
+- Deliver exactly one completion per terminal run: `subagent_stop`, a navigator Close, the reload drain, and orphaned cleanup now record the pending completion instead of leaving the outcome to `subagent_list` polling, and duplicate ordinary callback events are deduplicated by source and id rather than by an enqueue-time status snapshot. (#624)
+- Recover an interrupted run across a full Pi restart from the child's own coherent log, and keep a live foreign parent's terminal callback under its original owner instead of delivering it into the resumed conversation. (#625)
+- Keep an interrupted run's owed completion for its own conversation, so an unrelated session that finishes first cannot consume it and the rightful session still receives exactly one delivery. (#625)
+- Refuse continuation while a recorded child is still alive, so a stopped attempt whose stop signal has not taken effect cannot let two writers append to one saved conversation. (#626)
+- Keep a running tool call from being judged stuck after `/reload`: the parent records the call it last saw open, so a bounded log read that no longer contains that call's start does not turn it into "no progress". (#620)
+- Stop the supervision ticker on a torn-down instance and let a new launch clear the teardown latch, so a run launched after a session shutdown still settles the health watcher instead of leaving it armed. (#625)
+- Report a miscopied cursor as `cursor-corrupt` instead of replaying page 1 as `source-replaced`, and resume only at an offset that a witness recomputed from the current source proves, so a damaged cursor cannot skip unread content or answer "end of text". (#617)
+- Stop purging a live launch attempt's artifacts, and re-classify debris under the same per-run metadata lock that publishes a run, so a launch that commits its metadata while a purge waits is preserved. (#623)
+- Keep a code point split across writes on a raw tail page, so tail-then-poll returns the whole character once and does not lose it at the page handoff. (#618)
+
+## [pi-better-background-tasks@0.13.1] - 2026-11-02
+
+### Added
+
+- Run a shell task under an opt-in `require_successful_steps` step gate: the command runs under bash `errexit`, so its first unhandled failing step ends the task with that step's exit code, and status reports `(step gate)` with the failing command and the shell's own exit. Handled failures stay green; the gate is refused before any task state exists for `shell: false`, structured `ssh`, and watch checks, which already report their real outcome. (#619)
+
+### Changed
+
+- Count only a changed watch outcome as progress: running a poll, appending its result, and polling on schedule are activity, so a watch that keeps reporting the same thing becomes quiet and then a suspected stall. The outcome is compared by content with sorted JSON keys and without poll timing, and the comparison survives `/reload` and session resume. (#616)
+
+### Fixed
+
+- Report a miscopied log cursor as `cursor-corrupt` instead of `source-replaced` with a replayed first page, and resume only at an offset that a witness recomputed from the current source proves, so unread log content is never skipped. (#617)
+
+## [pi-better-server@0.2.2] - 2026-11-02
+
+### Changed
+
+- Validate the native `/remote` bridge against the required host capabilities instead of requiring exactly Pi 1.2.0, so a client on another Pi version attaches when the native methods exist and an unsupported operation is named in the error. Automatic server setup now targets Pi SDK 1.4.0; Pi 1.2.0 clients need an explicitly configured matching server through `PI_SERVER_COMMAND`. (#636)
+
 ## [pi-better-harness@0.38.0] - 2026-11-01
 
 ### Changed
