@@ -14,6 +14,7 @@
  */
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { writeMeta, runDir, logPathFor } from "../registry.ts";
 import { subagentResultTool } from "../tools.ts";
@@ -38,8 +39,11 @@ const TypeStub = {
 
 const ORIGIN = { cwd: "/tmp", sessionId: "result-cursor-session" };
 
-/** A finished run whose final answer is far larger than one answer page. */
-function writeLongAnswerRun(id) {
+/**
+ * A finished run whose final answer is far larger than one answer page. Writing
+ * the same id again replaces its log, which is how a "replaced source" is staged.
+ */
+function writeAnswerRun(id, prefix = "answer") {
     diskIds.push(id);
     writeMeta({
         id,
@@ -57,7 +61,7 @@ function writeLongAnswerRun(id) {
         callbackOrigin: ORIGIN,
     });
     mkdirSync(runDir(id), { recursive: true });
-    const lines = Array.from({ length: 220 }, (_, i) => `answer-line-${String(i).padStart(3, "0")} ${"z".repeat(70)}`);
+    const lines = Array.from({ length: 220 }, (_, i) => `${prefix}-line-${String(i).padStart(3, "0")} ${"z".repeat(70)}`);
     writeFileSync(logPathFor(id), [
         JSON.stringify({
             type: "message_end",
@@ -69,7 +73,7 @@ function writeLongAnswerRun(id) {
         }),
         JSON.stringify({ type: "agent_end" }),
     ].join("\n") + "\n");
-    return { first: lines[0], last: lines[lines.length - 1] };
+    return { first: lines[0], last: lines[lines.length - 1], text: lines.join("\n") };
 }
 
 function textOf(result) {
@@ -102,6 +106,13 @@ function miscopiedCursor(cursor, kind, accept) {
     throw new Error("no single-character miscopy of this cursor satisfied the expectation");
 }
 
+/** The same cursor with one field rewritten: a still-parseable damaged payload. */
+function reencodedCursor(cursor, edit) {
+    const payload = JSON.parse(Buffer.from(cursor.slice(3), "base64url").toString("utf8"));
+    edit(payload);
+    return `${cursor.slice(0, 3)}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
+}
+
 function cursorFrom(text, name) {
     const cursor = text.match(new RegExp(`${name}=(\\S+)`))?.[1];
     assert.ok(cursor, `payload must carry ${name}`);
@@ -113,7 +124,7 @@ describe("subagent_result cursor corruption (#617)", () => {
     // @level unit
     it("continues after a miscopied answer cursor instead of replaying page 1", async () => {
         const id = `sa_result_cursor_${Date.now()}`;
-        const { first, last } = writeLongAnswerRun(id);
+        const { first, last } = writeAnswerRun(id);
         const tool = subagentResultTool(TypeStub);
 
         const page1 = textOf(await tool.execute("tc", { id, max_bytes: 2048 }));
@@ -146,5 +157,69 @@ describe("subagent_result cursor corruption (#617)", () => {
         }
         assert.doesNotMatch(lastPage, /hasMore=true/);
         assert.ok(lastPage.includes(last), "the end of the answer is reachable");
+    });
+
+    // @covers subagent.result-pagination
+    // @level unit
+    it("never answers an unread tail with a damaged offset's empty end page", async () => {
+        const id = `sa_result_cursor_offset_${Date.now()}`;
+        const { first, text: answerText } = writeAnswerRun(id);
+        const tool = subagentResultTool(TypeStub);
+
+        const page1 = textOf(await tool.execute("tc", { id, max_bytes: 2048 }));
+        const next = cursorFrom(page1, "nextCursor");
+        // The offset field moved to the snapshot length: an unverified offset
+        // used to return an empty page with hasMore=false, hiding the tail.
+        const atEnd = reencodedCursor(next, (payload) => { payload.o = payload.n; });
+        const restarted = textOf(await tool.execute("tc", { id, cursor: atEnd, max_bytes: 2048 }));
+
+        assert.match(restarted, /reset=cursor-corrupt/);
+        assert.match(restarted, /hasMore=true/, "the unread tail stays reachable");
+        assert.ok(restarted.includes(first), "the page restarts at the first line instead of skipping to the end");
+
+        // A cursor minted by an earlier release carries neither witness, so its
+        // offset cannot be verified: it restarts at the first line.
+        const legacy = reencodedCursor(next, (payload) => {
+            payload.v = createHash("sha256").update(Buffer.from(answerText, "utf8")).digest("base64url").slice(0, 22);
+            delete payload.w;
+            delete payload.x;
+        });
+        const unreachable = textOf(await tool.execute("tc", { id, cursor: legacy, max_bytes: 2048 }));
+        assert.match(unreachable, /reset=cursor-corrupt/);
+        assert.doesNotMatch(unreachable, /reset=source-replaced/);
+        assert.ok(unreachable.includes(first), "an unverifiable cursor restarts at the first line");
+        assert.match(unreachable, /hasMore=true/);
+    });
+
+    // @covers subagent.result-pagination
+    // @level unit
+    it("reports a replaced answer as a replacement, not as a usable continuation", async () => {
+        const id = `sa_result_cursor_replaced_${Date.now()}`;
+        writeAnswerRun(id);
+        const tool = subagentResultTool(TypeStub);
+
+        const page1 = textOf(await tool.execute("tc", { id, max_bytes: 2048 }));
+        const next = cursorFrom(page1, "nextCursor");
+        writeAnswerRun(id, "replacement");
+
+        const replaced = textOf(await tool.execute("tc", { id, cursor: next, max_bytes: 2048 }));
+        assert.match(replaced, /reset=source-replaced/);
+        assert.doesNotMatch(replaced, /reset=cursor-corrupt/);
+        assert.ok(replaced.includes(`replacement-line-000`), "the replacement is shown from its first line");
+
+        // An untagged cursor from an earlier release must not skip the prefix of
+        // a source that was replaced behind it (#617 R1).
+        const id2 = `sa_result_cursor_replaced_legacy_${Date.now()}`;
+        const { text: originalText } = writeAnswerRun(id2);
+        const before = textOf(await tool.execute("tc", { id: id2, max_bytes: 2048 }));
+        const legacy = reencodedCursor(cursorFrom(before, "nextCursor"), (payload) => {
+            payload.v = createHash("sha256").update(Buffer.from(originalText, "utf8")).digest("base64url").slice(0, 22);
+            delete payload.w;
+            delete payload.x;
+        });
+        writeAnswerRun(id2, "replacement");
+        const afterReplacement = textOf(await tool.execute("tc", { id: id2, cursor: legacy, max_bytes: 2048 }));
+        assert.match(afterReplacement, /reset=cursor-corrupt/);
+        assert.ok(afterReplacement.includes("replacement-line-000"), "the replacement is shown from its first line, not mid-answer");
     });
 });

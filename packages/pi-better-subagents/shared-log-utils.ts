@@ -139,6 +139,8 @@ export type OutputBudgetSurface = keyof typeof OUTPUT_BUDGET_BYTES;
  * Why a supplied cursor was not followed. `cursor-corrupt` means the payload
  * itself failed its integrity check — a hand-copied character, not evidence
  * that the source changed or that the cursor belongs to another scope (#617).
+ * A corrupt cursor only resumes from an offset a witness recomputed from the
+ * current source proves; otherwise the page restarts at byte 0.
  */
 export type PageReset = "stale-cursor" | "source-replaced" | "compacted" | "cursor-corrupt";
 export type EvidenceGapKind = "capture" | "retention" | "read";
@@ -291,6 +293,7 @@ interface CursorPayload {
   i?: string;
   h?: string;
   hl?: number;
+  /** Position witness: the byte window before the offset (`k: "f"`), or the source snapshot (`k: "t"`). */
   w?: string;
   c?: string;
   f?: string;
@@ -500,6 +503,27 @@ function cursorIntegrityOk(parsed: CursorPayload): boolean {
   return typeof parsed.x === "string" && parsed.x === cursorIntegrityTag(parsed);
 }
 
+/**
+ * Digest of one source snapshot at one offset. A text cursor carries it in `v`
+ * and, recomputed against the current text, it answers both questions a
+ * continuation needs: is this still the same source, and is this still its
+ * offset? A changed source or a shifted offset changes it (#617).
+ */
+function textSnapshotDigest(revision: string, offset: number): string {
+  return shortHash(encoder.encode(`t\0${revision}\0${offset}`));
+}
+
+/**
+ * Second, independent witness of the same fact, stored in `w`: the snapshot,
+ * its length, and the offset. Both witnesses are recomputed from the current
+ * text, so damage to either one alone still leaves a usable cursor — the
+ * reported one-character miscopy keeps the page advancing instead of replaying
+ * page 1 forever, while a genuinely replaced or shifted source fails both.
+ */
+function textOffsetWitness(revision: string, offset: number, length: number): string {
+  return shortHash(encoder.encode(`t\0${revision}\0${length}\0${offset}`)).slice(0, 6);
+}
+
 /** Decoded page offset, or NaN when the field did not survive decoding. */
 function cursorOffset(parsed: CursorPayload): number {
   const o = parsed.o;
@@ -546,10 +570,12 @@ function emptyPage(overrides: Partial<PageResult> & Pick<PageResult, "revision" 
  * same page, and two callers do not share consumption.
  *
  * A cursor that fails its integrity check is reported as `cursor-corrupt`,
- * never as a replaced source. When its decoded offset still lands inside this
- * text — the usual one-character miscopy, where only the source digest moved —
- * the page resumes there, so a hand-copied cursor cannot trap the caller in an
- * endless replay of page 1.
+ * never as a replaced source, and never replays page 1 blindly: it resumes at
+ * its decoded offset only when a witness recomputed from the current text
+ * proves that offset still belongs to the same snapshot. Otherwise — a
+ * replaced, grown, or shifted source, a damaged offset, or a cursor from
+ * before the witnesses existed — the page restarts at byte 0, so no unread
+ * text is skipped (#617).
  */
 export function pageVerbatimText(text: string, request: PageRequest = {}): PageResult {
   const maxBytes = pagerBudget(request.maxBytes, OUTPUT_BUDGET_BYTES.answer);
@@ -562,26 +588,41 @@ export function pageVerbatimText(text: string, request: PageRequest = {}): PageR
   if (request.cursor) {
     if (!parsed || parsed.k !== "t") {
       reset = "stale-cursor";
-    } else if (!cursorIntegrityOk(parsed)) {
+    } else if (!cursorIntegrityOk(parsed) || parsed.w === undefined) {
+      // A payload without its position witness (a cursor minted before this
+      // format) is treated the same as a damaged one: its offset is unproven.
       reset = "cursor-corrupt";
       if ((parsed.r ?? undefined) === resource) {
         const decoded = cursorOffset(parsed);
-        offset = Number.isFinite(decoded) && decoded >= 0 && decoded <= encoded.length ? decoded : 0;
+        const inside = Number.isFinite(decoded) && decoded >= 0 && decoded <= encoded.length;
+        // Two independent witnesses of "this snapshot at this offset": either
+        // one surviving a single damaged field keeps a static-source cursor
+        // moving instead of looping on page 1.
+        const witnessed = inside && (
+          parsed.v === textSnapshotDigest(revision, decoded)
+          || (parsed.w !== undefined && parsed.w === textOffsetWitness(revision, decoded, encoded.length))
+        );
+        if (witnessed) offset = decoded;
       }
     } else if ((parsed.r ?? undefined) !== resource) {
       reset = "stale-cursor";
-    } else if (parsed.v !== revision) {
-      reset = "source-replaced";
     } else {
       offset = Math.min(encoded.length, Math.max(0, Math.floor(parsed.o ?? 0)));
+      if (parsed.v !== textSnapshotDigest(revision, offset)) {
+        // Same cursor, different text: restart at byte 0 rather than serving
+        // bytes from a position that no longer means what it did.
+        reset = "source-replaced";
+        offset = 0;
+      }
     }
   }
   const mint = (o: number): string => encodeCursor({
     k: "t",
     ...(resource !== undefined ? { r: resource } : {}),
-    v: revision,
+    v: textSnapshotDigest(revision, o),
     o,
     n: encoded.length,
+    w: textOffsetWitness(revision, o, encoded.length),
   });
   const make = (start: number, end: number): PageResult => ({
     text: decoder.decode(encoded.subarray(start, end)),

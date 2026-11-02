@@ -306,13 +306,13 @@ describe("registered subagent payloads", () => {
         const first = textOf(await resultTool.execute("tc", { id, history: true }));
         assert.match(first, /History page of 12 failure observations/);
         assert.doesNotMatch(first, /\{"content"/, "rows show the tool's text, not its result JSON");
-        let cursor = first.includes("hasMore=true") ? first.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+        let cursor = first.includes("hasMore=true") ? first.match(/\bnextCursor=(i2\.\S+)/)?.[1] : undefined;
         const pages = [first];
         for (let i = 0; i < 20 && cursor; i += 1) {
             const page = textOf(await resultTool.execute("tc", { id, cursor }));
             pages.push(page);
             assert.ok(utf8ByteLength(page) <= OUTPUT_BUDGET_BYTES.answer, page);
-            const next = page.match(/\bnextCursor=(i1\.\S+)/)?.[1];
+            const next = page.match(/\bnextCursor=(i2\.\S+)/)?.[1];
             if (!page.includes("hasMore=true") || !next || next === cursor) break;
             cursor = next;
         }

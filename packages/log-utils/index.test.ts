@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
@@ -289,6 +290,31 @@ function miscopiedCursor(
   throw new Error("no single-character miscopy of this cursor satisfied the expectation");
 }
 
+/** The same cursor with one field rewritten: a still-parseable damaged payload. */
+function reencodedCursor(cursor: string, edit: (payload: Record<string, any>) => void): string {
+  const payload = JSON.parse(Buffer.from(cursor.slice(3), "base64url").toString("utf8"));
+  edit(payload);
+  return `${cursor.slice(0, 3)}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
+}
+
+function textDigest22(text: string): string {
+  return createHash("sha256").update(Buffer.from(text, "utf8")).digest("base64url").slice(0, 22);
+}
+
+/**
+ * A text cursor exactly as released versions minted it: the source digest and
+ * the offset, with none of the position witnesses this module adds now.
+ */
+function legacyTextCursor(text: string, offset: number): string {
+  return `p1.${Buffer.from(JSON.stringify({ k: "t", v: textDigest22(text), o: offset, n: utf8ByteLength(text) }), "utf8").toString("base64url")}`;
+}
+
+/** The integrity tag a released version minted: a SHA-256 of every other field. */
+function integrityTagOf(payload: Record<string, unknown>): string {
+  const { x: _ignored, ...rest } = payload;
+  return createHash("sha256").update(JSON.stringify(rest)).digest("base64url").slice(0, 6);
+}
+
 describe("cursor integrity (#617)", () => {
   const answer = Array.from({ length: 120 }, (_, i) => `answer-${String(i).padStart(3, "0")} ${"z".repeat(40)}`).join("\n");
   const resource = "answer:session-a:sa_1";
@@ -335,6 +361,57 @@ describe("cursor integrity (#617)", () => {
     const first = pageVerbatimText("alpha-answer-body", { maxBytes: 8 });
     const replaced = pageVerbatimText("omega-answer-body", { cursor: first.nextCursor, maxBytes: 8 });
     assert.equal(replaced.reset, "source-replaced");
+    assert.equal(replaced.startByte, 0);
+    assert.equal(replaced.text, "omega-an");
+  });
+
+  it("still advances when only the second position witness is damaged", () => {
+    const first = pageVerbatimText(answer, { maxBytes: 400, resource });
+    const clean = pageVerbatimText(answer, { cursor: first.nextCursor, maxBytes: 400, resource });
+    const damaged = miscopiedCursor(first.nextCursor, "t", (p, o) => p.w !== o.w && p.o === o.o && p.v === o.v);
+    const page = pageVerbatimText(answer, { cursor: damaged, maxBytes: 400, resource });
+    assert.equal(page.reset, "cursor-corrupt");
+    assert.equal(page.startByte, clean.startByte);
+    assert.equal(page.text, clean.text, "the surviving witness proves the same position");
+  });
+
+  it("restarts at byte 0 when the cursor's offset itself is damaged", () => {
+    // A damaged offset must never be served: an offset pushed to the end used
+    // to answer "end of text, nothing omitted" while most of the text was
+    // still unread (#617 R1).
+    const first = pageVerbatimText(answer, { maxBytes: 400, resource });
+    const pageOne = pageVerbatimText(answer, { maxBytes: 400, resource });
+    const atEnd = reencodedCursor(first.nextCursor, (payload) => { payload.o = payload.n; });
+    const shifted = miscopiedCursor(first.nextCursor, "t", (p, o) => typeof p.o === "number" && p.o !== o.o);
+    for (const [label, damaged] of [["moved to the end", atEnd], ["moved by one", shifted]] as const) {
+      const page = pageVerbatimText(answer, { cursor: damaged, maxBytes: 400, resource });
+      assert.equal(page.reset, "cursor-corrupt", label);
+      assert.equal(page.startByte, 0, `${label}: restarts at byte 0`);
+      assert.equal(page.text, pageOne.text, `${label}: serves the first page, not a shifted one`);
+      assert.equal(page.hasMore, true, `${label}: the unread tail stays reachable`);
+      assert.notEqual(page.text, "", `${label}: never an empty end page`);
+    }
+  });
+
+  it("restarts a cursor with no witness instead of trusting its offset over a replaced source", () => {
+    const legacy = legacyTextCursor("alpha-answer-body", 8);
+    const legacyPage = pageVerbatimText("alpha-answer-body", { cursor: legacy, maxBytes: 8 });
+    assert.equal(legacyPage.reset, "cursor-corrupt");
+    assert.equal(legacyPage.startByte, 0, "an untagged cursor cannot prove its offset, so nothing is skipped");
+    assert.equal(legacyPage.text, "alpha-an");
+    const replaced = pageVerbatimText("omega-answer-body", { cursor: legacy, maxBytes: 8 });
+    assert.equal(replaced.reset, "cursor-corrupt");
+    assert.equal(replaced.startByte, 0);
+    assert.equal(replaced.text, "omega-an", "the replacement is shown from its first byte (#617 R1)");
+
+    // The intermediate format carried an integrity tag but no position witness.
+    // An intact tag must not be read as proof that the offset still applies.
+    const payload = { k: "t", v: textDigest22("alpha-answer-body"), o: 8, n: utf8ByteLength("alpha-answer-body") };
+    const taggedWithoutWitness = `p1.${Buffer.from(JSON.stringify({ ...payload, x: integrityTagOf(payload) }), "utf8").toString("base64url")}`;
+    const unproven = pageVerbatimText("alpha-answer-body", { cursor: taggedWithoutWitness, maxBytes: 8 });
+    assert.equal(unproven.reset, "cursor-corrupt");
+    assert.equal(unproven.startByte, 0, "an unproven offset restarts the page");
+    assert.equal(unproven.text, "alpha-an");
   });
 
   it("reports a corrupted file cursor as corrupt and resumes when the byte checks still hold", () => {

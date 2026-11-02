@@ -413,7 +413,15 @@ export function historyTailLine(state: FailureState): string | undefined {
   return history ? `Also in history: ${history}` : undefined;
 }
 
-const INCIDENT_CURSOR_PREFIX = "i1.";
+/**
+ * Current incident cursor prefix. The prefix is the cursor format: it replaced
+ * the in-payload `x` version field so that two position witnesses fit in the
+ * same space (these cursors are printed inside 1 KiB incident summaries, where
+ * every byte competes with the count line). `i1.` cursors are still recognised
+ * for routing but decode as stale.
+ */
+const INCIDENT_CURSOR_PREFIX = "i2.";
+const LEGACY_INCIDENT_CURSOR_PREFIXES = ["i1."];
 const encoder = new TextEncoder();
 
 /** Longest summary or disposition-reason excerpt a compact row shows, in UTF-8 bytes. */
@@ -629,17 +637,32 @@ function resourceTag(resource: string | undefined): string | undefined {
 }
 
 /**
- * Incident cursor format. `x` is the format version: cursors minted before scope and row detail
- * existed (no `x`) carry byte offsets into full-detail rows of every active incident, so they reset
- * as stale instead of resuming inside a compact row. `h`: the explicit history view; `f`: full rows.
- * `q` is an integrity tag over the other fields (#617): a hand-copied cursor used to decode into a
- * still-parseable payload whose row digest no longer matched, which was reported as a replaced
- * source and replayed the first page forever. It is four characters because these cursors are
- * printed inside 1 KiB incident summaries, where every cursor byte competes with the count line.
+ * Incident cursor (`i2.`). `h`: the explicit history view; `f`: full rows; `q` is an integrity tag
+ * over the other fields; `v` and `w` are two independent witnesses of the same fact — this page
+ * set at this row and byte offset (#617). A hand-copied cursor used to decode into a still
+ * parseable payload whose row digest no longer matched, which was reported as a replaced source and
+ * replayed the first page forever; it also used to resume at its decoded offset even when the page
+ * set had moved, skipping a failure that had just been inserted ahead of the cursor. A corrupt
+ * cursor now resumes only when a witness recomputed from the current rows proves its offset, and
+ * otherwise restarts at the first row. Both witnesses are short because these cursors are printed
+ * inside 1 KiB incident summaries.
  */
-const INCIDENT_CURSOR_FORMAT = 3;
-interface IncidentCursor { o: number; b: number; v: string; n: number; r?: string; h?: 1; f?: 1 }
+interface IncidentCursor { o: number; b: number; v: string; w: string; n: number; r?: string; h?: 1; f?: 1 }
 interface DecodedIncidentCursor { cursor: IncidentCursor; corrupt: boolean }
+
+function incidentDigest(domain: string, revision: string, o: number, b: number): string {
+  return createHash("sha256").update(`${domain}\0${revision}\0${o}\0${b}`).digest("base64url");
+}
+
+/** Digest of this page set at this row and byte offset. */
+function incidentPositionDigest(revision: string, o: number, b: number): string {
+  return incidentDigest("v", revision, o, b).slice(0, 16);
+}
+
+/** Independent witness of the same position, so damage to either digest alone stays usable. */
+function incidentPositionWitness(revision: string, o: number, b: number): string {
+  return incidentDigest("w", revision, b, o).slice(0, 4);
+}
 
 function incidentCursorTag(payload: Record<string, unknown>): string {
   const { q: _ignored, ...rest } = payload;
@@ -647,19 +670,19 @@ function incidentCursorTag(payload: Record<string, unknown>): string {
 }
 
 function encodeIncidentCursor(cursor: IncidentCursor): string {
-  const payload = { k: "i", x: INCIDENT_CURSOR_FORMAT, o: cursor.o, ...(cursor.b ? { b: cursor.b } : {}),
-    v: cursor.v, n: cursor.n, ...(cursor.r !== undefined ? { r: cursor.r } : {}), ...(cursor.h ? { h: 1 } : {}),
-    ...(cursor.f ? { f: 1 } : {}) };
+  const payload = { o: cursor.o, ...(cursor.b ? { b: cursor.b } : {}), v: cursor.v, n: cursor.n,
+    ...(cursor.r !== undefined ? { r: cursor.r } : {}), ...(cursor.h ? { h: 1 } : {}),
+    ...(cursor.f ? { f: 1 } : {}), w: cursor.w };
   return INCIDENT_CURSOR_PREFIX + Buffer.from(JSON.stringify({ ...payload, q: incidentCursorTag(payload) }), "utf8").toString("base64url");
 }
 
 function decodeIncidentCursor(cursor: string | undefined): DecodedIncidentCursor | undefined {
   if (!cursor || !cursor.startsWith(INCIDENT_CURSOR_PREFIX)) return undefined;
   try {
-    const parsed = JSON.parse(Buffer.from(cursor.slice(INCIDENT_CURSOR_PREFIX.length), "base64url").toString("utf8")) as { k?: string; x?: number; o?: number; b?: number; v?: string; n?: number; r?: string; h?: number; f?: number; q?: string };
-    if (parsed?.k === "i" && parsed.x === INCIDENT_CURSOR_FORMAT && typeof parsed.v === "string") {
+    const parsed = JSON.parse(Buffer.from(cursor.slice(INCIDENT_CURSOR_PREFIX.length), "base64url").toString("utf8")) as { o?: number; b?: number; v?: string; n?: number; r?: string; h?: number; f?: number; q?: string; w?: string };
+    if (typeof parsed?.v === "string" && typeof parsed.w === "string") {
       return { corrupt: typeof parsed.q !== "string" || parsed.q !== incidentCursorTag(parsed), cursor: {
-        o: Math.max(0, Math.floor(parsed.o ?? 0)), b: Math.max(0, Math.floor(parsed.b ?? 0)), v: parsed.v,
+        o: Math.max(0, Math.floor(parsed.o ?? 0)), b: Math.max(0, Math.floor(parsed.b ?? 0)), v: parsed.v, w: parsed.w,
         n: Math.max(0, Math.floor(parsed.n ?? 0)), ...(typeof parsed.r === "string" ? { r: parsed.r } : {}),
         ...(parsed.h === 1 ? { h: 1 as const } : {}), ...(parsed.f === 1 ? { f: 1 as const } : {}) } };
     }
@@ -668,7 +691,8 @@ function decodeIncidentCursor(cursor: string | undefined): DecodedIncidentCursor
 }
 
 export function isIncidentCursor(cursor: string | undefined): boolean {
-  return Boolean(cursor?.startsWith(INCIDENT_CURSOR_PREFIX));
+  if (!cursor) return false;
+  return cursor.startsWith(INCIDENT_CURSOR_PREFIX) || LEGACY_INCIDENT_CURSOR_PREFIXES.some((prefix) => cursor.startsWith(prefix));
 }
 
 /** The scope an incident cursor pages, or undefined for anything that is not an incident cursor. */
@@ -724,18 +748,24 @@ export function pageFailureIncidents(state: FailureState, request: IncidentPageR
     if (!parsed || parsed.r !== resource || Boolean(parsed.h) !== (scope === "all") || Boolean(parsed.f) !== (detail === "full")) {
       reset = corrupt ? "cursor-corrupt" : "stale-cursor";
     } else if (corrupt) {
-      // A hand-copied cursor is corruption, not a replaced source (#617). Its
-      // row offset is still usable while it points inside this page set, so the
-      // caller continues instead of replaying the first page forever.
+      // A hand-copied cursor is corruption, not a replaced source (#617), and
+      // its offset is never trusted on the payload's word. It resumes only
+      // when a witness recomputed from the current rows proves this exact
+      // position in this exact page set; otherwise it restarts at the first
+      // row, so a failure inserted ahead of the cursor is not skipped.
       reset = "cursor-corrupt";
-      if (parsed.o <= total) { offset = parsed.o; byte = offset < total ? parsed.b : 0; }
-    } else if (parsed.v !== revision) reset = "source-replaced";
+      const witnessed = parsed.o <= total
+        && (parsed.v === incidentPositionDigest(revision, parsed.o, parsed.b)
+          || parsed.w === incidentPositionWitness(revision, parsed.o, parsed.b));
+      if (witnessed) { offset = parsed.o; byte = offset < total ? parsed.b : 0; }
+    } else if (parsed.v !== incidentPositionDigest(revision, parsed.o, parsed.b)) reset = "source-replaced";
     else { offset = Math.min(total, parsed.o); byte = offset < total ? parsed.b : 0; }
   }
   const maxBytes = Number.isFinite(request.maxBytes) && (request.maxBytes ?? -1) >= 0
     ? Math.floor(request.maxBytes as number)
     : 2 * 1024;
-  const mint = (o: number, b: number) => encodeIncidentCursor({ o, b, v: revision, n: total, ...(resource !== undefined ? { r: resource } : {}),
+  const mint = (o: number, b: number) => encodeIncidentCursor({ o, b, v: incidentPositionDigest(revision, o, b),
+    w: incidentPositionWitness(revision, o, b), n: total, ...(resource !== undefined ? { r: resource } : {}),
     ...(scope === "all" ? { h: 1 as const } : {}), ...(detail === "full" ? { f: 1 as const } : {}) });
   const parts: string[] = [];
   let used = 0;
@@ -850,9 +880,12 @@ export function incidentCursorAt(state: FailureState, offset: number, resource?:
   const scope = options.scope ?? "actionable";
   const detail = options.detail ?? "compact";
   const lines = formatFailureLines(state, { scope, detail });
+  const revision = incidentRevision(state, scope, detail);
+  const o = Math.max(0, Math.floor(offset));
   const tag = resourceTag(resource);
-  return encodeIncidentCursor({ o: Math.max(0, Math.floor(offset)), b: 0, v: incidentRevision(state, scope, detail), n: lines.length,
-    ...(tag !== undefined ? { r: tag } : {}), ...(scope === "all" ? { h: 1 as const } : {}), ...(options.detail === "full" ? { f: 1 as const } : {}) });
+  return encodeIncidentCursor({ o, b: 0, v: incidentPositionDigest(revision, o, 0), w: incidentPositionWitness(revision, o, 0),
+    n: lines.length, ...(tag !== undefined ? { r: tag } : {}), ...(scope === "all" ? { h: 1 as const } : {}),
+    ...(options.detail === "full" ? { f: 1 as const } : {}) });
 }
 
 const MIN_PARTIAL_ROW_BYTES = 96;
