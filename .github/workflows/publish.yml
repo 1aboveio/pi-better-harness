@@ -14,6 +14,7 @@ on:
           - pi-better-subagents
           - pi-better-goal
           - pi-better-server
+          - pi-better-model-router
           - pi-better-harness
 
 permissions:
@@ -88,6 +89,7 @@ jobs:
             pi-better-subagents) WORKSPACE="packages/pi-better-subagents" ;;
             pi-better-goal) WORKSPACE="packages/pi-better-goal" ;;
             pi-better-server) WORKSPACE="packages/pi-better-server" ;;
+            pi-better-model-router) WORKSPACE="packages/pi-better-model-router" ;;
             pi-better-harness) WORKSPACE="packages/pi-better-harness" ;;
             *) echo "Unsupported package: $PACKAGE" >&2; exit 1 ;;
           esac
@@ -193,6 +195,10 @@ jobs:
               ;;
             pi-better-goal)
               check_pack_file /tmp/package-pack.json src/index.ts
+              ;;
+            pi-better-model-router)
+              check_pack_file /tmp/package-pack.json src/index.ts
+              check_pack_file /tmp/package-pack.json node_modules/pi-ollama-cloud/index.ts
               ;;
             pi-better-server)
               check_pack_file /tmp/package-pack.json src/index.ts

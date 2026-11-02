@@ -18,7 +18,7 @@ For a temporary run:
 pi -e ./packages/pi-better-model-router
 ```
 
-Authenticate DeepSeek through `/login`. Install and authenticate `pi-ollama-cloud` to enable the other route. Open `/model`, then select **DeepSeek Flash Auto**. One authenticated candidate is enough; no eligible candidates produces an actionable error.
+Authenticate DeepSeek and Ollama Cloud through `/login`. The package bundles and loads `pi-ollama-cloud`; a separate plugin installation is not needed. Open `/model`, then select **DeepSeek Flash Auto**. One authenticated candidate is enough; no eligible candidates produces an actionable error.
 
 The router reuses Pi's physical models, authentication, streaming, and model settings. Define custom endpoints, credentials, capabilities, and price overrides in Pi's normal provider configuration or `models.json`. No physical model needs to be defined again for the router.
 
