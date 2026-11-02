@@ -6,13 +6,13 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import extension, { route, type VirtualDefinition } from "./index.ts";
 import { defaults, chooseCandidate, ratesAt, resolveCandidates } from "./routing.ts";
+import { parseConfig, loadConfig } from "./config.ts";
 
 const catalog = [
   { provider: "deepseek", id: "deepseek-flash", api: "openai-completions", cost: { input: 0.3, output: 1.2, cacheRead: 0.006 } },
   { provider: "ollama-cloud", id: "deepseek-v4.1-flash:cloud", api: "openai-completions", cost: { input: 0.3, output: 1.2, cacheRead: 0.006 } },
 ];
 const candidates = resolveCandidates(catalog);
-import { parseConfig, loadConfig } from "./config.ts";
 
 test("UTC weekday schedule routes around both providers' peak boundaries", () => {
   for (const [time, provider] of [
@@ -45,8 +45,14 @@ test("policy config rejects model settings, unknown fields, and invalid weights"
   for (const config of [
     { candidates: [] }, { model: "another-model" }, { peakWindows: [] },
     { estimatedInputTokens: 0 }, { preferredProvider: "unknown" }, { preferredProvider: null },
+    { type: "unknown" }, { pricing: { deepseek: { peak: { input: -1 } } } },
+    { pricing: { deepseek: { peakWindows: [[240, 60]] } } },
+    { pricing: { deepseek: { offPeakDates: ["2026-02-30"] } } },
+    { pricing: { deepseek: { model: "another-model" } } },
+    { pricing: { deepseek: { peak: { typo: 1 } } } },
   ]) assert.throws(() => parseConfig(config), /Invalid/);
   assert.equal(parseConfig({}).preferredProvider, "deepseek");
+  assert.equal(parseConfig({}).type, "price");
 });
 test("candidate resolution reuses catalog IDs and price overrides without redefining models", () => {
   const overridden = resolveCandidates([
@@ -66,10 +72,17 @@ test("project config overrides user config and malformed JSON is actionable", ()
   try {
     const agent = join(root, "agent"); const cwd = join(root, "project");
     mkdirSync(agent); mkdirSync(join(cwd, ".pi"), { recursive: true });
-    writeFileSync(join(agent, "model-router.json"), JSON.stringify({ preferredProvider: "ollama-cloud", estimatedInputTokens: 123 }));
-    writeFileSync(join(cwd, ".pi", "model-router.json"), JSON.stringify({ preferredProvider: "deepseek" }));
+    writeFileSync(join(agent, "model-router.json"), JSON.stringify({ preferredProvider: "ollama-cloud", estimatedInputTokens: 123,
+      pricing: { deepseek: { peak: { input: 0.8, output: 2 }, peakWindows: [[0, 60]] },
+        "ollama-cloud": { offPeak: { output: 0.4 } } } }));
+    writeFileSync(join(cwd, ".pi", "model-router.json"), JSON.stringify({ preferredProvider: "deepseek",
+      pricing: { deepseek: { peak: { output: 3 }, peakWindows: [] } } }));
     assert.equal(loadConfig(agent, cwd).preferredProvider, "deepseek");
     assert.equal(loadConfig(agent, cwd).estimatedInputTokens, 123);
+    const merged = loadConfig(agent, cwd);
+    assert.deepEqual(merged.pricing.deepseek?.peak, { input: 0.8, output: 3 });
+    assert.deepEqual(merged.pricing.deepseek?.peakWindows, []);
+    assert.equal(merged.pricing["ollama-cloud"]?.offPeak?.output, 0.4);
     writeFileSync(join(cwd, ".pi", "model-router.json"), "{");
     assert.throws(() => loadConfig(agent, cwd), /Model router config/);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -87,6 +100,13 @@ test("registered route preserves continuations and bounds transient fallback", (
     const now = new Date("2026-10-26T02:00Z");
     const selected = route({ reason: "user", thinkingLevel: "high" }, ctx, now);
     assert.equal(selected.model.provider, "ollama-cloud");
+    mkdirSync(join(cwd, ".pi"));
+    const policyPath = join(cwd, ".pi", "model-router.json");
+    writeFileSync(policyPath, JSON.stringify({ type: "price", pricing: {
+      "ollama-cloud": { offPeak: { input: 5, output: 10 } },
+    } }));
+    assert.equal(route({ reason: "user", thinkingLevel: "high" }, ctx, now).model.provider, "deepseek");
+    rmSync(policyPath);
     const continued = route({ reason: "continuation", thinkingLevel: "high", previous: selected }, ctx,
       new Date("2026-10-26T12:00Z"));
     assert.equal(continued.model.provider, "ollama-cloud");

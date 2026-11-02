@@ -22,7 +22,7 @@ export interface VirtualDefinition {
 export function route(request: RouteRequest, ctx: ExtensionContext, now = new Date()): RouteResult {
   const config = loadConfig(getAgentDir(), ctx.cwd);
   const models = ctx.modelRegistry.getAvailable();
-  const available = resolveCandidates(models);
+  const available = resolveCandidates(models, config);
   const find = (physical?: Physical) => physical && available.find(c =>
     c.provider === physical.model.provider && c.model === physical.model.id);
   let failedProviders = request.reason === "user" || request.reason === "direct"

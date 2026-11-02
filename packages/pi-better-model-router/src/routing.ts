@@ -7,7 +7,15 @@ export interface Candidate {
   peakWindows: [number, number][];
   offPeakDates: string[];
 }
+export interface PricingOverride {
+  peak?: Partial<Rates>;
+  offPeak?: Partial<Rates>;
+  peakWindows?: [number, number][];
+  offPeakDates?: string[];
+}
 export interface RouterConfig {
+  type: "price";
+  pricing: Partial<Record<"deepseek" | "ollama-cloud", PricingOverride>>;
   preferredProvider: string;
   estimatedInputTokens: number;
   estimatedOutputTokens: number;
@@ -18,9 +26,9 @@ export interface CatalogModel {
   api: string;
   cost: Rates;
 }
-// Provider schedules belong to the bundled integration; model metadata comes
-// from Pi's catalog, including models.json overrides.
-export function resolveCandidates(models: readonly CatalogModel[]): Candidate[] {
+// Use catalog metadata and bundled schedules unless the price policy overrides
+// a rate or calendar rule. Physical model definitions remain owned by Pi.
+export function resolveCandidates(models: readonly CatalogModel[], config: RouterConfig = defaults): Candidate[] {
   return [
     { provider: "deepseek", ids: ["deepseek-flash", "deepseek-v4-flash"], windows: [[60, 240], [360, 600]] },
     { provider: "ollama-cloud", ids: ["deepseek-v4.1-flash:cloud", "deepseek-v4.1-flash"], windows: [[720, 1080]] },
@@ -31,16 +39,21 @@ export function resolveCandidates(models: readonly CatalogModel[]): Candidate[] 
         ? pool.filter(m => m.id.startsWith("deepseek-v4.1-flash:")).sort((a, b) => a.id.localeCompare(b.id))[0]
         : undefined);
     if (!model) return [];
-    const peak = { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead };
-    if (!Object.values(peak).every(n => Number.isFinite(n) && n >= 0) || peak.input + peak.output === 0) {
+    const override = config.pricing[spec.provider as keyof typeof config.pricing];
+    const peak = { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead, ...override?.peak };
+    const offPeak = { input: peak.input / 2, output: peak.output / 2, cacheRead: peak.cacheRead / 2, ...override?.offPeak };
+    if (![...Object.values(peak), ...Object.values(offPeak)].every(n => Number.isFinite(n) && n >= 0) ||
+        (!Object.keys(override?.peak ?? {}).length && peak.input + peak.output === 0)) {
       throw new Error(`Model router: ${model.provider}/${model.id} needs nonzero catalog pricing. Set cost in Pi's models.json.`);
     }
     return [{ provider: model.provider, model: model.id, peak,
-      offPeak: { input: peak.input / 2, output: peak.output / 2, cacheRead: peak.cacheRead / 2 },
-      peakWindows: spec.windows as [number, number][], offPeakDates: [] }];
+      offPeak, peakWindows: override?.peakWindows ?? spec.windows as [number, number][],
+      offPeakDates: override?.offPeakDates ?? [] }];
   });
 }
 export const defaults: RouterConfig = {
+  type: "price",
+  pricing: {},
   preferredProvider: "deepseek",
   estimatedInputTokens: 10000,
   estimatedOutputTokens: 2000,

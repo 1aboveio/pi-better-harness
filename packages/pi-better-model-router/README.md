@@ -26,28 +26,58 @@ The router reuses Pi's physical models, authentication, streaming, and model set
 
 No configuration file is needed for the default policy. To override it, use `<Pi agent directory>/model-router.json` (normally `~/.pi/agent/model-router.json`) or `<project>/.pi/model-router.json`. Project fields override user fields. Changes apply before the next request.
 
-The complete policy schema is:
+A minimal explicit configuration is:
 
 ```json
 {
+  "type": "price",
+  "preferredProvider": "deepseek"
+}
+```
+
+`price` is currently the only supported policy type and is the default when omitted. It compares estimated request cost and uses `preferredProvider` to break ties at the start of a user turn.
+
+Optional price and schedule overrides:
+
+```json
+{
+  "type": "price",
   "preferredProvider": "deepseek",
+  "pricing": {
+    "deepseek": {
+      "peak": { "input": 0.30, "output": 1.20 },
+      "offPeak": { "input": 0.15, "output": 0.60 },
+      "peakWindows": [[60, 240], [360, 600]],
+      "offPeakDates": []
+    },
+    "ollama-cloud": {
+      "peak": { "input": 0.30, "output": 1.20 },
+      "offPeak": { "input": 0.15, "output": 0.60 },
+      "peakWindows": [[720, 1080]]
+    }
+  }
+}
+```
+
+Prices are USD per million tokens, not spending caps. Every field under `pricing` is optional. `peak` and `offPeak` accept `input`, `output`, and `cacheRead`. Missing peak fields use catalog prices. Missing off-peak fields use half the effective peak rate, including any peak override.
+
+`peakWindows` uses minutes after UTC midnight, with start included and end excluded. Split overnight windows at midnight. An empty array makes all hours off-peak. `offPeakDates` contains UTC dates in `YYYY-MM-DD` form that are off-peak all day; use this to maintain DeepSeek holiday exceptions.
+
+User and project pricing overrides merge per provider and rate field. Project arrays replace user arrays. For example, overriding only DeepSeek output price preserves a user-level input price and Ollama overrides.
+
+For workloads where providers have different input/output price ratios, two optional weights control the comparison:
+
+```json
+{
+  "type": "price",
   "estimatedInputTokens": 10000,
   "estimatedOutputTokens": 2000
 }
 ```
 
-- `preferredProvider` is either `deepseek` or `ollama-cloud`. It wins when prices tie at the start of a user turn.
-- The positive token estimates weight input versus output cost. They do not limit actual tokens or predict usage.
+The router compares `input rate × estimatedInputTokens + output rate × estimatedOutputTokens`. The common per-million divisor does not change the winning provider. These positive weights do not limit actual tokens or represent a spending budget. With matching provider rates and proportional discounts, changing them does not change the choice.
 
-A minimal explicit configuration is:
-
-```json
-{
-  "preferredProvider": "deepseek"
-}
-```
-
-Model IDs, endpoints, prices, capabilities, and schedules are not accepted in this policy file. Unknown fields report an error. Older configurations containing `candidates` must remove that field; move physical model overrides into `models.json`.
+Model IDs, endpoints, and capabilities remain in Pi configuration. Unknown fields report an error. Older configurations containing `candidates` must remove that field; place model definitions in `models.json` and routing price overrides under `pricing`.
 
 ## Model discovery and prices
 
@@ -56,9 +86,9 @@ The router resolves authenticated physical models from Pi's available catalog on
 - DeepSeek: `deepseek-flash`, with `deepseek-v4-flash` as a legacy fallback.
 - Ollama Cloud: `deepseek-v4.1-flash:cloud`, then `deepseek-v4.1-flash`, then an available version-tagged `deepseek-v4.1-flash:…` entry.
 
-It uses the catalog's input, output, and cached-input cost metadata, including `models.json` overrides. Models with missing, invalid, or zero input/output pricing produce an error rather than being treated as free.
+It uses the catalog's input, output, and cached-input cost metadata, including `models.json` overrides, then applies any policy price overrides. Models with missing, invalid, or zero input/output pricing produce an error rather than being treated as free, unless peak rates are explicitly supplied by the policy. Explicit zero-rate overrides are allowed.
 
-The bundled schedule treats catalog rates as **peak rates** and applies a 50% discount off-peak:
+By default, the bundled schedule treats catalog rates as **peak rates** and applies a 50% discount off-peak:
 
 | Provider | Weekday peak windows, UTC |
 | --- | --- |
@@ -67,11 +97,11 @@ The bundled schedule treats catalog rates as **peak rates** and applies a 50% di
 
 Windows include the start and exclude the end. Weekends are off-peak. The schedule is a bundled integration rule, not a live pricing feed.
 
-DeepSeek also excludes Chinese public holidays. The bundled holiday list is currently empty, so the router conservatively treats those weekdays as ordinary weekdays. It can choose Ollama unnecessarily during those exceptions. Holiday-calendar support is not exposed as model configuration.
+DeepSeek also excludes Chinese public holidays. The bundled holiday list is currently empty. Supply UTC dates through `pricing.deepseek.offPeakDates`; without those dates, the router treats holidays as ordinary weekdays and can choose Ollama unnecessarily.
 
 ## Routing behavior
 
-- Compare estimated uncached input and output cost using catalog rates and the bundled schedule.
+- Compare estimated uncached input and output cost using catalog rates, bundled schedules, and policy overrides.
 - On equal cost, prefer DeepSeek by default. If the preferred provider is unavailable, preserve the previous eligible model, then use candidate order.
 - Keep tool follow-ups on the chosen provider, even across a price boundary.
 - On a transient retry (rate limit, overload, timeout, or selected network/server errors), exclude the failed provider for the rest of that user turn.
