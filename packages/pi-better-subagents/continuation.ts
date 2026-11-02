@@ -464,6 +464,34 @@ function isActiveAttempt(meta: RunMeta): boolean {
 const CONTINUABLE_STATUSES: ReadonlySet<RunStatus> = new Set(["completed", "killed"]);
 
 /**
+ * A recorded writer that may still be appending to the conversation.
+ *
+ * A fresh launch opens a brand-new session and takes no lease, so a killed
+ * attempt can be recorded terminal while its child is still alive (for example
+ * SIGTERM is pending behind SIGSTOP). In that state no lease blocks the next
+ * writer. Check the prior attempt explicitly — the active-sibling scan excludes
+ * it — plus every same-conversation attempt that is not known to have exited.
+ * `completed`/`failed` attempts are omitted because their compact durable
+ * records drop the process-start identity, so a recycled pid could otherwise
+ * block an unrelated conversation. `recordedWriterLive` applies the same pid
+ * and start-token evidence the conversation lease uses.
+ */
+function findLiveConversationWriter(
+    prior: RunMeta,
+    others: readonly RunMeta[],
+    probe?: LeaseProbe,
+): RunMeta | undefined {
+    const candidates = [
+        prior,
+        ...others.filter((meta) => meta.sessionId === prior.sessionId
+            && meta.id !== prior.id
+            && meta.status !== "completed"
+            && meta.status !== "failed"),
+    ];
+    return candidates.find((meta) => recordedWriterLive(meta, probe));
+}
+
+/**
  * Validate one continuable attempt for continuation and return the exact
  * conversation plus frozen recipe to relaunch. Every refusal is fail-closed:
  * nothing is spawned and no history is created or replaced.
@@ -473,6 +501,8 @@ export function planContinuation(options: {
     prior: RunMeta | undefined;
     origin: RunCallbackOrigin | undefined;
     others: readonly RunMeta[];
+    /** Process-identity seam for the recorded-writer check. */
+    probe?: LeaseProbe;
 }): ContinuationPlan {
     const { id, prior, origin, others } = options;
     if (!prior) throw refusal(id, "no such run id.");
@@ -492,6 +522,14 @@ export function planContinuation(options: {
 
     const active = others.find((meta) => meta.sessionId === prior.sessionId && meta.id !== prior.id && isActiveAttempt(meta));
     if (active) throw refusal(id, `attempt ${active.id} is still active in the same conversation; stop it first.`);
+
+    // A killed record means stop was requested, not that the writer exited. A
+    // fresh launch has no lease, so this check is the only admission barrier
+    // while the prior child can still append to the saved conversation.
+    const writer = findLiveConversationWriter(prior, others, options.probe);
+    if (writer) {
+        throw refusal(id, `attempt ${writer.id} is still active and may still be writing the conversation (pid ${writer.pid}); wait for it to exit before continuing.`);
+    }
 
     let workspaceIsDir = false;
     try { workspaceIsDir = statSync(recipe.cwd).isDirectory(); } catch { workspaceIsDir = false; }

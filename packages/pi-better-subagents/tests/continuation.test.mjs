@@ -441,6 +441,11 @@ describe("completed-subagent continuation", () => {
             assert.equal(saved.kind, "ok");
             const sessionPath = saved.conversation.path;
 
+            // Freeze the child before stopping it: SIGTERM stays pending behind
+            // SIGSTOP, so metadata becomes killed while the original writer is
+            // still alive. A fresh launch has no lease, so this is the case that
+            // previously let a second writer into the conversation.
+            process.kill(-interrupted.pid, "SIGSTOP");
             const stopped = await h.tools.get("subagent_stop").execute(
                 "tc", { id: killedId }, undefined, undefined, h.ctx,
             );
@@ -451,10 +456,20 @@ describe("completed-subagent continuation", () => {
             });
             assert.ok(killed, "the stop recorded a killed attempt");
             assert.equal(killed.lifecycleClassification, "killed");
-            // Wait for the stopped child to leave the OS before continuing; while
-            // it is alive it is still a writer candidate and must block admission.
+            assert.equal(processExists(killed.pid), true, "SIGTERM is pending; the stopped child is still alive");
+            try {
+                await assert.rejects(
+                    resumeRun(h, { id: killedId, prompt: "SECOND WRITER WHILE STOP PENDING" }),
+                    /still active|already being written/,
+                    "a stopped but live original writer must block continuation",
+                );
+                assert.equal(listMetas().filter((meta) => meta.sessionId === killed.sessionId).length, 1,
+                    "the refused continuation launched nothing");
+            } finally {
+                killProcessTree(killed.pid, "SIGKILL");
+            }
             assert.ok(await waitFor(() => !processExists(killed.pid), { timeoutMs: 5000 }),
-                "the stopped child exited");
+                "the stopped writer exited");
 
             // The killed attempt is now a saved conversation, while the other
             // terminal outcomes keep their existing refusal.
@@ -467,6 +482,22 @@ describe("completed-subagent continuation", () => {
                     id: killedId, prior: { ...killed, status }, origin, others: listMetas(),
                 }), new RegExp(`its status is ${status}`), `${status} must keep its existing refusal`);
             }
+
+            // PID reuse: a live pid with the recorded start identity is still the
+            // old writer; a different start identity proves the pid was recycled.
+            const ownStart = "recorded-own-start";
+            assert.throws(() => planContinuation({
+                id: killedId,
+                prior: { ...killed, pid: process.pid, pidStartTime: ownStart },
+                origin, others: listMetas(),
+                probe: { startToken: (pid) => pid === process.pid ? ownStart : undefined },
+            }), /still active|still be writing/, "a live pid with matching identity still owns the conversation");
+            assert.equal(planContinuation({
+                id: killedId,
+                prior: { ...killed, pid: process.pid, pidStartTime: ownStart },
+                origin, others: listMetas(),
+                probe: { startToken: (pid) => pid === process.pid ? "recycled-process" : undefined },
+            }).conversation.path, sessionPath, "a different process identity is not the old writer");
 
             const killedSnapshot = JSON.stringify(readMeta(killedId));
             const killedLog = readFileSync(logPathFor(killedId), "utf-8");
