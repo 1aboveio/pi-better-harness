@@ -84,6 +84,11 @@ export interface PayloadRequest {
      * those that need action, as an incident page. Default output lists only what needs action.
      */
     history?: unknown;
+    /**
+     * Raw mode only: start from the newest retained byte and page toward the
+     * oldest one (#618). Without it, raw pages start at byte 0.
+     */
+    tail?: unknown;
 }
 
 export type LoadedRun =
@@ -228,7 +233,7 @@ function parserDiagnostics(run: ParsedRun): string | undefined {
 }
 
 function retrievalHint(id: string): string {
-    return `Retrieve retained evidence with subagent_output id="${id}" mode="raw" (16 KiB default, up to 64 KiB, caller cursor).`;
+    return `Retrieve retained evidence with subagent_output id="${id}" mode="raw" (16 KiB default, up to 64 KiB, caller cursor; tail:true starts at the newest bytes).`;
 }
 
 function bestParsed(run: ParsedRun): string {
@@ -387,12 +392,22 @@ function isContinuationPage(cursor: string | undefined): boolean {
     return cursorKind(cursor) === "t";
 }
 
+/** An explicit end-anchored raw read: `tail: true`. */
+function wantsTail(request: PayloadRequest): boolean {
+    return isAll(request.tail);
+}
+
 function rawPage(ctx: CallContext, cursor: string | undefined, remaining: number): VerbatimPage {
-    return pageRetainedFile(logPathFor(ctx.id), {
+    const page = pageRetainedFile(logPathFor(ctx.id), {
         cursor,
         maxBytes: remaining,
         resource: `raw:${ctx.scopeKey}:${ctx.id}`,
+        ...(wantsTail(ctx.request) ? { direction: "backward" as const } : {}),
     });
+    // A forward raw page points at the end-anchored read: a multi-MB retained
+    // log must not cost one round-trip per page to reach its newest bytes (#618).
+    if (page.direction === "backward" || !page.hasMore) return page;
+    return { ...page, via: "tail:true reads the newest bytes first" };
 }
 
 function answerPage(ctx: CallContext, text: string, cursor: string | undefined, remaining: number, maxLines?: number): VerbatimPage {
@@ -547,7 +562,7 @@ function assembleRaw(
     const continuing = cursorKind(request.cursor) === "f";
     return envelopeText({
         maxBytes,
-        identity: `${identity} raw retained log`,
+        identity: `${identity} raw retained log${wantsTail(request) ? " · newest first" : ""}`,
         // Raw evidence keeps whole excerpts and evidence paths.
         failure: failureSection(ctx, continuing ? CONTINUATION_FAILURE_BYTES : 1024, "full"),
         diagnostics: joinSections([changeDiagnostics(ctx), optInFacts(run, request), parserDiagnostics(run)]),

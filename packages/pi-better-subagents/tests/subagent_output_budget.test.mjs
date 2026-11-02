@@ -21,6 +21,7 @@ import { subagentListTool, subagentOutputTool, subagentResultTool } from "../too
 import { listIncidentComputationCount } from "../output-payload.ts";
 import {
     OUTPUT_BUDGET_BYTES,
+    OUTPUT_BUDGET_MAX_BYTES,
     utf8ByteLength,
 } from "../shared-log-utils.ts";
 
@@ -470,6 +471,91 @@ describe("registered subagent payloads", () => {
         assert.equal(text, blob, "raw pages must concatenate to the retained bytes exactly");
     });
 
+    // Issue #618: mode=raw used to page a multi-MB retained log only from byte zero.
+    it("reaches the newest retained bytes of a multi-MB log in one call and pages backwards", async () => {
+        const id = trackDisk(`sa_tail_raw_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        const unit = `${JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "z".repeat(200) } })}\n`;
+        const blobs = [];
+        for (let bytes = 0; bytes < 700_000; bytes += unit.length) blobs.push(unit);
+        const source = `${blobs.join("")}NEWEST_RETAINED_MARKER\n`;
+        writeFileSync(logPathFor(id), source);
+
+        // The default read is unchanged: it still starts at byte zero and now
+        // advertises the end-anchored read instead of forcing ~128 round-trips.
+        const forward = textOf(await outputTool.execute("tc", { id, mode: "raw" }));
+        assert.doesNotMatch(forward, /NEWEST_RETAINED_MARKER/);
+        assert.match(forward, /hasMore=true omittedBytes=\d+/);
+        assert.match(forward, /tail:true reads the newest bytes first/);
+
+        const tail = textOf(await outputTool.execute("tc", { id, mode: "raw", tail: true, max_bytes: OUTPUT_BUDGET_MAX_BYTES.rawPage }));
+        assert.ok(utf8ByteLength(tail) <= OUTPUT_BUDGET_MAX_BYTES.rawPage, "a tail page keeps the raw cap");
+        assert.match(tail, /raw retained log · newest first/);
+        assert.match(tail, /hasMore=true omittedBytes=\d+/);
+        assert.match(tail, /newest-first page; nextCursor reads earlier bytes/);
+        assert.match(rawBody(tail), /NEWEST_RETAINED_MARKER\n$/, "the first tail page ends at the newest retained byte");
+
+        // Following nextCursor walks toward the oldest byte and rebuilds the log exactly.
+        let cursor = nextCursorOf(tail);
+        let rebuilt = rawBody(tail);
+        let pages = 1;
+        let endCursor;
+        for (; pages < 200; pages += 1) {
+            const page = textOf(await outputTool.execute("tc", { id, mode: "raw", cursor, max_bytes: OUTPUT_BUDGET_MAX_BYTES.rawPage }));
+            assert.ok(utf8ByteLength(page) <= OUTPUT_BUDGET_MAX_BYTES.rawPage, `backward page ${pages} exceeded the raw cap`);
+            rebuilt = rawBody(page) + rebuilt;
+            if (!/hasMore=true/.test(page)) {
+                endCursor = page.match(/\bend nextCursor=(\S+)/)?.[1];
+                assert.ok(endCursor, page);
+                break;
+            }
+            assert.match(page, /newest-first page; nextCursor reads earlier bytes/);
+            cursor = nextCursorOf(page);
+            assert.ok(cursor, page);
+        }
+        assert.equal(rebuilt, source, "backward raw pages must concatenate to the retained bytes exactly");
+        assert.ok(pages > 2, `expected several backward pages, got ${pages}`);
+
+        // Reaching the oldest byte hands back an append-ready cursor.
+        appendFileSync(logPathFor(id), "APPENDED_AFTER_TAIL\n");
+        const appended = textOf(await outputTool.execute("tc", { id, mode: "raw", cursor: endCursor }));
+        assert.match(appended, /APPENDED_AFTER_TAIL/);
+        assert.doesNotMatch(appended, /message_update/);
+
+        // subagent_result shares the raw pager, so it takes the same flag.
+        const resultTail = textOf(await resultTool.execute("tc", { id, mode: "raw", tail: true, max_bytes: OUTPUT_BUDGET_MAX_BYTES.rawPage }));
+        assert.match(rawBody(resultTail), /APPENDED_AFTER_TAIL\n$/);
+    });
+
+    it("serves the whole retained log from the tail when one page is enough", async () => {
+        const id = trackDisk(`sa_tail_small_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        const blob = "first-line\nsecond-line\n";
+        writeFileSync(logPathFor(id), blob);
+        const page = textOf(await outputTool.execute("tc", { id, mode: "raw", tail: true }));
+        assert.equal(rawBody(page), blob);
+        assert.doesNotMatch(page, /hasMore=true/);
+        assert.doesNotMatch(page, /newest-first page/);
+    });
+
+    // Issue #618 review R1: a code point split across writes must survive the
+    // tail page and its append-ready handoff, not turn into replacement bytes.
+    it("withholds a split newest byte in a raw tail page and returns it whole from the append cursor", async () => {
+        const id = trackDisk(`sa_tail_split_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        const euro = Buffer.from("€\n", "utf8");
+        writeFileSync(logPathFor(id), Buffer.concat([Buffer.from("A", "utf8"), euro.subarray(0, 2)]));
+        const tail = textOf(await outputTool.execute("tc", { id, mode: "raw", tail: true }));
+        assert.equal(rawBody(tail), "A");
+        assert.doesNotMatch(tail, /\uFFFD/);
+        assert.match(tail, /pendingBytes=2 \(incomplete UTF-8 sequence withheld until the writer completes it\)/);
+        const endCursor = tail.match(/\bend nextCursor=(\S+)/)?.[1];
+        assert.ok(endCursor, tail);
+        appendFileSync(logPathFor(id), euro.subarray(2));
+        const completed = textOf(await outputTool.execute("tc", { id, mode: "raw", cursor: endCursor }));
+        assert.equal(rawBody(completed), "€\n", "the append cursor returns the completed character, not just later bytes");
+        assert.equal(rawBody(tail) + rawBody(completed), "A€\n");
+    });
     it("paginates list rows under the list budget without full failure paragraphs", async () => {
         const stamp = Date.now();
         const folder = `/tmp/budget-list-${stamp}`;
@@ -871,6 +957,7 @@ describe("output-control aliases and opt-in facts (#321)", () => {
             assert.ok(tool.parameters.lines, tool.name);
             assert.match(tool.parameters.tail_lines.description, /Deprecated alias for lines/, tool.name);
             assert.ok("include" in tool.parameters, tool.name);
+            assert.match(tool.parameters.tail.description, /newest retained byte/, tool.name);
         }
     });
 

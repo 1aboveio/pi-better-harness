@@ -67,7 +67,19 @@ unread ranges in the current snapshot.
 - A trailing, still-incomplete UTF-8 sequence (a writer split a code point
   across writes) is withheld and reported as `pendingBytes`; the next read
   returns the whole character once it is complete. Malformed bytes that can
-  never complete are passed through instead of stalling.
+  never complete are passed through instead of stalling. Backward pages obey
+  the same rule: the newest page withholds such a suffix and anchors its
+  append-ready cursor at the sequence's first byte, so the tail-then-append
+  sequence still yields the whole character exactly once.
+- `direction: "backward"` starts an end-anchored pager: the first page is the
+  newest retained bytes instead of byte 0 (issue #618). Backward pages start
+  just after a newline when that keeps at least half the window (one oversized
+  line starts on the next whole code point), report the earlier bytes they did
+  not show as `omittedBytes`, and set `direction: "backward"` so callers can
+  name the direction. `nextCursor` continues toward the oldest byte; reaching
+  the start sets `appendReady` and hands back a forward cursor that reads only
+  bytes appended later. A backward cursor keeps its direction on its own, so
+  the request flag is only needed to start the pager.
 - Cursors bind `resource` (task/run id plus session scope), the file object's
   identity (`dev`, `ino`, and birth time where the platform reports it, so a
   delete + recreate that reuses an inode number is still `source-replaced`),
