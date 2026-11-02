@@ -61,7 +61,7 @@ process.env.TMPDIR = HERMETIC_TMPDIR;
 const { default: betterSubagents, setIdentityProbeForTests, isHealthTickerActive } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, nextRunId, runDir, baseDir, recordTaskRuntimeProvenance, removeRunDirectory, taskRuntimeProvenancePath,
-    discardFailedLaunch, sessionsDir, taskWorkspaceDir } = await import("../registry.ts");
+    discardFailedLaunch, sessionsDir, taskWorkspaceDir, processStartToken } = await import("../registry.ts");
 const { realProcessProbe, OLD_METADATA_LOST_CONFIRM_TICKS } = await import("../health.ts");
 const { killProcessTree } = await import("../spawn.ts");
 const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
@@ -809,6 +809,35 @@ describe("interrupted supervision handoff (#625)", () => {
                 "B still never received it");
         } finally {
             if (b) await b.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("a live foreign parent keeps ownership of its terminal callback", async () => {
+        // R3: recovery must not take a live pi's terminal callback just because the
+        // record is interrupted, terminal and addressed to the resumed conversation.
+        // The defining state is a foreign parent process that is still alive —
+        // process.ppid here — with its own start token recorded.
+        const parentToken = processStartToken(process.ppid);
+        assert.equal(process.kill(process.ppid, 0), true, "the foreign parent is alive");
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+        const id = seedRestartRun({ originSession: "origin-A" });
+        writeMeta({
+            ...readMeta(id), status: "completed", endedAt: Date.now(), exitCode: null,
+            spawnPid: process.ppid, spawnPidStartTime: parentToken,
+            completionCallbackPendingAt: Date.now() - 2_000,
+        });
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            await getCallbackBatcher(h.pi).flush();
+            const meta = readMeta(id);
+            assert.equal(h.sent.filter((entry) =>
+                entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id)).length, 0,
+                "a live foreign parent retains ownership: no takeover");
+            assert.equal(meta.completionCallbackSentAt, undefined, "no receipt is written for a live foreign parent");
+            assert.equal(meta.completionCallbackSuppressedAt, undefined, "the live owner's obligation is not consumed either");
+            assert.equal(typeof meta.completionCallbackPendingAt, "number", "the live parent's pending marker is untouched");
+        } finally {
+            await h.shutdown({ reason: "quit" });
         }
     });
 

@@ -495,9 +495,11 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
  *
  * Current-parent records are recovered unconditionally (the owner decides, and the
  * session gate still suppresses a different foreground session). A run an
- * interrupted dead parent left behind is recovered only by the conversation that
+ * interrupted DEAD parent left behind is recovered only by the conversation that
  * launched it: that session id is the ownership proof, so an unrelated session
- * never adopts it and live-run ownership is untouched (#625, DEV-226 criterion 5).
+ * never adopts it. A foreign parent that is still alive keeps ownership — the
+ * same `isAbandonedByParent` proof the running-record supervision uses — so this
+ * path never takes a live pi's terminal callback (#625, DEV-226 criterion 5).
  */
 function recoverCompletionCallbacks(pi: ExtensionAPI): void {
     for (const meta of listMetasForParent(process.pid)) {
@@ -509,6 +511,8 @@ function recoverCompletionCallbacks(pi: ExtensionAPI): void {
     for (const summary of listMetas()) {
         if (ownedByThisParent(summary) || summary.supervisionInterruptedAt === undefined) continue;
         if (summary.status === "running" || summary.status === "orphaned") continue;
+        // A live foreign parent still owns its run's callback: never deliver for it.
+        if (!isAbandonedByParent(summary, realProcessProbe)) continue;
         const meta = readMeta(summary.id);
         if (!meta || meta.status === "running" || meta.status === "orphaned") continue;
         if (meta.callbackOrigin?.sessionId !== activeSessionId) continue;
