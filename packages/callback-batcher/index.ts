@@ -603,7 +603,7 @@ export function createCallbackBatcher(
 
   const enqueue = (event: CallbackBatchEvent): boolean => {
     if (event.callback === false) return false;
-    const key = eventKey(event);
+    const key = completionKey(event);
     if (pending.has(key) || inFlight.has(key)) return false;
     pending.set(key, { event, sequence: sequence++ });
     schedule(windowMs);
@@ -881,6 +881,23 @@ function globalState(): SharedCallbackBatcherState {
 
 function eventKey(event: Pick<CallbackBatchEvent, "source" | "id" | "status">): string {
   return `${event.source}\u0000${event.id}\u0000${event.status}`;
+}
+
+/**
+ * Ordinary completion identity is the run/task id, not the status wording (#624).
+ *
+ * The status field is a snapshot taken when a notification is enqueued (failure
+ * notes, observation gaps, timing reason). Including it in the key meant a
+ * not-yet-delivered run whose status changed between enqueues entered the
+ * pending map twice; one flush then rendered both rows and the caller saw one
+ * completion twice. Urgent events keep the status in their key: those are
+ * distinct transitions (orphaned, lost, a timing wake, a failure key), not
+ * restatements of a single ordinary completion. The first queued snapshot is the
+ * one delivered; a later status wording for the same id is dropped rather than
+ * re-queued, and the durable result stays the authority for failure detail.
+ */
+function completionKey(event: Pick<CallbackBatchEvent, "source" | "id">): string {
+  return `${event.source}\u0000${event.id}`;
 }
 
 function eventDisposition(

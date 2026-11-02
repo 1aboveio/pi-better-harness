@@ -755,6 +755,9 @@ function stopForTiming(pi: ExtensionAPI | undefined, id: string, reason: TimingS
         // it was finalized from its log): its own exit is the outcome, not a harness stop.
         patchTiming(id, { stopReason: undefined, stoppedAt: undefined });
         progressCache.delete(id);
+        // A log finalization is terminal evidence discovered here, not by the child
+        // exit handler, so this path still owes the one completion callback (#624).
+        if (pi && outcome.action === "finalized") enqueueCompletionCallback(pi, id);
         return outcome.action === "finalized";
     }
     const current = readMeta(id);
@@ -1108,6 +1111,10 @@ function navigatorCloseRun(id: string) {
     resetChildEventLogCursor(id);
     resetParseRunCursor(id);
     syncHealthTicker();
+    // Close stops (or log-finalizes) the run, which is a terminal transition:
+    // queue its one completion callback so no terminal state is silent (#624).
+    // enqueueCompletionCallback is a no-op for runs that owe no callback.
+    if (healthPi) enqueueCompletionCallback(healthPi, id);
     return outcome;
 }
 
@@ -2672,9 +2679,12 @@ export default function (pi: ExtensionAPI) {
     const acceptanceResultTool = subagentResultTool(Type, toolSession);
     pi.registerTool(acceptanceResultTool);
     publishAcceptanceHooks(acceptanceResultTool);
-    const acceptanceStopTool = subagentStopTool(Type, { onStopped: () => {
+    const acceptanceStopTool = subagentStopTool(Type, { onStopped: (id) => {
         renderWidget();
         syncHealthTicker();
+        // Stopping a run is a terminal transition, so it owes the caller its one
+        // completion callback even when the caller is the one who asked (#624).
+        enqueueCompletionCallback(pi, id);
     } });
     acceptanceStopToolRef = acceptanceStopTool;
     pi.registerTool(acceptanceStopTool);
