@@ -518,10 +518,10 @@ describe("retained log paging and capture/retention disclosure", () => {
     const status = formatStatus(inspectMeta(meta.id), { origin });
     expect(utf8ByteLength(status)).toBeLessThanOrEqual(1024);
     expect(status).not.toContain("\uFFFD");
-    expect(status).toMatch(/incidentCursor=i1\./);
+    expect(status).toMatch(/incidentCursor=i2\./);
     const shownCount = Number(status.match(/(\d+) shown/)?.[1]);
     expect(status).toMatch(new RegExp(`12 active failure observations · ${shownCount} shown · ${12 - shownCount} omitted`));
-    let cursor = status.match(/incidentCursor=(i1\.\S+)/)?.[1];
+    let cursor = status.match(/incidentCursor=(i2\.\S+)/)?.[1];
     expect(cursor).toBeTruthy();
     const seen = new Set<string>();
     for (const match of status.matchAll(/bg-incident-(\d+)/g)) seen.add(match[1]!);
@@ -534,7 +534,7 @@ describe("retained log paging and capture/retention disclosure", () => {
         expect(seen.has(match[1]!), `incident ${match[1]} repeated`).toBe(false);
         seen.add(match[1]!);
       }
-      cursor = page.includes("hasMore=true") ? page.match(/nextCursor=(i1\.\S+)/)?.[1] : undefined;
+      cursor = page.includes("hasMore=true") ? page.match(/nextCursor=(i2\.\S+)/)?.[1] : undefined;
     }
     expect([...seen].sort()).toEqual(Array.from({ length: 12 }, (_, i) => String(i)).sort());
     const log = formatLog(meta.id, { origin });

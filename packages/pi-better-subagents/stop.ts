@@ -16,6 +16,11 @@
  * process-group evidence remains, reread the child log and finalize from
  * coherent terminal evidence (`completed` / `failed`) or record `lost`.
  *
+ * Terminal completion (#624): every terminal write here also records the run's
+ * pending completion marker, so a stopped, killed, or cleanup-finalized run
+ * still produces exactly one completion callback (delivered at the next
+ * boundary, or recovered by the next Pi instance after `/reload`).
+ *
  * Process-group-only contract (ADR 0002): related work is the captured
  * process group (pgid, falling back to pid for old metadata). Escaped /
  * reparented descendants outside that group are out of contract and are
@@ -26,6 +31,8 @@ import { realProcessProbe, type ProcessProbe } from "./health.ts";
 import { parseRunForLifecycle } from "./parse.ts";
 import {
     effectiveStatus,
+    launchAttemptInProgress,
+    purgeAbandonedLaunch,
     readMeta,
     writeMeta,
     type RunMeta,
@@ -35,7 +42,13 @@ import { killProcessTree } from "./spawn.ts";
 export type StopOutcome =
     | { action: "stopped"; id: string }
     | { action: "finalized"; id: string; status: "completed" | "failed" | "lost" }
-    | { action: "not-running"; id: string; status: string };
+    | { action: "not-running"; id: string; status: string }
+    | { action: "purged"; id: string }
+    /**
+     * The id is not debris right now: a concurrent launch either published its
+     * metadata or is still preparing it. Nothing was removed.
+     */
+    | { action: "preserved"; id: string; status: string };
 
 export interface StopDeps {
     /** OS process probe; defaults to the real probe. Tests inject fakes. */
@@ -66,10 +79,32 @@ function terminateRelatedWork(meta: Pick<RunMeta, "pid" | "pgid">): number | und
     return pgid;
 }
 
+/**
+ * Record the one durable terminal-completion obligation (#624).
+ *
+ * Every terminal transition owes its caller exactly one completion callback:
+ * the callback batcher delivers it once at the next boundary and writes the
+ * sent marker, and `/reload` recovers a record that is still marked pending.
+ * A stop is a terminal transition like any other, so it must set the marker —
+ * otherwise a killed run stays silent now and after `session_start` recovery,
+ * which is the case the caller can only notice by polling (or never).
+ *
+ * `callback:false` runs owe no model message, and an existing marker (sent,
+ * suppressed, or already pending) is never moved or reintroduced.
+ */
+function oweTerminalCompletion(meta: RunMeta, now: number): void {
+    if (meta.callback === false) return;
+    if (meta.completionCallbackPendingAt !== undefined
+        || meta.completionCallbackSentAt !== undefined
+        || meta.completionCallbackSuppressedAt !== undefined) return;
+    meta.completionCallbackPendingAt = now;
+}
+
 function recordKilled(meta: RunMeta, now: number): StopOutcome {
     meta.status = "killed";
     meta.lifecycleClassification = "killed";
     meta.endedAt = now;
+    oweTerminalCompletion(meta, now);
     writeMeta(meta);
     return { action: "stopped", id: meta.id };
 }
@@ -87,6 +122,7 @@ function finalizeOrphanedWithoutProcess(meta: RunMeta, now: number): StopOutcome
         meta.lifecycleClassification = "complete";
         if (meta.exitCode === undefined) meta.exitCode = 0;
         meta.endedAt = now;
+        oweTerminalCompletion(meta, now);
         writeMeta(meta);
         return { action: "finalized", id: meta.id, status: "completed" };
     }
@@ -96,11 +132,15 @@ function finalizeOrphanedWithoutProcess(meta: RunMeta, now: number): StopOutcome
         meta.lifecycleClassification = "incomplete_open_tools";
         meta.failureReason = "incomplete-stream";
         meta.endedAt = now;
+        oweTerminalCompletion(meta, now);
         writeMeta(meta);
         return { action: "finalized", id: meta.id, status: "failed" };
     }
 
     // No coherent terminal completion evidence and no related process remains.
+    // `lost` is the one terminal outcome that does NOT owe a completion callback:
+    // its dedicated health callback (subagent-health) is the terminal notice, so
+    // marking a completion here would report the same run twice.
     meta.status = "lost";
     meta.lifecycleClassification = "lost";
     meta.lostAt = now;
@@ -131,11 +171,29 @@ function cleanupOrphanedRun(meta: RunMeta, probe: ProcessProbe, now: number): St
  *   otherwise reread logs and finalize completed/failed/lost.
  * - other statuses → not-running (on-disk record untouched).
  *
+ * An id with no metadata is either unknown or an abandoned launch record (a
+ * launch that never wrote `meta.json` and never started a child). The latter is
+ * purged, so the operator can clear launch debris (#623) without waiting for the
+ * sweep's grace period. A concurrent launch that owns the record — published, or
+ * still preparing under its claim — is preserved, never deleted (#623 R1).
+ * Anything else stays an unknown id.
+ *
  * Throws on an unknown id (same contract as the stop tool).
  */
 export function stopRun(id: string, deps: StopDeps = {}): StopOutcome {
     const meta = readMeta(id);
-    if (!meta) throw new Error(`Unknown run id: ${id}`);
+    if (!meta) {
+        const purge = purgeAbandonedLaunch(id);
+        if (purge === "purged") return { action: "purged", id };
+        // The purge re-checks under the run's metadata lock, so a launch may have
+        // become visible while we waited. Preserve it and say what it is.
+        const published = readMeta(id);
+        if (published) return { action: "preserved", id, status: effectiveStatus(published) };
+        if (purge === "retained" || launchAttemptInProgress(id)) {
+            return { action: "preserved", id, status: "launching" };
+        }
+        throw new Error(`Unknown run id: ${id}`);
+    }
     const probe = deps.probe ?? realProcessProbe;
     const now = typeof deps.now === "function" ? deps.now() : Date.now();
     const status = effectiveStatus(meta);

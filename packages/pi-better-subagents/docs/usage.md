@@ -99,10 +99,10 @@ thresholds continue to take precedence for subagent health.
 | `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; optional per-job `session_id` or `session_name` continues a saved conversation), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, per-setting `sources` (`session` or `config`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
-| `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
-| `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
-| `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
-| `subagent_stop` | never | SIGTERM a running run's process group. |
+| `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. Abandoned launch records are reported separately and are never counted as runs. |
+| `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `tail` (raw mode: start from the newest retained byte and page backwards; the final step returns an append-ready cursor), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
+| `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `tail` (raw mode: newest bytes first), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
+| `subagent_stop` | never | SIGTERM a running run's process group. The run is terminal, so its completion callback (one per run id) reports `killed`. An abandoned launch record (see below) is removed instead of stopped, and a run a concurrent launch owns is preserved. |
 
 ## Finding a saved conversation
 
@@ -135,6 +135,16 @@ A launch without a session selector starts a new conversation. With a selector,
 Each attempt gets a new run id, log, timing record, and capacity slot while the
 native session id and history stay the same. The launch recipe preserves the
 worker's role, tools, model, and workspace, including uncommitted changes.
+
+A run stopped with `subagent_stop` (status `killed`) can be continued the same
+way. Stopping ends that execution, not the saved conversation or its
+uncommitted workspace: the next attempt reopens the same history and records
+`resumedFrom`, while the stopped attempt's status, log, and result stay as they
+were. A run that ended `failed` or `lost` is still refused; this path recovers
+interrupted work, it does not retry a failed run. The stopped child must also
+have exited: if the stop signal has not taken effect yet (for example the
+process was suspended), continuation is refused until that recorded child exits.
+The saved history and workspace stay intact while the stop settles.
 
 `session_name` is an exact display-name match within the current folder and its
 descendants. Several attempts of the same conversation count once. If several
@@ -244,10 +254,15 @@ may be fractional. A job's own number (including `0`) wins over `shared`.
   sandbox command time limit can bound individual commands. With the run ceiling off, a steer stuck behind a
   hung tool call is never delivered, the deadline stop stays held, and the run
   is never stopped by that deadline. Opt into a ceiling to bound the whole run.
-- The parent reads at most the last 32 MiB of a child log after `/reload`. If
-  the log is larger and the running tool call started before that window, the
-  parent cannot see the call, so the hold is lost and grace counts from when
-  the steer was sent. The child can be stopped mid-call.
+- The parent reads at most the last 32 MiB of a child log after `/reload`. It
+  also records the call it last saw open in the run's metadata on each
+  supervision tick, so a reload normally keeps the hold and the not-stuck
+  accounting even when the call's start is outside that window. The record is
+  written by the tick, so a call that started less than one tick (15 s) before
+  the reload is not covered; and a record whose call ended while the window was
+  lost keeps the hold, and keeps the run from being reported stuck, until the
+  next observed tool call starts. Opt into a ceiling when the run needs a hard
+  wall-clock bound.
 - The child confirms delivery by matching the steer's exact text in its
   conversation. If another extension rewrites user input (an input-transform
   hook), the text no longer matches, no receipt is written, and grace silently
@@ -266,7 +281,9 @@ harness remembers up to 4096 distinct calls per run as fixed-size hashes of the
 name and normalized arguments; past that the oldest is forgotten, so a call from
 long ago counts again. Time the child spends waiting on a running tool call does not count toward the
 stuck window, so a child in the middle of a 20-minute test run is waiting, not
-stuck. A hanging command can be bounded by the sandbox command time limit; the run
+stuck — including after `/reload`: the call the parent saw open is stored in the
+run's metadata, so a bounded log read that no longer contains its start does not
+turn it into "no progress". A hanging command can be bounded by the sandbox command time limit; the run
 ceiling separately bounds the whole run.
 The other stuck signal is the existing escalation: the same operation failing
 three times wakes the parent once as an `Action required` incident
@@ -327,6 +344,14 @@ given.
   pending records retryable, and `/reload` recovers records explicitly marked
   pending. `callback:false` sends no model message; read the durable result later
   with `subagent_result`.
+- **One completion per run.** A run's ordinary notification is identified by
+  its run id, so a terminal run is reported once even if its status wording
+  changes (failure notes, observation gaps) between queueing and delivery.
+  Stopped runs are terminal too: `subagent_stop`, a navigator Close, the reload
+  drain, or cleanup that finalizes an orphaned run from its log records the same
+  pending completion, so the caller receives one `killed`/`completed`/`failed`
+  row instead of discovering the outcome by polling `subagent_list()`. A run
+  stopped while the session is shutting down is recovered by the next session.
 - **Optional busy steering.** In `/harness-settings`, set **Completions while
   busy** to **Steer active run** to receive ordinary completions during
   foreground work. Changes autosave to the current session branch and apply
@@ -777,6 +802,48 @@ state. Session shutdown disposes open navigator timers.
 ## Parent-process scoping
 
 The live widget, concurrency cap, and supervision ticker track this Pi process's runs. `subagent_list` searches the current folder and its descendants across foreground sessions; `all:true` searches globally. Rows show the attempt id and the native `session_id`, so a listed conversation can be continued explicitly. Results are newest first, with 10 rows / 1 KiB by default. Use `limit` (max 100), `max_bytes` (max 4 KiB), and `status` filters as needed. Cursors are bound to the local folder or global scope and cannot be replayed from a different folder. Id-based `subagent_result` and `subagent_output` keep their current-session scope; use `all:true` to read another session's run evidence. Unknown ownership remains an explicit gap for those evidence tools. Saved conversation discovery and continuation do not require the original foreground session to exist.
+
+## Abandoned launch records
+
+A launch creates and claims its run directory, writes `prompt.md`, and prepares
+the sandbox `control/` dir before the child starts and `meta.json` is committed. When that
+preparation fails — or Pi dies inside that window — only those artifacts remain:
+no metadata (nothing was committed) and no `output.log` (the log is created at
+spawn and removed when the spawn itself fails). A launch failure now removes
+them, so this state cannot be created anew.
+
+A directory in that state that is left by an older version or a crashed process
+is an **abandoned launch record**, not a run. It has no owner, status, log or
+result, and can never gain any, so `subagent_list` reports it separately as not
+run evidence and does not count it:
+
+```text
+1 abandoned launch record(s), not run evidence and not counted: the launch
+stopped before any child started (prompt written, no metadata, no log): sa_…
+Cleanup reclaims them after 1 hour; remove one now with subagent_stop <id>.
+```
+
+Every launch's hygiene pass (`runDailyCleanupOnce`, alongside the daily and size
+sweeps) reclaims abandoned launch records older than one hour, or immediately
+with `subagent_stop <id>`. Only the attempt's own run directory, its per-run
+session directory, and a clone workspace it owned are removed.
+
+Cleanup never deletes a live attempt. A launch claims its run directory
+(`.launch-attempt.json`: pid + process start identity) before it prepares
+anything, and removes the claim when `meta.json` becomes the record. A record
+whose claim is owned by a live process is not debris at any age, and the purge
+re-classifies under the same per-run metadata lock a launch publishes under, so a
+launch that commits metadata while a purge waits is preserved. In that case
+`subagent_stop` reports `Preserved …` and removes nothing:
+
+```text
+Preserved sa_…: a concurrent launch published this run (running), so nothing
+was removed. Call subagent_stop again to stop the run.
+```
+
+A directory that has a log is deliberately **not** treated as debris either: a
+child may have started and its output is real evidence, so it stays an explicit
+unreadable-record gap until normal retention reclaims it.
 
 ## Supervision health (`orphaned` / `lost`)
 

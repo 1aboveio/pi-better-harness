@@ -184,6 +184,38 @@ describe("extension e2e", () => {
     expect(harness.tools.get("bg_task_stop")?.description).toContain("kills its remote tmux session");
   });
 
+  it("advertises the step gate only where it can observe steps (#619)", () => {
+    const harness = createHarness();
+
+    for (const name of ["bg_task_spawn", "bg_task"]) {
+      const gate = harness.tools.get(name)?.parameters?.properties?.require_successful_steps;
+      expect(gate, name).toBeTruthy();
+      expect(gate?.description, name).toContain("runs under bash errexit");
+      expect(gate?.description, name).toContain("Not supported with shell:false or ssh");
+      expect(gate?.description, name).toContain("Default false");
+    }
+    // A watch polls one command whose own exit code is the outcome; the field is not offered there.
+    expect(harness.tools.get("bg_task_watch")?.parameters?.properties?.require_successful_steps).toBeUndefined();
+  });
+
+  it("reports a masked failing step of a chained command through both spawn entry points (#619)", async () => {
+    const harness = createHarness();
+    const command = "bash -c 'exit 8'\necho summary ok";
+
+    for (const [tool, extra, name] of [["bg_task_spawn", {}, "gate-spawn-tool"], ["bg_task", { action: "spawn" }, "gate-wrapper-tool"]] as const) {
+      const launch = await harness.execute(tool, { ...extra, name, command, callback: false, require_successful_steps: true });
+      const id = extractTaskId(launch);
+      const terminal = await waitForMeta(id, (meta) => meta?.status === "failed" && typeof meta.endedAt === "number", 15_000);
+      expect(terminal?.lastExitCode, tool).toBe(8);
+      expect(terminal?.stepGateFailure, tool).toMatchObject({ stepExitCode: 8, shellExitCode: 8 });
+
+      // The operator's verdict surface: the red gate reads red, and it says why.
+      const status = await harness.execute("bg_task_status", { id });
+      expect(status, tool).toContain("exit=8 (step gate)");
+      expect(status, tool).toContain("step gate: bash -c 'exit 8' exited 8; the shell stopped at that step");
+    }
+  }, 25_000);
+
   // @covers background-task.ssh-tool-contract
   // @level integration
   // @fails-without-fix background-task.ssh-tool-contract
