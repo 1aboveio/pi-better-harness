@@ -1,0 +1,35 @@
+{
+  "name": "pi-better-model-router",
+  "version": "0.1.0",
+  "description": "Price-aware virtual model routing for Pi.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "model-routing"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1aboveio/pi-better-harness.git",
+    "directory": "packages/pi-better-model-router"
+  }
+}

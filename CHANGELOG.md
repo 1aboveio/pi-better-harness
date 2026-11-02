@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Standalone `pi-better-model-router` extension with the `router/deepseek-flash-auto` virtual model, configurable UTC peak/off-peak rates, provider availability checks, stable tool follow-ups, and bounded transient retry fallback. Requires Pi's native virtual-model API; tested with Pi 1.4.0. Not included in the Harness bundle.
+
 ## [pi-better-harness@0.38.1] - 2026-11-02
 
 ### Changed
