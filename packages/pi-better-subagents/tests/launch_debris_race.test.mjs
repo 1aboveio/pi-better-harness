@@ -95,6 +95,29 @@ function hasExited(child) {
     });
 }
 
+/**
+ * Kill a child started through `spawnDetached` and wait for it to exit.
+ *
+ * `spawnDetached` unrefs the child so a real launch outlives the foreground, and
+ * an unref'd handle does not keep the event loop alive. Killing one and awaiting
+ * only its exit promise therefore races process exit: on Node 22 with no other
+ * referenced handle, the loop drains before the close event lands and node:test
+ * ends the file with "Promise resolution is still pending but the event loop has
+ * already resolved" (CI #41406604798 cancelled these tests that way). One
+ * referenced timer holds the loop open for exactly as long as the real exit
+ * event needs; it adds no delay and weakens no assertion.
+ */
+async function reapDetached(child) {
+    if (!child) return;
+    killProcessTree(child.pid, "SIGKILL");
+    const keepAlive = setInterval(() => {}, 20);
+    try {
+        await child.exit;
+    } finally {
+        clearInterval(keepAlive);
+    }
+}
+
 /** A separate pi that prepares a launch (claim + prompt) and then waits to be killed. */
 function startPreparingLaunch(id, readyPath) {
     const script = `
@@ -182,10 +205,7 @@ describe("launch-debris purge vs a concurrent launch (#623 R1)", () => {
         } finally {
             fs.existsSync = exists;
             syncBuiltinESMExports();
-            if (child) {
-                killProcessTree(child.pid, "SIGKILL");
-                await child.exit;
-            }
+            await reapDetached(child);
         }
     });
 
@@ -274,10 +294,7 @@ describe("launch-debris purge vs a concurrent launch (#623 R1)", () => {
         } finally {
             fs.existsSync = exists;
             syncBuiltinESMExports();
-            if (child) {
-                killProcessTree(child.pid, "SIGKILL");
-                await child.exit;
-            }
+            await reapDetached(child);
         }
     });
 
