@@ -9,6 +9,7 @@ import {
   commandExecution,
   resolveDefaultShell,
   spawnCommand,
+  stepGateScript,
   stopProcessGroup,
   toMsysPath,
   withWindowsLogRedirect,
@@ -105,6 +106,21 @@ describe("withWindowsLogRedirect", () => {
     expect(result.command).toBe("exec >> '/c/Temp/Out Dir/log.log' 2>&1\necho hi");
     expect(result.cwd).toBe("C:\\work");
     expect(result.env).toEqual({ A: "1" });
+  });
+
+  it("keeps the step gate's script and command variable after the redirect (#619)", () => {
+    const script = stepGateScript("bg_win_1");
+    const result = withWindowsLogRedirect(
+      { shell: true, command: script, cwd: "C:\\work", env: { PI_BG_STEP_GATE_COMMAND: "false; echo summary ok" } },
+      "C:\\Temp\\log.log",
+    );
+
+    // The redirect stays first, the gate script follows verbatim, and the operator's
+    // command keeps travelling in its own variable instead of being rewritten.
+    const command = result.command ?? "";
+    expect(command).toBe(`exec >> '/c/Temp/log.log' 2>&1\n${script}`);
+    expect(command.indexOf("set -e")).toBeGreaterThan(command.indexOf("exec >> "));
+    expect(result.env).toEqual({ PI_BG_STEP_GATE_COMMAND: "false; echo summary ok" });
   });
 
   it("pins the argv trampoline shape: redirect, MSYS2 exclusion, verbatim exec", () => {

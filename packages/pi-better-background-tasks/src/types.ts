@@ -28,6 +28,19 @@ export interface CommandSpec {
   env?: Record<string, string>;
 }
 
+/**
+ * Evidence from an opt-in step gate (#619): bash reported a failing step inside a
+ * chained shell command, so a later command's exit 0 could not mask it.
+ */
+export interface StepGateFailure {
+  /** Exit code of the first failing step bash reported. */
+  stepExitCode: number;
+  /** The shell's own final status, before the gate turned a masked 0 into a failure. */
+  shellExitCode: number | null;
+  /** The failing step as bash named it, bounded so task metadata stays small. */
+  command: string;
+}
+
 export interface CommandResult {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -166,6 +179,14 @@ export interface BackgroundTaskMeta {
   spawnPid: number;
   /** Opaque process-start token used to reject recycled supervisor PIDs. */
   spawnPidStartTime?: string;
+  /**
+   * Launch intent (#619): this shell command runs with the step gate. A failure bash
+   * reports for one step is surfaced even when a later command exits 0. Absent means
+   * ordinary shell semantics: only the command's own exit status is reported.
+   */
+  requireSuccessfulSteps?: boolean;
+  /** Observed step-gate evidence; absent when the gate is off or no step failed. */
+  stepGateFailure?: StepGateFailure;
   successWhen?: Condition;
   failureWhen?: Condition;
   /**

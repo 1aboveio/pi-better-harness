@@ -309,6 +309,50 @@ history count line with no incident cursor; pass `history: true` to
 (120-byte excerpt, evidence such as `output.log#poll=3`); the raw log keeps the
 full evidence path.
 
+## Chained commands and the step gate
+
+A shell command that chains steps with `;` or newlines reports only its last
+command's exit status. `ctest; write-summary` therefore reads as success when
+`ctest` fails and the summary exits 0. That is ordinary shell behavior, and it
+stays the default.
+
+Pass `require_successful_steps: true` on `bg_task_spawn` (or `bg_task` with
+`action:spawn`) to opt into a step gate:
+
+```json
+{ "command": "ctest --output-on-failure\nnpm run report", "require_successful_steps": true }
+```
+
+The gate is a bash `errexit` contract, not shell parsing: the command runs under
+`set -e`, so its first unhandled failing step ends the task with that step's
+exit code and the remaining steps do not run. That covers the same list, shell
+functions and subshells, and it is why a summary command
+after a failed `ctest` can no longer turn the task green. A failure the command
+handles itself (`|| true`, `if`/`while`/`until` conditions, `!`, `&&`/`||`
+lists) is not a gate failure, and neither is a failing process substitution
+whose status bash discards. Status reports the real process exit with
+`(step gate)` plus the failing step:
+
+```text
+exit=8 (step gate)
+step gate: ctest --output-on-failure exited 8; the shell stopped at that step
+```
+
+A command that switches errexit off (`set +e`) keeps a different own exit; when
+that exit is 0 the gate still fails the task with the failing step's code and
+the status says so (`the shell's own exit was 0`).
+
+The gate is refused (and the task is not started) with `shell:false`, whose
+argv already reports the real exit code, and with structured `ssh`, whose
+command runs under remote semantics the local gate cannot observe. It applies
+to spawns, not to watch checks: a check is one polled command whose own exit
+code is the outcome. Limits inherited from bash's own errexit rules: assignment
+builtins such as `local` and `export` mask a command substitution's status.
+Bash also clears errexit inside command substitutions by default, so
+`x=$(false; echo summary)` can still succeed. A command that disables errexit
+and clears the ERR trap can bypass the gate, and
+`exec` replaces the shell before the gate can decide.
+
 ## When To Use
 
 Use this package for shell commands that need logs, status, cancellation, or completion notifications across a Pi turn.

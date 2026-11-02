@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendLine, appendTaskOutput, appendWatchResult, retainLogTail, resolveMaxLogBytes } from "./logs.js";
 import { evaluateCondition, validateCondition } from "./conditions.js";
-import { processExists, runCommandOnce, spawnCommand, stopProcessGroup } from "./process.js";
+import { parseStepGateFailure, processExists, runCommandOnce, spawnCommand, STEP_GATE_COMMAND_ENV, stepGateScript, stopProcessGroup } from "./process.js";
 import { currentProcessStartToken, readProcessStartToken } from "./process-identity.js";
 import { DEFAULT_TMUX_BOOTSTRAP_TIMEOUT_MS, expandSshRemoteTaskPreset } from "./remote-task-preset.js";
 import type { RemoteRunner, ResolvedSshRemoteTask } from "./remote-task-preset.js";
@@ -23,6 +23,7 @@ import type {
   FirstWatchCheck,
   RemoteTaskParams,
   SshConnectionParams,
+  StepGateFailure,
   TerminalResult,
 } from "./types.js";
 import { observeTaskStallAttention } from "./stall-attention.js";
@@ -171,6 +172,12 @@ export interface SpawnTaskParams extends CommandSpec, TaskIntentParams {
   callback?: boolean;
   timeout_seconds?: number;
   max_log_bytes?: number;
+  /**
+   * Opt-in step gate (#619): run the command under bash errexit, so the first
+   * unhandled failing step ends the task with that step's exit code and a later
+   * command cannot mask it.
+   */
+  require_successful_steps?: boolean;
   ssh?: SshConnectionParams;
   remote?: RemoteTaskParams;
 }
@@ -183,6 +190,12 @@ export interface WatchTaskParams extends CommandSpec, TaskIntentParams {
   max_log_bytes?: number;
   success_when: Condition;
   failure_when?: Condition;
+  /**
+   * Rejected (#619): a watch check is one polled command whose own exit code is the
+   * outcome, so the step gate cannot apply. Accepted in the shared schema only where
+   * the same wrapper also spawns.
+   */
+  require_successful_steps?: boolean;
   /** Consecutive blind checks before the watch is flagged (#359). Default 3; 0 turns it off. */
   blind_checks?: number;
   ssh?: SshConnectionParams;
@@ -206,6 +219,46 @@ export interface TaskRuntimeDependencies {
  */
 function withCommandPolicy(meta: BackgroundTaskMeta, seconds: number | undefined): BackgroundTaskMeta {
   return seconds === undefined ? meta : { ...meta, commandTimeoutSeconds: seconds };
+}
+
+/**
+ * The step gate applies to a shell command only (#619). A direct argv launch already
+ * reports the real exit code, and a structured SSH command runs under remote
+ * semantics the local gate cannot observe, so both are refused rather than silently
+ * ignored: a gate that quietly does nothing is the masking bug it exists to fix.
+ */
+function stepGateRefusal(params: SpawnTaskParams): string | undefined {
+  if (params.require_successful_steps !== true) return undefined;
+  if (params.shell === false) {
+    return "Invalid step gate: require_successful_steps needs a shell command; argv with shell:false already reports the real exit code. The task was not started.";
+  }
+  if (!params.command || params.command.trim().length === 0) {
+    return "Invalid step gate: require_successful_steps needs a non-empty shell command. The task was not started.";
+  }
+  if (params.ssh) {
+    return "Invalid step gate: require_successful_steps is local-only and cannot observe a structured ssh command. The task was not started.";
+  }
+  return undefined;
+}
+
+/** Read the gate verdict bash wrote at the end of the task log (#619). */
+function readStepGateFailure(meta: BackgroundTaskMeta): StepGateFailure | undefined {
+  try {
+    return parseStepGateFailure(readFileSync(meta.logPath, "utf8"), meta.id);
+  } catch {
+    // A swept temp dir or an unreadable log costs the reason, never the verdict.
+    return undefined;
+  }
+}
+
+/**
+ * The command actually spawned for a gated task: bash runs the gate script and
+ * `eval`s the operator's own command from `STEP_GATE_COMMAND_ENV`. Meta keeps the
+ * operator's command verbatim, so status, log, and recovery never show the wrapper.
+ */
+function withStepGate(spec: CommandSpec, id: string, gated: boolean): CommandSpec {
+  if (!gated) return spec;
+  return { ...spec, command: stepGateScript(id), env: { ...spec.env, [STEP_GATE_COMMAND_ENV]: spec.command! } };
 }
 
 function persistedCommandCapSeconds(meta: BackgroundTaskMeta): number | undefined {
@@ -238,6 +291,10 @@ export function spawnTask(
   // Resolved before any task directory, log, or metadata exists so a blocked
   // launch leaves nothing behind. Structured SSH must also honor launch restrictions.
   const intent = readTaskIntent(params);
+  // A gate that could only be silently ignored is refused before any task state exists (#619).
+  const stepGateRefused = stepGateRefusal(params);
+  if (stepGateRefused) throw new Error(stepGateRefused);
+  const stepGated = params.require_successful_steps === true;
   const cwd = params.cwd ?? defaultCwd;
   const sandboxPlan = resolveForegroundSandboxPlan(pi, !!params.ssh, params);
   // The application/shell switches apply before any task state exists, so a
@@ -260,7 +317,8 @@ export function spawnTask(
       remote: params.remote,
     }, dependencies.remoteRunner)
     : undefined;
-  const commandSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const operatorSpec: CommandSpec = remoteTask?.commandSpec ?? { ...params, cwd, shell: params.shell ?? true };
+  const commandSpec = withStepGate(operatorSpec, id, stepGated);
   const sandboxNotices: string[] = [];
   const launchSpec = remoteTask
     ? commandSpec
@@ -299,6 +357,7 @@ export function spawnTask(
     command: params.command,
     argv: commandSpec.argv,
     shell: commandSpec.shell,
+    ...(stepGated ? { requireSuccessfulSteps: true } : {}),
     cwd,
     env: params.env,
     launchArgv: launchArgvOf(commandSpec, launchSpec),
@@ -328,8 +387,17 @@ export function spawnTask(
       if (!latest) return;
       enforceLogRetention(latest);
       if (isTerminalStatus(latest.status)) return;
-      if (exitCode !== 0) recordExitFailure(latest, "execution", `Process exited with code ${exitCode ?? "unknown"}${signal ? ` (${signal})` : ""}`, exitCode, "close", { at: Date.now() });
-      else {
+      // The gate's own marker names the failing step (#619). It never decides the
+      // verdict: bash errexit already exits with that step's code (and the gate's EXIT
+      // trap forces it when a command disabled errexit), so a missing marker loses the
+      // reason, not the failure.
+      const stepGateFailure = latest.requireSuccessfulSteps ? readStepGateFailure(latest) : undefined;
+      const detail = `Process exited with code ${exitCode ?? "unknown"}${signal ? ` (${signal})` : ""}`;
+      if (exitCode !== 0) {
+        recordExitFailure(latest, "execution", stepGateFailure
+          ? `${detail}; step gate: ${stepGateFailure.command || "a chained step"} exited ${stepGateFailure.stepExitCode}`
+          : detail, exitCode, "close", { at: Date.now() });
+      } else {
         recoverFailure(latest, "execution", "close");
         recoverDeclaredOperation(latest);
       }
@@ -337,6 +405,7 @@ export function spawnTask(
       latest.endedAt = Date.now();
       latest.lastExitCode = exitCode;
       latest.lastSignal = signal;
+      if (stepGateFailure) latest.stepGateFailure = stepGateFailure;
       latest.result = { exitCode, signal };
       writeMeta(latest);
       void notifyTerminal(pi, latest, getActiveSession);
@@ -533,6 +602,9 @@ export function startWatchTask(
   for (const [name, condition] of [["success_when", params.success_when], ["failure_when", params.failure_when]] as const) {
     const error = condition && validateCondition(condition);
     if (error) throw new Error(`${name}: ${error}`);
+  }
+  if (params.require_successful_steps === true) {
+    throw new Error("Invalid step gate: require_successful_steps is for a spawned shell command; a watch poll reports its own exit code as the outcome. The task was not started.");
   }
   const blindChecks = readBlindChecks(params.blind_checks);
   const intent = readTaskIntent(params);
