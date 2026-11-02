@@ -498,10 +498,12 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
 /**
  * Stop is the one tool with a UI side effect (widget redraw after a kill);
  * the caller injects it so the factory stays loadable without a TUI context.
+ * The hook receives the run id so the host can also queue the run's one
+ * terminal completion callback (#624).
  */
 export function subagentStopTool(
     Type: TypeModule,
-    deps: { onStopped?: () => void } = {},
+    deps: { onStopped?: (id: string) => void } = {},
 ): ToolDefinition {
     return {
         name: "subagent_stop",
@@ -522,7 +524,7 @@ export function subagentStopTool(
             if (outcome.action === "not-running") {
                 return text(`Run ${p.id} is not running (${outcome.status}).`);
             }
-            deps.onStopped?.();
+            deps.onStopped?.(p.id);
             if (outcome.action === "finalized") {
                 return text(`Resolved orphaned subagent ${p.id} → ${outcome.status}.`);
             }
