@@ -23,7 +23,7 @@ register(new URL("./pi_host_stub_hooks.mjs", import.meta.url));
 const HERMETIC_TMPDIR = mkdtempSync(join(tmpdir(), "subagent-timing-"));
 process.env.TMPDIR = HERMETIC_TMPDIR;
 
-const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive } = await import("../index.ts");
+const { default: betterSubagents, progressCacheIdsForTests, isHealthTickerActive, forgetProgressCacheForTests } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, runDir } = await import("../registry.ts");
 const { killProcessTree } = await import("../spawn.ts");
@@ -641,6 +641,76 @@ describe("harness timing: stuck wake", () => {
                 assert.equal(wakes(h, "stuck").length, 2, "a new stuck spell after progress wakes again");
                 await reap(run);
             } finally { h.shutdown(); }
+        });
+    });
+});
+
+describe("harness timing: a reload whose bounded log read lost the running call (#620)", () => {
+    // A child log past the 32 MiB read window. The window's leading partial line is
+    // dropped, so nothing before it — including a running call's start — is visible.
+    const LOST_WINDOW = "x".repeat(33 * 1024 * 1024) + "\n";
+    const startCall = (id) => ({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: { command: "pnpm build" } });
+    const endCall = (id) => ({ type: "message_end", message: { role: "toolResult", toolCallId: id, toolName: "bash", isError: false, timestamp: Date.now(), content: [] } });
+
+    it("still treats the silent command as waiting, not stuck, and resumes detection once it ends", async () => {
+        await withFakeClock(async () => {
+            const first = makeHarness();
+            const run = await spawnRun(first, { deadline_minutes: 0, max_minutes: 0, stuck_minutes: 0.002 });
+            let second;
+            try {
+                appendEvents(run.id, [startCall("long-build")]);
+                await tick();
+                assert.equal(readMeta(run.id).timing.inFlight?.id, "long-build", "the parent records the running call durably");
+                appendFileSync(join(runDir(run.id), "output.log"), LOST_WINDOW);
+                forgetProgressCacheForTests();
+                second = makeHarness();
+                await second.handlers.get("session_start")({}, second.ctx);
+                await sleep(200);
+                await tick();
+                assert.equal(wakes(second, "stuck").length, 0, "a rebuild from the log tail is not evidence of no progress");
+                assert.equal(readMeta(run.id).status, "running");
+                appendEvents(run.id, [endCall("long-build")]);
+                await tick();
+                assert.equal(readMeta(run.id).timing.inFlight, undefined, "the record is cleared by the call's own result");
+                assert.equal(wakes(second, "stuck").length, 0, "the call's own duration is a pause, not silence");
+                await sleep(200);
+                await tick();
+                await waitFor(() => wakes(second, "stuck").length === 1);
+                assert.equal(wakes(second, "stuck").length, 1, "a full window of real silence after the call still wakes the parent");
+            } finally {
+                second?.shutdown();
+                await reap(run);
+                first.shutdown();
+            }
+        });
+    });
+
+    it("keeps the deadline hold for a running call whose start the rebuilt log window lost", async () => {
+        await withFakeClock(async () => {
+            const first = makeHarness();
+            const run = await spawnRun(first, { deadline_minutes: 0.001, grace_minutes: 10, max_minutes: 0, stuck_minutes: 0 });
+            let second;
+            try {
+                appendEvents(run.id, [startCall("long-build")]);
+                await tick();
+                await untilSteerRequested(run.id);
+                assert.equal(readMeta(run.id).timing.inFlight?.id, "long-build", "the call is recorded before the deadline");
+                rewindTiming(run.id, (timing) => ({ steerRequestedAt: timing.steerRequestedAt - 11 * MINUTE }));
+                appendFileSync(join(runDir(run.id), "output.log"), LOST_WINDOW);
+                forgetProgressCacheForTests();
+                second = makeHarness();
+                await second.handlers.get("session_start")({}, second.ctx);
+                await tick();
+                const meta = readMeta(run.id);
+                assert.equal(meta.status, "running", "the steer still waits behind the running call");
+                assert.equal(meta.timing.stopReason, undefined, "not stopped mid-call");
+                const result = (await second.tools.get("subagent_result").execute("x", { id: run.id }, undefined, undefined, second.ctx)).content[0].text;
+                assert.match(result, /once the message reaches it/);
+            } finally {
+                second?.shutdown();
+                await reap(run);
+                first.shutdown();
+            }
         });
     });
 });
