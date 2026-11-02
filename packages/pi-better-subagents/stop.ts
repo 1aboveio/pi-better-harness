@@ -31,6 +31,8 @@ import { realProcessProbe, type ProcessProbe } from "./health.ts";
 import { parseRunForLifecycle } from "./parse.ts";
 import {
     effectiveStatus,
+    launchAttemptInProgress,
+    purgeAbandonedLaunch,
     readMeta,
     writeMeta,
     type RunMeta,
@@ -40,7 +42,13 @@ import { killProcessTree } from "./spawn.ts";
 export type StopOutcome =
     | { action: "stopped"; id: string }
     | { action: "finalized"; id: string; status: "completed" | "failed" | "lost" }
-    | { action: "not-running"; id: string; status: string };
+    | { action: "not-running"; id: string; status: string }
+    | { action: "purged"; id: string }
+    /**
+     * The id is not debris right now: a concurrent launch either published its
+     * metadata or is still preparing it. Nothing was removed.
+     */
+    | { action: "preserved"; id: string; status: string };
 
 export interface StopDeps {
     /** OS process probe; defaults to the real probe. Tests inject fakes. */
@@ -163,11 +171,29 @@ function cleanupOrphanedRun(meta: RunMeta, probe: ProcessProbe, now: number): St
  *   otherwise reread logs and finalize completed/failed/lost.
  * - other statuses → not-running (on-disk record untouched).
  *
+ * An id with no metadata is either unknown or an abandoned launch record (a
+ * launch that never wrote `meta.json` and never started a child). The latter is
+ * purged, so the operator can clear launch debris (#623) without waiting for the
+ * sweep's grace period. A concurrent launch that owns the record — published, or
+ * still preparing under its claim — is preserved, never deleted (#623 R1).
+ * Anything else stays an unknown id.
+ *
  * Throws on an unknown id (same contract as the stop tool).
  */
 export function stopRun(id: string, deps: StopDeps = {}): StopOutcome {
     const meta = readMeta(id);
-    if (!meta) throw new Error(`Unknown run id: ${id}`);
+    if (!meta) {
+        const purge = purgeAbandonedLaunch(id);
+        if (purge === "purged") return { action: "purged", id };
+        // The purge re-checks under the run's metadata lock, so a launch may have
+        // become visible while we waited. Preserve it and say what it is.
+        const published = readMeta(id);
+        if (published) return { action: "preserved", id, status: effectiveStatus(published) };
+        if (purge === "retained" || launchAttemptInProgress(id)) {
+            return { action: "preserved", id, status: "launching" };
+        }
+        throw new Error(`Unknown run id: ${id}`);
+    }
     const probe = deps.probe ?? realProcessProbe;
     const now = typeof deps.now === "function" ? deps.now() : Date.now();
     const status = effectiveStatus(meta);

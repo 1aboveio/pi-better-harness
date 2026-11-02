@@ -55,6 +55,29 @@ holding different cursors do not consume each other. A content-hash change retur
 returns `reset: "stale-cursor"` and the first page. Cursors carry a short
 digest of the resource, never the scope text.
 
+Offset-bearing cursors also carry a short integrity tag over their other
+fields plus two independent *position witnesses*: `v` digests the source
+snapshot at that offset, `w` (in the text pager) digests the snapshot, its
+length, and the offset again. Cursors are re-typed by the model, and a payload
+that still parsed after one mistyped character used to be read as a *replaced
+source*, which restarted at byte 0 and minted the same cursor again: the caller
+could never reach the rest of the text (#617).
+
+A damaged payload now returns `reset: "cursor-corrupt"`, never
+`source-replaced` — that name claims the source changed, and it is reserved for
+an intact cursor whose digest no longer matches. The decoded offset is never
+trusted on the payload's word: the page resumes only when a witness recomputed
+from the **current** text proves that offset still belongs to the same snapshot
+(either witness surviving one damaged field is enough, so a single-character
+miscopy keeps advancing instead of looping on page 1). Otherwise — a replaced,
+grown, or shifted source, a damaged offset, or a cursor from before the
+witnesses existed — the page restarts at byte 0, so no unread text is skipped
+and an out-of-range offset cannot answer with an empty "end of text".
+
+Status cursors (`k: "s"`) are untagged: they hold no offset, a damaged one
+falls back to the current facts, and their payload competes with decision facts
+in 1 KiB status responses.
+
 ## Retained-file paging
 
 `pageRetainedFile(path, request)` pages raw retained bytes without skipping
@@ -87,6 +110,13 @@ unread ranges in the current snapshot.
   before the offset. Increment `generation` on replacement or same-inode
   compaction; the pre-offset sample also catches in-place rewrites that keep
   the head, size, and inode.
+- A cursor whose integrity tag does not match is reported as
+  `reset: "cursor-corrupt"`, never as `source-replaced`, and is never resumed:
+  both its offset and its direction (`a` append flag, `b` backward flag) come
+  from a payload that failed its integrity check. The pass restarts at its own
+  anchor — byte 0 forward, the newest retained byte for a backward pass — so a
+  hand-copied cursor cannot continue from an unproven position or flip the
+  direction of a tail read.
 - `discardedBytes` and `captureGaps` are disclosed on every page. They are not
   recoverable. Empty readable files have no gaps; missing or unreadable files
   return a `read` gap and never look like a healthy empty log.

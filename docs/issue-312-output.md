@@ -53,7 +53,13 @@ long failure section cannot starve them.
   missing task, and never same-process “legacy” evidence without `all:true`.
 - Every cursor (answer, raw, list, incident, status) binds a digest of its
   resource **and** the selected scope. Reusing a cursor under another scope
-  resets with `reset=stale-cursor`.
+  resets with `reset=stale-cursor`. Answer, raw, and incident page cursors also
+  carry an integrity tag over their other fields and two independent witnesses
+  of their position in the source: a hand-copied cursor is reported as
+  `reset=cursor-corrupt`, never as `source-replaced`, and it resumes only when
+  a witness recomputed from the current source proves its offset. Otherwise it
+  restarts at the first byte/row, so a replaced source, a shifted offset, or a
+  cursor from before the witnesses existed never skips unread content (#617).
 
 ## Cursors
 
@@ -94,7 +100,17 @@ Every omission is one of:
    `gap retention` with byte counts (each poll result counted once). Not
    recoverable. Do not claim full-history recovery.
 4. **Cursor invalidated** — `reset=stale-cursor` / `source-replaced` /
-   `compacted` (including same-inode retention and in-place rewrites).
+   `compacted` (including same-inode retention and in-place rewrites), or
+   `reset=cursor-corrupt` when the cursor payload itself failed its integrity
+   check. Corruption is never reported as a replaced source. A corrupt cursor
+   resumes only where a witness recomputed from the current source proves its
+   position, so a single mistyped character does not loop on page 1; every
+   other case restarts at the first byte or row rather than skipping unread
+   evidence. Retained-file cursors are never resumed when damaged, because
+   their offset *and* their direction (`a` append, `b` backward) are equally
+   unproven: the pass restarts at byte 0, or at the newest retained byte for a
+   tail read. Incident cursors (`i2.`) use the prefix as their format version
+   and carry the same pair of witnesses; `i1.` cursors reset as stale.
 
 A trailing, incomplete UTF-8 sequence in a retained file is withheld
 (`pendingBytes=…`) until the writer completes it. Capture never keeps a

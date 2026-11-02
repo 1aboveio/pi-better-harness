@@ -15,7 +15,7 @@
 import type { RunTiming } from "./timing.ts";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -285,6 +285,14 @@ export function promptPathFor(id: string): string {
 function metaPathFor(id: string): string {
     return join(runDir(id), "meta.json");
 }
+
+/**
+ * How long a launch attempt that never produced a child is kept before a sweep
+ * reclaims it. Launch preparation takes seconds; the grace only exists so a
+ * paused or unusually slow launch in another process is never reclaimed under
+ * it. A record this old has no metadata and no log, so it can never become a run.
+ */
+export const ABANDONED_LAUNCH_GRACE_MS = 60 * 60 * 1000;
 
 /**
  * Parent-authored provenance for a run launched on the trusted task runtime (#325).
@@ -1135,6 +1143,12 @@ export interface RunRecordIndex {
     metas: RunMeta[];
     /** Run directories whose metadata is missing, unreadable, or corrupt. */
     unreadable: Array<{ id: string; detail: string }>;
+    /**
+     * Launch attempts that never produced a supervised run (no metadata, no
+     * log). They are not runs, cannot be read or finalized, and are reclaimed
+     * by the launch-debris sweep or an explicit `subagent_stop`.
+     */
+    abandoned: string[];
     /** The runs directory itself could not be read (not "no runs"). */
     indexError?: string;
 }
@@ -1147,6 +1161,187 @@ export function runMetaShapeProblem(meta: unknown, id: string): string | undefin
     if (typeof value.status !== "string" || !value.status) return "missing status";
     if (typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt)) return "missing startedAt";
     return undefined;
+}
+
+/** A run directory a launch created but never turned into a supervised run. */
+export interface AbandonedLaunchRecord {
+    id: string;
+    /** Directory mtime (ms), used as the launch attempt's age. */
+    mtimeMs: number;
+}
+
+/**
+ * Durable claim a launch writes into its run directory before it prepares
+ * anything (#623). It states WHO owns the attempt while no metadata exists, so a
+ * concurrent purge can tell a live launch from the debris of a dead one.
+ *
+ * It is a plain file rather than the metadata lock because the claim must cover
+ * the whole preparation (workspace, sandbox control dir, session dir, spawn and
+ * metadata publication), not only the metadata write. It is removed at the same
+ * moment `meta.json` becomes the record of the run, and it is never a second
+ * registry: nothing reads it as run evidence.
+ */
+export interface LaunchAttemptClaim {
+    version: 1;
+    id: string;
+    pid: number;
+    /** Start-identity token of the claiming pi; only equality is meaningful. */
+    start?: string;
+    at: number;
+}
+
+function launchAttemptClaimPath(id: string): string {
+    return join(runDir(id), ".launch-attempt.json");
+}
+
+/** Claim this run directory for a launch in progress. The directory must exist. */
+export function recordLaunchAttempt(id: string): void {
+    const claim: LaunchAttemptClaim = { version: 1, id, pid: process.pid, at: Date.now() };
+    const start = processStartToken(process.pid);
+    if (start) claim.start = start;
+    writeFileSync(launchAttemptClaimPath(id), JSON.stringify(claim), { mode: 0o600 });
+}
+
+/** Drop the claim once `meta.json` is the run's record. Best effort. */
+export function clearLaunchAttempt(id: string): void {
+    try {
+        unlinkSync(launchAttemptClaimPath(id));
+    } catch { /* no claim, or the attempt's directory is already gone */ }
+}
+
+/**
+ * Whether a launch claim is still owned by a live process. Conservative for one
+ * direction only: an unreadable, malformed, or token-less claim counts as live,
+ * so the attempt's artifacts are preserved. A dead pid, or a pid whose start
+ * token no longer matches (recycled), is a dead attempt.
+ */
+function launchAttemptClaimIsLive(id: string): boolean {
+    let raw: string;
+    try {
+        raw = readFileSync(launchAttemptClaimPath(id), "utf-8");
+    } catch (error) {
+        return errnoOf(error) !== "ENOENT";
+    }
+    let parsed: Partial<LaunchAttemptClaim> | undefined;
+    try {
+        parsed = JSON.parse(raw) as Partial<LaunchAttemptClaim>;
+    } catch {
+        return true;
+    }
+    if (!parsed || typeof parsed !== "object") return true;
+    const pid = parsed.pid;
+    if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
+    if (!processExists(pid)) return false;
+    const start = parsed.start;
+    if (typeof start !== "string" || start.length === 0) return true;
+    const current = cachedStartToken(pid);
+    // An unavailable token does not prove the pid is dead, so the claim stays live.
+    return current === undefined || current === start;
+}
+
+/**
+ * True when a launch is preparing this run id right now, so its directory must
+ * not be treated as debris. Unreadable state counts as in progress.
+ */
+export function launchAttemptInProgress(id: string): boolean {
+    if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) return false;
+    return launchAttemptClaimIsLive(id);
+}
+
+/**
+ * Read one run directory as an abandoned launch attempt, or `undefined`.
+ *
+ * A launch creates the directory, claims it, writes `prompt.md`, and prepares
+ * the sandbox `control/` dir before the child starts and `meta.json` is
+ * committed. When that preparation throws, or pi dies in that window, only
+ * those artifacts remain: no metadata (nothing was committed) and no
+ * `output.log` (the log is created at spawn and removed when the spawn itself
+ * fails). Such a directory was never a run: it has no owner, no status, no log
+ * and no result, and it can never gain any, so it must not be reported as
+ * unreadable run evidence forever.
+ *
+ * The rule is deliberately narrow in the other direction too. A live launch
+ * claim means the attempt is still being prepared and is never debris; a
+ * directory WITH a log is not debris either, because a child may have started
+ * and its output is real evidence; and a directory without the launch artifacts
+ * is left to the age sweep rather than guessed at.
+ */
+export function abandonedLaunchRecord(id: string): AbandonedLaunchRecord | undefined {
+    if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) return undefined;
+    let mtimeMs: number;
+    try {
+        mtimeMs = statSync(runDir(id)).mtimeMs;
+    } catch {
+        return undefined;
+    }
+    // Metadata absence is the claim of debris, so it is re-established as late as
+    // possible: the launch shape first, then every piece of run evidence.
+    if (!existsSync(promptPathFor(id)) && !existsSync(join(runDir(id), "control"))) return undefined;
+    if (launchAttemptClaimIsLive(id)) return undefined;
+    try {
+        statSync(metaPathFor(id));
+        return undefined;
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") return undefined;
+    }
+    try {
+        statSync(logPathFor(id));
+        return undefined;
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") return undefined;
+    }
+    return { id, mtimeMs };
+}
+
+export type AbandonedLaunchPurge =
+    /** The attempt's artifacts were removed. */
+    | "purged"
+    /** Not launch debris (a run record, a live launch, or something else entirely). */
+    | "not-debris"
+    /** It looked like debris, but a writer or an unavailable lock made removal unsafe. */
+    | "retained";
+
+/**
+ * Reclaim one abandoned launch attempt: its run directory, the per-run session
+ * directory a confined launch prepared, and the clone workspace it owned. Only
+ * paths named by the attempt's own id are removed (shared sessions and a
+ * caller-chosen `sandbox_dir` are never touched), exactly like a failed launch.
+ *
+ * Classification runs again inside the same per-run lock `writeMeta` publishes
+ * under, and the removal happens there, so a launch that commits metadata while
+ * the purger waits is preserved instead of deleted. A held or unavailable lock
+ * is a live writer, so it is preserved too. This closes the race the earlier
+ * shape-only rule lost (#623 review R1): no deletion of a live attempt's
+ * metadata or log, and no orphaned child left behind by a purge.
+ */
+export function purgeAbandonedLaunch(id: string): AbandonedLaunchPurge {
+    if (!abandonedLaunchRecord(id)) return "not-debris";
+    let outcome: AbandonedLaunchPurge = "retained";
+    try {
+        withRunMetaLock(id, (owns) => {
+            if (!owns()) throw new MetadataLockLost();
+            // Re-establish the negative evidence under the publication exclusion.
+            if (!abandonedLaunchRecord(id)) {
+                outcome = "not-debris";
+                return;
+            }
+            discardFailedLaunch(id, { sessionDir: join(sessionsDir(), id), workspaceDir: taskWorkspaceDir(id) });
+            outcome = "purged";
+        });
+    } catch {
+        // A live writer (or an unreadable run directory) is never safe to delete.
+        // A directory that disappeared meanwhile is no longer debris.
+        return abandonedLaunchRecord(id) ? "retained" : "not-debris";
+    }
+    if (outcome === "purged") {
+        try {
+            statSync(runDir(id));
+            outcome = "retained";
+        } catch (error) {
+            if (errnoOf(error) !== "ENOENT") outcome = "retained";
+        }
+    }
+    return outcome;
 }
 
 /**
@@ -1196,10 +1391,11 @@ export function listRunRecords(): RunRecordIndex {
         ids = readdirSync(join(baseDir(), "runs"));
     } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT") return { metas: [], unreadable: [], indexError: error instanceof Error ? error.message : String(error) };
+        if (code !== "ENOENT") return { metas: [], unreadable: [], abandoned: [], indexError: error instanceof Error ? error.message : String(error) };
     }
     const metas: RunMeta[] = [];
     const unreadable: Array<{ id: string; detail: string }> = [];
+    const abandoned: string[] = [];
     for (const id of ids) {
         const cached = metaCache.get(id);
         if (cached && cached.status !== "running" && cached.status !== "orphaned") {
@@ -1208,14 +1404,17 @@ export function listRunRecords(): RunRecordIndex {
         }
         const inspected = inspectRunMeta(id);
         if (inspected.kind === "ok") metas.push(inspected.meta);
-        else if (inspected.kind === "unreadable") unreadable.push({ id, detail: inspected.detail });
+        else if (inspected.kind === "unreadable") {
+            if (abandonedLaunchRecord(id)) abandoned.push(id);
+            else unreadable.push({ id, detail: inspected.detail });
+        }
     }
     const volatileIds = new Set(ids);
     for (const archived of listArchivedAttempts()) {
         if (!volatileIds.has(archived.id)) metas.push(archived);
     }
     metas.sort((a, b) => b.startedAt - a.startedAt);
-    return { metas, unreadable };
+    return { metas, unreadable, abandoned };
 }
 
 export function listMetasForParent(parentPid: number): RunMeta[] {

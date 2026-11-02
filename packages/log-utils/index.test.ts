@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
@@ -255,6 +256,221 @@ describe("pageVerbatimText", () => {
     assert.equal(page.nextCursor.includes(source.slice(0, 20)), false);
     const next = pageVerbatimText(source, { cursor: page.nextCursor, maxBytes: 8 * 1024, maxLines: 10 });
     assert.match(next.text, /^line-11/);
+  });
+});
+
+const CURSOR_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/**
+ * A cursor as the model re-types it: exactly one base64url character changed.
+ * Picks the first edit whose payload still parses as the same cursor kind and
+ * satisfies `accept`, which is the near-miss described in #617.
+ */
+function miscopiedCursor(
+  cursor: string,
+  kind: "t" | "f" | "s",
+  accept: (payload: Record<string, any>, original: Record<string, any>) => boolean,
+): string {
+  const prefix = "p1.";
+  const body = cursor.slice(prefix.length);
+  const original = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  for (let index = 0; index < body.length; index += 1) {
+    for (const replacement of CURSOR_ALPHABET) {
+      if (replacement === body[index]) continue;
+      const candidate = `${prefix}${body.slice(0, index)}${replacement}${body.slice(index + 1)}`;
+      let payload: Record<string, any>;
+      try {
+        payload = JSON.parse(Buffer.from(candidate.slice(prefix.length), "base64url").toString("utf8"));
+      } catch {
+        continue;
+      }
+      if (payload?.k === kind && accept(payload, original)) return candidate;
+    }
+  }
+  throw new Error("no single-character miscopy of this cursor satisfied the expectation");
+}
+
+/** The same cursor with one field rewritten: a still-parseable damaged payload. */
+function reencodedCursor(cursor: string, edit: (payload: Record<string, any>) => void): string {
+  const payload = JSON.parse(Buffer.from(cursor.slice(3), "base64url").toString("utf8"));
+  edit(payload);
+  return `${cursor.slice(0, 3)}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
+}
+
+function textDigest22(text: string): string {
+  return createHash("sha256").update(Buffer.from(text, "utf8")).digest("base64url").slice(0, 22);
+}
+
+/**
+ * A text cursor exactly as released versions minted it: the source digest and
+ * the offset, with none of the position witnesses this module adds now.
+ */
+function legacyTextCursor(text: string, offset: number): string {
+  return `p1.${Buffer.from(JSON.stringify({ k: "t", v: textDigest22(text), o: offset, n: utf8ByteLength(text) }), "utf8").toString("base64url")}`;
+}
+
+/** The integrity tag a released version minted: a SHA-256 of every other field. */
+function integrityTagOf(payload: Record<string, unknown>): string {
+  const { x: _ignored, ...rest } = payload;
+  return createHash("sha256").update(JSON.stringify(rest)).digest("base64url").slice(0, 6);
+}
+
+describe("cursor integrity (#617)", () => {
+  const answer = Array.from({ length: 120 }, (_, i) => `answer-${String(i).padStart(3, "0")} ${"z".repeat(40)}`).join("\n");
+  const resource = "answer:session-a:sa_1";
+
+  it("reports a miscopied answer cursor as cursor-corrupt and continues after its offset", () => {
+    const first = pageVerbatimText(answer, { maxBytes: 400, resource });
+    assert.equal(first.hasMore, true);
+    // The reported near-miss: only the whole-text digest changed, so the offset
+    // is still meaningful. It used to be read as a replaced source, restarting
+    // page 1 and minting the same cursor again — forever.
+    const miscopied = miscopiedCursor(first.nextCursor, "t", (p, o) => p.o === o.o && p.n === o.n && p.v !== o.v);
+    const page = pageVerbatimText(answer, { cursor: miscopied, maxBytes: 400, resource });
+    assert.equal(page.reset, "cursor-corrupt");
+    assert.equal(page.startByte, first.endByte, "a still-meaningful offset is reused");
+    assert.equal(page.text, pageVerbatimText(answer, { cursor: first.nextCursor, maxBytes: 400, resource }).text);
+    assert.notEqual(page.text, first.text, "the corrupted cursor must not replay page 1");
+    assert.notEqual(page.nextCursor, first.nextCursor, "it must not mint the page-1 cursor again");
+  });
+
+  it("reaches the end of the answer from a corrupted cursor the caller keeps miscopying", () => {
+    const first = pageVerbatimText(answer, { maxBytes: 400, resource });
+    let cursor: string | undefined = miscopiedCursor(first.nextCursor, "t", (p, o) => p.o === o.o && p.v !== o.v);
+    let rest = "";
+    for (let pages = 1; pages <= 100; pages += 1) {
+      const page = pageVerbatimText(answer, { cursor, maxBytes: 400, resource });
+      assert.equal(page.reset, pages === 1 ? "cursor-corrupt" : undefined, `page ${pages}`);
+      rest += page.text;
+      if (!page.hasMore) break;
+      cursor = page.nextCursor;
+      assert.notEqual(page.nextCursor, first.nextCursor);
+    }
+    assert.equal(first.text + rest, answer);
+  });
+
+  it("classifies a damaged scope tag as corrupt rather than as another scope", () => {
+    const first = pageVerbatimText(answer, { maxBytes: 400, resource });
+    const miscopied = miscopiedCursor(first.nextCursor, "t", (p, o) => p.r !== o.r && p.o === o.o);
+    const page = pageVerbatimText(answer, { cursor: miscopied, maxBytes: 400, resource });
+    assert.equal(page.reset, "cursor-corrupt");
+    assert.equal(page.startByte, 0);
+  });
+
+  it("keeps a pristine cursor's source replacement distinct from corruption", () => {
+    const first = pageVerbatimText("alpha-answer-body", { maxBytes: 8 });
+    const replaced = pageVerbatimText("omega-answer-body", { cursor: first.nextCursor, maxBytes: 8 });
+    assert.equal(replaced.reset, "source-replaced");
+    assert.equal(replaced.startByte, 0);
+    assert.equal(replaced.text, "omega-an");
+  });
+
+  it("still advances when only the second position witness is damaged", () => {
+    const first = pageVerbatimText(answer, { maxBytes: 400, resource });
+    const clean = pageVerbatimText(answer, { cursor: first.nextCursor, maxBytes: 400, resource });
+    const damaged = miscopiedCursor(first.nextCursor, "t", (p, o) => p.w !== o.w && p.o === o.o && p.v === o.v);
+    const page = pageVerbatimText(answer, { cursor: damaged, maxBytes: 400, resource });
+    assert.equal(page.reset, "cursor-corrupt");
+    assert.equal(page.startByte, clean.startByte);
+    assert.equal(page.text, clean.text, "the surviving witness proves the same position");
+  });
+
+  it("restarts at byte 0 when the cursor's offset itself is damaged", () => {
+    // A damaged offset must never be served: an offset pushed to the end used
+    // to answer "end of text, nothing omitted" while most of the text was
+    // still unread (#617 R1).
+    const first = pageVerbatimText(answer, { maxBytes: 400, resource });
+    const pageOne = pageVerbatimText(answer, { maxBytes: 400, resource });
+    const atEnd = reencodedCursor(first.nextCursor, (payload) => { payload.o = payload.n; });
+    const shifted = miscopiedCursor(first.nextCursor, "t", (p, o) => typeof p.o === "number" && p.o !== o.o);
+    for (const [label, damaged] of [["moved to the end", atEnd], ["moved by one", shifted]] as const) {
+      const page = pageVerbatimText(answer, { cursor: damaged, maxBytes: 400, resource });
+      assert.equal(page.reset, "cursor-corrupt", label);
+      assert.equal(page.startByte, 0, `${label}: restarts at byte 0`);
+      assert.equal(page.text, pageOne.text, `${label}: serves the first page, not a shifted one`);
+      assert.equal(page.hasMore, true, `${label}: the unread tail stays reachable`);
+      assert.notEqual(page.text, "", `${label}: never an empty end page`);
+    }
+  });
+
+  it("restarts a cursor with no witness instead of trusting its offset over a replaced source", () => {
+    const legacy = legacyTextCursor("alpha-answer-body", 8);
+    const legacyPage = pageVerbatimText("alpha-answer-body", { cursor: legacy, maxBytes: 8 });
+    assert.equal(legacyPage.reset, "cursor-corrupt");
+    assert.equal(legacyPage.startByte, 0, "an untagged cursor cannot prove its offset, so nothing is skipped");
+    assert.equal(legacyPage.text, "alpha-an");
+    const replaced = pageVerbatimText("omega-answer-body", { cursor: legacy, maxBytes: 8 });
+    assert.equal(replaced.reset, "cursor-corrupt");
+    assert.equal(replaced.startByte, 0);
+    assert.equal(replaced.text, "omega-an", "the replacement is shown from its first byte (#617 R1)");
+
+    // The intermediate format carried an integrity tag but no position witness.
+    // An intact tag must not be read as proof that the offset still applies.
+    const payload = { k: "t", v: textDigest22("alpha-answer-body"), o: 8, n: utf8ByteLength("alpha-answer-body") };
+    const taggedWithoutWitness = `p1.${Buffer.from(JSON.stringify({ ...payload, x: integrityTagOf(payload) }), "utf8").toString("base64url")}`;
+    const unproven = pageVerbatimText("alpha-answer-body", { cursor: taggedWithoutWitness, maxBytes: 8 });
+    assert.equal(unproven.reset, "cursor-corrupt");
+    assert.equal(unproven.startByte, 0, "an unproven offset restarts the page");
+    assert.equal(unproven.text, "alpha-an");
+  });
+
+  it("never resumes a damaged file cursor, because its offset and direction are both unproven", () => {
+    const path = join(tempDir(), "integrity.log");
+    writeFileSync(path, `${"row ".repeat(400)}\n`);
+    const resource = "raw:session-a:sa_1";
+    const first = pageRetainedFile(path, { maxBytes: 64, resource });
+    assert.equal(first.hasMore, true);
+    const clean = pageRetainedFile(path, { cursor: first.nextCursor, maxBytes: 64, resource });
+    for (const [label, damaged] of [
+      ["integrity tag", miscopiedCursor(first.nextCursor, "f", (p, o) => p.x !== o.x && p.o === o.o && p.i === o.i)],
+      ["boundary digest", miscopiedCursor(first.nextCursor, "f", (p, o) => p.w !== o.w)],
+    ] as const) {
+      const page = pageRetainedFile(path, { cursor: damaged, maxBytes: 64, resource });
+      assert.equal(page.reset, "cursor-corrupt", `damaged ${label} is corruption, not a replacement claim`);
+      assert.equal(page.startByte, 0, `damaged ${label} restarts at byte 0`);
+      assert.ok(!page.appendReady, `damaged ${label} must not hand back an append-ready cursor`);
+    }
+    // The intact cursor still continues where it left off.
+    assert.equal(clean.reset, undefined);
+    assert.equal(clean.startByte, first.endByte);
+  });
+
+  it("never continues a pass in a direction the cursor failed to prove", () => {
+    // A tail cursor carries its own direction. Damage to that bit (or to the
+    // append flag) must not silently continue the pass at an unproven offset:
+    // the page restarts from its own anchor and reports the corruption, so no
+    // unread byte becomes unreachable (#617 R1, #618).
+    const path = join(tempDir(), "integrity-direction.log");
+    const source = Array.from({ length: 60 }, (_, i) => `line-${String(i).padStart(3, "0")} ${"y".repeat(20)}`).join("\n");
+    writeFileSync(path, source);
+    const resource = "raw:session-a:sa_1";
+    const tail = pageRetainedFile(path, { maxBytes: 200, resource, direction: "backward" });
+    assert.equal(tail.direction, "backward");
+    assert.equal(tail.hasMore, true);
+    const damagedTail = miscopiedCursor(tail.nextCursor, "f", (p, o) => p.b !== o.b && p.o === o.o && p.i === o.i);
+    const page = pageRetainedFile(path, { cursor: damagedTail, maxBytes: 200, resource });
+    assert.equal(page.reset, "cursor-corrupt");
+    assert.notEqual(page.startByte, tail.startByte, "the damaged offset is not resumed");
+    assert.equal(page.startByte, 0, "a forward restart starts at byte 0");
+    // Nothing is lost: paging forward from the restart reaches the newest byte.
+    let cursor: string | undefined = page.nextCursor;
+    let furthest = page.endByte;
+    for (let pages = 0; pages < 100 && cursor; pages += 1) {
+      const next = pageRetainedFile(path, { cursor, maxBytes: 200, resource });
+      furthest = Math.max(furthest, next.endByte);
+      cursor = next.hasMore ? next.nextCursor : undefined;
+    }
+    assert.equal(furthest, Buffer.byteLength(source), "the whole retained file stays reachable");
+
+    // The append flag flipped into a direction bit: the pass restarts at the
+    // newest retained byte rather than resuming at the unproven offset.
+    const end = pageRetainedFile(path, { maxBytes: 64 * 1024, resource });
+    assert.equal(end.appendReady, true);
+    const damagedAppend = miscopiedCursor(end.nextCursor, "f", (p, o) => p.b === 1 && p.a === undefined && p.o === o.o);
+    const appended = pageRetainedFile(path, { cursor: damagedAppend, maxBytes: 200, resource });
+    assert.equal(appended.reset, "cursor-corrupt");
+    assert.equal(appended.endByte, appended.totalBytes, "restarts at the newest retained byte");
+    assert.match(appended.text, /line-059 /, "the newest page is delivered, not a page from the wrong end");
   });
 });
 

@@ -386,6 +386,7 @@ export function subagentListTool(Type: TypeModule, baseSession: SubagentToolSess
                 scopeKey,
                 statusesKey,
                 unreadable: index.unreadable,
+                abandonedLaunches: index.abandoned,
                 indexError: index.indexError,
                 incidentRuns,
             }));
@@ -515,7 +516,10 @@ export function subagentStopTool(
         description:
             "Stop a running or orphaned subagent. Terminates identifiable related " +
             "process-group members when present; otherwise finalizes from log " +
-            "evidence (completed/failed) or records lost.",
+            "evidence (completed/failed) or records lost. " +
+            "An abandoned launch record (a launch that never wrote metadata and never " +
+            "started a child) is removed instead; a launch that is still preparing or " +
+            "published concurrently is preserved.",
         promptSnippet: "Stop a running or orphaned background subagent",
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
@@ -525,6 +529,19 @@ export function subagentStopTool(
             // Shared stop semantics with the TUI navigator close action (#44/#68):
             // stopRun rereads meta + effective status from disk before acting.
             const outcome = stopRun(p.id);
+            if (outcome.action === "purged") {
+                // No run record exists, so the stop hook's completion half is a
+                // no-op (#624); the widget/ticker refresh still applies.
+                deps.onStopped?.(p.id);
+                return text(`Removed abandoned launch record ${p.id} (no run metadata was written, so no child ever ran).`);
+            }
+            if (outcome.action === "preserved") {
+                // Nothing stopped: a live run owes no terminal completion, so the
+                // stop hook is deliberately not fired here (#624).
+                return text(outcome.status === "launching"
+                    ? `Preserved ${p.id}: a launch is still preparing it (no metadata yet), so nothing was removed. Retry after it publishes, or after it fails.`
+                    : `Preserved ${p.id}: a concurrent launch published this run (${outcome.status}), so nothing was removed. Call subagent_stop again to stop the run.`);
+            }
             if (outcome.action === "not-running") {
                 return text(`Run ${p.id} is not running (${outcome.status}).`);
             }
