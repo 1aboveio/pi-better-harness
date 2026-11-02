@@ -86,6 +86,8 @@ Do not use the bundle when you only need one extension; install that package dir
 - `pi-better-goal`: explicit triggers, pause/resume, and background-aware continuation.
 - Harness Outcome & Todo: session context and checklist progress, off until enabled in `/harness-settings`.
 
+[`pi-better-model-router`](packages/pi-better-model-router/README.md) provides configurable price-based routing between DeepSeek and Ollama Cloud. It is standalone, requires Pi's virtual-model API (tested with Pi 1.4.0), and is not included in the meta package.
+
 `pi-better-read-aloud` lives in this repo but is not published or included in the meta package yet.
 
 ## Compatibility

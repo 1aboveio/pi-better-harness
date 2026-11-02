@@ -58,6 +58,7 @@ The package workspaces are:
 | `packages/pi-better-plan` | retired private archive | no | no |
 | `packages/pi-better-server` | `pi-better-server` | yes | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
+| `packages/pi-better-model-router` | `pi-better-model-router` | yes | no |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
 | `packages/sandbox-diagnostics` | internal workspace, vendored into sandbox consumers | no | no |
