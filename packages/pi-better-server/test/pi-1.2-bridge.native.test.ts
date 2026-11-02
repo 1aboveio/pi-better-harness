@@ -6,15 +6,16 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-// The workspace SDK may be 0.82. Opt in with the actual installed 1.2 CLI:
+// The workspace SDK may be 0.82. Opt in with an installed supported native CLI:
 // PI12_NATIVE_CLI=/path/to/pi node --import tsx --test test/pi-1.2-bridge.native.test.ts
 const cli = process.env.PI12_NATIVE_CLI;
+const nativeVersion = cli ? execFileSync(cli, ["--version"], { encoding: "utf8" }).trim() : "unavailable";
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 const fixture = fileURLToPath(new URL("./fixtures/pi-1.2-browse.mjs", import.meta.url));
 
 for (const mode of ["regular", "fullscreen"]) {
-  test(`native Pi 1.2 ${mode}: clean browse, Escape/failure restore, resize, attach`, { skip: !cli && "Set PI12_NATIVE_CLI to a Pi 1.2.0 CLI", timeout: 60_000 }, async t => {
-    assert.match(execFileSync(cli!, ["--version"], { encoding: "utf8" }), /^1\.2\.0\s*$/);
+  test(`native Pi ${nativeVersion} ${mode}: clean browse, Escape/failure restore, resize, attach`, { skip: !cli && "Set PI12_NATIVE_CLI to an installed Pi CLI", timeout: 60_000 }, async t => {
+    assert.match(execFileSync(cli!, ["--version"], { encoding: "utf8" }), /^\d+\.\d+\.\d+\s*$/);
     assert.equal(spawnSync("tmux", ["-V"]).status, 0, "native screen proof requires tmux");
     const root = mkdtempSync(join(tmpdir(), "pi12-browse-"));
     const socket = `pi12-browse-${process.pid}-${mode}`;
@@ -28,7 +29,7 @@ for (const mode of ["regular", "fullscreen"]) {
     const source = fileURLToPath(new URL("../src/remote-client/", import.meta.url));
     mkdirSync(join(root, "src", "remote-client"), { recursive: true });
     mkdirSync(join(root, "test", "fixtures"), { recursive: true });
-    for (const name of ["pi-1.2-bridge.ts", "session-browser.ts", "remote-progress.ts"]) cpSync(join(source, name), join(root, "src", "remote-client", name));
+    for (const name of ["pi-1.2-bridge.ts", "session-browser.ts", "remote-progress.ts", "connection-progress.ts"]) cpSync(join(source, name), join(root, "src", "remote-client", name));
     const stagedFixture = join(root, "test", "fixtures", "pi-1.2-browse.ts");
     cpSync(fixture, stagedFixture);
     let sdkRoot = dirname(realpathSync(cli!));
@@ -111,6 +112,6 @@ for (const mode of ["regular", "fullscreen"]) {
     assert.deepEqual(JSON.parse(readFileSync(join(root, "attach.json"), "utf8")), { attached: true, shutdowns: 1 });
     const attached = screen();
     for (const marker of [...local, ...footer, "startup help", "Pi can explain", "to interrupt"]) assert.equal(attached.includes(marker), false, attached);
-    t.diagnostic(`Pi 1.2.0 ${mode}: actual tmux screen clean at 100x32 and 42x18; Escape/failure restore; native attach clean`);
+    t.diagnostic(`Pi ${nativeVersion} ${mode}: actual tmux screen clean at 100x32 and 42x18; Escape/failure restore; native attach clean`);
   });
 }

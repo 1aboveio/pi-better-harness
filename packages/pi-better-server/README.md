@@ -107,7 +107,7 @@ A client that skips `hello` is still served.
 ## Native remote client (`/remote`, experimental)
 
 The native client provides an experimental VS Code Remote-style workflow:
-start ordinary local Pi **1.2.0** with this package loaded at startup, then run
+start ordinary local Pi **1.4.0** with this package loaded at startup, then run
 `/remote connect r5`, or `/remote connect localhost` for the daemon on this machine.
 The terminal keeps Pi's native local UI while the daemon owns
 the model, tools, workspace and session state. Your local conversation stays separate
@@ -261,8 +261,9 @@ optional workspace files can contain secrets: review the scope before approving.
 ### Compatibility and controls
 
 The native bridge in `src/remote-client/pi-1.2-bridge.ts` uses private Pi internals
-and supports **exactly Pi 1.2.0** on the local client. This is narrower than the
-daemon's general Pi compatibility. Client and daemon Pi major.minor versions must
+and imposes **no Pi version limits** on the local client. Required native methods
+are checked before the bridge patches or attaches the UI; missing capabilities
+produce an error that identifies the unsupported operation. Client and daemon Pi major.minor versions must
 match, and the remote daemon must be upgraded to code advertising
 `native-client-v1` and `session-browser-v1`. An older daemon is refused before the local runtime is replaced.
 This describes work in development, not a production release.
@@ -287,9 +288,10 @@ dependency lock. Supported remote targets are Linux and macOS on x64 and arm64.
 
 The server runs from an immutable release under
 `~/.pi-better-server/managed/releases/<build-id>`, outside `node_modules`. Each
-release contains private Node **24.14.1** and SDK **1.2.0** dependencies installed
+release contains private Node **24.14.1** and SDK **1.4.0** dependencies installed
 on the target. Node checksums and locked dependency integrity are verified. If
 target downloads fail, the client downloads and uploads verified archives instead.
+Automatic server setup targets Pi 1.4.0. Pi 1.2.0 clients require an explicitly configured matching server through `PI_SERVER_COMMAND`.
 Concurrent connectors share the same release only after integrity validation.
 Published releases are not overwritten to repair corruption.
 

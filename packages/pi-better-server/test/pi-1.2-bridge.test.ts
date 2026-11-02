@@ -246,13 +246,17 @@ async function captured() {
   return { ...f, controller: f.bridge.getPi12Bridge(f.manager)! };
 }
 
-test("unsupported versions and missing host members reject before patching the prototype", async () => {
-  const f = await fixture("1.2.1");
-  const init = f.InteractiveMode.prototype.init;
-  assert.throws(() => f.bridge.installPi12Bridge(), /running 1.2.1/);
-  assert.equal(f.InteractiveMode.prototype.init, init);
-  assert.equal(f.bridge.getPi12Bridge(f.manager), undefined);
-  const missing = await fixture();
+for (const version of ["0.82.1", "1.0.0", "1.1.9", "1.2.1", "1.4.0", "1.99.0", "2.0.0", "2.0.0-beta.1", "development"]) {
+  test(`Pi ${version} captures the native bridge when host members match`, async () => {
+    const f = await fixture(version);
+    f.bridge.installPi12Bridge();
+    await f.mode.init();
+    assert.ok(f.bridge.getPi12Bridge(f.manager));
+  });
+}
+
+test("missing host members reject before patching the prototype regardless of version", async () => {
+  const missing = await fixture("0.82.1");
   const before = missing.InteractiveMode.prototype.init;
   delete (missing.InteractiveMode.prototype as any).resetExtensionUI;
   assert.throws(() => missing.bridge.installPi12Bridge(), /lacks resetExtensionUI/);

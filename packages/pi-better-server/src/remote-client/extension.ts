@@ -1,5 +1,4 @@
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { VERSION } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { DaemonClient } from "../client.ts";
@@ -75,14 +74,16 @@ export async function chooseRemoteConnection(args: string, ui: Pick<ExtensionUIC
 export function registerRemoteClient(pi: ExtensionAPI, dependencies: RemoteClientDependencies = { resolveTarget: resolveNativeTarget }): void {
   registerLocalOwnershipGuard(pi);
   const localWork = observeLocalTransferWork(pi);
-  if (VERSION === "1.2.0") installPi12Bridge();
+  let bridgeError: unknown;
+  try { installPi12Bridge(); }
+  catch (error) { bridgeError = error; }
   pi.registerCommand("remote", {
     description: "Connect to a remote server and browse its sessions",
     getArgumentCompletions: (prefix) => argumentCompletions(prefix),
     handler: async (args, ctx) => {
       const ui = ctx.ui;
       try {
-        if (VERSION !== "1.2.0") throw new Error(`Native /remote currently requires Pi 1.2.0; this client is ${VERSION}. The local session is unchanged.`);
+        if (bridgeError) throw bridgeError;
         if (!ctx.hasUI) throw new Error("/remote requires Pi's interactive terminal UI");
         if (/^pull(?:\s|$)/.test(args.trim())) {
           const transfer = parseRemoteTransferArgs(args);

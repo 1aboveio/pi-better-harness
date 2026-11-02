@@ -51,7 +51,7 @@ function fixture(t: any) {
     else copyFileSync(privateNode.node, join(path, "node/bin/node"));
     const npm = join(path, "node/lib/node_modules/npm/bin"); mkdirSync(npm, { recursive: true });
     // npm is the external boundary here. The real pinned npm/SDK closure is exercised by the opt-in integration below.
-    writeFileSync(join(npm, "npm-cli.js"), `const fs=require('node:fs'); const p=require('node:path'); if (!process.argv.includes('--ignore-scripts')) throw Error('scripts allowed'); fs.appendFileSync(${JSON.stringify(trace)}, 'install\\n'); const d=p.join(process.cwd(),'node_modules/@earendil-works/pi-coding-agent');fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,'package.json'),JSON.stringify({name:'@earendil-works/pi-coding-agent',version:'1.2.0',type:'module',main:'index.js'}));fs.writeFileSync(p.join(d,'index.js'),"export const VERSION='1.2.0';");`);
+    writeFileSync(join(npm, "npm-cli.js"), `const fs=require('node:fs'); const p=require('node:path'); if (!process.argv.includes('--ignore-scripts')) throw Error('scripts allowed'); fs.appendFileSync(${JSON.stringify(trace)}, 'install\\n'); const d=p.join(process.cwd(),'node_modules/@earendil-works/pi-coding-agent');fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,'package.json'),JSON.stringify({name:'@earendil-works/pi-coding-agent',version:${JSON.stringify(artifact.build.piSdkVersion)},type:'module',main:'index.js'}));fs.writeFileSync(p.join(d,'index.js'),${JSON.stringify(`export const VERSION=${JSON.stringify(artifact.build.piSdkVersion)};`)});`);
     writeFileSync(join(path, "artifact.gz"), artifact.bytes);
     for (const name of ["installer.ts", "format.ts"]) copyFileSync(join(pkg, "scripts/private-runtime", name), join(path, name));
     return path;
