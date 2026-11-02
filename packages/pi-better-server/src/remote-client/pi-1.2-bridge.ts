@@ -1,7 +1,7 @@
-import { InteractiveMode, VERSION } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 
 /**
- * Private compatibility boundary for the native Pi 1.2.0 TUI only.
+ * Private compatibility boundary for native Pi TUIs, validated by host capabilities.
  * Install during extension loading, before InteractiveMode.init(). No second TUI
  * or local AgentSession is created for a remote connection.
  *
@@ -30,7 +30,6 @@ type Native = Record<PropertyKey, any>;
 type Method = (this: Native, ...args: any[]) => any;
 
 const KEY = Symbol.for("pi-better-server.pi-1.2-bridge.v1");
-const SUPPORTED_VERSION = "1.2.0";
 const blockedUi = {
   handleClearCommand: "/new",
   showUserMessageSelector: "/fork",
@@ -77,7 +76,7 @@ interface Installation {
 }
 
 function failure(message: string): Error {
-  return new Error(`Pi remote bridge requires native Pi ${SUPPORTED_VERSION}: ${message}`);
+  return new Error(`Pi remote bridge: ${message}`);
 }
 
 function object(value: unknown, label: string): Native {
@@ -99,14 +98,13 @@ function writable(value: Native, name: string): void {
 }
 
 function installation(): Installation | undefined {
-  return (InteractiveMode.prototype as Native)[KEY] as Installation | undefined;
+  return (InteractiveMode?.prototype as Native | undefined)?.[KEY] as Installation | undefined;
 }
 
 /** Idempotent across extension reloads, including jiti module cache replacement. */
 export function installPi12Bridge(): void {
-  if (VERSION !== SUPPORTED_VERSION) throw failure(`running ${VERSION}; /remote is unavailable. Local Pi is unchanged.`);
   if (installation()) return;
-  const prototype = InteractiveMode.prototype as Native;
+  const prototype = object(InteractiveMode?.prototype, "InteractiveMode.prototype");
   methods(prototype, requiredUi, "InteractiveMode.prototype");
   for (const name of ["init", "rebindCurrentSession"]) writable(prototype, name);
   const state: Installation = { managers: new WeakMap(), modes: new WeakMap() };
