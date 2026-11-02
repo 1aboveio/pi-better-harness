@@ -1117,8 +1117,14 @@ function reconcileAbandonedRuns(now: number = Date.now()): number {
 /** Completion batches own their retry timer; only supervision keeps this one alive. */
 function syncHealthTicker(): void {
     // A replaced instance never restarts supervision loops for a session it no
-    // longer owns; the live instance runs its own.
-    if (sessionTornDown) return;
+    // longer owns; the live instance runs its own. It must still STOP one that is
+    // already armed: a run this instance launched before teardown can finish
+    // afterwards, and returning early here left the interval supervising a
+    // session that no longer exists (#625).
+    if (sessionTornDown) {
+        stopHealthTicker();
+        return;
+    }
     if (needsMonitoring(listMetasForParent(process.pid)) || needsInterruptedSupervision()) ensureHealthTicker();
     else stopHealthTicker();
 }
@@ -2437,6 +2443,11 @@ export default function (pi: ExtensionAPI) {
             // This instance holds the exit observer for a run it actually
             // started; only it can finalize on the exit event (#625).
             directlySupervisedRunIds.add(id);
+            // A launch is live work of the current session, so an earlier
+            // teardown of this instance no longer applies. Without this the
+            // teardown latch would keep supervision from ever settling again
+            // for a run started after it (#625).
+            sessionTornDown = false;
             // Register exit supervision before any fallible post-spawn publication.
             // A failed metadata write must not strand a running child without a close
             // handler; the lease stays held until that child has actually exited.
