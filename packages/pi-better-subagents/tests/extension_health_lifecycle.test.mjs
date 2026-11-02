@@ -701,6 +701,124 @@ describe("interrupted supervision handoff (#625)", () => {
             }
         });
     });
+
+    /**
+     * A full process restart is the second half of #625: the old pi is gone, so
+     * the record is foreign to this process and its parent is provably dead.
+     * Nothing can adopt it silently, but an explicit interruption record must
+     * still recover a finished child from its own log instead of `lost`.
+     */
+    const seedRestartRun = ({ coherent = true, interrupted = true, originSession } = {}) => {
+        const id = nextRunId();
+        dirOnly.push(id);
+        mkdirSync(runDir(id), { recursive: true });
+        const events = [
+            { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "restart-survives answer" }] } },
+        ];
+        if (coherent) {
+            events.push({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "restart-survives answer" }] }] });
+        }
+        writeFileSync(join(runDir(id), "output.log"), events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+        writeMeta({
+            id, status: "running", pid: DEAD_PID, pgid: DEAD_PID, pidStartTime: "dead-token",
+            // The spawning pi exited: a different process (this test) owns the session now.
+            spawnPid: DEAD_PID, spawnPidStartTime: "dead-token",
+            cwd: tmpdir(), promptPreview: "restarted", startedAt: Date.now() - 5_000,
+            logPath: join(runDir(id), "output.log"), sessionId: `${id}-child`, callback: true,
+            ...(originSession ? { callbackOrigin: { cwd: tmpdir(), sessionId: originSession } } : {}),
+            ...(interrupted ? { supervisionInterruptedAt: Date.now() - 3_000, supervisionInterruptedReason: "quit" } : {}),
+        });
+        return id;
+    };
+
+    it("a full restart recovers a dead parent's interrupted run and completes its own conversation once", async () => {
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "resumed-conversation" });
+        const id = seedRestartRun({ originSession: "resumed-conversation" });
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            const meta = readMeta(id);
+            assert.equal(meta.status, "completed", "a finished child left by a dead parent is recovered, not reported lost");
+            assert.equal(meta.lifecycleClassification, "complete");
+            assert.equal(meta.exitCode, null, "no exit code is invented after the observer is gone");
+            assert.equal(meta.supervisionInterruptedReason, "quit", "the interruption record is kept as history");
+
+            await getCallbackBatcher(h.pi).flush();
+            const completions = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+            assert.equal(completions.length, 1, "the resumed conversation gets exactly one completion");
+            assert.match(completions[0].message.content, new RegExp(id));
+            assert.ok(readMeta(id).completionCallbackSentAt > 0);
+        } finally {
+            await h.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("a restart in a different conversation keeps the truth but never adopts the dead parent's callback", async () => {
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "different-conversation" });
+        const id = seedRestartRun({ originSession: "resumed-conversation" });
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            assert.equal(readMeta(id).status, "completed", "the on-disk result is recorded truthfully");
+            await getCallbackBatcher(h.pi).flush();
+            assert.equal(readMeta(id).completionCallbackSentAt, undefined);
+            const suppressed = readMeta(id);
+            assert.ok(suppressed.completionCallbackSuppressedAt > 0, "non-delivery is durably recorded, not silently dropped");
+            assert.match(suppressed.completionCallbackSuppressedReason, /origin session resumed-conversation does not match active session different-conversation/);
+            assert.equal(h.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0);
+        } finally {
+            await h.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("a restart supervises a dead parent's live child and only recovers it once it has finished", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness({ cwd: tmpdir(), sessionId: "live-writer" });
+            let run;
+            try {
+                run = await spawnRun(h);
+                // Same durable interruption record, but the child (writer) is alive:
+                // process evidence, not the log, decides.
+                writeMeta({
+                    ...readMeta(run.id), spawnPid: DEAD_PID, spawnPidStartTime: "dead-token",
+                    supervisionInterruptedAt: Date.now() - 3_000, supervisionInterruptedReason: "quit",
+                });
+                await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+                assert.equal(readMeta(run.id).status, "running", "a live child is never finalized from a partial log");
+                assert.equal(readMeta(run.id).lifecycleClassification, undefined);
+                assert.equal(realProcessProbe.pidExists(run.pid), true);
+                // The foreign interruption keeps this process supervising it,
+                // even though the owner-gated monitor would ignore it.
+                assert.equal(isHealthTickerActive(), true, "an interrupted foreign run is still supervised");
+
+                // The child finishes while the restarted session is up: its own
+                // coherent log is then the exit evidence, with no observer around.
+                appendFileSync(join(runDir(run.id), "output.log"),
+                    JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "finished after restart" }] }] }) + "\n");
+                killProcessTree(run.pid, "SIGKILL");
+                assert.equal(await waitFor(() => !realProcessProbe.pidExists(run.pid), { timeoutMs: 2_000 }), true);
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+                const recovered = readMeta(run.id);
+                assert.equal(recovered.status, "completed", `supervision recovered ${recovered.status}`);
+                assert.equal(recovered.lifecycleClassification, "complete");
+                assert.equal(recovered.exitCode, null, "no exit code is invented for a child nobody observed");
+            } finally {
+                if (run) await reapRun(run);
+                await h.shutdown({ reason: "quit" });
+            }
+        });
+    });
+
+    it("a hard-killed parent without an interruption record is not silently promoted to completed", async () => {
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "hard-crash" });
+        const id = seedRestartRun({ interrupted: false, coherent: true });
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            assert.equal(readMeta(id).status, "lost", "no interruption record means no recovery claim");
+            assert.equal(readMeta(id).lifecycleClassification, undefined);
+        } finally {
+            await h.shutdown({ reason: "quit" });
+        }
+    });
 });
 
 describe("AC9 — health ticker production lifecycle (fake clock)", () => {

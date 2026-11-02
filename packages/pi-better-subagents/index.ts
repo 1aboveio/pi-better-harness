@@ -979,6 +979,19 @@ function reconcileHealth(): void {
             deliverHealthCallback(pi, meta, meta.status, now);
         }
     }
+    // A restart leaves an explicitly interrupted child whose owning pi is gone
+    // (#625). Its record is foreign, so the owner-gated loops above never see it:
+    // finalize it from its own coherent log once the child itself is gone. This
+    // is the human's own interrupted work, not another session's live run, and
+    // `finalizeInterruptedRunFromLog` still requires all process evidence to be
+    // absent, so a live writer is never touched.
+    for (const summary of listMetas()) {
+        if (summary.status !== "running" && summary.status !== "orphaned") continue;
+        if (ownedByThisParent(summary) || !ownsInterruptedSupervision(summary)) continue;
+        const meta = readMeta(summary.id);
+        if (!meta || (meta.status !== "running" && meta.status !== "orphaned")) continue;
+        try { finalizeInterruptedRunFromLog(pi, meta, Date.now()); } catch { /* the next tick retries */ }
+    }
     // Completed runs can still have failed completion handoffs to retry.
     for (const summary of listMetasForParent(process.pid)) {
         if (!pi || !ownedByThisParent(summary) || summary.status === "running" || summary.status === "orphaned" || summary.status === "lost") continue;
@@ -1065,13 +1078,16 @@ function syncHealthTicker(): void {
     // A replaced instance never restarts supervision loops for a session it no
     // longer owns; the live instance runs its own.
     if (sessionTornDown) return;
-    if (needsMonitoring(listMetasForParent(process.pid))) ensureHealthTicker();
+    if (needsMonitoring(listMetasForParent(process.pid)) || needsInterruptedSupervision()) ensureHealthTicker();
     else stopHealthTicker();
 }
 
 /** Start the reconciliation loop if it isn't already running. */
 function ensureHealthTicker(): void {
-    if (sessionTornDown || healthTicker) return;
+    // Not gated on `sessionTornDown`: a spawn always means the current session is
+    // doing new work. Only `syncHealthTicker` — the path a late child finalizer
+    // takes — stays closed in a replaced instance.
+    if (healthTicker) return;
     healthTicker = setInterval(reconcileHealth, HEALTH_TICK_MS);
     healthTicker.unref?.(); // never keep the process alive on our account
 }
@@ -1604,13 +1620,43 @@ function finalizeInterruptedRunFromLog(
     return true;
 }
 
-/** Attempt log-evidence finalization for every interrupted current-parent run. */
+/**
+ * Does this process have to supervise this explicit interruption record (#625)?
+ *
+ * A run this parent launched is this session's own (#625 reload). A run left by
+ * a parent that is provably gone has no live owner at all — the restart case —
+ * so its recorded interruption is the only thing that can recover it. Anything
+ * else belongs to a live pi and is never adjudicated here.
+ */
+function ownsInterruptedSupervision(summary: Pick<RunMeta, "spawnPid" | "spawnPidStartTime" | "supervisionInterruptedAt">): boolean {
+    if (summary.supervisionInterruptedAt === undefined) return false;
+    return ownedByThisParent(summary) || isAbandonedByParent(summary, realProcessProbe);
+}
+
+/** True while an interrupted record still needs this process's supervision loop. */
+function needsInterruptedSupervision(): boolean {
+    try {
+        for (const summary of listMetas()) {
+            if (summary.status !== "running" && summary.status !== "orphaned") continue;
+            if (ownsInterruptedSupervision(summary)) return true;
+        }
+    } catch { /* best-effort scheduler gate */ }
+    return false;
+}
+
+/**
+ * Attempt log-evidence finalization for every interrupted run this process has
+ * to supervise: its own current-parent ones and the ones a dead parent left
+ * behind. Live children are never finalized (`finalizeInterruptedRunFromLog`
+ * requires the process evidence to be gone), so this only recovers a child that
+ * already finished on its own.
+ */
 function recoverInterruptedSubagents(pi: ExtensionAPI | undefined): number {
     let recovered = 0;
     const now = Date.now();
-    for (const summary of listMetasForParent(process.pid)) {
-        if (!ownedByThisParent(summary) || summary.supervisionInterruptedAt === undefined) continue;
+    for (const summary of listMetas()) {
         if (summary.status !== "running" && summary.status !== "orphaned") continue;
+        if (!ownsInterruptedSupervision(summary)) continue;
         const meta = readMeta(summary.id);
         if (!meta || (meta.status !== "running" && meta.status !== "orphaned")) continue;
         try {
@@ -3036,6 +3082,10 @@ export default function (pi: ExtensionAPI) {
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
+        // A session begins in this process again (reload, restart, or a session
+        // switch), so the previous session's teardown no longer applies: the
+        // replacing session owns this instance's supervision loops (#625).
+        sessionTornDown = false;
         setCallbackBatchContext(pi, ctx);
         agentSessionSettings.restore(ctx);
         restoreDelegationMode(ctx);
@@ -3053,14 +3103,16 @@ export default function (pi: ExtensionAPI) {
         // - Repaint the widget even if its last in-memory lines match; the host
         //   may have dropped extension UI during reload/session replacement.
         ensureSubagentProvider();
-        // Adopt records left non-terminal by a pi that died without a clean
-        // shutdown, so the age sweep can eventually retire them.
-        reconcileAbandonedRuns();
         // A reload/restart leaves detached children alive without an in-memory
         // exit observer (#625). Finalize any that finished while the foreground
         // session was gone; live ones stay `running` and the ticker below
-        // supervises them until they exit.
+        // supervises them until they exit. This runs BEFORE abandonment
+        // adoption: a finished child's coherent log is terminal evidence, and
+        // `lost` would otherwise win the race and hide the result.
         recoverInterruptedSubagents(pi);
+        // Adopt records left non-terminal by a pi that died without a clean
+        // shutdown, so the age sweep can eventually retire them.
+        reconcileAbandonedRuns();
         disposeBackgroundWorkNavigator(ctx);
         widgetNavActive = false;
         widgetNavSelectedId = undefined;
