@@ -372,6 +372,200 @@ describe("pageRetainedFile", () => {
     assert.ok(a2.startByte >= a1.endByte);
   });
 
+  // Issue #618: a multi-MB retained log must be readable from its end.
+  describe("end-anchored (backward) paging", () => {
+    function walkBackward(path: string, maxBytes: number, request: Omit<Parameters<typeof pageRetainedFile>[1], "cursor" | "maxBytes"> = {}) {
+      const pages = [pageRetainedFile(path, { ...request, maxBytes, direction: "backward" })];
+      for (let guard = 0; guard < 10_000; guard += 1) {
+        const last = pages[pages.length - 1]!;
+        if (!last.hasMore) break;
+        assert.notEqual(last.nextCursor, last.cursor, "a backward page with more bytes must advance");
+        pages.push(pageRetainedFile(path, { ...request, maxBytes, cursor: last.nextCursor }));
+      }
+      return { pages, text: pages.map((page) => page.text).reverse().join("") };
+    }
+
+    it("returns the newest bytes first and pages back to the oldest byte", () => {
+      const path = join(tempDir(), "tail.log");
+      const lines = Array.from({ length: 4_000 }, (_, i) => `row-${String(i).padStart(4, "0")} ${"y".repeat(30)}`);
+      const source = `${lines.join("\n")}\n`;
+      writeFileSync(path, source);
+      assert.ok(Buffer.byteLength(source) > 64 * 1024);
+
+      // The default read still starts at byte zero: the flag is opt-in.
+      assert.equal(pageRetainedFile(path, { maxBytes: 1024, resource: "raw:scope:run" }).startByte, 0);
+
+      const first = pageRetainedFile(path, { maxBytes: 1024, resource: "raw:scope:run", direction: "backward" });
+      assert.equal(first.direction, "backward");
+      assert.equal(first.startByte > 0, true);
+      assert.equal(first.endByte, Buffer.byteLength(source));
+      assert.equal(first.text, source.slice(first.startByte, first.endByte));
+      assert.equal(first.text, source.slice(-first.text.length), "an end-anchored page ends at the newest retained byte");
+      assert.equal(first.hasMore, true);
+      assert.equal(first.omittedBytes, first.startByte, "omittedBytes counts earlier bytes, not later ones");
+
+      const { pages, text } = walkBackward(path, 1024, { resource: "raw:scope:run" });
+      assert.equal(text, source, "backward pages concatenate to the retained bytes exactly");
+      assert.ok(pages.length > 1);
+      assert.ok(pages.every((page) => page.direction === "backward"));
+      assert.ok(pages.every((page) => utf8ByteLength(page.text) <= 1024));
+      const last = pages[pages.length - 1]!;
+      assert.equal(last.startByte, 0);
+      assert.equal(last.hasMore, false);
+      assert.equal(last.appendReady, true);
+    });
+
+    it("reads the end of a multi-MB log in one call and then only appended bytes", () => {
+      const path = join(tempDir(), "big.log");
+      const unit = `${JSON.stringify({ type: "message_update", delta: "z".repeat(200) })}\n`;
+      const lines: string[] = [];
+      for (let bytes = 0; bytes < 1_500_000; bytes += unit.length) lines.push(unit);
+      const source = `${lines.join("")}NEWEST_MARKER\n`;
+      writeFileSync(path, source);
+
+      const tail = pageRetainedFile(path, { maxBytes: 64 * 1024, resource: "raw:scope:run", direction: "backward" });
+      assert.match(tail.text, /NEWEST_MARKER\n$/, "one request reaches the newest bytes");
+      assert.equal(tail.endByte, Buffer.byteLength(source));
+      assert.equal(tail.hasMore, true);
+      assert.equal(tail.omittedBytes, tail.startByte);
+
+      const all = walkBackward(path, 64 * 1024, { resource: "raw:scope:run" });
+      assert.equal(all.text, source);
+      const last = all.pages[all.pages.length - 1]!;
+      appendFileSync(path, "APPENDED_AFTER_TAIL\n");
+      const appended = pageRetainedFile(path, { maxBytes: 64 * 1024, resource: "raw:scope:run", cursor: last.nextCursor });
+      assert.equal(appended.reset, undefined);
+      assert.equal(appended.direction, undefined, "reaching the oldest byte hands back a forward append cursor");
+      assert.equal(appended.text, "APPENDED_AFTER_TAIL\n");
+    });
+
+    it("reproduces a page from its own cursor for a second caller", () => {
+      const path = join(tempDir(), "replay.log");
+      writeFileSync(path, `${Array.from({ length: 500 }, (_, i) => `row-${i}`).join("\n")}\n`);
+      const first = pageRetainedFile(path, { maxBytes: 512, resource: "raw:scope:run", direction: "backward" });
+      const a = pageRetainedFile(path, { cursor: first.cursor, maxBytes: 512, resource: "raw:scope:run" });
+      const b = pageRetainedFile(path, { cursor: first.cursor, maxBytes: 512, resource: "raw:scope:run" });
+      assert.equal(a.text, first.text);
+      assert.equal(b.text, first.text);
+      assert.equal(a.startByte, first.startByte);
+      assert.equal(b.nextCursor, first.nextCursor);
+    });
+
+    // Review witness R1: the tail page showed replacement bytes and its append
+    // cursor skipped the split character, so tail-then-poll lost a code point.
+    it("withholds a code point split across writes and returns it whole from the append cursor", () => {
+      const path = join(tempDir(), "split-tail.log");
+      writeFileSync(path, Buffer.from([0x41, 0xe2, 0x82]));
+      const first = pageRetainedFile(path, { direction: "backward", maxBytes: 1_024, resource: "raw:scope:run" });
+      assert.equal(first.text, "A", "the incomplete suffix is withheld, not decoded as replacement bytes");
+      assert.equal(first.pendingBytes, 2);
+      assert.equal(first.startByte, 0);
+      assert.equal(first.endByte, 1, "the page ends where the incomplete sequence starts");
+      assert.equal(first.hasMore, false);
+      assert.equal(first.appendReady, true);
+      appendFileSync(path, Buffer.from([0xac, 0x0a]));
+      const next = pageRetainedFile(path, { cursor: first.nextCursor, maxBytes: 1_024, resource: "raw:scope:run" });
+      assert.equal(next.reset, undefined);
+      assert.equal(next.text, "€\n", "the append cursor returns the completed character, not just the bytes after it");
+      assert.equal(first.text + next.text, "A€\n");
+    });
+
+    it("withholds a split suffix at every boundary a writer can tear", () => {
+      const cases: Array<{ name: string; head: number[]; tails: number[][] }> = [
+        { name: "euro-1-of-2", head: [0x41, 0xe2], tails: [[0x82], [0xac, 0x0a]] },
+        { name: "euro-2-of-2", head: [0x41, 0xe2, 0x82], tails: [[0xac, 0x0a]] },
+        { name: "emoji-1-of-3", head: [0x41, 0xf0], tails: [[0x9f], [0x98], [0x80, 0x0a]] },
+        { name: "emoji-2-of-3", head: [0x41, 0xf0, 0x9f], tails: [[0x98, 0x80, 0x0a]] },
+        { name: "emoji-3-of-3", head: [0x41, 0xf0, 0x9f, 0x98], tails: [[0x80, 0x0a]] },
+        { name: "only-a-prefix", head: [0xe2, 0x82], tails: [[0xac, 0x0a]] },
+      ];
+      for (const item of cases) {
+        const path = join(tempDir(), `${item.name}.log`);
+        writeFileSync(path, Buffer.from(item.head));
+        const first = pageRetainedFile(path, { direction: "backward", maxBytes: 1_024, resource: "resume" });
+        const expectedFirst = item.head[0] === 0x41 ? "A" : "";
+        assert.equal(first.text, expectedFirst, item.name);
+        assert.ok((first.pendingBytes ?? 0) > 0, `${item.name}: the torn suffix is reported`);
+        let text = first.text;
+        let cursor = first.nextCursor;
+        for (const tail of item.tails) {
+          appendFileSync(path, Buffer.from(tail));
+          const page = pageRetainedFile(path, { cursor, maxBytes: 1_024, resource: "resume" });
+          assert.equal(page.reset, undefined, item.name);
+          text += page.text;
+          cursor = page.nextCursor;
+        }
+        assert.equal(text, Buffer.concat([Buffer.from(item.head), ...item.tails.map((tail) => Buffer.from(tail))]).toString("utf8"), item.name);
+      }
+    });
+
+    it("reports a withheld suffix on a tail page that does not reach the start, and shows it once complete", () => {
+      const path = join(tempDir(), "split-mid.log");
+      writeFileSync(path, `${"x".repeat(100)}\n`.repeat(200));
+      appendFileSync(path, Buffer.from([0xe2, 0x82]));
+      const first = pageRetainedFile(path, { direction: "backward", maxBytes: 512, resource: "resume" });
+      assert.equal(first.pendingBytes, 2);
+      assert.equal(first.hasMore, true, "earlier bytes are still paged");
+      assert.doesNotMatch(first.text, /\uFFFD/, "the withheld bytes are not shown as replacement characters");
+      appendFileSync(path, Buffer.from([0xac, 0x0a]));
+      const fresh = pageRetainedFile(path, { direction: "backward", maxBytes: 512, resource: "resume" });
+      assert.equal(fresh.pendingBytes, undefined);
+      assert.equal(fresh.text.endsWith("€\n"), true);
+    });
+
+    it("rebuilds a multi-page tail plus its append handoff exactly when the newest byte is torn", () => {
+      const path = join(tempDir(), "split-pages.log");
+      const body = `${Array.from({ length: 4_000 }, (_, i) => `row-${String(i).padStart(4, "0")} ${"y".repeat(20)}`).join("\n")}\n`;
+      const emoji = Buffer.from("😀\n", "utf8");
+      writeFileSync(path, Buffer.concat([Buffer.from(body, "utf8"), emoji.subarray(0, 2)]));
+      const pages = [pageRetainedFile(path, { direction: "backward", maxBytes: 4_096, resource: "poll" })];
+      for (let guard = 0; pages[pages.length - 1]!.hasMore && guard < 500; guard += 1) {
+        pages.push(pageRetainedFile(path, { direction: "backward", maxBytes: 4_096, resource: "poll", cursor: pages[pages.length - 1]!.nextCursor }));
+      }
+      assert.equal(pages[0]!.pendingBytes, 2);
+      assert.ok(pages.length > 2, "the fixture needs several backward pages");
+      appendFileSync(path, emoji.subarray(2));
+      const handoff = pageRetainedFile(path, { maxBytes: 4_096, resource: "poll", cursor: pages[pages.length - 1]!.nextCursor });
+      assert.equal(handoff.text, "😀\n", "the append cursor returns the completed character only once");
+      assert.equal(pages.map((page) => page.text).reverse().join("") + handoff.text, `${body}😀\n`);
+    });
+
+    it("starts a page inside one oversized line without skipping or duplicating bytes", () => {
+      const path = join(tempDir(), "oneline.log");
+      const source = "café😀".repeat(4_000);
+      writeFileSync(path, source);
+      const { pages, text } = walkBackward(path, 1024, { resource: "tail:scope:run" });
+      assert.equal(text, source);
+      assert.ok(pages[0]!.text.length > 0);
+
+      // A budget smaller than the next code point behind the cursor stays put.
+      const tiny = pageRetainedFile(path, { maxBytes: 3, resource: "tail:scope:run", direction: "backward" });
+      assert.equal(tiny.text, "");
+      assert.equal(tiny.hasMore, true);
+      assert.equal(tiny.startByte, tiny.endByte);
+      assert.equal(tiny.nextCursor, tiny.cursor);
+      assert.equal(pageRetainedFile(path, { maxBytes: 4, resource: "tail:scope:run", cursor: tiny.nextCursor }).text.endsWith("😀"), true);
+    });
+
+    it("keeps backward cursors bound to the resource and restarts at the tail after a rewrite", () => {
+      const path = join(tempDir(), "scope.log");
+      writeFileSync(path, `${"a\n".repeat(1_000)}`);
+      const own = pageRetainedFile(path, { maxBytes: 100, resource: "raw:session-a:run", direction: "backward" });
+      const other = pageRetainedFile(path, { maxBytes: 100, resource: "raw:all:run", cursor: own.nextCursor });
+      assert.equal(other.reset, "stale-cursor");
+      const same = pageRetainedFile(path, { maxBytes: 100, resource: "raw:session-a:run", cursor: own.nextCursor });
+      assert.equal(same.reset, undefined);
+      assert.equal(same.direction, "backward");
+
+      writeFileSync(path, `${"b\n".repeat(1_000)}`);
+      const rewritten = pageRetainedFile(path, { maxBytes: 100, resource: "raw:session-a:run", cursor: same.nextCursor });
+      assert.equal(rewritten.reset, "source-replaced");
+      assert.equal(rewritten.direction, "backward", "a rewritten log restarts at the newest bytes, not at byte zero");
+      assert.equal(rewritten.endByte, 2_000);
+      assert.match(rewritten.text, /^b\n/);
+    });
+  });
+
   it("resets on same-inode compaction when the consumer generation advances", () => {
     const path = join(tempDir(), "compact.log");
     writeFileSync(path, "AAAAAAAAAA\nBBBBBBBBBB\nCCCCCCCCCC\n");
