@@ -135,7 +135,12 @@ export const OUTPUT_PAGE_DEFAULTS = {
 
 export type OutputBudgetSurface = keyof typeof OUTPUT_BUDGET_BYTES;
 
-export type PageReset = "stale-cursor" | "source-replaced" | "compacted";
+/**
+ * Why a supplied cursor was not followed. `cursor-corrupt` means the payload
+ * itself failed its integrity check — a hand-copied character, not evidence
+ * that the source changed or that the cursor belongs to another scope (#617).
+ */
+export type PageReset = "stale-cursor" | "source-replaced" | "compacted" | "cursor-corrupt";
 export type EvidenceGapKind = "capture" | "retention" | "read";
 export type StatusChange = "none" | "failure" | "content" | "reset";
 export type EnvelopeSectionName =
@@ -290,6 +295,8 @@ interface CursorPayload {
   c?: string;
   f?: string;
   a?: 1;
+  /** Integrity tag over every other field; see `cursorIntegrityTag`. */
+  x?: string;
 }
 
 function positiveInt(value: unknown): number | undefined {
@@ -438,10 +445,44 @@ function resourceTag(resource: string): string {
   return hashBytes(encoder.encode(resource)).slice(0, 16);
 }
 
-function encodeCursor(payload: CursorPayload): string {
-  return CURSOR_PREFIX + Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+/**
+ * Cursors that carry an offset are tagged, so a hand-copied cursor can be
+ * recognised as damaged. Status cursors are not: they hold no offset, a
+ * damaged one already falls back to the current facts, and their payload sits
+ * in 1 KiB status responses where every cursor byte competes with decision
+ * facts (`remote setup: …` was clipped once the cursor grew).
+ */
+function isTaggedCursorKind(kind: CursorPayload["k"]): boolean {
+  return kind !== "s";
 }
 
+function encodeCursor(payload: CursorPayload): string {
+  const tagged = isTaggedCursorKind(payload.k) ? { ...payload, x: cursorIntegrityTag(payload) } : payload;
+  return CURSOR_PREFIX + Buffer.from(JSON.stringify(tagged), "utf8").toString("base64url");
+}
+
+/**
+ * Integrity tag over every payload field except the tag itself.
+ *
+ * Cursors are re-typed by the model. One mistyped base64url character used to
+ * decode into a payload that still parsed: when the changed field was the
+ * source digest the pager reported `source-replaced`, restarted at byte 0 and
+ * minted the same cursor again — the caller could never reach the rest of the
+ * text (#617). The tag makes a near-miss detectable as corruption instead of
+ * being read as a different source.
+ */
+function cursorIntegrityTag(payload: CursorPayload): string {
+  const { x: _ignored, ...rest } = payload;
+  // 36 bits: enough to catch an accidental edit, and short enough that the
+  // cursor stays a small thing to copy.
+  return shortHash(encoder.encode(JSON.stringify(rest))).slice(0, 6);
+}
+
+/**
+ * Structural decode only: a corrupted payload still reports its kind and
+ * resource so it can be classified and, where the offset is still meaningful,
+ * resumed. `cursorIntegrityOk` is the separate integrity verdict.
+ */
 function decodeCursor(cursor: string | undefined): CursorPayload | undefined {
   if (!cursor || !cursor.startsWith(CURSOR_PREFIX)) return undefined;
   try {
@@ -451,6 +492,18 @@ function decodeCursor(cursor: string | undefined): CursorPayload | undefined {
     return undefined;
   }
   return undefined;
+}
+
+/** False when any payload field was altered after the cursor was minted. */
+function cursorIntegrityOk(parsed: CursorPayload): boolean {
+  if (!isTaggedCursorKind(parsed.k)) return true;
+  return typeof parsed.x === "string" && parsed.x === cursorIntegrityTag(parsed);
+}
+
+/** Decoded page offset, or NaN when the field did not survive decoding. */
+function cursorOffset(parsed: CursorPayload): number {
+  const o = parsed.o;
+  return typeof o === "number" && Number.isFinite(o) ? Math.floor(o) : Number.NaN;
 }
 
 export function cursorKind(cursor: string | undefined): "t" | "f" | "s" | "l" | undefined {
@@ -491,6 +544,12 @@ function emptyPage(overrides: Partial<PageResult> & Pick<PageResult, "revision" 
  * Page exact UTF-8 text. Consecutive pages concatenate to the original string.
  * Cursors are caller-owned: the same cursor plus maxBytes always yields the
  * same page, and two callers do not share consumption.
+ *
+ * A cursor that fails its integrity check is reported as `cursor-corrupt`,
+ * never as a replaced source. When its decoded offset still lands inside this
+ * text — the usual one-character miscopy, where only the source digest moved —
+ * the page resumes there, so a hand-copied cursor cannot trap the caller in an
+ * endless replay of page 1.
  */
 export function pageVerbatimText(text: string, request: PageRequest = {}): PageResult {
   const maxBytes = pagerBudget(request.maxBytes, OUTPUT_BUDGET_BYTES.answer);
@@ -501,7 +560,15 @@ export function pageVerbatimText(text: string, request: PageRequest = {}): PageR
   let reset: PageReset | undefined;
   const parsed = decodeCursor(request.cursor);
   if (request.cursor) {
-    if (!parsed || parsed.k !== "t" || (parsed.r ?? undefined) !== resource) {
+    if (!parsed || parsed.k !== "t") {
+      reset = "stale-cursor";
+    } else if (!cursorIntegrityOk(parsed)) {
+      reset = "cursor-corrupt";
+      if ((parsed.r ?? undefined) === resource) {
+        const decoded = cursorOffset(parsed);
+        offset = Number.isFinite(decoded) && decoded >= 0 && decoded <= encoded.length ? decoded : 0;
+      }
+    } else if ((parsed.r ?? undefined) !== resource) {
       reset = "stale-cursor";
     } else if (parsed.v !== revision) {
       reset = "source-replaced";
@@ -640,32 +707,43 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
     let appendReady = false;
 
     if (request.cursor) {
-      if (!parsed || parsed.k !== "f" || parsed.r !== resource) {
+      if (!parsed || parsed.k !== "f") {
         reset = "stale-cursor";
-      } else if (parsed.i !== identity) {
-        reset = "source-replaced";
       } else {
-        const o = Math.max(0, Math.floor(parsed.o ?? 0));
-        const n = Math.max(0, Math.floor(parsed.n ?? 0));
-        const headLength = Math.max(0, Math.floor(parsed.hl ?? 0));
-        const generationChanged = generation !== undefined && parsed.g !== generation;
-        const bytesIntact = o <= n
-          && n <= size
-          && headLength <= size
-          && (!parsed.h || shortHash(head.subarray(0, headLength)) === parsed.h)
-          && (o === 0 || windowHash(o) === parsed.w);
-        if (generationChanged) {
-          // The consumer declared a compaction/replacement of this file.
-          reset = "compacted";
-        } else if (!bytesIntact) {
-          // Same file object as far as stat can tell, but the bytes behind the
-          // cursor changed without a declared compaction: rewritten in place,
-          // or deleted and recreated on a reused inode with coarse timestamps.
-          reset = "source-replaced";
+        // A hand-copied cursor is never reported as a replaced source: that was
+        // a false claim, and the restart replayed page 1 forever (#617). The
+        // independent byte checks below still decide whether the decoded
+        // offset can be trusted; the reason stays `cursor-corrupt` either way.
+        const corrupt = !cursorIntegrityOk(parsed);
+        const reason = (clean: PageReset): PageReset => (corrupt ? "cursor-corrupt" : clean);
+        if (parsed.r !== resource) {
+          reset = reason("stale-cursor");
+        } else if (parsed.i !== identity) {
+          reset = reason("source-replaced");
         } else {
-          offset = o;
-          snapshot = n;
-          appendReady = parsed.a === 1;
+          const o = Math.max(0, Math.floor(parsed.o ?? 0));
+          const n = Math.max(0, Math.floor(parsed.n ?? 0));
+          const headLength = Math.max(0, Math.floor(parsed.hl ?? 0));
+          const generationChanged = generation !== undefined && parsed.g !== generation;
+          const bytesIntact = o <= n
+            && n <= size
+            && headLength <= size
+            && (!parsed.h || shortHash(head.subarray(0, headLength)) === parsed.h)
+            && (o === 0 || windowHash(o) === parsed.w);
+          if (generationChanged) {
+            // The consumer declared a compaction/replacement of this file.
+            reset = reason("compacted");
+          } else if (!bytesIntact) {
+            // Same file object as far as stat can tell, but the bytes behind the
+            // cursor changed without a declared compaction: rewritten in place,
+            // or deleted and recreated on a reused inode with coarse timestamps.
+            reset = reason("source-replaced");
+          } else {
+            offset = o;
+            snapshot = n;
+            appendReady = parsed.a === 1;
+            if (corrupt) reset = "cursor-corrupt";
+          }
         }
       }
     }

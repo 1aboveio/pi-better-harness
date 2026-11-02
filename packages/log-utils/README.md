@@ -55,6 +55,19 @@ holding different cursors do not consume each other. A content-hash change retur
 returns `reset: "stale-cursor"` and the first page. Cursors carry a short
 digest of the resource, never the scope text.
 
+Offset-bearing cursors also carry a short integrity tag over their other
+fields. Cursors are re-typed by the model, and a payload that still parsed after
+one mistyped character used to be read as a *replaced source*, which restarted
+at byte 0 and minted the same cursor again: the caller could never reach the
+rest of the text (#617). A damaged payload now returns
+`reset: "cursor-corrupt"` — never `source-replaced`, which claims the source
+changed — and, when the decoded offset still lands inside the text, the page
+resumes there. Corrupting the scope tag itself leaves no trustworthy offset, so
+that page starts at byte 0 but still reports `cursor-corrupt` rather than
+blaming another scope. Status cursors (`k: "s"`) are untagged: they hold no
+offset, a damaged one falls back to the current facts, and their payload
+competes with decision facts in 1 KiB status responses.
+
 ## Retained-file paging
 
 `pageRetainedFile(path, request)` pages raw retained bytes without skipping
@@ -75,6 +88,12 @@ unread ranges in the current snapshot.
   before the offset. Increment `generation` on replacement or same-inode
   compaction; the pre-offset sample also catches in-place rewrites that keep
   the head, size, and inode.
+- A cursor whose integrity tag does not match is reported as
+  `reset: "cursor-corrupt"` instead of `source-replaced`. The identity, head,
+  and pre-offset checks still decide whether its offset may be used: when they
+  hold, the page resumes there (so a hand-copied cursor does not replay the
+  first page forever); otherwise it restarts at byte 0 and says the cursor was
+  corrupt rather than that the file was replaced.
 - `discardedBytes` and `captureGaps` are disclosed on every page. They are not
   recoverable. Empty readable files have no gaps; missing or unreadable files
   return a `read` gap and never look like a healthy empty log.

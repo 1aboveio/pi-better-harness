@@ -53,7 +53,11 @@ long failure section cannot starve them.
   missing task, and never same-process “legacy” evidence without `all:true`.
 - Every cursor (answer, raw, list, incident, status) binds a digest of its
   resource **and** the selected scope. Reusing a cursor under another scope
-  resets with `reset=stale-cursor`.
+  resets with `reset=stale-cursor`. Answer, raw, and incident page cursors also
+  carry an integrity tag over their other fields: a hand-copied cursor is
+  reported as `reset=cursor-corrupt`, never as `source-replaced`, and it
+  resumes at the offset it still carries when that offset is inside the source
+  (#617).
 
 ## Cursors
 
@@ -94,7 +98,11 @@ Every omission is one of:
    `gap retention` with byte counts (each poll result counted once). Not
    recoverable. Do not claim full-history recovery.
 4. **Cursor invalidated** — `reset=stale-cursor` / `source-replaced` /
-   `compacted` (including same-inode retention and in-place rewrites).
+   `compacted` (including same-inode retention and in-place rewrites), or
+   `reset=cursor-corrupt` when the cursor payload itself failed its integrity
+   check. Corruption is never reported as a replaced source; a corrupt cursor
+   whose offset still points inside the source resumes there instead of
+   replaying the first page.
 
 A trailing, incomplete UTF-8 sequence in a retained file is withheld
 (`pendingBytes=…`) until the writer completes it. Capture never keeps a

@@ -737,6 +737,60 @@ test("an incident cursor from before scope and detail existed resets instead of 
   assert.notEqual(v(compact.nextCursor), v(pageFailureIncidents(state, { maxBytes: 150, resource, scope: "all" }).nextCursor));
 });
 
+test("a miscopied incident cursor is reported as corrupt and resumes instead of replaying the first page (#617)", () => {
+  let state = emptyFailureState();
+  for (let i = 0; i < 6; i++) state = reduceFailure(state, { id: `x${i}`, operation: `exit-${i}`, kind: "failure", category: "exit",
+    summary: `Child check ${i} exited 1 ${"z".repeat(200)}`, evidence: `output.log#byte=${100 * i}` }, 1000 + i);
+  const resource = "incidents:s:sa_1";
+  const lines = formatFailureLines(state, { detail: "full" });
+  const first = pageFailureIncidents(state, { maxBytes: 300, resource, detail: "full" });
+  assert.equal(first.hasMore, true);
+
+  // Exactly the reported near-miss: one base64url character, still parseable,
+  // only the row digest moved. It used to reset as `source-replaced` and mint
+  // the identical first-page cursor again — an endless replay.
+  const body = first.nextCursor.slice(3);
+  const original = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  const edit = (accept: (payload: Record<string, any>, original: Record<string, any>) => boolean) => {
+    for (let index = 0; index < body.length; index += 1) {
+      for (const replacement of "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") {
+        if (replacement === body[index]) continue;
+        const candidate = `i1.${body.slice(0, index)}${replacement}${body.slice(index + 1)}`;
+        let payload: Record<string, any>;
+        try {
+          payload = JSON.parse(Buffer.from(candidate.slice(3), "base64url").toString("utf8"));
+        } catch {
+          continue;
+        }
+        if (payload?.k === "i" && accept(payload, original)) return candidate;
+      }
+    }
+    throw new Error("no single-character miscopy of this cursor satisfied the expectation");
+  };
+
+  const miscopied = edit((payload, from) => typeof payload.v === "string" && payload.v !== from.v && payload.o === from.o);
+  const next = pageFailureIncidents(state, { cursor: miscopied, maxBytes: 300, resource, detail: "full" });
+  assert.equal(next.reset, "cursor-corrupt");
+  assert.notEqual(next.text, first.text, "the corrupt cursor must not replay the first page");
+  assert.notEqual(next.nextCursor, first.nextCursor, "nor mint the first-page cursor again");
+  assert.ok(next.represented >= 1);
+  // The rest of the rows still concatenate onto the page already delivered.
+  let rest = next.text;
+  let page = next;
+  let cursor = next.nextCursor;
+  while (page.hasMore) {
+    page = pageFailureIncidents(state, { cursor, maxBytes: 300, resource, detail: "full" });
+    assert.equal(page.reset, undefined);
+    rest += (rest && !page.startsPartial ? "\n" : "") + page.text;
+    cursor = page.nextCursor;
+  }
+  assert.equal(lines.join("\n").endsWith(rest), true);
+
+  const damagedScope = edit((payload, from) => typeof payload.r === "string" && payload.r !== from.r && payload.o === from.o);
+  assert.equal(pageFailureIncidents(state, { cursor: damagedScope, maxBytes: 300, resource, detail: "full" }).reset, "cursor-corrupt",
+    "a damaged scope tag is corruption, not a cursor from another scope");
+});
+
 test("#332 the journal's 400-unit cut never leaves half of a surrogate pair", () => {
   // 399 ASCII units, then an emoji (two UTF-16 units) straddling the cut.
   const summary = `${"x".repeat(399)}😀 and more`;
