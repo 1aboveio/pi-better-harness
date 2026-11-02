@@ -61,8 +61,8 @@ function nextCursorOf(content) {
 }
 
 function incidentCursorOf(content) {
-    return String(content ?? "").match(/incidentCursor=(i1\.\S+)/)?.[1]
-        ?? String(content ?? "").match(/cursor=(i1\.\S+)/)?.[1];
+    return String(content ?? "").match(/incidentCursor=(i2\.\S+)/)?.[1]
+        ?? String(content ?? "").match(/cursor=(i2\.\S+)/)?.[1];
 }
 
 /** The answer text of one subagent_result page: after the header line, before the continuation. */
@@ -336,7 +336,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
         const historyPages = [textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.quietHistory.id, history: true }, undefined, undefined, ctx))];
         for (let i = 0; i < 16; i += 1) {
             const last = historyPages.at(-1);
-            const next = last.includes("hasMore=true") ? last.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+            const next = last.includes("hasMore=true") ? last.match(/\bnextCursor=(i2\.\S+)/)?.[1] : undefined;
             if (!next) break;
             historyPages.push(textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.quietHistory.id, cursor: next }, undefined, undefined, ctx)));
         }
@@ -592,7 +592,7 @@ export async function collectBaseline({ phase = "before" } = {}) {
                 for (let i = 0; i < 32 && next; i += 1) {
                     const page = textOf(await subagent.result.execute("issue-312-baseline", { id: seeded.manyFailures.id, cursor: next }, undefined, undefined, ctx));
                     count(page);
-                    next = page.includes("hasMore=true") ? page.match(/\bnextCursor=(i1\.\S+)/)?.[1] : undefined;
+                    next = page.includes("hasMore=true") ? page.match(/\bnextCursor=(i2\.\S+)/)?.[1] : undefined;
                 }
                 many.facts.omittedIncidentsRetrievable = seen.size === 12 && [...seen.values()].every((value) => value === 1);
             }

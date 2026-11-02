@@ -2301,7 +2301,7 @@ export default function (pi: ExtensionAPI) {
             "Subagent sandboxing defaults to off. Human settings in /sandbox control file, credential-file, command, and network permissions; sandbox:false cannot override an enabled human profile. Set sandbox:true to request kernel confinement, including without published settings. Set callback:false to finish quietly — then read the result on demand via subagent_result.",
             "Every launch automatically joins one shared harness-owned watcher, including batch launches; it stops when the last active run ends. Do not start a separate heartbeat or background watcher for subagents. No progress for stuck_minutes (default 10) wakes you once without stopping the run. Elapsed-time limits are opt-in: deadline_minutes steers the child to wrap up and later stops it after grace_minutes, while max_minutes stops it without grace. Do not set elapsed-time limits merely because a task may take a while; use them only when the work needs a real wall-clock bound.",
             "Use git_clone_workspace:true when the subagent will mutate Git in a sandbox. The parent prepares a disposable, self-contained clone with a real .git/ directory inside the sandbox root, so linked-worktree metadata outside the sandbox cannot stall the child.",
-            "Saved conversations persist automatically. To continue a completed worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
+            "Saved conversations persist automatically. To continue a completed or stopped worker in its own history, call subagent_spawn with session_id (the native session id reported for the saved conversation) and the new feedback as prompt. Omit session_id for a brand-new conversation.",
             "On a continuation, pass prompt, session_id, and only optional model, thinking, callback, or timing overrides. Launch-only options (name, agent, role, alias, tools, exclude_tools, clean, sandbox, sandbox_dir, cwd, git_clone_workspace, approve, allow_nested) keep the saved recipe; repeat them only with the same value, otherwise the launch is refused.",
             "Do not restate the original task or role when continuing: they already live in the saved conversation. A running or orphaned latest attempt blocks continuation until it stops, and missing saved history is refused rather than recreated.",
         ],
@@ -2377,7 +2377,7 @@ export default function (pi: ExtensionAPI) {
                     reserved = 0;
                     return {
                         content: [{ type: "text" as const, text:
-                            `Subagent continued: ${plan.recipe.name ? `${plan.recipe.name} ` : ""}id=${id} (pid ${spawned.pid}) from ${plan.prior.id}.\n` +
+                            `Subagent continued: ${plan.recipe.name ? `${plan.recipe.name} ` : ""}id=${id} (pid ${spawned.pid}) from ${plan.prior.id}${plan.prior.status === "killed" ? " (interrupted attempt)" : ""}.\n` +
                             `Conversation: session ${plan.conversation.sessionId} — pass session_id=${plan.conversation.sessionId} for the next follow-up.\n` +
                             (modelNote ? `${modelNote[0]!.toUpperCase()}${modelNote.slice(1)}.\n` : "") +
                             (continuation.callback === false
