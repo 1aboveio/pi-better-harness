@@ -141,7 +141,10 @@ way. Stopping ends that execution, not the saved conversation or its
 uncommitted workspace: the next attempt reopens the same history and records
 `resumedFrom`, while the stopped attempt's status, log, and result stay as they
 were. A run that ended `failed` or `lost` is still refused; this path recovers
-interrupted work, it does not retry a failed run.
+interrupted work, it does not retry a failed run. The stopped child must also
+have exited: if the stop signal has not taken effect yet (for example the
+process was suspended), continuation is refused until that recorded child exits.
+The saved history and workspace stay intact while the stop settles.
 
 `session_name` is an exact display-name match within the current folder and its
 descendants. Several attempts of the same conversation count once. If several
