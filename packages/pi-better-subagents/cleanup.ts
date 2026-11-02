@@ -9,12 +9,15 @@ import {
 } from "node:fs";
 import { join, relative, sep } from "node:path";
 import {
+    ABANDONED_LAUNCH_GRACE_MS,
+    abandonedLaunchRecord,
     baseDir,
     listMetas,
     observeArchivePublication,
     ownedByThisParent,
     orphanedTaskRuntimeProvenance,
     processStartToken,
+    purgeAbandonedLaunch,
     readMeta,
     removeMetaArtifacts,
     removeRunDirectory,
@@ -82,6 +85,14 @@ export interface DailyCleanupResult {
     dateKey: string;
     removedRunDirs: number;
     removedSessionPaths: number;
+    /** Launch attempts that never produced a run, reclaimed on this pass. */
+    removedAbandonedLaunches: number;
+    errors: string[];
+}
+
+/** Outcome of the launch-debris sweep alone (unit-testable, no daily marker). */
+export interface AbandonedLaunchSweepResult {
+    removed: string[];
     errors: string[];
 }
 
@@ -715,12 +726,49 @@ function cleanSessionTree(
     return removed;
 }
 
+/**
+ * Reclaim launch attempts that never produced a supervised run (#623).
+ *
+ * A launch that throws while preparing (or a pi that dies in that window) can
+ * leave a run directory with only `prompt.md` and a sandbox `control/` dir: no
+ * `meta.json`, no `output.log`. Such a directory is unreadable run evidence
+ * forever and skews `subagent_list` counts, so it is reclaimed once it is older
+ * than {@link ABANDONED_LAUNCH_GRACE_MS}. The grace is the only guard needed:
+ * launch preparation is synchronous and short, and a directory with a log is
+ * never debris (the child may have started and its output is real evidence).
+ *
+ * Runs before the daily marker in {@link runDailyCleanupOnce}, so every launch
+ * reclaims earlier debris instead of waiting for the next day's sweep.
+ * Best-effort; never throws into its caller.
+ */
+export function sweepAbandonedLaunches(options: { now?: number; graceMs?: number } = {}): AbandonedLaunchSweepResult {
+    const now = options.now ?? Date.now();
+    const grace = Number.isFinite(options.graceMs) && options.graceMs! >= 0 ? options.graceMs! : ABANDONED_LAUNCH_GRACE_MS;
+    const cutoff = now - grace;
+    let ids: string[];
+    try {
+        ids = readdirSync(join(baseDir(), "runs"));
+    } catch {
+        return { removed: [], errors: [] };
+    }
+    const removed: string[] = [];
+    const errors: string[] = [];
+    for (const id of ids) {
+        const attempt = abandonedLaunchRecord(id);
+        if (!attempt || attempt.mtimeMs >= cutoff) continue;
+        if (purgeAbandonedLaunch(id)) removed.push(id);
+        else errors.push(`${runDir(id)}: abandoned launch record could not be removed`);
+    }
+    return { removed, errors };
+}
+
 export function runDailyCleanupOnce(options: DailyCleanupOptions = {}): DailyCleanupResult {
     const now = options.now ?? Date.now();
+    const abandoned = sweepAbandonedLaunches({ now });
     const dateKey = localDateKey(now);
     const state = readCleanupState();
     if (state.lastLocalDate === dateKey) {
-        return { ran: false, dateKey, removedRunDirs: 0, removedSessionPaths: 0, errors: [] };
+        return { ran: false, dateKey, removedRunDirs: 0, removedSessionPaths: 0, removedAbandonedLaunches: abandoned.removed.length, errors: [...abandoned.errors] };
     }
 
     const errors: string[] = [];
@@ -761,7 +809,7 @@ export function runDailyCleanupOnce(options: DailyCleanupOptions = {}): DailyCle
         errors.push(`${cleanupStatePath()}: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    return { ran: true, dateKey, removedRunDirs, removedSessionPaths, errors };
+    return { ran: true, dateKey, removedRunDirs, removedSessionPaths, removedAbandonedLaunches: abandoned.removed.length, errors: [...abandoned.errors, ...errors] };
 }
 
 /** Bytes held under one run directory. Best-effort; unreadable entries count 0. */

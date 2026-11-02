@@ -26,6 +26,7 @@ import { realProcessProbe, type ProcessProbe } from "./health.ts";
 import { parseRunForLifecycle } from "./parse.ts";
 import {
     effectiveStatus,
+    purgeAbandonedLaunch,
     readMeta,
     writeMeta,
     type RunMeta,
@@ -35,7 +36,8 @@ import { killProcessTree } from "./spawn.ts";
 export type StopOutcome =
     | { action: "stopped"; id: string }
     | { action: "finalized"; id: string; status: "completed" | "failed" | "lost" }
-    | { action: "not-running"; id: string; status: string };
+    | { action: "not-running"; id: string; status: string }
+    | { action: "purged"; id: string };
 
 export interface StopDeps {
     /** OS process probe; defaults to the real probe. Tests inject fakes. */
@@ -131,11 +133,19 @@ function cleanupOrphanedRun(meta: RunMeta, probe: ProcessProbe, now: number): St
  *   otherwise reread logs and finalize completed/failed/lost.
  * - other statuses → not-running (on-disk record untouched).
  *
+ * An id with no metadata is either unknown or an abandoned launch record (a
+ * launch that never wrote `meta.json` and never started a child). The latter is
+ * purged, so the operator can clear launch debris (#623) without waiting for the
+ * sweep's grace period. Anything else stays an unknown id.
+ *
  * Throws on an unknown id (same contract as the stop tool).
  */
 export function stopRun(id: string, deps: StopDeps = {}): StopOutcome {
     const meta = readMeta(id);
-    if (!meta) throw new Error(`Unknown run id: ${id}`);
+    if (!meta) {
+        if (purgeAbandonedLaunch(id)) return { action: "purged", id };
+        throw new Error(`Unknown run id: ${id}`);
+    }
     const probe = deps.probe ?? realProcessProbe;
     const now = typeof deps.now === "function" ? deps.now() : Date.now();
     const status = effectiveStatus(meta);

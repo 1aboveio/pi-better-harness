@@ -1923,183 +1923,191 @@ export default function (pi: ExtensionAPI) {
         // A continuation never prepares another clone: the recipe's workspace already
         // holds the prior attempt's uncommitted work.
         const ownedCloneWorkspace = !resume && !p.sandbox_dir && sandboxEnabled && p.git_clone_workspace ? taskWorkspaceDir(id) : undefined;
-        if (!resume) mkdirSync(childSessionDir, { recursive: true });
-        mkdirSync(runDir(id), { recursive: true });
+        // A launch attempt only becomes a run when `writeMeta` commits. Until
+        // then everything it creates (prompt, control/, provenance, its own
+        // session dir, clone workspace, task scratch) belongs to the attempt and
+        // must go if it fails, so no unreadable record is left in the registry
+        // (#325, #332, #623).
+        let lease: ConversationLease | undefined;
+        let spawned: ReturnType<typeof spawnDetached> | undefined;
+        let launchScratch: string | undefined;
+        let committed = false;
+        try {
+            if (!resume) mkdirSync(childSessionDir, { recursive: true });
+            mkdirSync(runDir(id), { recursive: true });
 
-        const workspace = resume
-            ? { cwd: resume.recipe.cwd, requestedSandboxDir: resume.recipe.sandboxDir }
-            : resolveSubagentWorkspace({
-                ctxCwd: ctx.cwd,
-                cwd: p.cwd,
-                sandboxDir: p.sandbox_dir ?? ownedCloneWorkspace,
-                gitCloneWorkspace: p.git_clone_workspace,
-                runId: id,
-                runDirPath: runDir(id),
-                sandboxEnabled,
-            });
-        const cwd = workspace.cwd;
-        const requestedSandboxDir = workspace.requestedSandboxDir;
+            const workspace = resume
+                ? { cwd: resume.recipe.cwd, requestedSandboxDir: resume.recipe.sandboxDir }
+                : resolveSubagentWorkspace({
+                    ctxCwd: ctx.cwd,
+                    cwd: p.cwd,
+                    sandboxDir: p.sandbox_dir ?? ownedCloneWorkspace,
+                    gitCloneWorkspace: p.git_clone_workspace,
+                    runId: id,
+                    runDirPath: runDir(id),
+                    sandboxEnabled,
+                });
+            const cwd = workspace.cwd;
+            const requestedSandboxDir = workspace.requestedSandboxDir;
 
-        if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
-        writeFileSync(promptPathFor(id), p.prompt);
+            if (requestedSandboxDir) mkdirSync(requestedSandboxDir, { recursive: true });
+            writeFileSync(promptPathFor(id), p.prompt);
 
-        // A continuation keeps the recipe's launch intent; only current
-        // permission-driven adjustments are re-derived from it.
-        const requestedTools = resume ? resume.recipe.tools : p.tools;
-        const requestedExcludeTools = resume ? resume.recipe.excludeTools ?? "" : p.exclude_tools ?? "";
-        const clean = resume ? resume.recipe.clean : p.clean === true;
-        const allowNested = resume ? resume.recipe.allowNested : p.allow_nested === true;
-        const approve = resume ? resume.recipe.approve : p.approve === true;
-        const gitCloneWorkspace = resume ? resume.recipe.gitCloneWorkspace : p.git_clone_workspace === true;
-        const callbackEnabled = resume ? p.callback ?? resume.recipe.callback : p.callback !== false;
-        const launchName = resume ? resume.recipe.name : p.name;
-        // The frozen launch snapshot is the same shape a fresh spawn freezes.
-        const launchCatalog: RunMeta["catalog"] = resume
-            ? resume.recipe.catalog
-            : p.catalog as unknown as RunMeta["catalog"] | undefined;
+            // A continuation keeps the recipe's launch intent; only current
+            // permission-driven adjustments are re-derived from it.
+            const requestedTools = resume ? resume.recipe.tools : p.tools;
+            const requestedExcludeTools = resume ? resume.recipe.excludeTools ?? "" : p.exclude_tools ?? "";
+            const clean = resume ? resume.recipe.clean : p.clean === true;
+            const allowNested = resume ? resume.recipe.allowNested : p.allow_nested === true;
+            const approve = resume ? resume.recipe.approve : p.approve === true;
+            const gitCloneWorkspace = resume ? resume.recipe.gitCloneWorkspace : p.git_clone_workspace === true;
+            const callbackEnabled = resume ? p.callback ?? resume.recipe.callback : p.callback !== false;
+            const launchName = resume ? resume.recipe.name : p.name;
+            // The frozen launch snapshot is the same shape a fresh spawn freezes.
+            const launchCatalog: RunMeta["catalog"] = resume
+                ? resume.recipe.catalog
+                : p.catalog as unknown as RunMeta["catalog"] | undefined;
 
-        let allow = normalizeTools(
-            requestedTools ?? cfg.defaultTools ?? (clean ? SAFE_CLEAN_TOOLS : SAFE_DEFAULT_TOOLS),
-        );
-        if (allowNested) {
-            const have = new Set(allow.split(","));
-            allow = [...allow.split(","), ...SUBAGENT_TOOLS.filter((t) => !have.has(t))]
-                .filter(Boolean).join(",");
-        }
+            let allow = normalizeTools(
+                requestedTools ?? cfg.defaultTools ?? (clean ? SAFE_CLEAN_TOOLS : SAFE_DEFAULT_TOOLS),
+            );
+            if (allowNested) {
+                const have = new Set(allow.split(","));
+                allow = [...allow.split(","), ...SUBAGENT_TOOLS.filter((t) => !have.has(t))]
+                    .filter(Boolean).join(",");
+            }
 
-        // A confined child gets extension tools only through /sandbox Subagents · Tools (ADR 0009):
-        // the guarded apply_patch adapter, and trusted tools admitted by name and package.
-        const requestedExcludes = new Set(requestedExcludeTools.split(",").map((t) => t.trim()).filter(Boolean));
-        if (sandboxEnabled && !clean) {
-            const names = allow.split(",").filter(Boolean);
-            // Models reach for apply_patch whenever they may edit; ticked trusted tools join the default set.
-            if (permissionPlan.tools.applyPatch && names.some((name) => name === "edit" || name === "write")) names.push(APPLY_PATCH);
-            if (requestedTools === undefined) names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
-            allow = [...new Set(names)].join(",");
-        }
-        if (sandboxEnabled && requestedTools === undefined && permissionPlan.permissions?.processAccess === "read") {
-            allow = [...new Set([...allow.split(","), "process_list"])].join(",");
-        }
-        // Shell Off confines the child to directly launched applications: a requested bash
-        // becomes the guarded run_application builtin. Exclusions stay exclusions (an excluded
-        // run_application leaves bash out rather than restoring it), and a read-only loadout
-        // keeps no command capability at all.
-        const commandSettings = resolveCommandSettings(permissionPlan.permissions);
-        if (sandboxEnabled && !commandSettings.shell) {
-            allow = applyDirectApplicationLoadout(allow.split(",").filter(Boolean), {
-                shell: false, excluded: requestedExcludes,
-            }).tools.join(",");
-        }
-        const taskTools = sandboxEnabled ? planTaskTools({
-            requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name)),
-            settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
-            processAccess: permissionPlan.permissions?.processAccess ?? "off",
-            builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
-            toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
-        }) : undefined;
-        const resolution = resolveExtensions({
-            // Only SDK builtins reach `--tools` and extension resolution: process_list and run_application
-            // are task builtins that the mandatory guard installs and activates itself.
-            tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
-            model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
-        });
-        const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
-        const trustedExtArgs = [...new Set(taskTools?.trusted.map((tool) => tool.loadPath) ?? [])]
-            .filter((path) => !resolvedExtArgs.includes(path)).flatMap((path) => ["--extension", path]);
-        // Harness child controls ride along in every mode, including clean and unsandboxed runs.
-        // They deliver deadline steers and keep external monitoring with the coordinator.
-        const codemodeArgs = !sandboxEnabled && allow.split(",").includes("codemode") && !requestedExcludes.has("codemode")
-            ? ["--extension", join(selfDir(), "child-codemode.ts")] : [];
-        const extArgs = [...resolvedExtArgs, ...trustedExtArgs, ...codemodeArgs,
-            "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
-            .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
-        const baseExtensionArgs = [...resolvedExtArgs, ...codemodeArgs,
-            "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
-            .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
-        if (resume?.recipe.extensionArgs) {
-            // A model escalation may change provider auth, but an unchanged tool
-            // must not silently switch implementations with current configuration.
-            const reference = model === resume.recipe.model ? resolution : resolveExtensions({
+            // A confined child gets extension tools only through /sandbox Subagents · Tools (ADR 0009):
+            // the guarded apply_patch adapter, and trusted tools admitted by name and package.
+            const requestedExcludes = new Set(requestedExcludeTools.split(",").map((t) => t.trim()).filter(Boolean));
+            if (sandboxEnabled && !clean) {
+                const names = allow.split(",").filter(Boolean);
+                // Models reach for apply_patch whenever they may edit; ticked trusted tools join the default set.
+                if (permissionPlan.tools.applyPatch && names.some((name) => name === "edit" || name === "write")) names.push(APPLY_PATCH);
+                if (requestedTools === undefined) names.push(...permissionPlan.tools.trusted.map((entry) => entry.name));
+                allow = [...new Set(names)].join(",");
+            }
+            if (sandboxEnabled && requestedTools === undefined && permissionPlan.permissions?.processAccess === "read") {
+                allow = [...new Set([...allow.split(","), "process_list"])].join(",");
+            }
+            // Shell Off confines the child to directly launched applications: a requested bash
+            // becomes the guarded run_application builtin. Exclusions stay exclusions (an excluded
+            // run_application leaves bash out rather than restoring it), and a read-only loadout
+            // keeps no command capability at all.
+            const commandSettings = resolveCommandSettings(permissionPlan.permissions);
+            if (sandboxEnabled && !commandSettings.shell) {
+                allow = applyDirectApplicationLoadout(allow.split(",").filter(Boolean), {
+                    shell: false, excluded: requestedExcludes,
+                }).tools.join(",");
+            }
+            const taskTools = sandboxEnabled ? planTaskTools({
+                requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name)),
+                settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
+                processAccess: permissionPlan.permissions?.processAccess ?? "off",
+                builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
+                toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
+            }) : undefined;
+            const resolution = resolveExtensions({
+                // Only SDK builtins reach `--tools` and extension resolution: process_list and run_application
+                // are task builtins that the mandatory guard installs and activates itself.
                 tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
-                model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
+                model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
             });
-            const referenceArgs = [...extensionArgs(reference, resolveExtensionPath).args, ...codemodeArgs,
-                ...(!resume.recipe.baseExtensionArgs ? trustedExtArgs : []),
+            const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
+            const trustedExtArgs = [...new Set(taskTools?.trusted.map((tool) => tool.loadPath) ?? [])]
+                .filter((path) => !resolvedExtArgs.includes(path)).flatMap((path) => ["--extension", path]);
+            // Harness child controls ride along in every mode, including clean and unsandboxed runs.
+            // They deliver deadline steers and keep external monitoring with the coordinator.
+            const codemodeArgs = !sandboxEnabled && allow.split(",").includes("codemode") && !requestedExcludes.has("codemode")
+                ? ["--extension", join(selfDir(), "child-codemode.ts")] : [];
+            const extArgs = [...resolvedExtArgs, ...trustedExtArgs, ...codemodeArgs,
                 "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
                 .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
-            assertContinuationExtensions(resume.prior.id, resume.recipe,
-                referenceArgs, taskTools?.trusted ?? []);
-        }
-        if (sandboxEnabled && resolution.mode === "inherit") {
-            throw new Error("Task confinement requires explicit extensions; inheritExtensions is unsupported while sandboxing is enabled.");
-        }
-        if (missing.length) {
-            throw new Error(
-                `Subagent needs extension(s) that are not installed: ${missing.join(", ")}. ` +
-                `Install them, drop the tools that require them, or remove the mapping from config.json.`,
-            );
-        }
+            const baseExtensionArgs = [...resolvedExtArgs, ...codemodeArgs,
+                "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
+                .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
+            if (resume?.recipe.extensionArgs) {
+                // A model escalation may change provider auth, but an unchanged tool
+                // must not silently switch implementations with current configuration.
+                const reference = model === resume.recipe.model ? resolution : resolveExtensions({
+                    tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
+                    model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
+                });
+                const referenceArgs = [...extensionArgs(reference, resolveExtensionPath).args, ...codemodeArgs,
+                    ...(!resume.recipe.baseExtensionArgs ? trustedExtArgs : []),
+                    "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
+                    .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
+                assertContinuationExtensions(resume.prior.id, resume.recipe,
+                    referenceArgs, taskTools?.trusted ?? []);
+            }
+            if (sandboxEnabled && resolution.mode === "inherit") {
+                throw new Error("Task confinement requires explicit extensions; inheritExtensions is unsupported while sandboxing is enabled.");
+            }
+            if (missing.length) {
+                throw new Error(
+                    `Subagent needs extension(s) that are not installed: ${missing.join(", ")}. ` +
+                    `Install them, drop the tools that require them, or remove the mapping from config.json.`,
+                );
+            }
 
-        const excludes = new Set<string>();
-        if (requestedExcludeTools) for (const t of requestedExcludeTools.split(",")) if (t.trim()) excludes.add(t.trim());
-        if (!allowNested && resolution.mode === "inherit") {
-            for (const t of SUBAGENT_TOOLS) excludes.add(t);
-        }
+            const excludes = new Set<string>();
+            if (requestedExcludeTools) for (const t of requestedExcludeTools.split(",")) if (t.trim()) excludes.add(t.trim());
+            if (!allowNested && resolution.mode === "inherit") {
+                for (const t of SUBAGENT_TOOLS) excludes.add(t);
+            }
 
-        // A continuation reopens the exact saved conversation with `--session`;
-        // never `--session-id`, which would create a replacement session when the
-        // history is missing, and never both (Pi rejects the combination).
-        const sessionArgs = resume
-            ? ["--session", resume.conversation.path, "--session-dir", childSessionDir]
-            : ["--session-dir", childSessionDir, "--session-id", id];
-        const args = [
-            "-p", "--mode", "json",
-            ...sessionArgs,
-            ...extArgs,
-            ...(model ? ["--model", model] : []),
-            ...(thinking ? ["--thinking", thinking] : []),
-            ...(allow && !sandboxEnabled ? ["--tools", allow] : []),
-            ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
-            ...(sandboxEnabled ? ["--no-builtin-tools", "--no-approve"] : approve ? ["--approve"] : []),
-            p.prompt,
-        ];
+            // A continuation reopens the exact saved conversation with `--session`;
+            // never `--session-id`, which would create a replacement session when the
+            // history is missing, and never both (Pi rejects the combination).
+            const sessionArgs = resume
+                ? ["--session", resume.conversation.path, "--session-dir", childSessionDir]
+                : ["--session-dir", childSessionDir, "--session-id", id];
+            const args = [
+                "-p", "--mode", "json",
+                ...sessionArgs,
+                ...extArgs,
+                ...(model ? ["--model", model] : []),
+                ...(thinking ? ["--thinking", thinking] : []),
+                ...(allow && !sandboxEnabled ? ["--tools", allow] : []),
+                ...(excludes.size ? ["--exclude-tools", [...excludes].join(",")] : []),
+                ...(sandboxEnabled ? ["--no-builtin-tools", "--no-approve"] : approve ? ["--approve"] : []),
+                p.prompt,
+            ];
 
-        const piBin = resolvePiBinary();
-        const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
-        const unavailable = taskTools?.refused.filter((tool) => selectedTools.includes(tool.name)) ?? [];
-        const unavailableTools = unavailable.map((tool) => tool.name);
-        if (sandboxEnabled && selectedTools.length && unavailableTools.length === selectedTools.length) {
-            throw new Error(`No requested tool has a verified task sandbox adapter: ${unavailable.map((tool) => `${tool.name} (${tool.reason})`).join(", ")}.`);
-        }
-        const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
-            root: requestedSandboxDir, controlDir: join(runDir(id), "control"), piBin,
-            tools: selectedTools,
-            permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
-            applyPatch: taskTools?.applyPatch === true,
-            extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => tool) ?? [],
-            extensionPaths: extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]!] : []),
-            runtimeRoots: [baseDir()],
-        }) : undefined;
-        if (sandboxEnabled && !taskRuntime) throw new Error("Task sandbox has no workspace; refusing an unconfined child.");
-        // Parent-authored trust record, written before the child can run (#325).
-        if (taskRuntime) recordTaskRuntimeProvenance(id);
-        // Outside project = Write or Write & delete lets the run change files
-        // outside its workspace: start an APFS local snapshot (macOS, in the
-        // background; a failure is reported, never blocks the run).
-        const snapshot = taskRuntime ? takeRecoverySnapshot(taskRuntime.policy.permissions) : undefined;
-        if (snapshot?.started) {
-            void snapshot.done.then((outcome) => {
-                if (outcome.ok) return;
-                // The snapshot can finish after the session was replaced and ctx went stale.
-                try { ctx.ui?.notify?.(`Subagent ${id}: recovery snapshot failed (run continues): ${outcome.detail}`, "warning"); } catch { /* ignore */ }
-            });
-        }
-        const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: piBin, fileArgs: args };
-        const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
+            const piBin = resolvePiBinary();
+            const selectedTools = allow.split(",").filter((name) => name && !excludes.has(name));
+            const unavailable = taskTools?.refused.filter((tool) => selectedTools.includes(tool.name)) ?? [];
+            const unavailableTools = unavailable.map((tool) => tool.name);
+            if (sandboxEnabled && selectedTools.length && unavailableTools.length === selectedTools.length) {
+                throw new Error(`No requested tool has a verified task sandbox adapter: ${unavailable.map((tool) => `${tool.name} (${tool.reason})`).join(", ")}.`);
+            }
+            const taskRuntime = sandboxEnabled && requestedSandboxDir ? prepareTaskRuntime({
+                root: requestedSandboxDir, controlDir: join(runDir(id), "control"), piBin,
+                tools: selectedTools,
+                permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
+                applyPatch: taskTools?.applyPatch === true,
+                extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => tool) ?? [],
+                extensionPaths: extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]!] : []),
+                runtimeRoots: [baseDir()],
+            }) : undefined;
+            launchScratch = taskRuntime?.policy.scratch;
+            if (sandboxEnabled && !taskRuntime) throw new Error("Task sandbox has no workspace; refusing an unconfined child.");
+            // Parent-authored trust record, written before the child can run (#325).
+            if (taskRuntime) recordTaskRuntimeProvenance(id);
+            // Outside project = Write or Write & delete lets the run change files
+            // outside its workspace: start an APFS local snapshot (macOS, in the
+            // background; a failure is reported, never blocks the run).
+            const snapshot = taskRuntime ? takeRecoverySnapshot(taskRuntime.policy.permissions) : undefined;
+            if (snapshot?.started) {
+                void snapshot.done.then((outcome) => {
+                    if (outcome.ok) return;
+                    // The snapshot can finish after the session was replaced and ctx went stale.
+                    try { ctx.ui?.notify?.(`Subagent ${id}: recovery snapshot failed (run continues): ${outcome.detail}`, "warning"); } catch { /* ignore */ }
+                });
+            }
+            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: piBin, fileArgs: args };
+            const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
-        let spawned: ReturnType<typeof spawnDetached>;
-        let lease: ConversationLease | undefined;
-        try {
             // Reservations prevent competing admissions, but do not grandfather
             // unstarted work after a cap reduction. No await separates this live
             // occupancy check, child creation, and the running metadata below.
@@ -2122,106 +2130,109 @@ export default function (pi: ExtensionAPI) {
             if (resume) revalidateContinuationUnderLease(resume, callbackOrigin);
             spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
                 env: { [STEER_FILE_ENV]: steerPathFor(id) } });
-        } catch (error) {
-            // Nothing references the run yet (no metadata): drop its directory (prompt, control/), its
-            // provenance record, its session directory, its clone workspace, and the task scratch, so a
-            // failed launch leaves nothing behind (#325, #332). A continuation's session
-            // directory is the retained owner's and is never removed here.
-            lease?.release();
-            discardFailedLaunch(id, { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: taskRuntime?.policy.scratch });
-            throw error;
-        }
-        // Record process identity (pgid, start-time token) so health
-        // reconciliation can tell a supervised child from a recycled pid
-        // or an orphaned process group (#63). Best-effort: when the OS
-        // probes are unavailable the fields stay absent and the run is
-        // reconciled via the conservative old-metadata path.
-        const identity = captureProcessIdentity(spawned.pid, spawnIdentityProbe);
-        const startedAt = Date.now();
-        // The effective launch recipe is frozen on the attempt so a later
-        // continuation can reproduce its runtime intent without re-resolving the
-        // catalog or guessing from current configuration.
-        const recipe = buildLaunchRecipe({
-            attemptId: id,
-            sessionId,
-            sessionDir: childSessionDir,
-            cwd,
-            model,
-            effort: thinking,
-            tools: allow,
-            excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
-            clean,
-            allowNested,
-            approve,
-            sandbox: sandboxEnabled,
-            sandboxDir: requestedSandboxDir,
-            gitCloneWorkspace,
-            callback: callbackEnabled,
-            name: launchName,
-            agent: resume ? resume.recipe.agent : p.agent,
-            role: resume ? resume.recipe.role : p.role,
-            alias: resume ? resume.recipe.alias : p.alias,
-            catalog: launchCatalog,
-            extensionArgs: extArgs,
-            baseExtensionArgs,
-            trustedExtensions: resume?.recipe.trustedExtensions ?? taskTools?.trusted.map(({ name, package: owner, loadPath }) => ({ name, package: owner, loadPath })),
-        });
+            // Record process identity (pgid, start-time token) so health
+            // reconciliation can tell a supervised child from a recycled pid
+            // or an orphaned process group (#63). Best-effort: when the OS
+            // probes are unavailable the fields stay absent and the run is
+            // reconciled via the conservative old-metadata path.
+            const identity = captureProcessIdentity(spawned.pid, spawnIdentityProbe);
+            const startedAt = Date.now();
+            // The effective launch recipe is frozen on the attempt so a later
+            // continuation can reproduce its runtime intent without re-resolving the
+            // catalog or guessing from current configuration.
+            const recipe = buildLaunchRecipe({
+                attemptId: id,
+                sessionId,
+                sessionDir: childSessionDir,
+                cwd,
+                model,
+                effort: thinking,
+                tools: allow,
+                excludeTools: requestedExcludes.size ? [...requestedExcludes].join(",") : undefined,
+                clean,
+                allowNested,
+                approve,
+                sandbox: sandboxEnabled,
+                sandboxDir: requestedSandboxDir,
+                gitCloneWorkspace,
+                callback: callbackEnabled,
+                name: launchName,
+                agent: resume ? resume.recipe.agent : p.agent,
+                role: resume ? resume.recipe.role : p.role,
+                alias: resume ? resume.recipe.alias : p.alias,
+                catalog: launchCatalog,
+                extensionArgs: extArgs,
+                baseExtensionArgs,
+                trustedExtensions: resume?.recipe.trustedExtensions ?? taskTools?.trusted.map(({ name, package: owner, loadPath }) => ({ name, package: owner, loadPath })),
+            });
 
-        const meta: RunMeta = {
-            id, name: launchName, status: "running",
-            pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model,
-            effort: thinking, cwd,
-            ...identity,
-            promptPreview: p.prompt.slice(0, 200),
-            startedAt, logPath: logPathFor(id), sessionId,
-            rootRunId,
-            ...(resume ? { resumedFrom: resume.prior.id } : {}),
-            recipe,
-            callbackOrigin,
-            sandbox: sandboxDir, taskRuntime: Boolean(taskRuntime), taskScratch: taskRuntime?.policy.scratch, callback: callbackEnabled,
-            ...batchInfo,
-            // The launch record is JSON. Registry freezes that value; it does not
-            // require the resolver's nominal type to carry an index signature.
-            ...(launchCatalog ? { catalog: launchCatalog as unknown as RunMeta["catalog"] } : {}),
-            timing: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt }),
-        };
-        // Register exit supervision before any fallible post-spawn publication.
-        // A failed metadata write must not strand a running child without a close
-        // handler; the lease stays held until that child has actually exited.
-        void spawned.exit.then((code) => {
-            try { finalizeRun(pi, ctx, id, code); }
-            finally { lease?.release(); }
-        });
-        try {
+            const meta: RunMeta = {
+                id, name: launchName, status: "running",
+                pid: spawned.pid, spawnPid: process.pid, spawnPidStartTime: parentStartToken(), model,
+                effort: thinking, cwd,
+                ...identity,
+                promptPreview: p.prompt.slice(0, 200),
+                startedAt, logPath: logPathFor(id), sessionId,
+                rootRunId,
+                ...(resume ? { resumedFrom: resume.prior.id } : {}),
+                recipe,
+                callbackOrigin,
+                sandbox: sandboxDir, taskRuntime: Boolean(taskRuntime), taskScratch: taskRuntime?.policy.scratch, callback: callbackEnabled,
+                ...batchInfo,
+                // The launch record is JSON. Registry freezes that value; it does not
+                // require the resolver's nominal type to carry an index signature.
+                ...(launchCatalog ? { catalog: launchCatalog as unknown as RunMeta["catalog"] } : {}),
+                timing: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt }),
+            };
+            // Register exit supervision before any fallible post-spawn publication.
+            // A failed metadata write must not strand a running child without a close
+            // handler; the lease stays held until that child has actually exited.
+            void spawned.exit.then((code) => {
+                try { finalizeRun(pi, ctx, id, code); }
+                finally { lease?.release(); }
+            });
             writeMeta(meta);
+            committed = true;
+
+            uiCtx = ctx;
+            ensureTicker();
+            // Start periodic supervision reconciliation (self-stops when idle).
+            ensureHealthTicker();
+            // Footer hint: a visible run now exists, so `← background work · N` shows.
+            updateNavigatorFooter(ctx);
+
+            const toolSummary = taskTools ? describeTaskTools(taskTools) : undefined;
+            const runtime = resolution.mode === "inherit"
+                ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
+                : toolSummary
+                    ? `Runtime: isolated · ${toolSummary}${resolution.specs.length ? ` · extensions ${resolution.specs.join(", ")}` : ""}\n`
+                    : resolution.specs.length
+                    ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
+                    : `Runtime: isolated · built-in tools only\n`;
+            const warn = (unavailable.length ? `Task sandbox: ${unavailable.map((tool) => `${tool.name} disabled (${tool.reason})`).join("; ")}.\n` : "") +
+                (!sandboxEnabled && resolution.unmapped.length
+                ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
+                  `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
+                  `Add a toolExtensions entry in config.json.\n`
+                : "");
+            const modelNote = catalogDefaultNote(resume ? undefined : p.catalog, model, thinking);
+            return { id, meta, spawned, runtime: runtime + (meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""), warn, sandboxDir, modelNote };
         } catch (error) {
-            killProcessTree(spawned.pid, "SIGKILL");
+            // A launch that never committed metadata is not a run: drop
+            // everything the attempt created so the registry keeps no
+            // unreadable record (#325, #332, #623). A continuation's session
+            // directory belongs to the retained owner and a caller-chosen
+            // `sandbox_dir` is never ours, so `discardFailedLaunch` only
+            // removes this attempt's own paths. A child that already started
+            // must not keep running unsupervised; its log goes with the
+            // attempt, because a record without metadata can never be read.
+            if (!committed) {
+                lease?.release();
+                if (spawned) killProcessTree(spawned.pid, "SIGKILL");
+                discardFailedLaunch(id, { sessionDir: childSessionDir, workspaceDir: ownedCloneWorkspace, scratch: launchScratch });
+            }
             throw error;
         }
-
-        uiCtx = ctx;
-        ensureTicker();
-        // Start periodic supervision reconciliation (self-stops when idle).
-        ensureHealthTicker();
-        // Footer hint: a visible run now exists, so `← background work · N` shows.
-        updateNavigatorFooter(ctx);
-
-        const toolSummary = taskTools ? describeTaskTools(taskTools) : undefined;
-        const runtime = resolution.mode === "inherit"
-            ? `Runtime: ALL installed extensions (inheritExtensions) — mid-turn drain risk\n`
-            : toolSummary
-                ? `Runtime: isolated · ${toolSummary}${resolution.specs.length ? ` · extensions ${resolution.specs.join(", ")}` : ""}\n`
-                : resolution.specs.length
-                ? `Runtime: isolated · extensions ${resolution.specs.join(", ")}\n`
-                : `Runtime: isolated · built-in tools only\n`;
-        const warn = (unavailable.length ? `Task sandbox: ${unavailable.map((tool) => `${tool.name} disabled (${tool.reason})`).join("; ")}.\n` : "") +
-            (!sandboxEnabled && resolution.unmapped.length
-            ? `NOTE: no extension mapped for ${resolution.unmapped.join(", ")} — ` +
-              `${resolution.unmapped.length > 1 ? "these tools" : "this tool"} will NOT exist in the child. ` +
-              `Add a toolExtensions entry in config.json.\n`
-            : "");
-        const modelNote = catalogDefaultNote(resume ? undefined : p.catalog, model, thinking);
-        return { id, meta, spawned, runtime: runtime + (meta.timing ? `${formatTimingLimits(meta.timing, startedAt)}\n` : ""), warn, sandboxDir, modelNote };
     }
 
     // ---- subagent_spawn -------------------------------------------------

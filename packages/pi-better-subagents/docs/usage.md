@@ -99,10 +99,10 @@ thresholds continue to take precedence for subagent health.
 | `subagent_spawn` | never | Launch a task in a background subagent; returns a run id at once. Params: `prompt`, `name`, `model`, `tools` (allowlist), `exclude_tools`, `sandbox`, `sandbox_dir`, `callback`, `clean`, `cwd`, `git_clone_workspace`, `approve`, `allow_nested`, optional `session_id` or `session_name` (continue a saved conversation), and the [timing](#run-timing-deadline-ceiling-stuck) overrides `deadline_minutes`, `grace_minutes`, `max_minutes`, `stuck_minutes`. |
 | `subagent_spawn_batch` | never | Launch several independent subagents at once. Each job becomes a normal run. Params: `batchName`, `shared` (options applied to every job), `jobs[]` (each needs `prompt`; optional per-job `session_id` or `session_name` continues a saved conversation), `onCapacity` (`reject` or `launch-available`). |
 | `subagent_settings` | never | Read-only effective settings and capacity snapshot. No parameters. Returns `delegationMode`, `maxConcurrent`, per-setting `sources` (`session` or `config`), a stable settings `revision`, `runningCount`, `pendingCount`, `occupiedSlots`, and `availableSlots`. The limit is a ceiling, not a target; spawn admission rechecks live capacity. |
-| `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. |
+| `subagent_list` | never | Compact list for the current folder and descendants across foreground sessions (default 10 rows / 1 KiB page). Each row includes `session_id`. Params: `all` (machine-global search), `limit` (default 10, max 100), `cursor`, `max_bytes` (max 4 KiB), `status` (`running`, `completed`, `failed`, `killed`, `exited`, durable `orphaned`, `lost`). Incident counts are compact; no spend/tool histories. Abandoned launch records are reported separately and are never counted as runs. |
 | `subagent_output` | never | Bounded current-session excerpt (default 1 KiB / 10 lines). Params: `id`, `lines` (`tail_lines` is a deprecated alias), `cursor` (a returned `nextCursor`, `statusCursor`, or `incidentCursor`), `max_bytes` (max 4 KiB; raw 16 KiB default, 64 KiB max), `mode` (`raw` pages retained log bytes), `include` (`["cost"]`, `["tools"]`, or both: opt-in spend and tool-count lines), `all` (foreign-session id). Missing/unreadable logs are gaps, not empty healthy output. |
 | `subagent_result` | never | Finished-run answer for the current session (2048-byte page). Params: `id`, `cursor` (a returned `nextCursor` continues the answer; `statusCursor` / `incidentCursor` also accepted), `max_bytes` (maximum 8192 bytes), `lines` (optional line cap per answer page), `mode` (`raw`), `include` (`["cost"]`, `["tools"]`, or both), `all` (foreign-session id). Failures and exceptional lifecycle facts come before progress; no tool-name histories. TUI folding is display-only. |
-| `subagent_stop` | never | SIGTERM a running run's process group. |
+| `subagent_stop` | never | SIGTERM a running run's process group. An abandoned launch record (see below) is removed instead of stopped. |
 
 ## Finding a saved conversation
 
@@ -777,6 +777,34 @@ state. Session shutdown disposes open navigator timers.
 ## Parent-process scoping
 
 The live widget, concurrency cap, and supervision ticker track this Pi process's runs. `subagent_list` searches the current folder and its descendants across foreground sessions; `all:true` searches globally. Rows show the attempt id and the native `session_id`, so a listed conversation can be continued explicitly. Results are newest first, with 10 rows / 1 KiB by default. Use `limit` (max 100), `max_bytes` (max 4 KiB), and `status` filters as needed. Cursors are bound to the local folder or global scope and cannot be replayed from a different folder. Id-based `subagent_result` and `subagent_output` keep their current-session scope; use `all:true` to read another session's run evidence. Unknown ownership remains an explicit gap for those evidence tools. Saved conversation discovery and continuation do not require the original foreground session to exist.
+
+## Abandoned launch records
+
+A launch creates its run directory, writes `prompt.md`, and prepares the sandbox
+`control/` dir before the child starts and `meta.json` is committed. When that
+preparation fails — or Pi dies inside that window — only those artifacts remain:
+no metadata (nothing was committed) and no `output.log` (the log is created at
+spawn and removed when the spawn itself fails). A launch failure now removes
+them, so this state cannot be created anew.
+
+A directory in that state that is left by an older version or a crashed process
+is an **abandoned launch record**, not a run. It has no owner, status, log or
+result, and can never gain any, so `subagent_list` reports it separately as not
+run evidence and does not count it:
+
+```text
+1 abandoned launch record(s), not run evidence and not counted: the launch
+stopped before any child started (prompt written, no metadata, no log): sa_…
+Cleanup reclaims them after 1 hour; remove one now with subagent_stop <id>.
+```
+
+Every launch's hygiene pass (`runDailyCleanupOnce`, alongside the daily and size
+sweeps) reclaims abandoned launch records older than one hour, or immediately
+with `subagent_stop <id>`. Only the attempt's own run directory, its per-run
+session directory, and a clone workspace it owned are removed. A directory that
+has a log is deliberately **not** treated as debris: a child may have started and
+its output is real evidence, so it stays an explicit unreadable-record gap until
+normal retention reclaims it.
 
 ## Supervision health (`orphaned` / `lost`)
 

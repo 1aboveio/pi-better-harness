@@ -15,7 +15,7 @@
 import type { RunTiming } from "./timing.ts";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -285,6 +285,14 @@ export function promptPathFor(id: string): string {
 function metaPathFor(id: string): string {
     return join(runDir(id), "meta.json");
 }
+
+/**
+ * How long a launch attempt that never produced a child is kept before a sweep
+ * reclaims it. Launch preparation takes seconds; the grace only exists so a
+ * paused or unusually slow launch in another process is never reclaimed under
+ * it. A record this old has no metadata and no log, so it can never become a run.
+ */
+export const ABANDONED_LAUNCH_GRACE_MS = 60 * 60 * 1000;
 
 /**
  * Parent-authored provenance for a run launched on the trusted task runtime (#325).
@@ -1135,6 +1143,12 @@ export interface RunRecordIndex {
     metas: RunMeta[];
     /** Run directories whose metadata is missing, unreadable, or corrupt. */
     unreadable: Array<{ id: string; detail: string }>;
+    /**
+     * Launch attempts that never produced a supervised run (no metadata, no
+     * log). They are not runs, cannot be read or finalized, and are reclaimed
+     * by the launch-debris sweep or an explicit `subagent_stop`.
+     */
+    abandoned: string[];
     /** The runs directory itself could not be read (not "no runs"). */
     indexError?: string;
 }
@@ -1147,6 +1161,71 @@ export function runMetaShapeProblem(meta: unknown, id: string): string | undefin
     if (typeof value.status !== "string" || !value.status) return "missing status";
     if (typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt)) return "missing startedAt";
     return undefined;
+}
+
+/** A run directory a launch created but never turned into a supervised run. */
+export interface AbandonedLaunchRecord {
+    id: string;
+    /** Directory mtime (ms), used as the launch attempt's age. */
+    mtimeMs: number;
+}
+
+/**
+ * Read one run directory as an abandoned launch attempt, or `undefined`.
+ *
+ * A launch creates the directory, writes `prompt.md`, and prepares the sandbox
+ * `control/` dir before the child starts and `meta.json` is committed. When that
+ * preparation throws, or pi dies in that window, only those artifacts remain:
+ * no metadata (nothing was committed) and no `output.log` (the log is created at
+ * spawn and removed when the spawn itself fails). Such a directory was never a
+ * run: it has no owner, no status, no log and no result, and it can never gain
+ * any, so it must not be reported as unreadable run evidence forever.
+ *
+ * The rule is deliberately narrow. A directory WITH a log is not debris: a child
+ * may have started and its output is real evidence, so it stays an unreadable
+ * record under normal retention. A directory without the launch artifacts is
+ * left to the age sweep rather than guessed at.
+ */
+export function abandonedLaunchRecord(id: string): AbandonedLaunchRecord | undefined {
+    if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) return undefined;
+    let mtimeMs: number;
+    try {
+        mtimeMs = statSync(runDir(id)).mtimeMs;
+    } catch {
+        return undefined;
+    }
+    try {
+        statSync(metaPathFor(id));
+        return undefined;
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") return undefined;
+    }
+    try {
+        statSync(logPathFor(id));
+        return undefined;
+    } catch (error) {
+        if (errnoOf(error) !== "ENOENT") return undefined;
+    }
+    if (!existsSync(promptPathFor(id)) && !existsSync(join(runDir(id), "control"))) return undefined;
+    return { id, mtimeMs };
+}
+
+/**
+ * Reclaim one abandoned launch attempt: its run directory, the per-run session
+ * directory a confined launch prepared, and the clone workspace it owned. Only
+ * paths named by the attempt's own id are removed (shared sessions and a
+ * caller-chosen `sandbox_dir` are never touched), exactly like a failed launch.
+ * Returns whether the run directory is gone.
+ */
+export function purgeAbandonedLaunch(id: string): boolean {
+    if (!abandonedLaunchRecord(id)) return false;
+    discardFailedLaunch(id, { sessionDir: join(sessionsDir(), id), workspaceDir: taskWorkspaceDir(id) });
+    try {
+        statSync(runDir(id));
+        return false;
+    } catch (error) {
+        return errnoOf(error) === "ENOENT";
+    }
 }
 
 /**
@@ -1196,10 +1275,11 @@ export function listRunRecords(): RunRecordIndex {
         ids = readdirSync(join(baseDir(), "runs"));
     } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT") return { metas: [], unreadable: [], indexError: error instanceof Error ? error.message : String(error) };
+        if (code !== "ENOENT") return { metas: [], unreadable: [], abandoned: [], indexError: error instanceof Error ? error.message : String(error) };
     }
     const metas: RunMeta[] = [];
     const unreadable: Array<{ id: string; detail: string }> = [];
+    const abandoned: string[] = [];
     for (const id of ids) {
         const cached = metaCache.get(id);
         if (cached && cached.status !== "running" && cached.status !== "orphaned") {
@@ -1208,14 +1288,17 @@ export function listRunRecords(): RunRecordIndex {
         }
         const inspected = inspectRunMeta(id);
         if (inspected.kind === "ok") metas.push(inspected.meta);
-        else if (inspected.kind === "unreadable") unreadable.push({ id, detail: inspected.detail });
+        else if (inspected.kind === "unreadable") {
+            if (abandonedLaunchRecord(id)) abandoned.push(id);
+            else unreadable.push({ id, detail: inspected.detail });
+        }
     }
     const volatileIds = new Set(ids);
     for (const archived of listArchivedAttempts()) {
         if (!volatileIds.has(archived.id)) metas.push(archived);
     }
     metas.sort((a, b) => b.startedAt - a.startedAt);
-    return { metas, unreadable };
+    return { metas, unreadable, abandoned };
 }
 
 export function listMetasForParent(parentPid: number): RunMeta[] {

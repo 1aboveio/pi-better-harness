@@ -37,6 +37,7 @@ import {
 } from "./lifecycle.ts";
 import { parseRun, parseRunForLifecycle, type ParsedRun } from "./parse.ts";
 import {
+    ABANDONED_LAUNCH_GRACE_MS,
     belongsToOrigin,
     effectiveStatus,
     inspectRunMeta,
@@ -854,6 +855,12 @@ export function assembleSubagentListPayload(input: {
     statusesKey?: string;
     sessionWarning?: string;
     unreadable?: Array<{ id: string; detail: string }>;
+    /**
+     * Launch attempts that never produced a supervised run (no metadata, no
+     * log). They are not run evidence, so they are reported separately from
+     * `unreadable` and never counted as runs (#623).
+     */
+    abandonedLaunches?: string[];
     indexError?: string;
     incidentRuns?: number;
 }): string {
@@ -877,6 +884,8 @@ export function assembleSubagentListPayload(input: {
         });
     }
     const unreadable = input.unreadable ?? [];
+    const abandonedLaunches = input.abandonedLaunches ?? [];
+    const abandonedGrace = describeAbandonedLaunchGrace();
     const pageCursor = input.cursor && !statusCursorInput ? input.cursor : undefined;
     const identity = input.indexError
         ? "subagent_list · run index unreadable"
@@ -889,6 +898,9 @@ export function assembleSubagentListPayload(input: {
         input.indexError ? `Run index could not be read: ${input.indexError}. Cannot treat the registry as empty.` : undefined,
         unreadable.length
             ? `${unreadable.length} run record(s) with missing or unreadable metadata (ownership unknown; not counted as absent or healthy): ${unreadable.slice(0, 3).map((item) => item.id).join(", ")}${unreadable.length > 3 ? ", …" : ""}`
+            : undefined,
+        abandonedLaunches.length
+            ? `${abandonedLaunches.length} abandoned launch record(s), not run evidence and not counted: the launch stopped before any child started (prompt written, no metadata, no log): ${abandonedLaunches.slice(0, 3).join(", ")}${abandonedLaunches.length > 3 ? ", …" : ""}. Cleanup reclaims them after ${abandonedGrace}; remove one now with subagent_stop <id>.`
             : undefined,
         statusCursorInput && status.change === "failure" ? "change=failure" : undefined,
         statusCursorInput && status.change === "reset" ? "reset=stale-cursor (status cursor from another scope or filter)" : undefined,
@@ -923,6 +935,16 @@ export function assembleSubagentListPayload(input: {
 
 export function unknownRunError(id: string): Error {
     return new Error(`Unknown run id: ${id}`);
+}
+
+/** Human-readable grace period for abandoned launch records. */
+function describeAbandonedLaunchGrace(): string {
+    const minutes = Math.round(ABANDONED_LAUNCH_GRACE_MS / 60_000);
+    if (minutes % 60 === 0) {
+        const hours = minutes / 60;
+        return `${hours} hour${hours === 1 ? "" : "s"}`;
+    }
+    return `${minutes} minutes`;
 }
 
 export { originOf };
