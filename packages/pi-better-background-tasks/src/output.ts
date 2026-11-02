@@ -224,7 +224,12 @@ function formatDecision(meta: BackgroundTaskMeta): string | undefined {
     lines.push(formatCondition(result.matchedCondition, result.matchedValue));
   }
   if (meta.lastExitCode !== undefined || meta.lastSignal) {
-    lines.push(`exit=${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}`);
+    // A gated task's exit can be a failing step's code rather than the last command's (#619).
+    const gate = meta.stepGateFailure ? " (step gate)" : "";
+    lines.push(`exit=${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}${gate}`);
+  }
+  if (meta.stepGateFailure) {
+    lines.push(`step gate: ${oneLine(meta.stepGateFailure.command || "a chained step", 120)} exited ${meta.stepGateFailure.stepExitCode}; the shell's own exit was ${meta.stepGateFailure.shellExitCode ?? "unknown"}`);
   }
   if (result.reason && !result.matchedCondition) lines.push(oneLine(result.reason, 240));
   if (meta.error && meta.error !== meta.stopError && meta.error !== result.reason) {
@@ -288,6 +293,11 @@ function formatProcessDiagnostics(diagnostics: TaskProcessDiagnostics | undefine
   return `process diagnostics: ${facts}\nA snapshot cannot prove useful work or a hang.`;
 }
 
+function formatStepGate(meta: BackgroundTaskMeta): string | undefined {
+  if (!meta.requireSuccessfulSteps) return undefined;
+  return "step gate: on; a failing step is reported even when a later command exits 0. Every step still runs.";
+}
+
 function formatLaunchSandbox(meta: BackgroundTaskMeta): string | undefined {
   const sandbox = meta.sandbox;
   if (!sandbox) return "sandbox: unknown; launch-time policy was not recorded.";
@@ -330,6 +340,8 @@ function contentRevision(meta: BackgroundTaskMeta, stall?: StallObservation): st
     meta.lastProgressAt ?? null,
     meta.lastExitCode ?? null,
     meta.lastSignal ?? null,
+    meta.requireSuccessfulSteps ?? null,
+    meta.stepGateFailure ?? null,
     meta.error ?? null,
     meta.stopError ?? null,
     meta.logGeneration ?? 0,
@@ -493,7 +505,7 @@ export function formatLaunch(meta: BackgroundTaskMeta, firstCheck?: FirstWatchCh
       identity: `Started background ${meta.kind} ${label}. Status: ${meta.status}.`,
       failure: incidentSection(meta.id, {}),
       decision: formatDecision(meta),
-      diagnostics: [formatLaunchSandbox(meta), ...remoteLines, ...(checkText ? [checkText] : [])].filter(Boolean).join("\n") || undefined,
+      diagnostics: [formatLaunchSandbox(meta), formatStepGate(meta), ...remoteLines, ...(checkText ? [checkText] : [])].filter(Boolean).join("\n") || undefined,
       progress: withLog ? logLine : undefined,
     },
     gaps: taskGaps(meta),

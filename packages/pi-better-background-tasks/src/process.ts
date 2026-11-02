@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
-import type { CommandResult, CommandSpec } from "./types.js";
+import type { CommandResult, CommandSpec, StepGateFailure } from "./types.js";
 
 /** Known Git for Windows locations; `bash -lc` needs a real bash, not the WSL shim. */
 const WINDOWS_BASH_CANDIDATES = [
@@ -73,6 +73,97 @@ export function toMsysPath(path: string): string {
 /** Single-quote a value for safe literal use in a bash script line. Exposed for tests and reuse. */
 export function bashSingleQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Env var carrying the operator's own command into a gated launch (#619).
+ *
+ * The gate script `eval`s this value instead of concatenating it, so a command
+ * containing quotes, heredocs, or multiple lines is parsed exactly as bash would
+ * parse it alone. The value is also kept out of the spawned argv.
+ */
+export const STEP_GATE_COMMAND_ENV = "PI_BG_STEP_GATE_COMMAND";
+
+/** Longest failing-step text recorded in task metadata; the log keeps it whole. */
+export const STEP_GATE_COMMAND_CHARS = 160;
+
+/**
+ * Bash script that runs an opt-in step gate around the operator's command (#619).
+ *
+ * Ordinary shell semantics are preserved: there is no `set -e`, so every step
+ * still runs and a failure the command handles itself (`|| true`, `if`, `while`,
+ * `!`) is not a gate failure. Bash reports each failing command through its ERR
+ * trap; the first one decides the verdict. When the shell's own exit would be 0,
+ * the gate exits with that failing step's code instead, so a trailing summary
+ * command can no longer turn a red gate green. The verdict is also written to
+ * stderr, where the harness reads it back into task metadata.
+ *
+ * Exposed for tests and reuse.
+ */
+export function stepGateScript(id: string): string {
+  return [
+    "# Step gate (#619) from pi-better-background-tasks: no `set -e`, every step still runs.",
+    `__pi_step_gate_id=${bashSingleQuote(id)}`,
+    "__pi_step_gate_first=0",
+    "__pi_step_gate_command=",
+    "__pi_step_gate_record() {",
+    "  __pi_step_gate_status=$?",
+    "  if [ \"${__pi_step_gate_first:-0}\" -eq 0 ] && [ \"$__pi_step_gate_status\" -ne 0 ]; then",
+    "    __pi_step_gate_first=$__pi_step_gate_status",
+    "    __pi_step_gate_command=${BASH_COMMAND:-}",
+    "  fi",
+    "  return 0",
+    "}",
+    "__pi_step_gate_finish() {",
+    "  __pi_step_gate_status=$?",
+    "  if [ \"${__pi_step_gate_first:-0}\" -ne 0 ]; then",
+    "    __pi_step_gate_text=${__pi_step_gate_command//$'\\n'/ }",
+    "    printf '\\n--- step gate [%s]: first failing step exit=%s; shell exit=%s: %s ---\\n' \"$__pi_step_gate_id\" \"$__pi_step_gate_first\" \"$__pi_step_gate_status\" \"$__pi_step_gate_text\" >&2",
+    "    if [ \"$__pi_step_gate_status\" -eq 0 ]; then exit \"$__pi_step_gate_first\"; fi",
+    "  fi",
+    "  exit \"$__pi_step_gate_status\"",
+    "}",
+    "trap '__pi_step_gate_record' ERR",
+    "trap '__pi_step_gate_finish' EXIT",
+    `if [ -z "\${${STEP_GATE_COMMAND_ENV}:-}" ]; then`,
+    "  printf '\\n--- step gate [%s]: the gated command was not provided; nothing ran ---\\n' \"$__pi_step_gate_id\" >&2",
+    "  exit 125",
+    "fi",
+    `eval "\${${STEP_GATE_COMMAND_ENV}}"`,
+  ].join("\n");
+}
+
+/**
+ * Read the gate's verdict marker from a task log (#619). Bash writes it as the last
+ * line of stderr, so log retention cannot turn a red gate green; a missing marker
+ * only costs the failing command's name, never the verdict carried by the exit code.
+ *
+ * Exposed for tests and reuse.
+ */
+export function parseStepGateFailure(logText: string, id: string): StepGateFailure | undefined {
+  const marker = `--- step gate [${id}]: first failing step exit=`;
+  let found: StepGateFailure | undefined;
+  for (const rawLine of logText.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (!line.startsWith(marker) || !line.endsWith(" ---")) continue;
+    const match = /^--- step gate \[[^\]]+\]: first failing step exit=(-?\d+); shell exit=(-?\d+): (.*) ---$/.exec(line);
+    if (!match) continue;
+    const stepExitCode = Number(match[1]);
+    const shellExitCode = Number(match[2]);
+    if (!Number.isInteger(stepExitCode) || stepExitCode === 0) continue;
+    // The marker is the newest evidence, and the shell writes only the first failing step.
+    found = {
+      stepExitCode,
+      shellExitCode: Number.isInteger(shellExitCode) ? shellExitCode : null,
+      command: boundedStepCommand(match[3]),
+    };
+  }
+  return found;
+}
+
+function boundedStepCommand(value: string): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  return oneLine.length > STEP_GATE_COMMAND_CHARS ? `${oneLine.slice(0, STEP_GATE_COMMAND_CHARS - 1)}…` : oneLine;
 }
 
 /**

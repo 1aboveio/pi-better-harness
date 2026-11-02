@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { commandExecution } from "./process.js";
+import { commandExecution, stepGateScript } from "./process.js";
 import { baseDir, readMeta, taskDir, writeMeta } from "./registry.js";
 import { resumeRunningTask, spawnTask, startWatchTask, stopTask } from "./runtime.js";
 import {
@@ -345,6 +345,26 @@ describe("foreground sandbox launch planning", () => {
 
   // @covers background-task.sandbox-launch-capture
   // @level integration
+  it.each([
+    ["Seatbelt", MACOS],
+    ["Bubblewrap", LINUX],
+  ] as const)("keeps the step gate's script and command variable inside the %s wrapper (#619)", (_name, seams) => {
+    const { spec, project, profilePath } = wrapFixture(`gate-wrap-${_name}`);
+    const gateScript = stepGateScript("bg_wrap_1");
+    const gated: CommandSpec = { ...spec, command: gateScript, env: { ...spec.env, PI_BG_STEP_GATE_COMMAND: spec.command! } };
+
+    const confined = confineCommandSpec(gated, wrapPlan(project), profilePath, seams);
+
+    // Confinement wraps the same bash invocation, and the operator's command still
+    // travels in its own variable instead of being rewritten into the wrapper.
+    expect(confined.shell).toBe(false);
+    expect(confined.command).toBe(gateScript);
+    expect(confined.env).toEqual({ PROBE: "1", PI_BG_STEP_GATE_COMMAND: "echo hi" });
+    const { execPath, execArgs } = commandExecution(gated);
+    expect(execArgs).toEqual(["-lc", gateScript]);
+    expect(confined.argv!.slice(-1 - execArgs.length)).toEqual([execPath, ...execArgs]);
+  });
+
   it("wraps the exact executable and argv the unconfined launch would have run, under Bubblewrap", () => {
     const { spec, project, profilePath } = wrapFixture("wrap-linux");
 
@@ -756,6 +776,31 @@ backendDescribe("background application settings on a real launch", () => {
       expect(terminal?.sandbox?.confinement).toBe("confined");
       expect(readFileSync(join(project, "ran.txt"), "utf8")).toBe("direct");
       expect(persistedCap(terminal)).toBeUndefined();
+    } finally {
+      rmSync(taskDir(meta.id), { recursive: true, force: true });
+    }
+  });
+
+  it("runs the step gate inside a confined shell command (#619)", async () => {
+    const project = launchProject("settings-step-gate");
+    const { pi, events } = createPi();
+    createSandboxPublisher(events).announce({ ...enabledPolicy(project), permissions: permissionsFor() });
+
+    const meta = spawnTask(pi, {
+      name: "confined gated command",
+      command: "bash -c 'exit 8'\necho summary ok",
+      require_successful_steps: true,
+      cwd: project,
+      callback: false,
+    }, project);
+    try {
+      const terminal = await waitForStatus(meta.id, "failed", 20_000);
+      // Confinement wraps the same gate script; the verdict survives the backend wrapper
+      // and the operator's command still reaches the shell through its own variable.
+      expect(terminal?.sandbox?.confinement).toBe("confined");
+      expect(terminal?.lastExitCode).toBe(8);
+      expect(terminal?.stepGateFailure).toMatchObject({ stepExitCode: 8, shellExitCode: 0 });
+      expect(readFileSync(terminal!.logPath, "utf8")).toContain("summary ok");
     } finally {
       rmSync(taskDir(meta.id), { recursive: true, force: true });
     }

@@ -345,6 +345,30 @@ validated before launch (a malformed value starts nothing):
 { "command": "npm test -- src/scoped.test.ts", "operation_id": "unit-tests", "timeout_seconds": 600 }
 ```
 
+## Chained commands and the step gate
+
+Ordinary shell semantics report the exit status of the last command in a chain,
+so `ctest; write-summary` passes when the summary exits 0 even though `ctest`
+failed. `bg_task_spawn` and `bg_task` accept `require_successful_steps: true` to
+opt into a step gate for a shell command:
+
+- bash reports unhandled failing commands through its ERR trap and the first one
+  decides the verdict; when the command's own exit would be 0, the task exits
+  with that failing step's code;
+- there is no `set -e`: every step still runs and a failure the command handles
+  (`|| true`, `if`, `while`, `!`) is not a gate failure;
+- status reports the real process exit with `(step gate)`, then the failing step
+  and the shell's own exit. Metadata keeps the failing step (bounded) and the
+  command the operator actually wrote, never the wrapper.
+
+`require_successful_steps` is refused, before any task state exists, for
+`shell:false` (argv already reports the real exit code), for structured `ssh`
+(remote semantics are not observable locally), and for watch checks (a check is
+one polled command whose own exit code is the outcome). Not reported: a failure
+inside a subshell or process substitution whose own status is discarded. A
+command that clears the shell's traps or `exec`s away the shell bypasses the
+gate. `expected_exit_codes` applies to the reported exit.
+
 ## Observable Progress
 
 Running tasks are classified as `healthy`, `quiet`, or `stalled` from observable

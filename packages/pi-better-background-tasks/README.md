@@ -309,6 +309,42 @@ history count line with no incident cursor; pass `history: true` to
 (120-byte excerpt, evidence such as `output.log#poll=3`); the raw log keeps the
 full evidence path.
 
+## Chained commands and the step gate
+
+A shell command that chains steps with `;` or newlines reports only its last
+command's exit status. `ctest; write-summary` therefore reads as success when
+`ctest` fails and the summary exits 0. That is ordinary shell behavior, and it
+stays the default.
+
+Pass `require_successful_steps: true` on `bg_task_spawn` (or `bg_task` with
+`action:spawn`) to opt into a step gate:
+
+```json
+{ "command": "ctest --output-on-failure\nnpm run report", "require_successful_steps": true }
+```
+
+The gate keeps ordinary shell semantics: there is no `set -e`, every step still
+runs, and a failure the command handles itself (`|| true`, `if`, `while`, `!`)
+is not a gate failure. Bash reports each unhandled failing command through its
+ERR trap, and the first one decides the verdict: when the command's own exit
+would be 0, the task exits with that failing step's code instead. Status then
+reports the real process exit with `(step gate)`, the failing step, and the
+shell's own exit, for example:
+
+```text
+exit=8 (step gate)
+step gate: ctest --output-on-failure exited 8; the shell's own exit was 0
+```
+
+The gate is refused (and the task is not started) with `shell:false`, whose
+argv already reports the real exit code, and with structured `ssh`, whose
+command runs under remote semantics the local gate cannot observe. It applies
+to spawns, not to watch checks: a check is one polled command whose own exit
+code is the outcome. Two limits are worth knowing: a failure inside a subshell
+or process substitution whose own status is discarded is not reported, and a
+command that clears the shell's traps or replaces the shell with `exec` bypasses
+the gate.
+
 ## When To Use
 
 Use this package for shell commands that need logs, status, cancellation, or completion notifications across a Pi turn.
