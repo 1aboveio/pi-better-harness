@@ -354,8 +354,7 @@ opt into a step gate for a shell command:
 
 - the command runs under bash errexit (`set -e`), so its first unhandled failing
   step ends the task with that step's exit code; later steps do not run. The
-  rule applies in the same list, inside shell functions, subshells, and command
-  substitutions;
+  rule applies in the same list, inside shell functions and subshells;
 - a failure the command handles itself (`|| true`, `if`/`while`/`until`
   conditions, `!`, `&&`/`||` lists) is not a gate failure, and neither is a
   process substitution whose status bash discards;
@@ -369,8 +368,10 @@ opt into a step gate for a shell command:
 (remote semantics are not observable locally), and for watch checks (a check is
 one polled command whose own exit code is the outcome). Limits inherited from
 bash's own errexit rules: assignment builtins such as `local` and `export` mask
-a command substitution's status, disabling errexit and clearing the ERR trap
-bypasses the gate, and `exec` replaces the shell before the gate decides.
+a command substitution's status. Bash also clears errexit inside command
+substitutions by default, so `x=$(false; echo summary)` can still succeed.
+Disabling errexit and clearing the ERR trap bypasses the gate, and `exec`
+replaces the shell before the gate decides.
 `expected_exit_codes` applies to the reported exit.
 
 ## Observable Progress

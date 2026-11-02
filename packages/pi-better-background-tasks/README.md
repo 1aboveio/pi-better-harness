@@ -326,7 +326,7 @@ Pass `require_successful_steps: true` on `bg_task_spawn` (or `bg_task` with
 The gate is a bash `errexit` contract, not shell parsing: the command runs under
 `set -e`, so its first unhandled failing step ends the task with that step's
 exit code and the remaining steps do not run. That covers the same list, shell
-functions, subshells, and command substitutions, and it is why a summary command
+functions and subshells, and it is why a summary command
 after a failed `ctest` can no longer turn the task green. A failure the command
 handles itself (`|| true`, `if`/`while`/`until` conditions, `!`, `&&`/`||`
 lists) is not a gate failure, and neither is a failing process substitution
@@ -347,8 +347,10 @@ argv already reports the real exit code, and with structured `ssh`, whose
 command runs under remote semantics the local gate cannot observe. It applies
 to spawns, not to watch checks: a check is one polled command whose own exit
 code is the outcome. Limits inherited from bash's own errexit rules: assignment
-builtins such as `local` and `export` mask a command substitution's status, a
-command that disables errexit and clears the ERR trap can bypass the gate, and
+builtins such as `local` and `export` mask a command substitution's status.
+Bash also clears errexit inside command substitutions by default, so
+`x=$(false; echo summary)` can still succeed. A command that disables errexit
+and clears the ERR trap can bypass the gate, and
 `exec` replaces the shell before the gate can decide.
 
 ## When To Use
