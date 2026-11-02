@@ -176,6 +176,18 @@ export interface RunMeta {
      * diagnostic: it explains a `lost` record nobody's session reported.
      */
     adoptedFromLostParentAt?: number;
+    /**
+     * When a session shutdown ended this extension instance's direct supervision
+     * of the run while its detached child was left running (#625). The child is
+     * never signalled for a reload/quit: a later session of the same pi process
+     * re-adopts the record, and because the instance that held the in-memory
+     * exit observer is gone, that session finalizes the run from the child's own
+     * coherent log when its process later disappears. Additive and diagnostic;
+     * terminal records keep the marker as history.
+     */
+    supervisionInterruptedAt?: number;
+    /** Pi's `session_shutdown` reason that interrupted supervision (`reload`, `quit`, …). */
+    supervisionInterruptedReason?: string;
     model?: string;
     /** Reasoning effort passed to the child via Pi's --thinking option. */
     effort?: string;

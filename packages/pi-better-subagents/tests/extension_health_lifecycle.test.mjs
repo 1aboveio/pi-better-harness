@@ -117,7 +117,7 @@ function makeHarness(options = {}) {
         sessionManager: { getSessionId: () => sessionId },
     };
     betterSubagents(pi);
-    const shutdown = () => handlers.get("session_shutdown")?.({}, ctx);
+    const shutdown = (event = {}) => handlers.get("session_shutdown")?.(event, ctx);
     return { pi, tools, handlers, sent, notes, ctx, shutdown };
 }
 
@@ -568,29 +568,37 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
     });
 });
 
-describe("session_shutdown child ownership", () => {
-    it("kills current-session running subagents and records killed", async () => {
-        const h = makeHarness({ cwd: tmpdir(), sessionId: "shutdown-kill" });
-        try {
-            const { id, pid } = await spawnRun(h);
-            assert.equal(readMeta(id).status, "running");
-            await h.shutdown();
-            const meta = readMeta(id);
-            assert.equal(meta.status, "killed", "shutdown must close current-session running work as killed");
-            assert.equal(meta.lifecycleClassification, "killed");
-            assert.equal(typeof meta.endedAt, "number");
-            assert.equal(
-                await waitFor(() => !realProcessProbe.pidExists(pid), { timeoutMs: 3000 }),
-                true,
-                "shutdown must terminate the child process group",
-            );
-            rmSync(runDir(id), { recursive: true, force: true });
-        } finally {
-            await h.shutdown();
-        }
-    });
+describe("session_shutdown child ownership (#625)", () => {
+    for (const reason of ["reload", "quit"]) {
+        it(`keeps current-session running subagents alive across a ${reason} and records the interruption`, async () => {
+            const h = makeHarness({ cwd: tmpdir(), sessionId: `interrupt-${reason}` });
+            let id;
+            let pid;
+            try {
+                ({ id, pid } = await spawnRun(h));
+                assert.equal(readMeta(id).status, "running");
+                await h.shutdown({ reason });
+                const meta = readMeta(id);
+                assert.equal(meta.status, "running", `${reason} must not kill current-session delegated work`);
+                assert.equal(meta.lifecycleClassification, undefined, "no terminal verdict is recorded");
+                assert.equal(typeof meta.supervisionInterruptedAt, "number", "the interruption is durable");
+                assert.equal(meta.supervisionInterruptedReason, reason);
+                assert.equal(realProcessProbe.pidExists(pid), true, `${reason} must leave the detached child running`);
+                const warnings = h.notes.filter((n) => n.level === "warning");
+                assert.equal(warnings.length, 1, "the human is warned that live work survived");
+                assert.match(warnings[0].msg, /still running/);
+                assert.ok(warnings[0].msg.includes(id), "the warning names the run");
+                assert.ok(/reload|session shutdown/.test(warnings[0].msg));
+                await reapRun({ id, pid });
+            } finally {
+                if (pid) killProcessTree(pid, "SIGKILL");
+                if (id) rmSync(runDir(id), { recursive: true, force: true });
+                await h.shutdown({ reason });
+            }
+        });
+    }
 
-    it("does not kill same-parent runs from a different foreground session", async () => {
+    it("does not touch same-parent runs from a different foreground session", async () => {
         const cwd = tmpdir();
         const h = makeHarness({ cwd, sessionId: "session-b" });
         let id;
@@ -599,14 +607,16 @@ describe("session_shutdown child ownership", () => {
             ({ id, pid } = await spawnRun(h));
             const launched = readMeta(id);
             writeMeta({ ...launched, callbackOrigin: { cwd, sessionId: "session-a" } });
-            await h.shutdown();
+            await h.shutdown({ reason: "reload" });
             const meta = readMeta(id);
             assert.equal(meta.status, "running", "other-session run must stay running");
+            assert.equal(meta.supervisionInterruptedAt, undefined, "another session's run is not this session's to interrupt");
             assert.equal(realProcessProbe.pidExists(pid), true, "other-session child must not be killed");
+            assert.equal(h.notes.filter((n) => n.level === "warning").length, 0, "no warning about someone else's run");
         } finally {
             if (pid) killProcessTree(pid, "SIGKILL");
             if (id) rmSync(runDir(id), { recursive: true, force: true });
-            await h.shutdown();
+            await h.shutdown({ reason: "reload" });
         }
     });
 
@@ -628,12 +638,68 @@ describe("session_shutdown child ownership", () => {
                 logPath: join(runDir(id), "output.log"),
                 sessionId: id,
             });
-            await h.shutdown();
-            assert.equal(readMeta(id).status, "running", "self-referential metadata must be left untouched");
+            await h.shutdown({ reason: "quit" });
+            const meta = readMeta(id);
+            assert.equal(meta.status, "running", "self-referential metadata must be left untouched");
+            assert.equal(meta.supervisionInterruptedAt, undefined, "no interruption record for the foreground process");
         } finally {
             rmSync(runDir(id), { recursive: true, force: true });
-            await h.shutdown();
+            await h.shutdown({ reason: "quit" });
         }
+    });
+});
+
+/**
+ * #625 handoff after a reload/restart: the instance that held the child's exit
+ * observer is gone. A finished child's own coherent log is then the only exit
+ * evidence, and supervision must not record that work `lost`.
+ */
+describe("interrupted supervision handoff (#625)", () => {
+    const seedInterruptedRun = ({ coherent, interrupted = true }) => {
+        const id = nextRunId();
+        dirOnly.push(id);
+        mkdirSync(runDir(id), { recursive: true });
+        const events = [
+            { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "interrupted answer" }] } },
+        ];
+        if (coherent) {
+            events.push({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "interrupted answer" }] }] });
+        }
+        writeFileSync(join(runDir(id), "output.log"), events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+        writeMeta({
+            id, status: "running", pid: DEAD_PID, pgid: DEAD_PID, pidStartTime: "dead-token",
+            spawnPid: process.pid, cwd: tmpdir(), promptPreview: "interrupted",
+            startedAt: Date.now(), logPath: join(runDir(id), "output.log"), sessionId: id,
+            ...(interrupted ? { supervisionInterruptedAt: Date.now() - 1_000, supervisionInterruptedReason: "reload" } : {}),
+        });
+        return id;
+    };
+
+    it("finalizes interrupted work from its own log and keeps other verdicts unchanged", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness({ cwd: tmpdir(), sessionId: "interrupt-handoff" });
+            const recovered = seedInterruptedRun({ coherent: true });
+            const unfinished = seedInterruptedRun({ coherent: false });
+            const neverInterrupted = seedInterruptedRun({ coherent: true, interrupted: false });
+            try {
+                await h.handlers.get("session_start")({ reason: "reload" }, h.ctx);
+
+                const completed = readMeta(recovered);
+                assert.equal(completed.status, "completed", "a finished interrupted child is recovered from its log, not reported lost");
+                assert.equal(completed.lifecycleClassification, "complete");
+                assert.equal(completed.exitCode, null, "no exit code is invented after the observer is gone");
+                assert.equal(typeof completed.completionCallbackPendingAt, "number", "the completion is handed off");
+                assert.equal(completed.supervisionInterruptedReason, "reload", "the interruption record is kept as history");
+
+                // No coherent terminal evidence: the existing reconciliation verdict stands.
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(readMeta(unfinished).status, "lost");
+                // Runs without the interruption marker keep today's behavior exactly.
+                assert.equal(readMeta(neverInterrupted).status, "lost");
+            } finally {
+                await h.shutdown({ reason: "reload" });
+            }
+        });
     });
 });
 
