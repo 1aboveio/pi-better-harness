@@ -499,10 +499,12 @@ export function subagentResultTool(Type: TypeModule, baseSession: SubagentToolSe
 /**
  * Stop is the one tool with a UI side effect (widget redraw after a kill);
  * the caller injects it so the factory stays loadable without a TUI context.
+ * The hook receives the run id so the host can also queue the run's one
+ * terminal completion callback (#624).
  */
 export function subagentStopTool(
     Type: TypeModule,
-    deps: { onStopped?: () => void } = {},
+    deps: { onStopped?: (id: string) => void } = {},
 ): ToolDefinition {
     return {
         name: "subagent_stop",
@@ -524,11 +526,14 @@ export function subagentStopTool(
             // stopRun rereads meta + effective status from disk before acting.
             const outcome = stopRun(p.id);
             if (outcome.action === "purged") {
-                deps.onStopped?.();
+                // No run record exists, so the stop hook's completion half is a
+                // no-op (#624); the widget/ticker refresh still applies.
+                deps.onStopped?.(p.id);
                 return text(`Removed abandoned launch record ${p.id} (no run metadata was written, so no child ever ran).`);
             }
             if (outcome.action === "preserved") {
-                deps.onStopped?.();
+                // Nothing stopped: a live run owes no terminal completion, so the
+                // stop hook is deliberately not fired here (#624).
                 return text(outcome.status === "launching"
                     ? `Preserved ${p.id}: a launch is still preparing it (no metadata yet), so nothing was removed. Retry after it publishes, or after it fails.`
                     : `Preserved ${p.id}: a concurrent launch published this run (${outcome.status}), so nothing was removed. Call subagent_stop again to stop the run.`);
@@ -536,7 +541,7 @@ export function subagentStopTool(
             if (outcome.action === "not-running") {
                 return text(`Run ${p.id} is not running (${outcome.status}).`);
             }
-            deps.onStopped?.();
+            deps.onStopped?.(p.id);
             if (outcome.action === "finalized") {
                 return text(`Resolved orphaned subagent ${p.id} → ${outcome.status}.`);
             }

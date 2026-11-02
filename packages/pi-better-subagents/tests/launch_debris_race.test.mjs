@@ -51,6 +51,17 @@ const {
 const { sweepAbandonedLaunches } = await import("../cleanup.ts");
 const { stopRun } = await import("../stop.ts");
 const { spawnDetached, killProcessTree } = await import("../spawn.ts");
+const { subagentStopTool } = await import("../tools.ts");
+
+/** Only the schema-builder surface the stop tool touches. */
+const TYPE_STUB = {
+    Object: (properties) => ({ type: "object", properties }),
+    Optional: (schema) => schema,
+    String: () => ({ type: "string" }),
+    Number: () => ({ type: "number" }),
+    Boolean: () => ({ type: "boolean" }),
+    Array: (items) => ({ type: "array", items }),
+};
 
 const HOUR = 60 * 60 * 1000;
 
@@ -224,6 +235,64 @@ describe("launch-debris purge vs a concurrent launch (#623 R1)", () => {
         const after = sweepAbandonedLaunches({ now: Date.now() + 24 * HOUR, graceMs: 0 });
         assert.deepEqual(after.removed, [id], "a dead launch attempt is reclaimed");
         assert.deepEqual(runDirs(), []);
+    });
+
+    // The merge with #624 made the stop tool's hook owe a terminal completion.
+    // These two cases pin the integration point: a preserved live run owes
+    // nothing, while a purged record has no run at all.
+    it("stop tool: preserving a live run fires no terminal completion hook", async () => {
+        reset();
+        const id = "sa_racetoolpreserved_1";
+        mkdirSync(runDir(id), { recursive: true });
+        const prompt = promptPathFor(id);
+        writeFileSync(prompt, "active launch");
+        const exists = fs.existsSync;
+        const stoppedIds = [];
+        let child;
+        try {
+            fs.existsSync = function (path) {
+                if (path === prompt && !child) {
+                    child = spawnDetached({
+                        file: process.execPath, fileArgs: ["-e", "setInterval(()=>{},1000)"],
+                        cwd: RUNTIME, logPath: logPathFor(id),
+                    });
+                    writeFileSync(join(runDir(id), "meta.json"), JSON.stringify({
+                        id, status: "running", pid: child.pid, spawnPid: process.pid, callback: true,
+                        startedAt: Date.now(), cwd: RUNTIME, logPath: logPathFor(id), sessionId: id,
+                    }));
+                }
+                return exists(path);
+            };
+            syncBuiltinESMExports();
+            const out = await subagentStopTool(TYPE_STUB, { onStopped: (stopped) => stoppedIds.push(stopped) })
+                .execute("t", { id });
+            assert.match(out.content[0].text, /^Preserved /);
+            assert.deepEqual(stoppedIds, [], "a live run was not stopped, so it owes no completion");
+            const meta = JSON.parse(readFileSync(join(runDir(id), "meta.json"), "utf-8"));
+            assert.equal(meta.completionCallbackPendingAt, undefined, "no completion obligation was written");
+            assert.doesNotThrow(() => process.kill(child.pid, 0), "the child is untouched");
+        } finally {
+            fs.existsSync = exists;
+            syncBuiltinESMExports();
+            if (child) {
+                killProcessTree(child.pid, "SIGKILL");
+                await child.exit;
+            }
+        }
+    });
+
+    it("stop tool: purging debris refreshes the UI hook but creates no run or completion", async () => {
+        reset();
+        const id = "sa_racetoolpurged_1";
+        mkdirSync(join(runDir(id), "control"), { recursive: true });
+        writeFileSync(promptPathFor(id), "dead launch attempt");
+        const stoppedIds = [];
+        const out = await subagentStopTool(TYPE_STUB, { onStopped: (stopped) => stoppedIds.push(stopped) })
+            .execute("t", { id });
+        assert.match(out.content[0].text, /^Removed abandoned launch record /);
+        assert.deepEqual(stoppedIds, [id], "the widget/ticker hook still runs");
+        assert.deepEqual(runDirs(), [], "the debris record is gone");
+        assert.equal(fs.existsSync(join(runDir(id), "meta.json")), false, "no run record was invented");
     });
 });
 
