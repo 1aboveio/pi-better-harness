@@ -32,7 +32,7 @@ import {
     type BackgroundWorkRow,
 } from "./shared-navigator.ts";
 import { spawnDetached, killProcessTree, type SpawnResult } from "./spawn.ts";
-import { parseRun, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
+import { parseRun, parseRunForLifecycle, readRunTranscript, resetParseRunCursor, type Usage } from "./parse.ts";
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
@@ -297,10 +297,18 @@ function verifiedOriginFromContext(ctx: ExtensionContext | undefined): RunCallba
     }
 }
 
+/**
+ * Instance-local suppression: this module has no active session, not the run.
+ * A finalizer that runs after `/reload` (the process and its exit observer
+ * survive the session) can report this even though the replacing session owns
+ * the run, so it must never be written as a durable suppression (#625).
+ */
+const NO_ACTIVE_SESSION_REASON = "active session identity is unavailable";
+
 function callbackSuppressionReason(meta: RunMeta, active: RunCallbackOrigin | undefined = activeCallbackOrigin): string | undefined {
     const origin = meta.callbackOrigin;
     if (origin) {
-        if (!active) return "active session identity is unavailable";
+        if (!active) return NO_ACTIVE_SESSION_REASON;
         if (origin.cwd !== active.cwd) return `origin cwd ${origin.cwd} does not match active cwd ${active.cwd}`;
         if (origin.sessionId && origin.sessionId !== active.sessionId) {
             return `origin session ${origin.sessionId} does not match active session ${active.sessionId ?? "unknown"}`;
@@ -335,25 +343,104 @@ function hasSelfProcessIdentity(meta: RunMeta): boolean {
     return meta.pid === process.pid || meta.pgid === process.pid;
 }
 
-function stopCurrentSessionSubagents(ctx: ExtensionContext): void {
+/**
+ * Runs this extension instance launched, so its in-memory exit observer is the
+ * authority that finalizes them. A run adopted after `/reload` is absent here:
+ * the instance that held the observer is gone, so supervision falls back to the
+ * child's own log (see `finalizeInterruptedRunFromLog`).
+ */
+const directlySupervisedRunIds = new Set<string>();
+
+/**
+ * Detach current-session live work instead of killing it (#625).
+ *
+ * Subagent children are detached process groups: they survive the foreground
+ * process dying. The previous shutdown loop therefore made every controlled
+ * `/reload` (and every clean quit) a silent, destructive end to in-flight work —
+ * no drain, no warning, and the run recorded `killed`. Shutdown now only records
+ * that this session's direct supervision ended; the child and all of its saved
+ * state stay untouched, and the next session of the same pi process resumes
+ * supervision and finalizes it from the child's own log.
+ *
+ * Returns the interrupted runs so the caller can warn the human.
+ */
+function interruptCurrentSessionSubagents(reason: string, ctx: ExtensionContext): RunMeta[] {
     const origin = callbackOriginFromContext(ctx);
+    const now = Date.now();
+    const interrupted: RunMeta[] = [];
     for (const summary of listMetasForParent(process.pid)) {
         if (!ownedByThisParent(summary)) continue;
         if (summary.status !== "running" && summary.status !== "orphaned") continue;
         if (!belongsToOrigin(summary, origin)) continue;
-        // Automatic shutdown cleanup must not let corrupt or synthetic metadata
-        // signal the foreground Pi process itself.
+        // Corrupt or synthetic metadata must never point the interruption record
+        // (or any later signal) at the foreground Pi process itself.
         if (hasSelfProcessIdentity(summary)) continue;
-        try { stopRun(summary.id); } catch { /* best-effort shutdown cleanup */ }
+        try {
+            // Re-read under the id: a run may have finished while shutdown ran.
+            const meta = readMeta(summary.id);
+            if (!meta || (meta.status !== "running" && meta.status !== "orphaned")) continue;
+            meta.supervisionInterruptedAt = now;
+            meta.supervisionInterruptedReason = reason;
+            writeMeta(meta);
+            interrupted.push(meta);
+        } catch { /* a failed marker must never kill or block the child */ }
         spendCache.delete(summary.id);
         healthLogCache.delete(summary.id);
         resetChildEventLogCursor(summary.id);
     }
+    return interrupted;
+}
+
+/** Warn the human that a shutdown/reload left delegated work running (#625). */
+function warnInterruptedSubagents(ctx: ExtensionContext, interrupted: RunMeta[], reason: string): void {
+    if (interrupted.length === 0) return;
+    const count = interrupted.length;
+    const label = count === 1 ? "1 subagent run is" : `${count} subagent runs are`;
+    const ids = interrupted.slice(0, 3).map((meta) => meta.id).join(", ") + (count > 3 ? ", …" : "");
+    const verb = reason === "reload" ? "reload" : "session shutdown";
+    const guidance = reason === "reload"
+        ? "The reloaded session resumes supervision and reports the result; use subagent_stop to end it instead."
+        : "They keep running detached and stay readable with subagent_result/subagent_output; use subagent_stop to end one.";
+    try {
+        ctx.ui.notify(`Subagent ${label} still running (${ids}) — ${verb} no longer kills delegated work. ${guidance}`, "warning");
+    } catch { /* no UI available (print/RPC/quit) */ }
+}
+
+/**
+ * True once this extension instance's `session_shutdown` has run. A late child
+ * finalizer can still execute after `/reload` (the process and its exit
+ * observer survive the session), and such a finalizer must not restart
+ * supervision loops or durably suppress a callback just because THIS instance
+ * no longer has a session.
+ */
+let sessionTornDown = false;
+
+/**
+ * "The rightful conversation is not the active one", not "this notification is
+ * dead" (#625). These reasons only defer delivery to whoever owns the run, so
+ * they must never consume an interrupted run's owed completion.
+ */
+function isConversationIdentityReason(reason: string): boolean {
+    return reason === NO_ACTIVE_SESSION_REASON
+        || reason.startsWith("origin session ")
+        || reason.startsWith("origin cwd ")
+        || reason.startsWith("legacy run cwd ");
 }
 
 function markCompletionCallbackSuppressed(id: string, reason: string, now: number = Date.now()): void {
+    // A finalizer that runs after this instance was torn down cannot name the
+    // session that owns the run now. Suppressing durably would erase the
+    // pending marker the replacing session recovers (#625), so leave it.
+    if (sessionTornDown && reason === NO_ACTIVE_SESSION_REASON) return;
     const meta = readMeta(id);
     if (!meta || meta.completionCallbackSentAt !== undefined || meta.completionCallbackSuppressedAt !== undefined) return;
+    // An explicitly interrupted run owes its completion to the conversation that
+    // launched it (#625, DEV-226 criterion 5). An unrelated session merely being
+    // active — B opening before the original A returns — drops this delivery
+    // attempt but must keep the obligation: the pending marker stays, and A
+    // recovers it when it comes back. Records that never lost supervision keep
+    // today's durable suppression, so legacy/foreign notifications stay dead.
+    if (meta.supervisionInterruptedAt !== undefined && isConversationIdentityReason(reason)) return;
     meta.completionCallbackSuppressedAt = now;
     meta.completionCallbackSuppressedReason = reason;
     writeMeta(meta);
@@ -403,10 +490,32 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
     });
 }
 
-/** Recover only records explicitly marked pending; legacy terminal runs never replay. */
+/**
+ * Recover only records explicitly marked pending; legacy terminal runs never replay.
+ *
+ * Current-parent records are recovered unconditionally (the owner decides, and the
+ * session gate still suppresses a different foreground session). A run an
+ * interrupted DEAD parent left behind is recovered only by the conversation that
+ * launched it: that session id is the ownership proof, so an unrelated session
+ * never adopts it. A foreign parent that is still alive keeps ownership — the
+ * same `isAbandonedByParent` proof the running-record supervision uses — so this
+ * path never takes a live pi's terminal callback (#625, DEV-226 criterion 5).
+ */
 function recoverCompletionCallbacks(pi: ExtensionAPI): void {
     for (const meta of listMetasForParent(process.pid)) {
         if (!ownedByThisParent(meta)) continue;
+        enqueueCompletionCallback(pi, meta.id);
+    }
+    const activeSessionId = activeCallbackOrigin?.sessionId;
+    if (!activeSessionId) return;
+    for (const summary of listMetas()) {
+        if (ownedByThisParent(summary) || summary.supervisionInterruptedAt === undefined) continue;
+        if (summary.status === "running" || summary.status === "orphaned") continue;
+        // A live foreign parent still owns its run's callback: never deliver for it.
+        if (!isAbandonedByParent(summary, realProcessProbe)) continue;
+        const meta = readMeta(summary.id);
+        if (!meta || meta.status === "running" || meta.status === "orphaned") continue;
+        if (meta.callbackOrigin?.sessionId !== activeSessionId) continue;
         enqueueCompletionCallback(pi, meta.id);
     }
 }
@@ -866,6 +975,14 @@ function reconcileHealth(): void {
                 summary: meta.status === "lost" ? "Child supervision was lost; outcome is unknown" : "Child supervision interrupted; related work may still be alive" }], now);
         }
         deliverFailureAttention(pi, meta, now);
+        // Interrupted work whose child already exited is finalized from its own
+        // coherent log before any other verdict (and before timing can mislabel
+        // an already-finished run as stopped) (#625).
+        if (meta.status === "running" || meta.status === "orphaned") {
+            try {
+                if (finalizeInterruptedRunFromLog(pi, meta, now)) continue;
+            } catch { /* best-effort; the ordinary reconciliation below still runs */ }
+        }
         try {
             if (enforceTiming(pi, meta, now)) continue;
         } catch { /* timing is best-effort per tick; supervision below still runs */ }
@@ -902,6 +1019,19 @@ function reconcileHealth(): void {
         if (meta.status === "orphaned" || meta.status === "lost") {
             deliverHealthCallback(pi, meta, meta.status, now);
         }
+    }
+    // A restart leaves an explicitly interrupted child whose owning pi is gone
+    // (#625). Its record is foreign, so the owner-gated loops above never see it:
+    // finalize it from its own coherent log once the child itself is gone. This
+    // is the human's own interrupted work, not another session's live run, and
+    // `finalizeInterruptedRunFromLog` still requires all process evidence to be
+    // absent, so a live writer is never touched.
+    for (const summary of listMetas()) {
+        if (summary.status !== "running" && summary.status !== "orphaned") continue;
+        if (ownedByThisParent(summary) || !ownsInterruptedSupervision(summary)) continue;
+        const meta = readMeta(summary.id);
+        if (!meta || (meta.status !== "running" && meta.status !== "orphaned")) continue;
+        try { finalizeInterruptedRunFromLog(pi, meta, Date.now()); } catch { /* the next tick retries */ }
     }
     // Completed runs can still have failed completion handoffs to retry.
     for (const summary of listMetasForParent(process.pid)) {
@@ -986,12 +1116,24 @@ function reconcileAbandonedRuns(now: number = Date.now()): number {
 
 /** Completion batches own their retry timer; only supervision keeps this one alive. */
 function syncHealthTicker(): void {
-    if (needsMonitoring(listMetasForParent(process.pid))) ensureHealthTicker();
+    // A replaced instance never restarts supervision loops for a session it no
+    // longer owns; the live instance runs its own. It must still STOP one that is
+    // already armed: a run this instance launched before teardown can finish
+    // afterwards, and returning early here left the interval supervising a
+    // session that no longer exists (#625).
+    if (sessionTornDown) {
+        stopHealthTicker();
+        return;
+    }
+    if (needsMonitoring(listMetasForParent(process.pid)) || needsInterruptedSupervision()) ensureHealthTicker();
     else stopHealthTicker();
 }
 
 /** Start the reconciliation loop if it isn't already running. */
 function ensureHealthTicker(): void {
+    // Not gated on `sessionTornDown`: a spawn always means the current session is
+    // doing new work. Only `syncHealthTicker` — the path a late child finalizer
+    // takes — stays closed in a replaced instance.
     if (healthTicker) return;
     healthTicker = setInterval(reconcileHealth, HEALTH_TICK_MS);
     healthTicker.unref?.(); // never keep the process alive on our account
@@ -1477,19 +1619,98 @@ function resolvePiBinary(): string {
  * first-party finalizer (finalization.ts) so tests can exercise the durable
  * path without importing the pi package.
  */
-function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext, id: string, code: number | null): void {
+function finalizeRun(pi: ExtensionAPI, ctx: ExtensionContext | undefined, id: string, code: number | null): void {
     progressCache.delete(id);
+    directlySupervisedRunIds.delete(id);
     // Host-facing wrapper around first-party finalizer (finalization.ts).
     // Coherent child-exit evidence may supersede provisional orphaned/lost
     // reconciliation; finalization.ts enforces canExitFinalize + lifecycle authority.
     finalizeRunCore(id, code, {
         renderWidget,
         notify: (message, level) => {
-            try { ctx.ui.notify(message, level); } catch { /* ignore */ }
+            try { ctx?.ui.notify(message, level); } catch { /* ignore */ }
         },
         sendMessage: () => enqueueCompletionCallback(pi, id),
     });
     syncHealthTicker();
+}
+
+/**
+ * Finalize a run whose supervision a previous session interrupted (`/reload`,
+ * a session switch, or a quit) once its process evidence is gone (#625).
+ *
+ * The instance that held the in-memory exit observer is gone, so nothing else
+ * reads the child's own log when the process disappears: health reconciliation
+ * alone would record an interrupted-but-finished run `lost`, hiding a result
+ * that is fully on disk. Only coherent terminal stream evidence is accepted
+ * (`agent_end` with every tool call closed); anything else keeps the existing
+ * reconciliation verdict, so no failure or completion is manufactured.
+ *
+ * Runs this instance launched are skipped: their exit observer finalizes them.
+ */
+function finalizeInterruptedRunFromLog(
+    pi: ExtensionAPI | undefined,
+    meta: RunMeta,
+    now: number,
+): boolean {
+    if (!pi) return false;
+    if (directlySupervisedRunIds.has(meta.id)) return false;
+    if (meta.supervisionInterruptedAt === undefined) return false;
+    // Process evidence still exists: the child keeps running, nothing to finalize.
+    if (reconcileRun(meta, realProcessProbe, now).status !== "lost") return false;
+    let run;
+    try { run = parseRunForLifecycle(meta.id); } catch { return false; }
+    if (!run.sawEnd || run.unmatchedToolCalls.length > 0) return false;
+    // Exit code is unknown after the observer is gone; the lifecycle authority
+    // classifies from the coherent stream instead of inventing one.
+    finalizeRun(pi, uiCtx, meta.id, null);
+    return true;
+}
+
+/**
+ * Does this process have to supervise this explicit interruption record (#625)?
+ *
+ * A run this parent launched is this session's own (#625 reload). A run left by
+ * a parent that is provably gone has no live owner at all — the restart case —
+ * so its recorded interruption is the only thing that can recover it. Anything
+ * else belongs to a live pi and is never adjudicated here.
+ */
+function ownsInterruptedSupervision(summary: Pick<RunMeta, "spawnPid" | "spawnPidStartTime" | "supervisionInterruptedAt">): boolean {
+    if (summary.supervisionInterruptedAt === undefined) return false;
+    return ownedByThisParent(summary) || isAbandonedByParent(summary, realProcessProbe);
+}
+
+/** True while an interrupted record still needs this process's supervision loop. */
+function needsInterruptedSupervision(): boolean {
+    try {
+        for (const summary of listMetas()) {
+            if (summary.status !== "running" && summary.status !== "orphaned") continue;
+            if (ownsInterruptedSupervision(summary)) return true;
+        }
+    } catch { /* best-effort scheduler gate */ }
+    return false;
+}
+
+/**
+ * Attempt log-evidence finalization for every interrupted run this process has
+ * to supervise: its own current-parent ones and the ones a dead parent left
+ * behind. Live children are never finalized (`finalizeInterruptedRunFromLog`
+ * requires the process evidence to be gone), so this only recovers a child that
+ * already finished on its own.
+ */
+function recoverInterruptedSubagents(pi: ExtensionAPI | undefined): number {
+    let recovered = 0;
+    const now = Date.now();
+    for (const summary of listMetas()) {
+        if (summary.status !== "running" && summary.status !== "orphaned") continue;
+        if (!ownsInterruptedSupervision(summary)) continue;
+        const meta = readMeta(summary.id);
+        if (!meta || (meta.status !== "running" && meta.status !== "orphaned")) continue;
+        try {
+            if (finalizeInterruptedRunFromLog(pi, meta, now)) recovered += 1;
+        } catch { /* best-effort at session start; the health ticker retries */ }
+    }
+    return recovered;
 }
 
 /**
@@ -2219,6 +2440,14 @@ export default function (pi: ExtensionAPI) {
                 ...(launchCatalog ? { catalog: launchCatalog as unknown as RunMeta["catalog"] } : {}),
                 timing: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt }),
             };
+            // This instance holds the exit observer for a run it actually
+            // started; only it can finalize on the exit event (#625).
+            directlySupervisedRunIds.add(id);
+            // A launch is live work of the current session, so an earlier
+            // teardown of this instance no longer applies. Without this the
+            // teardown latch would keep supervision from ever settling again
+            // for a run started after it (#625).
+            sessionTornDown = false;
             // Register exit supervision before any fallible post-spawn publication.
             // A failed metadata write must not strand a running child without a close
             // handler; the lease stays held until that child has actually exited.
@@ -2905,6 +3134,10 @@ export default function (pi: ExtensionAPI) {
     // alive, resume the ticking widget. Deferred out of the factory per pi's
     // "no background resources at load" rule.
     pi.on("session_start", async (_event, ctx) => {
+        // A session begins in this process again (reload, restart, or a session
+        // switch), so the previous session's teardown no longer applies: the
+        // replacing session owns this instance's supervision loops (#625).
+        sessionTornDown = false;
         setCallbackBatchContext(pi, ctx);
         agentSessionSettings.restore(ctx);
         restoreDelegationMode(ctx);
@@ -2922,6 +3155,13 @@ export default function (pi: ExtensionAPI) {
         // - Repaint the widget even if its last in-memory lines match; the host
         //   may have dropped extension UI during reload/session replacement.
         ensureSubagentProvider();
+        // A reload/restart leaves detached children alive without an in-memory
+        // exit observer (#625). Finalize any that finished while the foreground
+        // session was gone; live ones stay `running` and the ticker below
+        // supervises them until they exit. This runs BEFORE abandonment
+        // adoption: a finished child's coherent log is terminal evidence, and
+        // `lost` would otherwise win the race and hide the result.
+        recoverInterruptedSubagents(pi);
         // Adopt records left non-terminal by a pi that died without a clean
         // shutdown, so the age sweep can eventually retire them.
         reconcileAbandonedRuns();
@@ -2949,18 +3189,34 @@ export default function (pi: ExtensionAPI) {
     });
 
     // Tear down the timer and clear the widget when the session ends.
-    pi.on("session_shutdown", async (_event, ctx) => {
+    pi.on("session_shutdown", async (event, ctx) => {
         if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
-        // The foreground Pi session owns this work. Stop current-session
-        // running/orphaned children before dropping the session origin, so they
-        // cannot become live process groups with no coordinator.
-        stopCurrentSessionSubagents(ctx);
-        // The stopped children exit after this handler returns; their finalizers
-        // must not reach for a ctx that Pi invalidates once the session is replaced.
+        // #625: subagent children are detached process groups that outlive this
+        // foreground session. A controlled reload or quit must not destroy
+        // delegated work: record the interruption durably, warn the human, and
+        // leave the child, its log, and its saved state untouched. The next
+        // session of this pi process resumes supervision and finalizes the run
+        // from the child's own log.
+        const reason = typeof event?.reason === "string" ? event.reason : "shutdown";
+        try {
+            const interrupted = interruptCurrentSessionSubagents(reason, ctx);
+            warnInterruptedSubagents(ctx, interrupted, reason);
+        } catch { /* shutdown cleanup must never block the session teardown */ }
+        // Late finalizers of surviving children must not restart supervision
+        // loops in this replaced instance.
+        sessionTornDown = true;
+        // Children keep running; their finalizers (if this instance still holds
+        // one) must not reach for a ctx that Pi invalidates once the session is
+        // replaced.
         uiCtx = undefined;
         agentSessionSettings.clear();
         catalogModelRegistry = undefined;
-        activeCallbackOrigin = undefined;
+        // `/reload` keeps the same session identity, so a finalizer that lands
+        // after the replacement still targets the live session and may deliver
+        // its completion. Every other reason replaces or ends that identity, so
+        // the origin is dropped and the pending marker is left for whichever
+        // session owns the run next.
+        if (reason !== "reload") activeCallbackOrigin = undefined;
         if (typeof unsubscribeDelegationRequest === "function") unsubscribeDelegationRequest();
         cancelCallbackBatch(pi);
         mainAgentStartedAt = undefined;

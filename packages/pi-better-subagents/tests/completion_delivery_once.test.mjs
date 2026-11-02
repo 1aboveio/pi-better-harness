@@ -164,22 +164,25 @@ describe("#624 one completion per terminal run", () => {
         } finally { h.shutdown(); }
     });
 
-    it("a run stopped by the reload drain is recovered once by the next extension instance", async () => {
-        const cwd = mkdtempSync(join(HERMETIC, "drain-cwd-"));
-        const sessionId = "drain-session";
-        const first = makeHarness({ cwd, sessionId });
+    it("a run interrupted while the caller was busy is recovered once by the next extension instance", async () => {
+        const cwd = mkdtempSync(join(HERMETIC, "interrupt-cwd-"));
+        const sessionId = "interrupt-session";
+        // A #625 reload/restart no longer drains children, so the interrupted
+        // attempt is produced the way one really is left behind: a terminal stop
+        // whose completion the busy turn never delivered. The durable record, not
+        // the drain mechanism, is what the next instance recovers.
+        const firstSent = [];
+        const first = makeHarness({ cwd, sessionId, sent: firstSent, idle: () => false });
         const secondSent = [];
         try {
             await first.start();
             const { id, pid } = await spawnRun(first);
-
-            // Reload: Pi stops current-session children before dropping the session.
-            await first.shutdown();
+            await first.tools.get("subagent_stop").execute("tc", { id }, undefined, undefined, first.ctx);
             const stopped = readMeta(id);
             assert.equal(stopped.status, "killed");
-            assert.ok(stopped.completionCallbackPendingAt > 0, "the drained run stays recoverable");
+            assert.ok(stopped.completionCallbackPendingAt > 0, "the stopped run stays recoverable");
             assert.equal(stopped.completionCallbackSentAt, undefined);
-            assert.equal(completionMessages(first.sent).length, 0, "the stopping instance never notifies");
+            assert.equal(completionMessages(firstSent).length, 0, "the stopping instance never delivers into the busy turn");
 
             // The resuming instance recovers the pending record exactly once.
             const second = makeHarness({ cwd, sessionId, sent: secondSent });
@@ -192,7 +195,7 @@ describe("#624 one completion per terminal run", () => {
             await second.start();
             await getCallbackBatcher(second.pi).flush();
             assert.equal(completionMessages(secondSent).length, 1, "a second session_start must not re-deliver");
-            assert.equal(completionMessages(first.sent).length, 0);
+            assert.equal(completionMessages(firstSent).length, 0);
             killProcessTree(pid, "SIGKILL");
             second.shutdown();
         } finally { first.shutdown(); }
@@ -274,15 +277,15 @@ describe("#624 one completion per terminal run", () => {
         } finally { h.shutdown(); }
     });
 
-    it("a callback:false run stopped by the drain stays silent and records no obligation", async () => {
+    it("a callback:false run interrupted while the caller was busy stays silent and records no obligation", async () => {
         const cwd = mkdtempSync(join(HERMETIC, "quiet-cwd-"));
         const sessionId = "quiet-session";
-        const first = makeHarness({ cwd, sessionId });
+        const first = makeHarness({ cwd, sessionId, idle: () => false });
         const secondSent = [];
         try {
             await first.start();
             const { id, pid } = await spawnRun(first, { callback: false });
-            await first.shutdown();
+            await first.tools.get("subagent_stop").execute("tc", { id }, undefined, undefined, first.ctx);
             const meta = readMeta(id);
             assert.equal(meta.status, "killed");
             assert.equal(meta.completionCallbackPendingAt, undefined);

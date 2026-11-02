@@ -61,7 +61,7 @@ process.env.TMPDIR = HERMETIC_TMPDIR;
 const { default: betterSubagents, setIdentityProbeForTests, isHealthTickerActive } = await import("../index.ts");
 const { getCallbackBatcher } = await import("../shared-callback-batcher.ts");
 const { readMeta, writeMeta, nextRunId, runDir, baseDir, recordTaskRuntimeProvenance, removeRunDirectory, taskRuntimeProvenancePath,
-    discardFailedLaunch, sessionsDir, taskWorkspaceDir } = await import("../registry.ts");
+    discardFailedLaunch, sessionsDir, taskWorkspaceDir, processStartToken } = await import("../registry.ts");
 const { realProcessProbe, OLD_METADATA_LOST_CONFIRM_TICKS } = await import("../health.ts");
 const { killProcessTree } = await import("../spawn.ts");
 const { renderRegisteredWorkDetail } = await import("../shared-navigator.ts");
@@ -117,7 +117,7 @@ function makeHarness(options = {}) {
         sessionManager: { getSessionId: () => sessionId },
     };
     betterSubagents(pi);
-    const shutdown = () => handlers.get("session_shutdown")?.({}, ctx);
+    const shutdown = (event = {}) => handlers.get("session_shutdown")?.(event, ctx);
     return { pi, tools, handlers, sent, notes, ctx, shutdown };
 }
 
@@ -568,29 +568,37 @@ describe("AC1 — subagent_spawn persists process identity into meta.json", () =
     });
 });
 
-describe("session_shutdown child ownership", () => {
-    it("kills current-session running subagents and records killed", async () => {
-        const h = makeHarness({ cwd: tmpdir(), sessionId: "shutdown-kill" });
-        try {
-            const { id, pid } = await spawnRun(h);
-            assert.equal(readMeta(id).status, "running");
-            await h.shutdown();
-            const meta = readMeta(id);
-            assert.equal(meta.status, "killed", "shutdown must close current-session running work as killed");
-            assert.equal(meta.lifecycleClassification, "killed");
-            assert.equal(typeof meta.endedAt, "number");
-            assert.equal(
-                await waitFor(() => !realProcessProbe.pidExists(pid), { timeoutMs: 3000 }),
-                true,
-                "shutdown must terminate the child process group",
-            );
-            rmSync(runDir(id), { recursive: true, force: true });
-        } finally {
-            await h.shutdown();
-        }
-    });
+describe("session_shutdown child ownership (#625)", () => {
+    for (const reason of ["reload", "quit"]) {
+        it(`keeps current-session running subagents alive across a ${reason} and records the interruption`, async () => {
+            const h = makeHarness({ cwd: tmpdir(), sessionId: `interrupt-${reason}` });
+            let id;
+            let pid;
+            try {
+                ({ id, pid } = await spawnRun(h));
+                assert.equal(readMeta(id).status, "running");
+                await h.shutdown({ reason });
+                const meta = readMeta(id);
+                assert.equal(meta.status, "running", `${reason} must not kill current-session delegated work`);
+                assert.equal(meta.lifecycleClassification, undefined, "no terminal verdict is recorded");
+                assert.equal(typeof meta.supervisionInterruptedAt, "number", "the interruption is durable");
+                assert.equal(meta.supervisionInterruptedReason, reason);
+                assert.equal(realProcessProbe.pidExists(pid), true, `${reason} must leave the detached child running`);
+                const warnings = h.notes.filter((n) => n.level === "warning");
+                assert.equal(warnings.length, 1, "the human is warned that live work survived");
+                assert.match(warnings[0].msg, /still running/);
+                assert.ok(warnings[0].msg.includes(id), "the warning names the run");
+                assert.ok(/reload|session shutdown/.test(warnings[0].msg));
+                await reapRun({ id, pid });
+            } finally {
+                if (pid) killProcessTree(pid, "SIGKILL");
+                if (id) rmSync(runDir(id), { recursive: true, force: true });
+                await h.shutdown({ reason });
+            }
+        });
+    }
 
-    it("does not kill same-parent runs from a different foreground session", async () => {
+    it("does not touch same-parent runs from a different foreground session", async () => {
         const cwd = tmpdir();
         const h = makeHarness({ cwd, sessionId: "session-b" });
         let id;
@@ -599,14 +607,16 @@ describe("session_shutdown child ownership", () => {
             ({ id, pid } = await spawnRun(h));
             const launched = readMeta(id);
             writeMeta({ ...launched, callbackOrigin: { cwd, sessionId: "session-a" } });
-            await h.shutdown();
+            await h.shutdown({ reason: "reload" });
             const meta = readMeta(id);
             assert.equal(meta.status, "running", "other-session run must stay running");
+            assert.equal(meta.supervisionInterruptedAt, undefined, "another session's run is not this session's to interrupt");
             assert.equal(realProcessProbe.pidExists(pid), true, "other-session child must not be killed");
+            assert.equal(h.notes.filter((n) => n.level === "warning").length, 0, "no warning about someone else's run");
         } finally {
             if (pid) killProcessTree(pid, "SIGKILL");
             if (id) rmSync(runDir(id), { recursive: true, force: true });
-            await h.shutdown();
+            await h.shutdown({ reason: "reload" });
         }
     });
 
@@ -628,11 +638,295 @@ describe("session_shutdown child ownership", () => {
                 logPath: join(runDir(id), "output.log"),
                 sessionId: id,
             });
-            await h.shutdown();
-            assert.equal(readMeta(id).status, "running", "self-referential metadata must be left untouched");
+            await h.shutdown({ reason: "quit" });
+            const meta = readMeta(id);
+            assert.equal(meta.status, "running", "self-referential metadata must be left untouched");
+            assert.equal(meta.supervisionInterruptedAt, undefined, "no interruption record for the foreground process");
         } finally {
             rmSync(runDir(id), { recursive: true, force: true });
-            await h.shutdown();
+            await h.shutdown({ reason: "quit" });
+        }
+    });
+});
+
+/**
+ * #625 handoff after a reload/restart: the instance that held the child's exit
+ * observer is gone. A finished child's own coherent log is then the only exit
+ * evidence, and supervision must not record that work `lost`.
+ */
+describe("interrupted supervision handoff (#625)", () => {
+    const seedInterruptedRun = ({ coherent, interrupted = true }) => {
+        const id = nextRunId();
+        dirOnly.push(id);
+        mkdirSync(runDir(id), { recursive: true });
+        const events = [
+            { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "interrupted answer" }] } },
+        ];
+        if (coherent) {
+            events.push({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "interrupted answer" }] }] });
+        }
+        writeFileSync(join(runDir(id), "output.log"), events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+        writeMeta({
+            id, status: "running", pid: DEAD_PID, pgid: DEAD_PID, pidStartTime: "dead-token",
+            spawnPid: process.pid, cwd: tmpdir(), promptPreview: "interrupted",
+            startedAt: Date.now(), logPath: join(runDir(id), "output.log"), sessionId: id,
+            ...(interrupted ? { supervisionInterruptedAt: Date.now() - 1_000, supervisionInterruptedReason: "reload" } : {}),
+        });
+        return id;
+    };
+
+    it("finalizes interrupted work from its own log and keeps other verdicts unchanged", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness({ cwd: tmpdir(), sessionId: "interrupt-handoff" });
+            const recovered = seedInterruptedRun({ coherent: true });
+            const unfinished = seedInterruptedRun({ coherent: false });
+            const neverInterrupted = seedInterruptedRun({ coherent: true, interrupted: false });
+            try {
+                await h.handlers.get("session_start")({ reason: "reload" }, h.ctx);
+
+                const completed = readMeta(recovered);
+                assert.equal(completed.status, "completed", "a finished interrupted child is recovered from its log, not reported lost");
+                assert.equal(completed.lifecycleClassification, "complete");
+                assert.equal(completed.exitCode, null, "no exit code is invented after the observer is gone");
+                assert.equal(typeof completed.completionCallbackPendingAt, "number", "the completion is handed off");
+                assert.equal(completed.supervisionInterruptedReason, "reload", "the interruption record is kept as history");
+
+                // No coherent terminal evidence: the existing reconciliation verdict stands.
+                mock.timers.tick(HEALTH_TICK_MS);
+                assert.equal(readMeta(unfinished).status, "lost");
+                // Runs without the interruption marker keep today's behavior exactly.
+                assert.equal(readMeta(neverInterrupted).status, "lost");
+            } finally {
+                await h.shutdown({ reason: "reload" });
+            }
+        });
+    });
+
+    /**
+     * A full process restart is the second half of #625: the old pi is gone, so
+     * the record is foreign to this process and its parent is provably dead.
+     * Nothing can adopt it silently, but an explicit interruption record must
+     * still recover a finished child from its own log instead of `lost`.
+     */
+    const seedRestartRun = ({ coherent = true, interrupted = true, originSession } = {}) => {
+        const id = nextRunId();
+        dirOnly.push(id);
+        mkdirSync(runDir(id), { recursive: true });
+        const events = [
+            { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "restart-survives answer" }] } },
+        ];
+        if (coherent) {
+            events.push({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "restart-survives answer" }] }] });
+        }
+        writeFileSync(join(runDir(id), "output.log"), events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+        writeMeta({
+            id, status: "running", pid: DEAD_PID, pgid: DEAD_PID, pidStartTime: "dead-token",
+            // The spawning pi exited: a different process (this test) owns the session now.
+            spawnPid: DEAD_PID, spawnPidStartTime: "dead-token",
+            cwd: tmpdir(), promptPreview: "restarted", startedAt: Date.now() - 5_000,
+            logPath: join(runDir(id), "output.log"), sessionId: `${id}-child`, callback: true,
+            ...(originSession ? { callbackOrigin: { cwd: tmpdir(), sessionId: originSession } } : {}),
+            ...(interrupted ? { supervisionInterruptedAt: Date.now() - 3_000, supervisionInterruptedReason: "quit" } : {}),
+        });
+        return id;
+    };
+
+    it("a full restart recovers a dead parent's interrupted run and completes its own conversation once", async () => {
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "resumed-conversation" });
+        const id = seedRestartRun({ originSession: "resumed-conversation" });
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            const meta = readMeta(id);
+            assert.equal(meta.status, "completed", "a finished child left by a dead parent is recovered, not reported lost");
+            assert.equal(meta.lifecycleClassification, "complete");
+            assert.equal(meta.exitCode, null, "no exit code is invented after the observer is gone");
+            assert.equal(meta.supervisionInterruptedReason, "quit", "the interruption record is kept as history");
+
+            await getCallbackBatcher(h.pi).flush();
+            const completions = h.sent.filter((entry) => entry.message.customType === "background-completion-batch");
+            assert.equal(completions.length, 1, "the resumed conversation gets exactly one completion");
+            assert.match(completions[0].message.content, new RegExp(id));
+            assert.ok(readMeta(id).completionCallbackSentAt > 0);
+        } finally {
+            await h.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("a restart in a different conversation records the truth but never consumes the dead parent's owed callback", async () => {
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "different-conversation" });
+        const id = seedRestartRun({ originSession: "resumed-conversation" });
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            assert.equal(readMeta(id).status, "completed", "the on-disk result is recorded truthfully");
+            await getCallbackBatcher(h.pi).flush();
+            const meta = readMeta(id);
+            assert.equal(meta.completionCallbackSentAt, undefined);
+            assert.equal(h.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0,
+                "an unrelated session never receives the dead parent's completion");
+            assert.equal(meta.completionCallbackSuppressedAt, undefined,
+                "an unrelated session must not permanently consume the obligation");
+            assert.equal(typeof meta.completionCallbackPendingAt, "number",
+                "the owed completion stays pending for the conversation that owns it");
+        } finally {
+            await h.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("the rightful conversation recovers its owed completion exactly once when it returns after an unrelated session", async () => {
+        // The coordinator's counterexample: origin A dies with work in flight, an
+        // unrelated B opens first, then A resumes. B must never receive A's
+        // completion, and B must not consume A's obligation either.
+        const b = makeHarness({ cwd: tmpdir(), sessionId: "unrelated-B" });
+        const id = seedRestartRun({ originSession: "origin-A" });
+        try {
+            await b.handlers.get("session_start")({ reason: "startup" }, b.ctx);
+            await getCallbackBatcher(b.pi).flush();
+            const afterB = readMeta(id);
+            assert.equal(afterB.status, "completed");
+            assert.equal(afterB.completionCallbackSentAt, undefined);
+            assert.equal(afterB.completionCallbackSuppressedAt, undefined, "B leaves the obligation pending");
+            assert.equal(b.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0);
+            await b.shutdown({ reason: "quit" });
+
+            const a = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+            try {
+                await a.handlers.get("session_start")({ reason: "startup" }, a.ctx);
+                await getCallbackBatcher(a.pi).flush();
+                const delivered = () => a.sent.filter((entry) =>
+                    entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id));
+                assert.equal(delivered().length, 1, "resumed origin A must recover its owed completion after B opened first");
+                assert.ok(readMeta(id).completionCallbackSentAt > 0);
+                assert.equal(readMeta(id).completionCallbackSuppressedAt, undefined);
+
+                // Returning twice is still once: the receipt is durable.
+                await a.handlers.get("session_start")({ reason: "startup" }, a.ctx);
+                await getCallbackBatcher(a.pi).flush();
+                assert.equal(delivered().length, 1, "a second session_start must not re-deliver");
+            } finally {
+                await a.shutdown({ reason: "quit" });
+            }
+            assert.equal(b.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0,
+                "B still never received it");
+        } finally {
+            if (b) await b.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("a live foreign parent keeps ownership of its terminal callback", async () => {
+        // R3: recovery must not take a live pi's terminal callback just because the
+        // record is interrupted, terminal and addressed to the resumed conversation.
+        // The defining state is a foreign parent process that is still alive —
+        // process.ppid here — with its own start token recorded.
+        const parentToken = processStartToken(process.ppid);
+        assert.equal(process.kill(process.ppid, 0), true, "the foreign parent is alive");
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+        const id = seedRestartRun({ originSession: "origin-A" });
+        writeMeta({
+            ...readMeta(id), status: "completed", endedAt: Date.now(), exitCode: null,
+            spawnPid: process.ppid, spawnPidStartTime: parentToken,
+            completionCallbackPendingAt: Date.now() - 2_000,
+        });
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            await getCallbackBatcher(h.pi).flush();
+            const meta = readMeta(id);
+            assert.equal(h.sent.filter((entry) =>
+                entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id)).length, 0,
+                "a live foreign parent retains ownership: no takeover");
+            assert.equal(meta.completionCallbackSentAt, undefined, "no receipt is written for a live foreign parent");
+            assert.equal(meta.completionCallbackSuppressedAt, undefined, "the live owner's obligation is not consumed either");
+            assert.equal(typeof meta.completionCallbackPendingAt, "number", "the live parent's pending marker is untouched");
+        } finally {
+            await h.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("a failed handoff to the rightful conversation is retried when that conversation restarts", async () => {
+        // DEV-226 criterion 5: a persisted source of truth recovers missing
+        // notifications. The owed marker is only consumed by a successful
+        // delivery, so a failed send is retried by the next session of the same
+        // conversation — not by an unrelated one.
+        const id = seedRestartRun({ originSession: "origin-A" });
+        let failOnce = true;
+        const first = makeHarness({ cwd: tmpdir(), sessionId: "origin-A", sendMessage(message, options, sent) {
+            if (message.customType === "background-completion-batch" && failOnce) {
+                failOnce = false;
+                throw new Error("simulated handoff failure");
+            }
+            sent.push({ message, options });
+        } });
+        try {
+            await first.handlers.get("session_start")({ reason: "startup" }, first.ctx);
+            assert.equal(await getCallbackBatcher(first.pi).flush(), false, "the failed handoff is not marked delivered");
+            const owed = readMeta(id);
+            assert.equal(owed.completionCallbackSentAt, undefined);
+            assert.equal(owed.completionCallbackSuppressedAt, undefined, "failure keeps the obligation recoverable");
+        } finally {
+            await first.shutdown({ reason: "quit" });
+        }
+        assert.equal(first.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0);
+
+        const second = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+        try {
+            await second.handlers.get("session_start")({ reason: "startup" }, second.ctx);
+            await getCallbackBatcher(second.pi).flush();
+            const delivered = second.sent.filter((entry) =>
+                entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id));
+            assert.equal(delivered.length, 1, "the restarted conversation recovers the retried completion");
+            assert.ok(readMeta(id).completionCallbackSentAt > 0);
+        } finally {
+            await second.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("a restart supervises a dead parent's live child and only recovers it once it has finished", async () => {
+        await withFakeClock(async () => {
+            const h = makeHarness({ cwd: tmpdir(), sessionId: "live-writer" });
+            let run;
+            try {
+                run = await spawnRun(h);
+                // Same durable interruption record, but the child (writer) is alive:
+                // process evidence, not the log, decides.
+                writeMeta({
+                    ...readMeta(run.id), spawnPid: DEAD_PID, spawnPidStartTime: "dead-token",
+                    supervisionInterruptedAt: Date.now() - 3_000, supervisionInterruptedReason: "quit",
+                });
+                await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+                assert.equal(readMeta(run.id).status, "running", "a live child is never finalized from a partial log");
+                assert.equal(readMeta(run.id).lifecycleClassification, undefined);
+                assert.equal(realProcessProbe.pidExists(run.pid), true);
+                // The foreign interruption keeps this process supervising it,
+                // even though the owner-gated monitor would ignore it.
+                assert.equal(isHealthTickerActive(), true, "an interrupted foreign run is still supervised");
+
+                // The child finishes while the restarted session is up: its own
+                // coherent log is then the exit evidence, with no observer around.
+                appendFileSync(join(runDir(run.id), "output.log"),
+                    JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "finished after restart" }] }] }) + "\n");
+                killProcessTree(run.pid, "SIGKILL");
+                assert.equal(await waitFor(() => !realProcessProbe.pidExists(run.pid), { timeoutMs: 2_000 }), true);
+                mock.timers.tick(HEALTH_TICK_MS);
+                await new Promise((resolve) => setImmediate(resolve));
+                const recovered = readMeta(run.id);
+                assert.equal(recovered.status, "completed", `supervision recovered ${recovered.status}`);
+                assert.equal(recovered.lifecycleClassification, "complete");
+                assert.equal(recovered.exitCode, null, "no exit code is invented for a child nobody observed");
+            } finally {
+                if (run) await reapRun(run);
+                await h.shutdown({ reason: "quit" });
+            }
+        });
+    });
+
+    it("a hard-killed parent without an interruption record is not silently promoted to completed", async () => {
+        const h = makeHarness({ cwd: tmpdir(), sessionId: "hard-crash" });
+        const id = seedRestartRun({ interrupted: false, coherent: true });
+        try {
+            await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
+            assert.equal(readMeta(id).status, "lost", "no interruption record means no recovery claim");
+            assert.equal(readMeta(id).lifecycleClassification, undefined);
+        } finally {
+            await h.shutdown({ reason: "quit" });
         }
     });
 });
