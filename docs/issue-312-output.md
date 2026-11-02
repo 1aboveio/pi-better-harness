@@ -106,7 +106,10 @@ Every omission is one of:
    resumes only where a witness recomputed from the current source proves its
    position, so a single mistyped character does not loop on page 1; every
    other case restarts at the first byte or row rather than skipping unread
-   evidence. Incident cursors (`i2.`) use the prefix as their format version
+   evidence. Retained-file cursors are never resumed when damaged, because
+   their offset *and* their direction (`a` append, `b` backward) are equally
+   unproven: the pass restarts at byte 0, or at the newest retained byte for a
+   tail read. Incident cursors (`i2.`) use the prefix as their format version
    and carry the same pair of witnesses; `i1.` cursors reset as stale.
 
 A trailing, incomplete UTF-8 sequence in a retained file is withheld

@@ -90,7 +90,19 @@ unread ranges in the current snapshot.
 - A trailing, still-incomplete UTF-8 sequence (a writer split a code point
   across writes) is withheld and reported as `pendingBytes`; the next read
   returns the whole character once it is complete. Malformed bytes that can
-  never complete are passed through instead of stalling.
+  never complete are passed through instead of stalling. Backward pages obey
+  the same rule: the newest page withholds such a suffix and anchors its
+  append-ready cursor at the sequence's first byte, so the tail-then-append
+  sequence still yields the whole character exactly once.
+- `direction: "backward"` starts an end-anchored pager: the first page is the
+  newest retained bytes instead of byte 0 (issue #618). Backward pages start
+  just after a newline when that keeps at least half the window (one oversized
+  line starts on the next whole code point), report the earlier bytes they did
+  not show as `omittedBytes`, and set `direction: "backward"` so callers can
+  name the direction. `nextCursor` continues toward the oldest byte; reaching
+  the start sets `appendReady` and hands back a forward cursor that reads only
+  bytes appended later. A backward cursor keeps its direction on its own, so
+  the request flag is only needed to start the pager.
 - Cursors bind `resource` (task/run id plus session scope), the file object's
   identity (`dev`, `ino`, and birth time where the platform reports it, so a
   delete + recreate that reuses an inode number is still `source-replaced`),
@@ -99,11 +111,12 @@ unread ranges in the current snapshot.
   compaction; the pre-offset sample also catches in-place rewrites that keep
   the head, size, and inode.
 - A cursor whose integrity tag does not match is reported as
-  `reset: "cursor-corrupt"` instead of `source-replaced`. The identity, head,
-  and pre-offset checks still decide whether its offset may be used: when they
-  hold, the page resumes there (so a hand-copied cursor does not replay the
-  first page forever); otherwise it restarts at byte 0 and says the cursor was
-  corrupt rather than that the file was replaced.
+  `reset: "cursor-corrupt"`, never as `source-replaced`, and is never resumed:
+  both its offset and its direction (`a` append flag, `b` backward flag) come
+  from a payload that failed its integrity check. The pass restarts at its own
+  anchor — byte 0 forward, the newest retained byte for a backward pass — so a
+  hand-copied cursor cannot continue from an unproven position or flip the
+  direction of a tail read.
 - `discardedBytes` and `captureGaps` are disclosed on every page. They are not
   recoverable. Empty readable files have no gaps; missing or unreadable files
   return a `read` gap and never look like a healthy empty log.

@@ -673,7 +673,9 @@ function childSteerExtensionPath(): string {
 function readProgress(meta: RunMeta): ProgressState {
     let entry = progressCache.get(meta.id);
     const read = readAppendedLines(logPathFor(meta.id), entry?.cursor);
-    if (!entry || read.restarted) entry = { state: emptyProgress(meta.startedAt) };
+    // A fresh (or restarted) fold may have lost the start of a call that is still
+    // running: seed it from the durable record rather than reporting silence.
+    if (!entry || read.restarted) entry = { state: emptyProgress(meta.startedAt, meta.timing?.inFlight) };
     if (read.error === undefined) entry.cursor = read.cursor;
     for (const line of read.lines) {
         if (!isProgressRelevantLine(line)) continue;
@@ -755,6 +757,9 @@ function stopForTiming(pi: ExtensionAPI | undefined, id: string, reason: TimingS
         // it was finalized from its log): its own exit is the outcome, not a harness stop.
         patchTiming(id, { stopReason: undefined, stoppedAt: undefined });
         progressCache.delete(id);
+        // A log finalization is terminal evidence discovered here, not by the child
+        // exit handler, so this path still owes the one completion callback (#624).
+        if (pi && outcome.action === "finalized") enqueueCompletionCallback(pi, id);
         return outcome.action === "finalized";
     }
     const current = readMeta(id);
@@ -785,10 +790,24 @@ function enforceTiming(pi: ExtensionAPI | undefined, meta: RunMeta, now: number)
         return timing.ceilingAt !== undefined && now >= timing.ceilingAt ? stopForTiming(pi, meta.id, "ceiling", now) : false;
     }
     if (meta.status !== "running") return false;
-    const needsProgress = timing.stuckMs !== undefined || (timing.deadlineAt !== undefined && now >= timing.deadlineAt);
+    // Progress is folded whenever a control can use it: the stuck window, or a deadline whose
+    // steer must be held behind a running call (the record of that call must exist before the
+    // deadline, not only after it).
+    const needsProgress = timing.stuckMs !== undefined || timing.deadlineAt !== undefined;
     const progress = needsProgress ? readProgress(meta) : undefined;
     const patch: Partial<NonNullable<RunMeta["timing"]>> = {};
     if (progress?.lastProgressAt !== undefined && progress.lastProgressAt > (timing.lastProgressAt ?? 0)) patch.lastProgressAt = progress.lastProgressAt;
+    if (progress) {
+        // Durable still-alive evidence: the call the child is waiting on. Survives a
+        // reload whose bounded log read no longer contains the call's start (#620).
+        const openId = progress.open.keys().next().value as string | undefined;
+        const since = progress.inFlightSince ?? progress.lastEventAt ?? meta.startedAt;
+        if (openId === undefined) {
+            if (timing.inFlight !== undefined) patch.inFlight = undefined;
+        } else if (timing.inFlight?.id !== openId || timing.inFlight.since !== since) {
+            patch.inFlight = { id: openId, since };
+        }
+    }
     if (timing.steerRequestedAt !== undefined && timing.steerDeliveredAt === undefined) {
         // The child's receipt for this run's steer; clamped so a skewed clock cannot move grace earlier than the request.
         const receipt = readSteerReceipt(steerPathFor(meta.id));
@@ -903,6 +922,11 @@ function pruneProgressCache(): void {
 /** Test seam: run ids whose progress state is held in memory. */
 export function progressCacheIdsForTests(): string[] {
     return [...progressCache.keys()];
+}
+
+/** Test seam: drop the in-memory progress fold, as a reloaded extension instance does. */
+export function forgetProgressCacheForTests(): void {
+    progressCache.clear();
 }
 
 /**
@@ -1108,6 +1132,10 @@ function navigatorCloseRun(id: string) {
     resetChildEventLogCursor(id);
     resetParseRunCursor(id);
     syncHealthTicker();
+    // Close stops (or log-finalizes) the run, which is a terminal transition:
+    // queue its one completion callback so no terminal state is silent (#624).
+    // enqueueCompletionCallback is a no-op for runs that owe no callback.
+    if (healthPi) enqueueCompletionCallback(healthPi, id);
     return outcome;
 }
 
@@ -2672,9 +2700,12 @@ export default function (pi: ExtensionAPI) {
     const acceptanceResultTool = subagentResultTool(Type, toolSession);
     pi.registerTool(acceptanceResultTool);
     publishAcceptanceHooks(acceptanceResultTool);
-    const acceptanceStopTool = subagentStopTool(Type, { onStopped: () => {
+    const acceptanceStopTool = subagentStopTool(Type, { onStopped: (id) => {
         renderWidget();
         syncHealthTicker();
+        // Stopping a run is a terminal transition, so it owes the caller its one
+        // completion callback even when the caller is the one who asked (#624).
+        enqueueCompletionCallback(pi, id);
     } });
     acceptanceStopToolRef = acceptanceStopTool;
     pi.registerTool(acceptanceStopTool);
