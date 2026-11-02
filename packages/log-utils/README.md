@@ -67,7 +67,10 @@ unread ranges in the current snapshot.
 - A trailing, still-incomplete UTF-8 sequence (a writer split a code point
   across writes) is withheld and reported as `pendingBytes`; the next read
   returns the whole character once it is complete. Malformed bytes that can
-  never complete are passed through instead of stalling.
+  never complete are passed through instead of stalling. Backward pages obey
+  the same rule: the newest page withholds such a suffix and anchors its
+  append-ready cursor at the sequence's first byte, so the tail-then-append
+  sequence still yields the whole character exactly once.
 - `direction: "backward"` starts an end-anchored pager: the first page is the
   newest retained bytes instead of byte 0 (issue #618). Backward pages start
   just after a newline when that keeps at least half the window (one oversized

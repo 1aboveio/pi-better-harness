@@ -634,6 +634,18 @@ function backwardPageStart(window: Buffer): number {
 }
 
 /**
+ * Largest boundary <= `end` that does not split a UTF-8 sequence, looking only
+ * at the bytes retained up to `end`. Used for the newest retained byte, which
+ * a writer can leave inside a code point it has not finished emitting.
+ */
+function completeCodePointEnd(fd: number, end: number): number {
+  if (end <= 0) return 0;
+  const from = Math.max(0, end - 4);
+  const tail = readAt(fd, from, end - from);
+  return from + utf8SafeEnd(tail, 0, tail.length);
+}
+
+/**
  * Page retained file bytes without skipping unread ranges. Snapshot high-water
  * marks keep a page stable while the file appends. Cursors bind the resource
  * (task/run plus session scope), the file object's identity, the consumer
@@ -738,26 +750,36 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
       if (offset > snapshot) offset = snapshot;
       const mintBackward = (o: number): string => mint(o, snapshot, false, true);
       const revision = fileRevision(generation, identity, snapshot);
+      // The newest retained byte can stop inside a code point the writer has not
+      // finished. Withhold that suffix like the forward pager does, and anchor
+      // the append cursor at its first byte, so the whole character arrives once
+      // the writer completes it. Every other page starts where a previous page
+      // already aligned.
+      const snapshotEnd = completeCodePointEnd(opened, snapshot);
       if (offset <= 0) {
         // Nothing earlier is retained: hand back the forward append-ready cursor.
         return emptyPage({
           revision,
           cursor: mintBackward(0),
-          nextCursor: mint(snapshot, snapshot, true),
+          nextCursor: mint(snapshotEnd, snapshotEnd, true),
           totalBytes: snapshot,
           startByte: 0,
           endByte: 0,
           appendReady: true,
           direction: "backward",
+          ...(snapshotEnd < snapshot ? { pendingBytes: snapshot - snapshotEnd } : {}),
           ...base,
         });
       }
       const from = Math.max(0, offset - maxBytes);
       const window = readAt(opened, from, offset - from);
+      const withheldFrom = offset === snapshot ? snapshotEnd : offset;
+      const pendingBytes = offset - withheldFrom;
       // Byte 0 is always a valid page start; otherwise start at the first line
       // boundary that keeps as much of the window as possible.
-      const start = from === 0 ? 0 : from + backwardPageStart(window);
-      if (start >= offset) {
+      const reachedStart = from === 0;
+      const start = reachedStart ? 0 : from + backwardPageStart(window.subarray(0, withheldFrom - from));
+      if (!reachedStart && start >= withheldFrom) {
         // Budget is smaller than the next code point behind the cursor: stay put.
         const here = mintBackward(offset);
         return emptyPage({
@@ -770,24 +792,25 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
           startByte: offset,
           endByte: offset,
           direction: "backward",
+          ...(pendingBytes > 0 ? { pendingBytes } : {}),
           ...base,
         });
       }
-      const reachedStart = start === 0;
-      // A trailing sequence the writer has not completed is decoded with a
-      // replacement character here rather than withheld: this page is the only
-      // place those raw bytes are shown, and the next page starts below them.
       return {
-        text: decoder.decode(window.subarray(start - from)),
+        text: decoder.decode(window.subarray(start - from, withheldFrom - from)),
         revision,
         cursor: mintBackward(offset),
-        nextCursor: reachedStart ? mint(snapshot, snapshot, true) : mintBackward(start),
+        // Reaching the oldest byte hands the whole pass back to forward polling:
+        // the append cursor sits on the newest complete code point, so a withheld
+        // character is returned whole rather than skipped.
+        nextCursor: reachedStart ? mint(snapshotEnd, snapshotEnd, true) : mintBackward(start),
         hasMore: !reachedStart,
         omittedBytes: start,
         totalBytes: snapshot,
         startByte: start,
-        endByte: offset,
+        endByte: withheldFrom,
         ...(reachedStart ? { appendReady: true } : {}),
+        ...(pendingBytes > 0 ? { pendingBytes } : {}),
         direction: "backward",
         ...base,
       };

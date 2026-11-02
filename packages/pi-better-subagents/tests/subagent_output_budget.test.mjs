@@ -537,6 +537,25 @@ describe("registered subagent payloads", () => {
         assert.doesNotMatch(page, /hasMore=true/);
         assert.doesNotMatch(page, /newest-first page/);
     });
+
+    // Issue #618 review R1: a code point split across writes must survive the
+    // tail page and its append-ready handoff, not turn into replacement bytes.
+    it("withholds a split newest byte in a raw tail page and returns it whole from the append cursor", async () => {
+        const id = trackDisk(`sa_tail_split_${Date.now()}`);
+        seedMeta(id, { status: "completed", exitCode: 0 });
+        const euro = Buffer.from("€\n", "utf8");
+        writeFileSync(logPathFor(id), Buffer.concat([Buffer.from("A", "utf8"), euro.subarray(0, 2)]));
+        const tail = textOf(await outputTool.execute("tc", { id, mode: "raw", tail: true }));
+        assert.equal(rawBody(tail), "A");
+        assert.doesNotMatch(tail, /\uFFFD/);
+        assert.match(tail, /pendingBytes=2 \(incomplete UTF-8 sequence withheld until the writer completes it\)/);
+        const endCursor = tail.match(/\bend nextCursor=(\S+)/)?.[1];
+        assert.ok(endCursor, tail);
+        appendFileSync(logPathFor(id), euro.subarray(2));
+        const completed = textOf(await outputTool.execute("tc", { id, mode: "raw", cursor: endCursor }));
+        assert.equal(rawBody(completed), "€\n", "the append cursor returns the completed character, not just later bytes");
+        assert.equal(rawBody(tail) + rawBody(completed), "A€\n");
+    });
     it("paginates list rows under the list budget without full failure paragraphs", async () => {
         const stamp = Date.now();
         const folder = `/tmp/budget-list-${stamp}`;

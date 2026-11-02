@@ -451,6 +451,85 @@ describe("pageRetainedFile", () => {
       assert.equal(b.nextCursor, first.nextCursor);
     });
 
+    // Review witness R1: the tail page showed replacement bytes and its append
+    // cursor skipped the split character, so tail-then-poll lost a code point.
+    it("withholds a code point split across writes and returns it whole from the append cursor", () => {
+      const path = join(tempDir(), "split-tail.log");
+      writeFileSync(path, Buffer.from([0x41, 0xe2, 0x82]));
+      const first = pageRetainedFile(path, { direction: "backward", maxBytes: 1_024, resource: "raw:scope:run" });
+      assert.equal(first.text, "A", "the incomplete suffix is withheld, not decoded as replacement bytes");
+      assert.equal(first.pendingBytes, 2);
+      assert.equal(first.startByte, 0);
+      assert.equal(first.endByte, 1, "the page ends where the incomplete sequence starts");
+      assert.equal(first.hasMore, false);
+      assert.equal(first.appendReady, true);
+      appendFileSync(path, Buffer.from([0xac, 0x0a]));
+      const next = pageRetainedFile(path, { cursor: first.nextCursor, maxBytes: 1_024, resource: "raw:scope:run" });
+      assert.equal(next.reset, undefined);
+      assert.equal(next.text, "€\n", "the append cursor returns the completed character, not just the bytes after it");
+      assert.equal(first.text + next.text, "A€\n");
+    });
+
+    it("withholds a split suffix at every boundary a writer can tear", () => {
+      const cases: Array<{ name: string; head: number[]; tails: number[][] }> = [
+        { name: "euro-1-of-2", head: [0x41, 0xe2], tails: [[0x82], [0xac, 0x0a]] },
+        { name: "euro-2-of-2", head: [0x41, 0xe2, 0x82], tails: [[0xac, 0x0a]] },
+        { name: "emoji-1-of-3", head: [0x41, 0xf0], tails: [[0x9f], [0x98], [0x80, 0x0a]] },
+        { name: "emoji-2-of-3", head: [0x41, 0xf0, 0x9f], tails: [[0x98, 0x80, 0x0a]] },
+        { name: "emoji-3-of-3", head: [0x41, 0xf0, 0x9f, 0x98], tails: [[0x80, 0x0a]] },
+        { name: "only-a-prefix", head: [0xe2, 0x82], tails: [[0xac, 0x0a]] },
+      ];
+      for (const item of cases) {
+        const path = join(tempDir(), `${item.name}.log`);
+        writeFileSync(path, Buffer.from(item.head));
+        const first = pageRetainedFile(path, { direction: "backward", maxBytes: 1_024, resource: "resume" });
+        const expectedFirst = item.head[0] === 0x41 ? "A" : "";
+        assert.equal(first.text, expectedFirst, item.name);
+        assert.ok((first.pendingBytes ?? 0) > 0, `${item.name}: the torn suffix is reported`);
+        let text = first.text;
+        let cursor = first.nextCursor;
+        for (const tail of item.tails) {
+          appendFileSync(path, Buffer.from(tail));
+          const page = pageRetainedFile(path, { cursor, maxBytes: 1_024, resource: "resume" });
+          assert.equal(page.reset, undefined, item.name);
+          text += page.text;
+          cursor = page.nextCursor;
+        }
+        assert.equal(text, Buffer.concat([Buffer.from(item.head), ...item.tails.map((tail) => Buffer.from(tail))]).toString("utf8"), item.name);
+      }
+    });
+
+    it("reports a withheld suffix on a tail page that does not reach the start, and shows it once complete", () => {
+      const path = join(tempDir(), "split-mid.log");
+      writeFileSync(path, `${"x".repeat(100)}\n`.repeat(200));
+      appendFileSync(path, Buffer.from([0xe2, 0x82]));
+      const first = pageRetainedFile(path, { direction: "backward", maxBytes: 512, resource: "resume" });
+      assert.equal(first.pendingBytes, 2);
+      assert.equal(first.hasMore, true, "earlier bytes are still paged");
+      assert.doesNotMatch(first.text, /\uFFFD/, "the withheld bytes are not shown as replacement characters");
+      appendFileSync(path, Buffer.from([0xac, 0x0a]));
+      const fresh = pageRetainedFile(path, { direction: "backward", maxBytes: 512, resource: "resume" });
+      assert.equal(fresh.pendingBytes, undefined);
+      assert.equal(fresh.text.endsWith("€\n"), true);
+    });
+
+    it("rebuilds a multi-page tail plus its append handoff exactly when the newest byte is torn", () => {
+      const path = join(tempDir(), "split-pages.log");
+      const body = `${Array.from({ length: 4_000 }, (_, i) => `row-${String(i).padStart(4, "0")} ${"y".repeat(20)}`).join("\n")}\n`;
+      const emoji = Buffer.from("😀\n", "utf8");
+      writeFileSync(path, Buffer.concat([Buffer.from(body, "utf8"), emoji.subarray(0, 2)]));
+      const pages = [pageRetainedFile(path, { direction: "backward", maxBytes: 4_096, resource: "poll" })];
+      for (let guard = 0; pages[pages.length - 1]!.hasMore && guard < 500; guard += 1) {
+        pages.push(pageRetainedFile(path, { direction: "backward", maxBytes: 4_096, resource: "poll", cursor: pages[pages.length - 1]!.nextCursor }));
+      }
+      assert.equal(pages[0]!.pendingBytes, 2);
+      assert.ok(pages.length > 2, "the fixture needs several backward pages");
+      appendFileSync(path, emoji.subarray(2));
+      const handoff = pageRetainedFile(path, { maxBytes: 4_096, resource: "poll", cursor: pages[pages.length - 1]!.nextCursor });
+      assert.equal(handoff.text, "😀\n", "the append cursor returns the completed character only once");
+      assert.equal(pages.map((page) => page.text).reverse().join("") + handoff.text, `${body}😀\n`);
+    });
+
     it("starts a page inside one oversized line without skipping or duplicating bytes", () => {
       const path = join(tempDir(), "oneline.log");
       const source = "café😀".repeat(4_000);
