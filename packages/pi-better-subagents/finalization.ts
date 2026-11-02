@@ -144,7 +144,7 @@ export function buildSubagentResultText(id: string): string | null {
 /** Optional paging/raw evidence for the registered result tool. */
 export function buildSubagentResultPayload(
     id: string,
-    request?: { cursor?: string; maxBytes?: unknown; mode?: unknown; all?: unknown },
+    request?: { cursor?: string; maxBytes?: unknown; mode?: unknown; all?: unknown; lines?: unknown; include?: unknown; history?: unknown; tail?: unknown },
     healthLine = "",
     scopeKey = `parent:${process.pid}`,
 ): string | null {

@@ -191,6 +191,12 @@ export interface PageResult {
   appendReady?: boolean;
   /** Bytes of a trailing, still-incomplete UTF-8 sequence withheld until the writer completes it. */
   pendingBytes?: number;
+  /**
+   * `backward` marks an end-anchored page: the text ends at the cursor's upper
+   * bound, `omittedBytes` counts earlier bytes not shown, and `nextCursor`
+   * continues toward the start of the file.
+   */
+  direction?: "backward";
 }
 
 export interface FilePageRequest extends PageRequest {
@@ -205,6 +211,14 @@ export interface FilePageRequest extends PageRequest {
   captureGaps?: Array<{ bytes: number; detail?: string }>;
   /** Pin pagination to this many leading bytes; defaults to the size at first read. */
   snapshotBytes?: number;
+  /**
+   * Start an uncursored read from the newest retained byte instead of byte 0
+   * (issue #618). The first page is end-anchored and `nextCursor` then pages
+   * toward the oldest byte; reaching the start hands back an append-ready
+   * cursor. A backward cursor keeps this direction on its own, so the request
+   * flag is only needed to start such a pager.
+   */
+  direction?: "backward";
 }
 
 export interface VerbatimPage {
@@ -224,6 +238,8 @@ export interface VerbatimPage {
   endByte?: number;
   appendReady?: boolean;
   pendingBytes?: number;
+  /** `backward` marks an end-anchored page whose `nextCursor` reads earlier bytes. */
+  direction?: "backward";
   /** Where `nextCursor` is accepted when that is not the tool that returned it. */
   via?: string;
 }
@@ -290,6 +306,8 @@ interface CursorPayload {
   c?: string;
   f?: string;
   a?: 1;
+  /** End-anchored page: `o` is the page's upper bound and `nextCursor` reads earlier bytes. */
+  b?: 1;
 }
 
 function positiveInt(value: unknown): number | undefined {
@@ -599,6 +617,35 @@ function fileReadError(
 }
 
 /**
+ * Start byte of an end-anchored page inside `window` (the bytes immediately
+ * before its upper bound). A backward page starts just after the first newline
+ * that keeps at least half the window, so consecutive pages concatenate; when
+ * no such newline exists (one oversized line) it starts on the next whole code
+ * point and the page begins mid-line rather than stalling.
+ */
+function backwardPageStart(window: Buffer): number {
+  let start = 0;
+  while (start < window.length && isContinuation(window[start]!)) start += 1;
+  const floor = Math.ceil(window.length / 2);
+  for (let i = start; i < floor; i += 1) {
+    if (window[i] === NEWLINE) return i + 1;
+  }
+  return start;
+}
+
+/**
+ * Largest boundary <= `end` that does not split a UTF-8 sequence, looking only
+ * at the bytes retained up to `end`. Used for the newest retained byte, which
+ * a writer can leave inside a code point it has not finished emitting.
+ */
+function completeCodePointEnd(fd: number, end: number): number {
+  if (end <= 0) return 0;
+  const from = Math.max(0, end - 4);
+  const tail = readAt(fd, from, end - from);
+  return from + utf8SafeEnd(tail, 0, tail.length);
+}
+
+/**
  * Page retained file bytes without skipping unread ranges. Snapshot high-water
  * marks keep a page stable while the file appends. Cursors bind the resource
  * (task/run plus session scope), the file object's identity, the consumer
@@ -674,7 +721,7 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
       snapshot = Math.max(snapshot, initialSnapshot());
     }
 
-    const mint = (o: number, n: number, append: boolean): string => {
+    const mint = (o: number, n: number, append: boolean, back = false): string => {
       const window = windowHash(o);
       return encodeCursor({
         k: "f",
@@ -687,12 +734,87 @@ export function pageRetainedFile(path: string, request: FilePageRequest = {}): P
         hl: head.length,
         ...(window ? { w: window } : {}),
         ...(append ? { a: 1 } : {}),
+        ...(back ? { b: 1 as const } : {}),
       });
     };
     const base = {
       gaps: suppliedGaps,
       ...(reset ? { reset } : {}),
     };
+
+    // A backward cursor keeps its own direction (even after a reset, which
+    // restarts at the newest bytes); the request flag starts one.
+    const backward = parsed?.k === "f" ? parsed.b === 1 : request.direction === "backward";
+    if (backward) {
+      if (!request.cursor || reset) offset = snapshot;
+      if (offset > snapshot) offset = snapshot;
+      const mintBackward = (o: number): string => mint(o, snapshot, false, true);
+      const revision = fileRevision(generation, identity, snapshot);
+      // The newest retained byte can stop inside a code point the writer has not
+      // finished. Withhold that suffix like the forward pager does, and anchor
+      // the append cursor at its first byte, so the whole character arrives once
+      // the writer completes it. Every other page starts where a previous page
+      // already aligned.
+      const snapshotEnd = completeCodePointEnd(opened, snapshot);
+      if (offset <= 0) {
+        // Nothing earlier is retained: hand back the forward append-ready cursor.
+        return emptyPage({
+          revision,
+          cursor: mintBackward(0),
+          nextCursor: mint(snapshotEnd, snapshotEnd, true),
+          totalBytes: snapshot,
+          startByte: 0,
+          endByte: 0,
+          appendReady: true,
+          direction: "backward",
+          ...(snapshotEnd < snapshot ? { pendingBytes: snapshot - snapshotEnd } : {}),
+          ...base,
+        });
+      }
+      const from = Math.max(0, offset - maxBytes);
+      const window = readAt(opened, from, offset - from);
+      const withheldFrom = offset === snapshot ? snapshotEnd : offset;
+      const pendingBytes = offset - withheldFrom;
+      // Byte 0 is always a valid page start; otherwise start at the first line
+      // boundary that keeps as much of the window as possible.
+      const reachedStart = from === 0;
+      const start = reachedStart ? 0 : from + backwardPageStart(window.subarray(0, withheldFrom - from));
+      if (!reachedStart && start >= withheldFrom) {
+        // Budget is smaller than the next code point behind the cursor: stay put.
+        const here = mintBackward(offset);
+        return emptyPage({
+          revision,
+          cursor: here,
+          nextCursor: here,
+          hasMore: true,
+          omittedBytes: offset,
+          totalBytes: snapshot,
+          startByte: offset,
+          endByte: offset,
+          direction: "backward",
+          ...(pendingBytes > 0 ? { pendingBytes } : {}),
+          ...base,
+        });
+      }
+      return {
+        text: decoder.decode(window.subarray(start - from, withheldFrom - from)),
+        revision,
+        cursor: mintBackward(offset),
+        // Reaching the oldest byte hands the whole pass back to forward polling:
+        // the append cursor sits on the newest complete code point, so a withheld
+        // character is returned whole rather than skipped.
+        nextCursor: reachedStart ? mint(snapshotEnd, snapshotEnd, true) : mintBackward(start),
+        hasMore: !reachedStart,
+        omittedBytes: start,
+        totalBytes: snapshot,
+        startByte: start,
+        endByte: withheldFrom,
+        ...(reachedStart ? { appendReady: true } : {}),
+        ...(pendingBytes > 0 ? { pendingBytes } : {}),
+        direction: "backward",
+        ...base,
+      };
+    }
 
     if (offset > snapshot) offset = snapshot;
     if (offset >= snapshot) {
@@ -1088,7 +1210,9 @@ function formatContinuation(info: {
       ? `omittedRows=${page.omittedRows}`
       : `omittedBytes=${page.omittedBytes}`;
     const cursor = page.nextCursor ? ` nextCursor=${page.nextCursor}${page.via ? ` (${page.via})` : ""}` : "";
-    lines.push(`hasMore=${page.hasMore} ${amount}${cursor}`);
+    // End-anchored pages count earlier bytes and continue toward the start.
+    const direction = page.direction === "backward" ? " (newest-first page; nextCursor reads earlier bytes)" : "";
+    lines.push(`hasMore=${page.hasMore} ${amount}${cursor}${direction}`);
   } else if (page?.appendReady && page.nextCursor) {
     lines.push(`end nextCursor=${page.nextCursor} (reuse to read only bytes appended later)`);
   }
