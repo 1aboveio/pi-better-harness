@@ -752,20 +752,101 @@ describe("interrupted supervision handoff (#625)", () => {
         }
     });
 
-    it("a restart in a different conversation keeps the truth but never adopts the dead parent's callback", async () => {
+    it("a restart in a different conversation records the truth but never consumes the dead parent's owed callback", async () => {
         const h = makeHarness({ cwd: tmpdir(), sessionId: "different-conversation" });
         const id = seedRestartRun({ originSession: "resumed-conversation" });
         try {
             await h.handlers.get("session_start")({ reason: "startup" }, h.ctx);
             assert.equal(readMeta(id).status, "completed", "the on-disk result is recorded truthfully");
             await getCallbackBatcher(h.pi).flush();
-            assert.equal(readMeta(id).completionCallbackSentAt, undefined);
-            const suppressed = readMeta(id);
-            assert.ok(suppressed.completionCallbackSuppressedAt > 0, "non-delivery is durably recorded, not silently dropped");
-            assert.match(suppressed.completionCallbackSuppressedReason, /origin session resumed-conversation does not match active session different-conversation/);
-            assert.equal(h.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0);
+            const meta = readMeta(id);
+            assert.equal(meta.completionCallbackSentAt, undefined);
+            assert.equal(h.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0,
+                "an unrelated session never receives the dead parent's completion");
+            assert.equal(meta.completionCallbackSuppressedAt, undefined,
+                "an unrelated session must not permanently consume the obligation");
+            assert.equal(typeof meta.completionCallbackPendingAt, "number",
+                "the owed completion stays pending for the conversation that owns it");
         } finally {
             await h.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("the rightful conversation recovers its owed completion exactly once when it returns after an unrelated session", async () => {
+        // The coordinator's counterexample: origin A dies with work in flight, an
+        // unrelated B opens first, then A resumes. B must never receive A's
+        // completion, and B must not consume A's obligation either.
+        const b = makeHarness({ cwd: tmpdir(), sessionId: "unrelated-B" });
+        const id = seedRestartRun({ originSession: "origin-A" });
+        try {
+            await b.handlers.get("session_start")({ reason: "startup" }, b.ctx);
+            await getCallbackBatcher(b.pi).flush();
+            const afterB = readMeta(id);
+            assert.equal(afterB.status, "completed");
+            assert.equal(afterB.completionCallbackSentAt, undefined);
+            assert.equal(afterB.completionCallbackSuppressedAt, undefined, "B leaves the obligation pending");
+            assert.equal(b.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0);
+            await b.shutdown({ reason: "quit" });
+
+            const a = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+            try {
+                await a.handlers.get("session_start")({ reason: "startup" }, a.ctx);
+                await getCallbackBatcher(a.pi).flush();
+                const delivered = () => a.sent.filter((entry) =>
+                    entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id));
+                assert.equal(delivered().length, 1, "resumed origin A must recover its owed completion after B opened first");
+                assert.ok(readMeta(id).completionCallbackSentAt > 0);
+                assert.equal(readMeta(id).completionCallbackSuppressedAt, undefined);
+
+                // Returning twice is still once: the receipt is durable.
+                await a.handlers.get("session_start")({ reason: "startup" }, a.ctx);
+                await getCallbackBatcher(a.pi).flush();
+                assert.equal(delivered().length, 1, "a second session_start must not re-deliver");
+            } finally {
+                await a.shutdown({ reason: "quit" });
+            }
+            assert.equal(b.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0,
+                "B still never received it");
+        } finally {
+            if (b) await b.shutdown({ reason: "quit" });
+        }
+    });
+
+    it("a failed handoff to the rightful conversation is retried when that conversation restarts", async () => {
+        // DEV-226 criterion 5: a persisted source of truth recovers missing
+        // notifications. The owed marker is only consumed by a successful
+        // delivery, so a failed send is retried by the next session of the same
+        // conversation — not by an unrelated one.
+        const id = seedRestartRun({ originSession: "origin-A" });
+        let failOnce = true;
+        const first = makeHarness({ cwd: tmpdir(), sessionId: "origin-A", sendMessage(message, options, sent) {
+            if (message.customType === "background-completion-batch" && failOnce) {
+                failOnce = false;
+                throw new Error("simulated handoff failure");
+            }
+            sent.push({ message, options });
+        } });
+        try {
+            await first.handlers.get("session_start")({ reason: "startup" }, first.ctx);
+            assert.equal(await getCallbackBatcher(first.pi).flush(), false, "the failed handoff is not marked delivered");
+            const owed = readMeta(id);
+            assert.equal(owed.completionCallbackSentAt, undefined);
+            assert.equal(owed.completionCallbackSuppressedAt, undefined, "failure keeps the obligation recoverable");
+        } finally {
+            await first.shutdown({ reason: "quit" });
+        }
+        assert.equal(first.sent.filter((entry) => entry.message.customType === "background-completion-batch").length, 0);
+
+        const second = makeHarness({ cwd: tmpdir(), sessionId: "origin-A" });
+        try {
+            await second.handlers.get("session_start")({ reason: "startup" }, second.ctx);
+            await getCallbackBatcher(second.pi).flush();
+            const delivered = second.sent.filter((entry) =>
+                entry.message.customType === "background-completion-batch" && String(entry.message.content).includes(id));
+            assert.equal(delivered.length, 1, "the restarted conversation recovers the retried completion");
+            assert.ok(readMeta(id).completionCallbackSentAt > 0);
+        } finally {
+            await second.shutdown({ reason: "quit" });
         }
     });
 

@@ -415,6 +415,18 @@ function warnInterruptedSubagents(ctx: ExtensionContext, interrupted: RunMeta[],
  */
 let sessionTornDown = false;
 
+/**
+ * "The rightful conversation is not the active one", not "this notification is
+ * dead" (#625). These reasons only defer delivery to whoever owns the run, so
+ * they must never consume an interrupted run's owed completion.
+ */
+function isConversationIdentityReason(reason: string): boolean {
+    return reason === NO_ACTIVE_SESSION_REASON
+        || reason.startsWith("origin session ")
+        || reason.startsWith("origin cwd ")
+        || reason.startsWith("legacy run cwd ");
+}
+
 function markCompletionCallbackSuppressed(id: string, reason: string, now: number = Date.now()): void {
     // A finalizer that runs after this instance was torn down cannot name the
     // session that owns the run now. Suppressing durably would erase the
@@ -422,6 +434,13 @@ function markCompletionCallbackSuppressed(id: string, reason: string, now: numbe
     if (sessionTornDown && reason === NO_ACTIVE_SESSION_REASON) return;
     const meta = readMeta(id);
     if (!meta || meta.completionCallbackSentAt !== undefined || meta.completionCallbackSuppressedAt !== undefined) return;
+    // An explicitly interrupted run owes its completion to the conversation that
+    // launched it (#625, DEV-226 criterion 5). An unrelated session merely being
+    // active — B opening before the original A returns — drops this delivery
+    // attempt but must keep the obligation: the pending marker stays, and A
+    // recovers it when it comes back. Records that never lost supervision keep
+    // today's durable suppression, so legacy/foreign notifications stay dead.
+    if (meta.supervisionInterruptedAt !== undefined && isConversationIdentityReason(reason)) return;
     meta.completionCallbackSuppressedAt = now;
     meta.completionCallbackSuppressedReason = reason;
     writeMeta(meta);
@@ -471,10 +490,28 @@ function enqueueCompletionCallback(pi: ExtensionAPI, id: string): void {
     });
 }
 
-/** Recover only records explicitly marked pending; legacy terminal runs never replay. */
+/**
+ * Recover only records explicitly marked pending; legacy terminal runs never replay.
+ *
+ * Current-parent records are recovered unconditionally (the owner decides, and the
+ * session gate still suppresses a different foreground session). A run an
+ * interrupted dead parent left behind is recovered only by the conversation that
+ * launched it: that session id is the ownership proof, so an unrelated session
+ * never adopts it and live-run ownership is untouched (#625, DEV-226 criterion 5).
+ */
 function recoverCompletionCallbacks(pi: ExtensionAPI): void {
     for (const meta of listMetasForParent(process.pid)) {
         if (!ownedByThisParent(meta)) continue;
+        enqueueCompletionCallback(pi, meta.id);
+    }
+    const activeSessionId = activeCallbackOrigin?.sessionId;
+    if (!activeSessionId) return;
+    for (const summary of listMetas()) {
+        if (ownedByThisParent(summary) || summary.supervisionInterruptedAt === undefined) continue;
+        if (summary.status === "running" || summary.status === "orphaned") continue;
+        const meta = readMeta(summary.id);
+        if (!meta || meta.status === "running" || meta.status === "orphaned") continue;
+        if (meta.callbackOrigin?.sessionId !== activeSessionId) continue;
         enqueueCompletionCallback(pi, meta.id);
     }
 }
