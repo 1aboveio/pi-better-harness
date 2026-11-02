@@ -229,7 +229,15 @@ function formatDecision(meta: BackgroundTaskMeta): string | undefined {
     lines.push(`exit=${meta.lastExitCode ?? "null"}${meta.lastSignal ? ` signal=${meta.lastSignal}` : ""}${gate}`);
   }
   if (meta.stepGateFailure) {
-    lines.push(`step gate: ${oneLine(meta.stepGateFailure.command || "a chained step", 120)} exited ${meta.stepGateFailure.stepExitCode}; the shell's own exit was ${meta.stepGateFailure.shellExitCode ?? "unknown"}`);
+    // "stopped at that step" is the usual errexit case; a differing shell exit means the
+    // command disabled errexit and the gate's EXIT override or the command decided the exit.
+    const gate = meta.stepGateFailure;
+    const ending = gate.shellExitCode === null
+      ? "the shell exit is unknown"
+      : gate.shellExitCode === gate.stepExitCode
+        ? "the shell stopped at that step"
+        : `the shell's own exit was ${gate.shellExitCode}`;
+    lines.push(`step gate: ${oneLine(gate.command || "a chained step", 120)} exited ${gate.stepExitCode}; ${ending}`);
   }
   if (result.reason && !result.matchedCondition) lines.push(oneLine(result.reason, 240));
   if (meta.error && meta.error !== meta.stopError && meta.error !== result.reason) {
@@ -295,7 +303,7 @@ function formatProcessDiagnostics(diagnostics: TaskProcessDiagnostics | undefine
 
 function formatStepGate(meta: BackgroundTaskMeta): string | undefined {
   if (!meta.requireSuccessfulSteps) return undefined;
-  return "step gate: on; a failing step is reported even when a later command exits 0. Every step still runs.";
+  return "step gate: on; the command runs under bash errexit, so its first unhandled failing step ends the task.";
 }
 
 function formatLaunchSandbox(meta: BackgroundTaskMeta): string | undefined {

@@ -87,26 +87,32 @@ describe("process shell execution", () => {
     expect(result.captureTruncated).toBe(true);
   });
 
-  it("generates a gate script that reports the first failing step without changing shell semantics", async () => {
+  it("generates a gate script that ends the command at its first unhandled failing step", async () => {
     const script = stepGateScript("bg_script_1");
-    // No `set -e`: ordinary shell semantics keep every step running.
-    expect(script).not.toMatch(/^set -e$/m);
+    // Bash errexit is the rule; errtrace lets the trap name the step inside functions.
+    expect(script).toMatch(/^set -e$/m);
+    expect(script).toMatch(/^set -E$/m);
     expect(script).toContain("trap '__pi_step_gate_record' ERR");
     expect(script).toContain("trap '__pi_step_gate_finish' EXIT");
+    // Only main-shell failures are recorded, so a status bash discards is never claimed.
+    expect(script).toContain('[ "${BASH_SUBSHELL:-0}" -eq 0 ]');
     // The operator's command travels in its own variable and is eval'd, never concatenated.
     expect(script).toContain('eval "${PI_BG_STEP_GATE_COMMAND}"');
     expect(script).toContain("__pi_step_gate_id='bg_script_1'");
 
+    // The review's masked function: a failing step inside an ordinary function followed by
+    // a summary command that would otherwise make the shell (and the task) exit 0.
     const result = await runCommandOnce({
       command: script,
-      env: { PI_BG_STEP_GATE_COMMAND: "bash -c 'exit 8'\necho summary ok" },
+      env: { PI_BG_STEP_GATE_COMMAND: "validate() { bash -c 'exit 8'; echo summary; }; validate; echo done" },
     });
     expect(result.exitCode).toBe(8);
-    expect(result.stdout).toContain("summary ok");
-    expect(result.stderr).toContain("--- step gate [bg_script_1]: first failing step exit=8; shell exit=0: bash -c 'exit 8' ---");
+    expect(result.stdout).not.toContain("summary");
+    expect(result.stdout).not.toContain("done");
+    expect(result.stderr).toContain("--- step gate [bg_script_1]: first failing step exit=8; shell exit=8: bash -c 'exit 8' ---");
     expect(parseStepGateFailure(result.stderr, "bg_script_1")).toEqual({
       stepExitCode: 8,
-      shellExitCode: 0,
+      shellExitCode: 8,
       command: "bash -c 'exit 8'",
     });
   });

@@ -323,27 +323,33 @@ Pass `require_successful_steps: true` on `bg_task_spawn` (or `bg_task` with
 { "command": "ctest --output-on-failure\nnpm run report", "require_successful_steps": true }
 ```
 
-The gate keeps ordinary shell semantics: there is no `set -e`, every step still
-runs, and a failure the command handles itself (`|| true`, `if`, `while`, `!`)
-is not a gate failure. Bash reports each unhandled failing command through its
-ERR trap, and the first one decides the verdict: when the command's own exit
-would be 0, the task exits with that failing step's code instead. Status then
-reports the real process exit with `(step gate)`, the failing step, and the
-shell's own exit, for example:
+The gate is a bash `errexit` contract, not shell parsing: the command runs under
+`set -e`, so its first unhandled failing step ends the task with that step's
+exit code and the remaining steps do not run. That covers the same list, shell
+functions, subshells, and command substitutions, and it is why a summary command
+after a failed `ctest` can no longer turn the task green. A failure the command
+handles itself (`|| true`, `if`/`while`/`until` conditions, `!`, `&&`/`||`
+lists) is not a gate failure, and neither is a failing process substitution
+whose status bash discards. Status reports the real process exit with
+`(step gate)` plus the failing step:
 
 ```text
 exit=8 (step gate)
-step gate: ctest --output-on-failure exited 8; the shell's own exit was 0
+step gate: ctest --output-on-failure exited 8; the shell stopped at that step
 ```
+
+A command that switches errexit off (`set +e`) keeps a different own exit; when
+that exit is 0 the gate still fails the task with the failing step's code and
+the status says so (`the shell's own exit was 0`).
 
 The gate is refused (and the task is not started) with `shell:false`, whose
 argv already reports the real exit code, and with structured `ssh`, whose
 command runs under remote semantics the local gate cannot observe. It applies
 to spawns, not to watch checks: a check is one polled command whose own exit
-code is the outcome. Two limits are worth knowing: a failure inside a subshell
-or process substitution whose own status is discarded is not reported, and a
-command that clears the shell's traps or replaces the shell with `exec` bypasses
-the gate.
+code is the outcome. Limits inherited from bash's own errexit rules: assignment
+builtins such as `local` and `export` mask a command substitution's status, a
+command that disables errexit and clears the ERR trap can bypass the gate, and
+`exec` replaces the shell before the gate can decide.
 
 ## When To Use
 

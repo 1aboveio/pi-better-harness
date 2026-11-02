@@ -799,8 +799,9 @@ backendDescribe("background application settings on a real launch", () => {
       // and the operator's command still reaches the shell through its own variable.
       expect(terminal?.sandbox?.confinement).toBe("confined");
       expect(terminal?.lastExitCode).toBe(8);
-      expect(terminal?.stepGateFailure).toMatchObject({ stepExitCode: 8, shellExitCode: 0 });
-      expect(readFileSync(terminal!.logPath, "utf8")).toContain("summary ok");
+      expect(terminal?.stepGateFailure).toMatchObject({ stepExitCode: 8, shellExitCode: 8 });
+      // bash errexit stops at the failing step; the gate still ran inside the wrapper.
+      expect(readFileSync(terminal!.logPath, "utf8")).not.toContain("summary ok");
     } finally {
       rmSync(taskDir(meta.id), { recursive: true, force: true });
     }

@@ -352,22 +352,26 @@ so `ctest; write-summary` passes when the summary exits 0 even though `ctest`
 failed. `bg_task_spawn` and `bg_task` accept `require_successful_steps: true` to
 opt into a step gate for a shell command:
 
-- bash reports unhandled failing commands through its ERR trap and the first one
-  decides the verdict; when the command's own exit would be 0, the task exits
-  with that failing step's code;
-- there is no `set -e`: every step still runs and a failure the command handles
-  (`|| true`, `if`, `while`, `!`) is not a gate failure;
-- status reports the real process exit with `(step gate)`, then the failing step
-  and the shell's own exit. Metadata keeps the failing step (bounded) and the
-  command the operator actually wrote, never the wrapper.
+- the command runs under bash errexit (`set -e`), so its first unhandled failing
+  step ends the task with that step's exit code; later steps do not run. The
+  rule applies in the same list, inside shell functions, subshells, and command
+  substitutions;
+- a failure the command handles itself (`|| true`, `if`/`while`/`until`
+  conditions, `!`, `&&`/`||` lists) is not a gate failure, and neither is a
+  process substitution whose status bash discards;
+- status reports the real process exit with `(step gate)` and the failing step
+  (`the shell stopped at that step`, or the shell's own exit when the command
+  disabled errexit). Metadata keeps the failing step (bounded) and the command
+  the operator actually wrote, never the wrapper.
 
 `require_successful_steps` is refused, before any task state exists, for
 `shell:false` (argv already reports the real exit code), for structured `ssh`
 (remote semantics are not observable locally), and for watch checks (a check is
-one polled command whose own exit code is the outcome). Not reported: a failure
-inside a subshell or process substitution whose own status is discarded. A
-command that clears the shell's traps or `exec`s away the shell bypasses the
-gate. `expected_exit_codes` applies to the reported exit.
+one polled command whose own exit code is the outcome). Limits inherited from
+bash's own errexit rules: assignment builtins such as `local` and `export` mask
+a command substitution's status, disabling errexit and clearing the ERR trap
+bypasses the gate, and `exec` replaces the shell before the gate decides.
+`expected_exit_codes` applies to the reported exit.
 
 ## Observable Progress
 

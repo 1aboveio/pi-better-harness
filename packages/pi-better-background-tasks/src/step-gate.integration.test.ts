@@ -1,9 +1,11 @@
 /**
  * #619: a chained shell command reports only its last command's exit status, so a
  * failing validation step followed by summary commands reads as success at the
- * status surface. `require_successful_steps` opts into a step gate: bash reports a
- * failing step and the task fails with it, while ordinary shell semantics stay
- * (no `set -e`, every step still runs, handled failures are not gate failures).
+ * status surface. `require_successful_steps` opts into a step gate: the command
+ * runs under bash errexit, so its first unhandled failing step ends the task with
+ * that step's exit code — in the same list, inside a function, a subshell, or a
+ * command substitution. Handled failures stay handled and ungated tasks are
+ * unchanged.
  */
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,14 +66,37 @@ describe("opt-in step gate (#619)", () => {
     expect(terminal.requireSuccessfulSteps).toBe(true);
     expect(terminal.stepGateFailure).toEqual({
       stepExitCode: 8,
-      shellExitCode: 0,
+      shellExitCode: 8,
       command: "bash -c 'exit 8'",
     });
-    // Ordinary shell semantics: the steps after the failure still ran.
+    // Fail-fast: bash errexit stops at the failing step, so the masking commands never run.
     const log = readFileSync(terminal.logPath, "utf8");
-    expect(log).toContain("summary ok");
-    expect(log).toContain("done");
-    expect(log).toContain(`--- step gate [${terminal.id}]: first failing step exit=8; shell exit=0: bash -c 'exit 8' ---`);
+    expect(log).not.toContain("summary ok");
+    expect(log).not.toContain("done");
+    expect(log).toContain(`--- step gate [${terminal.id}]: first failing step exit=8; shell exit=8: bash -c 'exit 8' ---`);
+  });
+
+  it("fails a validation step that fails inside an ordinary shell function (#619 R1)", async () => {
+    // The retained review probe: the failing step is not the function's last command, so
+    // the function returns 0 and the caller's status would be green without the gate.
+    const terminal = await run("validate() { bash -c 'exit 8'; echo summary; }; validate; echo done", { require_successful_steps: true });
+
+    expect(terminal.status).toBe("failed");
+    expect(terminal.lastExitCode).toBe(8);
+    expect(terminal.stepGateFailure).toMatchObject({ stepExitCode: 8, command: "bash -c 'exit 8'" });
+    const log = readFileSync(terminal.logPath, "utf8");
+    expect(log).not.toContain("summary");
+    expect(log).not.toContain("done");
+    expect(statusText(terminal)).toContain("step gate: bash -c 'exit 8' exited 8");
+  });
+
+  it("fails a validation step that fails inside a subshell", async () => {
+    const terminal = await run("( bash -c 'exit 8'; echo inner ); echo done", { require_successful_steps: true });
+
+    // The subshell's summary masks its own status; errexit makes bash exit with the step.
+    expect(terminal.status).toBe("failed");
+    expect(terminal.lastExitCode).toBe(8);
+    expect(readFileSync(terminal.logPath, "utf8")).not.toContain("done");
   });
 
   it("surfaces the failing step at the status and callback surfaces", async () => {
@@ -80,7 +105,7 @@ describe("opt-in step gate (#619)", () => {
     const status = statusText(terminal);
     expect(status).toContain(`Background task ${terminal.id} is failed`);
     expect(status).toContain("exit=8 (step gate)");
-    expect(status).toContain("step gate: bash -c 'exit 8' exited 8; the shell's own exit was 0");
+    expect(status).toContain("step gate: bash -c 'exit 8' exited 8; the shell stopped at that step");
     expect(status).not.toContain("is succeeded");
 
     const callback = formatCallbackFacts(terminal);
@@ -89,8 +114,10 @@ describe("opt-in step gate (#619)", () => {
     expect(callback.failureRows?.join("\n")).toContain("step gate");
   });
 
-  it("keeps the shell's own exit when it already failed and still names the first failing step", async () => {
-    const terminal = await run("bash -c 'exit 8'\nbash -c 'exit 3'", { require_successful_steps: true });
+  it("keeps the command's own exit when it disabled errexit, and still names the failing step", async () => {
+    // `set +e` is the command's own decision, so the process keeps its real exit (3)
+    // rather than being rewritten; the gate still reports the earlier failing step.
+    const terminal = await run("set +e\nbash -c 'exit 8'\nexit 3", { require_successful_steps: true });
 
     expect(terminal.status).toBe("failed");
     expect(terminal.lastExitCode).toBe(3);
@@ -100,15 +127,16 @@ describe("opt-in step gate (#619)", () => {
   });
 
   it("does not turn an explicit exit 0 into a green verdict after a failed step", async () => {
-    const terminal = await run("bash -c 'exit 8'\nexit 0", { require_successful_steps: true });
+    const terminal = await run("set +e\nbash -c 'exit 8'\nexit 0", { require_successful_steps: true });
 
+    // errexit is off, so the command's own exit is 0; the gate's EXIT trap still fails it.
     expect(terminal.status).toBe("failed");
     expect(terminal.lastExitCode).toBe(8);
     expect(terminal.stepGateFailure).toMatchObject({ stepExitCode: 8, shellExitCode: 0 });
   });
 
   it("leaves an all-passing gated command succeeded", async () => {
-    const terminal = await run("echo one\ntrue\necho two", { require_successful_steps: true });
+    const terminal = await run("echo one\ntrue\nfalse || true\necho two", { require_successful_steps: true });
 
     expect(terminal.status).toBe("succeeded");
     expect(terminal.lastExitCode).toBe(0);
@@ -130,7 +158,9 @@ describe("opt-in step gate (#619)", () => {
     const terminal = await run("cat < <(grep -q needle ./missing-file)\necho done", { require_successful_steps: true });
 
     expect(terminal.status).toBe("succeeded");
+    expect(terminal.lastExitCode).toBe(0);
     expect(terminal.stepGateFailure).toBeUndefined();
+    expect(readFileSync(terminal.logPath, "utf8")).toContain("done");
   });
 
   it("keeps default shell semantics when the gate is not requested", async () => {
@@ -149,7 +179,7 @@ describe("opt-in step gate (#619)", () => {
   it("announces the gate at launch so the changed semantics are visible", async () => {
     const meta = spawnTask(pi, { command: "true", callback: false, cwd: origin.cwd, require_successful_steps: true }, origin.cwd, origin);
     launched.push(meta.id);
-    expect(formatLaunch(meta)).toContain("step gate: on; a failing step is reported even when a later command exits 0");
+    expect(formatLaunch(meta)).toContain("step gate: on; the command runs under bash errexit, so its first unhandled failing step ends the task");
     await waitTerminal(meta.id);
   });
 

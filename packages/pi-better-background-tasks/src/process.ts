@@ -90,25 +90,33 @@ export const STEP_GATE_COMMAND_CHARS = 160;
 /**
  * Bash script that runs an opt-in step gate around the operator's command (#619).
  *
- * Ordinary shell semantics are preserved: there is no `set -e`, so every step
- * still runs and a failure the command handles itself (`|| true`, `if`, `while`,
- * `!`) is not a gate failure. Bash reports each failing command through its ERR
- * trap; the first one decides the verdict. When the shell's own exit would be 0,
- * the gate exits with that failing step's code instead, so a trailing summary
- * command can no longer turn a red gate green. The verdict is also written to
- * stderr, where the harness reads it back into task metadata.
+ * The gate is a bash `errexit` contract, not shell parsing: `set -e` ends the
+ * command at the first unhandled failing step with that step's exit code, so a
+ * later command — in the same list, a function, a subshell, or a command
+ * substitution — can no longer turn a red gate green. A failure the command
+ * handles itself (`|| true`, `if`/`while`/`until` conditions, `!`, `&&`/`||`
+ * lists) is not a gate failure, and a discarded process-substitution status is
+ * not one either. `set -E` lets the ERR trap name a failure inside a shell
+ * function (functions run in the main shell); the trap records only main-shell
+ * failures (`BASH_SUBSHELL` 0), so a status bash itself discards is never claimed
+ * as the verdict — an unhandled command substitution still fails its assignment
+ * in the main shell. The EXIT trap writes the verdict to stderr, where the
+ * harness reads it back, and forces a failing step's code when the command
+ * disabled errexit and would have exited 0.
  *
  * Exposed for tests and reuse.
  */
 export function stepGateScript(id: string): string {
   return [
-    "# Step gate (#619) from pi-better-background-tasks: no `set -e`, every step still runs.",
+    "# Step gate (#619) from pi-better-background-tasks: bash errexit ends the command at its first unhandled failing step.",
+    "set -E",
+    "set -e",
     `__pi_step_gate_id=${bashSingleQuote(id)}`,
     "__pi_step_gate_first=0",
     "__pi_step_gate_command=",
     "__pi_step_gate_record() {",
     "  __pi_step_gate_status=$?",
-    "  if [ \"${__pi_step_gate_first:-0}\" -eq 0 ] && [ \"$__pi_step_gate_status\" -ne 0 ]; then",
+    "  if [ \"${BASH_SUBSHELL:-0}\" -eq 0 ] && [ \"${__pi_step_gate_first:-0}\" -eq 0 ] && [ \"$__pi_step_gate_status\" -ne 0 ]; then",
     "    __pi_step_gate_first=$__pi_step_gate_status",
     "    __pi_step_gate_command=${BASH_COMMAND:-}",
     "  fi",

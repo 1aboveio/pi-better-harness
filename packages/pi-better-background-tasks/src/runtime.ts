@@ -173,9 +173,9 @@ export interface SpawnTaskParams extends CommandSpec, TaskIntentParams {
   timeout_seconds?: number;
   max_log_bytes?: number;
   /**
-   * Opt-in step gate (#619). Bash reports a failing step inside a chained shell
-   * command, and the task fails even when a later command exits 0. Ordinary shell
-   * semantics stay: there is no `set -e`, so every step still runs.
+   * Opt-in step gate (#619): run the command under bash errexit, so the first
+   * unhandled failing step ends the task with that step's exit code and a later
+   * command cannot mask it.
    */
   require_successful_steps?: boolean;
   ssh?: SshConnectionParams;
@@ -388,8 +388,9 @@ export function spawnTask(
       enforceLogRetention(latest);
       if (isTerminalStatus(latest.status)) return;
       // The gate's own marker names the failing step (#619). It never decides the
-      // verdict: bash already exits with that step's code when the shell's own exit
-      // would have been 0, so a missing marker loses the reason, not the failure.
+      // verdict: bash errexit already exits with that step's code (and the gate's EXIT
+      // trap forces it when a command disabled errexit), so a missing marker loses the
+      // reason, not the failure.
       const stepGateFailure = latest.requireSuccessfulSteps ? readStepGateFailure(latest) : undefined;
       const detail = `Process exited with code ${exitCode ?? "unknown"}${signal ? ` (${signal})` : ""}`;
       if (exitCode !== 0) {

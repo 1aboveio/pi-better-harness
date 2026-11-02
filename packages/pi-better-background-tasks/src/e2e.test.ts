@@ -190,7 +190,7 @@ describe("extension e2e", () => {
     for (const name of ["bg_task_spawn", "bg_task"]) {
       const gate = harness.tools.get(name)?.parameters?.properties?.require_successful_steps;
       expect(gate, name).toBeTruthy();
-      expect(gate?.description, name).toContain("Bash reports a failing step");
+      expect(gate?.description, name).toContain("runs under bash errexit");
       expect(gate?.description, name).toContain("Not supported with shell:false or ssh");
       expect(gate?.description, name).toContain("Default false");
     }
@@ -207,12 +207,12 @@ describe("extension e2e", () => {
       const id = extractTaskId(launch);
       const terminal = await waitForMeta(id, (meta) => meta?.status === "failed" && typeof meta.endedAt === "number", 15_000);
       expect(terminal?.lastExitCode, tool).toBe(8);
-      expect(terminal?.stepGateFailure, tool).toMatchObject({ stepExitCode: 8, shellExitCode: 0 });
+      expect(terminal?.stepGateFailure, tool).toMatchObject({ stepExitCode: 8, shellExitCode: 8 });
 
       // The operator's verdict surface: the red gate reads red, and it says why.
       const status = await harness.execute("bg_task_status", { id });
       expect(status, tool).toContain("exit=8 (step gate)");
-      expect(status, tool).toContain("step gate: bash -c 'exit 8' exited 8; the shell's own exit was 0");
+      expect(status, tool).toContain("step gate: bash -c 'exit 8' exited 8; the shell stopped at that step");
     }
   }, 25_000);
 
