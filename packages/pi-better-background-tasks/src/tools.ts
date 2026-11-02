@@ -91,7 +91,17 @@ const CommandFields = {
   ...IntentFields,
 };
 
-const SpawnParams = Type.Object(CommandFields);
+/**
+ * Opt-in step gate (#619). Chained shell commands report only the last command's
+ * status, so a failing test run followed by summary commands reads as success at
+ * the status surface. The gate runs the command under bash errexit so its first
+ * unhandled failing step decides the task's exit code.
+ */
+const StepGateField = Type.Optional(Type.Boolean({
+  description: "Spawn only: opt in to a step gate for a shell command. The command runs under bash errexit, so its first unhandled failing step ends the task with that step's exit code and a later command cannot mask it; status reports that exit with `(step gate)` and names the failing step. Handled failures (`|| true`, `if`/`while`/`until` conditions, `!`) are not gate failures. Not supported with shell:false or ssh. Default false (ordinary shell semantics).",
+}));
+
+const SpawnParams = Type.Object({ ...CommandFields, require_successful_steps: StepGateField });
 
 const BlindChecksField = Type.Optional(Type.Integer({ minimum: 0, description: "Flag the watch as possibly blind after this many checks in a row exit 0, write stderr, and match neither success_when nor failure_when: one incident that needs action, with the latest stderr line. The watch keeps running; a check with no stderr or a matched condition recovers it. Default 3; 0 turns it off." }));
 
@@ -164,6 +174,7 @@ const ActionParams = Type.Object({
   tail_lines: Type.Optional(Type.Number({ description: "Deprecated alias for lines." })),
   verbose: Type.Optional(Type.Boolean()),
   ...CommandFields,
+  require_successful_steps: StepGateField,
   interval_seconds: Type.Optional(Type.Number()),
   success_when: Type.Optional(ConditionSchema),
   failure_when: Type.Optional(ConditionSchema),
@@ -239,7 +250,7 @@ export function registerTools(pi: ExtensionAPI): void {
   register({
     name: "bg_task_spawn",
     label: "BG Spawn",
-    description: "Start a long-running background process and return immediately with its task id. For remote work, prefer structured ssh: pass ssh:{host,user} and put the remote command in command; spawn defaults to a remote tmux session with durable local logs and real remote stop. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. If tmux is missing, the preset attempts to install tmux non-interactively and fails closed with operator guidance when setup cannot proceed. Explicit remote.session=direct skips tmux, but direct mode has weaker stop semantics and may leave the remote process running. Never wait or poll in the foreground.",
+    description: "Start a long-running background process and return immediately with its task id. For remote work, prefer structured ssh: pass ssh:{host,user} and put the remote command in command; spawn defaults to a remote tmux session with durable local logs and real remote stop. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. If tmux is missing, the preset attempts to install tmux non-interactively and fails closed with operator guidance when setup cannot proceed. Explicit remote.session=direct skips tmux, but direct mode has weaker stop semantics and may leave the remote process running. Pass require_successful_steps:true for a chained shell command whose earlier failing steps must not be masked by a later command's exit 0: it runs under bash errexit and ends at the first unhandled failing step. Never wait or poll in the foreground.",
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -316,7 +327,7 @@ export function registerTools(pi: ExtensionAPI): void {
   register({
     name: "bg_task",
     label: "BG Task",
-    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn returns immediately; do not poll in foreground. For action:watch: " + WATCH_CHECK_GUIDANCE + " For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override. Stop and clear change only current-session tasks: clear dismisses every owned terminal task, or one task with id (all:true allows another session's task by id).",
+    description: "Action wrapper for background tasks: spawn, watch, list, status, log, stop, or clear. For remote work, prefer structured ssh: pass ssh:{host,user} and provide the remote command in command. For action:spawn, require_successful_steps:true runs a chained shell command under bash errexit so it ends at its first unhandled failing step instead of only reporting its last command's exit. For short synchronous remote commands that should return output now, use remote_bash from pi-better-ssh. SSH spawn defaults to durable tmux; SSH watches use direct one-shot polls without tmux installation; remote.session=direct is a weaker-stop spawn escape hatch. Spawn returns immediately; do not poll in foreground. For action:watch: " + WATCH_CHECK_GUIDANCE + " For action:status, default compact output and use verbose:true only for full metadata. For action:log, default compact tail and use lines:0 to page retained raw bytes. Standalone tools and these wrappers share the same output assembler. List/status/log default to the current session; pass all:true to override. Stop and clear change only current-session tasks: clear dismisses every owned terminal task, or one task with id (all:true allows another session's task by id).",
     promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
     parameters: ActionParams,
     renderResult(result: unknown, options: unknown, theme: unknown) {
