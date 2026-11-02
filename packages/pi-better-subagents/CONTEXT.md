@@ -60,7 +60,9 @@ workspace) describes how that conversation is reconstructed. New conversations
 and their completed launch recipes are saved durably in the Pi agent directory,
 independent of temporary event logs and the foreground session that launched them.
 A later foreground session may continue the same conversation; the new attempt's
-callback belongs to that caller.
+callback belongs to that caller. A stopped (`killed`) attempt is still a saved
+conversation: the next attempt keeps the same history, records `resumedFrom`,
+and leaves the stopped attempt's own record unchanged.
 
 ### Saved Conversation
 
