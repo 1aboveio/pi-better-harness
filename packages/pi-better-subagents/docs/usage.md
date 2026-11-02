@@ -254,10 +254,15 @@ may be fractional. A job's own number (including `0`) wins over `shared`.
   sandbox command time limit can bound individual commands. With the run ceiling off, a steer stuck behind a
   hung tool call is never delivered, the deadline stop stays held, and the run
   is never stopped by that deadline. Opt into a ceiling to bound the whole run.
-- The parent reads at most the last 32 MiB of a child log after `/reload`. If
-  the log is larger and the running tool call started before that window, the
-  parent cannot see the call, so the hold is lost and grace counts from when
-  the steer was sent. The child can be stopped mid-call.
+- The parent reads at most the last 32 MiB of a child log after `/reload`. It
+  also records the call it last saw open in the run's metadata on each
+  supervision tick, so a reload normally keeps the hold and the not-stuck
+  accounting even when the call's start is outside that window. The record is
+  written by the tick, so a call that started less than one tick (15 s) before
+  the reload is not covered; and a record whose call ended while the window was
+  lost keeps the hold, and keeps the run from being reported stuck, until the
+  next observed tool call starts. Opt into a ceiling when the run needs a hard
+  wall-clock bound.
 - The child confirms delivery by matching the steer's exact text in its
   conversation. If another extension rewrites user input (an input-transform
   hook), the text no longer matches, no receipt is written, and grace silently
@@ -276,7 +281,9 @@ harness remembers up to 4096 distinct calls per run as fixed-size hashes of the
 name and normalized arguments; past that the oldest is forgotten, so a call from
 long ago counts again. Time the child spends waiting on a running tool call does not count toward the
 stuck window, so a child in the middle of a 20-minute test run is waiting, not
-stuck. A hanging command can be bounded by the sandbox command time limit; the run
+stuck — including after `/reload`: the call the parent saw open is stored in the
+run's metadata, so a bounded log read that no longer contains its start does not
+turn it into "no progress". A hanging command can be bounded by the sandbox command time limit; the run
 ceiling separately bounds the whole run.
 The other stuck signal is the existing escalation: the same operation failing
 three times wakes the parent once as an `Action required` incident

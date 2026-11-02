@@ -148,6 +148,35 @@ describe("progress", () => {
         assert.equal(state.lastProgressAt, 50);
         assert.equal(stuckAge(state, 41_000), 41_000 - 50 - 40_000, "only time outside the tool call counts");
     });
+
+    it("keeps a durable record of the open call, so a bounded reload read does not turn waiting into no progress (#620)", () => {
+        // The parent reloaded and can only rebuild from a bounded log window that no longer
+        // holds the call's start; the recorded call is its still-alive evidence.
+        const seeded = emptyProgress(0, { id: "build", since: 1_000 });
+        assert.deepEqual([...seeded.open.keys()], ["build"]);
+        assert.equal(stuckAge(seeded, 60 * MIN), undefined, "a child waiting on the recorded call is not stuck");
+
+        // Its own result ends the call; a silent build is a pause, not progress.
+        foldProgress(seeded, result("build", "bash", 70_000));
+        assert.equal(seeded.lastProgressAt, undefined, "the call's result is not itself progress");
+        assert.equal(seeded.open.size, 0);
+        assert.equal(stuckAge(seeded, 70_999), 70_999 - (70_000 - 1_000), "only time outside the call counts");
+
+        // A later, different call supersedes a record whose own end was never seen: a
+        // sequential child cannot still be in the earlier call.
+        const superseded = emptyProgress(0, { id: "build", since: 1_000 });
+        superseded.lastEventAt = 2_000;
+        foldProgress(superseded, start("next", "read", { path: "a" }));
+        assert.deepEqual([...superseded.open.keys()], ["next"]);
+        assert.equal(superseded.open.get("next").seeded, undefined, "the real start replaces the record");
+        assert.equal(superseded.pausedMs, 2_000 - 1_000, "the recorded wait stays a pause");
+
+        // A record without a usable id or start is ignored, never invented.
+        assert.equal(emptyProgress(0, {}).open.size, 0);
+        assert.equal(emptyProgress(0, { id: "", since: 5 }).open.size, 0);
+        const clamped = emptyProgress(1_000, { id: "build", since: 10 });
+        assert.equal(clamped.inFlightSince, 1_000, "the pause cannot start before the run");
+    });
 });
 
 describe("timing decisions", () => {
@@ -188,6 +217,20 @@ describe("timing decisions", () => {
         assert.deepEqual(decideTiming({ ...t, stuckWakeSentAt: 301, stuckAnchorAt: 0 }, busy, 1100).stuckWake, { anchorAt: 800, ageMs: 300 }, "re-armed by progress");
         assert.equal(decideTiming({ deadlineAt: 100, graceMs: 10_000, stuckMs: 300, steerRequestedAt: 100, deadlineWakeSentAt: 100 }, quiet, 5000).stuckWake, undefined,
             "past the deadline, the wrap-up flow governs");
+    });
+
+    it("a recorded open call holds both the stuck wake and the deadline stop across a bounded reload (#620)", () => {
+        const seeded = emptyProgress(0, { id: "build", since: 1_000 });
+        assert.deepEqual(decideTiming({ graceMs: 0, stuckMs: 300 }, seeded, 10 * MIN), {}, "a silent build past the window is still waiting");
+        const deadline = { deadlineAt: 500, graceMs: 1_000, steerRequestedAt: 500, deadlineWakeSentAt: 500, stuckMs: 300 };
+        assert.deepEqual(decideTiming(deadline, seeded, 10 * MIN), {}, "the hold survives a reload that lost the call's start");
+        // Once the call's own result arrives, the ordinary accounting resumes: the wait was a
+        // pause, and the undelivered steer's grace runs from the request (the documented rule).
+        foldProgress(seeded, { type: "message_end", message: { role: "toolResult", toolCallId: "build", toolName: "bash", isError: false, timestamp: 2_000 } });
+        assert.deepEqual(decideTiming({ graceMs: 0, stuckMs: 300 }, seeded, 1_299), {}, "the call's time is a pause, so no wake yet");
+        assert.deepEqual(decideTiming({ graceMs: 0, stuckMs: 300 }, seeded, 1_300), { stuckWake: { anchorAt: 0, ageMs: 300 } },
+            "a full window of genuine silence still wakes the parent");
+        assert.deepEqual(decideTiming(deadline, seeded, 10 * MIN), { stop: "deadline" });
     });
 
     it("renders the reason for every surface", () => {
