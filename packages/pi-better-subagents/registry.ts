@@ -1171,20 +1171,100 @@ export interface AbandonedLaunchRecord {
 }
 
 /**
+ * Durable claim a launch writes into its run directory before it prepares
+ * anything (#623). It states WHO owns the attempt while no metadata exists, so a
+ * concurrent purge can tell a live launch from the debris of a dead one.
+ *
+ * It is a plain file rather than the metadata lock because the claim must cover
+ * the whole preparation (workspace, sandbox control dir, session dir, spawn and
+ * metadata publication), not only the metadata write. It is removed at the same
+ * moment `meta.json` becomes the record of the run, and it is never a second
+ * registry: nothing reads it as run evidence.
+ */
+export interface LaunchAttemptClaim {
+    version: 1;
+    id: string;
+    pid: number;
+    /** Start-identity token of the claiming pi; only equality is meaningful. */
+    start?: string;
+    at: number;
+}
+
+function launchAttemptClaimPath(id: string): string {
+    return join(runDir(id), ".launch-attempt.json");
+}
+
+/** Claim this run directory for a launch in progress. The directory must exist. */
+export function recordLaunchAttempt(id: string): void {
+    const claim: LaunchAttemptClaim = { version: 1, id, pid: process.pid, at: Date.now() };
+    const start = processStartToken(process.pid);
+    if (start) claim.start = start;
+    writeFileSync(launchAttemptClaimPath(id), JSON.stringify(claim), { mode: 0o600 });
+}
+
+/** Drop the claim once `meta.json` is the run's record. Best effort. */
+export function clearLaunchAttempt(id: string): void {
+    try {
+        unlinkSync(launchAttemptClaimPath(id));
+    } catch { /* no claim, or the attempt's directory is already gone */ }
+}
+
+/**
+ * Whether a launch claim is still owned by a live process. Conservative for one
+ * direction only: an unreadable, malformed, or token-less claim counts as live,
+ * so the attempt's artifacts are preserved. A dead pid, or a pid whose start
+ * token no longer matches (recycled), is a dead attempt.
+ */
+function launchAttemptClaimIsLive(id: string): boolean {
+    let raw: string;
+    try {
+        raw = readFileSync(launchAttemptClaimPath(id), "utf-8");
+    } catch (error) {
+        return errnoOf(error) !== "ENOENT";
+    }
+    let parsed: Partial<LaunchAttemptClaim> | undefined;
+    try {
+        parsed = JSON.parse(raw) as Partial<LaunchAttemptClaim>;
+    } catch {
+        return true;
+    }
+    if (!parsed || typeof parsed !== "object") return true;
+    const pid = parsed.pid;
+    if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
+    if (!processExists(pid)) return false;
+    const start = parsed.start;
+    if (typeof start !== "string" || start.length === 0) return true;
+    const current = cachedStartToken(pid);
+    // An unavailable token does not prove the pid is dead, so the claim stays live.
+    return current === undefined || current === start;
+}
+
+/**
+ * True when a launch is preparing this run id right now, so its directory must
+ * not be treated as debris. Unreadable state counts as in progress.
+ */
+export function launchAttemptInProgress(id: string): boolean {
+    if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) return false;
+    return launchAttemptClaimIsLive(id);
+}
+
+/**
  * Read one run directory as an abandoned launch attempt, or `undefined`.
  *
- * A launch creates the directory, writes `prompt.md`, and prepares the sandbox
- * `control/` dir before the child starts and `meta.json` is committed. When that
- * preparation throws, or pi dies in that window, only those artifacts remain:
- * no metadata (nothing was committed) and no `output.log` (the log is created at
- * spawn and removed when the spawn itself fails). Such a directory was never a
- * run: it has no owner, no status, no log and no result, and it can never gain
- * any, so it must not be reported as unreadable run evidence forever.
+ * A launch creates the directory, claims it, writes `prompt.md`, and prepares
+ * the sandbox `control/` dir before the child starts and `meta.json` is
+ * committed. When that preparation throws, or pi dies in that window, only
+ * those artifacts remain: no metadata (nothing was committed) and no
+ * `output.log` (the log is created at spawn and removed when the spawn itself
+ * fails). Such a directory was never a run: it has no owner, no status, no log
+ * and no result, and it can never gain any, so it must not be reported as
+ * unreadable run evidence forever.
  *
- * The rule is deliberately narrow. A directory WITH a log is not debris: a child
- * may have started and its output is real evidence, so it stays an unreadable
- * record under normal retention. A directory without the launch artifacts is
- * left to the age sweep rather than guessed at.
+ * The rule is deliberately narrow in the other direction too. A live launch
+ * claim means the attempt is still being prepared and is never debris; a
+ * directory WITH a log is not debris either, because a child may have started
+ * and its output is real evidence; and a directory without the launch artifacts
+ * is left to the age sweep rather than guessed at.
  */
 export function abandonedLaunchRecord(id: string): AbandonedLaunchRecord | undefined {
     if (!/^sa_[a-z0-9]+_[a-z0-9]+$/i.test(id)) return undefined;
@@ -1194,6 +1274,10 @@ export function abandonedLaunchRecord(id: string): AbandonedLaunchRecord | undef
     } catch {
         return undefined;
     }
+    // Metadata absence is the claim of debris, so it is re-established as late as
+    // possible: the launch shape first, then every piece of run evidence.
+    if (!existsSync(promptPathFor(id)) && !existsSync(join(runDir(id), "control"))) return undefined;
+    if (launchAttemptClaimIsLive(id)) return undefined;
     try {
         statSync(metaPathFor(id));
         return undefined;
@@ -1206,26 +1290,58 @@ export function abandonedLaunchRecord(id: string): AbandonedLaunchRecord | undef
     } catch (error) {
         if (errnoOf(error) !== "ENOENT") return undefined;
     }
-    if (!existsSync(promptPathFor(id)) && !existsSync(join(runDir(id), "control"))) return undefined;
     return { id, mtimeMs };
 }
+
+export type AbandonedLaunchPurge =
+    /** The attempt's artifacts were removed. */
+    | "purged"
+    /** Not launch debris (a run record, a live launch, or something else entirely). */
+    | "not-debris"
+    /** It looked like debris, but a writer or an unavailable lock made removal unsafe. */
+    | "retained";
 
 /**
  * Reclaim one abandoned launch attempt: its run directory, the per-run session
  * directory a confined launch prepared, and the clone workspace it owned. Only
  * paths named by the attempt's own id are removed (shared sessions and a
  * caller-chosen `sandbox_dir` are never touched), exactly like a failed launch.
- * Returns whether the run directory is gone.
+ *
+ * Classification runs again inside the same per-run lock `writeMeta` publishes
+ * under, and the removal happens there, so a launch that commits metadata while
+ * the purger waits is preserved instead of deleted. A held or unavailable lock
+ * is a live writer, so it is preserved too. This closes the race the earlier
+ * shape-only rule lost (#623 review R1): no deletion of a live attempt's
+ * metadata or log, and no orphaned child left behind by a purge.
  */
-export function purgeAbandonedLaunch(id: string): boolean {
-    if (!abandonedLaunchRecord(id)) return false;
-    discardFailedLaunch(id, { sessionDir: join(sessionsDir(), id), workspaceDir: taskWorkspaceDir(id) });
+export function purgeAbandonedLaunch(id: string): AbandonedLaunchPurge {
+    if (!abandonedLaunchRecord(id)) return "not-debris";
+    let outcome: AbandonedLaunchPurge = "retained";
     try {
-        statSync(runDir(id));
-        return false;
-    } catch (error) {
-        return errnoOf(error) === "ENOENT";
+        withRunMetaLock(id, (owns) => {
+            if (!owns()) throw new MetadataLockLost();
+            // Re-establish the negative evidence under the publication exclusion.
+            if (!abandonedLaunchRecord(id)) {
+                outcome = "not-debris";
+                return;
+            }
+            discardFailedLaunch(id, { sessionDir: join(sessionsDir(), id), workspaceDir: taskWorkspaceDir(id) });
+            outcome = "purged";
+        });
+    } catch {
+        // A live writer (or an unreadable run directory) is never safe to delete.
+        // A directory that disappeared meanwhile is no longer debris.
+        return abandonedLaunchRecord(id) ? "retained" : "not-debris";
     }
+    if (outcome === "purged") {
+        try {
+            statSync(runDir(id));
+            outcome = "retained";
+        } catch (error) {
+            if (errnoOf(error) !== "ENOENT") outcome = "retained";
+        }
+    }
+    return outcome;
 }
 
 /**

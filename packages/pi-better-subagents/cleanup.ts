@@ -737,6 +737,13 @@ function cleanSessionTree(
  * launch preparation is synchronous and short, and a directory with a log is
  * never debris (the child may have started and its output is real evidence).
  *
+ * Age alone is not an ownership proof: `purgeAbandonedLaunch` re-classifies and
+ * removes under the run's metadata lock, and a launch claim owned by a live
+ * process makes the record not-debris at any age, so a preparer that is paused
+ * past the grace is preserved and the sweep never deletes a live attempt's
+ * artifacts (#623 R1). A record a writer retained is left for the next sweep
+ * with an error so the retention stays visible.
+ *
  * Runs before the daily marker in {@link runDailyCleanupOnce}, so every launch
  * reclaims earlier debris instead of waiting for the next day's sweep.
  * Best-effort; never throws into its caller.
@@ -756,8 +763,9 @@ export function sweepAbandonedLaunches(options: { now?: number; graceMs?: number
     for (const id of ids) {
         const attempt = abandonedLaunchRecord(id);
         if (!attempt || attempt.mtimeMs >= cutoff) continue;
-        if (purgeAbandonedLaunch(id)) removed.push(id);
-        else errors.push(`${runDir(id)}: abandoned launch record could not be removed`);
+        const purge = purgeAbandonedLaunch(id);
+        if (purge === "purged") removed.push(id);
+        else if (purge === "retained") errors.push(`${runDir(id)}: abandoned launch record could not be removed (in use, or its lock is unavailable)`);
     }
     return { removed, errors };
 }

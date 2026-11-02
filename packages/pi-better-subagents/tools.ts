@@ -512,7 +512,8 @@ export function subagentStopTool(
             "process-group members when present; otherwise finalizes from log " +
             "evidence (completed/failed) or records lost. " +
             "An abandoned launch record (a launch that never wrote metadata and never " +
-            "started a child) is removed instead.",
+            "started a child) is removed instead; a launch that is still preparing or " +
+            "published concurrently is preserved.",
         promptSnippet: "Stop a running or orphaned background subagent",
         parameters: Type.Object({
             id: Type.String({ description: "Run id from subagent_spawn." }),
@@ -525,6 +526,12 @@ export function subagentStopTool(
             if (outcome.action === "purged") {
                 deps.onStopped?.();
                 return text(`Removed abandoned launch record ${p.id} (no run metadata was written, so no child ever ran).`);
+            }
+            if (outcome.action === "preserved") {
+                deps.onStopped?.();
+                return text(outcome.status === "launching"
+                    ? `Preserved ${p.id}: a launch is still preparing it (no metadata yet), so nothing was removed. Retry after it publishes, or after it fails.`
+                    : `Preserved ${p.id}: a concurrent launch published this run (${outcome.status}), so nothing was removed. Call subagent_stop again to stop the run.`);
             }
             if (outcome.action === "not-running") {
                 return text(`Run ${p.id} is not running (${outcome.status}).`);

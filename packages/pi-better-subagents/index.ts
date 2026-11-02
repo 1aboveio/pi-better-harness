@@ -74,6 +74,8 @@ import {
     runDir,
     recordTaskRuntimeProvenance,
     discardFailedLaunch,
+    recordLaunchAttempt,
+    clearLaunchAttempt,
     logPathFor,
     promptPathFor,
     nextRunId,
@@ -1935,6 +1937,11 @@ export default function (pi: ExtensionAPI) {
         try {
             if (!resume) mkdirSync(childSessionDir, { recursive: true });
             mkdirSync(runDir(id), { recursive: true });
+            // Claim the directory before anything else is prepared. Until
+            // `meta.json` exists this claim is the only ownership evidence, so a
+            // concurrent purge can tell this live attempt from dead launch debris
+            // (#623 R1). The outer catch drops the whole directory on failure.
+            recordLaunchAttempt(id);
 
             const workspace = resume
                 ? { cwd: resume.recipe.cwd, requestedSandboxDir: resume.recipe.sandboxDir }
@@ -2193,6 +2200,9 @@ export default function (pi: ExtensionAPI) {
             });
             writeMeta(meta);
             committed = true;
+            // `meta.json` is now the record of this run; the claim has served its
+            // purpose. Best effort: a leftover claim is inert while metadata exists.
+            clearLaunchAttempt(id);
 
             uiCtx = ctx;
             ensureTicker();

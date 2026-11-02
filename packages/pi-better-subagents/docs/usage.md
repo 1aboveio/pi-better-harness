@@ -780,8 +780,8 @@ The live widget, concurrency cap, and supervision ticker track this Pi process's
 
 ## Abandoned launch records
 
-A launch creates its run directory, writes `prompt.md`, and prepares the sandbox
-`control/` dir before the child starts and `meta.json` is committed. When that
+A launch creates and claims its run directory, writes `prompt.md`, and prepares
+the sandbox `control/` dir before the child starts and `meta.json` is committed. When that
 preparation fails — or Pi dies inside that window — only those artifacts remain:
 no metadata (nothing was committed) and no `output.log` (the log is created at
 spawn and removed when the spawn itself fails). A launch failure now removes
@@ -801,10 +801,24 @@ Cleanup reclaims them after 1 hour; remove one now with subagent_stop <id>.
 Every launch's hygiene pass (`runDailyCleanupOnce`, alongside the daily and size
 sweeps) reclaims abandoned launch records older than one hour, or immediately
 with `subagent_stop <id>`. Only the attempt's own run directory, its per-run
-session directory, and a clone workspace it owned are removed. A directory that
-has a log is deliberately **not** treated as debris: a child may have started and
-its output is real evidence, so it stays an explicit unreadable-record gap until
-normal retention reclaims it.
+session directory, and a clone workspace it owned are removed.
+
+Cleanup never deletes a live attempt. A launch claims its run directory
+(`.launch-attempt.json`: pid + process start identity) before it prepares
+anything, and removes the claim when `meta.json` becomes the record. A record
+whose claim is owned by a live process is not debris at any age, and the purge
+re-classifies under the same per-run metadata lock a launch publishes under, so a
+launch that commits metadata while a purge waits is preserved. In that case
+`subagent_stop` reports `Preserved …` and removes nothing:
+
+```text
+Preserved sa_…: a concurrent launch published this run (running), so nothing
+was removed. Call subagent_stop again to stop the run.
+```
+
+A directory that has a log is deliberately **not** treated as debris either: a
+child may have started and its output is real evidence, so it stays an explicit
+unreadable-record gap until normal retention reclaims it.
 
 ## Supervision health (`orphaned` / `lost`)
 
