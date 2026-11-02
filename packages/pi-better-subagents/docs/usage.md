@@ -136,6 +136,13 @@ Each attempt gets a new run id, log, timing record, and capacity slot while the
 native session id and history stay the same. The launch recipe preserves the
 worker's role, tools, model, and workspace, including uncommitted changes.
 
+A run stopped with `subagent_stop` (status `killed`) can be continued the same
+way. Stopping ends that execution, not the saved conversation or its
+uncommitted workspace: the next attempt reopens the same history and records
+`resumedFrom`, while the stopped attempt's status, log, and result stay as they
+were. A run that ended `failed` or `lost` is still refused; this path recovers
+interrupted work, it does not retry a failed run.
+
 `session_name` is an exact display-name match within the current folder and its
 descendants. Several attempts of the same conversation count once. If several
 conversations share the name, spawn reports matching session ids and refuses to

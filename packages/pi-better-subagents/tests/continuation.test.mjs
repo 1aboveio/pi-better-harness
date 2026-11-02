@@ -97,7 +97,7 @@ const {
     retainedSessionIds,
 } = await import("../continuation.ts");
 const { runDailyCleanupOnce, enforceRegistrySizeCapOnce } = await import("../cleanup.ts");
-const { killProcessTree } = await import("../spawn.ts");
+const { killProcessTree, processExists } = await import("../spawn.ts");
 const { SANDBOX_POLICY_CHANNEL, SANDBOX_POLICY_REQUEST_CHANNEL } = await import("../permission-policy.ts");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -146,6 +146,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "INITIAL ANSWER" }] });
         }
         const answer = sessionPath ? "FOLLOWUP:" + prompt : "INITIAL ANSWER";
+        // Test seam for an interrupted attempt: save the turn, then wait to be
+        // stopped instead of writing a terminal agent_end event.
+        const holdAfterWrite = Number(process.env.PI_CONTINUATION_HOLD_AFTER_WRITE_MS || 0);
+        if (holdAfterWrite > 0) await sleep(holdAfterWrite);
         finish({
             sessionFile: manager.getSessionFile(),
             sessionIdAfter: manager.getSessionId(),
@@ -407,6 +411,130 @@ describe("completed-subagent continuation", () => {
         }
     });
 
+    it("continues a killed attempt in its saved conversation without rewriting the interruption", async () => {
+        const h = makeHarness();
+        let killedId;
+        let resumedId;
+        let holder;
+        try {
+            // Hold the child after its first turn is saved, so `subagent_stop`
+            // interrupts a run that already has conversation history — exactly
+            // the state the issue reported as unrecoverable.
+            process.env.PI_CONTINUATION_HOLD_AFTER_WRITE_MS = "60000";
+            try {
+                killedId = await spawnRun(h, {});
+            } finally {
+                delete process.env.PI_CONTINUATION_HOLD_AFTER_WRITE_MS;
+            }
+            const interrupted = await waitFor(() => {
+                const meta = readMeta(killedId);
+                if (!meta || meta.status !== "running" || !meta.recipe) return undefined;
+                const found = findSavedConversation({
+                    sessionDir: meta.recipe.sessionDir, sessionId: meta.sessionId, expectedCwd: meta.cwd,
+                });
+                return found.kind === "ok" && sessionMessages(found.conversation.path).length >= 2 ? meta : undefined;
+            });
+            assert.ok(interrupted, "the interrupted attempt saved its first turn before it was stopped");
+            const saved = findSavedConversation({
+                sessionDir: interrupted.recipe.sessionDir, sessionId: interrupted.sessionId, expectedCwd: interrupted.cwd,
+            });
+            assert.equal(saved.kind, "ok");
+            const sessionPath = saved.conversation.path;
+
+            const stopped = await h.tools.get("subagent_stop").execute(
+                "tc", { id: killedId }, undefined, undefined, h.ctx,
+            );
+            assert.match(stopped.content[0].text, /Stopped subagent/);
+            const killed = await waitFor(() => {
+                const current = readMeta(killedId);
+                return current?.status === "killed" ? current : undefined;
+            });
+            assert.ok(killed, "the stop recorded a killed attempt");
+            assert.equal(killed.lifecycleClassification, "killed");
+            // Wait for the stopped child to leave the OS before continuing; while
+            // it is alive it is still a writer candidate and must block admission.
+            assert.ok(await waitFor(() => !processExists(killed.pid), { timeoutMs: 5000 }),
+                "the stopped child exited");
+
+            // The killed attempt is now a saved conversation, while the other
+            // terminal outcomes keep their existing refusal.
+            const origin = { cwd: WORKSPACE, sessionId: "owner-session" };
+            assert.equal(planContinuation({
+                id: killedId, prior: killed, origin, others: listMetas(),
+            }).conversation.path, sessionPath);
+            for (const status of ["failed", "lost", "running"]) {
+                assert.throws(() => planContinuation({
+                    id: killedId, prior: { ...killed, status }, origin, others: listMetas(),
+                }), new RegExp(`its status is ${status}`), `${status} must keep its existing refusal`);
+            }
+
+            const killedSnapshot = JSON.stringify(readMeta(killedId));
+            const killedLog = readFileSync(logPathFor(killedId), "utf-8");
+            const killedResult = await resultText(h, killedId);
+
+            // Continuing a killed attempt never weakens the one-writer rule: a
+            // live lease holder still refuses admission before anything launches.
+            const foreignHolder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { detached: true, stdio: "ignore" });
+            holder = foreignHolder;
+            mkdirSync(conversationLeaseDir(), { recursive: true });
+            writeFileSync(join(conversationLeaseDir(), `${killed.sessionId}.lock`), JSON.stringify({
+                pid: holder.pid,
+                start: processStartToken(holder.pid),
+                token: "killed-holder",
+                sessionId: killed.sessionId,
+                attemptId: killedId,
+                at: Date.now(),
+            }));
+            await assert.rejects(
+                resumeRun(h, { id: killedId, prompt: "SECOND WRITER" }),
+                /already being written by another attempt/,
+            );
+            assert.equal(listMetas().filter((meta) => meta.sessionId === killed.sessionId).length, 1,
+                "the refused continuation launched nothing");
+            killProcessTree(holder.pid, "SIGKILL");
+            await once(foreignHolder, "exit");
+            holder = undefined;
+
+            const receipt = await resumeRun(h, { id: killedId, prompt: "RECOVER THE WORK" });
+            resumedId = idOf(receipt);
+            assert.match(receipt.content[0].text, new RegExp(`from ${killedId} \\(interrupted attempt\\)`),
+                "the launch receipt names the interrupted attempt");
+            assert.notEqual(resumedId, killedId, "continuation allocates a new attempt id");
+            const resumed = await waitTerminal(resumedId);
+            assert.equal(resumed.status, "completed");
+            assert.equal(resumed.sessionId, killed.sessionId, "the interrupted conversation is retained");
+            assert.equal(resumed.rootRunId, killedId);
+            assert.equal(resumed.resumedFrom, killedId, "the new attempt links back to the interrupted one");
+            assert.deepEqual(resumed.callbackOrigin, killed.callbackOrigin, "ownership follows the invoking foreground");
+            assert.equal(resumed.recipe.sessionDir, killed.recipe.sessionDir, "the saved recipe is reused");
+            assert.equal(resumed.recipe.model, killed.recipe.model);
+            assert.notEqual(resumed.logPath, killed.logPath, "each attempt keeps its own evidence");
+
+            const continued = findSavedConversation({
+                sessionDir: killed.recipe.sessionDir, sessionId: killed.sessionId, expectedCwd: killed.cwd,
+            });
+            assert.equal(continued.kind, "ok");
+            assert.equal(continued.conversation.path, sessionPath, "the continuation reopens the same session file");
+            assert.deepEqual(sessionMessages(sessionPath), [
+                { role: "user", text: "INITIAL TASK" },
+                { role: "assistant", text: "INITIAL ANSWER" },
+                { role: "user", text: "RECOVER THE WORK" },
+                { role: "assistant", text: "FOLLOWUP:RECOVER THE WORK" },
+            ]);
+            const child = childRecord(resumed.pid);
+            assert.equal(child.before, 2, "the new attempt loaded the interrupted history before appending");
+
+            // The interrupted attempt is evidence, not a draft to rewrite.
+            assert.equal(JSON.stringify(readMeta(killedId)), killedSnapshot, "the killed attempt is not mutated by continuation");
+            assert.equal(readFileSync(logPathFor(killedId), "utf-8"), killedLog);
+            assert.equal(await resultText(h, killedId), killedResult);
+        } finally {
+            if (holder?.pid) killProcessTree(holder.pid, "SIGKILL");
+            await reap([killedId, resumedId].filter(Boolean));
+            h.shutdown();
+        }
+    });
+
     it("parks a completed owner at zero capacity slots and occupies one only while an attempt runs", async () => {
         const h = makeHarness();
         let rootId;
@@ -448,7 +576,7 @@ describe("completed-subagent continuation", () => {
                 // before anything else can touch the conversation.
                 await assert.rejects(
                     resumeRun(h, { id: rootId, prompt: "SECOND WRITER" }),
-                    /still active in the same conversation|already being written|only a completed run can be continued/,
+                    /still active in the same conversation|already being written|only a completed or stopped run can be continued/,
                 );
             } finally {
                 delete process.env.PI_CONTINUATION_SLEEP_MS;
@@ -774,7 +902,7 @@ describe("completed-subagent continuation", () => {
                 // continue, never how many may write.
                 await assert.rejects(
                     resumeRun(owner, { id: rootId, prompt: "ORIGINAL OWNER RETRY" }),
-                    /still active in the same conversation|already being written|only a completed run can be continued/,
+                    /still active in the same conversation|already being written|only a completed or stopped run can be continued/,
                 );
             } finally {
                 delete process.env.PI_CONTINUATION_SLEEP_MS;

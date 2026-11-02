@@ -1,10 +1,16 @@
 /**
- * Completed-subagent continuation.
+ * Subagent continuation.
  *
  * A subagent attempt is one detached `pi -p` process; its conversation is a
  * saved native session JSONL that outlives the process. Continuation keeps the
  * conversation and allocates a NEW attempt, so old logs, results, callback
  * markers, and timing records stay intact under their own run id.
+ *
+ * A completed attempt and an interrupted attempt stopped by `subagent_stop`
+ * (status `killed`) are both continuable: stopping ends an execution, not the
+ * saved conversation or the uncommitted workspace it leaves behind. The stopped
+ * attempt is never rewritten; the next attempt keeps `rootRunId` and records
+ * `resumedFrom`, so the interruption and its recovery stay distinguishable.
  *
  * This module owns the four seams that decision needs and that the rest of the
  * package must not duplicate:
@@ -25,8 +31,8 @@
  *
  * Foreground-session ownership is provenance, not an authorization boundary:
  * Pi sessions are ordinary files on disk, so any foreground session that can
- * name a completed attempt with a verifiable saved conversation, workspace, and
- * launch recipe may continue it (or release its optional retention). The new
+ * name a continuable attempt with a verifiable saved conversation, workspace,
+ * and launch recipe may continue it (or release its optional retention). The new
  * attempt records the INVOKING foreground as its callback origin and its
  * permission admission is re-resolved from the current profile, so continuing
  * transfers the run to the caller instead of borrowing the original owner's
@@ -417,7 +423,7 @@ export function markRetentionReleased(
  * True when `origin` is the foreground session recorded on the run.
  *
  * This is a provenance/labelling helper, deliberately NOT an admission gate: a
- * different foreground session may continue a completed attempt (see the
+ * different foreground session may continue a continuable attempt (see the
  * module header). Callers that need to route a notification use it to decide
  * which foreground a run belongs to, not to deny an operation.
  */
@@ -451,7 +457,14 @@ function isActiveAttempt(meta: RunMeta): boolean {
 }
 
 /**
- * Validate one completed attempt for continuation and return the exact
+ * Terminal statuses whose saved conversation may be reopened by a new attempt.
+ * A stopped (`killed`) run is an interrupted execution, not a destroyed
+ * conversation; other terminal outcomes keep their existing refusal.
+ */
+const CONTINUABLE_STATUSES: ReadonlySet<RunStatus> = new Set(["completed", "killed"]);
+
+/**
+ * Validate one continuable attempt for continuation and return the exact
  * conversation plus frozen recipe to relaunch. Every refusal is fail-closed:
  * nothing is spawned and no history is created or replaced.
  */
@@ -469,8 +482,8 @@ export function planContinuation(options: {
     // and recipe are the thing being continued, and Pi sessions are shared
     // on-disk state rather than a per-foreground boundary.
     if (!origin?.sessionId) throw refusal(id, "the active foreground session identity is unavailable.");
-    if (prior.status !== "completed") {
-        throw refusal(id, `its status is ${prior.status}; only a completed run can be continued. Stop or launch a new run instead.`);
+    if (!CONTINUABLE_STATUSES.has(prior.status)) {
+        throw refusal(id, `its status is ${prior.status}; only a completed or stopped run can be continued. Stop a running attempt or launch a new run instead.`);
     }
     const recipe = prior.recipe;
     if (!recipe || recipe.version !== 1) throw refusal(id, "it was launched before continuation support, so no launch recipe was saved.");
