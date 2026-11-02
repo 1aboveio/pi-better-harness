@@ -470,6 +470,16 @@ describe("completed-subagent continuation", () => {
             }
             assert.ok(await waitFor(() => !processExists(killed.pid), { timeoutMs: 5000 }),
                 "the stopped writer exited");
+            // The completion contract (#624) makes the stop owe exactly one
+            // terminal callback. Let that handoff settle before snapshotting, so the
+            // only thing this test observes changing later is continuation's work.
+            await waitFor(() => {
+                const current = readMeta(killedId);
+                return current && (current.completionCallbackSentAt !== undefined
+                    || current.completionCallbackSuppressedAt !== undefined);
+            }, { timeoutMs: 6000 });
+            assert.equal(typeof readMeta(killedId).completionCallbackSentAt, "number",
+                "the killed attempt's one completion was handed off");
 
             // The killed attempt is now a saved conversation, while the other
             // terminal outcomes keep their existing refusal.
