@@ -22,6 +22,14 @@ tie preference. Installation does not change the default selected model. The rou
 requires Pi's `registerVirtualModel` API and is tested with Pi 1.4.0. On older
 hosts without that API, the bundle skips the router and shows an upgrade notice.
 
+Isolated subagents resolve the selected model's declared extension dependencies,
+including the router's DeepSeek and Ollama Cloud candidates. The launcher follows
+package `pi.childDependencies` and `pi.childRequirements` declarations recursively
+and checks the resulting model and tool requirements inside the child before its
+first request. Missing dependencies, dependency cycles, and configuration changes
+fail the launch checks with an explanation. These checks establish registration
+and configured authentication; provider connectivity still requires a live request.
+
 `pi-better-read-aloud` lives in this repo but is intentionally not part of the
 meta package.
 

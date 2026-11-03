@@ -10,6 +10,7 @@
     "model-routing"
   ],
   "pi": {
+    "childRequirements": "./src/child-requirements.ts",
     "extensions": [
       "./node_modules/pi-ollama-cloud/index.ts",
       "./src/index.ts"

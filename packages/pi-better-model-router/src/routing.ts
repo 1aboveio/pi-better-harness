@@ -26,20 +26,30 @@ export interface CatalogModel {
   api: string;
   cost: Rates;
 }
+export interface CandidateSpec {
+  provider: keyof RouterConfig["pricing"];
+  ids: readonly string[];
+  prefix?: string;
+  windows: [number, number][];
+}
+// Shared by runtime selection and child dependency discovery. IDs are ordered
+// by preference; prefix matches are considered only after all exact IDs.
+export const candidateSpecs: readonly CandidateSpec[] = [
+  { provider: "deepseek", ids: ["deepseek-flash", "deepseek-v4-flash"], windows: [[60, 240], [360, 600]] },
+  { provider: "ollama-cloud", ids: ["deepseek-v4.1-flash:cloud", "deepseek-v4.1-flash"],
+    prefix: "deepseek-v4.1-flash:", windows: [[720, 1080]] },
+];
 // Use catalog metadata and bundled schedules unless the price policy overrides
 // a rate or calendar rule. Physical model definitions remain owned by Pi.
 export function resolveCandidates(models: readonly CatalogModel[], config: RouterConfig = defaults): Candidate[] {
-  return [
-    { provider: "deepseek", ids: ["deepseek-flash", "deepseek-v4-flash"], windows: [[60, 240], [360, 600]] },
-    { provider: "ollama-cloud", ids: ["deepseek-v4.1-flash:cloud", "deepseek-v4.1-flash"], windows: [[720, 1080]] },
-  ].flatMap(spec => {
+  return candidateSpecs.flatMap(spec => {
     const pool = models.filter(m => m.provider === spec.provider && m.api !== "pi-virtual");
     const model = spec.ids.map(id => pool.find(m => m.id === id)).find(Boolean)
-      ?? (spec.provider === "ollama-cloud"
-        ? pool.filter(m => m.id.startsWith("deepseek-v4.1-flash:")).sort((a, b) => a.id.localeCompare(b.id))[0]
+      ?? (spec.prefix !== undefined
+        ? pool.filter(m => m.id.startsWith(spec.prefix!)).sort((a, b) => a.id.localeCompare(b.id))[0]
         : undefined);
     if (!model) return [];
-    const override = config.pricing[spec.provider as keyof typeof config.pricing];
+    const override = config.pricing[spec.provider];
     const peak = { input: model.cost.input, output: model.cost.output, cacheRead: model.cost.cacheRead, ...override?.peak };
     const offPeak = { input: peak.input / 2, output: peak.output / 2, cacheRead: peak.cacheRead / 2, ...override?.offPeak };
     if (![...Object.values(peak), ...Object.values(offPeak)].every(n => Number.isFinite(n) && n >= 0) ||
@@ -47,7 +57,7 @@ export function resolveCandidates(models: readonly CatalogModel[], config: Route
       throw new Error(`Model router: ${model.provider}/${model.id} needs nonzero catalog pricing. Set cost in Pi's models.json.`);
     }
     return [{ provider: model.provider, model: model.id, peak,
-      offPeak, peakWindows: override?.peakWindows ?? spec.windows as [number, number][],
+      offPeak, peakWindows: override?.peakWindows ?? spec.windows,
       offPeakDates: override?.offPeakDates ?? [] }];
   });
 }

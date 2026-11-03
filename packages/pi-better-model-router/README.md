@@ -115,6 +115,30 @@ The router does not assume that a provider has a warm cache. Choosing a cheaper 
 
 Routing does not rewrite provider cost metadata. Pi's displayed costs remain provider estimates; Ollama Cloud does not report cached-token usage through its completion API. Subscription credits are not treated as free tokens.
 
+## Child dependency discovery
+
+The package manifest exposes `pi.childRequirements: "./src/child-requirements.ts"` for hosts that prepare isolated child processes. This module is safe to import for discovery: it does not initialize the extension, load configuration, or access the model registry.
+
+The named export `childModelRequirements(model: string)` and default export `(input: { model: string })` return the same requirements for `router/deepseek-flash-auto`:
+
+```ts
+{
+  providers: ["deepseek", "ollama-cloud"],
+  modelGroups: [
+    { provider: "deepseek", ids: ["deepseek-flash", "deepseek-v4-flash"] },
+    {
+      provider: "ollama-cloud",
+      ids: ["deepseek-v4.1-flash:cloud", "deepseek-v4.1-flash"],
+      prefix: "deepseek-v4.1-flash:"
+    }
+  ]
+}
+```
+
+Each model group describes alternatives for one provider: the ordered exact IDs, then any ID starting with `prefix` when present. Both providers are declared so a child can select either provider and retry through the other. The runtime still needs only one authenticated eligible candidate. Other model strings return `undefined`.
+
+Requirements come from the exported `candidateSpecs` used by `resolveCandidates`; they include every selectable fallback regardless of price, schedule, or preferred provider. Each call returns fresh arrays. The host owns recursive dependency resolution and preflight checks.
+
 ## Development
 
 ```sh

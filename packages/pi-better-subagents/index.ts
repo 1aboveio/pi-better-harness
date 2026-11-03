@@ -36,7 +36,7 @@ import { parseRun, parseRunForLifecycle, readRunTranscript, resetParseRunCursor,
 import { finalizeRun as finalizeRunCore } from "./finalization.ts";
 import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
-import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
+import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
 import { createSubagentSettingsPage } from "./settings-page.ts";
 import { effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
@@ -57,6 +57,8 @@ import {
 import { readAppendedLines, type LogCursor } from "./log-cursor.ts";
 import { DELEGATION_MODES, DELEGATION_MODE_REQUEST, isDelegationMode, normalizeDelegationMode, type DelegationMode } from "./delegation.ts";
 import { appendExecutionPolicy } from "./shared-execution-policy.ts";
+import { resolveChildClosure, resolveChildLaunch, configSnapshot } from "./child-dependencies.mjs";
+import { PREFLIGHT_ENV } from "./child-preflight.mjs";
 import { resolveExtensions, extensionArgs } from "./extensions.ts";
 import { prepareTaskRuntime, applyDirectApplicationLoadout, RUN_APPLICATION, SDK_BUILTIN_TOOLS } from "./task-policy.ts";
 import { canonicalizePath, takeRecoverySnapshot } from "./shared-sandbox-core.ts";
@@ -66,7 +68,7 @@ import {
     announceExecutionAdapter, observeSandboxPermissions, resolveCommandSettings, resolveSubagentPermissions,
 } from "./permission-policy.ts";
 import { resolveSubagentWorkspace } from "./git-workspace.ts";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
     baseDir,
     taskWorkspaceDir,
@@ -2263,15 +2265,22 @@ export default function (pi: ExtensionAPI) {
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
                 toolExtensions: cfg.toolExtensions, resolvePath: resolveExtensionPath,
             }) : undefined;
-            const resolution = resolveExtensions({
+            const dependencyOptions = {
+                model, virtual: (() => {
+                    const slash = model?.indexOf("/") ?? -1;
+                    return slash > 0 && ctx.modelRegistry?.find?.(model!.slice(0, slash), model!.slice(slash + 1))?.api === "pi-virtual";
+                })(), config: cfg, resolvePath: resolveExtensionPath,
+                configPaths: [configPath(), join(selfDir(), "config.json")],
+            };
+            const { resolution, fullResolution } = await resolveChildLaunch({ ...dependencyOptions, resolution: resolveExtensions({
                 // Only SDK builtins reach `--tools` and extension resolution: process_list and run_application
                 // are task builtins that the mandatory guard installs and activates itself.
                 tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
                 model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
-            });
-            const { args: resolvedExtArgs, missing } = extensionArgs(resolution, resolveExtensionPath);
-            const trustedExtArgs = [...new Set(taskTools?.trusted.map((tool) => tool.loadPath) ?? [])]
-                .filter((path) => !resolvedExtArgs.includes(path)).flatMap((path) => ["--extension", path]);
+            }) }, taskTools?.trusted.map(tool => tool.loadPath) ?? []);
+            const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? resolveExtensionPath(spec));
+            const trustedExtArgs = fullResolution.specs.map(spec => fullResolution.paths[spec])
+                .filter(path => !resolvedExtArgs.includes(path)).flatMap(path => ["--extension", path]);
             // Harness child controls ride along in every mode, including clean and unsandboxed runs.
             // They deliver deadline steers and keep external monitoring with the coordinator.
             const codemodeArgs = !sandboxEnabled && allow.split(",").includes("codemode") && !requestedExcludes.has("codemode")
@@ -2285,11 +2294,12 @@ export default function (pi: ExtensionAPI) {
             if (resume?.recipe.extensionArgs) {
                 // A model escalation may change provider auth, but an unchanged tool
                 // must not silently switch implementations with current configuration.
-                const reference = model === resume.recipe.model ? resolution : resolveExtensions({
+                const reference = model === resume.recipe.model ? resolution : await resolveChildClosure({
+                    ...dependencyOptions, model: resume.recipe.model, virtual: false, resolution: resolveExtensions({
                     tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
                     model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
-                });
-                const referenceArgs = [...extensionArgs(reference, resolveExtensionPath).args, ...codemodeArgs,
+                }) });
+                const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? resolveExtensionPath(spec)).args, ...codemodeArgs,
                     ...(!resume.recipe.baseExtensionArgs ? trustedExtArgs : []),
                     "--extension", childSteerExtensionPath(), "--extension", join(selfDir(), "child-ownership.ts")]
                     .map((value, index, all) => sandboxEnabled && all[index - 1] === "--extension" ? canonicalizePath(value) : value);
@@ -2361,7 +2371,7 @@ export default function (pi: ExtensionAPI) {
                     try { ctx.ui?.notify?.(`Subagent ${id}: recovery snapshot failed (run continues): ${outcome.detail}`, "warning"); } catch { /* ignore */ }
                 });
             }
-            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: piBin, fileArgs: args };
+            const cmd = taskRuntime ? { file: taskRuntime.file, fileArgs: [...taskRuntime.fileArgs, ...args] } : { file: process.execPath, fileArgs: [join(selfDir(), "child-runtime.mjs"), piBin, ...args] };
             const sandboxDir = taskRuntime ? requestedSandboxDir : undefined;
 
             // Reservations prevent competing admissions, but do not grandfather
@@ -2384,8 +2394,12 @@ export default function (pi: ExtensionAPI) {
             // built from, so `--session` can never reopen a file another sweep
             // removed as an empty replacement.
             if (resume) revalidateContinuationUnderLease(resume, callbackOrigin);
+            const preflightPath = join(runDir(id), "child-preflight.json");
+            writeFileSync(preflightPath, JSON.stringify({ ...fullResolution, model, tools: selectedTools,
+                configSnapshot: configSnapshot([dirname(configPath()), join(cwd, ".pi")]),
+            }));
             spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
-                env: { [STEER_FILE_ENV]: steerPathFor(id) } });
+                env: { [STEER_FILE_ENV]: steerPathFor(id), [PREFLIGHT_ENV]: preflightPath } });
             // Record process identity (pgid, start-time token) so health
             // reconciliation can tell a supervised child from a recycled pid
             // or an orphaned process group (#63). Best-effort: when the OS
