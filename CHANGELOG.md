@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.39.1] - 2026-11-03
+
+### Fixed
+
+- Bundle Subagents 0.26.2 and Model Router 0.1.1 so isolated router children load their declared dependencies, including Ollama Cloud, and check their model and tools before the first request.
+- Declare host-provided `@sinclair/typebox` as a peer dependency instead of a Harness runtime dependency, avoiding a duplicate runtime copy.
+
+## [pi-better-subagents@0.26.2] - 2026-11-03
+
+### Fixed
+
+- Resolve package `pi.childDependencies` and `pi.childRequirements` declarations recursively, including virtual-model provider dependencies such as Ollama Cloud. Resolve nested dependencies from the declaring package's context and report missing dependencies or cycles before launch.
+- Check the selected model, configured authentication, and active tools inside the child before its first request. Refuse changed dependency declarations or configuration between resolution and launch instead of running with configuration drift. These checks do not establish live provider connectivity.
+
+## [pi-better-model-router@0.1.1] - 2026-11-03
+
+### Fixed
+
+- Declare child requirements for the router's DeepSeek and Ollama Cloud candidates so isolated children load the required provider extensions and check candidate availability using the same model selection rules as routing.
+- Move `@sinclair/typebox` from runtime dependencies to a host-provided peer dependency, avoiding a duplicate runtime copy in the Harness bundle.
+
 ## [pi-better-harness@0.39.0] - 2026-11-02
 
 ### Added

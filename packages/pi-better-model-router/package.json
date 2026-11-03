@@ -1,6 +1,6 @@
 {
   "name": "pi-better-model-router",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Price-aware virtual model routing for Pi.",
   "type": "module",
   "license": "MIT",
@@ -31,6 +31,7 @@
     "pi-ollama-cloud"
   ],
   "peerDependencies": {
+    "@sinclair/typebox": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
   },
@@ -40,7 +41,6 @@
     "directory": "packages/pi-better-model-router"
   },
   "dependencies": {
-    "@sinclair/typebox": "0.34.52",
     "pi-ollama-cloud": "0.13.1"
   },
   "bundleDependencies": [
