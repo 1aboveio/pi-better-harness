@@ -16,7 +16,7 @@ core extensions:
 | `pi-better-model-router` | Route between DeepSeek and Ollama Cloud by estimated price. |
 | Harness Outcome & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
 
-The bundle includes `pi-better-model-router` 0.1.1 and its Ollama Cloud provider.
+The bundle includes `pi-better-model-router` 0.1.2 and its Ollama Cloud provider.
 Select `router/deepseek-flash-auto` in `/model` to use it; DeepSeek is the default
 tie preference. Installation does not change the default selected model. The router
 requires Pi's `registerVirtualModel` API and is tested with Pi 1.4.0. On older

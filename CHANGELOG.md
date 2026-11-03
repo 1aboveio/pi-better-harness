@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.39.2] - 2026-11-03
+
+### Fixed
+
+- Bundle Model Router 0.1.2, so a running turn moves to the cheaper provider at a price boundary instead of holding its first choice, and long sessions no longer append one router-state entry per request.
+
+## [pi-better-model-router@0.1.2] - 2026-11-03
+
+### Fixed
+
+- Re-check prices during a turn instead of only at the start of a user turn. A continuation keeps its model while that model is still the cheapest and moves to the other provider when one becomes strictly cheaper at a peak-window boundary. Equal cost keeps the current provider, so a switch never pays a cold prompt cache for no gain.
+- Move a retry to the other candidate after any error, and keep the failed model only after a context overflow, where Pi retries that request after compacting the conversation.
+- Report router state only when the excluded-provider list changes, so a long session no longer appends one `pi.virtual-model-state` entry per request.
+
 ## [pi-better-harness@0.39.1] - 2026-11-03
 
 ### Fixed

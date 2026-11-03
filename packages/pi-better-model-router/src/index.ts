@@ -1,7 +1,7 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { loadConfig } from "./config.ts";
-import { chooseCandidate, isTransient, resolveCandidates } from "./routing.ts";
+import { chooseCandidate, isCheapest, isContextOverflow, resolveCandidates } from "./routing.ts";
 
 // Structural contract keeps this standalone package buildable alongside the
 // monorepo's older SDK. Pi 1.4's native virtual-model API is required at runtime.
@@ -19,6 +19,9 @@ export interface VirtualDefinition {
   provider: string; id: string; name: string; thinkingLevels: Level[];
   route(request: RouteRequest, ctx: ExtensionContext): RouteResult;
 }
+function sameList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
 export function route(request: RouteRequest, ctx: ExtensionContext, now = new Date()): RouteResult {
   const config = loadConfig(getAgentDir(), ctx.cwd);
   const models = ctx.modelRegistry.getAvailable();
@@ -28,21 +31,26 @@ export function route(request: RouteRequest, ctx: ExtensionContext, now = new Da
   let failedProviders = request.reason === "user" || request.reason === "direct"
     ? [] : request.state?.failedProviders ?? [];
   if (request.reason === "retry" && request.failed) {
-    if (!isTransient(request.failed.message.errorMessage ?? "")) {
+    const errorMessage = request.failed.message.errorMessage ?? "";
+    if (isContextOverflow(errorMessage)) {
       if (!find(request.failed)) throw new Error("Model router: failed model is no longer available.");
       return { model: request.failed.model, thinkingLevel: request.failed.thinkingLevel ?? request.thinkingLevel };
     }
+    // Any other failed request moves to the other candidate for the rest of the turn.
     failedProviders = [...new Set([...failedProviders, request.failed.model.provider])];
   }
   const eligible = available.filter(c => !failedProviders.includes(c.provider));
   const sticky = request.reason === "continuation" ? find(request.previous) : undefined;
-  const candidate = sticky && eligible.includes(sticky) ? sticky
-    : chooseCandidate(config, eligible, now, request.previous?.model);
+  const keep = sticky !== undefined && eligible.includes(sticky) && isCheapest(config, sticky, eligible, now);
+  const candidate = keep ? sticky! : chooseCandidate(config, eligible, now, request.previous?.model);
   const model = models.find(m => m.provider === candidate.provider && m.id === candidate.model)!;
+  // Pi appends a session entry for every state object it receives, so report the
+  // excluded providers only when that list changes.
+  const stored = request.state?.failedProviders ?? [];
   return {
     model,
-    thinkingLevel: sticky ? request.previous?.thinkingLevel ?? request.thinkingLevel : request.thinkingLevel,
-    state: { failedProviders },
+    thinkingLevel: keep ? request.previous?.thinkingLevel ?? request.thinkingLevel : request.thinkingLevel,
+    ...(sameList(stored, failedProviders) ? {} : { state: { failedProviders } }),
   };
 }
 export default function (pi: ExtensionAPI) {
