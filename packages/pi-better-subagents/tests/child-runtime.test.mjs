@@ -17,9 +17,15 @@ function fixture(t, script) {
   return { root, binary };
 }
 
-test('shell launcher receives preflight, exact original arguments, environment and stdio', t => {
+const launchModes = [
+  { name: 'native', prefix: [] },
+  { name: 'fallback', prefix: ['--import', 'data:text/javascript,process.execve%20%3D%20undefined'] },
+];
+
+for (const { name, prefix } of launchModes) {
+test(`${name}: shell launcher receives preflight, exact original arguments, environment and stdio`, t => {
   const { binary } = fixture(t, '#!/bin/sh\nprintf "%s\\n" "$@"\nprintf "%s\\n" "$CHILD_RUNTIME_TEST"\nread line\nprintf "%s\\n" "$line" >&2\nexit 23\n');
-  const result = spawnSync(process.execPath, [runtime, binary, '--print', 'prompt with spaces', '', '$literal'], {
+  const result = spawnSync(process.execPath, [...prefix, runtime, binary, '--print', 'prompt with spaces', '', '$literal'], {
     env: { ...process.env, CHILD_RUNTIME_TEST: 'inherited' }, input: 'stdin inherited\n', encoding: 'utf8', timeout: 10000,
   });
   assert.equal(result.error, undefined);
@@ -27,6 +33,23 @@ test('shell launcher receives preflight, exact original arguments, environment a
   assert.equal(result.stdout, ['--extension', preflight, '--print', 'prompt with spaces', '', '$literal', 'inherited', ''].join('\n'));
   assert.equal(result.stderr, 'stdin inherited\n');
 });
+
+for (const usePath of [false, true]) {
+  test(`${name}: ${usePath ? 'PATH' : 'absolute'} launcher PID identity`, { skip: process.platform === 'win32' }, async t => {
+    const { root, binary } = fixture(t, '#!/bin/sh\nprintf "%s" "$$"\n');
+    const child = spawn(process.execPath, [...prefix, runtime, usePath ? 'custom pi' : binary], {
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}` }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', data => { stdout += data; });
+    child.stderr.on('data', data => { stderr += data; });
+    assert.deepEqual(await once(child, 'close'), [0, null], stderr);
+    if (name === 'native' && typeof process.execve === 'function') assert.equal(Number(stdout), child.pid);
+    else assert.notEqual(Number(stdout), child.pid, 'fallback keeps its supervisor');
+  });
+}
+}
 
 test('launcher spawn errors are reported as bootstrap failures', t => {
   const { root } = fixture(t, '#!/bin/sh\nexit 0\n');
@@ -53,8 +76,9 @@ test('launcher signal exits retain their signal', t => {
   assert.equal(result.signal, 'SIGTERM');
 });
 
+for (const { name, prefix } of launchModes) {
 for (const group of [false, true]) {
-  test(group ? 'group termination reaches launcher descendants without a detached orphan' : 'direct bootstrap termination forwards to the launcher and waits for its exit', { timeout: 10000 }, async t => {
+  test(`${name}: ${group ? 'group termination reaches launcher descendants without a detached orphan' : 'direct bootstrap termination forwards to the launcher and waits for its exit'}`, { timeout: 10000 }, async t => {
     const { root, binary } = fixture(t, '#!/bin/sh\nexec "$RUNTIME_TEST_NODE" "$RUNTIME_TEST_LAUNCHER"\n');
     const ready = join(root, 'ready');
     const stopped = join(root, 'stopped');
@@ -75,7 +99,7 @@ for (const group of [false, true]) {
       writeFileSync(${JSON.stringify(ready)}, JSON.stringify([process.pid, child.pid]));
       setInterval(() => {}, 1000);
     `);
-    const child = spawn(process.execPath, [runtime, binary], { detached: true, stdio: 'ignore',
+    const child = spawn(process.execPath, [...prefix, runtime, binary], { detached: true, stdio: 'ignore',
       env: { ...process.env, RUNTIME_TEST_NODE: process.execPath, RUNTIME_TEST_LAUNCHER: launcher } });
     t.after(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} });
     const exit = once(child, 'exit');
@@ -90,8 +114,10 @@ for (const group of [false, true]) {
     for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
   });
 }
+}
 
-test('real Pi executes mandatory preflight before the model request', { timeout: 30000 }, t => {
+for (const { name, prefix } of launchModes) {
+test(`${name}: real Pi executes mandatory preflight before the model request`, { timeout: 30000 }, t => {
   const { root } = fixture(t, '#!/bin/sh\nexit 0\n');
   const cli = fileURLToPath(new URL('./cli.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
   const provider = join(root, 'provider.mjs');
@@ -107,7 +133,7 @@ test('real Pi executes mandatory preflight before the model request', { timeout:
   for (const tools of [['read'], ['unavailable-tool']]) {
     rmSync(requested, { force: true });
     writeFileSync(planPath, JSON.stringify({ model: 'bootstrap-test/test', tools, providers: [], modelGroups: [], declarations: [], fingerprints: [] }));
-    const result = spawnSync(process.execPath, [runtime, cli, '--no-extensions', '--extension', provider,
+    const result = spawnSync(process.execPath, [...prefix, runtime, cli, '--no-extensions', '--extension', provider,
       '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-session', '--tools', 'read',
       '--model', 'bootstrap-test/test', '--print', 'test'], {
       cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: join(root, 'agent'), PI_SUBAGENT_PREFLIGHT: planPath,
@@ -122,3 +148,4 @@ test('real Pi executes mandatory preflight before the model request', { timeout:
     }
   }
 });
+}
