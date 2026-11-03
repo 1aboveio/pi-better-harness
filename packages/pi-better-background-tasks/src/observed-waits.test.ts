@@ -73,6 +73,17 @@ function createCtx(cwd: string, sessionId = "session-1", branchId = "branch-1"):
   return createBranchCtx(cwd, sessionId, [branchId]);
 }
 
+function createMutableBranchCtx(cwd: string, sessionId: string, branchIds: readonly string[]): ExtensionContext {
+  return {
+    cwd,
+    sessionManager: {
+      getSessionId: () => sessionId,
+      getBranch: () => branchIds.map((id) => ({ id })),
+    },
+    isIdle: () => true,
+  } as unknown as ExtensionContext;
+}
+
 function createBranchCtx(cwd: string, sessionId: string, branchIds: readonly string[]): ExtensionContext {
   return {
     cwd,
@@ -1797,6 +1808,337 @@ describe("callback origin and delivery receipt", () => {
     expect(second.calls).toHaveLength(1);
   });
 
+
+  it("retries a terminal callback recorded before an active context is restored", async () => {
+    const root = workspace("no-active-context");
+    const notifier = deferredNotifier();
+    const harness = createHarness();
+    const options = {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+    };
+    const ctx = createCtx(root, "no-active-owner", "no-active-branch");
+    const first = createObservedWaitHost(harness.pi, { ...options, notifyParent: notifier.notify });
+    first.start(ctx);
+    const launch = await first.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand('setTimeout(() => { console.log("late"); }, 300)'), shell: false, callback: true },
+      ctx,
+    });
+    first.close();
+
+    // A replacement host can open the store before session_start restores a
+    // context (for example an RPC capability probe). Terminal evidence then lands
+    // with no active owner.
+    const host = createObservedWaitHost(harness.pi, { ...options, notifyParent: notifier.notify });
+    cleanups.push(() => host.close());
+    host.start();
+    await until(host, () => (host as unknown as {
+      operationForTask(id: string): { terminalRevision: number } | undefined;
+    }).operationForTask(launch.id)?.terminalRevision === 1);
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(0);
+
+    // The real active context arrives; the pending callback is handed off once.
+    host.start(ctx);
+    await until(host, () => notifier.calls.length === 1);
+    notifier.deliver(notifier.calls[0]!);
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(1);
+  });
+
+  it("discovers a terminal result recorded after this host's initial scan", async () => {
+    const root = workspace("late-terminal-discovery");
+    const options = {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+    };
+    const ctx = createCtx(root, "late-discovery-owner", "late-discovery-branch");
+    // B is active before the task exists and never observes it running.
+    const watcherHarness = createHarness();
+    const notifier = deferredNotifier();
+    const watcher = createObservedWaitHost(watcherHarness.pi, { ...options, notifyParent: notifier.notify });
+    cleanups.push(() => watcher.close());
+    watcher.start(ctx);
+    await watcher.reconcileNow();
+
+    // A separate launcher registers/starts the task, then another host with no
+    // session identity records terminal while the watcher is not reconciling.
+    const launcherHarness = createHarness();
+    const launcher = createObservedWaitHost(launcherHarness.pi, { ...options, notifyParent: () => {} });
+    launcher.start(ctx);
+    const launch = await launcher.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand('setTimeout(() => { console.log("late-terminal"); }, 300)'), shell: false, callback: true },
+      ctx,
+    });
+    launcher.close();
+    const recorderHarness = createHarness();
+    const recorder = createObservedWaitHost(recorderHarness.pi, { ...options, notifyParent: () => {} });
+    cleanups.push(() => recorder.close());
+    const anonymous = {
+      cwd: root,
+      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
+      isIdle: () => true,
+    } as unknown as ExtensionContext;
+    recorder.start(anonymous);
+    await until(recorder, () => (recorder as unknown as {
+      operationForTask(id: string): { terminalRevision: number } | undefined;
+    }).operationForTask(launch.id)?.terminalRevision === 1);
+
+    // The watcher did not see the running phase. Normal reconcile discovers the
+    // new shared sidecar/terminal result and hands off exactly once.
+    await until(watcher, () => notifier.calls.length === 1);
+    notifier.deliver(notifier.calls[0]!);
+    await watcher.reconcileNow();
+    expect(notifier.calls).toHaveLength(1);
+  });
+
+  it("protects a reopened host's live claim from a host created while it was closed", async () => {
+    const root = workspace("reopened-claim");
+    const options = { storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), pollMs: 0 };
+    const ctx = createCtx(root, "reopened-owner", "reopened-branch");
+    const notifier = deferredNotifier();
+    const host = createObservedWaitHost(createHarness().pi, { ...options, notifyParent: notifier.notify });
+    cleanups.push(() => host.close());
+    host.start(ctx);
+    host.close();
+    const competingNotifier = deferredNotifier();
+    const competing = createObservedWaitHost(createHarness().pi, { ...options, notifyParent: competingNotifier.notify });
+    cleanups.push(() => competing.close());
+    competing.start(ctx);
+    host.start(ctx);
+    const launch = await host.launchParent({ kind: "process", params: { argv: nodeCommand('console.log("reopened")'), shell: false, callback: true }, ctx });
+    await until(host, () => notifier.calls.length === 1);
+    const path = join(root, "supervisor", "observed", `${launch.id}.json`);
+    const before = JSON.parse(readFileSync(path, "utf8"));
+    await competing.reconcileNow();
+    expect(competingNotifier.calls).toHaveLength(0);
+    const after = JSON.parse(readFileSync(path, "utf8"));
+    expect(after.callbackClaimedBy).toBe(before.callbackClaimedBy);
+    expect(after.callbackClaimToken).toBe(before.callbackClaimToken);
+    notifier.deliver(notifier.calls[0]!);
+    expect(JSON.parse(readFileSync(path, "utf8")).callbackDeliveredAt).toBeTypeOf("number");
+  });
+
+  it.each(["defer", "delivered"] as const)("does not use a cached claim when %s encounters an unreadable journal", async (action) => {
+    const root = workspace(`unreadable-${action}`);
+    const notifier = deferredNotifier();
+    const host = createObservedWaitHost(createHarness().pi, { storePath: join(root, "operations.sqlite"), supervisorDirectory: join(root, "supervisor"), pollMs: 0, notifyParent: notifier.notify });
+    cleanups.push(() => host.close());
+    const ctx = createCtx(root, "unreadable-owner", "unreadable-branch");
+    host.start(ctx);
+    const launch = await host.launchParent({ kind: "process", params: { argv: nodeCommand('console.log("unreadable")'), shell: false, callback: true }, ctx });
+    await until(host, () => notifier.calls.length === 1);
+    const path = join(root, "supervisor", "observed", `${launch.id}.json`);
+    writeFileSync(path, "{partial");
+    const delivery = notifier.calls[0]!.delivery;
+    if (action === "defer") delivery.defer("journal unreadable");
+    else delivery.delivered();
+    expect(readFileSync(path, "utf8")).toBe("{partial");
+  });
+
+  it("preserves a newer host claim when a stale host delivery callback fires", async () => {
+    const root = workspace("claim-overlap");
+    const options = {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+    };
+    const ctx = createCtx(root, "overlap-owner", "overlap-branch");
+    const firstHarness = createHarness();
+    const firstNotifier = deferredNotifier();
+    const first = createObservedWaitHost(firstHarness.pi, { ...options, notifyParent: firstNotifier.notify });
+    cleanups.push(() => first.close());
+    first.start(ctx);
+    const launch = await first.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand('console.log("overlap")'), shell: false, callback: true },
+      ctx,
+    });
+    await until(first, () => firstNotifier.calls.length === 1);
+    const stale = firstNotifier.calls[0]!;
+    const sidecarPath = join(root, "supervisor", "observed", `${launch.id}.json`);
+
+    // A replacement host takes over the shared sidecar and claim.
+    const secondHarness = createHarness();
+    const secondNotifier = deferredNotifier();
+    const second = createObservedWaitHost(secondHarness.pi, { ...options, notifyParent: secondNotifier.notify });
+    cleanups.push(() => second.close());
+    second.start(ctx);
+    await until(second, () => secondNotifier.calls.length === 1);
+    const claimed = JSON.parse(readFileSync(sidecarPath, "utf8")) as Record<string, unknown>;
+
+    // A stale host can reconcile before its old delivery closure fires. That
+    // attempt must read the fresh shared claim and write nothing.
+    await first.reconcileNow();
+    const afterReconcile = JSON.parse(readFileSync(sidecarPath, "utf8")) as Record<string, unknown>;
+    expect(afterReconcile.callbackClaimToken).toBe(claimed.callbackClaimToken);
+    expect(afterReconcile.callbackClaimedBy).toBe(claimed.callbackClaimedBy);
+    expect(afterReconcile.callbackDeliveredAt).toBeUndefined();
+    expect(afterReconcile.callbackAttemptedAt).toBe(claimed.callbackAttemptedAt);
+    expect(afterReconcile.callbackSkipReason).toBe(claimed.callbackSkipReason);
+
+    // The old host's delivery closures still carry its old claim token. They
+    // must not clear or receipt the newer host's claim in the shared sidecar.
+    stale.delivery.defer("stale defer");
+    stale.delivery.delivered();
+    const afterStale = JSON.parse(readFileSync(sidecarPath, "utf8")) as Record<string, unknown>;
+    expect(afterStale.callbackClaimToken).toBe(claimed.callbackClaimToken);
+    expect(afterStale.callbackClaimedBy).toBe(claimed.callbackClaimedBy);
+    expect(afterStale.callbackDeliveredAt).toBeUndefined();
+    expect(afterStale.callbackDeferredReason).not.toBe("stale defer");
+
+    secondNotifier.deliver(secondNotifier.calls[0]!);
+    const delivered = JSON.parse(readFileSync(sidecarPath, "utf8")) as Record<string, unknown>;
+    expect(delivered.callbackDeliveredAt).toBeTypeOf("number");
+    stale.delivery.delivered();
+    const afterLate = JSON.parse(readFileSync(sidecarPath, "utf8")) as Record<string, unknown>;
+    expect(afterLate.callbackDeliveredAt).toBe(delivered.callbackDeliveredAt);
+  });
+
+  it("recovers a callback when a watched running task leaves the running set on another host", async () => {
+    const root = workspace("watched-transition");
+    const options = {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+    };
+    const ctx = createCtx(root, "watched-owner", "watched-branch");
+    const launcherHarness = createHarness();
+    const launcher = createObservedWaitHost(launcherHarness.pi, { ...options, notifyParent: () => {} });
+    launcher.start(ctx);
+    const launch = await launcher.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 500)"), shell: false, callback: true },
+      ctx,
+    });
+    launcher.close();
+
+    // The active host watches the operation while it is running.
+    const watcherHarness = createHarness();
+    const notifier = deferredNotifier();
+    const watcher = createObservedWaitHost(watcherHarness.pi, { ...options, notifyParent: notifier.notify });
+    cleanups.push(() => watcher.close());
+    watcher.start(ctx);
+    await watcher.reconcileNow();
+
+    // A different host with no session identity records the terminal revision.
+    const recorderHarness = createHarness();
+    const recorder = createObservedWaitHost(recorderHarness.pi, { ...options, notifyParent: () => {} });
+    cleanups.push(() => recorder.close());
+    const anonymous = {
+      cwd: root,
+      sessionManager: { getSessionId: () => undefined, getBranch: () => [] },
+      isIdle: () => true,
+    } as unknown as ExtensionContext;
+    recorder.start(anonymous);
+    await until(recorder, () => (recorder as unknown as {
+      operationForTask(id: string): { terminalRevision: number } | undefined;
+    }).operationForTask(launch.id)?.terminalRevision === 1);
+    await recorder.reconcileNow();
+    expect(notifier.calls).toHaveLength(0);
+
+    // The active watcher sees the task leave the running set and recovers the
+    // callback from the durable sidecar, then hands it off once.
+    await until(watcher, () => notifier.calls.length === 1);
+    notifier.deliver(notifier.calls[0]!);
+    await watcher.reconcileNow();
+    expect(notifier.calls).toHaveLength(1);
+  });
+
+  it("keeps a callback pending while the active context has no session identity, then delivers", async () => {
+    const root = workspace("anonymous-context");
+    const notifier = deferredNotifier();
+    const harness = createHarness();
+    const options = {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+    };
+    const ctx = createCtx(root, "anonymous-owner", "anonymous-branch");
+    const first = createObservedWaitHost(harness.pi, { ...options, notifyParent: notifier.notify });
+    first.start(ctx);
+    const launch = await first.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand('setTimeout(() => { console.log("anonymous"); }, 300)'), shell: false, callback: true },
+      ctx,
+    });
+    first.close();
+
+    const anonymous = {
+      cwd: root,
+      sessionManager: {
+        getSessionId: () => undefined,
+        getBranch: () => [],
+      },
+      isIdle: () => true,
+    } as unknown as ExtensionContext;
+    const host = createObservedWaitHost(harness.pi, { ...options, notifyParent: notifier.notify });
+    cleanups.push(() => host.close());
+    host.start(anonymous);
+    await until(host, () => (host as unknown as {
+      operationForTask(id: string): { terminalRevision: number } | undefined;
+    }).operationForTask(launch.id)?.terminalRevision === 1);
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(0); // unknown identity must never authorize
+
+    host.start(ctx); // the live real session identity arrives
+    await until(host, () => notifier.calls.length === 1);
+    notifier.deliver(notifier.calls[0]!);
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(1);
+  });
+
+  it("retries a pending terminal callback when the live branch settles after activation", async () => {
+    const root = workspace("live-branch");
+    const notifier = deferredNotifier();
+    const harness = createHarness();
+    const host = createObservedWaitHost(harness.pi, {
+      storePath: join(root, "operations.sqlite"),
+      supervisorDirectory: join(root, "supervisor"),
+      pollMs: 0,
+      notifyParent: notifier.notify,
+    });
+    cleanups.push(() => host.close());
+    const anchorIds = ["anchor-live"];
+    const ctxAnchor = createMutableBranchCtx(root, "live-branch-owner", anchorIds);
+    host.start(ctxAnchor);
+    const launch = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 30000)"), shell: false, callback: true },
+      ctx: ctxAnchor,
+    });
+
+    // Reload/activation settles before the SDK's in-memory branch history is
+    // available. The task then reaches terminal while the live branch is empty.
+    const liveIds: string[] = [];
+    const ctxLive = createMutableBranchCtx(root, "live-branch-owner", liveIds);
+    host.start(ctxLive);
+    await host.stopForParent(ctxLive, launch.id);
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(0);
+
+    // An abandoned fork never becomes eligible, even across retries.
+    liveIds.push("other-fork");
+    await host.reconcileNow();
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(0);
+
+    // The same live context later exposes the recorded anchor; no session_tree,
+    // reload or replacement start occurs. The reconcile retry delivers once.
+    liveIds.splice(0, liveIds.length, "anchor-live");
+    await host.reconcileNow();
+    expect(notifier.calls).toHaveLength(1);
+    await host.reconcileNow();
+    await host.reconcileNow();
+    expect(notifier.calls, "a claimed callback is not offered twice").toHaveLength(1);
+    notifier.deliver(notifier.calls[0]!);
+    await host.reconcileNow();
+    expect(notifier.calls, "the actual handoff removes the pending id").toHaveLength(1);
+  });
 
   it("resolves worker cwd against the worker workspace, not the parent cwd", async () => {
     let sibling: { getWorkerOperationService(pi: unknown): {

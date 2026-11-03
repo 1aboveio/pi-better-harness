@@ -59,6 +59,7 @@ process.env.TMPDIR = tmp;
 process.env.TMP = tmp;
 process.env.TEMP = tmp;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+process.env.PI_BG_OBSERVED_WAITS_DEBUG = "1";
 
 writeFileSync(join(fakeBin, "ssh"), [
   "#!/bin/sh",
@@ -72,11 +73,14 @@ chmodSync(join(fakeBin, "ssh"), 0o755);
 
 const originalPath = process.env.PATH ?? "";
 const originalWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
+const originalObservedDebug = process.env.PI_BG_OBSERVED_WAITS_DEBUG;
 let retainFixtures = false;
 after(() => {
   process.env.PATH = originalPath;
   if (originalWindow === undefined) delete process.env.PI_BETTER_CALLBACK_BATCH_MS;
   else process.env.PI_BETTER_CALLBACK_BATCH_MS = originalWindow;
+  if (originalObservedDebug === undefined) delete process.env.PI_BG_OBSERVED_WAITS_DEBUG;
+  else process.env.PI_BG_OBSERVED_WAITS_DEBUG = originalObservedDebug;
   if (!retainFixtures) rmSync(fixtures, { recursive: true, force: true });
 });
 
@@ -255,6 +259,7 @@ async function dumpDurableCallbackDiagnostics(host, id, project) {
     console.error("[reload-durable-diagnostics]", JSON.stringify({
       id,
       sidecar: readJson(join(defaultSupervisorDirectory(), "observed", `${id}.json`)),
+      host: readJson(join(defaultSupervisorDirectory(), "observed", "host.json")),
       result: readJson(paths.result),
       lost: readJson(paths.lost),
       command: readJson(paths.command),

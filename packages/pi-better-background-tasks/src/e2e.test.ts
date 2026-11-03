@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import backgroundTasksExtension from "./index.js";
 import { recordFailure } from "./failures.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { metaPathFor, readMeta, taskDir, writeMeta } from "./registry.js";
+import { defaultSupervisorDirectory } from "./supervisor/index.js";
 import { currentProcessStartToken } from "./process-identity.js";
 import { FOREGROUND_SANDBOX_POLICY_CHANNEL, FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL } from "./sandbox.js";
 
@@ -31,6 +32,15 @@ function renderWidget(value: unknown, width = 120): string {
     return value({ requestRender() {} }, { fg: (_color: string, text: string) => text }).render(width).join("\n");
   }
   return "";
+}
+
+async function flushUntil(harness: ReturnType<typeof createHarness>, count: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await getCallbackBatcher(harness.pi).flush();
+    if (harness.messages.length >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 describe("extension e2e", () => {
@@ -780,11 +790,25 @@ describe("extension e2e", () => {
       await getCallbackBatcher(harness.pi).flush();
       expect(harness.messages).toHaveLength(0);
 
-      // A descendant branch still contains the anchor and may receive it.
+      // A descendant branch still contains the anchor and may receive it. The
+      // batcher can settle a prior suppression on a microtask, so drain until the
+      // single receipt rather than assuming one synchronous flush is enough.
       await harness.fireSessionTree(["anchor-1", "descendant"]);
-      await getCallbackBatcher(harness.pi).flush();
+      await flushUntil(harness, 1);
+      if (harness.messages.length === 0) {
+        const readJson = (path: string) => { try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; } };
+        console.error("[branch-diagnostics]", JSON.stringify({
+          id,
+          sidecar: readJson(join(defaultSupervisorDirectory(), "observed", `${id}.json`)),
+          host: readJson(join(defaultSupervisorDirectory(), "observed", "host.json")),
+          branchIds: harness.ctx.sessionManager.getBranch().map((entry) => entry.id),
+          messages: harness.messages.length,
+        }, null, 2));
+      }
       expect(harness.messages).toHaveLength(1);
       expect(harness.messages[0]).toContain(id);
+      await getCallbackBatcher(harness.pi).flush();
+      expect(harness.messages).toHaveLength(1);
     } finally {
       if (id) await harness.execute("bg_task_stop", { id });
       await harness.fireSessionShutdown();

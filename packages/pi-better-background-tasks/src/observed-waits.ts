@@ -21,7 +21,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -113,6 +113,17 @@ export interface WorkerRunPolicyInput {
 }
 
 const OBSERVER = Object.freeze({ kind: "local-supervisor", version: "1" });
+
+/**
+ * Process-wide host-instance ordering shared across module copies. A stale host
+ * must never take over a newer same-process host's callback claim, while the
+ * newer host may still recover an older instance's claim after a reload.
+ */
+const HOST_INSTANCE_STATE = (() => {
+  const key = Symbol.for("pi-better-background-tasks:observed-waits-host-instances");
+  const global = globalThis as typeof globalThis & { [key]?: { next: number; generations: Map<string, number>; closed: Set<string> } };
+  return global[key] ??= { next: 0, generations: new Map<string, number>(), closed: new Set<string>() };
+})();
 const LOCAL_DURABLE_ID = /^bgs_[0-9a-f]{20}$/;
 const DEFAULT_POLL_MS = 250;
 
@@ -628,6 +639,16 @@ interface LaunchContext {
   callbackDeferredReason?: string;
   callbackClaimedBy?: string;
   callbackClaimedAt?: number;
+  /** Identifies the exact callback attempt, so stale delivery callbacks are ignored. */
+  callbackClaimToken?: string;
+  callbackAttemptedAt?: number;
+  callbackSkipReason?: string;
+  terminalRecordedBy?: string;
+  terminalRecordedAt?: number;
+  terminalRecordedWithContext?: boolean;
+  terminalActiveSessionId?: string;
+  terminalActiveBranchIds?: readonly string[];
+  terminalReplayObservedBy?: string;
   /** Exact outbox event handoffs whose store receipt was lost to a reload. */
   outboxDelivered?: Record<string, { waitId: string; generation: number; terminalRevision: number; deliveredAt: number }>;
   dismissedAt?: number;
@@ -801,7 +822,20 @@ export class ObservedWaitHost {
   private unavailableReason?: string;
   private parentOrigin?: BackgroundTaskCallbackOrigin;
   private activeOrigin?: BackgroundTaskCallbackOrigin;
-  private activeBranchIds = new Set<string>();
+  /**
+   * The live extension context for the active session. Branch eligibility is
+   * read from this context on every check; the SDK can settle/reload session
+   * history after session_start, so a start-time branch snapshot is stale.
+   */
+  private activeContext?: ExtensionContext;
+  /** A new session/workspace context needs one seed scan of terminal callbacks. */
+  private terminalRecoveryNeeded = false;
+  /** Terminal callbacks awaiting their exact batcher handoff. */
+  private readonly pendingTerminalCallbacks = new Set<string>();
+  /** Running operations this host observed; a transition out of running can need recovery. */
+  private readonly watchedRunningTasks = new Set<string>();
+  /** Durable sidecars discovered in this supervisor directory. */
+  private readonly discoveredTaskSidecars = new Set<string>();
   private continuation?: ContinuationAdapter;
   private continuationError?: string;
   private readonly launches = new Map<string, LaunchContext>();
@@ -814,6 +848,7 @@ export class ObservedWaitHost {
   /** Opaque, validation-safe process-instance identity: pid + hashed start token. */
   private readonly hostStartDigest = startTokenDigest(currentProcessStartToken());
   private readonly hostId = `${process.pid}:${this.hostStartDigest}:${randomUUID()}`;
+  private hostGeneration = ++HOST_INSTANCE_STATE.next;
 
   constructor(private readonly pi: ExtensionAPI, options: ObservedWaitHostOptions = {}) {
     this.options = options;
@@ -847,6 +882,7 @@ export class ObservedWaitHost {
       enumerable: true,
       get: () => this.continuation !== undefined || this.rpcRuns.size > 0,
     });
+    HOST_INSTANCE_STATE.generations.set(this.hostId, this.hostGeneration);
     this.service = Object.freeze(base) as unknown as BackgroundOperationService;
     this.listenForServiceRequests();
     this.listenForWorkerRequests();
@@ -872,8 +908,10 @@ export class ObservedWaitHost {
       // The same host instance can be activated for another session without a
       // reload. Re-evaluate pending deliveries against the new active origin.
       this.recoverAbandonedDeliveries();
+      this.discoverObservedTasks();
       void this.reconcileNow();
       this.recoverTerminalNotifications();
+      this.terminalRecoveryNeeded = false;
       return;
     }
     // session_before_switch closes the store, and the same extension instance
@@ -890,10 +928,18 @@ export class ObservedWaitHost {
       this.announceUnavailable(this.unavailableReason);
       return;
     }
+    if (HOST_INSTANCE_STATE.closed.delete(this.hostId)) {
+      // Reactivation is newer than instances created while this host was closed.
+      this.hostGeneration = ++HOST_INSTANCE_STATE.next;
+      HOST_INSTANCE_STATE.generations.set(this.hostId, this.hostGeneration);
+    }
     this.announce();
+    this.writeHostDebug();
     this.recoverAbandonedDeliveries();
+    this.discoverObservedTasks();
     void this.reconcileNow();
     this.recoverTerminalNotifications();
+    this.terminalRecoveryNeeded = false;
     if (this.pollMs > 0) {
       this.timer = setInterval(() => { void this.reconcileNow(); }, this.pollMs);
       this.timer.unref?.();
@@ -903,6 +949,7 @@ export class ObservedWaitHost {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    HOST_INSTANCE_STATE.closed.add(this.hostId);
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     try { this.store?.close(); } catch { /* already closed */ }
@@ -913,7 +960,12 @@ export class ObservedWaitHost {
     this.stagedCheckpoints.clear();
     this.branchAnchors.clear();
     this.activeOrigin = undefined;
-    this.activeBranchIds.clear();
+    this.activeContext = undefined;
+    this.terminalRecoveryNeeded = false;
+    this.pendingTerminalCallbacks.clear();
+    this.watchedRunningTasks.clear();
+    this.discoveredTaskSidecars.clear();
+    this.writeHostDebug();
     this.announceUnavailable("the Background operation host closed");
   }
 
@@ -931,12 +983,107 @@ export class ObservedWaitHost {
     }
   }
 
+  /**
+   * Discover durable tasks launched by any host sharing this supervisor
+   * directory. A host that started before a task was registered never saw it in
+   * the running set; terminal discovery must not depend on that observation.
+   * This is a bounded directory listing plus new-sidecar lookup, not a scan of
+   * historical terminal rows on every tick.
+   */
+  private discoverObservedTasks(): void {
+    const store = this.store;
+    if (!store) return;
+    let names: string[];
+    try { names = readdirSync(join(this.directory, "observed")); } catch { return; }
+    for (const name of names) {
+      if (!name.endsWith(".json") || name === "host.json") continue;
+      const taskId = name.slice(0, -5);
+      if (!LOCAL_DURABLE_ID.test(taskId) || this.discoveredTaskSidecars.has(taskId)) continue;
+      const operation = this.operationForTask(taskId);
+      if (!operation) continue; // registration may land on the next tick
+      this.discoveredTaskSidecars.add(taskId);
+      if (operation.terminalRevision > 0) {
+        this.attemptTerminalCallback(
+          operation,
+          this.statusOf(operation.operationId),
+          operation.terminalOutcome ?? "failed",
+          [],
+          { pendingWithoutContext: true },
+        );
+      } else {
+        this.watchedRunningTasks.add(taskId);
+      }
+    }
+  }
+
+  /**
+   * Retry only terminal callbacks that are still awaiting an exact handoff. The
+   * pending set is seeded once at activation and by each terminal attempt; it is
+   * not a scan of the historical terminal table on every 250 ms tick.
+   */
+  private retryPendingTerminalCallbacks(): void {
+    if (!this.store || this.pendingTerminalCallbacks.size === 0) return;
+    for (const taskId of [...this.pendingTerminalCallbacks]) {
+      const operation = this.operationForTask(taskId);
+      if (!operation || operation.terminalRevision === 0) {
+        this.pendingTerminalCallbacks.delete(taskId);
+        continue;
+      }
+      const context = this.launchContext(taskId);
+      if (!context || context.callback === false || context.callbackDeliveredAt !== undefined || !this.options.notifyParent) {
+        this.pendingTerminalCallbacks.delete(taskId);
+        continue;
+      }
+      if (!this.activeContext) continue; // wait for an exact active owner
+      const relation = this.activeOwnerRelation(operation.owner);
+      if (relation === "unknown") continue; // keep pending; never guess
+      if (relation === "foreign") {
+        this.pendingTerminalCallbacks.delete(taskId);
+        continue;
+      }
+      const waitPending = this.store.listWaits({ owner: operation.owner, pendingOnly: true })
+        .some((wait) => wait.dependencies.some((dep) => dep.operationId === operation.operationId));
+      if (waitPending) {
+        this.pendingTerminalCallbacks.delete(taskId);
+        continue;
+      }
+      this.attemptTerminalCallback(
+        operation,
+        this.statusOf(operation.operationId),
+        operation.terminalOutcome ?? "failed",
+        [],
+      );
+    }
+  }
+
   /** A deterministic, awaitable reconciliation pass for tests and session activation. */
   async reconcileNow(): Promise<void> {
     if (!this.store || this.closed) return;
-    for (const operation of this.store.listOperations({ phase: "running" })) {
+    this.discoverObservedTasks();
+    const running = this.store.listOperations({ phase: "running" });
+    const runningIds = new Set(running.map((operation) => operation.taskId));
+    for (const taskId of [...this.watchedRunningTasks]) {
+      if (runningIds.has(taskId)) continue;
+      this.watchedRunningTasks.delete(taskId);
+      const operation = this.operationForTask(taskId);
+      if (operation && operation.terminalRevision > 0) {
+        // Another host may have recorded the terminal result without a live
+        // owner context. This host watched the operation, so recover its callback
+        // now that the active branch/identity can authorize the handoff.
+        this.attemptTerminalCallback(
+          operation,
+          this.statusOf(operation.operationId),
+          operation.terminalOutcome ?? "failed",
+          [],
+          { pendingWithoutContext: true },
+        );
+      }
+    }
+    for (const operation of running) {
+      this.watchedRunningTasks.add(operation.taskId);
       this.reconcileOperation(operation);
     }
+    this.retryPendingTerminalCallbacks();
     await this.dispatchOutbox();
   }
 
@@ -1087,14 +1234,17 @@ export class ObservedWaitHost {
   // ---- status / log / stop --------------------------------------------
 
   statusForParent(ctx: ExtensionContext, taskId: string): StatusView {
+    this.noteParentContext(ctx);
     return this.status(taskId, this.ownerFor(ctx));
   }
 
   logForParent(ctx: ExtensionContext, taskId: string, options?: { lines?: number }): LogView {
+    this.noteParentContext(ctx);
     return this.log(taskId, this.ownerFor(ctx), options);
   }
 
   async stopForParent(ctx: ExtensionContext, taskId: string): Promise<StatusView> {
+    this.noteParentContext(ctx);
     return this.stop(taskId, this.ownerFor(ctx));
   }
 
@@ -1180,7 +1330,7 @@ export class ObservedWaitHost {
     if (!operation || !this.belongsToParentOrigin(operation, origin)) return false;
     const projection = this.projectDurable(operation, this.options.now?.() ?? Date.now());
     if (!projection || !projection.terminal) return false;
-    const context = this.launchContext(taskId) ?? {
+    const context = this.currentLaunchContext(taskId) ?? {
       kind: projection.kind,
       gated: projection.stepGateFailure !== undefined,
       callback: false,
@@ -1275,6 +1425,26 @@ export class ObservedWaitHost {
     const inspection = this.inspect(taskId);
     this.reconcileInspection(operation, inspection);
     const current = store.getOperation(operation.operationId) ?? operation;
+    if (this.watchedRunningTasks.delete(taskId) && current.terminalRevision > 0) {
+      this.attemptTerminalCallback(
+        current,
+        this.statusOf(current.operationId),
+        current.terminalOutcome ?? "failed",
+        [],
+        { pendingWithoutContext: true },
+      );
+    }
+    if (current.terminalRevision > 0) {
+      // Status is an explicit owner read of this exact terminal operation. It is
+      // the natural recovery point when another host recorded terminal first.
+      this.attemptTerminalCallback(
+        current,
+        this.statusOf(current.operationId),
+        current.terminalOutcome ?? "failed",
+        [],
+        { pendingWithoutContext: true },
+      );
+    }
     this.recordReadsForTask(owner, current);
     const paths = supervisorPaths(this.directory, taskId);
     const gateText = inspection ? `${tail(paths.stderr).text}` : "";
@@ -1376,6 +1546,7 @@ export class ObservedWaitHost {
   // ---- parent waits ----------------------------------------------------
 
   waitForParent(ctx: ExtensionContext, taskIds: readonly string[], continuationNote: string): WaitView {
+    this.noteParentContext(ctx);
     const store = this.requireStore();
     const owner = this.ownerFor(ctx);
     const operations = this.operationsForTaskIds(owner, taskIds);
@@ -1397,12 +1568,14 @@ export class ObservedWaitHost {
   }
 
   listWaitsForParent(ctx: ExtensionContext, options: { pendingOnly?: boolean } = {}): WaitView[] {
+    this.noteParentContext(ctx);
     const store = this.requireStore();
     const owner = this.ownerFor(ctx);
     return store.listWaits({ owner, ...(options.pendingOnly ? { pendingOnly: true } : {}) }).map((wait) => this.waitView(wait));
   }
 
   cancelWaitForParent(ctx: ExtensionContext, waitId: string, generation: number, reason: string): WaitView {
+    this.noteParentContext(ctx);
     return this.cancelWait(this.ownerFor(ctx), waitId, generation, reason);
   }
 
@@ -1413,6 +1586,7 @@ export class ObservedWaitHost {
     disposition: AcknowledgeDisposition;
     note: string;
   }): AcknowledgeView {
+    this.noteParentContext(ctx);
     return this.acknowledge(this.ownerFor(ctx), input);
   }
 
@@ -2452,9 +2626,34 @@ export class ObservedWaitHost {
       this.options.logger?.(`observed waits: terminal replay for ${operation.taskId}: ${oneLine(String(error), 160)}`);
       return;
     }
-    if (!recorded.recorded) return;
+    const recordContext = this.currentLaunchContext(operation.taskId);
+    if (recordContext) {
+      if (recorded.recorded) {
+        recordContext.terminalRecordedBy = this.hostId;
+        recordContext.terminalRecordedAt = Date.now();
+        recordContext.terminalRecordedWithContext = !!this.activeContext;
+        recordContext.terminalActiveSessionId = this.activeContext ? this.sessionId(this.activeContext) : undefined;
+        recordContext.terminalActiveBranchIds = this.activeContext ? branchIdsOf(this.activeContext) : [];
+      } else {
+        recordContext.terminalReplayObservedBy = this.hostId;
+      }
+      this.launches.set(operation.taskId, recordContext);
+      this.writeLaunchContext(operation.taskId, recordContext);
+    }
+    if (!recorded.recorded) {
+      // A concurrent host recorded this terminal revision. This host may still be
+      // the one with the live owner context; evaluate the callback against it.
+      this.attemptTerminalCallback(
+        recorded.operation,
+        status,
+        outcome,
+        refs,
+        { pendingWithoutContext: true },
+      );
+      return;
+    }
     this.options.logger?.(`observed waits: ${operation.taskId} ${status} (revision ${recorded.operation.terminalRevision})`);
-    this.attemptTerminalCallback(operation, status, outcome, refs);
+    this.attemptTerminalCallback(operation, status, outcome, refs, { pendingWithoutContext: true });
     this.emitDurableTaskChange();
     // The parent callback is independent from the worker's wait: a worker may be
     // parked, while the parent session still learns that the supervised task ended.
@@ -2473,38 +2672,95 @@ export class ObservedWaitHost {
     status: SupervisorTaskStatus,
     outcome: string,
     refs: readonly WaitEvidenceView[],
+    options: { pendingWithoutContext?: boolean } = {},
   ): void {
-    const context = this.launchContext(operation.taskId);
-    if (!this.options.notifyParent || operation.owner.kind !== "parent-session" || !context || context.callback === false) return;
-    if (context.callbackDeliveredAt !== undefined) return;
+    const context = this.currentLaunchContext(operation.taskId);
+    const skip = (reason: string): void => {
+      if (!context) return;
+      if (context.callbackSkipReason === reason && context.callbackAttemptedAt !== undefined) return;
+      context.callbackAttemptedAt = Date.now();
+      context.callbackSkipReason = oneLine(reason, 200);
+      this.launches.set(operation.taskId, context);
+      this.writeLaunchContext(operation.taskId, context);
+    };
+    if (!this.options.notifyParent) return;
+    if (operation.owner.kind !== "parent-session") return;
+    if (!context) return;
+    if (context.callback === false) return;
+    // Never write any journal field while a newer or unprovable other host owns
+    // the claim. In particular, a stale host's reconcile must not rewrite its
+    // cached claim token over the current shared one.
+    const claim = this.claimState(context.callbackClaimedBy);
+    if (claim === "live" || claim === "unknown") return;
+    if (context.callbackDeliveredAt !== undefined) {
+      this.pendingTerminalCallbacks.delete(operation.taskId);
+      skip("already delivered");
+      return;
+    }
     const waitPending = this.store?.listWaits({ owner: operation.owner, pendingOnly: true })
       .some((wait) => wait.dependencies.some((dep) => dep.operationId === operation.operationId)) ?? false;
-    if (waitPending) return;
+    if (waitPending) {
+      this.pendingTerminalCallbacks.delete(operation.taskId);
+      skip("a registered wait owns delivery");
+      return;
+    }
+    if (claim === "self") return; // this host's event is already in flight
+    if (!this.activeContext) {
+      // This host recorded terminal before a session context was restored. Keep
+      // the callback pending so the next activation/tool call can hand it off;
+      // never notify without an exact active owner.
+      skip("no active context; pending");
+      if (options.pendingWithoutContext) this.markCallbackPending(operation.taskId, context);
+      return;
+    }
+    // A shared coordinator store can contain other sessions' operations. They are
+    // never this host's callback work, even when they are terminal. An active
+    // context without a readable session identity is unknown, so keep pending.
+    const relation = this.activeOwnerRelation(operation.owner);
+    if (relation === "unknown") {
+      skip("active session identity is unavailable; pending");
+      if (options.pendingWithoutContext) this.markCallbackPending(operation.taskId, context);
+      return;
+    }
+    if (relation === "foreign") {
+      // Another session owns this operation. This host may have recorded the
+      // terminal revision while reconciling the shared store, but it must not
+      // write callback journal state or clear the owner's pending work.
+      this.pendingTerminalCallbacks.delete(operation.taskId);
+      return;
+    }
+    // A terminal result can become eligible later: the live session may have
+    // been settling when the record was produced, or the owner may navigate
+    // back to an eligible descendant branch. Keep retrying only this id.
+    this.pendingTerminalCallbacks.add(operation.taskId);
     const origin = context.parentOrigin ?? { cwd: operation.owner.workspace, sessionId: operation.owner.sessionId };
     const branchId = context.branchId ?? operation.owner.branchId;
     if (!this.isParentOriginActive(origin, branchId)) {
+      skip("recorded branch anchor is not on the active branch; pending");
       this.markCallbackPending(operation.taskId, context);
       return;
     }
-    const claim = this.claimState(context.callbackClaimedBy);
-    if (claim === "self" || claim === "live" || claim === "unknown") return;
+    context.callbackAttemptedAt = Date.now();
+    context.callbackSkipReason = undefined;
     context.callbackPendingAt ??= Date.now();
     context.callbackClaimedBy = this.hostId;
     context.callbackClaimedAt = Date.now();
+    context.callbackClaimToken = randomUUID();
     context.callbackDeferredReason = undefined;
     this.launches.set(operation.taskId, context);
     this.writeLaunchContext(operation.taskId, context);
+    const claimToken = context.callbackClaimToken;
     let settled = false;
     const delivery: ParentDelivery = {
       delivered: () => {
         if (settled) return;
         settled = true;
-        this.completeTerminalCallback(operation.taskId);
+        this.completeTerminalCallback(operation.taskId, claimToken);
       },
       defer: (reason: string) => {
         if (settled) return;
         settled = true;
-        this.deferTerminalCallback(operation.taskId, reason);
+        this.deferTerminalCallback(operation.taskId, reason, true, claimToken);
       },
     };
     try {
@@ -2524,51 +2780,98 @@ export class ObservedWaitHost {
         })),
       }, delivery);
     } catch (error) {
-      delivery.defer(error instanceof Error ? error.message : String(error));
+      // A notifier that threw synchronously must not spin the microtask retry.
+      this.deferTerminalCallback(operation.taskId, error instanceof Error ? error.message : String(error), false, claimToken);
     }
   }
 
-  private markCallbackPending(taskId: string, context = this.launchContext(taskId)): void {
+  /**
+   * Exact owner relation for the live context. An active context without a
+   * readable session identity is `unknown`, never `foreign`: a terminal result
+   * stays pending until the real session identity is restored.
+   */
+  private activeOwnerRelation(owner: OwnerIdentity): "match" | "foreign" | "unknown" {
+    const ctx = this.activeContext;
+    if (!ctx) return "unknown";
+    let cwd: string;
+    try { cwd = ctx.cwd; } catch { return "unknown"; }
+    if (cwd !== owner.workspace) return "foreign";
+    const known = this.sessionIdIfAvailable(ctx);
+    if (known) return owner.sessionId === known ? "match" : "foreign";
+    const fallback = this.sessionId(ctx);
+    if (owner.sessionId === fallback) return "match";
+    // A real owner and an anonymous active context cannot prove each other.
+    return owner.sessionId.startsWith("anonymous:") ? "foreign" : "unknown";
+  }
+
+  private markCallbackPending(taskId: string, context = this.currentLaunchContext(taskId)): void {
     if (!context || context.callbackDeliveredAt !== undefined) return;
+    const claim = this.claimState(context.callbackClaimedBy);
+    if (claim === "live" || claim === "unknown") {
+      this.pendingTerminalCallbacks.add(taskId);
+      return; // preserve the current owner's claim without any write
+    }
     context.callbackPendingAt ??= Date.now();
     this.launches.set(taskId, context);
     this.writeLaunchContext(taskId, context);
+    this.pendingTerminalCallbacks.add(taskId);
   }
 
-  private completeTerminalCallback(taskId: string): void {
-    const context = this.launchContext(taskId);
+  private completeTerminalCallback(taskId: string, claimToken?: string): void {
+    // The sidecar is shared across hosts and is authoritative for the claim.
+    // Never validate a stale delivery against this host's cached launch object.
+    const context = this.currentLaunchContext(taskId);
     if (!context) return;
+    // A stale handoff from an older attempt must not receipt a newer attempt.
+    if (claimToken !== undefined && context.callbackClaimToken !== claimToken) return;
+    this.pendingTerminalCallbacks.delete(taskId);
     context.callbackDeliveredAt ??= Date.now();
+    context.callbackAttemptedAt = Date.now();
+    delete context.callbackSkipReason;
     delete context.callbackPendingAt;
     delete context.callbackClaimedBy;
     delete context.callbackClaimedAt;
+    delete context.callbackClaimToken;
     delete context.callbackDeferredReason;
     this.launches.set(taskId, context);
     this.writeLaunchContext(taskId, context);
     this.emitDurableTaskChange();
   }
 
-  private deferTerminalCallback(taskId: string, reason: string): void {
-    const context = this.launchContext(taskId);
+  private deferTerminalCallback(taskId: string, reason: string, retry = true, claimToken?: string): void {
+    const context = this.currentLaunchContext(taskId);
     if (!context || context.callbackDeliveredAt !== undefined) return;
+    // A stale suppression must not clear the claim of a newer attempt.
+    if (claimToken !== undefined && context.callbackClaimToken !== claimToken) return;
+    this.pendingTerminalCallbacks.add(taskId);
     context.callbackDeferredReason = oneLine(reason, 200);
+    context.callbackAttemptedAt = Date.now();
+    context.callbackSkipReason = `deferred: ${oneLine(reason, 160)}`;
     delete context.callbackClaimedBy;
     delete context.callbackClaimedAt;
+    delete context.callbackClaimToken;
     this.launches.set(taskId, context);
     this.writeLaunchContext(taskId, context);
+    if (retry) {
+      // A batcher suppression can land after a session_tree retry already saw
+      // the old claim. Re-evaluate the live branch after the claim is cleared.
+      queueMicrotask(() => {
+        if (!this.closed) this.retryPendingTerminalCallbacks();
+      });
+    }
   }
 
   private outboxHandoffProof(
     taskId: string,
     event: OutboxEventRecord,
   ): boolean {
-    const proof = this.launchContext(taskId)?.outboxDelivered?.[event.eventId];
+    const proof = this.currentLaunchContext(taskId)?.outboxDelivered?.[event.eventId];
     return !!proof && proof.waitId === event.waitId && proof.generation === event.generation
       && proof.terminalRevision === event.terminalRevision;
   }
 
   private recordOutboxHandoffProof(taskId: string, event: OutboxEventRecord): void {
-    const context = this.launchContext(taskId);
+    const context = this.currentLaunchContext(taskId);
     if (!context) return;
     const map = { ...(context.outboxDelivered ?? {}) };
     const at = this.options.now?.() ?? Date.now();
@@ -2587,7 +2890,7 @@ export class ObservedWaitHost {
   }
 
   private clearOutboxHandoffProof(taskId: string, eventId: string): void {
-    const context = this.launchContext(taskId);
+    const context = this.currentLaunchContext(taskId);
     if (!context?.outboxDelivered || !(eventId in context.outboxDelivered)) return;
     const map = { ...context.outboxDelivered };
     delete map[eventId];
@@ -2605,8 +2908,17 @@ export class ObservedWaitHost {
     if (hostId === this.hostId) return "self";
     const { pid, startTokenDigest: claimedDigest } = parseHostIdentity(hostId);
     if (!pid) return "unknown";
-    // A different instance with this process's pid is the previous host instance
-    // in the same process (a reload); it cannot still be delivering.
+    if (HOST_INSTANCE_STATE.closed.has(hostId)) return "dead";
+    const generation = HOST_INSTANCE_STATE.generations.get(hostId);
+    if (generation !== undefined) {
+      if (pid === process.pid) {
+        // A newer live instance owns the claim; an older one is a reload
+        // predecessor whose claim this host may recover.
+        return generation > this.hostGeneration ? "live" : "dead";
+      }
+    }
+    // A different instance with this process's pid is a previous instance in the
+    // same process (a reload) or a host this process cannot prove is current.
     if (pid === process.pid) return "dead";
     if (!processExists(pid)) return "dead";
     if (!claimedDigest) return "unknown";
@@ -2617,8 +2929,7 @@ export class ObservedWaitHost {
 
   /**
    * Recover deliveries whose claiming host disappeared (reload, crash, or a
-   * session switch). A claim owned by a live other process is left alone until
-   * it is old enough to be considered abandoned.
+   * session switch). A claim owned by a live or unprovable host is left alone.
    */
   private recoverAbandonedDeliveries(): void {
     const store = this.store;
@@ -2636,11 +2947,12 @@ export class ObservedWaitHost {
       } catch { /* another host already recovered it */ }
     }
     for (const operation of store.listOperations({ phase: "terminal" })) {
-      const context = this.launchContext(operation.taskId);
+      const context = this.currentLaunchContext(operation.taskId);
       if (!context?.callbackClaimedBy || context.callbackClaimedBy === this.hostId) continue;
       if (this.claimState(context.callbackClaimedBy) !== "dead") continue;
       delete context.callbackClaimedBy;
       delete context.callbackClaimedAt;
+      delete context.callbackClaimToken;
       this.launches.set(operation.taskId, context);
       this.writeLaunchContext(operation.taskId, context);
     }
@@ -3067,15 +3379,37 @@ export class ObservedWaitHost {
     this.setActiveOrigin(ctx);
     if (!this.store) return;
     this.recoverAbandonedDeliveries();
+    if (this.terminalRecoveryNeeded) {
+      this.terminalRecoveryNeeded = false;
+      this.recoverTerminalNotifications();
+    }
     void this.dispatchOutbox();
-    this.recoverTerminalNotifications();
+    this.retryPendingTerminalCallbacks();
+    this.writeHostDebug();
   }
 
   private setActiveOrigin(ctx: ExtensionContext): void {
-    const origin = { cwd: ctx.cwd, sessionId: this.sessionId(ctx) };
+    const previous = this.activeContext;
+    const previousKey = previous ? this.contextKey(previous) : undefined;
+    const nextSessionId = this.sessionIdIfAvailable(ctx);
+    const previousSessionId = previous ? this.sessionIdIfAvailable(previous) : undefined;
+    // A partial tool/event context (no readable session identity) must not
+    // replace a context that still proves the real session.
+    if (!nextSessionId && previousSessionId) return;
+    const origin = { cwd: ctx.cwd, sessionId: nextSessionId ?? this.sessionId(ctx) };
+    const nextKey = this.contextKey(ctx);
     this.parentOrigin = origin;
     this.activeOrigin = origin;
-    this.activeBranchIds = new Set(branchIdsOf(ctx));
+    this.activeContext = ctx;
+    // A tool call or activation for a different session/workspace must seed the
+    // terminal callback journal once. Same-session calls keep the live context
+    // current without rescanning historical terminal records.
+    if (!previous || previousKey !== nextKey) this.terminalRecoveryNeeded = true;
+    this.writeHostDebug();
+  }
+
+  private contextKey(ctx: ExtensionContext): string | undefined {
+    try { return `${this.sessionId(ctx)}\u0000${ctx.cwd}`; } catch { return undefined; }
   }
 
   /**
@@ -3083,14 +3417,18 @@ export class ObservedWaitHost {
    * branch contains the recorded anchor; an abandoned fork does not.
    */
   isParentOriginActive(origin: BackgroundTaskCallbackOrigin | undefined, branchId?: string | null): boolean {
-    const active = this.activeOrigin;
-    if (!active || !origin) return false;
-    if (active.cwd !== origin.cwd) return false;
-    if (origin.sessionId || active.sessionId) {
-      if (origin.sessionId !== active.sessionId) return false;
+    const ctx = this.activeContext;
+    if (!ctx || !origin) return false;
+    let cwd: string;
+    try { cwd = ctx.cwd; } catch { return false; }
+    if (cwd !== origin.cwd) return false;
+    const sessionId = this.sessionId(ctx);
+    if (origin.sessionId || sessionId) {
+      if (origin.sessionId !== sessionId) return false;
     }
-    if (branchId) return this.activeBranchIds.has(branchId);
-    return true;
+    if (!branchId) return true;
+    // Read the branch live: the SDK may settle reload history after session_start.
+    return branchIdsOf(ctx).includes(branchId);
   }
 
   get parentSessionOrigin(): BackgroundTaskCallbackOrigin | undefined {
@@ -3100,6 +3438,37 @@ export class ObservedWaitHost {
   private requireStarted(ctx?: ExtensionContext): void {
     if (!ctx) return;
     this.noteParentContext(ctx);
+  }
+
+  /** Bounded host-level diagnostics for root reload investigations. */
+  private writeHostDebug(): void {
+    if (process.env.PI_BG_OBSERVED_WAITS_DEBUG !== "1") return;
+    try {
+      const dir = join(this.directory, "observed");
+      mkdirSync(dir, { recursive: true });
+      const ctx = this.activeContext;
+      writeFileSync(join(dir, "host.json"), JSON.stringify({
+        hostId: this.hostId,
+        storeOpen: !!this.store,
+        closed: this.closed,
+        activeContext: !!ctx,
+        activeSessionId: ctx ? this.sessionIdIfAvailable(ctx) ?? this.sessionId(ctx) : undefined,
+        activeCwd: ctx ? ctx.cwd : undefined,
+        activeBranchIds: ctx ? branchIdsOf(ctx) : [],
+        terminalRecoveryNeeded: this.terminalRecoveryNeeded,
+        pendingTerminalCallbacks: [...this.pendingTerminalCallbacks],
+        writtenAt: Date.now(),
+      }), { mode: 0o600 });
+    } catch { /* diagnostics only */ }
+  }
+
+  private sessionIdIfAvailable(ctx: ExtensionContext): string | undefined {
+    try {
+      const id = ctx.sessionManager?.getSessionId();
+      return typeof id === "string" && id.length > 0 ? id : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private sidecarPath(taskId: string): string {
@@ -3140,6 +3509,15 @@ export class ObservedWaitHost {
         ...(typeof value.callbackDeferredReason === "string" ? { callbackDeferredReason: value.callbackDeferredReason } : {}),
         ...(typeof value.callbackClaimedBy === "string" ? { callbackClaimedBy: value.callbackClaimedBy } : {}),
         ...(typeof value.callbackClaimedAt === "number" ? { callbackClaimedAt: value.callbackClaimedAt } : {}),
+        ...(typeof value.callbackClaimToken === "string" ? { callbackClaimToken: value.callbackClaimToken } : {}),
+        ...(typeof value.callbackAttemptedAt === "number" ? { callbackAttemptedAt: value.callbackAttemptedAt } : {}),
+        ...(typeof value.callbackSkipReason === "string" ? { callbackSkipReason: value.callbackSkipReason } : {}),
+        ...(typeof value.terminalRecordedBy === "string" ? { terminalRecordedBy: value.terminalRecordedBy } : {}),
+        ...(typeof value.terminalRecordedAt === "number" ? { terminalRecordedAt: value.terminalRecordedAt } : {}),
+        ...(typeof value.terminalRecordedWithContext === "boolean" ? { terminalRecordedWithContext: value.terminalRecordedWithContext } : {}),
+        ...(typeof value.terminalActiveSessionId === "string" ? { terminalActiveSessionId: value.terminalActiveSessionId } : {}),
+        ...(Array.isArray(value.terminalActiveBranchIds) ? { terminalActiveBranchIds: value.terminalActiveBranchIds } : {}),
+        ...(typeof value.terminalReplayObservedBy === "string" ? { terminalReplayObservedBy: value.terminalReplayObservedBy } : {}),
         ...(value.outboxDelivered && typeof value.outboxDelivered === "object" && !Array.isArray(value.outboxDelivered)
           ? { outboxDelivered: value.outboxDelivered as LaunchContext["outboxDelivered"] } : {}),
         ...(typeof value.dismissedAt === "number" ? { dismissedAt: value.dismissedAt } : {}),
@@ -3151,6 +3529,19 @@ export class ObservedWaitHost {
 
   private launchContext(taskId: string): LaunchContext | undefined {
     return this.launches.get(taskId) ?? this.readLaunchContext(taskId);
+  }
+
+  /**
+   * The shared sidecar is authoritative for callback claims. Every callback
+   * mutation and diagnostic write uses this fresh copy, never a cached object
+   * that another host may have already superseded.
+   */
+  private currentLaunchContext(taskId: string): LaunchContext | undefined {
+    const persisted = this.readLaunchContext(taskId);
+    if (persisted) { this.launches.set(taskId, persisted); return persisted; }
+    // An unreadable journal cannot establish ownership of a delivery claim.
+    this.launches.delete(taskId);
+    return undefined;
   }
 
   private requireStore(): Store {
