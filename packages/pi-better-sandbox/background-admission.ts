@@ -32,7 +32,7 @@ function trustedBackgroundEntries(): Set<string> {
 /** A familiar name is only a candidate, not evidence that its implementation is safe. */
 export function isBackgroundLaunch(name: string, input: unknown): boolean {
     const action = (input as { action?: unknown } | null)?.action;
-    return name === "bg_task_spawn" || name === "bg_task_watch" ||
+    return name === "bg_task_spawn" || name === "bg_task_spawn_batch" || name === "bg_task_watch" ||
         (name === "bg_task" && (action === "spawn" || action === "watch"));
 }
 
@@ -41,7 +41,7 @@ export function createBackgroundAdmission(pi: ExtensionAPI, requiresExecutionCon
     return (name: string, input: unknown, sourcePath?: string): BackgroundAdmission | undefined => {
         try {
             if (name !== "bg_task" && name !== "bg_status" && ![
-                "bg_task_spawn", "bg_task_watch", "bg_task_list", "bg_task_status", "bg_task_log", "bg_task_stop",
+                "bg_task_spawn", "bg_task_spawn_batch", "bg_task_watch", "bg_task_list", "bg_task_status", "bg_task_log", "bg_task_stop",
             ].includes(name)) return;
             const launch = isBackgroundLaunch(name, input);
             const executionControls = launch && requiresExecutionControls();

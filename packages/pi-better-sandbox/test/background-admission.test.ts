@@ -184,9 +184,11 @@ test("schema and canonical source must belong to the current registration, inclu
     registerTools(pi);
     const oldSchemas = new Map([...tools].map(([name, tool]) => [name, tool.parameters]));
     assert.equal(admit("bg_task_spawn", {}), "local-launch");
+    assert.equal(admit("bg_task_spawn_batch", {}), "local-launch", "a batch launch is admitted on the same trusted registration");
     for (const untrusted of [undefined, "<inline:background>", "relative/src/index.ts", sandboxEntry, join(fixture, "spoof/src/index.ts")]) {
         source = untrusted;
         assert.equal(admit("bg_task_spawn", {}), undefined);
+        assert.equal(admit("bg_task_spawn_batch", {}), undefined, "an untrusted batch source is not admitted");
     }
     source = wrapperEntry;
     assert.equal(admit("bg_task_spawn", {}), "local-launch");
@@ -197,6 +199,7 @@ test("schema and canonical source must belong to the current registration, inclu
     source = backgroundEntry;
     schemaOverride = { ...tools.get("bg_task_spawn")!.parameters };
     assert.equal(admit("bg_task_spawn", {}), undefined);
+    assert.equal(admit("bg_task_spawn_batch", {}), undefined, "a schema mismatch on the batch tool is not admitted");
     schemaOverride = undefined;
     for (const handler of shutdown) handler();
     assert.equal(admit("bg_task_spawn", {}), undefined);
