@@ -13,6 +13,7 @@ const BUNDLED_EXTENSIONS = [
   "extensions/background-tasks/index.ts",
   "extensions/ssh/index.ts",
   "extensions/goal/index.ts",
+  "extensions/model-router/index.ts",
   ...harnessExtensionFilters,
 ];
 
@@ -22,6 +23,7 @@ const STANDALONE = [
   ["pi-better-background-tasks", "src/index.ts"],
   ["pi-better-ssh", "src/index.ts"],
   ["pi-better-goal", "src/index.ts"],
+  ["pi-better-model-router", "src/index.ts"],
 ];
 
 function posix(path) {

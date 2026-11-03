@@ -145,7 +145,7 @@ before(async () => {
   for (const source of defaultExtensionEntries()) {
     const extension = (await import(source)).default;
     assert.equal(typeof extension, "function", `${source} must export an extension factory`);
-    extension(pi);
+    await extension(pi);
   }
 
   for (const handler of sessionStartHandlers) {

@@ -254,6 +254,8 @@ jobs:
                 node_modules/pi-better-background-tasks/src/shared-execution-policy.ts \
                 node_modules/pi-better-ssh/src/index.ts \
                 node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
+                node_modules/pi-better-model-router/src/index.ts \
+                node_modules/pi-better-model-router/node_modules/pi-ollama-cloud/index.ts \
                 node_modules/pi-better-goal/src/index.ts
               do
                 check_pack_file /tmp/package-pack.json "$required"

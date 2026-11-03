@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.39.0] - 2026-11-02
+
+### Added
+
+- Include Model Router 0.1.0 and its bundled Ollama Cloud provider in the Harness bundle and component installer. Select `router/deepseek-flash-auto` for price-based routing; the selected default model is unchanged. Older Pi hosts receive an upgrade notice and keep the other Harness extensions available.
+
 ## [pi-better-model-router@0.1.0] - 2026-11-02
 
 ### Added
