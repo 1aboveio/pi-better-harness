@@ -90,6 +90,7 @@ const subagentFailures = await import("../packages/pi-better-subagents/failures.
 const observations = await import("../packages/pi-better-subagents/shared-failure-observations.ts");
 const bgRegistry = await import("../packages/pi-better-background-tasks/src/registry.ts");
 const { defaultSupervisorDirectory, supervisorPaths } = await import("../packages/pi-better-background-tasks/src/supervisor/index.ts");
+const { openStore } = await import("../packages/pi-better-background-tasks/src/shared-operation-coordinator/index.ts");
 const { stopProcessGroup } = await import("../packages/pi-better-background-tasks/src/process.ts");
 const bgFailures = await import("../packages/pi-better-background-tasks/src/failures.ts");
 const bgObservations = await import("../packages/pi-better-background-tasks/src/shared-failure-observations.ts");
@@ -226,6 +227,52 @@ async function taskTerminal(host, id) {
   if (meta && meta.status !== "running") return true;
   try { return isTerminalStatusText(await host.call("bg_task_status", { id })); }
   catch { return !!supervisorTerminal(id); }
+}
+
+async function dumpDurableCallbackDiagnostics(host, id, project) {
+  if (!String(id).startsWith("bgs_")) return;
+  try {
+    const paths = supervisorPaths(defaultSupervisorDirectory(), id);
+    let operation;
+    let outbox = [];
+    let waits = [];
+    try {
+      const store = openStore({ path: join(agentDir, "operation-coordinator.sqlite") });
+      try {
+        operation = store.listOperations({ taskId: id })[0];
+        if (operation) {
+          outbox = store.listOutbox({ operationId: operation.operationId });
+          waits = store.listWaits().filter((wait) => wait.dependencies.some((dep) => dep.operationId === operation.operationId));
+        }
+      } finally { store.close(); }
+    } catch (error) {
+      operation = { storeError: error instanceof Error ? error.message : String(error) };
+    }
+    let status = "";
+    try { status = await host.call("bg_task_status", { id, verbose: true }); } catch (error) {
+      status = `status read failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    console.error("[reload-durable-diagnostics]", JSON.stringify({
+      id,
+      sidecar: readJson(join(defaultSupervisorDirectory(), "observed", `${id}.json`)),
+      result: readJson(paths.result),
+      lost: readJson(paths.lost),
+      command: readJson(paths.command),
+      operation,
+      outbox: outbox.map((event) => ({ eventId: event.eventId, state: event.state, attempts: event.attempts, claimedBy: event.dispatchClaim?.claimedBy, reason: event.reason })),
+      waits: waits.map((wait) => ({ waitId: wait.waitId, generation: wait.generation, phase: wait.phase, owner: wait.owner, cancelEpoch: wait.cancelEpoch })),
+      active: {
+        sessionId: host.session.sessionManager.getSessionId(),
+        cwd: project,
+        branchIds: host.session.sessionManager.getBranch().map((entry) => entry.id),
+      },
+      sent: host.sent.length,
+      requests: host.requests.length,
+      status,
+    }, null, 2));
+  } catch (error) {
+    console.error("[reload-durable-diagnostics] failed", error);
+  }
 }
 
 async function durableIdsFor(host, children) {
@@ -399,7 +446,29 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
   for (const [id, marker] of [[localId, localDone], [directId, directDone]]) {
     writeFileSync(marker, "");
     await waitFor(`${id} to finish`, () => taskTerminal(host, id));
-    await waitFor(`${id} completion callback`, () => host.completions(id).length > 0);
+    // The callback batcher only delivers when the session is idle. Let a reload
+    // settle before waiting for the callback; this changes no exact-once claim.
+    let idleTimer;
+    try {
+      await Promise.race([
+        host.session.waitForIdle(),
+        new Promise((_, reject) => {
+          idleTimer = setTimeout(() => reject(new Error(`${id}: the reloaded session did not become idle`)), 5_000);
+          idleTimer.unref?.();
+        }),
+      ]);
+    } catch (error) {
+      await dumpDurableCallbackDiagnostics(host, id, project);
+      throw error;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+    }
+    try {
+      await waitFor(`${id} completion callback`, () => host.completions(id).length > 0);
+    } catch (error) {
+      await dumpDurableCallbackDiagnostics(host, id, project);
+      throw error;
+    }
     const meta = bgRegistry.readMeta(id);
     if (meta) {
       assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
