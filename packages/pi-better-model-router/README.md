@@ -4,7 +4,7 @@ Select `router/deepseek-flash-auto` once. Pi chooses DeepSeek or Ollama Cloud by
 
 ## Requirements and setup
 
-Requires Pi's native `registerVirtualModel` API (tested with Pi 1.4.0). Older hosts report an upgrade error. This package is standalone and is not included in the Harness bundle.
+Requires Pi's native `registerVirtualModel` API (tested with Pi 1.4.0). Older hosts report an upgrade error. Install this package on its own, or use the pi-better-harness bundle, which includes the router and Ollama Cloud provider. The Harness bundle skips routing with an upgrade notice on older Pi hosts; the standalone router reports an upgrade error.
 
 From this checkout:
 

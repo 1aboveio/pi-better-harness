@@ -13,7 +13,14 @@ core extensions:
 | `pi-better-background-tasks` | Run durable shell tasks and command watchers without blocking the current turn. |
 | `pi-better-ssh` | Run short synchronous remote commands over reusable SSH connections. |
 | `pi-better-goal` | Track the current objective and keep Pi aware of active background work. |
+| `pi-better-model-router` | Route between DeepSeek and Ollama Cloud by estimated price. |
 | Harness Outcome & Todo | Display saved session context and checklist progress by default; hooks are opt-in in `/harness-settings`. |
+
+The bundle includes `pi-better-model-router` 0.1.0 and its Ollama Cloud provider.
+Select `router/deepseek-flash-auto` in `/model` to use it; DeepSeek is the default
+tie preference. Installation does not change the default selected model. The router
+requires Pi's `registerVirtualModel` API and is tested with Pi 1.4.0. On older
+hosts without that API, the bundle skips the router and shows an upgrade notice.
 
 `pi-better-read-aloud` lives in this repo but is intentionally not part of the
 meta package.
@@ -34,6 +41,7 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
+pi install npm:pi-better-model-router
 ```
 
 For a temporary one-off run without changing Pi settings:
@@ -58,12 +66,12 @@ The package workspaces are:
 | `packages/pi-better-plan` | retired private archive | no | no |
 | `packages/pi-better-server` | `pi-better-server` | yes | no |
 | `packages/pi-better-read-aloud` | not configured for publishing | no | no |
-| `packages/pi-better-model-router` | `pi-better-model-router` | yes | no |
+| `packages/pi-better-model-router` | `pi-better-model-router` | yes | yes |
 | `packages/navigator` | internal workspace | no | no |
 | `packages/sandbox-core` | internal workspace, vendored into consumers | no | no |
 | `packages/sandbox-diagnostics` | internal workspace, vendored into sandbox consumers | no | no |
 
-All publish-configured packages carry the `pi-package` npm keyword. Use `npx pi-better-harness install` to keep component identities while loading the filtered Harness-owned extensions, or install the bundle directly. The installer removes an old Plan registration only in the selected scope.
+All publish-configured packages carry the `pi-package` npm keyword. Use `npx pi-better-harness install` to keep all six component identities, including the router, while loading the filtered Harness-owned extensions, or install the bundle directly. The installer removes an old Plan registration only in the selected scope.
 
 ## Development
 
@@ -305,6 +313,7 @@ pi install ./packages/pi-better-subagents
 pi install ./packages/pi-better-background-tasks
 pi install ./packages/pi-better-ssh
 pi install ./packages/pi-better-goal
+pi install ./packages/pi-better-model-router
 ```
 
 ## Release Checklist

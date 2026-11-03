@@ -2,7 +2,7 @@
 
 <img src="docs/images/brand/logo.png" alt="Pi Better Harness logo" width="128" height="128" />
 
-`pi-better-harness` combines an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, Goal continuation, and optional Outcome & Todo.
+`pi-better-harness` combines an opt-in foreground write sandbox, delegated subagents, durable background shell tasks, synchronous SSH commands, Goal continuation, model routing, and optional Outcome & Todo.
 
 ## Quick Answer
 
@@ -26,6 +26,7 @@ pi install npm:pi-better-subagents
 pi install npm:pi-better-background-tasks
 pi install npm:pi-better-ssh
 pi install npm:pi-better-goal
+pi install npm:pi-better-model-router
 ```
 
 The backward-compatible bundled installation remains available:
@@ -84,9 +85,10 @@ Do not use the bundle when you only need one extension; install that package dir
 - `pi-better-background-tasks`: durable shell tasks, watchers, logs, and status inspection.
 - `pi-better-ssh`: safe synchronous remote commands over reusable SSH connections.
 - `pi-better-goal`: explicit triggers, pause/resume, and background-aware continuation.
+- [`pi-better-model-router`](packages/pi-better-model-router/README.md): price-based routing between DeepSeek and Ollama Cloud.
 - Harness Outcome & Todo: session context and checklist progress, off until enabled in `/harness-settings`.
 
-[`pi-better-model-router`](packages/pi-better-model-router/README.md) provides configurable price-based routing between DeepSeek and Ollama Cloud. It is standalone, requires Pi's virtual-model API (tested with Pi 1.4.0), and is not included in the meta package.
+The bundle includes `pi-better-model-router` 0.1.0 and its Ollama Cloud provider; the `npx` installer installs the router as a sixth standalone component. Select `router/deepseek-flash-auto` in `/model` to use it. The router prefers DeepSeek when prices tie and does not change the default selected model. It requires Pi's `registerVirtualModel` API and is tested with Pi 1.4.0. On older hosts without that API, the bundle skips the router and shows an upgrade notice.
 
 `pi-better-read-aloud` lives in this repo but is not published or included in the meta package yet.
 
