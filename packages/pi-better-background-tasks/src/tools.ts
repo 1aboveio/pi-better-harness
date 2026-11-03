@@ -16,6 +16,14 @@ import {
 } from "./output.js";
 import { cursorKind, readOutputControls } from "./shared-log-utils.js";
 import { cancelCallbackBatch, getCallbackBatcher, setCallbackBatchContext } from "./shared-callback-batcher.js";
+import { registerDeliveryObserver } from "./delivery-observer.js";
+import {
+  formatWaitView,
+  getObservedWaitHost,
+  observedWaitServiceUnavailableReason,
+  type DurableTaskKind,
+  type WaitView,
+} from "./observed-waits.js";
 import { inspectMeta, listMetasForOrigin, readMeta, writeMeta } from "./registry.js";
 import { awaitFirstWatchCheck, FIRST_WATCH_CHECK_WAIT_MS, resumeRunningTask, spawnTask, startWatchTask, stopTask, type WatchTaskParams } from "./runtime.js";
 import { runTaskMaintenance } from "./maintenance.js";
@@ -227,6 +235,56 @@ const StatusActionParams = Type.Object({
   ...CursorFields,
 });
 
+const WaitForOperationsParams = Type.Object({
+  task_ids: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
+    minItems: 1,
+    maxItems: 100,
+    description: "Durable local task ids owned by this session. Every listed operation must reach a terminal outcome.",
+  }),
+  continuation_note: Type.String({
+    minLength: 1,
+    maxLength: 2_000,
+    description: "The next reasoning step after the result. This cannot change tools, model, role, permissions or authorization.",
+  }),
+}, {
+  additionalProperties: false,
+  description: "Register an all-settled durable wait on owned background operations. Returns immediately; the parent stays responsive and is notified when every dependency is terminal. A final answer that says you are waiting is not a registration.",
+});
+
+const TerminalRevisionSchema = Type.Object({
+  operation_id: Type.String({ minLength: 1, maxLength: 200 }),
+  task_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+  revision: Type.Integer({ minimum: 1 }),
+}, { additionalProperties: false });
+
+const AcknowledgeParams = Type.Object({
+  wait_id: Type.String({ minLength: 1, maxLength: 200 }),
+  generation: Type.Integer({ minimum: 1 }),
+  terminal_revisions: Type.Union([
+    Type.Array(TerminalRevisionSchema, { minItems: 1, maxItems: 100 }),
+    Type.Record(Type.String(), Type.Integer({ minimum: 1 })),
+  ], { description: "The exact terminal revisions that were read. An object maps operation_id (or task_id) to revision." }),
+  disposition: Type.Union([Type.Literal("continue"), Type.Literal("blocked"), Type.Literal("assignment-complete")]),
+  note: Type.String({ maxLength: 4_000, description: "What the evidence means for the next step. This does not complete a Goal or assignment by itself." }),
+}, {
+  additionalProperties: false,
+  description: "Interpret the exact terminal evidence of a wait and consume that generation. Requires a prior status/log read of each revision. Acknowledging does not complete the assignment.",
+});
+
+const WaitCancelParams = Type.Object({
+  wait_id: Type.String({ minLength: 1, maxLength: 200 }),
+  generation: Type.Integer({ minimum: 1 }),
+  reason: Type.String({ minLength: 1, maxLength: 1_024 }),
+}, {
+  additionalProperties: false,
+  description: "Cancel one durable wait generation. This detaches observation ownership; it does not stop the background task. Stopping the task is a separate explicit action.",
+});
+
+const WaitListParams = Type.Object({
+  pending_only: Type.Optional(Type.Boolean({ description: "Only generations that can still accept a result. Default false lists consumed and cancelled history too." })),
+}, { additionalProperties: false, description: "List durable operation waits owned by the current session and workspace." });
+
+
 const BACKGROUND_ORCHESTRATION_GUIDELINES = [
   "Follow the Harness execution policy when scheduling independent background operations; subagent delegation mode does not require background commands to run serially.",
   "Use background tasks for genuinely long-running processes or repeated checks. Run short commands in the foreground.",
@@ -285,6 +343,11 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: SpawnParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
+      const durable = await durableLaunchText(pi, "process", params, ctx);
+      if (durable !== undefined) {
+        refreshBackgroundTasksNavigator(ctx);
+        return text(durable);
+      }
       const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, activeSession, getActiveSession));
       refreshBackgroundTasksNavigator(ctx);
       return text(launched);
@@ -313,6 +376,11 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: WatchParams,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
+      const durable = await durableLaunchText(pi, "watch", params, ctx);
+      if (durable !== undefined) {
+        refreshBackgroundTasksNavigator(ctx);
+        return text(durable);
+      }
       const launched = await launchWatch(pi, params, ctx.cwd, activeSession, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal);
       refreshBackgroundTasksNavigator(ctx);
       return text(launched);
@@ -326,7 +394,7 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: ListParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
-      return text(formatList(listOptions(params, activeSession)));
+      return text(durableAwareList(pi, params, activeSession));
     },
   });
 
@@ -337,6 +405,8 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
+      const durable = durableStatusText(pi, params.id, ctx);
+      if (durable !== undefined) return text(durable);
       return text(taskStatus(pi, params.id, params, statusOptions(params, activeSession)));
     },
   });
@@ -351,6 +421,8 @@ export function registerTools(pi: ExtensionAPI): void {
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = ctx ? getCallbackOrigin(ctx) : activeSession;
+      const durable = durableLogText(pi, params.id, params, ctx);
+      if (durable !== undefined) return text(durable);
       return logText(params.id, logOptions(params, activeSession));
     },
   });
@@ -362,6 +434,11 @@ export function registerTools(pi: ExtensionAPI): void {
     parameters: IdParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
+      const durable = await durableStopText(pi, params.id, ctx);
+      if (durable !== undefined) {
+        refreshBackgroundTasksNavigator(ctx);
+        return text(durable);
+      }
       const result = await formatStop(pi, params.id, ctx, getActiveSession, statusOptions(params, activeSession));
       refreshBackgroundTasksNavigator(ctx);
       return text(result);
@@ -394,6 +471,113 @@ export function registerTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       activeSession = getCallbackOrigin(ctx);
       return actionText(pi, params, ctx, activeSession, getActiveSession);
+    },
+  });
+
+  register({
+    name: "wait_for_operations",
+    label: "Wait for Operations",
+    description: "Register an all-settled durable wait on background operations owned by this session and return immediately. The parent stays responsive; a completion notification arrives when every listed operation is terminal. Reading the status/log and acknowledging the exact revisions is required before the wait is consumed. This never enqueues, merges, pushes, or resumes a model by itself.",
+    promptGuidelines: [
+      "Call wait_for_operations when no independent work remains; a final answer that says you are waiting is not a registration.",
+      "After a settled wait, inspect bg_task_status and bg_task_log, then acknowledge_operation_result with the exact revisions.",
+    ],
+    parameters: WaitForOperationsParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const host = getObservedWaitHost(pi);
+      if (!host?.available) {
+        return text(observedWaitServiceUnavailableReason(pi)
+          ?? "Observed waits are unavailable in this session; inspect tasks directly and continue without a durable wait.");
+      }
+      try {
+        const wait = host.waitForParent(ctx, params.task_ids, params.continuation_note);
+        return text(formatWaitView(wait), wait);
+      } catch (error) {
+        return text(`Wait was not registered: ${readableError(error)}`);
+      }
+    },
+  });
+
+  register({
+    name: "acknowledge_operation_result",
+    label: "Acknowledge Operation Result",
+    description: "Consume one ready wait generation after interpreting its exact terminal evidence. Requires a prior bg_task_status or bg_task_log read of every listed revision. The disposition (continue, blocked, assignment-complete) is recorded against the evidence; it does not complete a Goal or assignment by itself.",
+    parameters: AcknowledgeParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const host = getObservedWaitHost(pi);
+      if (!host?.available) {
+        return text(observedWaitServiceUnavailableReason(pi)
+          ?? "Observed waits are unavailable in this session; no wait was consumed.");
+      }
+      try {
+        const ack = host.acknowledgeForParent(ctx, {
+          waitId: params.wait_id,
+          generation: params.generation,
+          terminalRevisions: params.terminal_revisions,
+          disposition: params.disposition,
+          note: params.note,
+        });
+        return text(`Acknowledged ${ack.waitId} generation ${ack.generation} as ${ack.disposition}; phase ${ack.phase}. Released ${ack.releasedPinIds.length} evidence pin(s).`, ack);
+      } catch (error) {
+        return text(`Wait was not acknowledged: ${readableError(error)}`);
+      }
+    },
+  });
+
+  register({
+    name: "bg_task_wait_cancel",
+    label: "BG Wait Cancel",
+    description: "Cancel one durable wait generation owned by this session. This detaches observation ownership and voids unconsumed deliveries; it does not stop the background task. Stop the task separately with bg_task_stop when that is the intent.",
+    parameters: WaitCancelParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const host = getObservedWaitHost(pi);
+      if (!host?.available) return text("Observed waits are unavailable; no wait was cancelled.");
+      try {
+        const wait = host.cancelWaitForParent(ctx, params.wait_id, params.generation, params.reason);
+        return text(`Cancelled ${wait.waitId} generation ${wait.generation}. The operation itself was not stopped.`, wait);
+      } catch (error) {
+        return text(`Wait was not cancelled: ${readableError(error)}`);
+      }
+    },
+  });
+
+  register({
+    name: "bg_task_wait_list",
+    label: "BG Wait List",
+    description: "List durable waits owned by the current session and workspace. Compact rows; consumed and cancelled generations are included unless pending_only is true.",
+    parameters: WaitListParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const host = getObservedWaitHost(pi);
+      if (!host?.available) return text("Observed waits are unavailable in this session.");
+      try {
+        const waits = host.listWaitsForParent(ctx, { pendingOnly: params.pending_only === true });
+        if (waits.length === 0) return text("No durable waits for this session.");
+        return text(waits.map((wait: WaitView) => formatWaitView(wait)).join("\n\n"), waits);
+      } catch (error) {
+        return text(`Waits could not be listed: ${readableError(error)}`);
+      }
+    },
+  });
+
+  registerDeliveryObserver(pi, {
+    launch: async (params, ctx) => {
+      const host = getObservedWaitHost(pi);
+      if (!host?.available) {
+        throw new Error("Durable observed waits are unavailable; refusing to launch an unsupervised delivery watcher.");
+      }
+      const launched = await host.launchParent({
+        kind: "process",
+        params: params as unknown as Record<string, unknown>,
+        ctx,
+      });
+      return { id: launched.id };
+    },
+    wait: (taskIds, note, ctx) => {
+      const host = getObservedWaitHost(pi);
+      if (!host?.available) {
+        throw new Error("Durable observed waits are unavailable; the delivery wait was not registered.");
+      }
+      return host.waitForParent(ctx, taskIds, note);
     },
   });
 }
@@ -465,6 +649,8 @@ async function actionText(
   signal?: AbortSignal,
 ) {
   if (params.action === "log" && params.id) {
+    const durable = durableLogText(pi, String(params.id), params, ctx);
+    if (durable !== undefined) return text(durable);
     return logText(String(params.id), logOptions(params, callbackOrigin));
   }
   return text(await runAction(pi, params, ctx, callbackOrigin, getActiveSession, signal));
@@ -479,26 +665,183 @@ async function runAction(
   signal?: AbortSignal,
 ): Promise<string> {
   switch (params.action) {
-    case "spawn":
+    case "spawn": {
+      const durable = await durableLaunchText(pi, "process", params, ctx);
+      if (durable !== undefined) return withNavigatorRefresh(ctx, durable);
       return withNavigatorRefresh(ctx, reportLaunch(() => spawnTask(pi, params, ctx.cwd, callbackOrigin, getActiveSession)));
-    case "watch":
+    }
+    case "watch": {
       if (!params.success_when) return "Invalid parameters: watch requires success_when.";
+      const durable = await durableLaunchText(pi, "watch", params, ctx);
+      if (durable !== undefined) return withNavigatorRefresh(ctx, durable);
       return withNavigatorRefresh(ctx, await launchWatch(pi, params as unknown as WatchTaskParams, ctx.cwd, callbackOrigin, getActiveSession, FIRST_WATCH_CHECK_WAIT_MS, signal));
+    }
     case "list":
-      return formatList(listOptions(params, callbackOrigin));
-    case "status":
+      return durableAwareList(pi, params, callbackOrigin);
+    case "status": {
       if (!params.id) return "Invalid parameters: status requires id.";
+      const durable = durableStatusText(pi, String(params.id), ctx);
+      if (durable !== undefined) return durable;
       return taskStatus(pi, String(params.id), params, statusOptions(params, callbackOrigin));
-    case "log":
+    }
+    case "log": {
       if (!params.id) return "Invalid parameters: log requires id.";
+      const durable = durableLogText(pi, String(params.id), params, ctx);
+      if (durable !== undefined) return durable;
       return formatLog(String(params.id), logOptions(params, callbackOrigin));
-    case "stop":
+    }
+    case "stop": {
       if (!params.id) return "Invalid parameters: stop requires id.";
+      const durable = await durableStopText(pi, String(params.id), ctx);
+      if (durable !== undefined) return withNavigatorRefresh(ctx, durable);
       return withNavigatorRefresh(ctx, await formatStop(pi, String(params.id), ctx, getActiveSession, statusOptions(params, callbackOrigin)));
-    case "clear":
-      return withNavigatorRefresh(ctx, formatClear(params, statusOptions(params, callbackOrigin)));
+    }
+    case "clear": {
+      const host = getObservedWaitHost(pi);
+      const durableId = typeof params.id === "string" && params.id && host?.isDurableTask(params.id) === true;
+      if (durableId) {
+        return withNavigatorRefresh(ctx, dismissDurableForClear(pi, params, callbackOrigin)
+          ?? `Durable operation ${String(params.id)} was not dismissed.`);
+      }
+      const legacy = formatClear(params, statusOptions(params, callbackOrigin));
+      const durable = dismissDurableForClear(pi, params, callbackOrigin);
+      return withNavigatorRefresh(ctx, durable === undefined ? legacy : `${legacy}\n${durable}`);
+    }
     default:
       return `Unknown action: ${String(params.action)}`;
+  }
+}
+
+/**
+ * Durable rows are appended to the legacy list output only when they exist, so
+ * the legacy surface is byte-for-byte unchanged for sessions that never launch a
+ * supervised operation. Cursors stay legacy-only; durable rows are all shown on
+ * the first page.
+ */
+function durableAwareList(
+  pi: ExtensionAPI,
+  params: Record<string, unknown>,
+  origin: BackgroundTaskCallbackOrigin | undefined,
+): string {
+  const legacy = formatList(listOptions(params, origin));
+  const host = getObservedWaitHost(pi);
+  if (!host?.available || !origin || typeof params.cursor === "string") return legacy;
+  const wanted = Array.isArray(params.status) && params.status.length > 0
+    ? new Set(params.status.filter((status): status is string => typeof status === "string"))
+    : undefined;
+  const limit = Math.max(1, Math.min(Math.floor(typeof params.limit === "number" ? params.limit : 10), 100));
+  const durable = host.listDurableTasks(origin)
+    .filter((task) => !wanted || (task.active ? wanted.has("running") : wanted.has(task.status)))
+    .slice(0, limit);
+  if (durable.length === 0) return legacy;
+  const rows = durable.map((task) => {
+    const elapsed = Math.max(0, Math.round(((task.endedAt ?? Date.now()) - task.startedAt) / 1000));
+    const label = task.name ? `${task.name} · ` : "";
+    const command = (task.command ?? task.argv?.join(" ") ?? "").replace(/\s+/g, " ").trim();
+    const exit = task.exitCode !== null ? ` exit=${task.exitCode}` : "";
+    const waits = task.waits.length ? ` waits=${task.waits.length}` : "";
+    return `  ${task.id}  ${task.status}  ${task.kind}  ${elapsed}s  ${label}${command}${exit}${waits}`.slice(0, 500);
+  });
+  return [
+    `durable background operations (supervised, current session): ${durable.length}`,
+    ...rows,
+    "Inspect with bg_task_status/bg_task_log; stop with bg_task_stop; dismiss a terminal operation with clear.",
+    legacy,
+  ].join("\n");
+}
+
+/** Dismiss matching terminal durable operations without touching the legacy registry. */
+function dismissDurableForClear(
+  pi: ExtensionAPI,
+  params: Record<string, unknown>,
+  origin: BackgroundTaskCallbackOrigin | undefined,
+): string | undefined {
+  const host = getObservedWaitHost(pi);
+  if (!host?.available || !origin) return undefined;
+  const id = typeof params.id === "string" && params.id ? params.id : undefined;
+  if (id) {
+    if (!host.isDurableTask(id)) return undefined;
+    const task = host.readDurableTask(origin, id);
+    if (!task) return `Durable operation ${id} belongs to another session; it was not dismissed.`;
+    if (!task.terminal) return `Durable operation ${id} is ${task.status}; stop it before dismissing it.`;
+    const dismissed = host.dismissDurableTask(origin, id);
+    return dismissed
+      ? `Dismissed durable operation ${id}. Its terminal evidence remains available through bg_task_status and bg_task_log.`
+      : `Durable operation ${id} was not dismissed.`;
+  }
+  const terminal = host.listDurableTasks(origin).filter((task) => task.terminal);
+  let dismissed = 0;
+  for (const task of terminal) if (host.dismissDurableTask(origin, task.id)) dismissed += 1;
+  return dismissed > 0
+    ? `Dismissed ${dismissed} terminal durable operation${dismissed === 1 ? "" : "s"}.`
+    : undefined;
+}
+
+function readableError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Route a local launch through the durable supervisor when the observed-waits
+ * host is open. `undefined` means "use the legacy task route": remote/SSH work,
+ * an extension installed without the durable host, or a session that has not
+ * activated yet. Admission and sandboxing happen inside the host, through the
+ * same `resolve*SandboxPlan` helpers the legacy route uses.
+ */
+async function durableLaunchText(
+  pi: ExtensionAPI,
+  kind: DurableTaskKind,
+  params: Record<string, unknown>,
+  ctx: ExtensionContext,
+): Promise<string | undefined> {
+  const host = getObservedWaitHost(pi);
+  if (!host?.available || params.ssh) return undefined;
+  try {
+    const launched = await host.launchParent({ kind, params, ctx });
+    return host.formatLaunch(launched);
+  } catch (error) {
+    if (error instanceof ForegroundSandboxBlockedError) return error.message;
+    throw error;
+  }
+}
+
+function durableStatusText(pi: ExtensionAPI, id: string, ctx: ExtensionContext): string | undefined {
+  const host = getObservedWaitHost(pi);
+  if (!host?.available || !host.isDurableTask(id)) return undefined;
+  try {
+    return host.formatStatus(host.statusForParent(ctx, id));
+  } catch (error) {
+    return readableError(error);
+  }
+}
+
+function durableLogText(
+  pi: ExtensionAPI,
+  id: string,
+  params: Record<string, unknown>,
+  ctx: ExtensionContext,
+): string | undefined {
+  const host = getObservedWaitHost(pi);
+  if (!host?.available || !host.isDurableTask(id)) return undefined;
+  try {
+    const requested = typeof params.lines === "number" ? params.lines
+      : typeof params.tail_lines === "number" ? params.tail_lines : 40;
+    // `lines: 0` means the retained raw log on the legacy route; the durable
+    // store keeps the bounded tails, so show a wider tail instead of an empty page.
+    const lines = requested === 0 ? 200 : Math.max(1, Math.floor(requested));
+    return host.formatLog(host.logForParent(ctx, id, { lines }));
+  } catch (error) {
+    return readableError(error);
+  }
+}
+
+async function durableStopText(pi: ExtensionAPI, id: string, ctx: ExtensionContext): Promise<string | undefined> {
+  const host = getObservedWaitHost(pi);
+  if (!host?.available || !host.isDurableTask(id)) return undefined;
+  try {
+    return host.formatStatus(await host.stopForParent(ctx, id));
+  } catch (error) {
+    return readableError(error);
   }
 }
 

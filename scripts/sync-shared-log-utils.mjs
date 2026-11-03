@@ -1,3 +1,4 @@
+import "./sync-operation-coordinator.mjs";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { writeFileAtomically } from "./atomic-write.mjs";

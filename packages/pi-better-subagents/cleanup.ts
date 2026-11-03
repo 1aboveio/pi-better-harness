@@ -8,8 +8,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { join, relative, sep } from "node:path";
-import {
-    ABANDONED_LAUNCH_GRACE_MS,
+import {    ABANDONED_LAUNCH_GRACE_MS,
     abandonedLaunchRecord,
     baseDir,
     listMetas,
@@ -26,6 +25,7 @@ import {
     sessionsDir,
     type RunMeta,
     type RunStatus,
+    listPendingParkedRuns,
 } from "./registry.ts";
 import type { SubagentConfig } from "./config.ts";
 import {
@@ -335,6 +335,15 @@ function planCleanupOccupancy(
         if (ownedResources(meta).some((owned) => paths.some((keep) => pathWithin(keep, owned)))) {
             runIds.add(meta.id);
         }
+    }
+
+    // A parked worker still owns its assignment: its saved conversation and its
+    // owned workspace must survive until the wait is consumed or cancelled,
+    // otherwise the automatic continuation would reopen nothing. The park
+    // disposition is the evidence, so an unprotected park cannot be swept.
+    for (const parked of listPendingParkedRuns(metas)) {
+        runIds.add(parked.id);
+        paths.push(...ownedResources(parked));
     }
 
     const sessions = new Set<string>(protect?.sessionIds ?? []);

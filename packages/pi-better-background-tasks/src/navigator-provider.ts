@@ -14,6 +14,7 @@ import { actionableFailures, failureLabel, readFailureState } from "./shared-fai
 import { failurePath, failureView } from "./failures.js";
 import { readLog } from "./logs.js";
 import { listMetasForOrigin, onMetaChanged, readMeta, writeMeta } from "./registry.js";
+import { getObservedWaitHost, type DurableTaskProjection } from "./observed-waits.js";
 import { stopTask } from "./runtime.js";
 import { formatBackgroundTaskStall, observeBackgroundTaskStall } from "./stall.js";
 import type { BackgroundTaskCallbackOrigin, BackgroundTaskMeta, BackgroundTaskStatus } from "./types.js";
@@ -24,8 +25,15 @@ let activeNavigatorOrigin: BackgroundTaskCallbackOrigin | undefined;
 const TERMINAL_NAVIGATOR_RETENTION_MS = 30_000;
 
 export function ensureBackgroundTasksNavigatorProvider(pi: ExtensionAPI): void {
+  // A reloaded or replaced extension instance gets a fresh host. Re-register so
+  // the provider's durable-change subscription targets that host, not the one
+  // captured by the previous instance.
+  if (piRef === pi && unregister) return;
+  if (unregister) {
+    try { unregister(); } catch { /* ignore */ }
+    unregister = undefined;
+  }
   piRef = pi;
-  if (unregister) return;
   unregister = registerBackgroundWorkProvider(provider);
 }
 
@@ -51,11 +59,36 @@ const provider: BackgroundWorkProvider = {
   id: "background-tasks",
   label: "Background Tasks",
   priority: 20,
-  visibleCount: () => visibleMetas(Date.now()).filter((meta) => meta.status === "running").length,
-  listRows: (now) => visibleMetas(now).map((meta) => rowFromMeta(meta, now)),
-  detail: (id, now, options) => detailFromMeta(readMeta(id), now, options),
-  armCloseLabel: (row) => row.status === "running" ? "x again to stop" : "x again to dismiss",
+  visibleCount: () => {
+    const now = Date.now();
+    return visibleMetas(now).filter((meta) => meta.status === "running").length
+      + visibleDurableTasks(now).filter((task) => task.active).length;
+  },
+  listRows: (now) => [
+    ...visibleMetas(now).map((meta) => rowFromMeta(meta, now)),
+    ...visibleDurableTasks(now).map((task) => rowFromDurable(task, now)),
+  ],
+  detail: (id, now, options) => {
+    const durable = durableTask(id);
+    if (durable) return detailFromDurable(durable, options);
+    return detailFromMeta(readMeta(id), now, options);
+  },
+  armCloseLabel: (row) => row.status === "running" || row.status === "starting" ? "x again to stop" : "x again to dismiss",
   close: (id) => {
+    const durable = durableTask(id);
+    if (durable) {
+      const host = navigatorHost();
+      const origin = activeNavigatorOrigin;
+      if (!host || !origin) return { action: "missing", providerId: "background-tasks", id };
+      if (durable.active) {
+        void host.stopDurableTask(origin, id);
+        return { action: "stopped", providerId: "background-tasks", id, status: "stopping" };
+      }
+      if (host.dismissDurableTask(origin, id)) {
+        return { action: "dismissed", providerId: "background-tasks", id, status: durable.status };
+      }
+      return { action: "denied", providerId: "background-tasks", id };
+    }
     const meta = readMeta(id);
     if (!meta) return { action: "missing", providerId: "background-tasks", id };
     if (meta.status === "running") {
@@ -66,8 +99,144 @@ const provider: BackgroundWorkProvider = {
     writeMeta(meta);
     return { action: "dismissed", providerId: "background-tasks", id, status: meta.status };
   },
-  onVisibleChanged: onMetaChanged,
+  onVisibleChanged: (notify) => {
+    const offMeta = onMetaChanged(notify);
+    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange(notify);
+    return () => {
+      offMeta();
+      offDurable?.();
+    };
+  },
 };
+
+function navigatorHost() {
+  return piRef ? getObservedWaitHost(piRef) : undefined;
+}
+
+function visibleDurableTasks(now = Date.now()): DurableTaskProjection[] {
+  const active = activeNavigatorOrigin;
+  const host = navigatorHost();
+  if (!active || !host) return [];
+  const listed = host.listDurableTasks(active, { retentionMs: TERMINAL_NAVIGATOR_RETENTION_MS });
+  return listed
+    .filter((task) => task.dismissedAt === undefined && !isExpiredDurableRow(task, now));
+}
+
+function durableTask(id: string): DurableTaskProjection | undefined {
+  const active = activeNavigatorOrigin;
+  const host = navigatorHost();
+  if (!active || !host) return undefined;
+  return host.readDurableTask(active, id);
+}
+
+function isExpiredDurableRow(task: DurableTaskProjection, now: number): boolean {
+  if (!task.terminal || task.endedAt === undefined) return false;
+  return now - task.endedAt >= TERMINAL_NAVIGATOR_RETENTION_MS;
+}
+
+function rowFromDurable(task: DurableTaskProjection, now: number): BackgroundWorkRow {
+  const command = durableCommandLabel(task);
+  const elapsed = formatDuration((task.endedAt ?? now) - task.startedAt);
+  const facts: string[] = [];
+  if (task.attention && task.reason) facts.push(task.reason);
+  else if (task.attention) facts.push(task.status);
+  if (task.kind === "watch" && task.intervalSeconds) facts.push(`every ${formatDuration(task.intervalSeconds * 1000)}`);
+  if (task.active && task.deadlineAt) facts.push(`${formatDuration(task.deadlineAt - now)} left`);
+  if (task.waits.length) facts.push(`${task.waits.length} wait${task.waits.length === 1 ? "" : "s"}`);
+  return {
+    providerId: "background-tasks",
+    id: task.id,
+    name: task.name,
+    status: task.status,
+    statusTone: toneForDurableStatus(task.status),
+    kind: task.kind,
+    elapsed,
+    primary: compactDurableLabel(task),
+    command,
+    tool: compactDurableLabel(task),
+    secondary: [task.cwd, task.exitCode !== null ? `exit ${task.exitCode}` : undefined].filter(Boolean).join(" · ") || undefined,
+    facts: facts.slice(0, 2),
+    sortStartedAt: task.startedAt,
+    expiresAt: task.terminal && task.endedAt !== undefined
+      ? task.endedAt + TERMINAL_NAVIGATOR_RETENTION_MS
+      : undefined,
+  };
+}
+
+function detailFromDurable(task: DurableTaskProjection, options?: { logTailLines?: number }): BackgroundWorkDetail {
+  const active = activeNavigatorOrigin;
+  const host = navigatorHost();
+  const lines = options?.logTailLines ?? NAVIGATOR_DETAIL_ROWS;
+  const log = active && host ? host.readDurableTaskLog(active, task.id, lines) : undefined;
+  const metadata = [
+    { label: "provider", value: "Background Tasks (durable)" },
+    { label: "kind", value: task.kind },
+    { label: "operation", value: task.operationId },
+    { label: "status", value: `${task.status}${task.terminalOutcome ? ` (${task.terminalOutcome})` : ""}` },
+    { label: "started", value: new Date(task.startedAt).toISOString() },
+    ...(task.endedAt !== undefined ? [{ label: "ended", value: new Date(task.endedAt).toISOString() }] : []),
+    { label: "cwd", value: task.cwd },
+    ...(task.exitCode !== null || task.signal ? [{ label: "exit", value: `${task.exitCode ?? "null"}${task.signal ? ` signal ${task.signal}` : ""}` }] : []),
+    ...(task.reason ? [{ label: "reason", value: task.reason }] : []),
+    ...(task.stepGateFailure ? [{ label: "step gate", value: `${task.stepGateFailure.command} exited ${task.stepGateFailure.stepExitCode}` }] : []),
+    { label: "stdout", value: task.logPaths.stdout },
+    { label: "stderr", value: task.logPaths.stderr },
+    { label: "events", value: task.logPaths.events },
+    ...(task.waits.length
+      ? [{ label: "waits", value: task.waits.map((wait) => `${wait.waitId} ${wait.phase}`).join(", ") }]
+      : []),
+  ];
+  const evidenceText = log
+    ? [log.stdout, log.stderr ? `stderr:\n${log.stderr}` : "", log.events ? `events:\n${log.events}` : ""]
+      .filter(Boolean).join("\n") || "(log is empty)"
+    : "(durable log is unavailable)";
+  return {
+    providerId: "background-tasks",
+    id: task.id,
+    title: task.name || task.id,
+    status: task.status,
+    statusTone: toneForDurableStatus(task.status),
+    subtitle: task.stepGateFailure?.command ?? task.reason ?? compactDurableLabel(task),
+    metadata,
+    foldedSections: [{
+      id: "command",
+      label: "command",
+      text: task.command ?? (task.argv ? task.argv.join(" ") : "(no command recorded)"),
+      collapsedText: compactDurableLabel(task),
+      expandedByDefault: true,
+    }],
+    evidence: {
+      label: log?.truncated ? "log tail" : "log",
+      text: evidenceText,
+    },
+    footerActions: [task.active ? "x stop" : "x dismiss"],
+  };
+}
+
+function durableCommandLabel(task: DurableTaskProjection): string {
+  if (task.command) return task.command;
+  if (task.argv?.length) return task.argv.join(" ");
+  return task.name ?? "(no command recorded)";
+}
+
+function compactDurableLabel(task: DurableTaskProjection): string {
+  const value = durableCommandLabel(task).trim();
+  const parts = value.split(/\s+/).filter(Boolean);
+  return parts.length <= 3 ? value : parts.slice(0, 3).join(" ");
+}
+
+function toneForDurableStatus(status: string): BackgroundWorkRow["statusTone"] {
+  switch (status) {
+    case "running":
+    case "starting": return "running";
+    case "succeeded": return "success";
+    case "failed":
+    case "timed_out":
+    case "lost": return "failed";
+    case "cancelled": return "warning";
+    default: return "muted";
+  }
+}
 
 function visibleMetas(now = Date.now()): BackgroundTaskMeta[] {
   const active = activeNavigatorOrigin;

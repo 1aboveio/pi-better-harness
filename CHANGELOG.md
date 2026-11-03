@@ -4,6 +4,41 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.40.0] - 2026-11-03
+
+### Added
+
+- Bundle Background Tasks 0.14.0, Subagents 0.27.0, Goal 0.12.0 and Sandbox 0.14.1 for observed parent waits and worker park/resume. Workers keep ownership of assigned validation while supervised commands run and release their capacity slot while waiting.
+
+## [pi-better-background-tasks@0.14.0] - 2026-11-03
+
+### Added
+
+- Supervised local operations persist execution and terminal evidence across worker exit, reload and Pi shutdown. Ambiguous execution is reported as lost and is not automatically relaunched.
+- Register all-settled waits, inspect terminal revisions, acknowledge their interpretation, list wait generations and cancel observation separately from stopping the command. Delivery does not consume a wait or complete an assignment.
+- Observe supported merge delivery through the installed stateful watcher with `watch_delivery`. Durable operations appear in the task list, navigator and Goal activity view.
+- Apply both the captured worker authority and the current Background Tasks policy to worker commands.
+
+## [pi-better-subagents@0.27.0] - 2026-11-03
+
+### Added
+
+- Guarded operation tools let workers launch validation, save a wait checkpoint, exit cleanly and resume the same native conversation once dependencies settle. The attempt can finish while its assignment remains unfinished.
+- Recheck parent, branch, Goal, permissions, capacity, cancellation and writer ownership at execution release. Retain original task access across attempts, cancel published continuations by owned identity, and recover or visibly hold interrupted parks.
+- Show pending park dispositions in the navigator and protect their conversation and workspace from cleanup. Parking requires Pi SDK 0.82.1 or later; explicit tool exclusions and clean loadouts remain authoritative.
+
+## [pi-better-sandbox@0.14.1] - 2026-11-03
+
+### Fixed
+
+- Strip worker operation bridge credentials from task-command environments in the shared execution helper.
+
+## [pi-better-goal@0.12.0] - 2026-11-03
+
+### Added
+
+- Admit automatic worker resumes only for the owning active parent, eligible branch and current Goal. Pause, permission holds, disabled automatic continuation and unavailable workflow evidence hold resumption. A synchronous admission capability invalidates an earlier grant when state changes before execution release.
+
 ## [pi-better-harness@0.39.2] - 2026-11-03
 
 ### Fixed

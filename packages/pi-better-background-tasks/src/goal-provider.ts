@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { listMetas, listMetasForOrigin, onMetaChanged } from "./registry.js";
+import { getObservedWaitHost, type DurableTaskProjection } from "./observed-waits.js";
 import type { BackgroundTaskMeta } from "./types.js";
 import { isTerminalStatus } from "./types.js";
 import { backgroundTaskProgressAt, observeBackgroundTaskStall } from "./stall.js";
@@ -31,13 +32,19 @@ export function collectBackgroundTaskGoalActivity(
   metas: BackgroundTaskMeta[] = listMetas(),
   ctx?: ExtensionContext,
   now = Date.now(),
+  durable: readonly DurableTaskProjection[] = [],
 ): GoalBackgroundProviderSnapshot {
   return {
     providerId: "background-tasks",
     label: "Background Tasks",
-    items: metas
-      .filter((meta) => isVisibleGoalActivity(meta, ctx, now))
-      .map(backgroundTaskToGoalItem),
+    items: [
+      ...metas
+        .filter((meta) => isVisibleGoalActivity(meta, ctx, now))
+        .map(backgroundTaskToGoalItem),
+      ...durable
+        .filter((task) => isVisibleDurableGoalActivity(task, ctx, now))
+        .map(durableTaskToGoalItem),
+    ],
   };
 }
 
@@ -46,8 +53,23 @@ export function registerBackgroundTasksGoalProvider(pi: ExtensionAPI): void {
     pi.events?.emit(GOAL_REGISTER_PROVIDER_EVENT, {
       id: "background-tasks",
       label: "Background Tasks",
-      getActivity: (ctx: ExtensionContext) => collectBackgroundTaskGoalActivity(listMetasForOrigin(getGoalActivityOrigin(ctx)), ctx),
-      onActivityChanged: onMetaChanged,
+      getActivity: (ctx: ExtensionContext) => {
+        const origin = getGoalActivityOrigin(ctx);
+        const durable = getObservedWaitHost(pi)?.listDurableTasks(origin, {
+          retentionMs: TERMINAL_GOAL_ACTIVITY_RETENTION_MS,
+        }) ?? [];
+        return collectBackgroundTaskGoalActivity(listMetasForOrigin(origin), ctx, Date.now(), durable);
+      },
+      // A durable operation change must refresh Goal activity even though it
+      // never writes a mutable legacy registry meta.
+      onActivityChanged: (notify: () => void) => {
+        const offMeta = onMetaChanged(notify);
+        const offDurable = getObservedWaitHost(pi)?.onDurableTaskChange(notify);
+        return () => {
+          offMeta();
+          offDurable?.();
+        };
+      },
     });
   };
 
@@ -89,6 +111,51 @@ function getGoalActivityOrigin(ctx: ExtensionContext) {
     sessionId = undefined;
   }
   return { cwd: ctx.cwd, sessionId };
+}
+
+function isVisibleDurableGoalActivity(
+  task: DurableTaskProjection,
+  ctx: ExtensionContext | undefined,
+  now: number,
+): boolean {
+  if (task.dismissedAt !== undefined) return false;
+  if (ctx) {
+    const active = getGoalActivityOrigin(ctx);
+    if (task.owner.workspace !== active.cwd) return false;
+    if (active.sessionId || task.owner.sessionId) {
+      if (task.owner.sessionId !== active.sessionId) return false;
+    }
+  }
+  if (!task.terminal) return true;
+  if (!ctx) return true;
+  if (task.endedAt === undefined) return true;
+  return now - task.endedAt < TERMINAL_GOAL_ACTIVITY_RETENTION_MS;
+}
+
+function durableTaskToGoalItem(task: DurableTaskProjection): GoalBackgroundWorkItem {
+  const item: GoalBackgroundWorkItem = {
+    id: task.id,
+    status: task.status,
+    active: task.active,
+    terminal: task.terminal,
+    attention: task.attention,
+    startedAt: task.startedAt,
+    details: {
+      durable: true,
+      operationId: task.operationId,
+      kind: task.kind,
+      cwd: task.cwd,
+      command: task.command,
+      argv: task.argv,
+      logPath: task.logPaths.stdout,
+      lastProgressAt: task.endedAt ?? task.startedAt,
+      waits: task.waits.map((wait) => `${wait.waitId}:${wait.phase}`),
+      ...(task.reason ? { reason: task.reason } : {}),
+    },
+  };
+  if (task.name !== undefined) item.label = task.name;
+  if (task.endedAt !== undefined) item.endedAt = task.endedAt;
+  return item;
 }
 
 function backgroundTaskToGoalItem(meta: BackgroundTaskMeta): GoalBackgroundWorkItem {

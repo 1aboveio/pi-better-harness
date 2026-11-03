@@ -119,6 +119,20 @@ function detailFrom(overrides = {}) {
 // Pure detail builder (status / model / elapsed / tools / spend / output)
 // ---------------------------------------------------------------------------
 describe("buildNavigatorDetail", () => {
+    it("shows an unfinished parked assignment until its wait is consumed", () => {
+        const id = trackDisk(`sa_park_detail_${Date.now()}`);
+        const parked = meta({id, endedAt: 100_000, park: {version: 1, phase: "waiting", waitId: "wait-park", generation: 1,
+            attemptId: id, parkedAt: 100_000, updatedAt: 100_000, continuationNote: "Read build evidence"}});
+        writeMeta(parked);
+        writeLog(id, []);
+        const deps = {readMeta: () => parked, effectiveStatus, parseRun, shortModel, fmtElapsed, fmtSpend, now: 200_000};
+        const waiting = buildNavigatorDetail(id, deps);
+        assert.equal(waiting.status, "waiting", "the attempt exiting must not look like a completed assignment");
+        assert.equal(waiting.park.continuationNote, "Read build evidence");
+        parked.park.phase = "consumed";
+        assert.equal(buildNavigatorDetail(id, deps).status, "completed");
+        assert.equal(buildNavigatorDetail(id, deps).park, undefined);
+    });
     // @covers navigator.detail
     // @level unit
     it("assembles effective status, model, elapsed, tools, spend, and parsed output", () => {

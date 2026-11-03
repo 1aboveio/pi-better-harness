@@ -267,6 +267,40 @@ Try it for one run:
 pi -e npm:pi-better-background-tasks
 ```
 
+## Observed operations and waits
+
+Supervised local tasks use `bgs_` identifiers and a detached runner. The runner
+keeps observing after the worker or Pi process exits. Status and logs recover
+from durable evidence; an ambiguous launch becomes `lost` and is not relaunched.
+SSH tasks and older `bg_` identifiers use the existing runtime.
+
+Stop and timeout evidence can contain `groupCleanup=unproven` when the command's
+leader exits before cleanup can be verified. Descendants may remain running;
+inspect that evidence before interpreting the result.
+
+Call `wait_for_operations` with `task_ids` and an optional `continuation_note` to
+register an all-settled wait. The parent remains responsive. A notification means
+every dependency is terminal, including failed, cancelled, timed-out or lost
+operations; it does not mean the command succeeded.
+
+Read each operation's status or log, interpret its terminal revision, then call
+`acknowledge_operation_result` with the wait identity, exact revisions, disposition
+and interpretation note. The acknowledgement releases the wait's evidence pins.
+Reading evidence or receiving a callback alone does not consume the wait.
+`bg_task_wait_list` shows owned generations. `bg_task_wait_cancel` cancels a wait;
+use `bg_task_stop` separately when the command itself should stop.
+
+`watch_delivery` registers the installed stateful Mergify delivery watcher and its
+wait. The watcher observes delivery; the model interprets its result. The tool
+does not enqueue or merge a pull request.
+
+With Subagents loaded, workers can use the guarded operation bridge and park
+while waiting. Parking requires SDK 0.82.1 or later. The worker saves its wait
+result, exits cleanly and releases its capacity slot. The same conversation can
+resume after settlement when its original parent session and branch are active
+and current capacity, Goal, workflow and permission gates allow it. Restarting Pi
+does not start an unattended model. Uncertain recovery stays held with a reason.
+
 ## Failure observations
 
 Task lifecycle and failure evidence are reported separately. A watch can remain

@@ -150,6 +150,7 @@ import {
 import {
     executeNavigatorClose,
     buildNavigatorRows,
+    pendingNavigatorPark,
     buildNavigatorDetail,
 } from "./navigator.ts";
 import { enforceRegistrySizeCapOnce, runDailyCleanupOnce } from "./cleanup.ts";
@@ -162,6 +163,7 @@ import {
     type ContinuationPlan,
     type ConversationLease,
 } from "./continuation.ts";
+import { createHash } from "node:crypto";
 import { assertThinkingLevel, parseModelThinking, type ThinkingLevel } from "./thinking.ts";
 import { createAgentOperations } from "./agent-operations.ts";
 import { createAgentSessionSettings } from "./agent-session-settings.ts";
@@ -180,6 +182,33 @@ import {
     type CatalogRunRecord,
 } from "./catalog-runtime.ts";
 import { registerSubagentsGoalProvider } from "./goal-provider.ts";
+import {
+    DEFAULT_WORKER_BRIDGE_TOOLS,
+    PreSpawnResumeError,
+    assertFinalResumeDispatch,
+    releaseChild,
+    cancelParkedWait,
+    captureWorkerPolicy,
+    createOwnedAttemptStopper,
+    childBridgeExtensionPath,
+    childWriterLeaseEnv,
+    createResumeOrchestration,
+    createWorkerOperationsHost,
+    finalizeWorkerParkAfterExit,
+    manualResumeRefusal,
+    ownerBindingFromContext,
+    parkedWaitForRun,
+    planWorkerBridgeTools,
+    reconcileParkedWaits,
+    resolveProductionSchemas,
+    resumePrompt,
+    settleResumedAttemptExit,
+    type ResumeCapacity,
+    type ResumeLaunchInput,
+    type WaitOwnerBinding,
+    type ResumeOrchestration,
+    type WorkerOperationsHost,
+} from "./worker-waits.ts";
 import { defaultUserRoot, type CatalogSnapshot } from "./catalog-store.ts";
 
 const SUBAGENT_MODE_ACTIONS: readonly AutocompleteItem[] = [
@@ -1218,7 +1247,7 @@ function navigatorRows(visible?: RunMeta[], at?: number) {
 
 /** Runs that should advertise/open the left-arrow navigator affordance. */
 function navigatorRunningRuns(): RunMeta[] {
-    return sessionVisibleNavigatorRuns().filter((m) => effectiveStatus(m) === "running");
+    return sessionVisibleNavigatorRuns().filter((m) => effectiveStatus(m) === "running" || pendingNavigatorPark(m));
 }
 
 function navigatorRunningCount(): number {
@@ -1239,6 +1268,7 @@ function sessionVisibleNavigatorRuns(now: number = Date.now()): RunMeta[] {
 }
 
 function isExpiredTerminalNavigatorRun(meta: RunMeta, now: number): boolean {
+    if (pendingNavigatorPark(meta)) return false;
     const status = effectiveStatus(meta);
     if (!isTerminalNavigatorStatus(status)) return false;
     const endedAt = meta.endedAt ?? meta.lostAt;
@@ -1264,8 +1294,25 @@ function navigatorDetail(id: string, now: number = Date.now()) {
     });
 }
 
+/**
+ * Set by the active extension instance: cancel a parked assignment's pending
+ * wait. Returns false when the run is not parked, so the ordinary stop path runs.
+ */
+let cancelParkedForUi: ((id: string, reason: string) => boolean) | undefined;
+
 /** Shared #44 stop+dismiss path used by navigator Close (#47). */
 function navigatorCloseRun(id: string) {
+    // A parked attempt's child already exited cleanly, so "close" must cancel the
+    // pending automatic resume instead of pretending to stop a live process.
+    if (cancelParkedForUi?.(id, "closed from the navigator; the automatic resume is cancelled")) {
+        try { dismissRun(id); } catch { /* dismissal is best effort */ }
+        spendCache.delete(id);
+        healthLogCache.delete(id);
+        resetChildEventLogCursor(id);
+        resetParseRunCursor(id);
+        syncHealthTicker();
+        return { action: "stopped", id };
+    }
     const outcome = executeNavigatorClose(id, {
         readMeta,
         effectiveStatus,
@@ -1291,6 +1338,7 @@ function statusTone(status: string): BackgroundWorkRow["statusTone"] {
         case "completed": return "success";
         case "failed":
         case "lost": return "failed";
+        case "held":
         case "killed":
         case "orphaned": return "warning";
         default: return "muted";
@@ -1325,7 +1373,7 @@ function subagentWorkRows(now: number): BackgroundWorkRow[] {
             expiresAt: (() => {
                 const meta = metaById.get(row.id);
                 const endedAt = meta?.endedAt ?? meta?.lostAt;
-                return meta && isTerminalNavigatorStatus(effectiveStatus(meta)) && typeof endedAt === "number"
+                return meta && !pendingNavigatorPark(meta) && isTerminalNavigatorStatus(effectiveStatus(meta)) && typeof endedAt === "number"
                     ? endedAt + TERMINAL_NAVIGATOR_RETENTION_MS
                     : undefined;
             })(),
@@ -1419,6 +1467,10 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         { label: "elapsed", value: detail.elapsed },
         { label: "tools", value: detail.currentTool ? `current ${detail.currentTool}` : (detail.tools || "(none)") },
         { label: "spend", value: detail.spend || "(none)" },
+        ...(detail.park ? [
+            { label: "wait", value: `${detail.park.waitId} generation ${detail.park.generation}` },
+            { label: "assignment", value: detail.park.heldReason || detail.park.continuationNote || "Waiting for the operation result; assignment unfinished" },
+        ] : []),
         { label: "pid", value: detail.pid != null ? String(detail.pid) : "-" },
         { label: "pgid", value: detail.pgid != null ? String(detail.pgid) : "-" },
     ];
@@ -1433,7 +1485,7 @@ function subagentWorkDetail(id: string, now: number, options?: { logTailLines?: 
         evidence: { label: "transcript", text: detail.output || "(no transcript yet)" },
         transcript: transcript.entries,
         transcriptDiagnostic: transcript.diagnostic,
-        footerActions: [detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
+        footerActions: [detail.park ? "x cancel resume" : detail.status === "running" || detail.status === "orphaned" ? "x stop" : "x dismiss"],
     };
 }
 
@@ -1496,7 +1548,7 @@ function ensureSubagentProvider(): void {
         label: "Subagents",
         priority: 10,
         visibleCount: () => navigatorRunningCount(),
-        showSection: (rows) => rows.some((row) => row.status === "running"),
+        showSection: (rows) => rows.some((row) => row.status === "running" || ["parking", "waiting", "ready", "resuming", "held"].includes(row.status)),
         parentRow: (now) => mainAgentWorkRow(now),
         listRows: (now) => subagentWorkRows(now),
         detail: (id, now, options) => subagentWorkDetail(id, now, options),
@@ -1510,7 +1562,7 @@ function ensureSubagentProvider(): void {
             saveDelegationDefault(readDelegation().mode);
             return true;
         },
-        armCloseLabel: (row) => row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
+        armCloseLabel: (row) => pendingNavigatorPark(readMeta(row.id)) ? "x again to cancel resume" : row.status === "running" || row.status === "orphaned" ? "x again to stop" : "x again to dismiss",
         close: (id) => {
             const outcome = navigatorCloseRun(id) as { action: string; id: string; status?: string };
             return { ...outcome, providerId: "subagents" };
@@ -1916,6 +1968,28 @@ export default function (pi: ExtensionAPI) {
     const activeDelegationMode = (): DelegationMode => delegationOverride ?? normalizeDelegationMode(loadConfig().delegationMode);
     const countRunning = () =>
         listActiveMetasForParent(process.pid).filter((meta) => effectiveStatus(meta) === "running").length;
+    // Supervised worker operations: the Background observed-waits service owns
+    // durable records, this extension owns the trusted transport its children
+    // talk to. Both are absent in a standalone Subagents install, which is why
+    // the bridge is optional and parking refuses instead of pretending.
+    const workerOperations: WorkerOperationsHost = createWorkerOperationsHost({
+        pi,
+        childExtensionPath: childBridgeExtensionPath(selfDir()),
+    });
+    let resumeOrchestration: ResumeOrchestration | undefined;
+    /**
+     * Stop a continuation attempt only when this parent owns it and the token
+     * published with it matches. A pid is never signalled on a guess.
+     */
+    const stopPublishedAttempt = createOwnedAttemptStopper();
+    cancelParkedForUi = (id, reason) => {
+        const parked = parkedWaitForRun(id);
+        if (!parked) return false;
+        void cancelParkedWait(workerOperations.service, parked, reason, { stopAttempt: stopPublishedAttempt })
+            .catch(() => { /* the durable record keeps the wait visible */ })
+            .finally(() => syncHealthTicker());
+        return true;
+    };
     const effectiveSettings = () => effectiveSubagentSettings({
         delegationMode: activeDelegationMode(), maxConcurrent: activeConcurrencyCap(),
         sources: { delegationMode: delegationOverride ? "session" : "config",
@@ -2092,6 +2166,28 @@ export default function (pi: ExtensionAPI) {
         p: SpawnParams,
         batchInfo?: { batchId: string; batchName?: string },
         resume?: ContinuationPlan,
+        /**
+         * Internal resume identity. Never a tool parameter: an auto-resume
+         * publishes its attempt id and launch token in the coordinator before
+         * this call, and a manual continuation passes neither.
+         */
+        internal?: {
+            assignedRunId?: string;
+            launchToken?: string;
+            /** Present for an automatic resume: it may continue a conversation whose wait is still pending. */
+            resumeWait?: { waitId: string; generation: number };
+            /**
+             * Final dispatch fence: runs after every async preparation and
+             * immediately before the child is released. Throwing proves no child
+             * was started.
+             */
+            beforeSpawn?: (context: {
+                runId: string;
+                permissionPlan: ReturnType<typeof resolveSubagentPermissions>;
+            }) => Promise<void | (() => void)> | void | (() => void);
+            /** Called once a child process exists, so an ambiguous failure is never retried. */
+            onSpawned?: () => void;
+        },
     ): Promise<{
         id: string;
         meta: RunMeta;
@@ -2103,6 +2199,14 @@ export default function (pi: ExtensionAPI) {
         modelNote?: string;
     }> {
         assertThinkingLevel(p.thinking);
+        // A conversation parked on an observed wait resumes through the
+        // coordinator's claim. An ordinary manual continuation would leave that
+        // automatic resume armed for the same assignment, so it is refused until
+        // the human takes the parked attempt over (subagent_stop cancels the wait).
+        if (resume && !internal?.resumeWait) {
+            const parked = parkedWaitForRun(resume.prior.id);
+            if (parked) throw new ContinuationError(manualResumeRefusal(parked));
+        }
         // A continuation re-applies the CURRENT mandatory human permissions to its
         // frozen confinement intent. Historical metadata can never widen authority,
         // and a profile that would change confinement refuses instead of silently
@@ -2164,7 +2268,9 @@ export default function (pi: ExtensionAPI) {
         // .git/ inside the writable root for Git-mutating sandboxed subagents.
         const sandboxEnabled = permissionPlan.sandboxEnabled;
 
-        const id = nextRunId();
+        // An auto-resume carries the attempt id the coordinator already published;
+        // a fresh or manual launch allocates a new one.
+        const id = internal?.assignedRunId ?? nextRunId();
         // Attempt identity (`id`) and conversation identity (`sessionId`) are
         // separate. A continuation keeps the native session; only the attempt is new.
         const sessionId = resume ? resume.conversation.sessionId : id;
@@ -2238,6 +2344,28 @@ export default function (pi: ExtensionAPI) {
             // A confined child gets extension tools only through /sandbox Subagents · Tools (ADR 0009):
             // the guarded apply_patch adapter, and trusted tools admitted by name and package.
             const requestedExcludes = new Set(requestedExcludeTools.split(",").map((t) => t.trim()).filter(Boolean));
+
+            // Supervised worker operations. This only decides which names the
+            // child's loadout carries: clean children, explicit tool lists,
+            // exclusions and task-sandboxed children keep their restrictions, and
+            // the Background host still intersects the captured task authority
+            // with the current profile before any task launches.
+            // Production schemas come from the parent Background extension's own
+            // tool registrations; a bridge tool without one is withheld instead of
+            // being advertised with a permissive fallback schema.
+            const productionBridgeSchemas = resolveProductionSchemas(pi, DEFAULT_WORKER_BRIDGE_TOOLS);
+            const bridgePlan = planWorkerBridgeTools({
+                allow: allow.split(",").filter(Boolean),
+                excluded: [...requestedExcludes],
+                clean,
+                explicitTools: requestedTools !== undefined,
+                productionSchemas: new Set(productionBridgeSchemas.schemas.keys()),
+            });
+            const bridgeEnabled = workerOperations.available && bridgePlan.tools.length > 0;
+            if (bridgeEnabled) {
+                allow = [...new Set([...allow.split(",").filter(Boolean), ...bridgePlan.tools])].join(",");
+            }
+
             if (sandboxEnabled && !clean) {
                 const names = allow.split(",").filter(Boolean);
                 // Models reach for apply_patch whenever they may edit; ticked trusted tools join the default set.
@@ -2258,8 +2386,9 @@ export default function (pi: ExtensionAPI) {
                     shell: false, excluded: requestedExcludes,
                 }).tools.join(",");
             }
+            const bridgeToolNames = new Set<string>(bridgeEnabled ? bridgePlan.tools : []);
             const taskTools = sandboxEnabled ? planTaskTools({
-                requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name)),
+                requested: allow.split(",").filter((name) => name && !requestedExcludes.has(name) && !bridgeToolNames.has(name)),
                 settings: permissionPlan.tools, network: permissionPlan.permissions?.network ?? true,
                 processAccess: permissionPlan.permissions?.processAccess ?? "off",
                 builtins: [...TASK_BUILTINS, "codemode"], registered: pi.getAllTools?.() ?? [],
@@ -2272,10 +2401,17 @@ export default function (pi: ExtensionAPI) {
                 })(), config: cfg, resolvePath: resolveExtensionPath,
                 configPaths: [configPath(), join(selfDir(), "config.json")],
             };
+            // Bridge tools are supplied by the worker bridge extension, not by a
+            // configured toolExtensions mapping: keep them out of extension
+            // resolution so `unmapped` stays an accurate operator warning and the
+            // frozen launch recipe never depends on bridge availability.
+            const extensionAllowlist = () => (bridgeEnabled
+                ? allow.split(",").filter((name) => !(bridgePlan.tools as readonly string[]).includes(name)).join(",")
+                : allow);
             const { resolution, fullResolution } = await resolveChildLaunch({ ...dependencyOptions, resolution: resolveExtensions({
                 // Only SDK builtins reach `--tools` and extension resolution: process_list and run_application
                 // are task builtins that the mandatory guard installs and activates itself.
-                tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
+                tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : extensionAllowlist(),
                 model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
             }) }, taskTools?.trusted.map(tool => tool.loadPath) ?? []);
             const { args: resolvedExtArgs, missing } = extensionArgs(resolution, (spec) => resolution.paths[spec] ?? resolveExtensionPath(spec));
@@ -2296,7 +2432,7 @@ export default function (pi: ExtensionAPI) {
                 // must not silently switch implementations with current configuration.
                 const reference = model === resume.recipe.model ? resolution : await resolveChildClosure({
                     ...dependencyOptions, model: resume.recipe.model, virtual: false, resolution: resolveExtensions({
-                    tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : allow,
+                    tools: sandboxEnabled ? allow.split(",").filter((name) => (SDK_BUILTIN_TOOLS as readonly string[]).includes(name)).join(",") : extensionAllowlist(),
                     model: resume.recipe.model, clean, allowNested: sandboxEnabled ? false : allowNested, config: cfg,
                 }) });
                 const referenceArgs = [...extensionArgs(reference, (spec) => reference.paths[spec] ?? resolveExtensionPath(spec)).args, ...codemodeArgs,
@@ -2328,10 +2464,17 @@ export default function (pi: ExtensionAPI) {
             const sessionArgs = resume
                 ? ["--session", resume.conversation.path, "--session-dir", childSessionDir]
                 : ["--session-dir", childSessionDir, "--session-id", id];
+            // The bridge extension is added to the command, not to the frozen
+            // recipe: whether a supervising Background host is installed is a
+            // supervision capability, not a tool implementation, so it must not
+            // invalidate a conversation's saved recipe when it appears later.
+            const commandExtArgs = bridgeEnabled
+                ? [...extArgs, "--extension", childBridgeExtensionPath(selfDir())]
+                : extArgs;
             const args = [
                 "-p", "--mode", "json",
                 ...sessionArgs,
-                ...extArgs,
+                ...commandExtArgs,
                 ...(model ? ["--model", model] : []),
                 ...(thinking ? ["--thinking", thinking] : []),
                 ...(allow && !sandboxEnabled ? ["--tools", allow] : []),
@@ -2353,7 +2496,13 @@ export default function (pi: ExtensionAPI) {
                 permissions: permissionPlan.permissions && { ...permissionPlan.permissions, ...commandSettings },
                 applyPatch: taskTools?.applyPatch === true,
                 extensionTools: taskTools?.trusted.map(({ loadPath: _loadPath, ...tool }) => tool) ?? [],
-                extensionPaths: extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]!] : []),
+                // The sandboxed child's policy enables the guarded operation bridge
+                // only when the fixed bridge adapter path is among its extension
+                // paths; the task guard then admits those tools by exact source.
+                extensionPaths: [
+                    ...extArgs.flatMap((arg, index) => arg === "--extension" && extArgs[index + 1] ? [extArgs[index + 1]!] : []),
+                    ...(bridgeEnabled ? [childBridgeExtensionPath(selfDir())] : []),
+                ],
                 runtimeRoots: [baseDir()],
             }) : undefined;
             launchScratch = taskRuntime?.policy.scratch;
@@ -2398,8 +2547,74 @@ export default function (pi: ExtensionAPI) {
             writeFileSync(preflightPath, JSON.stringify({ ...fullResolution, model, tools: selectedTools,
                 configSnapshot: configSnapshot([dirname(configPath()), join(cwd, ".pi")]),
             }));
-            spawned = spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
-                env: { [STEER_FILE_ENV]: steerPathFor(id), [PREFLIGHT_ENV]: preflightPath } });
+            // Register the worker's bridge run before the child can start, so the
+            // child's first handshake finds a bound run and its task authority is
+            // already captured. A resume requires the bridge: without it the
+            // attempt could not read evidence or acknowledge its wait.
+            let workerBridge: { env: Record<string, string>; policy: ReturnType<typeof captureWorkerPolicy>; authorityReference: string } | undefined;
+            if (bridgeEnabled) {
+                const workerPolicy = captureWorkerPolicy({
+                    sandbox: sandboxEnabled,
+                    tools: selectedTools,
+                    clean,
+                    workspace: cwd,
+                    authorityReference: "",
+                    // The assignment deadline the attempt was admitted with; a
+                    // continuation must not silently extend it.
+                    deadlineAt: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt: Date.now() }).deadlineAt ?? null,
+                    taskPolicy: taskRuntime?.policy ?? null,
+                });
+                const authorityReference = `worker-policy:${createHash("sha256")
+                    .update(JSON.stringify(workerPolicy))
+                    .digest("hex")
+                    .slice(0, 16)}`;
+                const owner = ownerBindingFromContext(ctx);
+                try {
+                    const handle = await workerOperations.register({
+                        runId: id,
+                        conversationId: sessionId,
+                        workspace: cwd,
+                        authorityReference,
+                        branchId: owner.branchId,
+                        goalId: owner.goalId,
+                        policy: { ...workerPolicy, authorityReference },
+                        capabilities: bridgePlan.capabilities,
+                        tools: bridgePlan.tools,
+                        schemas: bridgePlan.tools.map((name) => productionBridgeSchemas.schemas.get(name)!).filter(Boolean),
+                        attemptId: id,
+                        ...(lease?.token ? { writerLeaseId: lease.token } : {}),
+                        owner,
+                    });
+                    workerBridge = {
+                        env: { ...handle.env, ...childWriterLeaseEnv(lease?.token) },
+                        policy: workerPolicy,
+                        authorityReference,
+                    };
+                } catch (error) {
+                    const reason = error instanceof Error ? error.message : String(error);
+                    // The child's loadout already promises the bridge (and a
+                    // sandboxed task policy would refuse to start without it), so a
+                    // registration failure refuses this launch instead of letting the
+                    // child run with tools that cannot work.
+                    if (internal?.resumeWait) {
+                        throw new PreSpawnResumeError(`Cannot resume this conversation without its operation bridge: ${reason}`);
+                    }
+                    throw new Error(`Cannot supervise this worker's background operations: ${reason}`);
+                }
+            }
+            // Last gate before execution: the parent identity, Goal admission
+            // revision, durable claim/token and current policy must all still hold.
+            // The fence returns a synchronous release guard that is invoked with no
+            // await between it and the spawn, so a cancellation or parent change
+            // cannot hide inside a final asynchronous window.
+            const dispatchGuard = await internal?.beforeSpawn?.({ runId: id, permissionPlan });
+            spawned = releaseChild(dispatchGuard, () => spawnDetached({ file: cmd.file, fileArgs: cmd.fileArgs, cwd, logPath: logPathFor(id),
+                env: {
+                    [STEER_FILE_ENV]: steerPathFor(id),
+                    [PREFLIGHT_ENV]: preflightPath,
+                    ...(workerBridge?.env ?? {}),
+                } }));
+            internal?.onSpawned?.();
             // Record process identity (pgid, start-time token) so health
             // reconciliation can tell a supervised child from a recycled pid
             // or an orphaned process group (#63). Best-effort: when the OS
@@ -2452,6 +2667,28 @@ export default function (pi: ExtensionAPI) {
                 // The launch record is JSON. Registry freezes that value; it does not
                 // require the resolver's nominal type to carry an index signature.
                 ...(launchCatalog ? { catalog: launchCatalog as unknown as RunMeta["catalog"] } : {}),
+                // Supervised-operation binding (references only; the per-run bridge
+                // token stays in the child environment and is never persisted).
+                ...(workerBridge ? {
+                    operations: {
+                        version: 1 as const,
+                        bridgeRunId: id,
+                        conversationId: sessionId,
+                        workspace: cwd,
+                        authorityReference: workerBridge.authorityReference,
+                        branchId: ownerBindingFromContext(ctx).branchId,
+                        goalId: ownerBindingFromContext(ctx).goalId,
+                        ...(internal?.launchToken ? { resumeLaunchToken: internal.launchToken } : {}),
+                        policy: {
+                            version: 1 as const,
+                            sandbox: workerBridge.policy.sandbox,
+                            tools: workerBridge.policy.tools,
+                            clean: workerBridge.policy.clean,
+                            deadlineAt: workerBridge.policy.deadlineAt,
+                        },
+                        tools: bridgePlan.tools,
+                    },
+                } : {}),
                 timing: resolveRunTiming({ params: p, settings: cfg, env: process.env, startedAt }),
             };
             // This instance holds the exit observer for a run it actually
@@ -2468,6 +2705,25 @@ export default function (pi: ExtensionAPI) {
             void spawned.exit.then((code) => {
                 try { finalizeRun(pi, ctx, id, code); }
                 finally { lease?.release(); }
+                if (workerBridge) workerOperations.release(id, "attempt-exited");
+                // After the writer lease is free: a clean park may already have a
+                // ready dependency, and a failed park must hold its wait rather
+                // than leave an automatic resume armed.
+                void settleParkedExit(id);
+                // If this attempt was a published resume of an earlier parked
+                // assignment, an exit before acknowledgement must settle that
+                // unconsumed generation explicitly instead of leaving it resuming.
+                void settleResumedAttemptExit({
+                    attemptId: id,
+                    service: workerOperations.service,
+                    status: readMeta(id)?.status ?? "exited",
+                    // The exit handler releases the conversation writer lease just
+                    // above, before this call.
+                    writerLeaseReleased: true,
+                    notify: (message) => {
+                        try { uiCtx?.ui?.notify?.(message, "warning"); } catch { /* ignore UI failures */ }
+                    },
+                });
             });
             writeMeta(meta);
             committed = true;
@@ -2514,6 +2770,231 @@ export default function (pi: ExtensionAPI) {
             }
             throw error;
         }
+    }
+
+    /**
+     * Finalize a parked attempt after its child exited.
+     *
+     * The bridge staged the verified checkpoint while the child was still alive;
+     * this is where Background receives the three-fact exit proof
+     * (checkpoint recorded, writer lease released, original writer gone) and the
+     * durable wait leaves `parking`. A park that cannot be proven holds the
+     * generation instead of leaving a resume armed for supervision that stopped.
+     */
+    async function settleParkedExit(id: string): Promise<void> {
+        try {
+            const result = await finalizeWorkerParkAfterExit({
+                runId: id,
+                service: workerOperations.service,
+                // The exit handler calls this after `lease?.release()`.
+                writerLeaseReleased: true,
+            });
+            if (result.outcome === "held" && result.reason) {
+                try { uiCtx?.ui?.notify?.(`Subagent ${id} park held: ${result.reason}`, "warning"); } catch { /* ignore UI failures */ }
+            } else if (result.outcome === "parked" && result.wait?.phase === "ready" && resumeOrchestration) {
+                // The dependency settled while this attempt was exiting: the ready
+                // delivery may already have been dispatched, but reconcile it here.
+                const park = parkedWaitForRun(id);
+                if (park) void resumeOrchestration.resume(park);
+            }
+        } catch {
+            // The durable park record still shows the staged state; reconciliation
+            // at the next session start retries the proof.
+        } finally {
+            syncHealthTicker();
+        }
+    }
+
+    /**
+     * Launch one automatic continuation of a parked conversation.
+     *
+     * Everything below is the ordinary continuation admission path
+     * (`planContinuation` → `spawnSubagentRun`), reused unchanged: native session,
+     * frozen recipe, current mandatory permissions, capacity, writer lease. Only
+     * the attempt id/token come from the durable park record written before this
+     * call; every failure is classified as pre-spawn (releasable) or ambiguous
+     * (must be held).
+     */
+    async function launchParkedResume(input: ResumeLaunchInput): Promise<void> {
+        const ctx = uiCtx;
+        if (!ctx || sessionTornDown) {
+            throw new PreSpawnResumeError("No active foreground session can resume the parked assignment.");
+        }
+        const prior = readMeta(input.park.runId);
+        if (!prior) throw new PreSpawnResumeError(`Cannot resume ${input.park.runId}: its run record is gone.`);
+        const now = Date.now();
+        if (prior.timing?.deadlineAt !== undefined && now >= prior.timing.deadlineAt) {
+            throw new PreSpawnResumeError(
+                `Cannot resume ${input.park.runId}: its assignment deadline passed while it was parked. The wait is held for the owner.`,
+            );
+        }
+        let plan: ContinuationPlan;
+        try {
+            plan = planContinuation({
+                id: prior.id,
+                prior,
+                origin: callbackOriginFromContext(ctx),
+                others: listMetas(),
+            });
+        } catch (error) {
+            throw new PreSpawnResumeError(error instanceof Error ? error.message : String(error));
+        }
+        const owner: WaitOwnerBinding = {
+            sessionId: input.park.record.ownerSessionId ?? ownerBindingFromContext(ctx).sessionId,
+            workspace: input.park.record.ownerWorkspace ?? ctx.cwd,
+            branchId: input.park.record.ownerBranchId ?? ownerBindingFromContext(ctx).branchId,
+            goalId: input.park.record.ownerGoalId ?? null,
+        };
+        const target = plan;
+        let spawned = false;
+        try {
+            await spawnSubagentRun(
+                ctx,
+                {
+                    prompt: resumePrompt(input.park),
+                    session_id: plan.conversation.sessionId,
+                    callback: prior.callback ?? true,
+                    ...continuationTiming(prior),
+                },
+                undefined,
+                plan,
+                {
+                    assignedRunId: input.assignedRunId,
+                    launchToken: input.launchToken,
+                    // Marks this launch as an automatic resume: it may continue a
+                    // conversation whose wait is still pending, which a manual
+                    // continuation is refused until it takes over.
+                    resumeWait: { waitId: input.park.waitId, generation: input.park.generation },
+                    // Final dispatch fence: extension resolution, permission
+                    // re-resolution, the bridge registration and the writer lease
+                    // all happened above. Nothing may have changed since admission.
+                    beforeSpawn: ({ permissionPlan }) => assertFinalResumeDispatch({
+                        pi,
+                        rpc: workerOperations.rpc,
+                        // Getter, not a captured value: the foreground context can be
+                        // replaced during the asynchronous preparation.
+                        service: () => workerOperations.service,
+                        context: () => uiCtx,
+                        park: input.park,
+                        claim: input.claim,
+                        owner,
+                        admissionRevision: input.admissionRevision,
+                        permissionsUnchanged: () => samePermissionPlan(
+                            permissionPlan,
+                            resolveSubagentPermissions(pi, target.recipe.sandbox),
+                        ),
+                        capacityAvailable: () => resumeCapacity().recheck(),
+                    }),
+                    onSpawned: () => { spawned = true; },
+                },
+            );
+        } catch (error) {
+            // A child that exists is ambiguous: the coordinator holds the claim
+            // and the next reconciliation must not launch a second execution.
+            if (spawned) throw error;
+            throw error instanceof PreSpawnResumeError
+                ? error
+                : new PreSpawnResumeError(error instanceof Error ? error.message : String(error));
+        }
+    }
+
+    /**
+     * Compare two permission resolutions by value. A changed worker authority
+     * during preparation (tightened or relaxed) invalidates the admission and
+     * requires a fresh launch decision.
+     */
+    function samePermissionPlan(
+        left: ReturnType<typeof resolveSubagentPermissions>,
+        right: ReturnType<typeof resolveSubagentPermissions>,
+    ): boolean {
+        const canonical = (value: unknown): string => {
+            const sort = (input: unknown): unknown => {
+                if (Array.isArray(input)) return input.map(sort);
+                if (input && typeof input === "object") {
+                    return Object.fromEntries(Object.keys(input as Record<string, unknown>).sort()
+                        .map((key) => [key, sort((input as Record<string, unknown>)[key])]));
+                }
+                return input;
+            };
+            return JSON.stringify(sort(value));
+        };
+        return canonical(left) === canonical(right);
+    }
+
+    /** Preserve the original assignment deadline across parking; never extend it. */
+    function continuationTiming(prior: RunMeta): TimingParams {
+        const timing = prior.timing;
+        if (!timing) return {};
+        const minutes = (at: number | undefined): number | undefined => {
+            if (at === undefined) return undefined;
+            return Math.max(1, at - Date.now()) / 60_000;
+        };
+        return {
+            ...(timing.deadlineAt !== undefined ? { deadline_minutes: minutes(timing.deadlineAt) } : {}),
+            ...(timing.ceilingAt !== undefined ? { max_minutes: minutes(timing.ceilingAt) } : {}),
+            ...(timing.graceMs !== undefined ? { grace_minutes: timing.graceMs / 60_000 } : {}),
+            ...(timing.stuckMs !== undefined ? { stuck_minutes: timing.stuckMs / 60_000 } : {}),
+        };
+    }
+
+    /**
+     * Capacity admission for an automatic resume. The ordinary shared gate is
+     * reserved before any durable pre-spawn record, so a saturated pool leaves the
+     * generation ready (delivery is retried) instead of publishing an
+     * unresumable claim; the recheck covers a cap reduced in the meantime.
+     */
+    function resumeCapacity(): ResumeCapacity {
+        const gate = () => getSharedCapacityGate(countRunning);
+        return {
+            tryReserve: () => gate().tryReserve(1, activeConcurrencyCap()),
+            recheck: () => countRunning() + gate().pending <= activeConcurrencyCap(),
+            commit: () => gate().commit(1),
+            release: () => gate().release(1),
+        };
+    }
+
+    /** Create the resume orchestration lazily (needs an active foreground context). */
+    function ensureResumeOrchestration(): ResumeOrchestration {
+        resumeOrchestration ??= createResumeOrchestration({
+            pi,
+            service: () => workerOperations.service,
+            rpc: workerOperations.rpc,
+            context: () => uiCtx,
+            capacity: resumeCapacity(),
+            launch: launchParkedResume,
+            stopAttempt: stopPublishedAttempt,
+            notify: (message, level) => {
+                try { uiCtx?.ui?.notify?.(message, level); } catch { /* ignore UI failures */ }
+            },
+        });
+        return resumeOrchestration;
+    }
+
+    /**
+     * Start the supervised-worker path: the local bridge host plus reconciliation
+     * of parked generations left by a previous session. Nothing here runs when the
+     * Background service is absent.
+     */
+    async function startWorkerOperations(): Promise<void> {
+        const ready = await workerOperations.start();
+        if (!ready) return;
+        const service = workerOperations.service;
+        if (!service) return;
+        const orchestration = ensureResumeOrchestration();
+        try {
+            // Register the continuation adapter first: Background refuses to
+            // register a park wait without one, and ready deliveries are dispatched
+            // to exactly this adapter.
+            service.registerContinuationAdapter(orchestration.adapter);
+        } catch { /* a host that refuses the adapter leaves parking unavailable */ }
+        try {
+            await reconcileParkedWaits(service, {
+                resume: (park) => orchestration.resume(park),
+                notify: (message) => {
+                    try { uiCtx?.ui?.notify?.(message, "warning"); } catch { /* ignore UI failures */ }
+                },
+            });
+        } catch { /* reconciliation retries on the next session start */ }
     }
 
     // ---- subagent_spawn -------------------------------------------------
@@ -2972,7 +3453,30 @@ export default function (pi: ExtensionAPI) {
         enqueueCompletionCallback(pi, id);
     } });
     acceptanceStopToolRef = acceptanceStopTool;
-    pi.registerTool(acceptanceStopTool);
+    // A parked assignment has no live child: `subagent_stop` is the explicit
+    // takeover that cancels its pending automatic resume, so the conversation can
+    // be continued manually. Without this, stop would report "not running" and
+    // leave the automatic resume armed for the same assignment.
+    const acceptanceStopToolWithParked = {
+        ...acceptanceStopTool,
+        async execute(toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) {
+            const target = (params as { id?: unknown } | undefined)?.id;
+            if (typeof target === "string" && cancelParkedForUi?.(target, "cancelled by subagent_stop; the automatic resume is cancelled")) {
+                renderWidget();
+                syncHealthTicker();
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Cancelled the pending wait of parked subagent ${target}. Its conversation can now be continued with subagent_spawn session_id.`,
+                    }],
+                };
+            }
+            return (acceptanceStopTool.execute as (
+                id: string, p: unknown, s?: AbortSignal, u?: unknown, c?: unknown,
+            ) => Promise<unknown>)(toolCallId, params, signal, onUpdate, ctx) as Promise<never>;
+        },
+    };
+    pi.registerTool(acceptanceStopToolWithParked as typeof acceptanceStopTool);
     publishAcceptanceHooks();
 
     const agentOperations = createAgentOperations({
@@ -3190,6 +3694,10 @@ export default function (pi: ExtensionAPI) {
         renderWidget();
         // Reattach one watcher after reload; ordinary completion retries belong to the batcher.
         syncHealthTicker();
+        // Supervised worker operations (ADR 0020): the bridge host is bound to this
+        // process, and parked generations from a previous session are reconciled
+        // against the durable coordinator before anything resumes.
+        void startWorkerOperations();
     });
 
     pi.on("session_before_switch", () => {
@@ -3219,6 +3727,12 @@ export default function (pi: ExtensionAPI) {
         // Late finalizers of surviving children must not restart supervision
         // loops in this replaced instance.
         sessionTornDown = true;
+        // This instance's bridge host dies with the session: a surviving child
+        // loses its transport (and therefore refuses to park) instead of talking
+        // to a replaced session's handlers. Durable wait records are untouched.
+        try { resumeOrchestration?.stop(); } catch { /* best effort */ }
+        resumeOrchestration = undefined;
+        void workerOperations.close().catch(() => {});
         // Children keep running; their finalizers (if this instance still holds
         // one) must not reach for a ctx that Pi invalidates once the session is
         // replaced.

@@ -177,10 +177,19 @@ export function isNavigatorUiAvailable(ctx) {
  * @param {(m: object) => object|undefined} [deps.healthFor] - #66 HealthObservation
  * @param {number} [deps.now]
  */
+export function pendingNavigatorPark(meta) {
+    const park = meta?.park;
+    return park?.version === 1 && ["parking", "waiting", "ready", "resuming", "held"].includes(park.phase) ? park : undefined;
+}
+
+function navigatorDisplayStatus(meta, status) {
+    return status === "running" || status === "orphaned" ? status : pendingNavigatorPark(meta)?.phase ?? status;
+}
+
 export function buildNavigatorRows(metas, deps) {
     const now = deps.now ?? Date.now();
     return metas.map((m) => {
-        const status = deps.effectiveStatus(m);
+        const status = navigatorDisplayStatus(m, deps.effectiveStatus(m));
         const health = typeof deps.healthFor === "function" ? deps.healthFor(m) : undefined;
         const effort = typeof deps.effortFor === "function" ? deps.effortFor(m) : (m.effort ?? m.modelEffort);
         const tool = typeof deps.toolFor === "function" ? (deps.toolFor(m) || "") : "";
@@ -374,7 +383,7 @@ export function buildNavigatorDetail(id, deps) {
     const now = deps.now ?? Date.now();
     const parsed = deps.parseRun(id);
     const toolCalls = parsed.toolCalls ?? [];
-    const status = deps.effectiveStatus(meta);
+    const status = navigatorDisplayStatus(meta, deps.effectiveStatus(meta));
     const running = status === "running" || status === "orphaned";
     const health = typeof deps.healthFor === "function" ? deps.healthFor(meta) : undefined;
     const effortRaw = typeof deps.effortFor === "function"
@@ -384,6 +393,8 @@ export function buildNavigatorDetail(id, deps) {
         id: meta.id,
         name: meta.name,
         role: meta.catalog?.roleName || (meta.catalog?.roleId ? String(meta.catalog.roleId).replace(/^role\./, "") : undefined) || undefined,
+        park: pendingNavigatorPark(meta),
+        attemptStatus: deps.effectiveStatus(meta),
         status,
         model: deps.shortModel(meta.model),
         effort: effortRaw ? String(effortRaw) : undefined,
