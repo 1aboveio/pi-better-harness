@@ -58,7 +58,7 @@ export default function fakeModel(pi: ExtensionAPI): void {
     const phase = process.env.WORKER_KERNEL_PHASE === "resume" ? "resume" : "fresh";
     const workspace = process.env.WORKER_KERNEL_WORKSPACE ?? process.cwd();
     const outside = process.env.WORKER_KERNEL_OUTSIDE ?? `${workspace}/../outside.txt`;
-    const node = process.execPath;
+    const networkUrl = process.env.WORKER_KERNEL_NETWORK_URL ?? "";
     let turn = 0;
     const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     const provider = {
@@ -85,14 +85,14 @@ export default function fakeModel(pi: ExtensionAPI): void {
                             type: "toolCall",
                             id: "kernel-spawn-read",
                             name: "bg_task_spawn",
-                            arguments: { argv: [node, "-e", "console.log('kernel-read-ok')"], shell: false, name: "kernel-read" },
+                            arguments: { argv: ["/bin/sh", "-c", "printf kernel-read-ok"], shell: false, name: "kernel-read" },
                         },
                         {
                             type: "toolCall",
                             id: "kernel-spawn-write",
                             name: "bg_task_spawn",
                             arguments: {
-                                argv: [node, "-e", `require('node:fs').writeFileSync(${JSON.stringify(outside)}, 'escape')`],
+                                argv: ["/bin/sh", "-c", "printf escape > \"$1\"", "kernel-write", outside],
                                 shell: false,
                                 name: "kernel-write",
                             },
@@ -102,7 +102,7 @@ export default function fakeModel(pi: ExtensionAPI): void {
                             id: "kernel-spawn-net",
                             name: "bg_task_spawn",
                             arguments: {
-                                argv: [node, "-e", "require('node:net').connect(80, '127.0.0.1').on('error', (e) => { console.error(e.code); process.exit(3); })"],
+                                argv: ["/usr/bin/curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--connect-timeout", "2", networkUrl],
                                 shell: false,
                                 name: "kernel-net",
                             },

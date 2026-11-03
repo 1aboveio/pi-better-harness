@@ -31,6 +31,7 @@
  * skip into a failure in CI.
  */
 import assert from "node:assert/strict";
+import { createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -236,6 +237,18 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
     const sessionDir = join(durableRoot, "sessions", attemptId);
     mkdirSync(sessionDir, { recursive: true });
     const outside = join(stack.root, "outside.txt");
+    let networkConnections = 0;
+    const server = createServer((socket) => {
+        networkConnections += 1;
+        socket.resume();
+        socket.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    });
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    const networkUrl = `http://127.0.0.1:${server.address().port}/`;
+    const control = await runConfined({file: "/usr/bin/curl", args: ["--noproxy", "*", "--fail", "--silent", "--show-error", "--connect-timeout", "2", networkUrl], cwd: stack.workspace, env: {}});
+    assert.equal(control.code, 0, `the network control must succeed before confinement: ${control.stderr}`);
+    assert.equal(networkConnections, 1);
     const { runtime } = writeAttempt(stack, { attemptId, sessionDir, workspace: stack.workspace });
     const plan = defaultPlan();
     const { handle } = await registerWorker(stack, {
@@ -255,6 +268,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
             WORKER_KERNEL_PHASE: "fresh",
             WORKER_KERNEL_WORKSPACE: stack.workspace,
             WORKER_KERNEL_OUTSIDE: outside,
+            WORKER_KERNEL_NETWORK_URL: networkUrl,
         },
     });
     if (fresh.code !== 0 && nestedSandboxFailure(`${fresh.stdout}\n${fresh.stderr}`)) {
@@ -323,6 +337,7 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
     });
     assert.deepEqual(Object.values(outcomes).sort(), ["failed", "failed", "succeeded"], JSON.stringify(diagnostics));
     assert.equal(existsSync(outside), false, "a write outside the workspace must stay denied");
+    assert.equal(networkConnections, 1, "the confined network task must not reach the listener that the control reached");
 
     // Exit proof: checkpoint staged, lease released, original writer gone.
     writeFileSync(registry.logPathFor(attemptId), `${fresh.stdout}\n`);

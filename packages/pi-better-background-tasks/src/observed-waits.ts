@@ -43,6 +43,7 @@ import {
   confineCommandSpec,
   resolveForegroundSandboxPlan,
   resolveWorkerSandboxPlan,
+  sandboxProvenance,
   type ForegroundSandboxPlan,
   type WorkerSandboxPolicy,
 } from "./sandbox.js";
@@ -68,7 +69,7 @@ import {
   type SupervisorStartOptions,
   type SupervisorTaskStatus,
 } from "./supervisor/index.js";
-import type { BackgroundTaskCallbackOrigin, CommandSpec, Condition } from "./types.js";
+import type { BackgroundTaskCallbackOrigin, CommandSpec, Condition, TaskSandboxProvenance } from "./types.js";
 import type { SpawnTaskParams, WatchTaskParams } from "./runtime.js";
 
 export const OBSERVED_WAITS_SERVICE_VERSION = 1 as const;
@@ -372,6 +373,7 @@ export interface StatusView {
   readonly lastOutput?: { stdout: string; stderr: string };
   readonly stepGateFailure?: { stepExitCode: number; shellExitCode: number | null; command: string };
   readonly waits: readonly WaitView[];
+  readonly sandbox?: TaskSandboxProvenance;
 }
 
 /** Read-only projection of one supervised durable task for list/navigator/Goal. */
@@ -404,6 +406,7 @@ export interface DurableTaskProjection {
   readonly deadlineAt?: number;
   readonly logPaths: { stdout: string; stderr: string; events: string };
   readonly waits: readonly WaitView[];
+  readonly sandbox?: TaskSandboxProvenance;
   readonly owner: { sessionId: string; workspace: string };
 }
 
@@ -616,6 +619,8 @@ interface LaunchContext {
   readonly command?: string;
   readonly argv?: readonly string[];
   readonly cwd?: string;
+  /** Launch-time sandbox provenance; never recomputed from the current profile. */
+  readonly sandbox?: TaskSandboxProvenance;
   /** Owner branch anchor captured at launch (undefined when unavailable). */
   readonly branchId?: string | null;
   callbackPendingAt?: number;
@@ -978,6 +983,7 @@ export class ObservedWaitHost {
       ...(typeof input.params.command === "string" ? { command: input.params.command } : {}),
       ...(prepared.spec.argv ? { argv: [...prepared.spec.argv] } : {}),
       cwd: prepared.cwd,
+      sandbox: prepared.provenance,
       branchId: owner.branchId ?? null,
     };
     // Persist supervision metadata outside the task execution record so a
@@ -1127,6 +1133,18 @@ export class ObservedWaitHost {
     return this.projectDurable(operation, this.options.now?.() ?? Date.now());
   }
 
+  /**
+   * True only when this host's **currently active** parent session/workspace
+   * owns the durable operation. The adapter contract uses this to admit a local
+   * stop/clear as a registry operation; it is not a regex and cannot authorize a
+   * foreign session or a worker-owned operation.
+   */
+  ownsDurableTask(taskId: string): boolean {
+    const origin = this.activeOrigin;
+    if (!origin) return false;
+    return this.readDurableTask(origin, taskId) !== undefined;
+  }
+
   /** Read-only log tails. Unlike status/log tools, this records no evidence read. */
   readDurableTaskLog(
     origin: BackgroundTaskCallbackOrigin,
@@ -1246,6 +1264,7 @@ export class ObservedWaitHost {
       ...(timeoutSeconds !== undefined && timeoutSeconds > 0 ? { deadlineAt: startedAt + timeoutSeconds * 1000 } : {}),
       logPaths: { stdout: pathSet.stdout, stderr: pathSet.stderr, events: pathSet.events },
       waits,
+      ...(context?.sandbox ? { sandbox: context.sandbox } : {}),
       owner: { sessionId: operation.owner.sessionId, workspace: operation.owner.workspace },
     };
   }
@@ -1284,6 +1303,7 @@ export class ObservedWaitHost {
       ...(result?.lastOutput ? { lastOutput: result.lastOutput } : {}),
       ...(stepGate ? { stepGateFailure: stepGate } : {}),
       waits,
+      ...(launched?.sandbox ? { sandbox: launched.sandbox } : {}),
     };
   }
 
@@ -1325,6 +1345,9 @@ export class ObservedWaitHost {
       `${view.taskId} ${view.kind}: ${view.status} (${view.phase})`,
       `operation: ${view.operationId}; terminal revision: ${view.terminalRevision}${view.terminalOutcome ? ` (${view.terminalOutcome})` : ""}`,
     ];
+    if (view.sandbox) {
+      lines.push(`sandbox: ${view.sandbox.confinement}${view.sandbox.backend ? `; ${oneLine(view.sandbox.backend, 40)}` : ""}; source: ${oneLine(view.sandbox.policySource, 80)}; later changes do not affect this task.`);
+    }
     if (view.exitCode !== null || view.signal) lines.push(`exit=${view.exitCode ?? "null"}${view.signal ? ` signal=${view.signal}` : ""}${view.stepGateFailure ? " (step gate)" : ""}`);
     if (view.startedAt) lines.push(`started: ${new Date(view.startedAt).toISOString()}${view.endedAt ? `; ended: ${new Date(view.endedAt).toISOString()}` : ""}`);
     if (view.checks !== undefined) lines.push(`checks: ${view.checks}`);
@@ -1434,6 +1457,7 @@ export class ObservedWaitHost {
       ...(typeof input.params.command === "string" ? { command: input.params.command } : {}),
       ...(prepared.spec.argv ? { argv: [...prepared.spec.argv] } : {}),
       cwd: prepared.cwd,
+      sandbox: prepared.provenance,
       branchId: owner.branchId ?? null,
     };
     this.writeLaunchContext(taskId, launchContext);
@@ -2207,6 +2231,7 @@ export class ObservedWaitHost {
     env?: Record<string, string>;
     notices: string[];
     gated: boolean;
+    provenance: TaskSandboxProvenance;
     commandTimeoutSeconds?: number;
   } {
     const cwd = workerWorkspace !== undefined
@@ -2255,6 +2280,7 @@ export class ObservedWaitHost {
       ...(spec.env ? { env: spec.env } : {}),
       notices: [],
       gated,
+      provenance: sandboxProvenance(plan, false),
       ...(limits.commandTimeoutSeconds !== undefined ? { commandTimeoutSeconds: limits.commandTimeoutSeconds } : {}),
     };
   }
@@ -3103,6 +3129,8 @@ export class ObservedWaitHost {
         ...(Array.isArray(value.argv) && value.argv.every((entry) => typeof entry === "string")
           ? { argv: value.argv as string[] } : {}),
         ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
+        ...(value.sandbox && typeof value.sandbox === "object" && !Array.isArray(value.sandbox)
+          ? { sandbox: value.sandbox as TaskSandboxProvenance } : {}),
         ...(typeof value.branchId === "string" || value.branchId === null ? { branchId: value.branchId } : {}),
         ...(typeof value.callbackPendingAt === "number" ? { callbackPendingAt: value.callbackPendingAt } : {}),
         ...(typeof value.callbackDeliveredAt === "number" ? { callbackDeliveredAt: value.callbackDeliveredAt }

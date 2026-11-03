@@ -26,6 +26,7 @@ import {
 } from "./sandbox.js";
 import type { LocalSupervisor, SupervisorStartOptions } from "./supervisor/index.js";
 import { supervisorTaskIdForToken } from "./supervisor/index.js";
+import { advertiseBackgroundAdapter, BACKGROUND_ADAPTER_REQUEST } from "./adapter-contract.js";
 import { readProcessStartToken } from "./process-identity.js";
 import { openStore } from "./shared-operation-coordinator/index.js";
 import { registerTools } from "./tools.js";
@@ -168,6 +169,8 @@ describe("parent durable launches", () => {
     expect(status.status).toBe("succeeded");
     expect(status.exitCode).toBe(0);
     expect(status.terminalRevision).toBe(1);
+    expect(status.sandbox?.confinement).toBe("unconfined");
+    expect(host.formatStatus(status)).toContain("sandbox: unconfined");
     expect(readFileSync(marker, "utf8")).toBe("ok");
 
     const revision = status.terminalRevision;
@@ -582,11 +585,14 @@ describe("worker operation service", () => {
       },
     };
 
-    await host.service.launchForWorker(run, {
+    const launched = await host.service.launchForWorker(run, {
       kind: "process",
       params: { cwd: "sub", argv: ["/usr/bin/true"], shell: false, callback: false },
       policy,
     });
+    const confinedView = host.service.statusForWorker(run, launched.id);
+    expect(confinedView.sandbox).toMatchObject({ confinement: "confined", policySource: "background" });
+    expect(host.formatStatus(confinedView)).toMatch(/sandbox: confined(?:; [^;]+)?; source: background/);
     expect(starts).toHaveLength(1);
     expect(starts[0]?.argv[0]).toBe("/usr/bin/sandbox-exec");
     expect(starts[0]?.commandTimeoutSeconds).toBe(7);
@@ -1203,6 +1209,7 @@ describe("durable read-only projections", () => {
       });
       expect(changes).toBeGreaterThan(0);
 
+      expect(host.ownsDurableTask(launch.id)).toBe(true);
       expect(host.listDurableTasks({ cwd: root, sessionId: "foreign-session" })).toEqual([]);
       expect(host.listDurableTasks({ cwd: root })).toEqual([]);
       expect(host.readDurableTask({ cwd: root, sessionId: "foreign-session" }, launch.id)).toBeUndefined();
@@ -1223,6 +1230,12 @@ describe("durable read-only projections", () => {
       });
       const workerLaunch = await worker;
       expect(host.readDurableTask(origin, workerLaunch.id)).toBeUndefined();
+      expect(host.ownsDurableTask(workerLaunch.id)).toBe(false);
+      // A different active session cannot claim the owner's durable task.
+      host.start(createCtx(root, "foreign-session", "foreign-branch"));
+      expect(host.ownsDurableTask(launch.id)).toBe(false);
+      host.start(ctx);
+      expect(host.ownsDurableTask(launch.id)).toBe(true);
 
       await host.stopDurableTask(origin, launch.id);
       await until(host, () => host.readDurableTask(origin, launch.id)?.terminal === true);
@@ -1299,6 +1312,60 @@ describe("durable read-only projections", () => {
     } finally {
       off();
     }
+  });
+});
+
+describe("durable adapter admission", () => {
+  it("admits an owned durable stop as a registry operation and refuses foreign or worker ids", async () => {
+    const root = workspace("adapter");
+    const harness = createHarness();
+    const { host } = startHost({ root, harness });
+    const ctxA = createCtx(root, "adapter-owner", "adapter-branch");
+    host.start(ctxA);
+    const parent = await host.launchParent({
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 30000)"), shell: false, callback: false },
+      ctx: ctxA,
+    });
+    const worker = await host.service.launchForWorker({
+      runId: "adapter-run",
+      conversationId: "adapter-conversation",
+      workspace: root,
+      authorityReference: "adapter-ref",
+      branchId: null,
+    }, {
+      kind: "process",
+      params: { argv: nodeCommand("setTimeout(() => {}, 30000)"), shell: false, callback: false },
+      policy: null,
+    });
+    advertiseBackgroundAdapter(harness.pi, new Map<string, object>([["bg_task_stop", {}]]));
+    const reply = (id: string) => {
+      let value: { admission?: string } | undefined;
+      harness.events.emit(BACKGROUND_ADAPTER_REQUEST, {
+        version: 1,
+        name: "bg_task_stop",
+        input: { id },
+        reply: (next: { admission?: string }) => { value = next; },
+      });
+      return value;
+    };
+
+    expect(reply(parent.id)?.admission).toBe("registry");
+    host.start(createCtx(root, "adapter-other", "other-branch"));
+    expect(reply(parent.id)).toBeUndefined();
+    expect(reply(worker.id)).toBeUndefined();
+    expect(reply("bg_missing")).toBeUndefined();
+    host.start(ctxA);
+    expect(reply(parent.id)?.admission).toBe("registry");
+
+    await host.stopForParent(ctxA, parent.id);
+    await host.service.stopForWorker({
+      runId: "adapter-run",
+      conversationId: "adapter-conversation",
+      workspace: root,
+      authorityReference: "adapter-ref",
+      branchId: null,
+    }, worker.id);
   });
 });
 

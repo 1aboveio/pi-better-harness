@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getObservedWaitHost } from "./observed-waits.js";
 import { inspectMeta } from "./registry.js";
 
 /** Optional-peer contract, mirrored by pi-better-sandbox/background-admission.ts. */
@@ -22,13 +23,13 @@ export function advertiseBackgroundAdapter(pi: ExtensionAPI, schemas: ReadonlyMa
         typeof request.reply !== "function") return;
     const parameters = schemas.get(request.name);
     if (!parameters) return;
-    const admission = classify(request.name, request.input);
+    const admission = classify(pi, request.name, request.input);
     if (admission) request.reply({ version: BACKGROUND_ADAPTER_VERSION, parameters, admission, executionControls: 1 });
   });
   pi.on("session_shutdown", () => { if (typeof unsubscribe === "function") unsubscribe(); });
 }
 
-function classify(name: string, input: unknown): Admission | undefined {
+function classify(pi: ExtensionAPI, name: string, input: unknown): Admission | undefined {
   if (!input || typeof input !== "object" || Array.isArray(input)) return;
   const params = input as Record<string, unknown>;
   let action: unknown;
@@ -53,4 +54,9 @@ function classify(name: string, input: unknown): Admission | undefined {
   // of a local stop; a remote stop can execute SSH in the trusted Pi process.
   const meta = inspectMeta(params.id).meta;
   if (meta && !meta.ssh && !meta.remote && (meta.kind === "process" || meta.kind === "command_watch")) return "registry";
+  // A durable local task has no legacy registry meta. Only the currently active
+  // owning session/workspace may admit it as a registry operation; the exact tool
+  // source and schema are still verified by the caller before this reply is
+  // trusted. A foreign session or worker-owned id stays unauthorized.
+  if (getObservedWaitHost(pi)?.ownsDurableTask(params.id) === true) return "registry";
 }

@@ -2177,6 +2177,15 @@ export default function (pi: ExtensionAPI) {
             /** Present for an automatic resume: it may continue a conversation whose wait is still pending. */
             resumeWait?: { waitId: string; generation: number };
             /**
+             * The owner binding captured when the worker parked. A resumed attempt
+             * must register its operation bridge and record meta.operations under
+             * THIS parent workspace/session/branch/Goal: a parent model turn appends
+             * branch entries while the continuation is being admitted, and the wait's
+             * exact-revision reads and acknowledgement are checked against the
+             * captured owner, not the current one.
+             */
+            parkOwner?: WaitOwnerBinding;
+            /**
              * Final dispatch fence: runs after every async preparation and
              * immediately before the child is released. Throwing proves no child
              * was started.
@@ -2568,7 +2577,9 @@ export default function (pi: ExtensionAPI) {
                     .update(JSON.stringify(workerPolicy))
                     .digest("hex")
                     .slice(0, 16)}`;
-                const owner = ownerBindingFromContext(ctx);
+                // A resumed attempt keeps the owner captured at park time; a fresh
+                // launch uses the active foreground binding.
+                const owner = internal?.parkOwner ?? ownerBindingFromContext(ctx);
                 try {
                     const handle = await workerOperations.register({
                         runId: id,
@@ -2676,8 +2687,14 @@ export default function (pi: ExtensionAPI) {
                         conversationId: sessionId,
                         workspace: cwd,
                         authorityReference: workerBridge.authorityReference,
-                        branchId: ownerBindingFromContext(ctx).branchId,
-                        goalId: ownerBindingFromContext(ctx).goalId,
+                        // Captured at park time for a resumed attempt; the worker
+                        // workspace above stays the actual task/sandbox root.
+                        ...(internal?.parkOwner
+                            ? { branchId: internal.parkOwner.branchId, goalId: internal.parkOwner.goalId }
+                            : {
+                                branchId: ownerBindingFromContext(ctx).branchId,
+                                goalId: ownerBindingFromContext(ctx).goalId,
+                            }),
                         ...(internal?.launchToken ? { resumeLaunchToken: internal.launchToken } : {}),
                         policy: {
                             version: 1 as const,
@@ -2865,6 +2882,10 @@ export default function (pi: ExtensionAPI) {
                     // conversation whose wait is still pending, which a manual
                     // continuation is refused until it takes over.
                     resumeWait: { waitId: input.park.waitId, generation: input.park.generation },
+                    // The bridge registration and meta.operations must describe the
+                    // owner captured when the worker parked, not the foreground
+                    // branch as it stands after the parent's later model turn.
+                    parkOwner: owner,
                     // Final dispatch fence: extension resolution, permission
                     // re-resolution, the bridge registration and the writer lease
                     // all happened above. Nothing may have changed since admission.
