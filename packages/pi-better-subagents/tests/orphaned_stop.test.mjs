@@ -105,6 +105,24 @@ function incompleteOpenToolEvents() {
     ];
 }
 
+/** Coherent terminal stream whose last model request was never served. */
+function terminalModelErrorEvents() {
+    const error = "Model router: no eligible Flash model is available. Check Pi's model catalog and provider login.";
+    return [
+        {
+            type: "message_end",
+            message: { role: "assistant", content: [{ type: "text", text: "first sentence" }], stopReason: "toolUse" },
+        },
+        {
+            type: "message_end",
+            message: { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: error },
+        },
+        { type: "agent_end", messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: error }], willRetry: false },
+        { type: "auto_retry_end", success: false, attempt: 1, finalError: error },
+        { type: "agent_settled", aborted: false },
+    ];
+}
+
 /** Detached sleeper that is its own process-group leader (pgid == pid). */
 function spawnGroupLeader(seconds = 30) {
     const proc = spawn("sleep", [String(seconds)], { detached: true, stdio: "ignore" });
@@ -275,6 +293,24 @@ describe("orphaned cleanup with terminal evidence", () => {
         assert.equal(back.lifecycleClassification, "complete");
         assert.equal(back.endedAt, 11_000);
         assert.equal(back.exitCode, 0);
+    });
+
+    // @covers stop.orphaned-cleanup
+    // @level unit
+    // @fails-without-fix stop.orphaned-cleanup
+    it("finalizes failed when coherent terminal evidence ends on a model error", () => {
+        const id = trackDisk(`sa_t68_model_err_${Date.now()}`);
+        writeMeta(meta({ id, status: "orphaned", pid: 0x3ffffff2, pgid: 0x3ffffff2 }));
+        writeLog(id, terminalModelErrorEvents());
+        const probe = fakeProbe();
+
+        const outcome = stopRun(id, { probe, now: () => 13_000 });
+        assert.equal(outcome.action, "finalized");
+        assert.equal(outcome.status, "failed");
+        const back = readMeta(id);
+        assert.equal(back.status, "failed");
+        assert.equal(back.lifecycleClassification, "failed_model_error");
+        assert.equal(back.endedAt, 13_000);
     });
 
     // @covers stop.orphaned-cleanup
