@@ -150,7 +150,7 @@ test('native Pi codemode batch receipts', { skip: !supported && 'native codemode
         assert.equal(receipt.failed.length, 1);
         assert.equal(receipt.failed[0].job, 1);
         assert.equal(receipt.failed[0].name, 'unavailable');
-        assert.match(receipt.failed[0].reason, /extension.*not installed/i);
+        assert.match(receipt.failed[0].reason, /Child dependency (?:npm:)?@juicesharp\/rpiv-web-tools is not installed\./);
         assert.deepEqual(receipt.launched.map(({ job, name }) => ({ job, name })), [{ job: 2, name: 'available' }]);
         assert.equal(registry.readMeta(receipt.launched[0].id).batchId, receipt.batchId);
     });

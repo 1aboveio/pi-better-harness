@@ -70,9 +70,10 @@ describe("built-in provider extensions", () => {
     });
 
     it("keeps a missing provider package an explicit missing error", (t) => {
-        openEnvironment(t, { installed: false });
+        const missing = "npm:pi-subagent-test-missing-provider";
+        openEnvironment(t, { installed: false, settings: { providerExtensions: { "ollama-cloud": missing } } });
         const child = extensionArgs(resolveFromShippedConfig(), resolveExtensionPath);
-        assert.deepEqual(child.missing, [OLLAMA]);
+        assert.deepEqual(child.missing, [missing]);
         assert.deepEqual(child.args, ["--no-extensions"]);
     });
 

@@ -1,4 +1,5 @@
 /** Trusted native entry point. Any failure before/inside guard installation is fatal. */
+import preflight from "./child-preflight.mjs";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join } from "node:path";
@@ -33,7 +34,7 @@ try {
   // source before provider/trusted packages, but keep activation in the final guard.
   const ownerPath = fileURLToPath(new URL("./task-tool-owner.ts", import.meta.url));
   await main(["--extension", ownerPath, ...args], {
-    extensionFactories: [{ name: "task-sandbox", factory: async (pi) => {
+    extensionFactories: [...(process.env.PI_SUBAGENT_PREFLIGHT ? [{ name: "subagent-preflight", factory: preflight }] : []), { name: "task-sandbox", factory: async (pi) => {
       try { await guard(pi, policy, fail, true); } catch (error) { fail(error); }
     } }],
   });

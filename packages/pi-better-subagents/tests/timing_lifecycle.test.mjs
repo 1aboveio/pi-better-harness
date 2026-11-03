@@ -344,7 +344,7 @@ describe("harness timing: soft deadline", () => {
                 assert.match(result, /Timing: stopped: deadline/);
                 const list = (await h.tools.get("subagent_list").execute("x", {}, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(list, new RegExp(`${run.id}.*stopped: deadline`));
-                const output = (await h.tools.get("subagent_output").execute("x", { id: run.id }, undefined, undefined, h.ctx)).content[0].text;
+                const output = (await h.tools.get("subagent_output").execute("x", { id: run.id, max_bytes: 2048 }, undefined, undefined, h.ctx)).content[0].text;
                 assert.match(output, /Timing: stopped: deadline/);
                 await tick();
                 assert.equal(wakes(h, "deadline").length, 1);

@@ -47,6 +47,7 @@ export const SELF_SPEC = "self";
  * replace these per provider (an empty list disables the built-in entry).
  */
 export const BUILTIN_PROVIDER_EXTENSIONS = {
+    "router": "npm:pi-better-model-router",
     "ollama-cloud": "npm:pi-ollama-cloud",
 };
 

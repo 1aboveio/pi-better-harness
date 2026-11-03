@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { SELF_SPEC } from "./extensions.ts";
+import { installedPackage } from "./child-dependencies.mjs";
 import { isDelegationMode, type DelegationMode } from "./delegation.ts";
 import type { TimingSettings } from "./timing.ts";
 import { harnessSettingsPath, readHarnessSetting, updateHarnessSetting } from "./shared-harness-settings.ts";
@@ -222,10 +223,13 @@ function piAgentDir(): string {
  * a missing dependency instead of silently launching a child without it.
  * (`-e` accepts either a package directory or an entrypoint file — verified.)
  */
-export function resolveExtensionPath(spec: string): string | undefined {
+export function resolveExtensionPath(spec: string, declaringRoot?: string): string | undefined {
     if (spec === SELF_SPEC) return selfDir();
     const path = spec.startsWith("npm:")
-        ? join(piAgentDir(), "npm", "node_modules", spec.slice(4))
-        : spec;
-    return existsSync(path) ? path : undefined;
+        ? (declaringRoot && installedPackage(spec.slice(4), [declaringRoot])) ?? (existsSync(join(piAgentDir(), "npm", "node_modules", spec.slice(4)))
+            ? join(piAgentDir(), "npm", "node_modules", spec.slice(4))
+            : installedPackage(spec.slice(4), [declaringRoot, join(piAgentDir(), "npm"), selfDir(),
+                join(piAgentDir(), "npm", "node_modules", "pi-better-harness")]))
+        : declaringRoot && !spec.startsWith("/") ? join(declaringRoot, spec) : spec;
+    return path && existsSync(path) ? path : undefined;
 }

@@ -17,7 +17,8 @@
  *    interrupted) is finalized from the child's own coherent log by the
  *    reloaded session instead of being reported `lost`.
  *
- * `pi` on PATH is a fake child that streams the same NDJSON events a real
+ * `pi` on PATH is a fake Node CLI entrypoint that the native child wrapper
+ * imports, just like the installed Pi CLI. It streams the same NDJSON events a real
  * `pi -p --mode json` child writes and waits for a release marker, so no model
  * request or installed Pi CLI is involved. The offline provider answers
  * callback-triggered turns.
@@ -52,11 +53,15 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 // Fake `pi` child: one assistant message, wait for the release marker, then a
 // coherent terminal event (agent_end) and exit 0.
 const FAKE_CHILD = [
-  "#!/bin/sh",
-  "printf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reload-survives answer\"}]}}'",
-  `while [ ! -f '${release}' ]; do sleep 0.05; done`,
-  "printf '%s\\n' '{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reload-survives answer\"}]}]}'",
-  "exit 0",
+  `#!${process.execPath}`,
+  'const { existsSync } = require("node:fs");',
+  'const message = { role: "assistant", content: [{ type: "text", text: "reload-survives answer" }] };',
+  'console.log(JSON.stringify({ type: "message_end", message }));',
+  'const timer = setInterval(() => {',
+  `  if (!existsSync(${JSON.stringify(release)})) return;`,
+  '  clearInterval(timer);',
+  '  console.log(JSON.stringify({ type: "agent_end", messages: [message] }));',
+  '}, 50);',
   "",
 ].join("\n");
 writeFileSync(join(fakeBin, "pi"), FAKE_CHILD);
@@ -193,6 +198,7 @@ test("a real /reload keeps a live subagent child running and delivers its comple
       const meta = registry.readMeta(id);
       return meta && meta.status !== "running" && meta.status !== "orphaned" ? meta : undefined;
     });
+    await waitFor("the child process to exit", () => !childAlive(pid));
     const done = registry.readMeta(id);
     assert.equal(done.status, "completed", `reload-survives run ended ${done.status} (${done.lifecycleClassification})`);
     assert.equal(done.lifecycleClassification, "complete");

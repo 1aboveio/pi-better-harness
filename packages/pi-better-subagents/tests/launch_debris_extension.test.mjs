@@ -69,7 +69,7 @@ describe("launch debris end to end (#623)", () => {
                 { prompt: "review the diff", tools: "web_search", sandbox: false, cwd: RUNTIME },
                 undefined, undefined, ctx,
             ),
-            /Subagent needs extension\(s\) that are not installed/,
+            /Child dependency npm:@juicesharp\/rpiv-web-tools is not installed/,
         );
         assert.deepEqual(runDirs(), [], "the failed attempt's run directory is gone");
         const records = listRunRecords();

@@ -85,7 +85,7 @@ The single-bundle installation remains available:
 pi install npm:pi-better-harness
 ```
 
-The bundle includes `pi-better-model-router` 0.1.0 and its Ollama Cloud provider.
+The bundle includes `pi-better-model-router` 0.1.1 and its Ollama Cloud provider.
 The `npx` installer installs the router as a sixth standalone component. Select
 `router/deepseek-flash-auto` in `/model` to use it; the router prefers DeepSeek
 when prices tie. Installation does not change the default selected model. The
