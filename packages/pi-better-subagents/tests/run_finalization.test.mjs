@@ -12,6 +12,7 @@ import {
     closeSync,
     mkdirSync,
     openSync,
+    readFileSync,
     rmSync,
     writeFileSync,
     writeSync,
@@ -23,6 +24,7 @@ import {
     LIFECYCLE_SCAN_CHUNK_BYTES,
 } from "../parse.ts";
 import { logPathFor, readMeta, runDir, writeMeta } from "../registry.ts";
+import { failurePath } from "../failures.ts";
 
 function writeLargeNewlineFreeRecord(id, { type, toolCallId, toolName, payloadBytes, appendNewline = true }) {
     mkdirSync(runDir(id), { recursive: true });
@@ -217,6 +219,36 @@ describe("classifyChildExit", () => {
 });
 
 describe("finalizeRun integration", () => {
+    // @covers subagent.run-finalization
+    // @level integration
+    // @fails-without-fix subagent.run-finalization
+    it("records a child-exit failure for an exit-0 model error without clearing supervision", () => {
+        const id = `sa_finalize_model_error_${process.pid}_${Date.now()}`;
+        writeRunLog(id, [
+            { type: "message_end", message: { role: "assistant", content: "I'll start by examining the repository.", stopReason: "toolUse" } },
+            { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: MODEL_ERROR } },
+            { type: "agent_end", messages: [], willRetry: false },
+        ]);
+        seedRunningMeta(id);
+        try {
+            const result = finalizeRun(id, 0, { renderWidget: () => {}, notify: () => {}, sendMessage: () => {} });
+
+            assert.equal(result.outcome?.status, "failed");
+            assert.equal(result.outcome?.classification, "failed_model_error");
+
+            const rows = readFileSync(failurePath(id), "utf8").trim().split("\n").filter(Boolean)
+                .map((line) => JSON.parse(line))
+                .map((row) => row.event ?? row);
+            const exit = rows.find((row) => row.operation === "child-exit");
+            assert.ok(exit, `a failed exit-0 run must still record a failure entry; saw ${JSON.stringify(rows)}`);
+            assert.equal(exit.kind, "failure");
+            assert.match(exit.summary, /model error|no eligible Flash model/i);
+            assert.ok(!rows.some((row) => row.kind === "recovered"),
+                "a failed run must not report supervision incidents as recovered");
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
     // @covers subagent.run-finalization
     // @level integration
     // @fails-without-fix subagent.run-finalization

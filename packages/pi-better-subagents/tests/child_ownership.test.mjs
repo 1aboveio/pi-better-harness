@@ -45,6 +45,11 @@ describe("worker monitoring ownership", () => {
         ]) assert.ok(workerMonitoringRefusal("bash", { command }), command);
         assert.ok(workerMonitoringRefusal("bg_task_spawn", { command: "gh run watch 123" }));
         assert.ok(workerMonitoringRefusal("bg_task_spawn", { argv: ["gh", "run", "watch", "123"], shell: false }));
+        assert.ok(workerMonitoringRefusal("bg_task_spawn_batch", { jobs: [{ command: "gh run watch 123" }] }), "a batch job cannot run a monitor");
+        assert.ok(workerMonitoringRefusal("bg_task_spawn_batch", { jobs: [{ argv: ["gh", "run", "watch", "123"], shell: false }] }));
+        assert.equal(workerMonitoringRefusal("bg_task_spawn_batch", {
+            jobs: [{ command: "npm test" }, { command: "gh pr view 149 --json state" }],
+        }), undefined, "a batch of ordinary jobs is allowed");
     });
 
     it("allows diagnostic reads, local tests/builds and quoted examples without weakening command limits", () => {

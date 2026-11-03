@@ -113,6 +113,17 @@ export function workerMonitoringRefusal(toolName: string, input: unknown): strin
         (value.args === undefined || (Array.isArray(value.args) && value.args.every((arg) => typeof arg === "string")))
         ? [value.executable, ...((value.args ?? []) as string[])] : undefined;
     if (argv && argvWatcher(argv)) return REFUSAL;
+    // A batch carries no shared command or argv, so every job has to be inspected
+    // on its own; otherwise one job can run a monitor past this refusal.
+    if (toolName === "bg_task_spawn_batch") {
+        for (const job of Array.isArray(value.jobs) ? value.jobs : []) {
+            if (!job || typeof job !== "object") continue;
+            const entry = job as Record<string, unknown>;
+            if (typeof entry.command === "string" && shellWatcher(entry.command, 0)) return REFUSAL;
+            if (Array.isArray(entry.argv) && entry.argv.every((arg) => typeof arg === "string") && argvWatcher(entry.argv)) return REFUSAL;
+        }
+        return;
+    }
     if (["bash", "remote_bash", "bg_task", "bg_task_spawn", "bg_task_watch"].includes(toolName)) {
         if (typeof value.command === "string" && shellWatcher(value.command, 0)) return REFUSAL;
         if (Array.isArray(value.argv) && value.argv.every((arg) => typeof arg === "string") && argvWatcher(value.argv)) return REFUSAL;

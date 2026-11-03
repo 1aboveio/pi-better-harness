@@ -59,16 +59,22 @@ export function finalizeRun(
     const r = parseRunForLifecycle(id);
     const outcome = classifyChildExit(code, r);
     collectRunFailures(id, meta.cwd, true);
-    if (!outcome.incomplete && code !== null) {
+    // A run can now end exit 0 as failed (a final request the model could not
+    // serve), so "not incomplete and has an exit code" no longer means success.
+    const completed = outcome.status === "completed";
+    if (completed && code !== null) {
         observeFailures(failurePath(id), ["orphaned", "lost"].map((status) => ({
             id: `supervision:${status}:exit-recovered`, operation: `supervision:${status}`,
             kind: "recovered" as const, incidents: [`supervision:${status}`],
         })));
     }
-    if (code !== 0 || outcome.incomplete) {
+    if (!completed) {
+        const summary = outcome.incomplete ? "Child exit evidence is incomplete"
+            : outcome.diagnostics.modelError ? `Child exited with code ${code}: ${outcome.diagnostics.modelError}`
+            : `Child exited with code ${code}`;
         observeFailures(failurePath(id), [{ id: `exit:${code ?? "unknown"}:${outcome.classification}`,
             operation: "child-exit", kind: outcome.incomplete ? "incomplete" : "failure",
-            category: "exit", summary: outcome.incomplete ? "Child exit evidence is incomplete" : `Child exited with code ${code}` }]);
+            category: "exit", summary }]);
     }
     meta.status = outcome.status;
     meta.lifecycleClassification = outcome.classification;
