@@ -223,7 +223,10 @@ jobs:
                 extensions/background-tasks/index.ts \
                 extensions/ssh/index.ts \
                 extensions/goal/index.ts \
+                extensions/model-router/index.ts \
                 extensions/task-context/index.ts \
+                extensions/minimal-output/index.ts \
+                extensions/settings/index.ts \
                 extensions/execution-policy.ts \
                 node_modules/pi-better-sandbox/index.ts \
                 node_modules/pi-better-sandbox/shared-sandbox-core.ts \
@@ -260,6 +263,30 @@ jobs:
               do
                 check_pack_file /tmp/package-pack.json "$required"
               done
+              # Presence is not version: a stale staged component would ship a bundle that
+              # declares one version and carries another. Compare the Harness manifest and the
+              # packed tree against each workspace manifest.
+              node -e '
+                const { readFileSync } = require("node:fs");
+                const harness = JSON.parse(readFileSync("packages/pi-better-harness/package.json", "utf8"));
+                for (const name of harness.bundledDependencies) {
+                  const workspace = JSON.parse(readFileSync(`packages/${name}/package.json`, "utf8")).version;
+                  const declared = harness.dependencies?.[name];
+                  if (declared !== workspace) {
+                    throw new Error(`${name}: Harness declares ${declared}, workspace is ${workspace}`);
+                  }
+                  let staged;
+                  try {
+                    staged = JSON.parse(readFileSync(`packages/pi-better-harness/node_modules/${name}/package.json`, "utf8")).version;
+                  } catch {
+                    throw new Error(`${name}: not staged into packages/pi-better-harness/node_modules`);
+                  }
+                  if (staged !== workspace) {
+                    throw new Error(`${name}: staged ${staged} is not the workspace ${workspace}`);
+                  }
+                }
+                console.log("bundled component versions match their workspaces");
+              '
               ;;
           esac
 
