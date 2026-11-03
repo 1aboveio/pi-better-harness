@@ -59,7 +59,6 @@
     "pi-better-goal": "0.11.0",
     "pi-better-model-router": "0.1.0",
     "pi-ollama-cloud": "0.13.1",
-    "@sinclair/typebox": "0.34.52",
     "pi-better-sandbox": "0.14.0",
     "pi-better-ssh": "0.1.4",
     "pi-better-subagents": "0.26.1",
@@ -68,6 +67,9 @@
     "smol-toml": "1.9.0",
     "tsx": "^4.22.3",
     "yaml": "^2.9.1"
+  },
+  "peerDependencies": {
+    "@sinclair/typebox": "*"
   },
   "bundledDependencies": [
     "pi-better-background-tasks",
