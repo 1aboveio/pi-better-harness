@@ -163,7 +163,10 @@ jobs:
             extensions/background-tasks/index.ts \
             extensions/ssh/index.ts \
             extensions/goal/index.ts \
+            extensions/model-router/index.ts \
             extensions/execution-policy.ts \
+            extensions/minimal-output/index.ts \
+            extensions/settings/index.ts \
             node_modules/pi-better-sandbox/index.ts \
             node_modules/pi-better-sandbox/shared-sandbox-core.ts \
             node_modules/pi-better-sandbox/shared-sandbox-diagnostics.ts \

@@ -94,6 +94,7 @@ describe("extension e2e", () => {
       "bg_task_list",
       "bg_task_log",
       "bg_task_spawn",
+      "bg_task_spawn_batch",
       "bg_task_status",
       "bg_task_stop",
       "bg_task_watch",

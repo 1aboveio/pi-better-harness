@@ -106,6 +106,14 @@ export interface TaskSandboxProvenance {
 export interface BackgroundTaskMeta {
   id: string;
   name?: string;
+  /**
+   * Launcher-assigned batch identity, e.g. `bg_batch_<uuid>`, set when this task
+   * was started by a batch launch. Absent for a single spawn. Persisted with the
+   * rest of the metadata, so a reloaded task still says which launch it belonged to.
+   */
+  batchId?: string;
+  /** Operator-facing batch label from the same launch, when one was given. */
+  batchName?: string;
   kind: BackgroundTaskKind;
   status: BackgroundTaskStatus;
   startedAt: number;

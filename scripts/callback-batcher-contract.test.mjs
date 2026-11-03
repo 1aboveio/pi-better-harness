@@ -55,6 +55,11 @@ for (const [pkg, path] of Object.entries(consumers)) {
   });
 }
 
+// A list entry that ends the list carries no line continuation, so that backslash is optional.
+function assertsPath(list, path) {
+  return new RegExp(`^\\s+${path.replaceAll(".", "\\.")}(?: \\\\)?\\s*$`, "m").test(list);
+}
+
 // Returns the body of one `case "$PACKAGE"` arm in publish.yml's pack check.
 function publishArm(workflow, pkg) {
   const match = workflow.match(new RegExp(`\\n\\s+${pkg}\\)\\n([\\s\\S]*?)\\n\\s+;;`));
@@ -71,6 +76,34 @@ test("publish.yml's pack check asserts every vendored copy, per package and in t
       `${pkg} arm must check ${path}`);
     assert.ok(bundle.includes(`node_modules/${pkg}/${path} \\`), `bundle arm must check node_modules/${pkg}/${path}`);
   }
+});
+
+test("ci.yml's bundled-tarball assertions name every extension the bundle loads", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  const start = workflow.indexOf("- name: Package dry run");
+  assert.ok(start !== -1, "ci.yml has no Package dry run step");
+  const rest = workflow.slice(start);
+  const nextStep = rest.indexOf("\n      - name:");
+  const step = nextStep === -1 ? rest : rest.slice(0, nextStep);
+  for (const path of JSON.parse(read("packages/pi-better-harness/package.json")).pi.extensions) {
+    assert.ok(assertsPath(step, path), `ci.yml must assert ${path}`);
+  }
+});
+
+test("publish.yml's Harness arm asserts every extension the bundle loads", () => {
+  const arm = publishArm(read(".github/workflows/publish.yml"), "pi-better-harness");
+  const manifest = JSON.parse(read("packages/pi-better-harness/package.json"));
+  for (const path of manifest.pi.extensions) {
+    assert.ok(assertsPath(arm, path), `Harness arm must assert ${path}`);
+  }
+});
+
+// A component's tarball presence is not its version: a stale staged copy would ship a
+// bundle that declares one version and carries another, which no path assertion catches.
+test("publish.yml's Harness arm compares staged component versions with their workspaces", () => {
+  const arm = publishArm(read(".github/workflows/publish.yml"), "pi-better-harness");
+  assert.match(arm, /harness\.bundledDependencies/, "must iterate the declared bundled dependencies");
+  assert.match(arm, /staged \$\{staged\} is not the workspace/, "must fail when the staged version differs");
 });
 
 test("ci.yml's bundled-tarball assertions name every vendored copy", () => {

@@ -643,9 +643,19 @@ mid-turn** — no `tool_execution_end`, no `agent_end`. Historically, exit 0 was
 indistinguishable from a clean finish, so all 17 observed mid-turn exits were
 reported as ✓ completed. Finalization now requires terminal agent evidence and
 no unmatched tool starts. Lifecycle validation classifies runs as `complete`,
-`incomplete_no_terminal_event`, `incomplete_open_tools`, `failed_exit`, or
-`killed`; incoherent exit-0 streams are recorded as failed with named lifecycle
-diagnostics on `subagent_result` and attention wording on completion callbacks.
+`incomplete_no_terminal_event`, `incomplete_open_tools`, `failed_exit`,
+`failed_model_error`, or `killed`; incoherent exit-0 streams are recorded as
+failed with named lifecycle diagnostics on `subagent_result` and attention
+wording on completion callbacks.
+
+A stream whose **last** model request failed - and that no later assistant turn
+superseded - is recorded as `failed_model_error`, never `complete`. Pi ends the
+loop normally after a provider error, so such a child exits 0 with a terminal
+event and used to look like a finished run that had simply produced very little
+text. The result now reports the failure and repeats the provider error verbatim
+(for example a virtual model that could not route: `Model router: no eligible
+Flash model is available.`). An earlier failure that auto-retry recovered does
+not fail the run.
 
 A tool allowlist alone cannot fix this. `--tools` restricts what the model may
 *call*; the package already overrode builtin `bash` at startup, so the `bash` in
