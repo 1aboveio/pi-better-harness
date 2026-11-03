@@ -336,7 +336,8 @@ test("a kernel-confined worker parks on supervised tasks, keeps denied capabilit
         };
     });
     assert.deepEqual(Object.values(outcomes).sort(), ["failed", "failed", "succeeded"], JSON.stringify(diagnostics));
-    assert.equal(existsSync(outside), false, "a write outside the workspace must stay denied");
+    assert.equal(existsSync(outside), false, "a write outside the workspace must never change the host, even when private /tmp scratch is writable");
+    assert.equal(existsSync(join(stack.workspace, "blocked-write.txt")), false, "the read-only project mount must refuse the visible write target");
     assert.equal(networkConnections, 1, "the confined network task must not reach the listener that the control reached");
 
     // Exit proof: checkpoint staged, lease released, original writer gone.

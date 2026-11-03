@@ -92,7 +92,7 @@ export default function fakeModel(pi: ExtensionAPI): void {
                             id: "kernel-spawn-write",
                             name: "bg_task_spawn",
                             arguments: {
-                                argv: ["/bin/sh", "-c", "printf escape > \"$1\"", "kernel-write", outside],
+                                argv: ["/bin/sh", "-c", "printf escape > \"$1\"; printf mutation > \"$2\"", "kernel-write", outside, `${workspace}/blocked-write.txt`],
                                 shell: false,
                                 name: "kernel-write",
                             },
