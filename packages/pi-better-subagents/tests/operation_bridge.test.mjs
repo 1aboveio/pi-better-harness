@@ -2,8 +2,9 @@
 // @level integration
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, truncateSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,6 +29,7 @@ import {
     createToolDescriptor,
     descriptorsForCapabilities,
     normalizeWaitForOperationsResult,
+    parseBridgeEndpoint,
     validateJsonSchema,
 } from "../operation-bridge-types.ts";
 
@@ -1306,6 +1308,84 @@ async function realSdkParkingSession(t, { batch = false, bashEnvCheck = false } 
         assert.match(output, /missing/);
         assert.doesNotMatch(output, /bridge-secret-should-not-leak/);
         assert.equal(process.env[tokenKey], "bridge-secret-should-not-leak", "the environment is restored after the tool boundary");
+    });
+
+    it("lets a finished foreground process exit naturally while an accepted bridge connection is idle", { timeout: 20_000 }, async (t) => {
+        const root = mkdtempSync(join(tmpdir(), "operation-bridge-exit-"));
+        const hostModuleUrl = new URL("../worker-operations-host.ts", import.meta.url).href;
+        const scriptPath = join(root, "exit-probe.mjs");
+        writeFileSync(scriptPath, `
+            import { createOperationBridgeHost } from ${JSON.stringify(hostModuleUrl)};
+            const host = await createOperationBridgeHost({ transport: process.platform === "win32" ? "tcp" : "unix" });
+            const handle = host.registerRun({
+                runId: "run-exit",
+                conversationId: "conv-exit",
+                workspace: ${JSON.stringify(root)},
+                authorityReference: "test:exit",
+                capabilities: {
+                    background: { spawn: false, watch: false, status: false, log: false },
+                    wait: false,
+                    acknowledge: false,
+                    parking: false,
+                },
+                tools: [],
+                ownership: () => false,
+                handlers: {},
+            });
+            process.stdout.write(JSON.stringify({ endpoint: host.endpoint, token: handle.token }) + "\\n");
+            await new Promise((resolve) => {
+                process.stdin.setEncoding("utf8");
+                process.stdin.once("data", resolve);
+            });
+            process.stdin.pause();
+            process.stdin.unref?.();
+            process.stdout.write("finished\\n");
+            // Deliberately no host.close(): the foreground process must exit naturally.
+        `);
+        const child = spawn(process.execPath, ["--import", "tsx", scriptPath], {
+            cwd: process.cwd(),
+            stdio: ["pipe", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+        child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+        let socket;
+        try {
+            const info = await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error(`bridge host did not announce its endpoint: ${stderr}`)), 8_000);
+                child.stdout.once("data", (chunk) => {
+                    clearTimeout(timer);
+                    try { resolve(JSON.parse(chunk.toString("utf8").split("\n")[0])); }
+                    catch (error) { reject(error); }
+                });
+            });
+            const endpoint = parseBridgeEndpoint(info.endpoint);
+            socket = endpoint.kind === "unix"
+                ? connect({ path: endpoint.path })
+                : connect({ host: endpoint.host, port: endpoint.port });
+            await new Promise((resolve, reject) => {
+                socket.once("connect", resolve);
+                socket.once("error", reject);
+            });
+            child.stdin.write("finish\n");
+            const exit = await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    child.kill("SIGKILL");
+                    reject(new Error(`bridge host stayed alive after main work: ${stderr}`));
+                }, 8_000);
+                child.once("exit", (code, signal) => {
+                    clearTimeout(timer);
+                    resolve({ code, signal });
+                });
+            });
+            assert.equal(exit.code, 0, `child exit ${JSON.stringify(exit)} stderr=${stderr} stdout=${stdout}`);
+            assert.match(stdout, /finished/);
+        } finally {
+            socket?.destroy();
+            if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 
     it("uses the small JSON Schema validator for production-shaped constraints", () => {

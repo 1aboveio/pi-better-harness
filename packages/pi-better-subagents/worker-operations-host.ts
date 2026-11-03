@@ -316,6 +316,9 @@ export async function createOperationBridgeHost(
     server.on("connection", (socket) => {
         connectionRuns.delete(socket);
         sockets.add(socket);
+        // Accepted sockets are transport for an active session, never a reason
+        // for an otherwise finished foreground SDK/CLI process to stay alive.
+        socket.unref?.();
         handleConnection(socket);
     });
 
@@ -333,6 +336,10 @@ export async function createOperationBridgeHost(
         const address = server.address();
         if (address && typeof address === "object") endpoint = `tcp://127.0.0.1:${address.port}`;
     }
+    // Unref only after the listen promise has resolved. The bridge still serves
+    // while the foreground session has work; it must not hold a finished
+    // process open, and v1 has no unattended model daemon.
+    server.unref?.();
     logger({ event: "listen", ok: true });
     const frozenLimits = Object.freeze(limits);
 
