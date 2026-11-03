@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { advertiseBackgroundAdapter } from "./adapter-contract.js";
+import { formatBatchLaunch, spawnTaskBatch } from "./batch.js";
 import { refreshBackgroundTasksNavigator } from "./navigator-provider.js";
 import {
   classifyOwnership,
@@ -102,6 +103,35 @@ const StepGateField = Type.Optional(Type.Boolean({
 }));
 
 const SpawnParams = Type.Object({ ...CommandFields, require_successful_steps: StepGateField });
+
+/**
+ * Batch launch. A job is exactly a spawn, so the job schema is the spawn schema;
+ * `shared` is that schema minus per-job identity, and a shared `name`/`command`/
+ * `argv` is refused here rather than silently applied to every job that omits it.
+ */
+const BatchJobParams = Type.Object({
+  ...CommandFields,
+  require_successful_steps: StepGateField,
+}, { description: "One independent background task. Supply its own command, or shell:false with argv; one invalid job refuses the whole batch before anything starts." });
+
+const BatchSharedParams = Type.Omit(
+  Type.Object({ ...CommandFields, require_successful_steps: StepGateField }),
+  ["name", "command", "argv"],
+  {
+    additionalProperties: false,
+    description: "Launch options applied to every job. A job's own value wins, and an explicit false, 0, or null overrides the shared value instead of inheriting it. name, command, and argv are per job: set them on each job, not here.",
+  },
+);
+
+const BatchParams = Type.Object({
+  batchName: Type.Optional(Type.String({ description: "Optional label for the whole batch. Recorded on every launched task and shown in the launch result." })),
+  shared: Type.Optional(BatchSharedParams),
+  jobs: Type.Array(BatchJobParams, {
+    minItems: 1,
+    maxItems: 100,
+    description: "One to 100 independent jobs. The whole batch is refused before launch if any job is invalid.",
+  }),
+});
 
 const BlindChecksField = Type.Optional(Type.Integer({ minimum: 0, description: "Flag the watch as possibly blind after this many checks in a row exit 0, write stderr, and match neither success_when nor failure_when: one incident that needs action, with the latest stderr line. The watch keeps running; a check with no stderr or a matched condition recovers it. Default 3; 0 turns it off." }));
 
@@ -258,6 +288,20 @@ export function registerTools(pi: ExtensionAPI): void {
       const launched = reportLaunch(() => spawnTask(pi, params, ctx.cwd, activeSession, getActiveSession));
       refreshBackgroundTasksNavigator(ctx);
       return text(launched);
+    },
+  });
+
+  register({
+    name: "bg_task_spawn_batch",
+    label: "BG Spawn Batch",
+    description: "Start up to 100 independent background processes at once and return immediately with a batch id, one task id per launched job, and any job that was refused. Each job is a normal background task with its own process, log, and metadata, and records the batch id and batch name. Every job is preflighted first, so one invalid job refuses the batch before any process starts. Never wait or poll in the foreground; inspect, log, or stop each task by its id.",
+    promptGuidelines: BACKGROUND_ORCHESTRATION_GUIDELINES,
+    parameters: BatchParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      activeSession = getCallbackOrigin(ctx);
+      const launched = spawnTaskBatch(pi, params, ctx.cwd, activeSession, getActiveSession);
+      refreshBackgroundTasksNavigator(ctx);
+      return text(formatBatchLaunch(launched), launched);
     },
   });
 

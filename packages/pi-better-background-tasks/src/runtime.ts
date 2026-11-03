@@ -169,6 +169,14 @@ export interface TaskIntentParams {
 
 export interface SpawnTaskParams extends CommandSpec, TaskIntentParams {
   name?: string;
+  /**
+   * Batch identity assigned by the batch launcher, never declared by a caller.
+   * Absent for a single spawn; carried into the persisted metadata so batch
+   * membership survives a reload instead of living only in the launch result.
+   */
+  batchId?: string;
+  /** Batch label from the same launch, when the operator gave one. */
+  batchName?: string;
   callback?: boolean;
   timeout_seconds?: number;
   max_log_bytes?: number;
@@ -346,6 +354,8 @@ export function spawnTask(
   const meta = withCommandPolicy({
     id,
     name: params.name,
+    batchId: params.batchId,
+    batchName: params.batchName,
     kind: "process",
     status: "running",
     startedAt: now,

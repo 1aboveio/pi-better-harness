@@ -55,6 +55,9 @@ const coherentRun = {
     usage: { input: 0, output: 0, cacheRead: 0, costUSD: 0, total: 0 },
 };
 
+/** Verbatim provider error from pi-better-model-router 0.1.2 after a timed-out candidate. */
+const MODEL_ERROR = "Model router: no eligible Flash model is available. Check Pi's model catalog and provider login.";
+
 function writeRunLog(id, events) {
     mkdirSync(runDir(id), { recursive: true });
     writeFileSync(
@@ -136,6 +139,49 @@ describe("classifyChildExit", () => {
         assert.equal(outcome.diagnostics.sawTerminalEvent, true);
         assert.equal(outcome.diagnostics.unmatchedToolCount, 0);
         assert.match(outcome.verdict, /completed/i);
+    });
+
+    // @covers subagent.run-finalization
+    // @level unit
+    // @fails-without-fix subagent.run-finalization
+    it("does not complete an exit-0 child whose last model request failed", () => {
+        const outcome = classifyChildExit(0, {
+            ...coherentRun,
+            modelError: MODEL_ERROR,
+        });
+
+        assert.equal(outcome.status, "failed");
+        assert.equal(outcome.incomplete, false);
+        assert.equal(outcome.classification, "failed_model_error");
+        // The provider error travels with the outcome, not only the log.
+        assert.equal(outcome.diagnostics.modelError, MODEL_ERROR);
+        assert.doesNotMatch(outcome.verdict, /completed/i);
+        assert.match(outcome.verdict, /model error/i);
+    });
+
+    // @covers subagent.run-finalization
+    // @level unit
+    // @characterizes subagent.run-finalization
+    it("lets a worse failure outrank a model error", () => {
+        assert.equal(classifyChildExit(1, { ...coherentRun, modelError: MODEL_ERROR }).classification, "failed_exit");
+        assert.equal(classifyChildExit(0, { ...coherentRun, modelError: MODEL_ERROR, sawEnd: false }).classification,
+            "incomplete_no_terminal_event");
+        assert.equal(classifyChildExit(0, {
+            ...coherentRun,
+            modelError: MODEL_ERROR,
+            unmatchedToolCalls: [{ id: "call_bash", toolName: "bash" }],
+        }).classification, "incomplete_open_tools");
+    });
+
+    // @covers subagent.run-finalization
+    // @level unit
+    // @characterizes subagent.run-finalization
+    it("keeps exit-0 completion when the stream ends on a served request", () => {
+        const outcome = classifyChildExit(0, { ...coherentRun, modelError: undefined });
+
+        assert.equal(outcome.status, "completed");
+        assert.equal(outcome.classification, "complete");
+        assert.equal(outcome.diagnostics.modelError, undefined);
     });
 
     // @covers subagent.run-finalization
@@ -267,6 +313,81 @@ describe("finalizeRun integration", () => {
             assert.match(rendered, /lifecycle complete/);
             assert.match(rendered, /Final answer/);
             assert.doesNotMatch(rendered, /ended unexpectedly/i);
+        } finally {
+            rmSync(runDir(id), { recursive: true, force: true });
+        }
+    });
+
+    // @covers subagent.run-finalization
+    // @level integration
+    // @fails-without-fix subagent.run-finalization
+    it("persists failed status with the provider error when a zero-exit run ends on a model error", () => {
+        const id = `sa_finalize_model_err_${process.pid}_${Date.now()}`;
+        const messages = [];
+        const notifications = [];
+
+        // Verbatim shape of a real router child: a normal turn, a timeout that
+        // auto-retry recovers, then a terminal timeout whose retry the router turns
+        // into "no eligible model". Pi ends the loop cleanly: agent_end,
+        // auto_retry_end success:false, agent_settled, exit 0.
+        const failedAssistant = (errorMessage) => ({
+            type: "message_end",
+            message: { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage },
+        });
+        writeRunLog(id, [
+            { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "I'll start by examining the repository state." }], stopReason: "toolUse" } },
+            { type: "tool_execution_start", toolCallId: "call_read", toolName: "read" },
+            { type: "tool_execution_end", toolCallId: "call_read", toolName: "read", isError: false },
+            failedAssistant("Request timed out."),
+            { type: "agent_end", messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "Request timed out." }] },
+            { type: "auto_retry_start", attempt: 1, maxAttempts: 10, errorMessage: "Request timed out." },
+            { type: "agent_start" },
+            { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "reviewing the diff" }], stopReason: "toolUse" } },
+            { type: "tool_execution_start", toolCallId: "call_bash", toolName: "bash" },
+            { type: "tool_execution_end", toolCallId: "call_bash", toolName: "bash", isError: false },
+            { type: "auto_retry_end", success: true, attempt: 1 },
+            failedAssistant("Request timed out."),
+            { type: "auto_retry_start", attempt: 1, maxAttempts: 10, errorMessage: "Request timed out." },
+            { type: "agent_start" },
+            failedAssistant(MODEL_ERROR),
+            { type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "" }], stopReason: "error", errorMessage: MODEL_ERROR }], willRetry: false },
+            { type: "auto_retry_end", success: false, attempt: 1, finalError: MODEL_ERROR },
+            { type: "agent_settled", aborted: false },
+        ]);
+        seedRunningMeta(id);
+
+        try {
+            const result = finalizeRun(id, 0, {
+                renderWidget: () => {},
+                notify: (message, level) => notifications.push({ message, level }),
+                sendMessage: (message, options) => messages.push({ message, options }),
+            });
+
+            assert.equal(result.applied, true);
+            assert.equal(result.outcome?.status, "failed");
+            assert.equal(result.outcome?.incomplete, false);
+            assert.equal(result.outcome?.classification, "failed_model_error");
+            assert.equal(result.outcome?.diagnostics.modelError, MODEL_ERROR);
+
+            const persisted = readMeta(id);
+            assert.equal(persisted?.status, "failed");
+            assert.equal(persisted?.exitCode, 0);
+            assert.equal(persisted?.lifecycleClassification, "failed_model_error");
+
+            assert.equal(messages.length, 1);
+            assert.match(messages[0].message.content, /failed \(model error\)/);
+            assert.match(messages[0].message.content, /lifecycle failed_model_error/);
+            assert.doesNotMatch(messages[0].message.content, /completed/i);
+            assert.equal(messages[0].options.triggerTurn, true);
+            assert.equal(notifications[0]?.level, "warning");
+
+            const rendered = buildSubagentResultText(id);
+            assert.ok(rendered);
+            assert.match(rendered, /lifecycle failed_model_error/);
+            // The provider error is attached verbatim, so the caller can act on it.
+            assert.ok(rendered.includes(MODEL_ERROR), `result must name the provider error:\n${rendered}`);
+            assert.match(rendered, /failed/);
+            assert.doesNotMatch(rendered, /lifecycle complete/);
         } finally {
             rmSync(runDir(id), { recursive: true, force: true });
         }

@@ -28,6 +28,7 @@
  */
 
 import { realProcessProbe, type ProcessProbe } from "./health.ts";
+import { classifyChildExit } from "./lifecycle.ts";
 import { parseRunForLifecycle } from "./parse.ts";
 import {
     effectiveStatus,
@@ -118,13 +119,16 @@ function finalizeOrphanedWithoutProcess(meta: RunMeta, now: number): StopOutcome
     const run = parseRunForLifecycle(meta.id);
 
     if (run.sawEnd && run.unmatchedToolCalls.length === 0) {
-        meta.status = "completed";
-        meta.lifecycleClassification = "complete";
+        // Terminal evidence is not success evidence: an exit-0 stream can end on a
+        // failed model request, which classifyChildExit reports as failed.
+        const outcome = classifyChildExit(meta.exitCode ?? 0, run);
+        meta.status = outcome.status;
+        meta.lifecycleClassification = outcome.classification;
         if (meta.exitCode === undefined) meta.exitCode = 0;
         meta.endedAt = now;
         oweTerminalCompletion(meta, now);
         writeMeta(meta);
-        return { action: "finalized", id: meta.id, status: "completed" };
+        return { action: "finalized", id: meta.id, status: outcome.status };
     }
 
     if (run.sawEnd && run.unmatchedToolCalls.length > 0) {
