@@ -605,7 +605,9 @@ describe("worker operation service", () => {
     expect(confinedView.sandbox).toMatchObject({ confinement: "confined", policySource: "background" });
     expect(host.formatStatus(confinedView)).toMatch(/sandbox: confined(?:; [^;]+)?; source: background/);
     expect(starts).toHaveLength(1);
-    expect(starts[0]?.argv[0]).toBe("/usr/bin/sandbox-exec");
+    expect(starts[0]?.argv[0]).toBe(process.platform === "linux" ? "/usr/bin/bwrap" : "/usr/bin/sandbox-exec");
+    const wrapped = JSON.parse(starts[0]!.argv.at(-1)!) as { executable: string; args: string[] };
+    expect({ executable: wrapped.executable, args: wrapped.args }).toEqual({ executable: "/usr/bin/true", args: [] });
     expect(starts[0]?.commandTimeoutSeconds).toBe(7);
     // The relative worker cwd is resolved against the worker workspace before
     // admission, confinement and supervisor execution.
