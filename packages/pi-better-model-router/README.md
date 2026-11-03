@@ -1,6 +1,6 @@
 # pi-better-model-router
 
-Select `router/deepseek-flash-auto` once. Pi chooses DeepSeek or Ollama Cloud by price at the start of each user turn. DeepSeek is the default preferred provider.
+Select `router/deepseek-flash-auto` once. Pi chooses DeepSeek or Ollama Cloud by price at the start of each user turn, and moves a running turn when the other provider becomes strictly cheaper at a price boundary. DeepSeek is the default preferred provider.
 
 ## Requirements and setup
 
@@ -35,7 +35,7 @@ A minimal explicit configuration is:
 }
 ```
 
-`price` is currently the only supported policy type and is the default when omitted. It compares estimated request cost and uses `preferredProvider` to break ties at the start of a user turn.
+`price` is currently the only supported policy type and is the default when omitted. It compares estimated request cost and uses `preferredProvider` to break ties at the start of a user turn. Inside a turn, equal cost keeps the current provider.
 
 Optional price and schedule overrides:
 
@@ -103,9 +103,10 @@ DeepSeek also excludes Chinese public holidays. The bundled holiday list is curr
 
 - Compare estimated uncached input and output cost using catalog rates, bundled schedules, and policy overrides.
 - On equal cost, prefer DeepSeek by default. If the preferred provider is unavailable, preserve the previous eligible model, then use candidate order.
-- Keep tool follow-ups on the chosen provider, even across a price boundary.
-- On a transient retry (rate limit, overload, timeout, or selected network/server errors), exclude the failed provider for the rest of that user turn.
-- Preserve the failed model on other retries, including context overflow.
+- Keep a turn's model while it is still the cheapest, and move the turn to the other provider when that provider becomes strictly cheaper at a price boundary. Equal cost keeps the current provider, so a switch never pays a cold prompt cache for no gain.
+- On a retry after any error, exclude the failed provider for the rest of that user turn, so the retry uses the other candidate.
+- Preserve the failed model only after a context overflow, because Pi retries that request after compacting the conversation and a switch would pay a cold cache.
+- Report excluded providers as router state only when that list changes, so a long session does not append one state entry per request.
 - Stop with an error when all candidates are unavailable or excluded. A new user turn clears exclusions.
 - Direct requests, such as compaction summaries, compare prices independently.
 

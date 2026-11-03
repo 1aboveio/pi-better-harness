@@ -75,13 +75,21 @@ export function ratesAt(candidate: Candidate, now: Date): Rates {
   return weekday && !holiday && candidate.peakWindows.some(([start, end]) => minute >= start && minute < end)
     ? candidate.peak : candidate.offPeak;
 }
+export function estimatedCost(config: RouterConfig, candidate: Candidate, now: Date): number {
+  const rates = ratesAt(candidate, now);
+  return rates.input * config.estimatedInputTokens + rates.output * config.estimatedOutputTokens;
+}
+// A continuation keeps its model unless another candidate is strictly cheaper, so a
+// price boundary can move a long turn. Equal cost keeps the current provider: a switch
+// would pay a cold prompt cache for no gain.
+export function isCheapest(config: RouterConfig, candidate: Candidate, available: Candidate[], now: Date): boolean {
+  const own = estimatedCost(config, candidate, now);
+  return available.every(other => estimatedCost(config, other, now) >= own - 1e-9);
+}
 export function chooseCandidate(config: RouterConfig, available: Candidate[], now: Date,
   previous?: { provider: string; id: string }): Candidate {
   if (!available.length) throw new Error("Model router: no eligible Flash model is available. Check Pi's model catalog and provider login.");
-  const score = (candidate: Candidate) => {
-    const rates = ratesAt(candidate, now);
-    return rates.input * config.estimatedInputTokens + rates.output * config.estimatedOutputTokens;
-  };
+  const score = (candidate: Candidate) => estimatedCost(config, candidate, now);
   const best = Math.min(...available.map(score));
   const tied = available.filter(candidate => Math.abs(score(candidate) - best) < 1e-9);
   return tied.find(candidate => candidate.provider === config.preferredProvider)
@@ -89,4 +97,9 @@ export function chooseCandidate(config: RouterConfig, available: Candidate[], no
 }
 export function isTransient(error: string): boolean {
   return /\b429\b|\b50[0234]\b|rate.?limit|overload|temporar(?:y|ily)|service unavailable|timed? ?out|ECONNRESET|ECONNREFUSED|fetch failed/i.test(error);
+}
+// Pi retries a context overflow after compacting the conversation. That retry keeps
+// the failed model, because a switch would pay a cold cache right after compaction.
+export function isContextOverflow(error: string): boolean {
+  return /context.?(length|window)|too many tokens|prompt is too long|exceeds? (?:the )?(?:maximum )?(?:context|token)|reduce the length of the (?:messages|prompt)/i.test(error);
 }

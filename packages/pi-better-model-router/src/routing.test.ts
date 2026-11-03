@@ -109,7 +109,7 @@ test("registered route preserves continuations and bounds transient fallback", (
     rmSync(policyPath);
     const continued = route({ reason: "continuation", thinkingLevel: "high", previous: selected }, ctx,
       new Date("2026-10-26T12:00Z"));
-    assert.equal(continued.model.provider, "ollama-cloud");
+    assert.equal(continued.model.provider, "deepseek");
     const failed = { ...selected, message: { errorMessage: "429 rate limit" } };
     const fallback = route({ reason: "retry", thinkingLevel: "high", failed }, ctx, now);
     assert.equal(fallback.model.provider, "deepseek");
@@ -120,6 +120,92 @@ test("registered route preserves continuations and bounds transient fallback", (
     assert.equal(route({ reason: "user", thinkingLevel: "high", state: fallback.state }, ctx, now).model.provider, "ollama-cloud");
     models.splice(1, 1);
     assert.equal(route({ reason: "user", thinkingLevel: "high" }, ctx, now).model.provider, "deepseek");
+  } finally {
+    if (original === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = original;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+test("continuations keep the cheapest model and switch when another provider is cheaper", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "model-router-switch-"));
+  const original = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = cwd;
+  try {
+    const models = [...catalog];
+    const ctx = { cwd, modelRegistry: { getAvailable: () => models } } as unknown as ExtensionContext;
+    const monday = (time: string) => new Date("2026-10-26T" + time + ":00Z");
+    const selected = route({ reason: "user", thinkingLevel: "high" }, ctx, monday("02:00"));
+    assert.equal(selected.model.provider, "ollama-cloud");
+    // DeepSeek is still at peak, so Ollama stays cheapest and the turn keeps its model.
+    assert.equal(route({ reason: "continuation", thinkingLevel: "high", previous: selected }, ctx,
+      monday("03:00")).model.provider, "ollama-cloud");
+    // Both providers are off-peak from 10:00. A tie keeps the current provider
+    // instead of paying a cold prompt cache for no gain.
+    assert.equal(route({ reason: "continuation", thinkingLevel: "high", previous: selected }, ctx,
+      monday("10:00")).model.provider, "ollama-cloud");
+    // Ollama opens its peak window at 12:00, so the continuation moves to DeepSeek.
+    const switched = route({ reason: "continuation", thinkingLevel: "high", previous: selected }, ctx, monday("12:00"));
+    assert.equal(switched.model.provider, "deepseek");
+    // A model chosen on Monday evening moves when DeepSeek enters its own peak window.
+    const overnight = route({ reason: "user", thinkingLevel: "low" }, ctx, monday("20:00"));
+    assert.equal(overnight.model.provider, "deepseek");
+    const tuesday = route({ reason: "continuation", thinkingLevel: "low", previous: overnight }, ctx,
+      new Date("2026-10-27T02:00Z"));
+    assert.equal(tuesday.model.provider, "ollama-cloud");
+    assert.equal(tuesday.thinkingLevel, "low");
+    // Weekends are off-peak for both providers, so a tie keeps Ollama even though a
+    // user turn would prefer DeepSeek.
+    assert.equal(route({ reason: "user", thinkingLevel: "high" }, ctx,
+      new Date("2026-10-25T12:00Z")).model.provider, "deepseek");
+    assert.equal(route({ reason: "continuation", thinkingLevel: "high", previous: selected }, ctx,
+      new Date("2026-10-25T12:00Z")).model.provider, "ollama-cloud");
+  } finally {
+    if (original === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = original;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+test("retries move to the other candidate except after a context overflow", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "model-router-retry-"));
+  const original = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = cwd;
+  try {
+    const models = [...catalog];
+    const ctx = { cwd, modelRegistry: { getAvailable: () => models } } as unknown as ExtensionContext;
+    const now = new Date("2026-10-26T02:00Z");
+    const selected = route({ reason: "user", thinkingLevel: "high" }, ctx, now);
+    assert.equal(selected.model.provider, "ollama-cloud");
+    const retry = (errorMessage: string) => route({ reason: "retry", thinkingLevel: "high",
+      failed: { ...selected, message: { errorMessage } } }, ctx, now).model.provider;
+    assert.equal(retry("429 rate limit"), "deepseek");
+    assert.equal(retry("400 invalid_request_error: tools[0] schema is invalid"), "deepseek");
+    assert.equal(retry("401 invalid api key"), "deepseek");
+    assert.equal(retry("context_length_exceeded"), "ollama-cloud");
+    assert.equal(retry("This model's maximum context length is 65536 tokens"), "ollama-cloud");
+  } finally {
+    if (original === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = original;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+test("router state is reported only when the excluded providers change", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "model-router-state-"));
+  const original = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = cwd;
+  try {
+    const models = [...catalog];
+    const ctx = { cwd, modelRegistry: { getAvailable: () => models } } as unknown as ExtensionContext;
+    const now = new Date("2026-10-26T02:00Z");
+    const selected = route({ reason: "user", thinkingLevel: "high" }, ctx, now);
+    assert.equal("state" in selected, false);
+    const fallback = route({ reason: "retry", thinkingLevel: "high",
+      failed: { ...selected, message: { errorMessage: "503 overloaded" } } }, ctx, now);
+    assert.deepEqual(fallback.state, { failedProviders: ["ollama-cloud"] });
+    // Pi appends a session entry for every state object it receives, so an unchanged
+    // exclusion list must not be reported again on each request.
+    assert.equal("state" in route({ reason: "continuation", thinkingLevel: "high",
+      previous: fallback, state: fallback.state }, ctx, now), false);
+    assert.deepEqual(route({ reason: "user", thinkingLevel: "high", state: fallback.state }, ctx, now).state,
+      { failedProviders: [] });
+    assert.equal("state" in route({ reason: "user", thinkingLevel: "high",
+      state: { failedProviders: [] } }, ctx, now), false);
   } finally {
     if (original === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = original;
     rmSync(cwd, { recursive: true, force: true });
