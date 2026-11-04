@@ -17,6 +17,7 @@ export {
     executeNavigatorClose,
     isNavigatorUiAvailable,
     buildNavigatorRows,
+    pendingNavigatorPark,
     buildNavigatorDetail,
     buildDetailLines,
     createNavigatorState,

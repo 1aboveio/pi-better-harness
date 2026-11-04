@@ -27,11 +27,11 @@
 
 import { accessSync, constants, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 
 import { commandExecution } from "./process.js";
 import { baseDir } from "./registry.js";
-import { compileWritePolicy, describeSandboxSupport, directApplicationTarget, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
+import { canonicalizePath, compileWritePolicy, describeSandboxSupport, directApplicationTarget, maybeBuildSandboxCommand, type SandboxSeams } from "./shared-sandbox-core.js";
 
 type SandboxPermissions = {
   /** `write` = read, create and overwrite in place; `read-write` = Write & delete. */
@@ -453,6 +453,280 @@ export function planFor(policy: ForegroundSandboxPolicy | undefined): Foreground
   } : undefined;
   return { confined: true, writableRoot: policy.writableRoot, denyWrite: policy.denyWrite,
     ...(permissions ? { permissions } : {}) };
+}
+
+/**
+ * The parent-captured task authority a worker conversation launches background
+ * tasks under.
+ *
+ * This is a structural subset of the Subagents task policy and is declared here
+ * on purpose: `pi-better-background-tasks` must keep working when the Subagents
+ * package is absent, so it never imports that package. The parent supplies the
+ * object from the policy it captured at worker launch; it is never built from
+ * model tool arguments, so a child cannot widen its own authority by asking for
+ * a different profile. The object is treated as immutable; the resolved plan is
+ * a copy that later changes to the source cannot alter.
+ *
+ * A present `root` means the worker was confined. An unconfined worker (the
+ * `sandbox:false` opt-out) has no captured task authority and passes `undefined`
+ * (or `null`). A `PermissionProfile`-shaped source may also express that with
+ * `permissions.enabled === false`.
+ *
+ * Supported intersection contract:
+ *
+ * - No worker authority: the current Background tasks profile applies unchanged.
+ * - Worker confined, Background tasks off: the worker's confinement and settings
+ *   are preserved exactly.
+ * - Both confined, same canonical root: project/outside/credential levels take
+ *   the weaker side, commands/network/shell are ANDed, the command cap is the
+ *   smaller one, and deny paths are unioned.
+ * - Both confined with different canonical roots, or either confined side
+ *   publishing no permission levels to intersect, refuses the launch. Dropping
+ *   one side's file or command rules would be a weaker profile than either
+ *   owner approved.
+ */
+export interface WorkerSandboxPolicy {
+  /** Canonical project directory the parent confined the worker to. */
+  readonly root: string;
+  readonly permissions?: WorkerSandboxPermissions;
+  /** Concrete paths that stay non-writable inside `root`. */
+  readonly denyWrite?: readonly string[];
+}
+
+/** The capability levels and command switches a worker was launched with. */
+export interface WorkerSandboxPermissions {
+  readonly projectFiles: "off" | "read" | "write" | "read-write";
+  readonly outsideProject: "off" | "read" | "write" | "read-write";
+  readonly storedCredentials: "off" | "read" | "read-write";
+  readonly commands: boolean;
+  readonly network: boolean;
+  readonly shell?: boolean;
+  readonly commandTimeoutSeconds?: number | null;
+  /** Present only on a `PermissionProfile`-shaped source; false = not confined. */
+  readonly enabled?: boolean;
+}
+
+/** Thrown when a parent-supplied worker policy is malformed; nothing was launched. */
+export class InvalidWorkerSandboxPolicyError extends Error {
+  constructor(detail: string) {
+    super(`Invalid worker sandbox policy: ${detail}`);
+    this.name = "InvalidWorkerSandboxPolicyError";
+  }
+}
+
+const FILE_ACCESS_RANK = Object.freeze({ off: 0, read: 1, write: 2, "read-write": 3 } as const);
+const CREDENTIAL_ACCESS_RANK = Object.freeze({ off: 0, read: 1, "read-write": 2 } as const);
+
+type WorkerAuthority =
+  | { readonly confined: false }
+  | { readonly confined: true; readonly root: string; readonly denyWrite: readonly string[]; readonly permissions?: SandboxPermissions };
+
+/**
+ * Validate and normalize the parent-captured authority before anything else
+ * happens. Levels are checked as a whole profile so a typo cannot narrow itself
+ * silently, and a relative root or deny entry is refused rather than resolved
+ * against Pi's own cwd.
+ */
+function readWorkerAuthority(value: WorkerSandboxPolicy | null | undefined): WorkerAuthority {
+  if (value === null || value === undefined) return { confined: false };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new InvalidWorkerSandboxPolicyError("the parent-captured policy must be an object.");
+  }
+  const raw = value as unknown as Record<string, unknown>;
+  if (typeof raw.root !== "string" || raw.root.length === 0 || !isAbsolute(raw.root)) {
+    throw new InvalidWorkerSandboxPolicyError("root must be an absolute path.");
+  }
+  const root = canonicalizePath(raw.root);
+  if (root === dirname(root) || root === canonicalizePath(homedir())) {
+    throw new InvalidWorkerSandboxPolicyError("root must be a project directory, not the filesystem or home root.");
+  }
+  const denyWrite = raw.denyWrite;
+  if (denyWrite !== undefined && (!Array.isArray(denyWrite) ||
+      !denyWrite.every((entry) => typeof entry === "string" && isAbsolute(entry)))) {
+    throw new InvalidWorkerSandboxPolicyError("denyWrite must be a list of absolute paths.");
+  }
+  const deny = Object.freeze([...new Set((denyWrite as string[] | undefined) ?? [])]);
+
+  if (raw.permissions === undefined) {
+    return { confined: true, root, denyWrite: deny };
+  }
+  const source = raw.permissions;
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    throw new InvalidWorkerSandboxPolicyError("permissions must be an object.");
+  }
+  const p = source as Record<string, unknown>;
+  if (p.enabled !== undefined && typeof p.enabled !== "boolean") {
+    throw new InvalidWorkerSandboxPolicyError("permissions.enabled must be a boolean.");
+  }
+  // A PermissionProfile that is not enabled grants no task authority at all.
+  if (p.enabled === false) return { confined: false };
+  if (typeof p.projectFiles !== "string" || !Object.hasOwn(FILE_ACCESS_RANK, p.projectFiles)) {
+    throw new InvalidWorkerSandboxPolicyError("permissions.projectFiles must be off, read, write or read-write.");
+  }
+  if (typeof p.outsideProject !== "string" || !Object.hasOwn(FILE_ACCESS_RANK, p.outsideProject)) {
+    throw new InvalidWorkerSandboxPolicyError("permissions.outsideProject must be off, read, write or read-write.");
+  }
+  if (typeof p.storedCredentials !== "string" || !Object.hasOwn(CREDENTIAL_ACCESS_RANK, p.storedCredentials)) {
+    throw new InvalidWorkerSandboxPolicyError("permissions.storedCredentials must be off, read or read-write.");
+  }
+  if (typeof p.commands !== "boolean") {
+    throw new InvalidWorkerSandboxPolicyError("permissions.commands must be a boolean.");
+  }
+  if (typeof p.network !== "boolean") {
+    throw new InvalidWorkerSandboxPolicyError("permissions.network must be a boolean.");
+  }
+  if (p.shell !== undefined && typeof p.shell !== "boolean") {
+    throw new InvalidWorkerSandboxPolicyError("permissions.shell must be a boolean.");
+  }
+  if (p.commandTimeoutSeconds !== undefined && p.commandTimeoutSeconds !== null && !isCommandTimeoutSeconds(p.commandTimeoutSeconds)) {
+    throw new InvalidWorkerSandboxPolicyError(`permissions.commandTimeoutSeconds must be null or a positive, finite number of seconds up to ${MAX_COMMAND_TIMEOUT_SECONDS}.`);
+  }
+  const permissions: SandboxPermissions = {
+    projectFiles: p.projectFiles as SandboxPermissions["projectFiles"],
+    outsideProject: p.outsideProject as SandboxPermissions["outsideProject"],
+    storedCredentials: p.storedCredentials as SandboxPermissions["storedCredentials"],
+    commands: p.commands,
+    network: p.network,
+    ...(p.shell === undefined ? {} : { shell: p.shell }),
+    ...(p.commandTimeoutSeconds === undefined ? {} : { commandTimeoutSeconds: p.commandTimeoutSeconds as number | null }),
+  };
+  return { confined: true, root, denyWrite: deny, permissions: Object.freeze(permissions) };
+}
+
+/** The weaker of two file-access levels; deletion is never broader than writes. */
+function weakerFileAccess(
+  a: SandboxPermissions["projectFiles"],
+  b: SandboxPermissions["projectFiles"],
+): SandboxPermissions["projectFiles"] {
+  return FILE_ACCESS_RANK[a] <= FILE_ACCESS_RANK[b] ? a : b;
+}
+
+function weakerCredentialAccess(
+  a: SandboxPermissions["storedCredentials"],
+  b: SandboxPermissions["storedCredentials"],
+): SandboxPermissions["storedCredentials"] {
+  return CREDENTIAL_ACCESS_RANK[a] <= CREDENTIAL_ACCESS_RANK[b] ? a : b;
+}
+
+/** Intersect two already-validated capability profiles. */
+function intersectPermissions(background: SandboxPermissions, worker: SandboxPermissions): SandboxPermissions {
+  const backgroundCap = isCommandTimeoutSeconds(background.commandTimeoutSeconds) ? background.commandTimeoutSeconds : undefined;
+  const workerCap = isCommandTimeoutSeconds(worker.commandTimeoutSeconds) ? worker.commandTimeoutSeconds : undefined;
+  const cap = backgroundCap === undefined ? workerCap
+    : workerCap === undefined ? backgroundCap : Math.min(backgroundCap, workerCap);
+  const shellGiven = background.shell !== undefined || worker.shell !== undefined;
+  const capGiven = background.commandTimeoutSeconds !== undefined || worker.commandTimeoutSeconds !== undefined;
+  return Object.freeze({
+    projectFiles: weakerFileAccess(background.projectFiles, worker.projectFiles),
+    outsideProject: weakerFileAccess(background.outsideProject, worker.outsideProject),
+    storedCredentials: weakerCredentialAccess(background.storedCredentials, worker.storedCredentials),
+    commands: background.commands && worker.commands,
+    network: background.network && worker.network,
+    ...(shellGiven ? { shell: background.shell !== false && worker.shell !== false } : {}),
+    ...(capGiven ? { commandTimeoutSeconds: cap ?? null } : {}),
+  });
+}
+
+/**
+ * The policy snapshot stored behind a worker-authored plan, so provenance and
+ * {@link backgroundExecutionLimits} read the effective authority rather than
+ * the parent's published profile.
+ */
+function workerPlanPolicy(
+  plan: { readonly writableRoot: string; readonly denyWrite: readonly string[]; readonly permissions?: SandboxPermissions },
+  reason: string,
+): ForegroundSandboxPolicy {
+  return Object.freeze({
+    state: "enabled",
+    writableRoot: plan.writableRoot,
+    denyWrite: Object.freeze([...plan.denyWrite]),
+    reason,
+    ...(plan.permissions ? { permissions: Object.freeze({ ...plan.permissions, enabled: true }) } : {}),
+    policySource: "background",
+  });
+}
+
+/**
+ * Resolve how a worker-launched local background task must be confined.
+ *
+ * The effective authority is always the worker's captured task authority and
+ * the current Background tasks profile, never the parent session's sibling Main
+ * profile. When the publisher sends a Background column this reads that column;
+ * a legacy publisher with one profile keeps its historical meaning, which is
+ * already what Background tasks enforce.
+ *
+ * Validation runs before any task state exists. A malformed policy, an invalid
+ * command cap or level, a disabled worker command capability, differing
+ * canonical roots, or an unsupported intersection refuses the launch instead of
+ * dropping a rule. The returned plan is an immutable snapshot: it is captured
+ * through {@link capturePlan} so later command checks and
+ * {@link backgroundExecutionLimits} keep the authority this launch started with.
+ */
+export function resolveWorkerSandboxPlan(
+  pi: unknown,
+  workerPolicy?: WorkerSandboxPolicy | null,
+  operation?: unknown,
+  tool = "bg_task_spawn",
+): ForegroundSandboxPlan {
+  const background = currentForegroundSandboxPolicy(pi);
+  let worker: WorkerAuthority;
+  try {
+    worker = readWorkerAuthority(workerPolicy);
+  } catch (error) {
+    backgroundDiagnostics(background)?.observe({ tool, operation, resource: "sandbox-backend", basis: "policy-refusal", outcome: "denied" });
+    throw error;
+  }
+
+  // No captured authority: the current Background tasks profile is the whole
+  // answer, exactly as it is for a parent-launched task.
+  if (!worker.confined) return capturePlan(planFor(background), background);
+
+  // Commands Off is the worker's master switch, independent of Background being
+  // on or off. It is checked before any plan is built.
+  if (worker.permissions && !worker.permissions.commands) {
+    const snapshot = { writableRoot: worker.root, denyWrite: worker.denyWrite, permissions: worker.permissions };
+    const policy = workerPlanPolicy(snapshot, "The worker task authority disables commands.");
+    backgroundDiagnostics(background)?.observe({ tool, operation, resource: "command-execution", basis: "policy-refusal", outcome: "denied" });
+    throw new ForegroundSandboxBlockedError(policy,
+      "The worker task authority disables commands. Change the Subagents permissions before launching background tasks.");
+  }
+
+  const backgroundOff = !background || background.state === "inactive" || background.state === "disabled";
+  if (backgroundOff) {
+    // Preserve the worker's own confinement even though no Background profile is
+    // enforcing anything. Its settings are copied, never linked to the source.
+    const plan = {
+      confined: true as const,
+      writableRoot: worker.root,
+      denyWrite: Object.freeze([...worker.denyWrite]),
+      ...(worker.permissions ? { permissions: worker.permissions } : {}),
+    };
+    return capturePlan(plan, workerPlanPolicy(plan, "Worker task authority applies; the Background tasks profile is off."));
+  }
+
+  try {
+    const base = planFor(background);
+    if (!base.confined) throw new Error("Worker sandbox resolution expected a confined Background tasks plan.");
+    const backgroundRoot = canonicalizePath(base.writableRoot);
+    if (backgroundRoot !== worker.root) {
+      throw new ForegroundSandboxBlockedError(background,
+        `Cannot intersect the Background tasks root ${JSON.stringify(backgroundRoot)} with the worker root ${JSON.stringify(worker.root)}: they confine different directories, so a correct intersection cannot be constructed. Refusing rather than dropping either side's rules.`);
+    }
+    if (!base.permissions || !worker.permissions) {
+      throw new ForegroundSandboxBlockedError(background,
+        `Cannot intersect the Background tasks profile with the worker task authority because ${base.permissions ? "the worker" : "the Background tasks profile"} publishes no permission levels (file access, commands, network). Refusing rather than dropping the other side's controls; update the sandbox packages or set permissions in /sandbox.`);
+    }
+    const permissions = intersectPermissions(base.permissions, worker.permissions);
+    const denyWrite = Object.freeze([...new Set([...base.denyWrite, ...worker.denyWrite])]);
+    const plan = { confined: true as const, writableRoot: backgroundRoot, denyWrite, permissions };
+    return capturePlan(plan, workerPlanPolicy(plan,
+      "Worker task authority intersected with the Background tasks profile (weaker levels, ANDed switches, smallest cap, deny paths unioned)."));
+  } catch (error) {
+    if (error instanceof ForegroundSandboxBlockedError) {
+      backgroundDiagnostics(background)?.observe({ tool, operation, resource: "sandbox-backend", basis: "policy-refusal", outcome: "denied" });
+    }
+    throw error;
+  }
 }
 
 /**

@@ -161,6 +161,10 @@ jobs:
               check_pack_file /tmp/package-pack.json src/shared-failure-observations.ts
               check_pack_file /tmp/package-pack.json src/shared-callback-batcher.ts
               check_pack_file /tmp/package-pack.json src/shared-execution-policy.ts
+              check_pack_file /tmp/package-pack.json src/shared-operation-coordinator/index.ts
+              check_pack_file /tmp/package-pack.json src/observed-waits.ts
+              check_pack_file /tmp/package-pack.json src/supervisor/generated/runner.mjs
+              check_pack_file /tmp/package-pack.json src/supervisor/generated/store.mjs
               ;;
             pi-better-sandbox)
               check_pack_file /tmp/package-pack.json index.ts
@@ -192,6 +196,9 @@ jobs:
               check_pack_file /tmp/package-pack.json shared-failure-observations.ts
               check_pack_file /tmp/package-pack.json shared-callback-batcher.ts
               check_pack_file /tmp/package-pack.json shared-execution-policy.ts
+              check_pack_file /tmp/package-pack.json shared-operation-coordinator/index.ts
+              check_pack_file /tmp/package-pack.json child-operations.ts
+              check_pack_file /tmp/package-pack.json worker-waits.ts
               ;;
             pi-better-goal)
               check_pack_file /tmp/package-pack.json src/index.ts
@@ -249,12 +256,19 @@ jobs:
                 node_modules/pi-better-subagents/shared-failure-observations.ts \
                 node_modules/pi-better-subagents/shared-callback-batcher.ts \
                 node_modules/pi-better-subagents/shared-execution-policy.ts \
+                node_modules/pi-better-subagents/shared-operation-coordinator/index.ts \
+                node_modules/pi-better-subagents/child-operations.ts \
+                node_modules/pi-better-subagents/worker-waits.ts \
                 node_modules/pi-better-background-tasks/src/index.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
                 node_modules/pi-better-background-tasks/src/shared-sandbox-diagnostics.ts \
                 node_modules/pi-better-background-tasks/src/shared-failure-observations.ts \
                 node_modules/pi-better-background-tasks/src/shared-callback-batcher.ts \
                 node_modules/pi-better-background-tasks/src/shared-execution-policy.ts \
+                node_modules/pi-better-background-tasks/src/shared-operation-coordinator/index.ts \
+                node_modules/pi-better-background-tasks/src/observed-waits.ts \
+                node_modules/pi-better-background-tasks/src/supervisor/generated/runner.mjs \
+                node_modules/pi-better-background-tasks/src/supervisor/generated/store.mjs \
                 node_modules/pi-better-ssh/src/index.ts \
                 node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
                 node_modules/pi-better-model-router/src/index.ts \

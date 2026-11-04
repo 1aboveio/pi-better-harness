@@ -34,6 +34,10 @@ jobs:
         run: |
           node --import tsx --import ./packages/pi-better-subagents/tests/isolate-registry.mjs --test packages/pi-better-subagents/tests/task_runtime.test.mjs
           node --import tsx --test packages/task-sandbox/apply-patch.test.ts
+      - name: Prove sandboxed worker parking and resumption
+        env:
+          PI_WORKER_KERNEL_REQUIRE: "1"
+        run: node --import tsx --test packages/pi-better-subagents/tests/worker-waits-kernel.test.mjs
 
   windows-verify:
     name: windows-verify
@@ -189,6 +193,9 @@ jobs:
             node_modules/pi-better-subagents/shared-failure-observations.ts \
             node_modules/pi-better-subagents/shared-callback-batcher.ts \
             node_modules/pi-better-subagents/shared-execution-policy.ts \
+            node_modules/pi-better-subagents/shared-operation-coordinator/index.ts \
+            node_modules/pi-better-subagents/child-operations.ts \
+            node_modules/pi-better-subagents/worker-waits.ts \
             node_modules/pi-better-background-tasks/src/index.ts \
             node_modules/pi-better-background-tasks/src/shared-navigator.ts \
             node_modules/pi-better-background-tasks/src/shared-sandbox-core.ts \
@@ -196,6 +203,10 @@ jobs:
             node_modules/pi-better-background-tasks/src/shared-failure-observations.ts \
             node_modules/pi-better-background-tasks/src/shared-callback-batcher.ts \
             node_modules/pi-better-background-tasks/src/shared-execution-policy.ts \
+            node_modules/pi-better-background-tasks/src/shared-operation-coordinator/index.ts \
+            node_modules/pi-better-background-tasks/src/observed-waits.ts \
+            node_modules/pi-better-background-tasks/src/supervisor/generated/runner.mjs \
+            node_modules/pi-better-background-tasks/src/supervisor/generated/store.mjs \
             node_modules/pi-better-ssh/src/index.ts \
             node_modules/pi-better-ssh/src/shared-ssh-core/index.ts \
             node_modules/pi-better-model-router/src/index.ts \

@@ -36,18 +36,29 @@ authorized, write the result, and return. Pending CI is a valid handoff, not a p
 The hook refuses recognized `gh run watch`, `gh pr checks --watch`, and bundled
 delivery-watcher commands through `bash` and `run_application`. Short status reads,
 failed-log retrieval, and legitimate long local tests and builds remain allowed.
-Workers use focused checks during implementation. Known long command-only jobs,
-broad validation suites, servers and repeated waits are handed back with the
-command, working directory, environment variable names (never secret values),
-current evidence and remaining validation. The coordinator runs these through
-`bg_task_spawn` or `bg_task_watch` and inspects the terminal result. Default children
-have no background-task tools; shell polling or detachment is not a substitute.
-If background tools are explicitly available to a child, recognized watcher
-commands are refused there too. Coordinator sessions are unaffected.
+Workers retain ownership of their assigned validation. When Background Tasks is
+loaded, default workers receive a guarded bridge to supervised local operations.
+They launch a known long command with `bg_task_spawn`, continue independent work,
+and call `wait_for_operations` when only the operation remains. The worker saves
+the wait result and exits, releasing its capacity slot. Once the operation settles,
+the same conversation resumes to read the evidence, acknowledge its interpretation,
+and finish the assignment. A completed parked attempt does not complete the assignment.
 
-This is an operational ownership guard, not a security boundary or a classifier
-for arbitrary programs. Indirect scripts and custom polling implementations still
-rely on the worker handoff contract. Command permissions and timeouts are unchanged.
+When the guarded bridge is unavailable, workers hand back the exact command, cwd,
+required environment variable names (never secret values), current evidence and
+remaining validation. The coordinator runs the command through background tools
+and inspects its terminal result. Shell polling and detachment are not substitutes.
+
+Explicit tool exclusions and clean loadouts remain authoritative. The bridge does
+not expand permissions: an operation must satisfy both the captured worker policy
+and the current Background Tasks policy. Parking requires Pi SDK 0.82.1 or later,
+a saved conversation, and a registered continuation adapter. If any prerequisite
+cannot be proved, parking is refused or held with a reason.
+
+The coordinator owns established command-only jobs and external delivery waits.
+Use `watch_delivery` for supported merge observation. Recognized external watcher
+commands remain refused in workers, including through their background bridge.
+Command permissions and timeouts are unchanged.
 
 ## Install
 

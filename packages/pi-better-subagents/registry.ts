@@ -250,14 +250,20 @@ export interface RunMeta {
      * `subagent_list` keep working for dismissed runs).
      */
     dismissedAt?: number;
-    /**
-     * Optional catalog launch snapshot. Additive: metadata written before the
-     * catalog has no `catalog` key and still parses. The first launch
-     * publication freezes `name` and `catalog` together, including when
-     * catalog is absent or null. Later status, result, and stop writes keep
-     * that whole snapshot and must not fill a missing catalog.
-     */
     catalog?: CatalogLaunchSnapshot;
+    /**
+     * Durable park disposition for a worker attempt that ended while waiting on
+     * an observed dependency. Additive: a record without it is an ordinary run.
+     * The attempt status stays `completed`; this field is what distinguishes
+     * "this attempt finished" from "the assignment finished" (ADR 0020).
+     */
+    park?: ParkRecord;
+    /**
+     * Supervised-operation binding for this attempt. Additive. Records only
+     * references (bridge run id, conversation id, authority reference) and the
+     * captured worker policy — never the per-run bridge token.
+     */
+    operations?: RunOperationsBinding;
     /**
      * Harness-owned timing policy and one-shot markers (soft deadline, grace,
      * hard ceiling, stuck window). Written at launch so /reload keeps it.
@@ -296,6 +302,186 @@ export function promptPathFor(id: string): string {
 }
 function metaPathFor(id: string): string {
     return join(runDir(id), "meta.json");
+}
+
+// ---- park disposition and supervised-operations binding -------------------
+
+/**
+ * Phase of a parked assignment's wait, mirrored from the coordinator record for
+ * display, resume decisions and cleanup protection. `consumed`/`cancelled` are
+ * terminal; `held` needs its owner.
+ */
+export type ParkPhase =
+    | "parking"
+    | "waiting"
+    | "ready"
+    | "resuming"
+    | "held"
+    | "consumed"
+    | "cancelled";
+
+/** Proof that the wait tool result is the persisted end of the saved conversation. */
+export interface ParkCheckpointIdentity {
+    sessionId: string;
+    sessionFile: string;
+    toolCallId: string;
+    entryId: string;
+    prefixBytes: number;
+    prefixSha256: string;
+}
+
+/**
+ * Durable park disposition of one attempt: which wait generation it parked on,
+ * the verified native checkpoint, and what happened afterwards. Written only by
+ * the parent after the checkpoint was verified and the coordinator admitted it,
+ * so an attempt cannot claim a park it did not prove.
+ */
+export interface ParkRecord {
+    version: 1;
+    waitId: string;
+    generation: number;
+    phase: ParkPhase;
+    /** Attempt that parked (this run id). */
+    attemptId: string;
+    /** Foreground owner binding recorded for admission, when known. */
+    ownerSessionId?: string;
+    ownerWorkspace?: string;
+    ownerBranchId?: string | null;
+    ownerGoalId?: string | null;
+    /** The next reasoning step the worker recorded when it parked. */
+    continuationNote?: string;
+    /** Verified saved-conversation checkpoint. */
+    checkpoint?: ParkCheckpointIdentity;
+    parkedAt: number;
+    updatedAt: number;
+    /** Why the wait is held instead of continuing. */
+    heldReason?: string;
+    /** Continuation attempt admitted for this wait generation. */
+    resumedAt?: number;
+    resumedBy?: string;
+    /** Launch token persisted with the attempt id BEFORE the child is spawned. */
+    resumeLaunchToken?: string;
+    /**
+     * Store-issued resume claim identity persisted with the attempt, so a proven
+     * failed exit can hold the generation with exact claim identity (the claim
+     * token is the same value the durable claim row already stores).
+     */
+    resumeClaimId?: string;
+    resumeClaimToken?: string;
+    cancelledAt?: number;
+    cancelReason?: string;
+}
+
+/** References for a run whose child may use supervised operations. */
+export interface RunOperationsBinding {
+    version: 1;
+    /** Bridge run id; equals the attempt id. */
+    bridgeRunId: string;
+    conversationId: string;
+    authorityReference: string;
+    /** Foreground branch/goal binding recorded for resume admission. */
+    branchId?: string | null;
+    goalId?: string | null;
+    /**
+     * Workspace the worker conversation was registered under (the sandbox or clone
+     * the child ran in). Background ownership uses this, not the foreground cwd.
+     */
+    workspace?: string;
+    /**
+     * Launch token persisted with the resume attempt BEFORE spawn, so a crash
+     * between publication and the child's own publication is reconciled instead
+     * of relaunched. Never a credential.
+     */
+    resumeLaunchToken?: string;
+    /** Worker policy captured at launch; Background intersects it, never the child. */
+    policy: {
+        version: 1;
+        sandbox: unknown;
+        tools: readonly string[];
+        clean: boolean;
+        deadlineAt: number | null;
+    };
+    /** Tools the child bridge exposes. */
+    tools: readonly string[];
+}
+
+export function parkRecordPath(id: string): string {
+    return join(runDir(id), "park.json");
+}
+
+/** Verify the shape before trusting a record read from disk. */
+function parseParkRecord(value: unknown): ParkRecord | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Partial<ParkRecord>;
+    if (record.version !== 1) return undefined;
+    if (typeof record.waitId !== "string" || !record.waitId) return undefined;
+    if (!Number.isSafeInteger(record.generation) || (record.generation ?? 0) < 1) return undefined;
+    if (typeof record.attemptId !== "string" || !record.attemptId) return undefined;
+    if (typeof record.parkedAt !== "number" || !Number.isFinite(record.parkedAt)) return undefined;
+    const phases: readonly ParkPhase[] = ["parking", "waiting", "ready", "resuming", "held", "consumed", "cancelled"];
+    if (!phases.includes(record.phase as ParkPhase)) return undefined;
+    return record as ParkRecord;
+}
+
+/**
+ * Write the park disposition atomically and mirror it into the run's metadata.
+ * The mirror keeps listings, the Goal provider and cleanup from needing a second
+ * read; the file remains the authoritative copy for this attempt.
+ */
+export function writeParkRecord(id: string, record: ParkRecord): void {
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("Invalid run ID.");
+    mkdirSync(runDir(id), { recursive: true });
+    const path = parkRecordPath(id);
+    const temp = join(dirname(path), `.park.${randomBytes(6).toString("hex")}.tmp`);
+    writeFileSync(temp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
+    renameSync(temp, path);
+    const meta = readMeta(id);
+    if (meta && (meta.park?.phase !== record.phase
+        || meta.park?.heldReason !== record.heldReason
+        || meta.park?.resumedBy !== record.resumedBy)) {
+        meta.park = record;
+        writeMeta(meta);
+    }
+}
+
+/** Read the attempt's park disposition; absent for an ordinary run. */
+export function readParkRecord(id: string): ParkRecord | undefined {
+    try {
+        return parseParkRecord(JSON.parse(readFileSync(parkRecordPath(id), "utf-8")));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+        // The volatile run directory may already be reclaimed; the durable
+        // completed-attempt record carries the park snapshot taken at finalization.
+        return readMeta(id)?.park;
+    }
+}
+
+/** Merge one phase/reason change into the park disposition. */
+export function updateParkRecord(
+    id: string,
+    patch: Partial<Omit<ParkRecord, "version" | "waitId" | "generation" | "attemptId" | "parkedAt">>,
+): ParkRecord | undefined {
+    const current = readParkRecord(id);
+    if (!current) return undefined;
+    const next: ParkRecord = { ...current, ...patch, updatedAt: Date.now() };
+    writeParkRecord(id, next);
+    return next;
+}
+
+/** A park still owns a pending continuation: `parking`, `waiting`, `ready`, `resuming` or `held`. */
+export function isPendingPark(record: Pick<ParkRecord, "phase">): boolean {
+    return record.phase !== "consumed" && record.phase !== "cancelled";
+}
+
+/**
+ * Runs whose park disposition can still resume. Used by cleanup protection and
+ * by resume reconciliation; a consumed or cancelled park is not included.
+ */
+export function listPendingParkedRuns(metas: readonly RunMeta[] = listMetas()): RunMeta[] {
+    return metas.filter((meta) => {
+        const record = meta.park ?? readParkRecord(meta.id);
+        return record !== undefined && isPendingPark(record);
+    });
 }
 
 /**

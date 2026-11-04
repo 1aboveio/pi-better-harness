@@ -106,6 +106,24 @@ function metadata(id: string, root: string, remote = false): TestMeta {
     };
 }
 
+/** Prefer the durable id; never mistake a tool name such as bg_task_status for a task id. */
+function extractTaskId(text: string): string | undefined {
+    return /Started durable background process (bgs_[0-9a-f]{20})/.exec(text)?.[1]
+        ?? /Started background (?:process|command_watch) (bg_[A-Za-z0-9_]+)/.exec(text)?.[1]
+        ?? /\b(bgs_[0-9a-f]{20})\b/.exec(text)?.[1];
+}
+
+async function taskStatusText(h: Awaited<ReturnType<typeof harness>>, id: string): Promise<string> {
+    const result = await h.execute("bg_task_status", { id });
+    assert.equal(result.blocked, false, result.text);
+    return result.text;
+}
+
+function isTerminalStatusText(text: string): boolean {
+    const head = text.split("\n").slice(0, 5).join(" ");
+    return /\b(succeeded|failed|cancelled|timed_out|lost)\b/.test(head) && !/\brunning\b/.test(head);
+}
+
 // These use Pi's loader, provenance records and ExtensionRunner.emitToolCall,
 // including both the shared admission gate and the later Main permission gate.
 for (const backgroundFirst of [false, true]) test(`all handlers admit only implemented local/registry operations (backgroundFirst=${backgroundFirst})`, { skip: backendSkip }, async () => {
@@ -260,40 +278,106 @@ test("all handlers block replaced/spoofed registrations before their bodies exec
     } finally { await h.close(); }
 });
 
+test("durable local tasks use the public status/list/stop surface, not a legacy registry record", async () => {
+    // No backend is needed: both profiles are off, so the task is unconfined.
+    // This pins the durable id extraction and the public read/stop/dismiss path
+    // that the real-kernel tests use when Background confines the command.
+    const h = await harness(settings(false, false));
+    let id: string | undefined;
+    try {
+        const launched = await h.execute("bg_task_spawn", { command: "sleep 30", callback: false });
+        id = extractTaskId(launched.text);
+        assert.ok(id, launched.text);
+        assert.match(id, /^bgs_[0-9a-f]{20}$/);
+        const running = await taskStatusText(h, id);
+        assert.match(running, /running/);
+        assert.match(running, /sandbox: unconfined/);
+        assert.equal(readMeta(id), undefined, "durable tasks do not write a legacy meta");
+        const list = await h.execute("bg_task_list", {});
+        assert.equal(list.blocked, false);
+        assert.equal(list.text.includes(id), true);
+        const stopped = await h.execute("bg_task_stop", { id });
+        assert.equal(stopped.blocked, false, stopped.text);
+        assert.match(await terminal(h, id), /cancelled/);
+        const cleared = await h.execute("bg_status", { action: "clear", id });
+        assert.equal(cleared.blocked, false, cleared.text);
+        const afterClear = await h.execute("bg_task_list", {});
+        assert.equal(afterClear.text.includes(id), false);
+        assert.match(await taskStatusText(h, id), /cancelled/);
+    } finally {
+        if (id) await h.execute("bg_task_stop", { id }).catch(() => {});
+        await h.close();
+    }
+});
+
 test("registry reads, local stop, and clear still execute after commands are turned off in both profiles", { skip: backendSkip }, async () => {
     const h = await harness(settings(true, true, false, true));
     let id: string | undefined;
     try {
         const launched = await h.execute("bg_task_spawn", { command: "sleep 60", callback: false });
-        id = launched.text.match(/bg_[a-z0-9_]+/)?.[0];
+        id = extractTaskId(launched.text);
         assert.ok(id, launched.text);
-        assert.equal(readMeta(id)?.status, "running");
+        assert.match(await taskStatusText(h, id), /running/);
         await h.policy(settings(true, true, false, false));
         const status = await h.execute("bg_status", { action: "status", id });
         assert.equal(status.blocked, false);
         assert.match(status.text, /running/);
-        assert.equal((await h.execute("bg_task_list", {})).blocked, false);
+        const list = await h.execute("bg_task_list", {});
+        assert.equal(list.blocked, false);
+        assert.equal(list.text.includes(id), true);
         assert.equal((await h.execute("bg_task_log", { id })).blocked, false);
         const stopped = await h.execute("bg_task_stop", { id });
         assert.equal(stopped.blocked, false, stopped.text);
-        assert.equal((await terminal(id)).status, "cancelled");
+        assert.match(await terminal(h, id), /cancelled/);
         const cleared = await h.execute("bg_status", { action: "clear", id });
         assert.equal(cleared.blocked, false, cleared.text);
-        assert.ok(readMeta(id)?.dismissedAt);
+        const afterClear = await h.execute("bg_task_list", {});
+        assert.equal(afterClear.blocked, false);
+        assert.equal(afterClear.text.includes(id), false);
+        // Dismissal hides the row; the terminal evidence remains readable.
+        assert.match(await taskStatusText(h, id), /cancelled/);
     } finally {
-        if (id && readMeta(id)?.status === "running") await h.execute("bg_task_stop", { id });
+        if (id) await h.execute("bg_task_stop", { id }).catch(() => {});
         await h.close();
     }
 });
 
-async function terminal(id: string): Promise<TestMeta> {
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-        const meta = readMeta(id);
-        if (meta && meta.status !== "running") return meta;
-        await new Promise((resolve) => setTimeout(resolve, 20));
+test("a foreign durable id is refused while the owning session may stop with commands off", { skip: backendSkip }, async () => {
+    const owner = await harness(settings(true, true, false, true));
+    const other = await harness(settings(true, true, false, true));
+    let id: string | undefined;
+    try {
+        const launched = await owner.execute("bg_task_spawn", { command: "sleep 60", callback: false });
+        id = extractTaskId(launched.text);
+        assert.ok(id, launched.text);
+        assert.match(await taskStatusText(owner, id), /running/);
+
+        const foreign = await other.execute("bg_task_stop", { id });
+        assert.equal(foreign.blocked, true, foreign.text);
+        assert.match(foreign.text, /no verified task execution adapter/);
+        assert.match(await taskStatusText(owner, id), /running/);
+
+        // The owning session may still stop after commands are off in both profiles.
+        await owner.policy(settings(true, true, false, false));
+        const stopped = await owner.execute("bg_task_stop", { id });
+        assert.equal(stopped.blocked, false, stopped.text);
+        assert.match(await terminal(owner, id), /cancelled/);
+    } finally {
+        if (id) await owner.execute("bg_task_stop", { id }).catch(() => {});
+        await other.close();
+        await owner.close();
     }
-    throw new Error(`task did not finish: ${JSON.stringify(readMeta(id))}`);
+});
+
+async function terminal(h: Awaited<ReturnType<typeof harness>>, id: string): Promise<string> {
+    const deadline = Date.now() + 15_000;
+    let text = "";
+    while (Date.now() < deadline) {
+        text = await taskStatusText(h, id);
+        if (isTerminalStatusText(text)) return text;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`task did not finish: ${text}`);
 }
 
 for (const backgroundFirst of [false, true]) test(`real kernel honors Background independently of Main through all handlers (backgroundFirst=${backgroundFirst})`, { skip: backendSkip }, async () => {
@@ -309,20 +393,19 @@ for (const backgroundFirst of [false, true]) test(`real kernel honors Background
                 ...((action === "watch" || name === "bg_task_watch") ? { success_when: { type: "stdout_contains", value: "DONE" } } : {}),
             });
             assert.equal(result.blocked, false, result.text);
-            const id = result.text.match(/bg_[a-z0-9_]+/)?.[0];
+            const id = extractTaskId(result.text);
             assert.ok(id, result.text);
-            const meta = await terminal(id);
-            assert.equal(meta.status, "succeeded");
-            assert.equal(meta.sandbox?.confinement, "confined");
-            assert.equal(meta.sandbox?.policySource, "background");
+            const status = await terminal(h, id);
+            assert.match(status, /succeeded/);
+            assert.match(status, /sandbox: confined(?:; [^;]+)?; source: background/);
             assert.equal(readFileSync(allowed, "utf8"), "inside");
             assert.equal(existsSync(denied), false);
         }
         await h.policy(settings(false, true, true, true));
         const mainOff = await h.execute("bg_task_spawn", { command: `printf outside > '${join(outside, "main-off")}'`, callback: false });
-        const mainOffId = mainOff.text.match(/bg_[a-z0-9_]+/)?.[0];
+        const mainOffId = extractTaskId(mainOff.text);
         assert.ok(mainOffId, mainOff.text);
-        assert.equal((await terminal(mainOffId)).sandbox?.confinement, "confined");
+        assert.match(await terminal(h, mainOffId), /sandbox: confined(?:; [^;]+)?; source: background/);
         assert.equal(existsSync(join(outside, "main-off")), false);
         for (const main of [false, true]) {
             await h.policy(settings(main, true, true, false));
@@ -334,9 +417,9 @@ for (const backgroundFirst of [false, true]) test(`real kernel honors Background
             await h.policy(settings(main, false));
             const controlPath = join(outside, `control-${main}`);
             const control = await h.execute("bg_task_spawn", { command: `printf outside > '${controlPath}'`, callback: false });
-            const controlId = control.text.match(/bg_[a-z0-9_]+/)?.[0];
+            const controlId = extractTaskId(control.text);
             assert.ok(controlId, control.text);
-            assert.equal((await terminal(controlId)).sandbox?.confinement, "unconfined");
+            assert.match(await terminal(h, controlId), /sandbox: unconfined/);
             assert.equal(readFileSync(controlPath, "utf8"), "outside");
         }
     } finally { await h.close(); }

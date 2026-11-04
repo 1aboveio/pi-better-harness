@@ -59,6 +59,7 @@ process.env.TMPDIR = tmp;
 process.env.TMP = tmp;
 process.env.TEMP = tmp;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+process.env.PI_BG_OBSERVED_WAITS_DEBUG = "1";
 
 writeFileSync(join(fakeBin, "ssh"), [
   "#!/bin/sh",
@@ -72,11 +73,14 @@ chmodSync(join(fakeBin, "ssh"), 0o755);
 
 const originalPath = process.env.PATH ?? "";
 const originalWindow = process.env.PI_BETTER_CALLBACK_BATCH_MS;
+const originalObservedDebug = process.env.PI_BG_OBSERVED_WAITS_DEBUG;
 let retainFixtures = false;
 after(() => {
   process.env.PATH = originalPath;
   if (originalWindow === undefined) delete process.env.PI_BETTER_CALLBACK_BATCH_MS;
   else process.env.PI_BETTER_CALLBACK_BATCH_MS = originalWindow;
+  if (originalObservedDebug === undefined) delete process.env.PI_BG_OBSERVED_WAITS_DEBUG;
+  else process.env.PI_BG_OBSERVED_WAITS_DEBUG = originalObservedDebug;
   if (!retainFixtures) rmSync(fixtures, { recursive: true, force: true });
 });
 
@@ -89,6 +93,8 @@ const subagentRegistry = await import("../packages/pi-better-subagents/registry.
 const subagentFailures = await import("../packages/pi-better-subagents/failures.ts");
 const observations = await import("../packages/pi-better-subagents/shared-failure-observations.ts");
 const bgRegistry = await import("../packages/pi-better-background-tasks/src/registry.ts");
+const { defaultSupervisorDirectory, supervisorPaths } = await import("../packages/pi-better-background-tasks/src/supervisor/index.ts");
+const { openStore } = await import("../packages/pi-better-background-tasks/src/shared-operation-coordinator/index.ts");
 const { stopProcessGroup } = await import("../packages/pi-better-background-tasks/src/process.ts");
 const bgFailures = await import("../packages/pi-better-background-tasks/src/failures.ts");
 const bgObservations = await import("../packages/pi-better-background-tasks/src/shared-failure-observations.ts");
@@ -181,7 +187,107 @@ async function openSession(project) {
 const nextCursor = (content) => String(content).match(/\bnextCursor=(\S+)/)?.[1];
 /** The continuation cursor while a page says more retained bytes follow (a final page's cursor only tails later appends). */
 const continuation = (content) => (/\bhasMore=true\b/.test(String(content)) ? nextCursor(content) : undefined);
-const taskId = (content) => String(content).match(/\((bg_[^)]+)\)/)?.[1];
+/**
+ * Legacy local/SSH launches print `name (bg_…)`; durable local launches print
+ * `Started durable background process bgs_…` and have no legacy meta.
+ */
+const taskId = (content) => String(content).match(/\((bg_[^)]+)\)/)?.[1]
+  ?? String(content).match(/Started durable background (?:process|watch) (bgs_[0-9a-f]{20})/)?.[1]
+  ?? String(content).match(/\b(bgs_[0-9a-f]{20})\b/)?.[1];
+
+function readJson(path) {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
+}
+
+function supervisorCommand(id) {
+  if (!String(id).startsWith("bgs_")) return undefined;
+  const command = readJson(supervisorPaths(defaultSupervisorDirectory(), id).command);
+  return command && typeof command.pid === "number" ? { pid: command.pid, pgid: command.pgid } : undefined;
+}
+
+function supervisorTerminal(id) {
+  if (!String(id).startsWith("bgs_")) return undefined;
+  const paths = supervisorPaths(defaultSupervisorDirectory(), id);
+  return readJson(paths.result) ?? readJson(paths.lost);
+}
+
+function durableCommandAlive(id) {
+  const command = supervisorCommand(id);
+  return !!command && processGroupAlive(command);
+}
+
+function durableGone(id) {
+  if (supervisorTerminal(id)) return true;
+  return !durableCommandAlive(id);
+}
+
+function isTerminalStatusText(text) {
+  const head = String(text).split("\n").slice(0, 5).join(" ");
+  return /\b(succeeded|failed|cancelled|timed_out|lost)\b/.test(head) && !/\brunning\b/.test(head);
+}
+
+async function taskTerminal(host, id) {
+  const meta = bgRegistry.readMeta(id);
+  if (meta && meta.status !== "running") return true;
+  try { return isTerminalStatusText(await host.call("bg_task_status", { id })); }
+  catch { return !!supervisorTerminal(id); }
+}
+
+async function dumpDurableCallbackDiagnostics(host, id, project) {
+  if (!String(id).startsWith("bgs_")) return;
+  try {
+    const paths = supervisorPaths(defaultSupervisorDirectory(), id);
+    let operation;
+    let outbox = [];
+    let waits = [];
+    try {
+      const store = openStore({ path: join(agentDir, "operation-coordinator.sqlite") });
+      try {
+        operation = store.listOperations({ taskId: id })[0];
+        if (operation) {
+          outbox = store.listOutbox({ operationId: operation.operationId });
+          waits = store.listWaits().filter((wait) => wait.dependencies.some((dep) => dep.operationId === operation.operationId));
+        }
+      } finally { store.close(); }
+    } catch (error) {
+      operation = { storeError: error instanceof Error ? error.message : String(error) };
+    }
+    let status = "";
+    try { status = await host.call("bg_task_status", { id, verbose: true }); } catch (error) {
+      status = `status read failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    console.error("[reload-durable-diagnostics]", JSON.stringify({
+      id,
+      sidecar: readJson(join(defaultSupervisorDirectory(), "observed", `${id}.json`)),
+      host: readJson(join(defaultSupervisorDirectory(), "observed", "host.json")),
+      result: readJson(paths.result),
+      lost: readJson(paths.lost),
+      command: readJson(paths.command),
+      operation,
+      outbox: outbox.map((event) => ({ eventId: event.eventId, state: event.state, attempts: event.attempts, claimedBy: event.dispatchClaim?.claimedBy, reason: event.reason })),
+      waits: waits.map((wait) => ({ waitId: wait.waitId, generation: wait.generation, phase: wait.phase, owner: wait.owner, cancelEpoch: wait.cancelEpoch })),
+      active: {
+        sessionId: host.session.sessionManager.getSessionId(),
+        cwd: project,
+        branchIds: host.session.sessionManager.getBranch().map((entry) => entry.id),
+      },
+      sent: host.sent.length,
+      requests: host.requests.length,
+      status,
+    }, null, 2));
+  } catch (error) {
+    console.error("[reload-durable-diagnostics] failed", error);
+  }
+}
+
+async function durableIdsFor(host, children) {
+  const ids = new Set(children.map((child) => child.id).filter((id) => typeof id === "string" && id.startsWith("bgs_")));
+  try {
+    const list = await host.call("bg_task_list", { limit: 100 });
+    for (const match of String(list).matchAll(/\b(bgs_[0-9a-f]{20})\b/g)) ids.add(match[1]);
+  } catch { /* a failed reload may leave no callable tools */ }
+  return [...ids];
+}
 
 test("a real /reload keeps pending callback receipts, the incident journal, and result cursors", async () => {
   const project = dir("subagent-project");
@@ -277,24 +383,35 @@ function processGroupAlive(meta) {
 async function cleanupExitChildren(host, project, children) {
   try {
     // A spawn can persist its task before the tool returns (or throws). Recover
-    // only this session's tasks, including one whose response did not yield an id.
+    // only this session's tasks: legacy metas from the registry and durable bgs
+    // ids from the public list (or from the failed-spawn record).
     const ids = new Set(children.map((child) => child.id).filter(Boolean));
     for (const meta of bgRegistry.listMetasForOrigin({ cwd: project, sessionId: host.sessionId })) ids.add(meta.id);
-    const metas = [...ids].map((id) => bgRegistry.readMeta(id)).filter((meta) => meta?.pid);
+    const durableIds = await durableIdsFor(host, children);
+    const legacyMetas = [...ids].map((id) => bgRegistry.readMeta(id)).filter((meta) => meta?.pid);
     for (const { marker } of children) {
       try { writeFileSync(marker, ""); } catch { /* Stop still works if release fails. */ }
     }
-    const gone = () => metas.every((meta) => !processGroupAlive(meta));
-    // Keep markers and supervision alive until the OS, not just terminal metadata,
-    // confirms exit. Stop owns normal group teardown; SIGKILL also works if a
-    // failed reload left no callable tools or a child ignored SIGTERM.
+    const gone = () => legacyMetas.every((meta) => !processGroupAlive(meta)) && durableIds.every(durableGone);
+    // Keep markers and supervision alive until terminal evidence (durable runner
+    // or legacy process group) confirms exit. Release must not kill an owned
+    // durable command; an explicit stop is only the bounded fallback.
     if (!await waitFor("released children to exit", gone, 1_000).catch(() => false)) {
-      for (const meta of metas.filter(processGroupAlive)) {
+      for (const meta of legacyMetas.filter(processGroupAlive)) {
         try { await host.call("bg_task_stop", { id: meta.id }); } catch { /* Reload may have failed. */ }
       }
+      for (const id of durableIds.filter((taskId) => !durableGone(taskId))) {
+        try { await host.call("bg_task_stop", { id }); } catch { /* Reload may have failed. */ }
+      }
       if (!await waitFor("stopped children to exit", gone, 1_000).catch(() => false)) {
-        for (const meta of metas.filter(processGroupAlive)) {
+        for (const meta of legacyMetas.filter(processGroupAlive)) {
           try { stopProcessGroup(meta.pid, meta.pgid, "SIGKILL"); } catch { /* Attempt both groups; verify exit below. */ }
+        }
+        for (const id of durableIds.filter((taskId) => !durableGone(taskId))) {
+          const command = supervisorCommand(id);
+          if (command && processGroupAlive(command)) {
+            try { stopProcessGroup(command.pid, command.pgid, "SIGKILL"); } catch { /* Attempt both groups; verify exit below. */ }
+          }
         }
         await waitFor("killed children to exit", gone, 1_000);
       }
@@ -333,11 +450,39 @@ test("local and direct-SSH processes that exit after /reload deliver their compl
   await host.session.reload();
   for (const [id, marker] of [[localId, localDone], [directId, directDone]]) {
     writeFileSync(marker, "");
-    await waitFor(`${id} to finish`, () => bgRegistry.readMeta(id)?.status === "succeeded");
-    await waitFor(`${id} completion callback`, () => host.completions(id).length > 0);
+    await waitFor(`${id} to finish`, () => taskTerminal(host, id));
+    // The callback batcher only delivers when the session is idle. Let a reload
+    // settle before waiting for the callback; this changes no exact-once claim.
+    let idleTimer;
+    try {
+      await Promise.race([
+        host.session.waitForIdle(),
+        new Promise((_, reject) => {
+          idleTimer = setTimeout(() => reject(new Error(`${id}: the reloaded session did not become idle`)), 5_000);
+          idleTimer.unref?.();
+        }),
+      ]);
+    } catch (error) {
+      await dumpDurableCallbackDiagnostics(host, id, project);
+      throw error;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+    }
+    try {
+      await waitFor(`${id} completion callback`, () => host.completions(id).length > 0);
+    } catch (error) {
+      await dumpDurableCallbackDiagnostics(host, id, project);
+      throw error;
+    }
     const meta = bgRegistry.readMeta(id);
-    assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
-    assert.ok(meta.callbackSentAt > 0);
+    if (meta) {
+      assert.equal(meta.callbackSuppressedAt, undefined, `${id} was suppressed: ${meta.callbackSuppressedReason}`);
+      assert.ok(meta.callbackSentAt > 0);
+    } else {
+      // A durable local task has no legacy receipt. Its exactly-once contract is
+      // the single delivered batch plus the second reload below.
+      assert.match(id, /^bgs_/);
+    }
     await host.session.waitForIdle();
   }
   assert.equal(host.sent.length, 2, "separated exits must each deliver a batch");
@@ -380,7 +525,9 @@ for (const mode of ["release", "partial-spawn", "stop", "failed-reload"]) {
       assert.ok(id);
       // Exercise registry recovery when a spawn response did not supply an id.
       if (mode !== "partial-spawn") children[i].id = id;
-      await waitFor("the child to enter its wait loop", () => readFileSync(bgRegistry.logPathFor(id), "utf8").includes("cleanup-ready"));
+      // Durable local tasks log through the supervisor; the public log tool reads
+      // that path, while legacy tasks use the registry log.
+      await waitFor("the child to enter its wait loop", async () => (await host.call("bg_task_log", { id, lines: 20 })).includes("cleanup-ready"));
     }
     if (mode === "partial-spawn") {
       await assert.rejects(host.call("bg_task_spawn", { shell: false, argv: [] }), /argv with at least one element/);
@@ -393,16 +540,32 @@ for (const mode of ["release", "partial-spawn", "stop", "failed-reload"]) {
     } else {
       await host.session.reload();
     }
-    const owned = bgRegistry.listMetasForOrigin({ cwd: project, sessionId: host.sessionId });
-    assert.equal(owned.length, count);
-    for (const meta of owned) assert.ok(processGroupAlive(meta), `${meta.id} must still be waiting`);
+    const legacyOwned = bgRegistry.listMetasForOrigin({ cwd: project, sessionId: host.sessionId });
+    const durableOwned = await durableIdsFor(host, children);
+    assert.equal(legacyOwned.length + durableOwned.length, count);
+    for (const meta of legacyOwned) assert.ok(processGroupAlive(meta), `${meta.id} must still be waiting`);
+    for (const id of durableOwned) assert.ok(durableCommandAlive(id), `${id} must still be waiting`);
     for (const child of children) assert.equal(existsSync(child.marker), false);
     const started = Date.now();
     await cleanupExitChildren(host, project, children);
     assert.ok(Date.now() - started < 5_000, "cleanup must finish within its bounded grace periods");
-    for (const meta of owned) {
+    for (const meta of legacyOwned) {
       assert.throws(() => process.kill(-meta.pgid, 0), { code: "ESRCH" }, `${meta.id}'s owned process group must be gone`);
       if (mode === "stop") assert.equal(bgRegistry.readMeta(meta.id).status, "cancelled", "normal fallback uses bg_task_stop");
+    }
+    for (const id of durableOwned) {
+      // The runner writes its terminal record just after the killed command
+      // exits; a failed reload has no callable stop tool, so the SIGKILL fallback
+      // is the explicit termination and still needs its evidence.
+      if (!supervisorTerminal(id)) await waitFor(`${id} terminal evidence`, () => supervisorTerminal(id), 5_000).catch(() => {});
+      const terminal = supervisorTerminal(id);
+      assert.ok(terminal, `${id} must have durable terminal evidence`);
+      if (mode === "stop") assert.equal(terminal.status, "cancelled", "normal fallback uses bg_task_stop");
+      else if (mode !== "failed-reload") assert.equal(terminal.status, "succeeded", "release must let the owned durable command exit");
+      const command = supervisorCommand(id);
+      if (command?.pgid) {
+        assert.throws(() => process.kill(-command.pgid, 0), { code: "ESRCH" }, `${id}'s durable process group must be gone`);
+      }
     }
     for (const child of children) assert.equal(existsSync(child.marker), true, "release markers survive cleanup until suite teardown");
   });

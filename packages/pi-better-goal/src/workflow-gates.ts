@@ -262,6 +262,21 @@ export function waitUntil(due: readonly SchedulerAction[]): number | undefined {
   return times.length > 0 ? Math.min(...times) : undefined;
 }
 
+export type OperationResumeSchedulerGate = { ok: true; waitUntil: number | undefined } | { ok: false; reason: string };
+
+/** Automatic worker admission cannot treat unavailable workflow evidence as permission. */
+export async function operationResumeSchedulerGate(
+  entries: Iterable<EntryLike>,
+  owner: WorkflowOwner,
+  options: { timeoutMs?: number } = {},
+): Promise<OperationResumeSchedulerGate> {
+  const located = locateRun(entries, owner);
+  if ("warning" in located) return { ok: false, reason: located.warning };
+  const run = await runScheduler(located.script, located.runDir, options.timeoutMs);
+  if (!run.ok) return { ok: false, reason: `Workflow admission evidence unavailable: ${run.reason}` };
+  return { ok: true, waitUntil: waitUntil(run.due) };
+}
+
 /** When the bound run next wants a continuation, or undefined when it is not only waiting. */
 export async function schedulerWaitUntil(
   entries: Iterable<EntryLike>,

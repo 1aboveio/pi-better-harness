@@ -6,6 +6,7 @@ import { Type } from "typebox";
 import { commandAvailable, commandInvocation, resolveGoalCommand } from "./command-binding.js";
 import { goalPreferencesPath, readGoalPreferences, writeGoalPreference, type GoalPreferences } from "./preferences.js";
 import { createGoalSettingsPage } from "./settings-page.js";
+import { OPERATION_RESUME_ADMISSION, operationOwnerMatches, type OperationResumeRequest } from "./operation-admission.js";
 
 import {
   collectActivitySnapshot,
@@ -41,7 +42,7 @@ import { createRenderScheduler } from "./shared-render-scheduler.js";
 import { initializeNavigatorPanels, setNavigatorPanel } from "./shared-navigator-panels.js";
 import { collectSubagentActivity } from "./subagents.js";
 import { currentWorkflowOwner, skillCommandName, workflowEntry, workflowOwnerFromSkill, WORKFLOW_ENTRY_TYPE } from "./workflow.js";
-import { completionGate, pauseGate, schedulerWaitUntil } from "./workflow-gates.js";
+import { completionGate, pauseGate, schedulerWaitUntil, operationResumeSchedulerGate } from "./workflow-gates.js";
 import { workflowRehydrateMessage, WORKFLOW_REHYDRATE_MESSAGE_TYPE } from "./rehydrate.js";
 import { requestTaskContext } from "./task-context.js";
 import {
@@ -313,6 +314,7 @@ export default function (pi: ExtensionAPI): void {
 
   let currentCtx: ExtensionContext | undefined;
   let executionGeneration = 0;
+  let operationAdmissionRevision = 0;
   let agentGeneration = -1;
   let turnGeneration = 0;
   let escapeAbortSuppression: { session: number; turn: number; execution: number } | undefined;
@@ -862,6 +864,51 @@ export default function (pi: ExtensionAPI): void {
     );
   };
 
+  const unsubscribeOperationAdmission = pi.events.on(OPERATION_RESUME_ADMISSION, (value) => {
+    const request = value as Partial<OperationResumeRequest> | undefined;
+    if (request?.version !== 1 || !request.owner || typeof request.reply !== "function") return;
+    const ctx = currentCtx;
+    const revision = executionGeneration;
+    const preferencesRevision = operationAdmissionRevision;
+    const reply = request.reply;
+    const held = (reason: string) => reply({ allowed: false, reason, revision: executionGeneration });
+    if (!operationOwnerMatches(ctx, request.owner) || !ctx) { held("Owning parent session or branch is inactive"); return; }
+    const goal = getGoal(ctx);
+    if ((request.owner.goalId ?? null) !== (goal?.goalId ?? null)) { held("Owning Goal is no longer current"); return; }
+    if (goal && !preferences.autoContinue) { held("Goal automatic continuation is disabled"); return; }
+    if (goal && !isPokeable(goal)) { held("Goal is not active"); return; }
+    if (goal && currentPermissionHold(ctx, goal.goalId).blockers.length) { held("Goal has an active permission hold"); return; }
+    if (goal && currentContinuationState(ctx, goal.goalId)?.blocked) { held("Goal continuation requires human resume"); return; }
+    if (goal && !boundCommandReady(goal, ctx)) { held("Bound workflow is not ready"); return; }
+    const workflow = getWorkflow(ctx);
+    void (workflow ? operationResumeSchedulerGate(ctx.sessionManager.getBranch(), workflow) : Promise.resolve({ ok: true as const, waitUntil: undefined })).then((gate) => {
+      if (ctx !== currentCtx || revision !== executionGeneration || preferencesRevision !== operationAdmissionRevision || !operationOwnerMatches(currentCtx, request.owner!)) {
+        held("Parent execution changed during resume admission"); return;
+      }
+      const latest = getGoal(ctx);
+      if ((request.owner!.goalId ?? null) !== (latest?.goalId ?? null)) { held("Owning Goal changed during resume admission"); return; }
+      if (latest && !preferences.autoContinue) { held("Goal automatic continuation is disabled"); return; }
+      if (latest && (!isPokeable(latest) || currentPermissionHold(ctx, latest.goalId).blockers.length || currentContinuationState(ctx, latest.goalId)?.blocked)) {
+        held("Goal became held during resume admission"); return;
+      }
+      if (!gate.ok) { held(gate.reason); return; }
+      if (gate.waitUntil && gate.waitUntil > Date.now()) { held("Workflow scheduler is waiting"); return; }
+      // An in-process capability lets the dispatcher validate this admission
+      // after its last await and immediately before releasing execution.
+      const isCurrent = (): boolean => {
+        if (ctx !== currentCtx || revision !== executionGeneration || preferencesRevision !== operationAdmissionRevision
+          || !operationOwnerMatches(currentCtx, request.owner!)) return false;
+        const active = getGoal(ctx);
+        if ((request.owner!.goalId ?? null) !== (active?.goalId ?? null)) return false;
+        if (JSON.stringify(getWorkflow(ctx)) !== JSON.stringify(workflow)) return false;
+        return !active || (preferences.autoContinue && isPokeable(active)
+          && !currentPermissionHold(ctx, active.goalId).blockers.length
+          && !currentContinuationState(ctx, active.goalId)?.blocked && boundCommandReady(active, ctx));
+      };
+      reply({ allowed: true, revision, isCurrent });
+    }, () => held("Workflow admission evidence is unavailable"));
+  });
+
   pi.events.on(EVENT_REGISTER_PROVIDER, (provider) => {
     const candidate = provider as Partial<BackgroundActivityProvider> | undefined;
     if (!candidate || typeof candidate.id !== "string" || typeof candidate.getActivity !== "function") {
@@ -880,6 +927,7 @@ export default function (pi: ExtensionAPI): void {
   const changePreference = async (ctx: ExtensionCommandContext, key: keyof GoalPreferences, enabled: boolean): Promise<void> => {
     const previous = preferences;
     preferences = writeGoalPreference(key, enabled);
+    operationAdmissionRevision += 1;
     if (previous.autoContinue !== preferences.autoContinue) clearIdleContinuation();
     syncResumeTool(getGoal(ctx));
     if (!previous.autoContinue && preferences.autoContinue) {
@@ -1576,6 +1624,7 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     if (typeof unsubscribeSettingsRequest === "function") unsubscribeSettingsRequest();
+    if (typeof unsubscribeOperationAdmission === "function") unsubscribeOperationAdmission();
 
     executionGeneration += 1;
     sessionGeneration += 1;

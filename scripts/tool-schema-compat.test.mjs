@@ -25,7 +25,7 @@ function plain(schema) {
 test("background-task tool schemas use only provider-accepted keywords", () => {
   const tools = new Map();
   registerTools({ on() {}, registerTool(tool) { tools.set(tool.name, tool); } });
-  assert.deepEqual([...tools.keys()].sort(), ["bg_status", "bg_task", "bg_task_list", "bg_task_log", "bg_task_spawn", "bg_task_spawn_batch", "bg_task_status", "bg_task_stop", "bg_task_watch"]);
+  assert.deepEqual([...tools.keys()].sort(), ["acknowledge_operation_result", "bg_status", "bg_task", "bg_task_list", "bg_task_log", "bg_task_spawn", "bg_task_spawn_batch", "bg_task_status", "bg_task_stop", "bg_task_wait_cancel", "bg_task_wait_list", "bg_task_watch", "wait_for_operations", "watch_delivery"]);
   for (const [name, tool] of tools) {
     assert.deepEqual(findProviderRejectedKeywords(plain(tool.parameters)), [], name);
   }

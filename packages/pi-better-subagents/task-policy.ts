@@ -7,6 +7,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { canonicalizePath, compileWritePolicy, describeSandboxSupport, type SandboxPermissions } from "./shared-sandbox-core.ts";
 import { createTaskScratch, ensureHarnessRuntimeDirectories, runtimeCodeRoot, writableRuntimeAlias } from "./shared-task-sandbox.ts";
 import { isCommandTimeoutSeconds, type CommandSettings } from "./permission-policy.ts";
+import { OPERATION_BRIDGE_TOOL_NAMES } from "./operation-bridge-types.ts";
 
 /**
  * Guarded builtin for a shell-free task: `{ executable, args, timeout? }` runs one
@@ -79,6 +80,8 @@ export type TaskPolicy = Readonly<{
     applyPatch: boolean;
     /** Trusted extension tools admitted by name AND canonical package root (ADR 0009). */
     extensionTools: readonly TaskExtensionTool[];
+    /** Fixed guarded bridge adapter, enabled only by the trusted launcher. */
+    operationBridge: boolean;
 }>;
 
 export type TaskExtensionTool = Readonly<{
@@ -142,6 +145,7 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {    if (!value || t
     if (!Array.isArray(v.denyWrite) || !v.denyWrite.every((path) => typeof path === "string" && isAbsolute(path))) throw new Error("Invalid task sandbox protected paths.");
     if (!Array.isArray(v.tools) || !v.tools.every((name) => typeof name === "string" && name.length > 0)) throw new Error("Invalid task sandbox tool selection.");
     if (v.applyPatch !== undefined && typeof v.applyPatch !== "boolean") throw new Error("Invalid task sandbox apply_patch setting.");
+    if (v.operationBridge !== undefined && typeof v.operationBridge !== "boolean") throw new Error("Invalid task sandbox operation bridge setting.");
     const extensionTools = v.extensionTools ?? [];
     if (!Array.isArray(extensionTools) || !extensionTools.every((entry) => {
         const e = entry as Record<string, unknown> | null;
@@ -160,6 +164,7 @@ export function parseTaskPolicy(value: unknown): TaskPolicy {    if (!value || t
         } as TaskPermissions),
         denyWrite: Object.freeze([...v.denyWrite]), tools: Object.freeze([...v.tools]),
         applyPatch: v.applyPatch === true,
+        operationBridge: v.operationBridge === true,
         extensionTools: Object.freeze((extensionTools as TaskExtensionTool[]).map((e) => Object.freeze({
             name: e.name, package: e.package, root: e.root, network: e.network,
         }))),
@@ -206,6 +211,8 @@ export function prepareTaskRuntime(options: {
         ])],
         tools: options.tools,
         applyPatch: options.applyPatch === true,
+        operationBridge: options.tools.some(name => (OPERATION_BRIDGE_TOOL_NAMES as readonly string[]).includes(name)) &&
+            (options.extensionPaths ?? []).some(path => canonicalizePath(path) === canonicalizePath(fileURLToPath(new URL("./child-operations.ts", import.meta.url)))),
         extensionTools: (options.extensionTools ?? []).map((tool) => ({ ...tool, root: canonicalizePath(tool.root) })),
     });
     compileWritePolicy({ writableRoot: root, home, permissions: policy.permissions, denyWrite: policy.denyWrite, runtimeCompatibility: true });

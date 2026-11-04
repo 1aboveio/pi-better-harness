@@ -63,9 +63,14 @@ mkdirSync(agentDir, { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;
 
 const originalCwd = process.cwd();
-after(() => {
-  process.chdir(originalCwd);
-  rmSync(fixtures, { recursive: true, force: true });
+const sessionShutdownHandlers = [];
+after(async () => {
+  try {
+    for (const handler of [...sessionShutdownHandlers].reverse()) await handler({ type: "session_shutdown" }, ctx);
+  } finally {
+    process.chdir(originalCwd);
+    rmSync(fixtures, { recursive: true, force: true });
+  }
 });
 
 /**
@@ -126,6 +131,7 @@ const pi = {
   registerCommand: (name, command) => commands.set(name, command),
   on: (event, handler) => {
     if (event === "session_start") sessionStartHandlers.push(handler);
+    if (event === "session_shutdown") sessionShutdownHandlers.push(handler);
     if (event === "user_bash") userBashHandlers.push(handler);
   },
   sendMessage: () => undefined,
@@ -329,7 +335,6 @@ test("local background tasks use their explicitly enabled independent policy", {
   assert.ok(plan.denyWrite.includes(join(projectRoot, ".env")));
 
   // And the same policy, proved by a real detached task doing real writes.
-  const { readMeta } = await import("../packages/pi-better-background-tasks/src/registry.ts");
   const inside = join(projectRoot, "task-allowed.txt");
   const escaped = join(outside, "task-escaped.txt");
   const denied = join(projectRoot, ".env");
@@ -345,19 +350,20 @@ test("local background tasks use their explicitly enabled independent policy", {
   });
   assert.equal(launch.ok, true, launch.text);
 
-  const id = launch.text.match(/bg_[a-z0-9_]+/)?.[0];
+  const id = launch.text.match(/Started (?:durable )?background process (bgs_[0-9a-f]{20}|bg_[a-z0-9_]+)/)?.[1];
   assert.ok(id, `no task id in: ${launch.text}`);
 
   const deadline = Date.now() + 30_000;
-  let meta;
+  let status;
   while (Date.now() < deadline) {
-    meta = readMeta(id);
-    if (meta?.status === "succeeded" || meta?.status === "failed") break;
+    status = await runTool("bg_task_status", { id });
+    if (/\b(succeeded|failed|cancelled|lost)\b/.test(status.text.split("\n")[0])) break;
     await new Promise((wake) => setTimeout(wake, 25));
   }
-  assert.equal(meta?.status, "succeeded", `task never finished: ${JSON.stringify(meta)}`);
-  assert.equal(meta.launchArgv?.[0], support.executable, "the task must launch under the backend wrapper");
-  assert.match(readFileSync(meta.logPath, "utf8"), /PROBE-COMPLETE/);
+  assert.match(status?.text ?? "", /succeeded/, `task never finished: ${JSON.stringify(status)}`);
+  assert.match(status.text, /sandbox: confined.*source: background/);
+  const log = await runTool("bg_task_log", { id });
+  assert.match(log.text, /PROBE-COMPLETE/);
   assert.equal(readFileSync(inside, "utf8"), "inside\n");
   assert.equal(existsSync(escaped), false, "a background task must not write outside the project root");
   assert.equal(readFileSync(denied, "utf8"), "SECRET=original\n", "a background task must not write a denied path");

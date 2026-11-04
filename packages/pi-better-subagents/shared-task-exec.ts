@@ -31,6 +31,14 @@ export type TaskExecOptions = {
     env?: NodeJS.ProcessEnv | undefined;
 };
 
+export function taskExecutionEnvironment(input: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const environment = { ...input };
+    // The authenticated worker transport belongs to trusted Pi, not to its task commands.
+    // Keep explicit undefined values so SDK shell helpers cannot merge them back from process.env.
+    for (const key of Object.keys(environment)) if (key.startsWith("PI_BETTER_OPERATIONS_")) environment[key] = undefined;
+    return environment;
+}
+
 export type TaskExec = (
     target: TaskExecTarget,
     cwd: string,
@@ -211,6 +219,7 @@ export function createTaskExecutor(
     diagnostics?: Pick<SandboxDiagnostics, "observe">,
 ): TaskExec {
     return async (target, cwd, options) => {
+        options = { ...options, env: taskExecutionEnvironment({ ...process.env, ...options.env }) };
         const tool = target.kind === "argv" ? "run_application" : "bash";
         const observed = (basis: "policy-refusal" | "os-permission-error", outcome: "denied" | "succeeded") => {
             try {

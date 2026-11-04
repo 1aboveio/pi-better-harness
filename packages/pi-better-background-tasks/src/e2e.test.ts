@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import backgroundTasksExtension from "./index.js";
 import { recordFailure } from "./failures.js";
 import { getCallbackBatcher } from "./shared-callback-batcher.js";
 import { metaPathFor, readMeta, taskDir, writeMeta } from "./registry.js";
+import { defaultSupervisorDirectory } from "./supervisor/index.js";
 import { currentProcessStartToken } from "./process-identity.js";
 import { FOREGROUND_SANDBOX_POLICY_CHANNEL, FOREGROUND_SANDBOX_POLICY_REQUEST_CHANNEL } from "./sandbox.js";
 
@@ -31,6 +32,15 @@ function renderWidget(value: unknown, width = 120): string {
     return value({ requestRender() {} }, { fg: (_color: string, text: string) => text }).render(width).join("\n");
   }
   return "";
+}
+
+async function flushUntil(harness: ReturnType<typeof createHarness>, count: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await getCallbackBatcher(harness.pi).flush();
+    if (harness.messages.length >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 describe("extension e2e", () => {
@@ -89,6 +99,7 @@ describe("extension e2e", () => {
     const harness = createHarness();
 
     expect(Array.from(harness.tools.keys()).sort()).toEqual([
+      "acknowledge_operation_result",
       "bg_status",
       "bg_task",
       "bg_task_list",
@@ -97,7 +108,11 @@ describe("extension e2e", () => {
       "bg_task_spawn_batch",
       "bg_task_status",
       "bg_task_stop",
+      "bg_task_wait_cancel",
+      "bg_task_wait_list",
       "bg_task_watch",
+      "wait_for_operations",
+      "watch_delivery",
     ].sort());
   });
 
@@ -549,16 +564,19 @@ describe("extension e2e", () => {
     });
     const id = extractTaskId(launch);
 
+    let sessionB: ReturnType<typeof createHarness> | undefined;
     try {
       expect(renderWidget(sessionA.lastWidget("background-work-list"))).toContain("session-a-task");
 
-      const sessionB = createHarness({ sessionId: "session-b", mode: "tui", hasUI: true });
+      sessionB = createHarness({ sessionId: "session-b", mode: "tui", hasUI: true });
       await sessionB.fireSessionStart();
 
       expect(renderWidget(sessionB.lastWidget("background-work-list"))).not.toContain("session-a-task");
       expect(renderWidget(sessionB.lastWidget("background-work-list"))).not.toContain(id);
     } finally {
       await sessionA.execute("bg_task_stop", { id });
+      await sessionA.fireSessionShutdown();
+      await sessionB?.fireSessionShutdown();
     }
   });
 
@@ -660,9 +678,178 @@ describe("extension e2e", () => {
       await owner.execute("bg_task_stop", { id });
     }
   });
+  it("lists, scopes and dismisses supervised durable tasks without losing their evidence", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bg-durable-list-test-"));
+    const harness = createHarness({ cwd, sessionId: "durable-a", mode: "tui", hasUI: true });
+    const other = createHarness({ cwd, sessionId: "durable-b", mode: "tui", hasUI: true });
+    let id = "";
+    try {
+      await harness.fireSessionStart();
+      const launch = await harness.execute("bg_task_spawn", {
+        name: "durable-list-task",
+        shell: false,
+        argv: [process.execPath, "-e", 'console.log("durable-visible")'],
+        callback: false,
+      });
+      id = extractTaskId(launch);
+      expect(id).toMatch(/^bgs_[0-9a-f]{20}$/);
+
+      await waitForText(() => harness.execute("bg_task_status", { id }), /succeeded/);
+      const list = await harness.execute("bg_task_list", { limit: 100 });
+      expect(list).toContain(id);
+      expect(list).toContain("durable-list-task");
+      expect(list).toContain("durable background operations");
+
+      await other.fireSessionStart();
+      const foreignList = await other.execute("bg_task_list", { limit: 100 });
+      expect(foreignList).not.toContain(id);
+      const foreignStop = await other.execute("bg_task_stop", { id });
+      expect(foreignStop).toMatch(/another execution owner|did not stop|not stopped/i);
+      expect(await harness.execute("bg_task_status", { id })).toContain("succeeded");
+
+      const log = await harness.execute("bg_task_log", { id });
+      expect(log).toContain("durable-visible");
+
+      const dismissed = await harness.execute("bg_status", { action: "clear", id });
+      expect(dismissed).toContain("Dismissed durable operation");
+      expect(await harness.execute("bg_task_list", { limit: 100 })).not.toContain(id);
+      // Dismissal hides the row; it does not erase terminal evidence.
+      expect(await harness.execute("bg_task_status", { id })).toContain("succeeded");
+      expect(await harness.execute("bg_task_log", { id })).toContain("durable-visible");
+    } finally {
+      if (id) await harness.execute("bg_task_stop", { id });
+      await harness.fireSessionShutdown();
+      await other.fireSessionShutdown();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("delivers a durable completion callback to the owning session after reload, not the wrong one", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bg-durable-callback-reload-"));
+    const sessionId = "durable-callback-owner";
+    const first = createHarness({ cwd, sessionId, mode: "tui", hasUI: true });
+    const second = createHarness({ cwd, sessionId, mode: "tui", hasUI: true });
+    let id = "";
+    try {
+      await first.fireSessionStart();
+      await first.fireAgentStart(); // busy: the batcher holds the completion
+      const launch = await first.execute("bg_task_spawn", {
+        name: "durable-callback-task",
+        shell: false,
+        argv: [process.execPath, "-e", 'console.log("durable callback")'],
+        callback: true,
+      });
+      id = extractTaskId(launch);
+      await waitForText(() => first.execute("bg_task_status", { id }), /succeeded/);
+      expect(first.messages).toHaveLength(0);
+
+      // Reload the extension/session while the batcher still holds the event.
+      await first.fireSessionShutdown();
+      expect(first.messages).toHaveLength(0);
+
+      await second.fireSessionStart();
+      await getCallbackBatcher(second.pi).flush();
+      expect(second.messages).toHaveLength(1);
+      expect(second.messages[0]).toContain(id);
+      await second.fireSessionStart();
+      await getCallbackBatcher(second.pi).flush();
+      expect(second.messages).toHaveLength(1);
+    } finally {
+      if (id) await second.execute("bg_task_stop", { id });
+      await second.fireSessionShutdown();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not release a queued completion onto an abandoned branch", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bg-durable-branch-tree-"));
+    const harness = createHarness({
+      cwd,
+      sessionId: "branch-tree-owner",
+      mode: "tui",
+      hasUI: true,
+      branchIds: ["anchor-1"],
+    });
+    let id = "";
+    try {
+      await harness.fireSessionStart();
+      await harness.fireAgentStart(); // busy: the completion stays queued
+      const launch = await harness.execute("bg_task_spawn", {
+        name: "branch-queued-task",
+        shell: false,
+        argv: [process.execPath, "-e", 'console.log("branch-queued")'],
+        callback: true,
+      });
+      id = extractTaskId(launch);
+      await waitForText(() => harness.execute("bg_task_status", { id }), /succeeded/);
+      expect(harness.messages).toHaveLength(0);
+
+      // Fork away from the recorded anchor while the completion is queued.
+      await harness.fireSessionTree(["other-fork"]);
+      await harness.fireAgentSettled();
+      await getCallbackBatcher(harness.pi).flush();
+      expect(harness.messages).toHaveLength(0);
+
+      // A descendant branch still contains the anchor and may receive it. The
+      // batcher can settle a prior suppression on a microtask, so drain until the
+      // single receipt rather than assuming one synchronous flush is enough.
+      await harness.fireSessionTree(["anchor-1", "descendant"]);
+      await flushUntil(harness, 1);
+      if (harness.messages.length === 0) {
+        const readJson = (path: string) => { try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; } };
+        console.error("[branch-diagnostics]", JSON.stringify({
+          id,
+          sidecar: readJson(join(defaultSupervisorDirectory(), "observed", `${id}.json`)),
+          host: readJson(join(defaultSupervisorDirectory(), "observed", "host.json")),
+          branchIds: harness.ctx.sessionManager.getBranch().map((entry) => entry.id),
+          messages: harness.messages.length,
+        }, null, 2));
+      }
+      expect(harness.messages).toHaveLength(1);
+      expect(harness.messages[0]).toContain(id);
+      await getCallbackBatcher(harness.pi).flush();
+      expect(harness.messages).toHaveLength(1);
+    } finally {
+      if (id) await harness.execute("bg_task_stop", { id });
+      await harness.fireSessionShutdown();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a running supervised operation as active Goal background work", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bg-durable-goal-test-"));
+    const harness = createHarness({ cwd, sessionId: "goal-durable", mode: "tui", hasUI: true });
+    let id = "";
+    try {
+      await harness.fireSessionStart();
+      const launch = await harness.execute("bg_task_spawn", {
+        name: "goal-durable-task",
+        shell: false,
+        argv: [process.execPath, "-e", "setTimeout(() => {}, 30_000)"],
+        callback: false,
+      });
+      id = extractTaskId(launch);
+      const provider = harness.goalProviders[0] as {
+        getActivity(ctx: unknown): { items: Array<{ id: string; active: boolean; status: string }> };
+      };
+      const snapshot = provider.getActivity(harness.ctx);
+      const item = snapshot.items.find((entry) => entry.id === id);
+      expect(item).toMatchObject({ id, active: true, status: "running" });
+
+      const foreign = provider.getActivity({
+        cwd,
+        sessionManager: { getSessionId: () => "goal-other" },
+      });
+      expect(foreign.items.find((entry) => entry.id === id)).toBeUndefined();
+    } finally {
+      if (id) await harness.execute("bg_task_stop", { id });
+      await harness.fireSessionShutdown();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });
 
-function createHarness(options: { cwd?: string; sessionId?: string; failUserMessage?: boolean; mode?: string; hasUI?: boolean } = {}) {
+function createHarness(options: { cwd?: string; sessionId?: string; failUserMessage?: boolean; mode?: string; hasUI?: boolean; branchIds?: readonly string[] } = {}) {
   const tools = new Map<string, RegisteredTool>();
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
   let idle = true;
@@ -670,10 +857,18 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
   const messageAttempts: string[] = [];
   const widgets: Array<[string, unknown]> = [];
   const events = new EventEmitter();
+  // Pi's event bus returns an unsubscribe function; Node's EventEmitter returns
+  // itself. Mirror Pi so session_shutdown cleanup is exercised faithfully.
+  const rawOn = events.on.bind(events);
+  events.on = ((name: string, listener: (...args: unknown[]) => void) => {
+    rawOn(name, listener);
+    return () => { events.off(name, listener); };
+  }) as unknown as typeof events.on;
   const goalProviders: unknown[] = [];
   events.on("pi-better-goal:register-provider", (provider) => goalProviders.push(provider));
   const cwd = options.cwd ?? process.cwd();
   const sessionId = options.sessionId ?? "test-session";
+  let branchIds = [...(options.branchIds ?? [])];
   const context = {
     cwd,
     isIdle: () => idle,
@@ -689,6 +884,7 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
     },
     sessionManager: {
       getSessionId: () => sessionId,
+      getBranch: () => branchIds.map((id) => ({ id })),
     },
   };
   const pi = {
@@ -712,6 +908,7 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
 
   return {
     pi,
+    ctx: context,
     tools,
     messages,
     messageAttempts,
@@ -733,6 +930,13 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
     async fireSessionStart() {
       for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, context);
     },
+    async fireSessionShutdown() {
+      for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, context);
+    },
+    async fireSessionTree(nextBranchIds?: readonly string[]) {
+      if (nextBranchIds) branchIds = [...nextBranchIds];
+      for (const handler of handlers.get("session_tree") ?? []) await handler({ type: "session_tree" }, context);
+    },
     async fireAgentStart() {
       idle = false;
       for (const handler of handlers.get("agent_start") ?? []) await handler({ type: "agent_start" }, context);
@@ -751,9 +955,20 @@ function createHarness(options: { cwd?: string; sessionId?: string; failUserMess
 }
 
 function extractTaskId(text: string): string {
-  const match = text.match(/bg_[a-z0-9_]+/);
+  const match = text.match(/bgs_[0-9a-f]{20}|bg_[a-z0-9_]+/);
   if (!match) throw new Error(`no task id in text: ${text}`);
   return match[0]!;
+}
+
+async function waitForText(read: () => Promise<string>, pattern: RegExp, timeoutMs = 15_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let text = "";
+  while (Date.now() < deadline) {
+    text = await read();
+    if (pattern.test(text)) return text;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`text did not match ${pattern}: ${text}`);
 }
 
 async function waitForMeta(

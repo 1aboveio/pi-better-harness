@@ -178,6 +178,37 @@ If new parameters are missing after an npm upgrade, run `/reload` in Pi.
 Updating files on disk does not replace extension code already loaded in a live
 session.
 
+## Waiting without occupying a worker slot
+
+When Background Tasks is loaded, eligible workers receive a guarded bridge to
+supervised local commands. The bridge retains the worker's captured permissions
+and applies the current Background Tasks policy as well. Explicit tool exclusions
+and clean loadouts can withhold the bridge.
+
+A worker starts a long validation command, continues independent work, then calls
+`wait_for_operations` with its owned task ids. Call this tool directly as the only
+tool call in its assistant message. A nested codemode call cannot deliver the
+SDK termination boundary. The SDK must be 0.82.1 or later.
+
+Parking saves the wait result at the end of the native conversation. The attempt
+then exits cleanly and releases its capacity slot. Its attempt status remains
+`completed`, but its park disposition means the assignment is unfinished. The
+navigator shows the wait phase and retains the row while the wait is pending.
+Closing that row cancels automatic resumption.
+
+Once all dependencies are terminal, the same saved conversation can resume with
+a new attempt id. The resumed worker can read operations launched by its earlier
+attempt. It inspects status and logs, then calls `acknowledge_operation_result`
+with the exact revisions and an interpretation note. Success, failure, cancellation,
+timeout and lost execution all settle a dependency; the worker must interpret the
+outcome before proceeding.
+
+Resumption requires the owning parent session and eligible branch to be active.
+Capacity, Goal, workflow, permissions, writer ownership and cancellation are
+checked again. Full capacity leaves the wait ready. Missing or conflicting
+recovery evidence leaves it held with a reason. The runner survives worker and Pi
+exit, but v1 does not run an unattended model after Pi shuts down.
+
 ## Codemode batch launches
 
 On Pi 0.99.1 or newer, enable native codemode alongside the existing direct
