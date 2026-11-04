@@ -255,6 +255,39 @@ items.", and kubectl and npm print warnings), which can raise a false alarm.
 If the stderr is expected, redirect it (`2>/dev/null`) or set
 `blind_checks: 0`. Set `blind_checks` to another number to change the count.
 
+## Batches
+
+`bg_task_spawn_batch` starts 1 to 100 independent background tasks at once and
+returns immediately with a `batchId`, one task id per launched job, and any job
+that was refused. Every job is an ordinary background task with its own process,
+log, and metadata; the batch only groups them.
+
+```json
+{
+  "batchName": "local builds",
+  "shared": { "cwd": "/repo", "env": { "CI": "1" } },
+  "jobs": [
+    { "name": "api", "command": "npm run build" },
+    { "name": "web", "command": "npm run build:web" }
+  ]
+}
+```
+
+- `jobs` is required. `shared` applies launch options to every job and cannot
+  carry `name`, `command`, `argv`, `batchId`, or `batchName`: those belong to a
+  single job, and the launcher refuses a batch that puts one in `shared`.
+- A job's own value wins over `shared`. An explicit `false`, `0`, or `null`
+  overrides the shared value instead of inheriting it.
+- The whole batch is preflighted before anything starts. One invalid job refuses
+  the batch, so a partial launch never happens.
+- Each launched task records `batchId` and `batchName` in its metadata, so a
+  reloaded task still says which batch it came from.
+- The result lists `launched` and `failed` with 1-based job positions, so a
+  refused entry points at the job in the request. Stopping one task does not
+  stop the others.
+- Do not wait or poll for the batch. Inspect, log, or stop each task by its id,
+  or watch one with `bg_task_watch`.
+
 ## Install
 
 ```sh

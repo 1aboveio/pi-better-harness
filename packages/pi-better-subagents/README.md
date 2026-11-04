@@ -44,6 +44,11 @@ the wait result and exits, releasing its capacity slot. Once the operation settl
 the same conversation resumes to read the evidence, acknowledge its interpretation,
 and finish the assignment. A completed parked attempt does not complete the assignment.
 
+When the guarded bridge is unavailable, workers hand back the exact command, cwd,
+required environment variable names (never secret values), current evidence and
+remaining validation. The coordinator runs the command through background tools
+and inspects its terminal result. Shell polling and detachment are not substitutes.
+
 Explicit tool exclusions and clean loadouts remain authoritative. The bridge does
 not expand permissions: an operation must satisfy both the captured worker policy
 and the current Background Tasks policy. Parking requires Pi SDK 0.82.1 or later,

@@ -35,6 +35,14 @@ function classify(pi: ExtensionAPI, name: string, input: unknown): Admission | u
   let action: unknown;
   switch (name) {
     case "bg_task_spawn": action = "spawn"; break;
+    case "bg_task_spawn_batch": {
+      // A batch is a local launch only when no job is remote: per-job ssh options
+      // are decided by the batch launcher, not in this trusted process.
+      const jobs = Array.isArray(params.jobs) ? params.jobs : [];
+      const remote = jobs.some((job) => job !== null && typeof job === "object" &&
+        Boolean((job as Record<string, unknown>).ssh));
+      return remote ? undefined : "local-launch";
+    }
     case "bg_task_watch": action = "watch"; break;
     case "bg_task_list": action = "list"; break;
     case "bg_task_status": action = "status"; break;
