@@ -376,9 +376,22 @@ class Supervisor implements LocalSupervisor {
     const command = readCommandRecord(this.directory, taskId).value;
     const stop = readStopRequest(this.directory, taskId);
     const cleanup = readCleanupRecord(this.directory, taskId);
+    // Reading a process start token spawns `ps`. A task that already published a
+    // terminal/lost record cannot change state again, so its liveness only
+    // matters to the one caller that may still act on a surviving command group
+    // (`stop`). Every other reader would pay for an answer it does not use, once
+    // per task per panel frame. Probe only when that authority is actually needed.
+    const needsLiveness = result === undefined && lostRecord === undefined
+      ? true
+      : result !== undefined && result.groupCleanup === "unproven"
+        || lostRecord !== undefined;
     // One identity source per instance: liveness and signalling agree.
-    const claimAlive = claim ? identityAlive(claim.pid, claim.pidStartTime, claim.claimedAt, this.readToken) : false;
-    const commandAlive = command ? identityAlive(command.pid, command.pidStartTime, command.startedAt, this.readToken) : false;
+    const claimAlive = needsLiveness && claim
+      ? identityAlive(claim.pid, claim.pidStartTime, claim.claimedAt, this.readToken)
+      : false;
+    const commandAlive = needsLiveness && command
+      ? identityAlive(command.pid, command.pidStartTime, command.startedAt, this.readToken)
+      : false;
 
     // A published terminal/lost record needs no fence. Anything else is decided
     // under the fence, so a `lost` attestation and a claim cannot both win.
@@ -419,6 +432,67 @@ class Supervisor implements LocalSupervisor {
       ...(state.lost === undefined ? {} : { lost: state.lost }),
       ...(cleanup === undefined ? {} : { cleanup }),
       ...(state.fenceBusy === true ? { fenceBusy: true as const } : {}),
+      ...(stop === undefined ? {} : { stopRequestedAt: stop.requestedAt }),
+      taskDir: paths.dir,
+      logs: { stdout: paths.stdout, stderr: paths.stderr, events: paths.events },
+      observedAt: Date.now(),
+    };
+  }
+
+  /**
+   * Read-only projection for rendering: no fence, no lost publication, no `ps`.
+   *
+   * `inspect` is the authoritative path and pays for that authority — a
+   * cross-process SQLite fence and a process-identity probe per recorded pid.
+   * A panel asks per task per frame, so it reads what the records already say.
+   */
+  snapshot(taskId: string): SupervisorInspection | undefined {
+    const launchRead = readLaunchRecord(this.directory, taskId);
+    if (launchRead.missing) return undefined;
+    if (!launchRead.value) {
+      throw new Error(`Unreadable supervisor launch record for ${taskId}: ${launchRead.error}`);
+    }
+    const launch = launchRead.value;
+    const paths = supervisorPaths(this.directory, taskId);
+    const result = readTerminalRecord(this.directory, taskId).value;
+    const lostRecord = readLostRecord(this.directory, taskId).value;
+    const claim = readClaimRecord(this.directory, taskId).value;
+    const command = readCommandRecord(this.directory, taskId).value;
+    const stop = readStopRequest(this.directory, taskId);
+    const cleanup = readCleanupRecord(this.directory, taskId);
+    const status: SupervisorTaskStatus = result
+      ? (result.status as SupervisorTaskStatus)
+      : lostRecord
+        ? "lost"
+        : claim
+          ? "running"
+          : "starting";
+    return {
+      taskId,
+      token: launch.token,
+      kind: launch.kind,
+      status,
+      terminal: result !== undefined || lostRecord !== undefined,
+      launch: launchSummary(launch),
+      // Liveness is deliberately not asserted here: a snapshot never spawns `ps`.
+      ...(claim === undefined
+        ? {}
+        : { claim: { pid: claim.pid, pidStartTime: claim.pidStartTime, claimedAt: claim.claimedAt, alive: false } }),
+      ...(command === undefined
+        ? {}
+        : {
+          command: {
+            pid: command.pid,
+            pgid: command.pgid,
+            pidStartTime: command.pidStartTime,
+            startedAt: command.startedAt,
+            attempt: command.attempt ?? 1,
+            alive: false,
+          },
+        }),
+      ...(result === undefined ? {} : { result }),
+      ...(lostRecord === undefined ? {} : { lost: lostRecord }),
+      ...(cleanup === undefined ? {} : { cleanup }),
       ...(stop === undefined ? {} : { stopRequestedAt: stop.requestedAt }),
       taskDir: paths.dir,
       logs: { stdout: paths.stdout, stderr: paths.stderr, events: paths.events },

@@ -408,6 +408,9 @@ function fakeSupervisor(root: string, outcome: "lost"): LocalSupervisor {
     inspect(taskId) {
       return inspectionFor(taskId, "token");
     },
+    snapshot(taskId) {
+      return inspectionFor(taskId, "token");
+    },
     async stop() { return undefined; },
   };
 }
@@ -576,6 +579,7 @@ describe("worker operation service", () => {
         };
       },
       inspect() { return undefined; },
+      snapshot() { return undefined; },
       async stop() { return undefined; },
     };
     const { host } = startHost({ root, supervisor });

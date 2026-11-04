@@ -1,41 +1,118 @@
 import { execFileSync } from "node:child_process";
 
-const selfStartToken = readProcessStartToken(process.pid);
+/**
+ * Process start-token reads.
+ *
+ * `ps` is a process spawn. Reading it on a rendering path — once per task, per
+ * frame, for every terminal task kept in the panel — is a measurable CPU drain
+ * on its own, and it competes with the very commands the panel is showing.
+ *
+ * Two rules keep that bounded:
+ *
+ * 1. A pid's start token is immutable for the life of that pid, so a short-lived
+ *    memo is safe. Entries expire so a recycled pid is re-read rather than
+ *    mistaking the previous owner's token for the current one, and failures are
+ *    memoized too, so a pid that cannot be read is not retried on every frame.
+ * 2. Callers that decide to *signal* a pid can ask for a fresh read. Liveness
+ *    display may use the memo; authorization may not.
+ */
 
-export function currentProcessStartToken(): string | undefined {
-  return selfStartToken;
+/** How long one pid→token answer is trusted. Short enough to bound pid reuse. */
+const TOKEN_MEMO_TTL_MS = 1_000;
+/** Bound on memo entries; the panel is small, but a long session is not. */
+const TOKEN_MEMO_MAX_ENTRIES = 512;
+
+interface TokenMemoEntry {
+    token: string | undefined;
+    readAt: number;
 }
 
+const tokenMemo = new Map<number, TokenMemoEntry>();
+
+function readTokenUncached(pid: number): string | undefined {
+    if (!Number.isInteger(pid) || pid <= 0 || process.platform === "win32") return undefined;
+    try {
+        const output = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+            timeout: 2_000,
+        }).trim();
+        return output || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function remember(pid: number, token: string | undefined, now: number): void {
+    if (tokenMemo.size >= TOKEN_MEMO_MAX_ENTRIES) {
+        // Drop expired entries first; only evict live ones if that was not enough.
+        for (const [candidate, entry] of tokenMemo) {
+            if (now - entry.readAt >= TOKEN_MEMO_TTL_MS) tokenMemo.delete(candidate);
+        }
+        if (tokenMemo.size >= TOKEN_MEMO_MAX_ENTRIES) {
+            const oldest = tokenMemo.keys().next();
+            if (!oldest.done) tokenMemo.delete(oldest.value);
+        }
+    }
+    tokenMemo.set(pid, { token, readAt: now });
+}
+
+/**
+ * Start token for `pid`, memoized for {@link TOKEN_MEMO_TTL_MS}.
+ *
+ * Suitable for liveness and display. A caller that is about to send a signal
+ * must use {@link readProcessStartTokenFresh} instead.
+ */
 export function readProcessStartToken(pid: number): string | undefined {
-  if (!Number.isInteger(pid) || pid <= 0 || process.platform === "win32") return undefined;
-  try {
-    const output = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2_000,
-    }).trim();
-    return output || undefined;
-  } catch {
-    return undefined;
-  }
+    if (!Number.isInteger(pid) || pid <= 0 || process.platform === "win32") return undefined;
+    const now = Date.now();
+    const entry = tokenMemo.get(pid);
+    if (entry && now - entry.readAt < TOKEN_MEMO_TTL_MS) return entry.token;
+    const token = readTokenUncached(pid);
+    remember(pid, token, now);
+    return token;
+}
+
+/**
+ * Start token for `pid`, always read from the OS.
+ *
+ * Used where the answer authorizes a signal, so a recycled pid cannot inherit
+ * a memoized identity.
+ */
+export function readProcessStartTokenFresh(pid: number): string | undefined {
+    if (!Number.isInteger(pid) || pid <= 0 || process.platform === "win32") return undefined;
+    const token = readTokenUncached(pid);
+    remember(pid, token, Date.now());
+    return token;
+}
+
+/** Drop every memoized identity. Tests and reloads start from a clean slate. */
+export function clearProcessIdentityMemo(): void {
+    tokenMemo.clear();
+}
+
+const selfStartToken = readTokenUncached(process.pid);
+
+export function currentProcessStartToken(): string | undefined {
+    return selfStartToken;
 }
 
 export function processIdentityAlive(
-  pid: number | undefined,
-  recordedStartToken?: string,
-  recordedAt?: number,
+    pid: number | undefined,
+    recordedStartToken?: string,
+    recordedAt?: number,
 ): boolean {
-  if (!pid || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
-  }
-  const current = readProcessStartToken(pid);
-  if (recordedStartToken && current) return recordedStartToken === current;
-  if (!recordedStartToken && current && recordedAt !== undefined) {
-    const currentStartedAt = Date.parse(current);
-    if (Number.isFinite(currentStartedAt) && currentStartedAt > recordedAt + 2_000) return false;
-  }
-  return true;
+    if (!pid || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
+    }
+    const current = readProcessStartToken(pid);
+    if (recordedStartToken && current) return recordedStartToken === current;
+    if (!recordedStartToken && current && recordedAt !== undefined) {
+        const currentStartedAt = Date.parse(current);
+        if (Number.isFinite(currentStartedAt) && currentStartedAt > recordedAt + 2_000) return false;
+    }
+    return true;
 }

@@ -1366,8 +1366,10 @@ export class ObservedWaitHost {
 
   private projectDurable(operation: OperationRecord, now: number): DurableTaskProjection | undefined {
     const context = this.launchContext(operation.taskId);
+    // Projection is the rendering path: a snapshot reads the durable records
+    // without taking the cross-process fence or spawning `ps`.
     const inspection = LOCAL_DURABLE_ID.test(operation.taskId)
-      ? (() => { try { return this.supervisor.inspect(operation.taskId, { recordLost: false }); } catch { return undefined; } })()
+      ? (() => { try { return this.supervisor.snapshot(operation.taskId); } catch { return undefined; } })()
       : undefined;
     const storeStatus = operation.terminalRevision > 0 ? this.statusOf(operation.operationId) : undefined;
     const status: SupervisorTaskStatus = inspection?.terminal ? inspection.status : storeStatus ?? inspection?.status ?? "running";
