@@ -38,7 +38,7 @@ import { selectSessionByName } from "./session-selection.ts";
 import { isWithinWorkspace } from "./workspace-scope.ts";
 import { loadConfig, writeDelegationMode, writeSubagentSettings, isConcurrencyCap, normalizeConcurrencyCap, normalizeTools, resolveExtensionPath, configPath, selfDir, SAFE_DEFAULT_TOOLS, SAFE_CLEAN_TOOLS } from "./config.ts";
 import { createSubagentSettingsPage } from "./settings-page.ts";
-import { effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
+import { appendSubagentSettings, effectiveSubagentSettings, formatSubagentSettings, subagentSettingsTool, SUBAGENT_SETTINGS_CONTEXT } from "./effective-settings.ts";
 import { STEER_FILE_ENV, readSteerReceipt } from "./child-steer.ts";
 import {
     decideTiming,
@@ -3603,17 +3603,11 @@ export default function (pi: ExtensionAPI) {
     pi.registerTool(discoveryTool as Parameters<ExtensionAPI["registerTool"]>[0]);
 
     pi.on("before_agent_start", (event) => ({
-        systemPrompt: `${appendExecutionPolicy(event.systemPrompt)}\n\nUse the latest Subagent settings context block as the authoritative delegation mode and capacity snapshot. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Inspect subagent_settings when needed; never treat the concurrency limit as a target number of agents.`,
+        systemPrompt: appendSubagentSettings(
+            `${appendExecutionPolicy(event.systemPrompt)}\n\nTreat the Subagent settings block at the end of this prompt as the authoritative delegation mode and cap. Its delegation guidance replaces earlier mode-specific guidance, including guidance in a plan. Live occupancy is not pushed into context: inspect subagent_settings when it matters, and never treat the concurrency limit as a target number of agents.`,
+            effectiveSettings(),
+        ),
     }));
-
-    pi.on("context", (event) => {
-        const settings = effectiveSettings();
-        return { messages: [
-            ...event.messages.filter(message => message.role !== "custom" || message.customType !== SUBAGENT_SETTINGS_CONTEXT),
-            { role: "custom" as const, customType: SUBAGENT_SETTINGS_CONTEXT,
-                content: formatSubagentSettings(settings), display: false, details: settings, timestamp: Date.now() },
-        ] };
-    });
 
     // ---- live-status lifecycle -----------------------------------------
     pi.on("agent_start", async (_event, ctx) => {

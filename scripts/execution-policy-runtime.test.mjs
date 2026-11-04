@@ -142,15 +142,17 @@ test("manual mode keeps the same execution policy while four host milestones rem
     const result = await h.tools.get("get_todo").execute("get", {}, undefined, undefined, h.ctx);
     assert.deepEqual(result.details.progress.readyIndices, [1, 2, 3, 4]);
     const manual = await h.prompt();
-    const manualContext = await h.context();
     await h.commands.get("subagents").handler("mode coordinator", h.ctx);
     const coordinator = await h.prompt();
     // Compare the policy paragraph only; delegation guidance may sit beside it
     // and is expected to change with settings without rewriting the policy.
     const policyBlock = (prompt) => prompt.split("\n\n").find((block) => block.startsWith(heading));
     assert.equal(policyBlock(manual), policyBlock(coordinator), "settings changes must not rewrite the static execution policy");
-    assert.match(manualContext, /Delegation mode: manual/);
-    assert.match(await h.context(), /Delegation mode: coordinator/);
+    // The delegation policy is carried at the end of the system prompt, not as a
+    // per-request settings message, so it must be read from the prompt itself.
+    assert.match(manual, /Delegation mode: manual/);
+    assert.match(coordinator, /Delegation mode: coordinator/);
+    assert.equal(await h.context(), "", "settings must not be injected into the request messages");
     await h.tools.get("update_todo").execute("start", {
       todo: steps.map((step) => hosts.includes(step.id) ? { ...step, status: "in_progress" } : step),
     }, undefined, undefined, h.ctx);

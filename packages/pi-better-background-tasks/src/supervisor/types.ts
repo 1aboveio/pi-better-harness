@@ -380,5 +380,15 @@ export interface LocalSupervisorOptions {
 export interface LocalSupervisor {
   start(options: SupervisorStartOptions): Promise<SupervisorStartResult>;
   inspect(taskId: string, options?: SupervisorInspectOptions): SupervisorInspection | undefined;
+  /**
+   * Read-only projection of the durable records: no state fence, no lost
+   * publication and no process-identity probe.
+   *
+   * This is the rendering path. `inspect` may take a cross-process SQLite fence
+   * and spawn `ps` per task, which must not happen once per task per frame. A
+   * snapshot reports what the records already say — `running` for a claim,
+   * `starting` before one — and leaves reconciliation to the caller's cadence.
+   */
+  snapshot(taskId: string): SupervisorInspection | undefined;
   stop(taskId: string, options?: SupervisorStopOptions): Promise<SupervisorStopResult | undefined>;
 }

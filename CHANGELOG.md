@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format is b
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [pi-better-harness@0.40.1] - 2026-11-04
+
+### Fixed
+
+- Bundle Background Tasks 0.14.1 and Subagents 0.27.1, which stop probing process identity on the task panel's render path and keep the delegation policy in the system prompt instead of re-sending it on every request.
+
+## [pi-better-background-tasks@0.14.1] - 2026-11-04
+
+### Fixed
+
+- Stop spawning `ps` from the task panel. `supervisor.inspect` resolved claim and command identity for every retained task on every paint, synchronously, and the navigator rebuilt the projection twice more per frame. Process start tokens are now memoized for one second (including failures), identity is skipped once a terminal or lost record already decides the task, and a new `supervisor.snapshot` serves projections with durable-record reads only. One refresh now reuses a single projection for 250ms. Measured on six terminal tasks over thirty frames: 360 `ps` spawns and 1781ms became zero spawns and 28ms.
+- Signalling paths read the start token without the memo, so a recycled pid cannot inherit a remembered identity.
+
+## [pi-better-subagents@0.27.1] - 2026-11-04
+
+### Fixed
+
+- Carry the delegation policy at the end of the system prompt instead of appending a settings message to every provider request. The message was request-local, so Pi never persisted it: it was written to the prompt cache once per request and never read back, and it repeated a launch instruction on every turn. The system prompt is outside the compaction window and inside the cached prefix, so the policy survives summarization and costs nothing while it is unchanged.
+- Stop printing live occupancy in the pushed policy. Counters change as children come and go, which would rewrite the cached prefix; `subagent_settings` still reports them on demand. A `/subagents mode` edit now applies at the next agent start.
+- Stop telling a `manual` session to "launch ready, independent, useful work within available capacity". The capacity sentence contradicted the mode line that followed it, and manual sessions fanned work out to several subagents per turn.
+
 ## [pi-better-harness@0.40.0] - 2026-11-03
 
 ### Added

@@ -28,17 +28,38 @@ export function effectiveSubagentSettings(
 }
 
 export function formatSubagentSettings(settings: EffectiveSubagentSettings): string {
+    const manual = settings.delegationMode === "manual";
+    const capacity = manual
+        ? "The limit is a ceiling, not a target. In manual mode it bounds only work the user or an active workflow explicitly delegates; no slot count is an invitation to launch work."
+        : "The limit is a ceiling, not a target. Launch ready, independent, useful work when a suitable subagent is available.";
+    // No occupancy counters here. This text is injected into the conversation and
+    // may only ever be appended to, so anything volatile would force either a
+    // rewrite of already-sent content (which invalidates the provider's cached
+    // prefix) or one more copy per change. Admission rechecks capacity at the
+    // spawn anyway; live counts stay available through the subagent_settings tool.
     return [
         `Subagent settings: revision ${settings.revision}`,
         `Delegation: ${settings.delegationMode} (${settings.sources.delegationMode})`,
         `Concurrency limit: ${settings.maxConcurrent} (${settings.sources.maxConcurrent})`,
-        `Running: ${settings.runningCount}; reserved: ${settings.pendingCount}`,
-        `Occupied slots: ${settings.occupiedSlots}`,
-        `Available slots: ${settings.availableSlots}`,
-        "The limit is a ceiling, not a target. Launch ready, independent, useful work within available capacity. " +
-            "This is a point-in-time snapshot; spawn admission rechecks capacity. Lowering the limit does not stop existing runs.",
+        // Mode first: the policy governs the settings that follow it.
         delegationPrompt(settings.delegationMode),
+        capacity + " Spawn admission rechecks capacity; lower the limit without stopping existing runs.",
     ].join("\n");
+}
+
+/**
+ * Append the delegation policy to the end of the system prompt.
+ *
+ * The system prompt is not part of the compaction window, so the policy survives
+ * a summary that rewrites the conversation. It is also part of the cached
+ * prefix, so it costs nothing per request while it stays unchanged.
+ *
+ * Nothing volatile goes in here: live occupancy would rewrite the cached prefix
+ * on every run, and admission rechecks capacity at spawn anyway.
+ */
+export function appendSubagentSettings(systemPrompt: string, settings: EffectiveSubagentSettings): string {
+    const policy = formatSubagentSettings(settings);
+    return systemPrompt.includes(policy) ? systemPrompt : `${systemPrompt}\n\n${policy}`;
 }
 
 export function subagentSettingsTool(Type: any, read: () => EffectiveSubagentSettings) {

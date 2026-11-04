@@ -101,8 +101,12 @@ const provider: BackgroundWorkProvider = {
   },
   onVisibleChanged: (notify) => {
     const offMeta = onMetaChanged(notify);
-    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange(notify);
+    const offDurable = getObservedWaitHost(piRef)?.onDurableTaskChange(() => {
+      invalidateDurableProjection();
+      notify();
+    });
     return () => {
+      invalidateDurableProjection();
       offMeta();
       offDurable?.();
     };
@@ -113,13 +117,30 @@ function navigatorHost() {
   return piRef ? getObservedWaitHost(piRef) : undefined;
 }
 
+/**
+ * One refresh asks for {@link provider.visibleCount} and then {@link provider.listRows},
+ * and a detail view asks again. Rebuilding the projection re-reads every durable
+ * record, so a single paint would pay for the same list up to three times. Hold
+ * one result per paint window; a durable-change notification clears it.
+ */
+const PROJECTION_MEMO_MS = 250;
+let projectionMemo: { at: number; tasks: DurableTaskProjection[] } | undefined;
+
+function invalidateDurableProjection(): void {
+  projectionMemo = undefined;
+}
+
 function visibleDurableTasks(now = Date.now()): DurableTaskProjection[] {
   const active = activeNavigatorOrigin;
   const host = navigatorHost();
   if (!active || !host) return [];
+  if (projectionMemo && now - projectionMemo.at < PROJECTION_MEMO_MS) {
+    return projectionMemo.tasks.filter((task) => !isExpiredDurableRow(task, now));
+  }
   const listed = host.listDurableTasks(active, { retentionMs: TERMINAL_NAVIGATOR_RETENTION_MS });
-  return listed
-    .filter((task) => task.dismissedAt === undefined && !isExpiredDurableRow(task, now));
+  const tasks = listed.filter((task) => task.dismissedAt === undefined);
+  projectionMemo = { at: now, tasks };
+  return tasks.filter((task) => !isExpiredDurableRow(task, now));
 }
 
 function durableTask(id: string): DurableTaskProjection | undefined {
