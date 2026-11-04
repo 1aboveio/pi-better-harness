@@ -36,6 +36,12 @@ authorized, write the result, and return. Pending CI is a valid handoff, not a p
 The hook refuses recognized `gh run watch`, `gh pr checks --watch`, and bundled
 delivery-watcher commands through `bash` and `run_application`. Short status reads,
 failed-log retrieval, and legitimate long local tests and builds remain allowed.
+Workers use focused checks during implementation. Known long command-only jobs,
+broad validation suites, servers and repeated waits are handed back with the
+command, working directory, environment variable names (never secret values),
+current evidence and remaining validation. The coordinator runs these through
+`bg_task_spawn` or `bg_task_watch` and inspects the terminal result. Default children
+have no background-task tools; shell polling or detachment is not a substitute.
 If background tools are explicitly available to a child, recognized watcher
 commands are refused there too. Coordinator sessions are unaffected.
 
