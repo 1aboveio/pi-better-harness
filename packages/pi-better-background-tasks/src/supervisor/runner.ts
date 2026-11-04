@@ -437,8 +437,10 @@ function runChild(ctx: RunnerContext, plan: ChildPlan): Promise<ChildOutcome> {
       arm(SUPERVISOR_TERMINATION_GRACE_MS, () => {
         // Direct-child signals are authorized by the retained handle. The group
         // signal is authorized only while that leader is still owned.
-        signalDirect("SIGKILL");
+        // Signal the verified group before killing its identity anchor. Killing
+        // the leader first lets the kernel reap it before group authorization.
         signalGroup("SIGKILL");
+        signalDirect("SIGKILL");
       });
       // Hard bound: never leave the caller waiting on a process the kernel keeps
       // alive; disclose cleanup as unproven instead.

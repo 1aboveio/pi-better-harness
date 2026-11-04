@@ -731,20 +731,26 @@ describe("record publication", () => {
 
     const seen = new Set<string>();
     const partial: string[] = [];
-    const code = await new Promise<number | null>((resolve) => {
-      const timer = setInterval(() => {
-        for (const name of readdirSync(directory)) {
-          if (!/^rec-\d+\.json$/.test(name)) continue;
-          seen.add(name);
-          try {
-            const parsed = JSON.parse(readFileSync(join(directory, name), "utf8")) as { pad?: string };
-            if (parsed.pad?.length !== 120_000) partial.push(`${name}: short payload`);
-          } catch (error) {
-            partial.push(`${name}: ${(error as Error).message}`);
-          }
+    const sampleRecords = (): void => {
+      for (const name of readdirSync(directory)) {
+        if (!/^rec-\d+\.json$/.test(name)) continue;
+        seen.add(name);
+        try {
+          const parsed = JSON.parse(readFileSync(join(directory, name), "utf8")) as { pad?: string };
+          if (parsed.pad?.length !== 120_000) partial.push(`${name}: short payload`);
+        } catch (error) {
+          partial.push(`${name}: ${(error as Error).message}`);
         }
-      }, 1);
-      child.once("exit", (exitCode) => { clearInterval(timer); resolve(exitCode); });
+      }
+    };
+    const code = await new Promise<number | null>((resolve) => {
+      const timer = setInterval(sampleRecords, 1);
+      child.once("exit", (exitCode) => {
+        clearInterval(timer);
+        // The last publications may land between the final timer and exit.
+        sampleRecords();
+        resolve(exitCode);
+      });
     });
 
     expect(stderr).toBe("");
