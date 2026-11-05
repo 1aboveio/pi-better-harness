@@ -35,7 +35,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { appendFileSync, closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync, } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { validateCondition } from "./conditions.mjs";
 import { SUPERVISOR_FENCE_WAIT_MS, SUPERVISOR_RECORD_VERSION, SUPERVISOR_TASK_ID_PATTERN, SUPERVISOR_TASK_ID_PREFIX, } from "./types.mjs";
 /** The task id is derived from the token, so one token can only ever name one execution. */
@@ -113,7 +113,9 @@ function fsyncDirectoryOf(path) {
     }
 }
 function tempPathFor(path) {
-    return join(dirname(path), `.${path.split("/").at(-1)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
+    // `basename`, not `split("/")`: a Windows path has no `/`, so the whole path
+    // would become the temp file name.
+    return join(dirname(path), `.${basename(path)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
 }
 /** Write a durable temp file; the caller publishes it. */
 function writeDurableTemp(path, text) {
